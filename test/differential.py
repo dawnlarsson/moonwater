@@ -7286,7 +7286,14 @@ FILES_UTILITIES = (
                    ("-x", "-n", "r/17", "c.txt"), ("-x", "-a1", "-n", "17", "c.txt"),
                    ("--numeric-suffixes=1", "-n", "r/100", "c.txt"), ("--numeric-suffixes=100", "-n", "r/100", "c.txt"),
                    ("--numeric-suffixes=5", "-a1", "-n", "5", "c.txt"), ("--numeric-suffixes=5", "-a1", "-n", "6", "c.txt"),
-                   ("-a0", "-n", "l/3", "c.txt"))),
+                   ("-a0", "-n", "l/3", "c.txt"),
+                   #   Left to choose its width, a numeric or hex suffix widens
+                   #   as the alphabetic one does: x89 then x9000, xef then xf000.
+                   ("-d", "-b1", "binary", "d-"), ("-x", "-b1", "binary", "h-"), ("-d", "-l1", "many", "m-"),
+                   ("-d", "-b1", "--additional-suffix=.t", "binary"),
+                   ("--numeric-suffixes=89", "-b1", "binary"), ("--numeric-suffixes=", "-b3", "c.txt"),
+                   ("--numeric-suffixes=0007", "-a3", "-b3", "c.txt"), ("--hex-suffixes=A", "-b3", "c.txt"),
+                   ("--numeric-suffixes=00000000000000000000000009", "-a", "24", "-b3", "c.txt"))),
     Utility("csplit", options=(Option("-k"), Option("-s"), Option("-z"), Option("--keep-files"), Option("--quiet"), Option("--silent"),
                                Option("--elide-empty-files"), Option("--suppress-matched"),
                                Option("-b", ("%03d", "%d", "%x", "%02d.txt", "bogus%", "%s", "%d%d", "%"), None),

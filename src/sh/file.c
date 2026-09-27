@@ -20981,7 +20981,6 @@ typedef struct
         positive prefix_length;
         positive additional_length;
         positive suffix_length;
-        positive number;
         p8 radix;
         bool suffix_fixed;
         bool need_advance;
@@ -21087,47 +21086,41 @@ static bool split_size(string_address text, positive address_to out)
         return split_parse_size(text, true, true, out);
 }
 
-/* The default alphabetic sequence remains lexically ordered when it grows:
-   .. yz, zaaa .. zyzz, zzaaaa ... .  An explicit -a instead uses every name
-   of its fixed width and reports exhaustion after zz. */
-static bool split_alpha_advance(split_output address_to output)
+/*
+        The suffix counts in its alphabet -- a to z, 0 to 9 for -d, 0 to f
+        for -x -- and a sequence left to choose its own width stays in
+        lexical order as it grows, the way GNU's next_file_name widens it:
+        when the leading place would take the alphabet's last letter, that
+        letter joins the prefix and the suffix starts again one place wider.
+        So yz is followed by zaaa and zyzz by zzaaaa, x89 by x9000 and xef by
+        xf000. A width that -a, -n or a start value fixed uses every name it
+        has and then reports exhaustion. The array holds the letters that
+        joined the prefix as well, so they are the run of last letters in
+        front of the place that changes.
+*/
+// A start value is letters of the suffix's alphabet, as many as it likes and
+// none at all among them: GNU takes it as the characters of the first name,
+// not as a number, and an empty one is zeros that do not widen.
+static bool split_start_valid(string_address value, positive radix)
 {
-        positive at = output->suffix_length;
-
-        while (at && output->suffix[at - 1] == 'z')
-        {
-                output->suffix[at - 1] = 'a';
-                at--;
-        }
-
-        if (!at)
+        if (!value)
                 return false;
 
-        positive changed = at - 1;
-
-        if (!output->suffix_fixed && output->suffix[changed] == 'y')
+        for (; string_get(value); value++)
         {
-                bool leading_z = true;
+                p8 letter = string_get(value);
 
-                for (positive i = 0; i < changed; i++)
-                        if (output->suffix[i] != 'z')
-                                leading_z = false;
-
-                if (leading_z)
-                {
-                        if (output->suffix_length + 2 > SPLIT_SUFFIX_MAX)
-                                return false;
-
-                        output->suffix[changed] = 'z';
-                        memory_fill(output->suffix + changed + 1, 'a',
-                                    output->suffix_length - changed + 1);
-                        output->suffix_length += 2;
-                        return true;
-                }
+                if (!byte_is_digit(letter) &&
+                    !(radix == 16 && letter >= 'a' && letter <= 'f'))
+                        return false;
         }
 
-        output->suffix[changed]++;
         return true;
+}
+
+static p8 split_suffix_last(split_output address_to output)
+{
+        return output->radix == 10 ? '9' : output->radix == 16 ? 'f' : 'z';
 }
 
 static bool split_output_advance(split_output address_to output)
@@ -21137,13 +21130,46 @@ static bool split_output_advance(split_output address_to output)
 
         output->need_advance = false;
 
-        if (!output->radix)
-                return split_alpha_advance(output);
+        p8 first = output->radix ? '0' : 'a';
+        p8 last = split_suffix_last(output);
+        positive at = output->suffix_length;
 
-        if (output->number == positive_max)
+        while (at && output->suffix[at - 1] == last)
+        {
+                output->suffix[at - 1] = first;
+                at--;
+        }
+
+        if (!at)
                 return false;
 
-        output->number++;
+        positive changed = at - 1;
+        p8 next = output->radix == 16 && output->suffix[changed] == '9'
+                      ? 'a'
+                      : output->suffix[changed] + 1;
+
+        if (!output->suffix_fixed && next == last)
+        {
+                bool leading = true;
+
+                for (positive i = 0; i < changed; i++)
+                        if (output->suffix[i] != last)
+                                leading = false;
+
+                if (leading)
+                {
+                        if (output->suffix_length + 2 > SPLIT_SUFFIX_MAX)
+                                return false;
+
+                        output->suffix[changed] = last;
+                        memory_fill(output->suffix + changed + 1, first,
+                                    output->suffix_length - changed + 1);
+                        output->suffix_length += 2;
+                        return true;
+                }
+        }
+
+        output->suffix[changed] = next;
         return true;
 }
 
@@ -21152,26 +21178,8 @@ static bool split_output_name(split_output address_to output)
         if (!split_output_advance(output))
                 return string_report(log_error, false, "split: output file suffixes exhausted\n");
 
-        p8 digits[SPLIT_SUFFIX_MAX];
         string_address suffix = output->suffix;
         positive suffix_length = output->suffix_length;
-
-        if (output->radix)
-        {
-                positive length = positive_into_base(
-                    digits, output->number, output->radix, false);
-
-                if (length > suffix_length)
-                {
-                        if (output->suffix_fixed || length > SPLIT_SUFFIX_MAX)
-                                return string_report(log_error, false, "split: output file suffixes exhausted\n");
-                        suffix_length = output->suffix_length = length;
-                }
-
-                positive padding = suffix_length - length;
-                memory_fill(output->suffix, '0', padding);
-                memory_copy_apart(output->suffix + padding, digits, length);
-        }
 
         if (output->prefix_length >= FILE_PATH_MAX ||
             suffix_length >= FILE_PATH_MAX - output->prefix_length ||
@@ -21872,9 +21880,8 @@ static bool split_option_seen(p8 letter, string_address value)
         if ((letter == 'd' || letter == 'x') && value)
         {
                 positive radix = letter == 'x' ? 16 : 10;
-                positive start;
 
-                if (!string_digits_checked_exact(value, radix, address_of start))
+                if (!split_start_valid(value, radix))
                 {
                         string_format(log_error,
                                       "split: '%w': invalid start value for %s suffix\n",
@@ -22068,8 +22075,7 @@ static b32 file_split()
                         return 1;
                 }
 
-                if (!string_digits_checked_exact(first_suffix, output.radix,
-                                                 address_of output.number))
+                if (!split_start_valid(first_suffix, output.radix))
                 {
                         string_format(log_error,
                                       "split: '%w': invalid start value for %s suffix\n",
@@ -22081,6 +22087,12 @@ static b32 file_split()
                                 system_close(in);
                         return 1;
                 }
+
+                // The start stands at the right of the zeros, as it was
+                // spelled less its leading zeros: its letters are the name's.
+                positive length = string_length(at);
+
+                memory_copy_apart(output.suffix + suffix_length - length, at, length);
         }
 
         file_facts facts;
