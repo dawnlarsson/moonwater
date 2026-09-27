@@ -288,9 +288,9 @@ typedef struct
 
 #define FILE_KIND_ROWS(X)                                                   \
         X(PIPE,      'p', '|', "fifo",                   "pi", "33")       \
-        X(CHARACTER, 'c',  0,  "character special file", "cd", "33;01")    \
+        X(CHARACTER, 'c',  0,  "character special file", "cd", "01;33")    \
         X(DIRECTORY, 'd', '/', "directory",              0,    0)           \
-        X(BLOCK,     'b',  0,  "block special file",     "bd", "33;01")    \
+        X(BLOCK,     'b',  0,  "block special file",     "bd", "01;33")    \
         X(FILE,      'f',  0,  "regular file",           0,    0)           \
         X(LINK,      'l', '@', "symbolic link",          0,    0)           \
         X(SOCKET,    's', '=', "socket",                 "so", "01;35")
@@ -7884,6 +7884,38 @@ static positive ls_color_index(string_address key)
         return LS_COLOR_FI;
 }
 
+static const string_address dircolors_database;
+
+// Whether this terminal is one the dircolors database would colour.
+static bool ls_term_colors()
+{
+        string_address colorterm = file_environment((string_address) "COLORTERM");
+        string_address term = file_environment((string_address) "TERM");
+
+        if (colorterm && string_get(colorterm))
+                return true;
+        if (!term || !string_get(term))
+                return false;
+
+        for (string_address line = dircolors_database; string_get(line);)
+        {
+                string_address stop = string_first_of_or_end(line, '\n');
+
+                if (!string_compare_max(line, "TERM ", 5) && stop - line - 5 < 64)
+                {
+                        p8 pattern[64];
+                        positive length = (positive)(stop - line - 5);
+
+                        memory_copy_apart(pattern, line + 5, length);
+                        pattern[length] = end;
+                        if (file_fnmatch(pattern, term))
+                                return true;
+                }
+                line = string_get(stop) ? stop + 1 : stop;
+        }
+        return false;
+}
+
 static fn ls_color_parse()
 {
         string_address at = ls_colors;
@@ -8213,6 +8245,33 @@ static fn ls_time_say(ls_entry address_to entry)
         p32 fraction;
 
         ls_entry_time(entry, address_of seconds, address_of fraction);
+
+        /*
+                A time no calendar year can hold is written as its seconds,
+                right-aligned in the width the style's stamps take, as GNU's
+                ls writes it when localtime refuses.
+        */
+        {
+                time_t stamp = (time_t)seconds;
+                tm broken;
+
+                if (!localtime_r(address_of stamp, address_of broken))
+                {
+                        p8 text[32];
+                        positive length = bipolar_into_string(text, seconds);
+                        positive width = ls_time_style == 'f' ? 35 : 12;
+
+                        if (ls_time_style == '+')
+                        {
+                                ls_counted = 0;
+                                date_shape(ls_count_bytes, 0, 0, ls_time_format_old);
+                                width = ls_counted;
+                        }
+                        writer_fill(ls_out, width > length ? width - length : 0, ' ');
+                        ls_out(text, length);
+                        return;
+                }
+        }
 
         switch (ls_time_style)
         {
@@ -9957,9 +10016,14 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                 ls_colors = null;
         }
 
+        /*
+                With no LS_COLORS, GNU colours with its built-in table --
+                the fallbacks each key has here -- when COLORTERM says
+                anything or TERM is one the dircolors database names.
+        */
         if (flags & FILE_FLAG('K'))
-                ls_coloring = ls_colors && string_get(ls_colors) &&
-                              ls_when_active(ls_color_when);
+                ls_coloring = ls_when_active(ls_color_when) &&
+                              ((ls_colors && string_get(ls_colors)) || ls_term_colors());
 
         //      A run of names with nothing between them but a zero byte is
         //      not a place for colour, whichever order the two were asked in.

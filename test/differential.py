@@ -7891,6 +7891,12 @@ FILES_SCENES = {
     "longiso": ("export TIME_STYLE=long-iso\n", "", ""),
     "acl": ("env touch plain acl && env mkdir dd && env setfacl -m u:nobody:r acl && "
             "env setfacl -d -m u:nobody:r dd || exit 9\n", "", ""),
+    "tmax": ("tm=$(env mktemp -d /dev/shm/sysfix-tmax.XXXXXX) && cd \"$tm\" && env touch f && "
+             "python3 -c 'import os; os.utime(\"f\", (2**63-1, 2**63-1))' || exit 9\n", "",
+             "cd / && env rm -rf \"$tm\"\n"),
+    "noco": ("unset LS_COLORS\nexport TERM=xterm-256color\n", "", ""),
+    "dumbterm": ("unset LS_COLORS COLORTERM\nexport TERM=dumb\n", "", ""),
+    "colorterm": ("unset LS_COLORS TERM\nexport COLORTERM=truecolor\n", "", ""),
     "bind2": ("env mkdir -p a/b/c && echo x > a/f && env mount --bind a a/b/c || exit 9\n", "", ""),
 }
 FILES_SCENE_CASES = (
@@ -7931,6 +7937,13 @@ FILES_SCENE_CASES = (
     ("acl", "ls", "-lgo", "--time-style=+x", "plain", "acl"), ("acl", "ls", "-lgo", "--time-style=+x", "plain"),
     ("acl", "ls", "-dlgo", "--time-style=+x", "dd", "plain"), ("acl", "ls", "-1", "plain", "acl"),
     ("none", "ls", "-lgo", "--time-style=+x", "--dired", "--hyperlink=always", "a.txt"),
+    # A time no year can hold is its seconds, in the style's width (tmpfs
+    # keeps what ext4 would clamp); with no LS_COLORS a known terminal still
+    # gets GNU's built-in colours, and an unknown one none.
+    ("tmax", "ls", "-lgo", "f"), ("tmax", "ls", "-lgo", "--time-style=full-iso", "f"),
+    ("tmax", "ls", "-lgo", "--time-style=+%Y", "f"),
+    ("noco", "ls", "--color=always", "-d", "dir", "a.txt", "exe", "link", "dangling", "/dev/null", "loop"),
+    ("dumbterm", "ls", "--color=always", "-d", "dir", "exe"), ("colorterm", "ls", "--color=always", "-d", "dir", "exe"),
 )
 
 
@@ -17880,6 +17893,12 @@ _TEXT_WRITE_TARGETS = {
     "longiso": ("export TIME_STYLE=long-iso\n", "", ""),
     "acl": ("env touch plain acl && env mkdir dd && env setfacl -m u:nobody:r acl && "
             "env setfacl -d -m u:nobody:r dd || exit 9\n", "", ""),
+    "tmax": ("tm=$(env mktemp -d /dev/shm/sysfix-tmax.XXXXXX) && cd \"$tm\" && env touch f && "
+             "python3 -c 'import os; os.utime(\"f\", (2**63-1, 2**63-1))' || exit 9\n", "",
+             "cd / && env rm -rf \"$tm\"\n"),
+    "noco": ("unset LS_COLORS\nexport TERM=xterm-256color\n", "", ""),
+    "dumbterm": ("unset LS_COLORS COLORTERM\nexport TERM=dumb\n", "", ""),
+    "colorterm": ("unset LS_COLORS TERM\nexport COLORTERM=truecolor\n", "", ""),
     "bind2": ("env mkdir -p a/b/c && echo x > a/f && env mount --bind a a/b/c || exit 9\n", "", ""),
 }
 _TEXT_WRITE_CASES = (
