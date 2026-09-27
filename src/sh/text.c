@@ -361,6 +361,7 @@ static bool text_write_error_worded()
         static const char address_to const names[] = {
             "tr", "cut", "paste", "nl", "fold", "expand", "unexpand", "od",
             "base64", "base32", "basenc", "uniq", "comm", "join", "tac", "wc",
+            "pr", "fmt", "ptx",
         };
 
         for (positive i = 0; i < sizeof(names) / sizeof(names[0]); i++)

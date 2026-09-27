@@ -17965,12 +17965,16 @@ _TEXT_WRITE_CASES = (
     ("sort", "lim20", "none", "--batch-size=99999999999999999999"),
     ("sort", "fd7", "sum", "-m"), ("sort", "fd10", "sum", "-m"), ("sort", "fd7", "none", "-m", "-o", "o"),
     ("sort", "fd7r", "sum", "-m", "--batch-size=3"), ("sort", "fd7r", "sum", "-m"), ("sort", "fd7", "sum", "-m", "-n", "--batch-size=5"),
+    #       pr, fmt and ptx say GNU's "write error" and the reason too.
+    ("pr", "small", "full"), ("pr", "yes", "full"), ("pr", "smallin", "closed"), ("pr", "small", "filled"),
+    ("fmt", "small", "full"), ("fmt", "smallin", "closed"), ("fmt", "small", "filled"),
+    ("ptx", "small", "full"), ("ptx", "smallin", "closed"),
 )
 
 
 _TEXT_WRITE_TOOLS = ("cat", "head", "tail", "tr", "cut", "sed", "sort", "base64", "base32", "basenc",
                      "grep", "paste", "nl", "expand", "unexpand", "fold", "od", "uniq", "comm",
-                     "join", "tac", "wc", "rev", "tee")
+                     "join", "tac", "wc", "rev", "tee", "pr", "fmt", "ptx")
 
 
 def _text_write_valid(argv):
