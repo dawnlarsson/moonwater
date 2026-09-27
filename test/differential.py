@@ -13829,6 +13829,27 @@ def shell_lang_test_bash_unary(rng):
         expression + " 2>/dev/null; echo \"s=$?\""))
 
 
+#       ${!ref} whose value names an element or the whole of an array:
+#       'a[1]', 'a[@]', 'm[k]'. The value is a parameter with its subscript
+#       and reads as one, with any operator after it; it was "invalid
+#       variable name", so passing an array by name as f 'arr[@]' failed.
+def shell_lang_indirect_elements(rng):
+    target = rng.choice(("a[1]", "a[@]", "a[*]", "a[5]", "m[k]", "m[z]", "a[i]", "a[-1]", "a", "a[0"))
+    operator = rng.choice(("", "", ":-d", "-d", "#?", "%?", "/b/B", "//?/.", "^", ":1", ":0:1", "+set"))
+    quoted = rng.random() < 0.5
+    via = rng.choice(("variable", "function"))
+    word = "${!r" + operator + "}"
+    if quoted:
+        word = '"' + word + '"'
+    line = "printf '<%s>' " + word + "; echo"
+    if via == "function":
+        line = "f() { r=$1; " + line + "; }; f " + shell_quote(target)
+    else:
+        line = "r=" + shell_quote(target) + "; " + line
+    return ("indirect-elements", shell_BASH, shell_program(
+        "a=(ab 'c d' ef); declare -A m=([k]=vb); i=2", line + " 2>/dev/null", 'echo "end=$?"'))
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16461,6 +16482,7 @@ SHELL_FAMILIES = (
     shell_lang_positional_each,
     shell_lang_declaration_append,
     shell_lang_test_bash_unary,
+    shell_lang_indirect_elements,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),

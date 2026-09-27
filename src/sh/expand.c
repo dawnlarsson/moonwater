@@ -7962,6 +7962,20 @@ static HOT __attribute__((noinline)) string_address expand_braced(
         return expand_braced_body(step, close, quoted);
 }
 
+// A name followed by one whole subscript, as an indirect value may be.
+static PURE bool expand_indirect_element(string_address name, positive length)
+{
+        positive base = string_span_max(name, length, string_set_name);
+        string_address shut;
+
+        if (!base || byte_is_digit(string_get(name)) || base + 2 >= length ||
+            name[base] != '[' || name[length - 1] != ']')
+                return false;
+
+        shut = expand_bracket_end(name + base + 1, '[', ']');
+        return shut == name + length - 1;
+}
+
 static string_address expand_braced_body(string_address step,
                                         string_address close, bool quoted)
 {
@@ -8304,6 +8318,32 @@ static string_address expand_braced_body(string_address step,
                         parameter_mode |= EXPAND_PARAMETER_MISSING;
                         name = source;
                         target_length = length;
+                }
+                else if (!reference.key && !array_form &&
+                         expand_indirect_element(name, target_length))
+                {
+                        /* ${!r} with r='a[1]' or 'a[@]' is ${a[1]} or
+                           ${a[@]}, whatever operator follows: the value is
+                           a parameter with its subscript, read as one. */
+                        positive rest = (positive)(close - (name_start + length));
+                        p8 address_to built = shell_store_take(
+                            address_of expand_store, target_length + rest + 4);
+
+                        if (!built)
+                        {
+                                expand_fail_state();
+                                return close + 1;
+                        }
+                        built[0] = '$';
+                        built[1] = '{';
+                        memory_copy(built + 2, name, target_length);
+                        memory_copy(built + 2 + target_length,
+                                    name_start + length, rest);
+                        built[2 + target_length + rest] = '}';
+                        built[3 + target_length + rest] = end;
+                        expand_braced_body(built, built + 2 + target_length + rest,
+                                           quoted);
+                        return close + 1;
                 }
                 else if (!expand_parameter_name(name, target_length))
                 {
