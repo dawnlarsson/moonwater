@@ -3108,8 +3108,48 @@ static b32 job_wait_job(positive found, string_address into,
                         bool address_to interrupted, bool forget, bool drop)
 {
         bipolar last = job_table[found].last;
+        positive number = job_table[found].number;
         b32 answer;
         positive raw;
+
+        /* Under job control a stop is an answer too, in bash: wait %1 on a
+           job that stops says so and gives 128 and the signal. This waited
+           for an exit that a stopped job never makes. */
+        if (shell_bash_compat && job_monitor())
+        {
+                address_to interrupted = false;
+                while (true)
+                {
+                        positive changed = 0;
+                        bipolar got;
+                        positive at = job_find(number, false);
+
+                        if (at >= job_count ||
+                            job_table[at].state != JOB_RUNNING ||
+                            !job_children(last, true))
+                                break;
+
+                        got = job_wait_call(-1, address_of changed,
+                                            JOB_UNTRACED);
+                        if (got == -4)
+                        {
+                                address_to interrupted = true;
+                                return job_wait_interrupted();
+                        }
+                        if (got <= 0)
+                                break;
+                        job_child_changed(got, changed);
+                }
+
+                positive at = job_find(number, false);
+
+                if (at < job_count && job_table[at].state == JOB_STOPPED)
+                {
+                        shell_told("warning: wait_for_job: job %p is stopped\n",
+                                   number);
+                        return 128 + (b32)job_table[at].stopped_by;
+                }
+        }
 
         answer = shell_wait_one(last, interrupted, false, false);
         if (into && !address_to interrupted)
