@@ -7186,7 +7186,11 @@ FILES_UTILITIES = (
                    ("-n", "-l"), ("--dired",), ("-I", "*.txt", "-a"), ("--hide=*.txt", "-A"), ("-B",),
                    ("--hyperlink=always", "-1"), ("-Z", "-l"), ("--author", "-l"), ("--full-time",),
                    ("-l", "--time-style=+%b %e\n%H:%M"), ("-l", "-T", "1", "-x"), ("-l", "unreadable", "shut"),
-                   ("-I", "[^a]*", "-a"), ("--hide=[^d]*", "-1"), ("-I", "[!^]*", "-1"), ("-I", "[a^]*", "-1"))),
+                   ("-I", "[^a]*", "-a"), ("--hide=[^d]*", "-1"), ("-I", "[!^]*", "-1"), ("-I", "[a^]*", "-1"),
+                   # -w and -T read as strtoumax's base 0; clocale's C-locale
+                   # quotes are the C string's.
+                   ("-w", "0x20", "-C"), ("-w", "017", "-x"), ("-T", "010", "-C", "-w", "30"), ("-w", "0x", "-C"),
+                   ("-w", "09", "-C"), ("--quoting-style=clocale", "-1"), ("--quoting-style=locale", "-1"))),
     #       dir and vdir are ls with a different default format, so they
     #       answer for the same surface and are walked over it. A shorter
     #       list of their own left sixty-nine of ls's options untouched in
@@ -7873,6 +7877,11 @@ FILES_SCENES = {
     # a bound over a/b, in a namespace of the scene's own: a directory that
     # is its own ancestor.
     "bind": ("env mkdir -p a/b/c && echo x > a/f && env mount --bind a a/b || exit 9\n", "", ""),
+    "blocks": ("export BLOCK_SIZE=1\n", "", ""),
+    "lsblocks": ("export BLOCK_SIZE=1 LS_BLOCK_SIZE=1K\n", "", ""),
+    "human": ("export LS_BLOCK_SIZE=human-readable\n", "", ""),
+    "timestyle": ("export TIME_STYLE=+%Y\n", "", ""),
+    "longiso": ("export TIME_STYLE=long-iso\n", "", ""),
     "bind2": ("env mkdir -p a/b/c && echo x > a/f && env mount --bind a a/b/c || exit 9\n", "", ""),
 }
 FILES_SCENE_CASES = (
@@ -7904,6 +7913,10 @@ FILES_SCENE_CASES = (
     # pass it; the tree once counted the mounted directory a second time.
     ("bind", "du", "a"), ("bind", "du", "-a", "a"), ("bind2", "du", "a/b"), ("bind2", "du", "-s", "a"),
     ("bind", "du", "-A", "a/f"), ("none", "du", "-A", "-s", "dir"),
+    # ls reads --block-size and --time-style from the environment too.
+    ("blocks", "ls", "-s", "a.txt", "long"), ("lsblocks", "ls", "-ls", "long"), ("human", "ls", "-ls", "long"),
+    ("timestyle", "ls", "-l", "a.txt"), ("longiso", "ls", "-l", "a.txt"), 
+    ("timestyle", "ls", "a.txt"), ("blocks", "ls", "-s", "--block-size=K", "long"),
 )
 
 
@@ -17570,6 +17583,11 @@ _TEXT_WRITE_TARGETS = {
     # a bound over a/b, in a namespace of the scene's own: a directory that
     # is its own ancestor.
     "bind": ("env mkdir -p a/b/c && echo x > a/f && env mount --bind a a/b || exit 9\n", "", ""),
+    "blocks": ("export BLOCK_SIZE=1\n", "", ""),
+    "lsblocks": ("export BLOCK_SIZE=1 LS_BLOCK_SIZE=1K\n", "", ""),
+    "human": ("export LS_BLOCK_SIZE=human-readable\n", "", ""),
+    "timestyle": ("export TIME_STYLE=+%Y\n", "", ""),
+    "longiso": ("export TIME_STYLE=long-iso\n", "", ""),
     "bind2": ("env mkdir -p a/b/c && echo x > a/f && env mount --bind a a/b/c || exit 9\n", "", ""),
 }
 _TEXT_WRITE_CASES = (

@@ -9269,7 +9269,8 @@ static const file_word ls_time_words[] = {
 static const file_word ls_quoting_words[] = {
     {"literal", 'L'}, {"shell", 's'}, {"shell-always", 'S'}, {"shell-escape", 'e'},
     {"shell-escape-always", 'E'}, {"c", 'c'}, {"c-maybe", 'c', true}, {"escape", 'b'},
-    {"locale", 'o'}, {"clocale", 'o', true}};
+    // clocale in the C locale quotes with the C string's double quotes.
+    {"locale", 'o'}, {"clocale", 'c', true}};
 static const file_word ls_indicator_words[] = {
     {"none", 'N'}, {"slash", '/'}, {"file-type", 'f'}, {"classify", 'F'}};
 
@@ -9294,8 +9295,20 @@ static bool ls_count_option(string_address value, string_address what,
 {
         string_address at = value;
         positive parsed;
+        positive base = 10;
 
-        if (!value || !string_digits_checked(address_of at, 10, address_of parsed) ||
+        // strtoumax's base 0, as GNU reads -w and -T: 0x is hexadecimal
+        // and a leading 0 octal.
+        if (value && string_is(at, '0') && (at[1] == 'x' || at[1] == 'X') &&
+            byte_is_hexadecimal(string_get(at + 2)))
+        {
+                base = 16;
+                at += 2;
+        }
+        else if (value && string_is(at, '0') && string_get(at + 1))
+                base = 8;
+
+        if (!value || !string_digits_checked(address_of at, base, address_of parsed) ||
             string_get(at) || !string_get(value))
         {
                 return string_report(log_error, false, "%s: invalid %s: '%w'\n", ls_program, what,
@@ -9691,9 +9704,16 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                 while `ls -l --time-style=bogus` is the error.
         */
         ls_time_style = 'd';
-        if (ls_selected.stamp == '5' && ls_format == 'l')
+
+        // TIME_STYLE stands in for --time-style when it is not given.
+        string_address time_style = ls_selected.stamp == '5'
+                                        ? file_option_value(address_of taking, '5')
+                                    : ls_selected.stamp ? null
+                                                        : file_environment((string_address) "TIME_STYLE");
+
+        if (time_style && string_get(time_style) && ls_format == 'l')
         {
-                string_address style = file_option_value(address_of taking, '5');
+                string_address style = time_style;
 
                 if (string_has_prefix(style, "posix-"))
                         style = (string_address) "locale";
@@ -9812,6 +9832,38 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                 ls_block_human = ls_size_human;
                 ls_block_si = ls_size_si;
                 memory_copy_apart(ls_block_suffix, ls_size_suffix, sizeof(ls_block_suffix));
+        }
+        else if (!ls_selected.size)
+        {
+                /*
+                        LS_BLOCK_SIZE, or failing it BLOCK_SIZE, is
+                        --block-size from the environment: both the blocks
+                        of -s and the sizes of -l, as GNU's ls reads them. A
+                        value that is no size is passed over.
+                */
+                string_address wanted = file_environment((string_address) "LS_BLOCK_SIZE");
+                positive unit;
+                bool human, si;
+                p8 suffix[sizeof(ls_size_suffix)];
+
+                if (!wanted || !string_get(wanted))
+                        wanted = file_environment((string_address) "BLOCK_SIZE");
+                if (wanted && (string_equals(wanted, "human-readable") ||
+                               string_equals(wanted, "si")))
+                {
+                        ls_size_human = ls_block_human = true;
+                        ls_size_si = ls_block_si = string_equals(wanted, "si");
+                }
+                else if (wanted && string_get(wanted) &&
+                    ls_block_size_read(wanted, address_of unit, address_of human,
+                                       address_of si, suffix))
+                {
+                        ls_size_unit = ls_block_unit = unit;
+                        ls_size_human = ls_block_human = human;
+                        ls_size_si = ls_block_si = si;
+                        memory_copy_apart(ls_size_suffix, suffix, sizeof(ls_size_suffix));
+                        memory_copy_apart(ls_block_suffix, suffix, sizeof(ls_block_suffix));
+                }
         }
 
         if (ls_kibibytes)
