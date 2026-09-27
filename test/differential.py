@@ -13325,6 +13325,39 @@ def shell_lang_escaped_pattern_bytes(rng):
     return "escaped-pattern-" + context, modes, shell_program(line, 'echo "end=$?"')
 
 
+#       NUL bytes in what a substitution or read takes in. A word cannot
+#       hold one, so both references drop it and keep the bytes around it;
+#       this shell ended the value at the first, and $(printf 'a\0b') was a.
+shell_NUL_PAYLOADS = ("a\\000b", "\\000x", "x\\000", "a\\000\\000b\\000c", "\\000\\000", "p\\000q\\nr\\000s",
+                      "a b\\000c d", "\\000\\n\\000")
+
+
+def shell_lang_nul_bytes(rng):
+    payload = "printf '" + rng.choice(shell_NUL_PAYLOADS) + "'"
+    consumer = rng.choice(("substitution", "quoted-substitution", "backquote", "read", "read-raw", "read-two",
+                           "read-delimiter", "read-count", "fields"))
+    if consumer == "substitution":
+        line = "v=$(" + payload + "); echo \"<$v> ${#v}\""
+    elif consumer == "quoted-substitution":
+        line = "echo \"<$(" + payload + ")>\""
+    elif consumer == "backquote":
+        line = "echo \"<`" + payload + "`>\""
+    elif consumer == "read":
+        line = payload + " | { read v; echo \"<$v> ${#v} $?\"; }"
+    elif consumer == "read-raw":
+        line = payload + " | { read -r v; echo \"<$v> ${#v}\"; }"
+    elif consumer == "read-two":
+        line = payload + " | { read a b; echo \"<$a|$b>\"; }"
+    elif consumer == "read-delimiter":
+        line = payload + " | { while read -d '' v; do echo \"<$v>\"; done; echo \"<$v>\"; }"
+    elif consumer == "read-count":
+        line = payload + " | { read -n 2 v; echo \"<$v> ${#v}\"; }"
+    else:
+        line = "set -- $(" + payload + "); echo \"$#:$*\""
+    modes = shell_BASH if consumer in ("read-delimiter", "read-count") else shell_ALL
+    return "nul-bytes-" + consumer, modes, shell_program(line + " 2>/dev/null", 'echo "end=$?"')
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -15948,6 +15981,7 @@ SHELL_FAMILIES = (
     shell_delivered(shell_lang_case_in_substitution),
     shell_lang_backquote_quoting,
     shell_lang_escaped_pattern_bytes,
+    shell_lang_nul_bytes,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),

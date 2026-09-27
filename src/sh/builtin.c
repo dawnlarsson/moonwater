@@ -12897,6 +12897,11 @@ COLD fn shell_read(writer write, string_address input)
 
                 if (!escaped && !exact && value == stop_at)
                         break;
+                /* A NUL that does not end the line cannot be part of a
+                   value, and both references drop it and keep reading: it
+                   cut `a\0b` to a. */
+                if (!value)
+                        continue;
                 if (!raw && !escaped && value == '\\')
                 {
                         escaped = true;

@@ -4277,13 +4277,46 @@ static fn expand_substitution_body(string_address command, bool capture);
 //      A substitution's bytes, read to the end of fd, which is then closed.
 //      The newlines at the end go, and only the ones at the end: that is the
 //      single piece of editing a substitution is allowed.
+//      A NUL byte cannot live in a word, so it is dropped and the bytes
+//      after it kept, as both references do; it ended the word, and
+//      $(printf 'a\0b') was a where they give ab. bash says so once.
 static fn expand_read_substitution(b32 fd, p8 mark, positive start)
 {
         p8 block[512];
         bipolar got;
+        bool dropped = false;
 
         while ((got = system_read_retry((positive)fd, block, sizeof(block))) > 0)
-                expand_push_run(block, (positive)got, mark);
+        {
+                positive at = 0;
+
+                while (at < (positive)got)
+                {
+                        positive run = memory_span_byte(block + at, 0,
+                                                        (positive)got - at);
+
+                        if (run)
+                        {
+                                dropped = true;
+                                at += run;
+                                continue;
+                        }
+
+                        p8 address_to nul = memory_first_of(block + at, 0,
+                                                            (positive)got - at);
+                        positive take = nul ? (positive)(nul - (block + at))
+                                            : (positive)got - at;
+
+                        expand_push_run(block + at, take, mark);
+                        at += take;
+                }
+        }
+
+        if (dropped && shell_bash_compat)
+        {
+                expand_where();
+                writer_stderr_once(str("warning: command substitution: ignored null byte in input\n"));
+        }
 
         system_close(fd);
 
