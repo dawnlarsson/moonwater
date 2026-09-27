@@ -13274,6 +13274,31 @@ def shell_lang_case_in_substitution(rng):
     return "case-in-substitution-" + style, shell_ALL, shell_program("x=a", line, "echo \"end=$?\"")
 
 
+#       A backquoted command inside double quotes: there a backslash in the
+#       body hides a double quote as well as $, ` and \, so the body of
+#       "x `echo \"hi\"`" is echo "hi" and the word is x hi. The quote kept
+#       its backslash and the word came out x "hi".
+shell_BACKQUOTE_ARGUMENTS = ('\\"hi\\"', '\\"a b\\"', '\\"$x\\"', '\\$x', '$x', "'q\\\"r'", '\\"\\"',
+                             '\\"*\\"', 'a\\"b\\"')
+
+
+def shell_lang_backquote_quoting(rng):
+    words = " ".join(rng.choice(shell_BACKQUOTE_ARGUMENTS) for _ in range(rng.randint(1, 2)))
+    body = "`printf '<%s>' " + words + "`"
+    place = rng.choice(("double", "double", "assign-double", "unquoted", "document", "double-around"))
+    if place == "double":
+        line = 'echo "' + body + '"'
+    elif place == "assign-double":
+        line = 'v="' + body + '"; echo "$v"'
+    elif place == "unquoted":
+        line = "echo " + body
+    elif place == "document":
+        line = "cat <<EOF\n" + body + "\nEOF"
+    else:
+        line = 'echo "a ' + body + ' b"'
+    return "backquote-quoting-" + place, shell_ALL, shell_program("x='v w'", line, 'echo "end=$?"')
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -15895,6 +15920,7 @@ SHELL_FAMILIES = (
     shell_lang_tilde,
     shell_lang_command_substitution,
     shell_delivered(shell_lang_case_in_substitution),
+    shell_lang_backquote_quoting,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),

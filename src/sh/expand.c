@@ -2028,7 +2028,8 @@ static fn expand_into(string_address text, bool quoted, p8 plain,
                       bool assignment);
 static string_address expand_double(string_address step);
 static string_address expand_dollar(string_address step, bool quoted);
-static string_address expand_backtick(string_address step, bool quoted);
+static string_address expand_backtick(string_address step, bool quoted,
+                                       bool in_double);
 static bool expand_sort_names(string_address address_to names, positive count);
 
 /*
@@ -4495,7 +4496,8 @@ static fn expand_backtick_dash_cut(p8 address_to text)
         }
 }
 
-static string_address expand_backtick(string_address step, bool quoted)
+static string_address expand_backtick(string_address step, bool quoted,
+                                       bool in_double)
 {
         p8 address_to text;
         positive length = 0;
@@ -4525,10 +4527,15 @@ static string_address expand_backtick(string_address step, bool quoted)
         while (step < look)
         {
                 // Inside backticks a backslash only hides the next byte when
-                // that byte is one that backticks care about.
+                // that byte is one that backticks care about, and inside
+                // double quotes the double quote is one of them: the body
+                // of "x `echo \"hi\"`" is echo "hi". A here-document body
+                // reads it the same way in dash and bash --posix; bash
+                // itself keeps the backslash there.
                 if (string_is(step, '\\') &&
                     (string_get(step + 1) == '`' || string_get(step + 1) == '\\' ||
-                     string_get(step + 1) == '$'))
+                     string_get(step + 1) == '$' ||
+                     (in_double && string_get(step + 1) == '"')))
                         step++;
 
                 if (length + 1 < room)
@@ -8497,7 +8504,8 @@ RETURNS_NONNULL string_address shell_expand_document_part(string_address step,
         // like a single quote there, the bytes are literal.  Return only the
         // dollar and let the here-body walker copy the following quote/run.
         if (string_is(step, '`'))
-                result = expand_backtick(step, true);
+                result = expand_backtick(step, true,
+                                         !shell_bash_compat || shell_posix_on());
         else if (string_is(step + 1, '\''))
         {
                 expand_push('$', MARK_QUOTED);
@@ -8579,7 +8587,7 @@ static string_address expand_double(string_address step)
 
                 if (seen == '`')
                 {
-                        step = expand_backtick(step, true);
+                        step = expand_backtick(step, true, true);
                         continue;
                 }
 
@@ -8743,7 +8751,7 @@ static fn expand_into(string_address text, bool quoted, p8 plain,
 
                 if (seen == '`')
                 {
-                        step = expand_backtick(step, quoted);
+                        step = expand_backtick(step, quoted, false);
                         continue;
                 }
 
