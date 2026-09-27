@@ -41113,6 +41113,23 @@ static fn date_operand(b32 index)
 
 static bool date_emit(string_address format, b64 when, positive nanoseconds)
 {
+        time_t stamp = (time_t)when;
+        tm broken;
+
+        /* A moment no calendar year can hold is out of range, said with
+           its seconds, after the empty line GNU's date still writes. */
+        if (!localtime_r(address_of stamp, address_of broken))
+        {
+                p8 seconds[32];
+
+                seconds[bipolar_into_string(seconds, when)] = end;
+                log("\n", 1);
+                log_flush();
+                string_format(log_error, "date: time '%s' is out of range\n",
+                              (string_address)seconds);
+                return false;
+        }
+
         if (!date_shape(log, when, nanoseconds, format))
                 return string_report(log_error, false,
                                      "date: formatted value is too large\n");
