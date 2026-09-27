@@ -14058,6 +14058,22 @@ def shell_lang_redirect_save_scope(rng):
             shell_program("SECONDS=0 2>/dev/null; rm -f f g", line + " 2>&1", 'echo "end=$?"'))
 
 
+#       trap '' CHLD and then programs. Ignoring SIGCHLD in the shell itself
+#       let the kernel reap its children before it could wait for them, so
+#       (trap '' CHLD; /bin/echo hi) printed hi and then failed with 125.
+def shell_lang_trap_child_ignore(rng):
+    #   A caught CHLD interrupts wait with 145 when it lands first, which is
+    #   a race; only ignoring and resetting are asked.
+    action = rng.choice(("''", "''", "-"))
+    command = rng.choice(("/bin/echo hi", "/bin/true", "/bin/false", "/bin/sh -c 'exit 3'", "/bin/echo a | /bin/cat",
+                          "x=$(/bin/echo sub); echo \"$x\"", "/bin/sleep 0.05 & wait $!"))
+    place = rng.choice(("subshell", "top", "function", "loop"))
+    body = "trap " + action + " CHLD; " + command + "; echo \"s=$?\""
+    line = {"subshell": "(" + body + ")", "top": body, "function": "f() { " + body + "; }; f",
+            "loop": "for i in 1 2; do " + body + "; done"}[place]
+    return ("trap-child-ignore-" + place, shell_ALL, shell_program(line, 'echo "end=$?"'))
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16703,6 +16719,7 @@ SHELL_FAMILIES = (
     shell_lang_empty_at_joins,
     shell_lang_source_frames,
     shell_lang_redirect_save_scope,
+    shell_lang_trap_child_ignore,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),

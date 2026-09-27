@@ -14832,8 +14832,16 @@ COLD fn shell_trap(writer write, string_address input)
                 {
                         if (!action)
                                 shell_default((b32)number);
+                        /* The shell itself never ignores SIGCHLD: the kernel
+                           would reap its children before it could wait for
+                           them, and (trap '' CHLD; cmd) ran cmd and then
+                           failed with 125. The trap is still recorded and
+                           listed, as bash and dash have it. */
                         else if (!string_get(action))
-                                shell_ignore((b32)number);
+                        {
+                                if (number != 17)
+                                        shell_ignore((b32)number);
+                        }
                         else
                                 shell_catch((b32)number);
                 }
