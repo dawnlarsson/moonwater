@@ -7116,7 +7116,11 @@ FILES_UTILITIES = (
                    ("-n", "0", "-o", "out", "c.txt"), ("-o", "out", "empty"), ("-o", "out", "-e"), ("-e", "-o", "out", "only"),
                    ("-i", "7-7", "-o", "out"), ("-o", "missing/out", "c.txt"), ("-e", "--", "-c", "-a"),
                    ("-e",), ("-i", "1-3", "a.txt"), ("-e", "-i", "1-3", "a"), ("--repeat", "-n", "5", "-e", "x"),
-                   ("-o", "out", "-n0", "-i", "1-9"), ("-r", "-e"), ("-zr", "-n2", "-e", "z"))),
+                   ("-o", "out", "-n0", "-i", "1-9"), ("-r", "-e"), ("-zr", "-n2", "-e", "z"),
+                   #   A second -o naming another file is refused before
+                   #   anything is written; naming the same one again is not.
+                   ("-o", "out", "-o", "out2", "-e", "x"), ("-o", "out", "-o", "out", "-e", "x"),
+                   ("--output=out", "-o", "out2", "c.txt"), ("-n1", "-o", "out", "--output", "out", "-e", "y"))),
     Utility("split", options=(Option("-d"), Option("-x"), Option("-e"), Option("-u"), Option("--verbose"),
                               Option("--elide-empty-files"), Option("--unbuffered"), Option("--numeric-suffixes"),
                               Option("--numeric-suffixes", ("7", "0", "x"), True), Option("--hex-suffixes"),
@@ -7160,7 +7164,9 @@ FILES_UTILITIES = (
             stdin=("text", "repeats", "many_lines", "empty", "nonl"), fixture="files", stderr="exact",
             extra=(("-f", "same", "-n", "2", "c.txt", "3"), ("--suppress-matched", "c.txt", "/9/+1"), ("-b", "%03d", "a.txt", "1"),
                    ("--suppress-matched", "many", "/5/", "/10/"), ("-k", "c.txt", "/9/", "{2}"), ("-k", "c.txt", "99"),
-                   ("-z", "c.txt", "1", "3"), ("-s", "c.txt", "2", "3"), ("-f", "part-", "-n3", "c.txt", "2", "3"))),
+                   ("-z", "c.txt", "1", "3"), ("-s", "c.txt", "2", "3"), ("-f", "part-", "-n3", "c.txt", "2", "3"),
+                   #   -q is the older letter for -s, still taken.
+                   ("-q", "c.txt", "2", "3"), ("-qz", "c.txt", "1", "3"), ("-sq", "c.txt", "/9/"))),
     Utility("cp", options=(Option("-a"), Option("-b"), Option("-d"), Option("-f"), Option("-H"), Option("-i"), Option("-l"),
                            Option("-L"), Option("-n"), Option("-p"), Option("-P"), Option("-r"), Option("-R"), Option("-s"),
                            Option("-T"), Option("-u"), Option("-v"), Option("-x"), Option("--archive"), Option("--backup"),

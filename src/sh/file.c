@@ -21332,6 +21332,9 @@ static const argument_option csplit_options[] = {
     {"quiet", 's'},
     {"silent", 's'},
     {"suppress-matched", 'M', ARGUMENT_LONG_ONLY},
+    //  -q is GNU's older letter for -s, still taken though no longer
+    //  documented; it has no long spelling of its own.
+    {"q", 0},
     {null},
 };
 
@@ -21859,7 +21862,7 @@ static b32 file_csplit()
             .prefix = file_option_value(address_of taking, 'f'),
             .digits = digits,
             .keep = (taking.flags & FILE_FLAG('k')) != 0,
-            .quiet = (taking.flags & FILE_FLAG('s')) != 0,
+            .quiet = (taking.flags & (FILE_FLAG('s') | FILE_FLAG('q'))) != 0,
             .elide = (taking.flags & FILE_FLAG('z')) != 0,
             .suppress_matched = (taking.flags & FILE_FLAG('M')) != 0,
             .output_mode = 0666 & ~file_umask(),
@@ -24249,6 +24252,7 @@ static bool shuf_emit_range(shuf_output address_to output, positive low,
 static positive shuf_wanted;
 static bool shuf_limited;
 static bool shuf_ranged;
+static string_address shuf_output_named;
 
 static bool shuf_seen(p8 letter, string_address value)
 {
@@ -24286,6 +24290,19 @@ static bool shuf_seen(p8 letter, string_address value)
                 shuf_ranged = true;
         }
 
+        //      A second -o is refused as it is read, unless it names the
+        //      same file again: GNU keeps the first name and compares the
+        //      next one with it, so `-o A -o A` is one output and `-o A -o B`
+        //      creates neither.
+        if (letter == 'o' && value)
+        {
+                if (shuf_output_named && !string_equals(shuf_output_named, value))
+                        return string_report(log_error, false,
+                                             "shuf: multiple output files specified\n");
+
+                shuf_output_named = value;
+        }
+
         return true;
 }
 
@@ -24295,6 +24312,7 @@ static b32 file_shuf()
         shuf_wanted = 0;
         shuf_limited = false;
         shuf_ranged = false;
+        shuf_output_named = null;
         file_taking taking = {
             .program = (string_address) "shuf",
             .options = shuf_options,
