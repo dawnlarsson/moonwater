@@ -7249,7 +7249,7 @@ static b32 tools_mcookie()
 #define DD_LCASE 0x080
 #define DD_UCASE 0x100
 #define DD_SWAB 0x200
-// Accepted for GNU's sake: a regular file comes out the same either way.
+// An output block of nothing but NULs is seeked over, not written.
 #define DD_SPARSE 0x400
 // open(2) flags shared by iflag and oflag, above each group's own bits.
 #define DD_DIRECT 0x004
@@ -7305,6 +7305,16 @@ static positive dd_status_level;
 static bool dd_out_direct;
 static positive dd_out_block;
 static positive dd_started;
+/*
+        conv=sparse, and whether the last output was a seek rather than a
+        write. It is coreutils' iwrite: a whole write of NULs becomes a seek
+        forward, so conv=notrunc keeps what the file held there and a new
+        file gets a hole; an output that cannot seek turns the conversion
+        off and is written. A seek at the very end leaves a regular file
+        short of its length, which the end of the copy puts right.
+*/
+static bool dd_sparse;
+static bool dd_final_seek;
 
 // Set in the handler, acted on where a block boundary is, because printing
 // the summary from inside the handler would land it in the middle of one.
@@ -7724,6 +7734,20 @@ static positive dd_output(positive handle, string_address name,
                 }
         }
 
+        dd_final_seek = false;
+
+        if (dd_sparse && length &&
+            memory_span_byte(bytes, 0, length) == length)
+        {
+                if (system_seek(handle, length, 1) < 0)
+                        dd_sparse = false;
+                else
+                {
+                        dd_final_seek = true;
+                        wrote = length;
+                }
+        }
+
         // Written a piece at a time so the kernel's reason for a refusal
         // reaches the complaint, as coreutils' does.
         while (wrote < length)
@@ -8131,6 +8155,8 @@ static b32 tools_dd(void)
 
         dd_out_direct = (oflags & DD_DIRECT) != 0;
         dd_out_block = obs;
+        dd_sparse = (conv & DD_SPARSE) != 0;
+        dd_final_seek = false;
 
         if (!ibuf || !obuf || !converted)
                 return 1;
@@ -8433,6 +8459,49 @@ static b32 tools_dd(void)
 
                 if (wrote != held)
                         result = 1;
+        }
+
+        /*
+                A copy that ended in a seek has not reached its length yet:
+                a regular file is cut out to where the output stands, which
+                is the hole at its end. Anything else keeps its size.
+        */
+        if (dd_final_seek)
+        {
+                file_facts facts;
+                bipolar told = system_stat_at(out_handle, "",
+                                              AT_EMPTY_PATH | AT_NO_AUTOMOUNT,
+                                              STATX_BASIC, address_of facts);
+
+                if (told < 0)
+                {
+                        text_flush();
+                        string_format(writer_stderr, "dd: cannot fstat '%w': %s\n",
+                                      writer_terminal_quoted_name, output ? output : (string_address)"standard output",
+                                      file_reason(told));
+                        result = 1;
+                }
+                else if ((facts.mode & MODE_FORMAT) == MODE_FILE)
+                {
+                        bipolar stands = system_seek(out_handle, 0, 1);
+
+                        if (stands >= 0 && facts.size < (positive)stands)
+                        {
+                                bipolar refused = system_truncate_handle(
+                                    out_handle, (positive)stands);
+
+                                if (refused < 0)
+                                {
+                                        text_flush();
+                                        string_format(writer_stderr,
+                                            "dd: failed to truncate to %p bytes in output file '%w': %s\n",
+                                            (positive)stands, writer_terminal_quoted_name,
+                                            output ? output : (string_address)"standard output",
+                                            file_reason(refused));
+                                        result = 1;
+                                }
+                        }
+                }
         }
 
         /*

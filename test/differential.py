@@ -9317,7 +9317,18 @@ MISC_UTILITIES = (
                    ("if=blob", "ibs=997", "obs=311", "status=noxfer"),
                    ("if=misc", "of=/dev/null"), ("if=missing", "of=/dev/null"),
                    ("if=ten", "of=/dev/full", "bs=2", "status=none"),
-                   ("if=ten", "of=/dev/full", "ibs=8", "obs=64", "status=none"))),
+                   ("if=ten", "of=/dev/full", "ibs=8", "obs=64", "status=none"),
+                   # conv=sparse seeks over a block of NULs: notrunc keeps what
+                   # the file held there, a new file ends in a hole cut out
+                   # to its length, and a pipe that cannot seek is written.
+                   {"argv": ("of=a.txt", "bs=1", "conv=sparse,notrunc", "status=none"),
+                    "stdin": "nul", "fixture": "misc"},
+                   {"argv": ("of=out", "bs=2", "conv=sparse", "status=none"),
+                    "stdin": "nul", "fixture": "misc"},
+                   ("if=zeros", "of=a.txt", "bs=512", "conv=sparse,notrunc", "status=noxfer"),
+                   ("if=zeros", "of=out", "bs=1K", "conv=sparse", "status=noxfer"),
+                   ("if=blob", "of=b.txt", "ibs=512", "obs=64", "conv=sparse,notrunc", "status=noxfer"),
+                   ("if=zeros", "bs=1K", "conv=sparse", "status=none"))),
 
     Utility("od",
             options=(Option("-A", ("d", "o", "x", "n", "bad", "dd"), None),
