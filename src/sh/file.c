@@ -17171,6 +17171,9 @@ static string_address file_backup_control_named;
 static string_address file_backup_suffix;
 static p8 file_backup_shown[FILE_PATH_MAX];
 static bool file_backup_did;
+// ln's backup onto a hard link of the destination itself: renamed in name
+// only, so the destination is still there to be replaced.
+static bool file_backup_left;
 static bool file_backup_made_at(string_address program, bipolar directory,
                                 string_address destination,
                                 string_address shown,
@@ -17259,22 +17262,33 @@ static bool ln_relative_text(string_address target, string_address name,
         return realpath_relative(above, there, into);
 }
 
-static bool ln_same_dirent(string_address source, bipolar dest_dir,
-                           string_address dest_leaf)
+/* gnulib's same_nameat as ln calls it: the same last component, and the
+   directory each name is spelled in looked at without following it, so d/f
+   through a link d to here is not f. Linking into a target directory the
+   destination's directory is that one, opened; given as the second of two
+   operands, it is the destination's spelled head. */
+static bool ln_into;
+
+static bool ln_same_dirent(string_address source, string_address destination,
+                           bipolar dest_dir, string_address dest_leaf)
 {
         if (!string_equals(file_last_component(source), dest_leaf))
                 return false;
 
-        p8 source_leaf[FILE_PATH_MAX];
-        bipolar source_dir = file_parent_open(source, source_leaf);
+        p8 head[FILE_PATH_MAX];
+        file_facts named;
+        file_facts there;
 
-        if (source_dir < 0)
+        path_head_copy(head, FILE_PATH_MAX, source);
+        if (!file_look(AT_FDCWD, head, AT_SYMLINK_NOFOLLOW, address_of named))
                 return false;
-
-        bool same = file_same_dirent(source_dir, source_leaf, dest_dir,
-                                     dest_leaf);
-        system_close(source_dir);
-        return same;
+        if (ln_into)
+                return file_look(dest_dir, (string_address) "", AT_EMPTY_PATH,
+                                 address_of there) &&
+                       file_same_identity(address_of named, address_of there);
+        path_head_copy(head, FILE_PATH_MAX, destination);
+        return file_look(AT_FDCWD, head, AT_SYMLINK_NOFOLLOW, address_of there) &&
+               file_same_identity(address_of named, address_of there);
 }
 
 //      A hard link that could not be made names only the destination
@@ -17299,6 +17313,19 @@ static bool ln_failed(string_address target, string_address name,
                 string_format(log_error, "ln: failed to create hard link %w => %w: %s\n",
                               writer_shell_quoted_name, name,
                               writer_shell_quoted_name, target, file_reason(reason));
+        return false;
+}
+
+/* A link that could not be made after its destination was moved aside
+   puts the destination back, as the reference does. */
+static bool ln_unbackup(string_address name)
+{
+        file_backup_did = false;
+        bipolar back = system_rename_at(AT_FDCWD, file_backup_shown,
+                                        AT_FDCWD, name, 0);
+        if (back < 0)
+                string_format(log_error, "ln: cannot un-backup %w: %s\n",
+                              writer_shell_quoted_name, name, file_reason(back));
         return false;
 }
 
@@ -17441,6 +17468,43 @@ static bool ln_make(string_address target, string_address name)
                 return false;
         }
 
+        /*
+                GNU do_link, in its order: with -f, -i or a backup in hand,
+                a destination that is the source's own directory entry is
+                refused before anything is asked or moved, because removing
+                it would take the source with it -- a hard link then fails,
+                and a symbolic one made in its place points at itself, which
+                is what ln -sf a a once left. A backup covers a symbolic
+                link, so there only a hard link is checked, and without one
+                only -f is. The source is taken as the link call will read
+                it: a hard link's as it was looked at, a symbolic link's
+                text followed from here, and the same only when it has one
+                name or the two are the same entry.
+        */
+        if (destination_exists &&
+            (file_backup_kind ? !ln_symbolic : ln_selected.collision == 'f'))
+        {
+                file_facts from = source;
+                bool looked = ln_symbolic
+                                  ? file_look(AT_FDCWD, target, 0, address_of from)
+                                  : true;
+
+                if (looked &&
+                    file_same_identity(address_of from, address_of destination) &&
+                    (from.hard_links == 1 ||
+                     ln_same_dirent(target, name, destination_directory,
+                                    destination_leaf)))
+                {
+                        string_format(log_error, "ln: %w and %w are the same file\n",
+                                      writer_shell_quoted_name, target,
+                                      writer_shell_quoted_name, name);
+                        system_close(destination_directory);
+                        if (source_handle >= 0)
+                                system_close(source_handle);
+                        return false;
+                }
+        }
+
         if (ln_selected.collision == 'i' && destination_exists &&
             !file_ask((string_address)"ln", (string_address)"replace", name))
         {
@@ -17452,9 +17516,12 @@ static bool ln_make(string_address target, string_address name)
 
         /* Bind an interactive overwrite decision to the object that was
            shown.  An object that appears after an absent -i check is left in
-           place and makes the exclusive link fail. */
+           place and makes the exclusive link fail.  A backup that is already
+           a hard link of the destination is a rename the kernel does nothing
+           for, and the destination it leaves is replaced like any other. */
         bool make_backup = file_backup_kind &&
                            (ln_selected.collision != 'i' || destination_exists);
+        file_backup_left = false;
         if (make_backup &&
             !file_backup_made_at(
                 (string_address)"ln", destination_directory,
@@ -17466,31 +17533,39 @@ static bool ln_make(string_address target, string_address name)
                         system_close(source_handle);
                 return false;
         }
-        if (make_backup && destination_exists)
+        if (make_backup && destination_exists && !file_backup_left)
                 destination_exists = false;
 
-        /*
-                A hard link needs its source pinned before the destination is
-                given up.  GNU do_link refuses the same file only when it
-                would unlink dest and (nlink==1 or the same directory entry).
-                -i without -f/-b does not take that path.
-        */
-        if (!ln_symbolic && destination_exists &&
-            (ln_selected.collision == 'f' || file_backup_kind) &&
-            file_same_identity(address_of source, address_of destination) &&
-            (source.hard_links == 1 ||
-             ln_same_dirent(target, destination_directory, destination_leaf)))
+        /* The reference links the source by its name after the backup has
+           moved the destination aside, so a source that was the destination
+           under another spelling -- ln -b f d/f, with d a link to here --
+           is gone by then and the link fails for want of it. */
+        if (make_backup && file_backup_did && !ln_symbolic)
         {
-                string_format(log_error, "ln: %w and %w are the same file\n",
-                              writer_shell_quoted_name, target, writer_shell_quoted_name,
-                              name);
-                system_close(destination_directory);
-                system_close(source_handle);
-                return false;
+                file_facts still;
+                bipolar there = file_look_code(AT_FDCWD, target,
+                                               ln_through ? 0 : AT_SYMLINK_NOFOLLOW,
+                                               address_of still);
+                if (there < 0)
+                {
+                        system_close(destination_directory);
+                        system_close(source_handle);
+                        ln_failed(target, name, there);
+                        return ln_unbackup(name);
+                }
         }
 
-        if ((ln_selected.collision == 'f' || ln_selected.collision == 'i') &&
-            destination_exists)
+        /* A hard link onto a name that already is the source -- ln -i a a
+           answered yes -- is made by GNU through a fresh name renamed over
+           the old, which the kernel does nothing for. Removing the name
+           first and linking the pinned source back would find it with no
+           name left and lose it. */
+        bool already = !ln_symbolic && destination_exists &&
+                       file_same_identity(address_of source,
+                                          address_of destination);
+        if ((ln_selected.collision == 'f' || ln_selected.collision == 'i' ||
+             file_backup_left) &&
+            destination_exists && !already)
         {
                 bipolar removed = file_remove_same(
                     destination_directory, destination_leaf, 0,
@@ -17511,6 +17586,9 @@ static bool ln_make(string_address target, string_address name)
         if (ln_symbolic)
                 done = system_symbolic_link_at(
                     target, destination_directory, destination_leaf);
+        else if (already && (ln_selected.collision == 'f' ||
+                             ln_selected.collision == 'i' || file_backup_left))
+                done = 0;
         else
                 done = system_path_link_opened_at(
                     source_handle, destination_directory, destination_leaf);
@@ -17520,7 +17598,10 @@ static bool ln_make(string_address target, string_address name)
                 system_close(source_handle);
 
         if (done < 0)
-                return ln_failed(target, name, done);
+        {
+                ln_failed(target, name, done);
+                return file_backup_did ? ln_unbackup(name) : false;
+        }
 
         if (ln_loud)
         {
@@ -17566,6 +17647,7 @@ static b32 file_ln()
         positive count = (positive)program_argument_count();
         ln_selected = (ln_selection){};
         ln_target_directory = null;
+        ln_into = false;
         file_backup_control_named = null;
 
         file_taking taking = {
@@ -17708,6 +17790,7 @@ static b32 file_ln()
 
         b32 status = 0;
 
+        ln_into = true;
         while (first < after)
         {
                 string_address target = program_argument((b32)first++);
@@ -25436,7 +25519,9 @@ static bool file_backup_made_at(string_address program, bipolar directory,
                         : kept_exists &&
                                   file_same_identity(address_of facts,
                                                      address_of kept_facts)
-                            ? -ERROR_INVALID
+                            ? (string_equals(program, (string_address) "ln")
+                                   ? (file_backup_left = true, 0)
+                                   : -ERROR_INVALID)
                         : kind == 'n' && kept_exists
                             ? -ERROR_EXISTS
                             : file_rename_decided_at(

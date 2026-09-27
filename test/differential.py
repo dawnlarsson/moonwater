@@ -6700,6 +6700,42 @@ files_FIND_CARET = (
     (".", "-ipath", "./[^D]*/*"), (".", "-lname", "[^a]*"), ("dir", "-name", "[^s]*", "-delete"),
 )
 
+
+#       A destination that is the source by another road: the same name,
+#       the name through a link to the directory it is in, a link to it, a
+#       hard link of it, and the source a link to what it is copied onto.
+#       Every tool that removes a destination before writing it must first
+#       see that the removal would take the source too; cp -a sl f and
+#       ln -sf f f once each left f a link to itself.
+FIXTURES["files_self"] = {
+    "f": files_file(b"XYZ\n", 1000000000),
+    "g": files_file(b"other\n", 1010000000),
+    "h": ("hard", "f"),
+    "sl": files_link("f", 1020000000),
+    "sl2": files_link("f", 1030000000),
+    "d": files_link(".", 1040000000),
+    "sub/f": files_file(b"inner\n", 1050000000),
+    "sub": files_dir(1060000000),
+}
+
+
+def files_self_cases(tool, flags, pairs=None):
+    """Each pair of names for one file, under a seeded draw of the tool's
+    options: none, each alone once, and pairs and triples of them."""
+    rng = random.Random(int.from_bytes(hashlib.sha256(
+        ("self:" + tool).encode()).digest()[:8], "little"))
+    pairs = pairs or (("f", "f"), ("f", "d/"), ("f", "d/f"), ("./f", "f"), ("sl", "f"), ("f", "sl"),
+                      ("f", "h"), ("h", "f"), ("sl", "sl2"), ("sl", "sl"), ("d/f", "f"), ("sl", "d/sl"))
+    cases = []
+    for pair in pairs:
+        chosen = [()] + [(flag,) for flag in rng.sample(flags, min(4, len(flags)))] + \
+            [tuple(rng.sample(flags, 2)) for _ in range(3)] + [tuple(rng.sample(flags, 3)) for _ in range(2)]
+        for words in chosen:
+            for stdin in (("files_yes", "files_no") if "-i" in words else ("files_yes",)):
+                cases.append({"fixture": "files_self", "argv": tuple(words) + pair, "stdin": stdin})
+    return tuple(cases)
+
+
 FILES_UTILITIES = (
     # yes is the one program here the engine cannot bound: it writes until
     # something stops it, so both sides die on the harness's file-size limit
@@ -7012,7 +7048,9 @@ FILES_UTILITIES = (
             + files_slash_destinations(
                 "ln", ("-s", "-f", "-n", "-v", "-T", "-b", "-r", "-L", "-P", "--backup=numbered"),
                 ("a.txt", "dir", "link", "dangling"))
-            + files_backup_cases("ln", ("-s",)) + files_backup_cases("ln", ("-f",))),
+            + files_backup_cases("ln", ("-s",)) + files_backup_cases("ln", ("-f",))
+            + files_self_cases("ln", ("-s", "-f", "-i", "-b", "-n", "-v", "-T", "-L", "-P", "-r",
+                                      "--backup=numbered"))),
     Utility("link", operands=(("a.txt", "hard"), ("link", "hard"), ("a.txt", "-W"), ("--", "-dash", "hard"), ("missing", "hard"),
                               ("dir", "hard"), ("a.txt", "b.txt"), ("a.txt",), (), ("one", "two", "three"), ("a.txt", "dir"),
                               ("a.txt", "dir/"), ("dangling", "hard"), ("a.txt", "shut/hard"), ("two words", "sp ace"),
