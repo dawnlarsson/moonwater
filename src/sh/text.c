@@ -9162,6 +9162,10 @@ static const b8 text_tab_space_span[256] = {[' '] = 1};
 static const b8 text_tab_unexpand_special[256] = {['\b'] = 1, ['\t'] = 1, ['\n'] = 1,
                                                   [' '] = 1};
 
+static positive text_tab_extend;
+static positive text_tab_increment;
+static bool text_tab_t_seen;
+
 static fn text_tab_reset()
 {
         text_tab_stop_count = 0;
@@ -9170,104 +9174,132 @@ static fn text_tab_reset()
         text_tab_repeat_said = false;
         text_tab_custom = false;
         text_tab_option_seen = false;
+        text_tab_extend = 0;
+        text_tab_increment = 0;
+        text_tab_t_seen = false;
 }
 
-static bool text_tab_number(string_address at, positive address_to used,
-                            positive address_to made)
-{
-        string_address start = at;
-        positive value;
-        if (!string_digits_checked(address_of at, 10, address_of value))
-                return false;
-        address_to used = (positive)(at - start);
-        address_to made = value;
-        return true;
-}
-
+// A stop as written. Whether the list is ascending and free of zeros is
+// only asked once every option is in, as GNU asks it.
 static bool text_tab_add(positive value)
 {
-        if (!value)
-                return string_diagnostic(&text_diagnostic, 0, null, "tab size cannot be 0");
-
-        if (text_tab_stop_count &&
-            value <= text_tab_stops[text_tab_stop_count - 1])
-                return string_diagnostic(&text_diagnostic, 0, null, "tab sizes must be ascending");
-
         if (text_tab_stop_count == TEXT_TAB_STOP_MAX)
                 return string_diagnostic(&text_diagnostic, 0, null, "too many tab stops");
-
-        /*
-                A list with something in it replaces the eight-column
-                default; a list with nothing in it -- expand -t , -- leaves
-                it standing. A repeat the caller asked for is not the
-                default and is not replaced: -t +4 -t 4 is a stop at four
-                and every four after it, and clearing the repeat when the
-                explicit stop arrived left the stops after the first one
-                falling wherever the empty list put them.
-        */
-        if (!text_tab_custom)
-        {
-                text_tab_custom = true;
-
-                if (!text_tab_repeat_said)
-                        text_tab_repeat = 0;
-        }
 
         text_tab_stops[text_tab_stop_count++] = value;
         return true;
 }
 
+static bool text_tab_complain(string_address format, string_address about)
+{
+        text_flush();
+        string_format(writer_stderr, format, text_name, about);
+        text_status = 1;
+        return false;
+}
+
+// A /N or +N: one of each for the whole command line, and only as the last.
+static bool text_tab_repeat_set(positive address_to into, positive value,
+                                string_address format)
+{
+        bool fine = !address_to into;
+
+        if (!fine)
+                text_tab_complain(format, null);
+
+        address_to into = value;
+        return fine;
+}
+
+/*
+        One -t list, read as GNU's parse_tab_stops reads it. Numbers are
+        parted by commas and blanks; a / or a + before a number makes it the
+        repeat -- every multiple of it after the stops, or every step of it
+        after the last stop -- and the mark stays with every number after it
+        in the same list, so a second one there is the "only allowed with
+        the last value" refusal. A mark after a digit is refused but the
+        list is read to its end, every complaint said, before stopping.
+*/
 static bool text_tab_parse(string_address list)
 {
-        positive at = 0;
+        bool have = false;
+        bool extend = false;
+        bool increment = false;
+        bool fine = true;
+        positive value = 0;
+        string_address start = list;
 
-        while (list[at])
+        for (string_address at = list; ; at++)
         {
-                at += string_span_of_set(list + at, ", \t\n\v\f\r");
+                p8 c = (p8)*at;
 
-                if (!list[at])
-                        break;
-
-                p8 prefix = 0;
-
-                if (list[at] == '/' || list[at] == '+')
-                        prefix = list[at++];
-
-                positive used;
-                positive value;
-
-                if (!text_tab_number(list + at, address_of used,
-                                     address_of value))
-                        return string_diagnostic(&text_diagnostic, 0, list, "invalid tab stops");
-
-                at += used;
-
-                if (list[at] && list[at] != ',' && !byte_is_space(list[at]))
-                        return string_diagnostic(&text_diagnostic, 0, list + at, "invalid tab stops");
-
-                if (prefix)
+                if (!c || c == ',' || c == ' ' || c == '\t')
                 {
-                        positive after = at;
+                        if (have)
+                        {
+                                if (extend)
+                                        fine &= text_tab_repeat_set(address_of text_tab_extend, value,
+                                                                    "%s: '/' specifier only allowed with the last value\n");
+                                else if (increment)
+                                        fine &= text_tab_repeat_set(address_of text_tab_increment, value,
+                                                                    "%s: '+' specifier only allowed with the last value\n");
+                                else
+                                        fine &= text_tab_add(value);
+                        }
 
-                        after += string_span_of_set(list + after,
-                                                    ", \t\n\v\f\r");
+                        have = false;
 
-                        if (list[after])
-                                return string_diagnostic(&text_diagnostic, 0, list, "tab repeat must be last");
-
-                        text_tab_repeat = value;
-                        text_tab_repeat_relative = prefix == '+';
-                        text_tab_repeat_said = true;
-                        at = after;
+                        if (!c || !fine)
+                                break;
                         continue;
                 }
 
-                if (!text_tab_add(value))
-                        return false;
+                if (c == '/' || c == '+')
+                {
+                        if (have)
+                                fine = text_tab_complain(c == '/' ? "%s: '/' specifier not at start of number: '%s'\n"
+                                                                  : "%s: '+' specifier not at start of number: '%s'\n",
+                                                         at);
+                        extend = c == '/';
+                        increment = c == '+';
+                        continue;
+                }
+
+                if (byte_is_digit(c))
+                {
+                        if (!have)
+                        {
+                                value = 0;
+                                have = true;
+                                start = at;
+                        }
+
+                        if (value > (positive_max - (positive)(c - '0')) / 10)
+                        {
+                                positive length = 0;
+                                p8 number[64];
+
+                                while (byte_is_digit((p8)start[length]) && length < sizeof(number) - 1)
+                                {
+                                        number[length] = (p8)start[length];
+                                        length++;
+                                }
+                                number[length] = 0;
+                                fine = text_tab_complain("%s: tab stop is too large '%s'\n", number);
+                                while (byte_is_digit((p8)at[1]))
+                                        at++;
+                                continue;
+                        }
+
+                        value = value * 10 + (positive)(c - '0');
+                        continue;
+                }
+
+                fine = text_tab_complain("%s: tab size contains invalid character(s): '%s'\n", at);
+                break;
         }
 
-        // An empty list, -t ',', asks for nothing and leaves the default.
-        return true;
+        return fine;
 }
 
 /*
@@ -9304,6 +9336,7 @@ static bool text_tab_prescan(file_taking address_to taking, bool unexpand)
                                 continue;
 
                         text_tab_option_seen = true;
+                        text_tab_t_seen = true;
 
                         if (word[name])
                         {
@@ -9347,7 +9380,7 @@ static bool text_tab_prescan(file_taking address_to taking, bool unexpand)
                                 positive digit = word[c] - '0';
 
                                 if (value > (positive_max - digit) / 10)
-                                        return string_diagnostic(&text_diagnostic, 0, word, "tab stop value is too large");
+                                        return string_diagnostic(&text_diagnostic, 0, null, "tab stop value is too large");
 
                                 value = value * 10 + digit;
                                 have_value = true;
@@ -9360,6 +9393,7 @@ static bool text_tab_prescan(file_taking address_to taking, bool unexpand)
                         if (word[c] == 't')
                         {
                                 text_tab_option_seen = true;
+                                text_tab_t_seen = true;
 
                                 if (word[c + 1])
                                 {
@@ -9380,15 +9414,45 @@ static bool text_tab_prescan(file_taking address_to taking, bool unexpand)
         return true;
 }
 
-static fn text_tab_finish_options()
+// GNU's validate_tab_stops and finalize_tab_stops, once every option is in.
+static bool text_tab_finish_options()
 {
-        /* A lone ordinary number is a spacing, not a finite one-stop list. */
-        if (text_tab_custom && text_tab_stop_count == 1 &&
-            !text_tab_repeat_said)
+        for (positive i = 0; i < text_tab_stop_count; i++)
         {
+                if (!text_tab_stops[i])
+                        return text_tab_complain("%s: tab size cannot be 0\n", null);
+
+                if (i && text_tab_stops[i] <= text_tab_stops[i - 1])
+                        return text_tab_complain("%s: tab sizes must be ascending\n", null);
+        }
+
+        if (text_tab_extend && text_tab_increment)
+                return text_tab_complain("%s: '/' specifier is mutually exclusive with '+'\n", null);
+
+        text_tab_custom = text_tab_stop_count != 0;
+        text_tab_repeat_relative = false;
+
+        if (!text_tab_stop_count)
+                text_tab_repeat = text_tab_extend ? text_tab_extend
+                                  : text_tab_increment ? text_tab_increment
+                                                       : 8;
+        else if (text_tab_stop_count == 1 && !text_tab_extend && !text_tab_increment)
+        {
+                // A lone ordinary number is a spacing, not a one-stop list.
                 text_tab_repeat = text_tab_stops[0];
                 text_tab_stop_count = 0;
         }
+        else if (text_tab_extend)
+                text_tab_repeat = text_tab_extend;
+        else if (text_tab_increment)
+        {
+                text_tab_repeat = text_tab_increment;
+                text_tab_repeat_relative = true;
+        }
+        else
+                text_tab_repeat = 0;
+
+        return true;
 }
 
 /* The first stop strictly after column, and whether it was explicitly named. */
@@ -9829,13 +9893,18 @@ static inline INLINE b32 text_tabs(bool unexpand)
         if (!text_tab_prescan(address_of taking, unexpand))
                 return text_done(1);
 
-        text_tab_finish_options();
+        if (!text_tab_finish_options())
+                return text_done(1);
+
         bool initial_only = (taking.flags & FILE_FLAG('i')) != 0;
         if (unexpand)
         {
+                //      -t says -a as well, and the old -N does not: GNU
+                //      reads unexpand -3 as tabs every three columns that
+                //      still only turn leading blanks into tabs.
                 bool first = (taking.flags & FILE_FLAG('f')) != 0;
                 bool all = !first && ((taking.flags & FILE_FLAG('a')) ||
-                                      text_tab_option_seen);
+                                      text_tab_t_seen);
                 initial_only = !all;
         }
         text_tab_transform(unexpand, initial_only);
