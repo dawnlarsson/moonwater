@@ -3583,11 +3583,20 @@ lane_socket() { freestanding_checks_lane socket socket; }
 #
 #       tls_chains puts wget's certificate verdicts against openssl verify's
 #       over a grammar of generated chains, served from loopback.
+#       http_response_framing holds the response parser to a written
+#       accept/refuse matrix (and names deliberate disagreements with
+#       Python's http.client).
 lane_net()
 {
         freestanding_checks_lane net net
         net_outcome=$?
         python3 test/differential.py --harness tls_chains
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
+        python3 test/differential.py --harness http_response_framing
         case $? in
         0) ;;
         2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;

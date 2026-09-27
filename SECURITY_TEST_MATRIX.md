@@ -6,6 +6,7 @@
 | Netlink source, sequence, attributes; DNS; HTTP; TLS; DHCP | freestanding network checks | `sh test/run net` |
 | UDP replay and DHCP reacquisition authorization | identity mutation, queued prior transaction, exhaustive state cross-product | `sh test/run net machine` |
 | Certificate path semantics | generated chains against OpenSSL | `python3 test/differential.py --harness tls_chains` |
+| HTTP response framing (chunked, TE/CL, headers, trailers) | written MUST_ACCEPT/MUST_REFUSE matrix; http.client as second oracle with named deliberate disagreements | `python3 test/differential.py --harness http_response_framing` |
 | SNTP nonce, ancillary timestamps, timing arithmetic, server selection | machine checks | `sh test/run machine` |
 | Shell parsing, expansion, environment, status and effects | generated Bash/Dash comparison | `sh test/run shell builtins` |
 | File traversal, symlink and replacement behavior | effect-based coreutils differential | `sh test/run files` |

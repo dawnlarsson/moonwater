@@ -99,10 +99,9 @@ jobs:
       - uses: actions/checkout@v4
 
       # Cross compilers + qemu-user let freestanding net/machine exercise
-      # x86_64, arm64, and riscv64 when those tools are here. A missing arch
-      # is NOT RUN (lane exit 2 → `did not run:` in the log), not a silent
-      # pass. We install the tools on this runner; we do not add a separate
-      # hard gate that every arch must exist on every host.
+      # x86_64, arm64, and riscv64. A missing arch is NOT RUN (lane exit 2 →
+      # `did not run:`), which already fails `test/run`. The step below also
+      # greps the tally for all three arch rows so a silent skip cannot pass.
       - name: Install net/machine/tls_chains dependencies
         run: |
           sudo apt-get update
@@ -110,7 +109,20 @@ jobs:
             gcc-aarch64-linux-gnu gcc-riscv64-linux-gnu openssl
 
       - name: Freestanding net and machine
-        run: sh test/run net machine
+        run: |
+          set -o pipefail
+          sh test/run net machine | tee "$RUNNER_TEMP/net-machine.log"
+          # Hard gate: each freestanding suite must have tally rows for all
+          # three arches (names from target_lane / freestanding_checks_one).
+          for suite in net machine; do
+            for arch in x86_64 arm64 riscv64; do
+              if ! grep -E "^  ${suite}-${arch}[[:space:]]+[0-9]+ of [0-9]+$" \
+                  "$RUNNER_TEMP/net-machine.log"; then
+                echo "required security lane missing or did not run: ${suite}-${arch}"
+                exit 1
+              fi
+            done
+          done
 
       # Also embedded in lane_net; kept explicit so a certificate failure is
       # a named step. Exit 1 is a real oracle disagreement and fails the job.

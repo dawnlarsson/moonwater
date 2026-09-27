@@ -41,8 +41,9 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
   trailers have bounded grammar tests.
 - [x] Stream framing is tested at every socket/header split.
 - [x] Redirect count and HTTPS downgrade are bounded/refused.
-- [ ] Differentially test response framing against multiple independent HTTP
-  implementations, retaining a written policy where references disagree.
+- [x] Differentially test response framing against multiple independent HTTP
+  implementations, retaining a written policy where references disagree
+  (`python3 test/differential.py --harness http_response_framing`).
 
 ## TLS and certificates
 
@@ -82,7 +83,7 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
 - [x] Partial I/O, EINTR, ENOSPC, deadlines, stream fragmentation, and guard
   boundaries have procedural coverage in existing lanes.
 - [x] Network namespace and netem tests exist for privileged network paths.
-- [ ] Require x86-64, ARM64, and RISC-V security lanes in CI.
+- [x] Require x86-64, ARM64, and RISC-V security lanes in CI.
 - [ ] Add descriptor-, mapping-, and allocation-exhaustion sweeps to every
   externally reachable service loop.
 - [ ] Publish fuzz corpus coverage and sanitizer versions with each release.

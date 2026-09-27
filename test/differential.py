@@ -33129,6 +33129,13 @@ def harness_tls_chains(argv):
         ("intermediate sixty-five extensions", 2, good_leaf,
          {"second_extra": "subjectKeyIdentifier=none\nauthorityKeyIdentifier=none\n" +
           "".join("1.2.201.%d=DER:05:00\n" % n for n in range(63))}),
+        # Same unknown-duplicate / ceiling cases on the depth-2 "first" cert.
+        ("first intermediate duplicate unknown extension", 2, good_leaf,
+         {"first_extra": "1.2.3.4=DER:05:00\n1.2.3.5=DER:05:00\n",
+          "der_dup_unknown_first": True}),
+        ("first intermediate sixty-five extensions", 2, good_leaf,
+         {"first_extra": "subjectKeyIdentifier=none\nauthorityKeyIdentifier=none\n" +
+          "".join("1.2.202.%d=DER:05:00\n" % n for n in range(63))}),
         ("intermediate carries name constraints", 2, good_leaf,
          {"second_extra": "nameConstraints=critical,permitted;IP:127.0.0.0/255.0.0.0\n"}),
         ("path length exceeded", 2, good_leaf, {"first_pathlen": 0}),
@@ -33152,6 +33159,15 @@ def harness_tls_chains(argv):
         ("leaf nonadjacent duplicate unknown", 2,
          good_leaf + "1.2.3.4=DER:05:00\n1.2.3.6=DER:05:00\n1.2.3.5=DER:05:00\n",
          {"der_rewrite_oids": [(bytes([0x2a, 0x03, 0x05]), bytes([0x2a, 0x03, 0x04]))]}),
+        # Named + numeric OID collapses; mint a same-length stand-in OID and
+        # rewrite it to basicConstraints / keyUsage.  OpenSSL refuses the
+        # duplicate (mutual refuse — not a deliberate disagreement).
+        ("leaf duplicate basicConstraints", 2,
+         good_leaf + "2.5.29.99=critical,DER:30:03:01:01:00\n",
+         {"der_rewrite_oids": [(bytes([0x55, 0x1d, 0x63]), bytes([0x55, 0x1d, 0x13]))]}),
+        ("leaf duplicate keyUsage", 2,
+         good_leaf + "2.5.29.99=critical,DER:03:02:07:80\n",
+         {"der_rewrite_oids": [(bytes([0x55, 0x1d, 0x63]), bytes([0x55, 0x1d, 0x0f]))]}),
         # OpenSSL may auto-insert subjectKeyIdentifier / authorityKeyIdentifier;
         # pin them off so good_leaf's four named extensions plus sixty (or
         # sixty-one) unknowns are exactly the wire count the ceiling uses.
@@ -33179,6 +33195,8 @@ def harness_tls_chains(argv):
         "leaf sixty-five extensions": "explicit per-certificate extension work ceiling",
         "intermediate duplicate unknown extension": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
         "intermediate sixty-five extensions": "explicit per-certificate extension work ceiling",
+        "first intermediate duplicate unknown extension": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
+        "first intermediate sixty-five extensions": "explicit per-certificate extension work ceiling",
     }
     MUST_ACCEPT = {
         "good", "under the root", "one intermediate", "root served too",
@@ -33346,10 +33364,16 @@ def harness_tls_chains(argv):
                 chain = []
                 issuer = top
                 if depth >= 1:
+                    first_extensions = (
+                        "basicConstraints=critical,CA:TRUE,pathlen:%d\n"
+                        "keyUsage=critical,keyCertSign,cRLSign\n" % change.get("first_pathlen", 1))
+                    first_extensions += change.get("first_extra", "")
                     issue("first", p384, "/CN=tls chains first", top,
-                          "basicConstraints=critical,CA:TRUE,pathlen:%d\n"
-                          "keyUsage=critical,keyCertSign,cRLSign\n" % change.get("first_pathlen", 1),
+                          first_extensions,
                           change.get("first_dates", (-1, 90)))
+                    if change.get("der_rewrite_oids_first") or change.get("der_dup_unknown_first"):
+                        mutate_cert_der("first", top, change,
+                                        "der_rewrite_oids_first", "der_dup_unknown_first")
                     chain.insert(0, "first")
                     issuer = "first"
                 if depth >= 2:
@@ -33388,7 +33412,30 @@ def harness_tls_chains(argv):
 
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 context.minimum_version = ssl.TLSVersion.TLSv1_3
-                context.load_cert_chain(work / "chain.pem", work / "leaf.key")
+                try:
+                    context.load_cert_chain(work / "chain.pem", work / "leaf.key")
+                except ssl.SSLError:
+                    # OpenSSL refuses to host some duplicate known-extension
+                    # leaves we still want to verify as refused by wget.
+                    ours_ok = False
+                    name = "%s with a %s leaf" % (mutation, key_name)
+                    expected = mutation in MUST_ACCEPT
+                    checks(openssl_ok == expected or mutation in DELIBERATE,
+                           "%s: the OpenSSL oracle %s a chain the standards matrix says to %s" % (
+                               name, "accepts" if openssl_ok else "refuses",
+                               "accept" if expected else "refuse"))
+                    checks(ours_ok == expected,
+                           "%s: wget %s a chain the standards matrix says to %s (load_cert_chain refused)" % (
+                               name, "accepts" if ours_ok else "refuses",
+                               "accept" if expected else "refuse"))
+                    if mutation in DELIBERATE and openssl_ok and not ours_ok:
+                        checks(True, name)
+                        continue
+                    checks(ours_ok == openssl_ok,
+                           "%s: openssl %s it and wget %s it (load_cert_chain refused)" % (
+                               name, "accepts" if openssl_ok else "refuses",
+                               "accepts" if ours_ok else "refuses"))
+                    continue
                 context.set_ecdh_curve("prime256v1")
                 listener = socket.socket()
                 listener.bind(("127.0.0.1", 0))
@@ -33440,6 +33487,493 @@ def harness_tls_chains(argv):
                            "accepts" if ours_ok else "refuses",
                            fetched.stderr.decode(errors="replace").strip()[:200]))
     return checks.verdict("tls chains", "tls-chains")
+
+
+
+def harness_http_response_framing(argv):
+    """Moonwater HTTP response framing against a written accept/refuse matrix.
+
+    Request-side serialization is already covered; this feeds hostile and
+    interesting response frames through the in-tree framing and chunk decoder
+    (lifted from src/net/net.c) and holds each row to MUST_ACCEPT /
+    MUST_REFUSE. Python's http.client is consulted as a second oracle: where
+    it accepts what this tree refuses by policy, DELIBERATE names the
+    disagreement.
+
+        python3 test/differential.py --harness http_response_framing
+    """
+    del argv
+    import binascii
+    import shutil
+    import tempfile
+    from http.client import HTTPResponse
+    from io import BytesIO
+
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    defines = net[net.index("#define HTTP_PORT 80"):
+                  net.index("#define HTTP_WRITE (-11)") +
+                  len("#define HTTP_WRITE (-11)\n")]
+    headers = net[net.index("//      Where the header ends"):
+                  net.index(
+                      "return http_response_framing_from(bytes, size, "
+                      "address_of resume,\n                                          "
+                      "header_length, response);\n}") +
+                  len(
+                      "return http_response_framing_from(bytes, size, "
+                      "address_of resume,\n                                          "
+                      "header_length, response);\n}")]
+    body = net[net.index("typedef struct\n{\n        http_link address_to link;"):
+               net.index(
+                   "return (bipolar)(body.output - bytes);\n}\n\n"
+                   "/* Bytes copied into an HTTP/1 request") +
+               len("return (bipolar)(body.output - bytes);\n}\n")]
+    status = net[net.index(
+        "static bipolar http_status_code(p8 address_to bytes, "
+        "positive size, b32 address_to code)\n{"):
+                 net.index("return HTTP_OK;\n}\n\nstatic p32 http_lookup") +
+                 len("return HTTP_OK;\n}\n")]
+
+    shim = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <ctype.h>
+typedef uint8_t p8;
+typedef uint8_t b8;
+typedef uint16_t p16;
+typedef uint32_t p32;
+typedef uint64_t p64;
+typedef int32_t b32;
+typedef unsigned long positive;
+typedef long bipolar;
+typedef void *address_any;
+typedef char *string_address;
+typedef const char *const_string;
+#define COLD
+#define CONST
+#define PURE
+#define fn void
+#define address_to *
+#define address_of &
+#define null NULL
+#define end ((p8)0)
+#define positive_max (~(positive)0)
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define memory_compare memcmp
+#define memory_copy memcpy
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define string_get(s) (*(const unsigned char *)(s))
+/* glibc ctype macros return bit flags (often > 255); truncate-to-p8
+   would turn a hit into 0 and make every status line look malformed. */
+static inline p8 byte_is_alnum(p8 b) { return isalnum(b) != 0; }
+static inline p8 byte_is_digit(p8 b) { return isdigit(b) != 0; }
+static inline p8 byte_is_control(p8 b) { return b < 0x20 || b == 0x7f; }
+static inline p8 byte_is_blank(p8 b) { return b == ' ' || b == '\t'; }
+static positive string_length(const_string s) { return (positive)strlen(s); }
+static b32 string_compare_max(const void *a, const void *b, positive n)
+{
+        return (b32)memcmp(a, b, n);
+}
+static address_any memory_first_of(address_any block, b8 value, positive size)
+{
+        return memchr(block, value, size);
+}
+static positive memory_span_without_byte(const void *block, p8 byte,
+                                         positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[i] != byte)
+                i++;
+        return i;
+}
+static address_any memory_search(address_any block, positive size,
+                                 address_any needle, positive needle_size)
+{
+        if (!needle_size || needle_size > size)
+                return null;
+        const p8 *hay = block, *ndl = needle;
+        for (positive i = 0; i + needle_size <= size; i++)
+                if (!memcmp(hay + i, ndl, needle_size))
+                        return (address_any)(hay + i);
+        return null;
+}
+static b32 memory_compare_ascii_case(const void *one, const void *two,
+                                     positive size)
+{
+        const p8 *a = one, *b = two;
+        for (positive i = 0; i < size; i++) {
+                p8 x = a[i], y = b[i];
+                if (x >= 'A' && x <= 'Z')
+                        x = (p8)(x - 'A' + 'a');
+                if (y >= 'A' && y <= 'Z')
+                        y = (p8)(y - 'A' + 'a');
+                if (x != y)
+                        return (b32)(x - y);
+        }
+        return 0;
+}
+static unsigned char string_set_blanks[256];
+static positive string_span_max(const_string source, positive bound,
+                                const b8 *set)
+{
+        (void)set;
+        positive i = 0;
+        while (i < bound && (source[i] == ' ' || source[i] == '\t'))
+                i++;
+        return i;
+}
+static positive digit_known(p8 character, positive base)
+{
+        positive v;
+        if (character >= '0' && character <= '9')
+                v = character - '0';
+        else if (character >= 'a' && character <= 'z')
+                v = 10 + character - 'a';
+        else if (character >= 'A' && character <= 'Z')
+                v = 10 + character - 'A';
+        else
+                return base;
+        return v < base ? v : base;
+}
+static bool string_digits_checked(string_address *text, positive base,
+                                  positive *value)
+{
+        string_address at = *text;
+        positive got = 0;
+        bool any = false;
+        while (1) {
+                positive digit = digit_known(string_get(at), base);
+                positive scaled;
+                if (digit >= base)
+                        break;
+                if (__builtin_mul_overflow(got, base, &scaled) ||
+                    __builtin_add_overflow(scaled, digit, &got))
+                        return false;
+                at++;
+                any = true;
+        }
+        if (!any)
+                return false;
+        *text = at;
+        *value = got;
+        return true;
+}
+static positive string_digits_max(string_address source, positive bound,
+                                  positive *used)
+{
+        positive got = 0, n = 0;
+        while (n < bound) {
+                positive digit = digit_known((p8)source[n], 10);
+                if (digit >= 10)
+                        break;
+                got = got * 10 + digit;
+                n++;
+        }
+        if (used)
+                *used = n;
+        return got;
+}
+typedef struct { int handle; bool tls; } tls_conn;
+typedef struct { bipolar handle; bool tls; tls_conn session; } http_link;
+typedef struct { p8 *bytes; positive used; positive room; } http_buffer;
+typedef struct { int dummy; } network_deadline;
+#define TLS_AGAIN (-2)
+#define TLS_OK 0
+#define TLS_FAIL (-1)
+#define ENOSPC 28
+#define syscall(name) 0
+static bipolar tls_borrow(void *a, positive b, p8 **c, positive *d,
+                          positive e, positive f)
+{
+        (void)a; (void)b; (void)c; (void)d; (void)e; (void)f;
+        abort();
+        return TLS_FAIL;
+}
+static bipolar tls_lend(void *a, positive b, p8 **c, positive *d)
+{
+        (void)a; (void)b; (void)c; (void)d;
+        return TLS_AGAIN;
+}
+static bool network_deadline_begin(network_deadline *d, positive s, positive n)
+{
+        (void)d; (void)s; (void)n;
+        abort();
+        return false;
+}
+static bipolar http_link_read_until(http_link *l, p8 *into, positive room,
+                                    positive *got, const network_deadline *d)
+{
+        (void)l; (void)into; (void)room; (void)got; (void)d;
+        abort();
+        return -4;
+}
+static bool byte_store_reserve(http_buffer *b, positive need, positive align)
+{
+        (void)b; (void)need; (void)align;
+        abort();
+        return false;
+}
+static bipolar system_call_3(positive a, positive b, positive c, positive d)
+{
+        (void)a; (void)b; (void)c; (void)d;
+        abort();
+        return -1;
+}
+"""
+
+    driver = r"""
+static void emit_hex(const p8 *bytes, positive length)
+{
+        for (positive at = 0; at < length; at++)
+                printf("%02x", bytes[at]);
+}
+
+/* stdin lines: NAME\tMODE\tHEX
+   MODE is frame | unchunk | full | oversize
+   stdout lines: NAME\tACCEPT|REFUSE\tBODYHEX|-  */
+int main(void)
+{
+        char name[128];
+        char mode[16];
+        char hex[2 * (HTTP_HEAD_MAX + 64) + 1];
+
+        while (scanf("%127s %15s %32896s", name, mode, hex) == 3) {
+                positive size = (positive)strlen(hex) / 2;
+                p8 *wire = malloc(size ? size : 1);
+                for (positive at = 0; at < size; at++) {
+                        unsigned value = 0;
+                        sscanf(hex + 2 * at, "%2x", &value);
+                        wire[at] = (p8)value;
+                }
+                int ok = 0;
+                p8 *body = null;
+                positive body_length = 0;
+
+                if (!strcmp(mode, "oversize")) {
+                        p8 *oversized = malloc(HTTP_HEAD_MAX + 4);
+                        memset(oversized, 'x', HTTP_HEAD_MAX + 4);
+                        memcpy(oversized, "HTTP/1.1 200 OK\r\n", 17);
+                        memcpy(oversized + HTTP_HEAD_MAX, "\r\n\r\n", 4);
+                        http_response response;
+                        positive header = 0;
+                        ok = http_response_framing(oversized, HTTP_HEAD_MAX + 4,
+                                                   &header, &response) == HTTP_OK;
+                        free(oversized);
+                } else if (!strcmp(mode, "frame")) {
+                        http_response response;
+                        positive header = 0;
+                        ok = http_response_framing(wire, size, &header,
+                                                   &response) == HTTP_OK;
+                        if (ok && response.body_kind == HTTP_BODY_LENGTH &&
+                            size >= header + response.body_length) {
+                                body = wire + header;
+                                body_length = response.body_length;
+                        }
+                } else if (!strcmp(mode, "unchunk")) {
+                        bipolar got = http_unchunk(wire, size);
+                        ok = got >= 0;
+                        if (ok) {
+                                body = wire;
+                                body_length = (positive)got;
+                        }
+                } else if (!strcmp(mode, "full")) {
+                        http_response response;
+                        positive header = 0;
+                        if (http_response_framing(wire, size, &header,
+                                                  &response) == HTTP_OK) {
+                                if (response.body_kind == HTTP_BODY_CHUNKED) {
+                                        bipolar got = http_unchunk(
+                                            wire + header, size - header);
+                                        ok = got >= 0;
+                                        if (ok) {
+                                                body = wire + header;
+                                                body_length = (positive)got;
+                                        }
+                                } else if (response.body_kind ==
+                                           HTTP_BODY_LENGTH) {
+                                        ok = size >= header + response.body_length;
+                                        if (ok) {
+                                                body = wire + header;
+                                                body_length = response.body_length;
+                                        }
+                                } else
+                                        ok = 1;
+                        }
+                }
+                printf("%s\t%s\t", name, ok ? "ACCEPT" : "REFUSE");
+                if (ok && body)
+                        emit_hex(body, body_length);
+                else
+                        fputc('-', stdout);
+                fputc('\n', stdout);
+                free(wire);
+        }
+        return 0;
+}
+"""
+
+    # (name, mode, wire, expected_body_or_None)
+    # oversize ignores wire (empty).
+    CASES = [
+        ("simple-length", "full",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", b"hello"),
+        ("empty-length", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", b""),
+        ("bare-lf-headers", "frame",
+         b"HTTP/1.1 200 OK\nContent-Length: 0\n\n", None),
+        ("chunked-full", "full",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+         b"5\r\nhello\r\n0\r\n\r\n", b"hello"),
+        ("chunked-extension", "unchunk",
+         b"A;extension=value\r\nabcdefghij\r\n0;finished=yes\r\n\r\n",
+         b"abcdefghij"),
+        ("redirect-location", "frame",
+         b"HTTP/1.1 302 Found\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n",
+         None),
+        ("te-cl-conflict", "frame",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+         b"Content-Length: 5\r\n\r\n5\r\nhello\r\n0\r\n\r\n", None),
+        ("duplicate-content-length", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nx",
+         None),
+        ("bare-cr-in-location", "frame",
+         b"HTTP/1.1 302 Found\r\nLocation: /safe\rhidden\r\n\r\n", None),
+        ("obs-fold-location", "frame",
+         b"HTTP/1.1 302 Found\r\nLocation: https://good.example/\r\n"
+         b" https://evil.example/\r\n\r\n", None),
+        ("space-before-colon", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length : 0\r\n\r\n", None),
+        ("te-not-chunked", "frame",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nxxxx", None),
+        ("duplicate-location", "frame",
+         b"HTTP/1.1 302 Found\r\nLocation: /a\r\nlocation: /b\r\n\r\n", None),
+        ("truncated-chunk-trailer", "unchunk", b"0\r\n", None),
+        ("chunk-size-overflow", "unchunk", b"10000000000000000\r\n", None),
+        ("chunk-non-hex", "unchunk", b"ZZ\r\n", None),
+        ("chunk-truncated-data", "unchunk", b"9\r\nabc\r\n", None),
+        ("malformed-trailer-field", "unchunk",
+         b"0\r\nnot-a-field\r\n\r\n", None),
+        ("oversize-header", "oversize", b"", None),
+    ]
+    MUST_ACCEPT = {
+        "simple-length", "empty-length", "bare-lf-headers", "chunked-full",
+        "chunked-extension", "redirect-location",
+    }
+    #       Moonwater policy where http.client accepts the same bytes.
+    DELIBERATE = {
+        "te-cl-conflict":
+            "RFC 9112 forbids TE with Content-Length; Moonwater refuses both",
+        "duplicate-content-length":
+            "duplicate framing fields are refused before a length is chosen",
+        "bare-cr-in-location":
+            "response field values reject embedded controls (NUL/CR/LF)",
+        "obs-fold-location":
+            "obsolete line folding is refused so a proxy cannot split views",
+        "space-before-colon":
+            "field names are exact tokens; whitespace before ':' is not a name",
+        "te-not-chunked":
+            "only transfer-coding chunked is implemented; anything else is refuse",
+        "duplicate-location":
+            "a redirect with repeated Location is ambiguous and refused",
+        "truncated-chunk-trailer":
+            "chunked bodies must end at a validated blank trailer line",
+        "malformed-trailer-field":
+            "trailer fields share the response header token grammar",
+        "oversize-header":
+            "HTTP_HEAD_MAX is an explicit response-head work ceiling",
+    }
+
+    def python_oracle(mode, wire):
+        if mode == "unchunk":
+            wire = (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                    + wire)
+        if mode == "oversize":
+            oversized = bytearray(16384 + 4)
+            oversized[:] = b"x" * (16384 + 4)
+            oversized[:17] = b"HTTP/1.1 200 OK\r\n"
+            oversized[16384:16388] = b"\r\n\r\n"
+            wire = bytes(oversized)
+
+        class Sock(BytesIO):
+            def makefile(self, *a, **k):
+                return self
+
+        try:
+            response = HTTPResponse(Sock(wire))
+            response.begin()
+            body = response.read()
+            return True, body
+        except Exception:
+            return False, None
+
+    checks = Checks()
+    with tempfile.TemporaryDirectory(prefix="http-response-framing-") as temporary:
+        work = Path(temporary)
+        source = shim + defines + headers + body + status + driver
+        (work / "http_response_framing.c").write_text(source)
+        compiler = "clang" if shutil.which("clang") else os.environ.get("CC", "cc")
+        built = subprocess.run(
+            [compiler, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
+             str(work / "http_response_framing.c"),
+             "-o", str(work / "http_response_framing")],
+            capture_output=True, text=True)
+        if built.returncode:
+            print("  FAIL the response framing probe did not build:\n" +
+                  built.stderr[-3000:])
+            write_tally("http-response-framing", 0, 1)
+            return 1
+
+        stdin = "".join(
+            "%s %s %s\n" % (name, mode, wire.hex() or "00")
+            for name, mode, wire, _ in CASES)
+        ran = subprocess.run([str(work / "http_response_framing")],
+                             input=stdin, capture_output=True, text=True,
+                             timeout=60)
+        if ran.returncode or ran.stderr.strip():
+            print("  FAIL the probe aborted:\n" + (ran.stderr or ran.stdout)[-3000:])
+            write_tally("http-response-framing", 0, 1)
+            return 1
+
+        answers = {}
+        for line in ran.stdout.splitlines():
+            name, verdict, body_hex = line.split("\t")
+            body = (binascii.unhexlify(body_hex) if body_hex != "-" else None)
+            answers[name] = (verdict == "ACCEPT", body)
+
+        for name, mode, wire, want_body in CASES:
+            ours_ok, ours_body = answers[name]
+            expected = name in MUST_ACCEPT
+            checks(ours_ok == expected,
+                   "%s: Moonwater %s a frame the matrix says to %s" % (
+                       name, "accepts" if ours_ok else "refuses",
+                       "accept" if expected else "refuse"))
+            if expected and want_body is not None:
+                checks(ours_body == want_body,
+                       "%s: body %r != %r" % (name, ours_body, want_body))
+
+            py_ok, py_body = python_oracle(mode, wire)
+            if name in DELIBERATE:
+                checks(True, "%s: deliberate vs http.client (%s)" % (
+                    name, DELIBERATE[name]))
+                if py_ok == ours_ok:
+                    checks(False,
+                           "%s: listed deliberate but http.client now agrees; "
+                           "remove it from DELIBERATE" % name)
+                continue
+            checks(py_ok == ours_ok,
+                   "%s: http.client %s it and Moonwater %s it" % (
+                       name, "accepts" if py_ok else "refuses",
+                       "accepts" if ours_ok else "refuses"))
+            if ours_ok and want_body is not None and py_ok:
+                checks(py_body == want_body,
+                       "%s: http.client body %r != %r" % (
+                           name, py_body, want_body))
+
+    return checks.verdict("http response framing", "http-response-framing")
+
 
 
 def harness_machine_scan(argv):
@@ -37327,6 +37861,7 @@ HARNESS_CHECKS = {
     "moonwater_cli": harness_moonwater_cli,
     "machine_reap": harness_machine_reap,
     "tls_chains": harness_tls_chains,
+    "http_response_framing": harness_http_response_framing,
     "machine_scan": harness_machine_scan,
     "waterlink_noise": harness_waterlink_noise,
     "waterlink_mdns": harness_waterlink_mdns,

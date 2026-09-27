@@ -49309,6 +49309,48 @@ static fn resolving_edges(void)
                 }
         }
 
+        /* Named inclusive ceilings beside the sweep: one label of sixty-three
+           and a whole name of two hundred fifty-five octets, each with its
+           one-over refusal. */
+        {
+                p8 label63[64];
+                p8 label64[65];
+                p8 name255[256];
+                p8 name256[257];
+                p8 into[256];
+                positive at = 0;
+
+                memory_fill(label63, 'a', 63);
+                label63[63] = 0;
+                memory_fill(label64, 'a', 64);
+                label64[64] = 0;
+                check("a DNS label of sixty-three is accepted",
+                      dns_write_name(into, sizeof into, label63) == 65);
+                check("a DNS label of sixty-four is refused",
+                      dns_write_name(into, sizeof into, label64) ==
+                          DNS_MALFORMED);
+
+                for (positive label = 0; label < 3; label++)
+                {
+                        if (label)
+                                name255[at++] = '.';
+                        memory_fill(name255 + at, 'b', 63);
+                        at += 63;
+                }
+                name255[at++] = '.';
+                memory_fill(name255 + at, 'c', 61);
+                at += 61;
+                name255[at] = 0;
+                memory_copy(name256, name255, at);
+                name256[at++] = 'c';
+                name256[at] = 0;
+                check("a DNS name of two hundred fifty-five octets is accepted",
+                      dns_write_name(into, sizeof into, name255) == 255);
+                check("a DNS name of two hundred fifty-six octets is refused",
+                      dns_write_name(into, sizeof into, name256) ==
+                          DNS_MALFORMED);
+        }
+
         p8 packet[256];
         for (positive base = 0; base < 32; base++)
         for (positive length = 1; length <= 63; length++)
@@ -49667,20 +49709,10 @@ static fn fetching(void)
                           http_get_request(request, sizeof request, name, port,
                                            path, false, '1', "agent",
                                            &used) == HTTP_BAD_URL);
-                check("an empty User-Agent is still a present field value",
-                      http_get_request(request, sizeof request, "example.com",
-                                       80, "/safe", false, '1', "",
-                                       &used) == HTTP_OK);
-        }        /* The URL parser deliberately does not decode.  The request
-           serializer is the sink that refuses percent-encoded CR/LF/NUL so a
-           peer decoder cannot turn a stored path into a second header. */
-        {
-                p8 request[HTTP_HEAD_MAX];
-                positive used = 0;
-
-                check("HTTP serializer refuses a path the URL parser preserved",
-                      http_split_into("http://h/%0d%0a", name, sizeof name,
+                check("HTTP serializer refuses nested percent CR the URL parser preserved",
+                      http_split_into("http://h/%250d", name, sizeof name,
                                       &port, &path, &tls) == HTTP_OK &&
+                          string_equals(path, "/%250d") &&
                           http_get_request(request, sizeof request, name, port,
                                            path, false, '1', "agent",
                                            &used) == HTTP_BAD_URL);
@@ -49866,6 +49898,27 @@ static fn fetching(void)
                           HTTP_MALFORMED);
         }
 
+        /* Exact ceiling: a well-framed response whose blank line ends on
+           HTTP_HEAD_MAX must still parse.  The one-over case above proves the
+           bound is exclusive of a terminator past the cap. */
+        {
+                p8 at_ceiling[HTTP_HEAD_MAX];
+                http_response response;
+                positive header = 0;
+                positive used = sizeof("HTTP/1.1 200 OK\r\n") - 1;
+
+                memory_copy(at_ceiling, "HTTP/1.1 200 OK\r\n", used);
+                memory_copy(at_ceiling + used, "A:", 2);
+                used += 2;
+                memory_fill(at_ceiling + used, 'a', HTTP_HEAD_MAX - used - 4);
+                memory_copy(at_ceiling + HTTP_HEAD_MAX - 4, "\r\n\r\n", 4);
+                check("a response header ending on the shared cap is accepted",
+                      http_response_framing(at_ceiling, sizeof at_ceiling,
+                                            address_of header,
+                                            address_of response) == HTTP_OK &&
+                          header == HTTP_HEAD_MAX && response.code == 200);
+        }
+
         {
                 p8 duplicate[] = "HTTP/1.1 302 Found\r\n"
                                  "Location: /first\r\n"
@@ -49889,6 +49942,8 @@ static fn fetching(void)
                     "HTTP/1.1 200 OK\nContent-Length: 0\n\n";
                 static const p8 bare_cr[] =
                     "HTTP/1.1 302 Found\r\nLocation: /safe\rhidden\r\n\r\n";
+                static const p8 nested_cr[] =
+                    "HTTP/1.1 302 Found\r\nLocation: /%250d\r\n\r\n";
                 static const p8 bad_name[] =
                     "HTTP/1.1 200 OK\r\nContent-Length : 0\r\n\r\n";
                 http_response response;
@@ -49910,6 +49965,47 @@ static fn fetching(void)
                       http_response_framing((p8 address_to)bare_cr,
                                             sizeof bare_cr - 1, address_of header,
                                             address_of response) == HTTP_MALFORMED);
+                /* Nested percent CR is not a raw control, so framing keeps the
+                   Location; the next-hop request builder is the sink that
+                   refuses it once the path is in origin-form. */
+                {
+                        p8 next[256];
+                        p8 hop_host[64];
+                        p8 request[HTTP_HEAD_MAX];
+                        string_address hop_path;
+                        p16 hop_port;
+                        bool hop_tls;
+                        positive used = 0;
+                        p8 placed[16];
+
+                        check("HTTP redirect Location nested percent CR passes framing",
+                              http_response_framing((p8 address_to)nested_cr,
+                                                    sizeof nested_cr - 1,
+                                                    address_of header,
+                                                    address_of response) ==
+                                      HTTP_OK &&
+                                  response.code == 302 &&
+                                  response.location_length == 6 &&
+                                  !memory_compare(response.location, "/%250d",
+                                                  6));
+                        memory_copy(placed, response.location,
+                                    response.location_length);
+                        placed[response.location_length] = end;
+                        check("HTTP redirect Location nested percent CR is refused by the next request",
+                              http_absolutize(false, "h", 80, "/old", placed,
+                                              next, sizeof next) == HTTP_OK &&
+                                  string_equals(next, "http://h/%250d") &&
+                                  http_split_into(next, hop_host,
+                                                  sizeof hop_host,
+                                                  address_of hop_port,
+                                                  address_of hop_path,
+                                                  address_of hop_tls) ==
+                                      HTTP_OK &&
+                                  http_get_request(request, sizeof request,
+                                                   hop_host, hop_port, hop_path,
+                                                   false, '1', "agent",
+                                                   &used) == HTTP_BAD_URL);
+                }
                 check("HTTP response field names are exact tokens",
                       http_response_framing((p8 address_to)bad_name,
                                             sizeof bad_name - 1, address_of header,
@@ -50183,7 +50279,15 @@ static fn fetching(void)
                                        "example.com", 80, "/%250d", false,
                                        '1', "agent", &used) == HTTP_BAD_URL &&
                           http_get_request(request, sizeof request,
+                                           "example.com", 80, "/%250A",
+                                           false, '1', "agent", &used) ==
+                              HTTP_BAD_URL &&
+                          http_get_request(request, sizeof request,
                                            "example.com", 80, "/%25250a",
+                                           false, '1', "agent", &used) ==
+                              HTTP_BAD_URL &&
+                          http_get_request(request, sizeof request,
+                                           "example.com", 80, "/%25250D",
                                            false, '1', "agent", &used) ==
                               HTTP_BAD_URL &&
                           http_get_request(request, sizeof request,
@@ -50196,7 +50300,11 @@ static fn fetching(void)
                                        "agent", &used) == HTTP_OK &&
                           http_get_request(request, sizeof request,
                                            "example.com", 80, "/%2541", false,
-                                           '1', "agent", &used) == HTTP_OK);
+                                           '1', "agent", &used) == HTTP_OK &&
+                          http_get_request(request, sizeof request,
+                                           "example.com", 80, "/%252041",
+                                           false, '1', "agent", &used) ==
+                              HTTP_OK);
                 check("an empty request target becomes the origin-form root",
                       http_get_request(request, sizeof request,
                                        "example.com", 80, "", false, '1',
@@ -51410,6 +51518,25 @@ static fn tls_certificate_identity_rules(void)
             0x30, 0x03, 0x82, 0x01, 'a',
             0x30, 0x0c, 0x06, 0x03, 0x55, 0x1d, 0x11, 0x04, 0x05,
             0x30, 0x03, 0x82, 0x01, 'b'};
+        /* Two basicConstraints OIDs (2.5.29.19).  Empty SEQUENCE is the
+           minimal value tls_parse_basic_constraints accepts (CA:FALSE, no
+           pathLen); the first must parse wholly so the OID tracker sees the
+           second instance. */
+        static p8 duplicate_basic_constraints[] = {
+            0xa3, 0x18, 0x30, 0x16,
+            0x30, 0x09, 0x06, 0x03, 0x55, 0x1d, 0x13, 0x04, 0x02,
+            0x30, 0x00,
+            0x30, 0x09, 0x06, 0x03, 0x55, 0x1d, 0x13, 0x04, 0x02,
+            0x30, 0x00};
+        /* Two keyUsage OIDs (2.5.29.15).  BIT STRING with digitalSignature
+           set (unused=7, 0x80) is the shortest value tls_parse_key_usage
+           accepts. */
+        static p8 duplicate_key_usage[] = {
+            0xa3, 0x1c, 0x30, 0x1a,
+            0x30, 0x0b, 0x06, 0x03, 0x55, 0x1d, 0x0f, 0x04, 0x04,
+            0x03, 0x02, 0x07, 0x80,
+            0x30, 0x0b, 0x06, 0x03, 0x55, 0x1d, 0x0f, 0x04, 0x04,
+            0x03, 0x02, 0x07, 0x80};
         static p8 distinct_unknown[] = {
             0xa3, 0x14, 0x30, 0x12,
             0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x01, 0x00,
@@ -51491,6 +51618,16 @@ static fn tls_certificate_identity_rules(void)
               tls_parse_extensions(duplicate_san, sizeof duplicate_san, 0, 2,
                                    address_of cert, null) == TLS_FAIL);
         memory_fill(address_of cert, 0, sizeof cert);
+        check("duplicate basicConstraints extensions are refused by OID identity",
+              tls_parse_extensions(duplicate_basic_constraints,
+                                   sizeof duplicate_basic_constraints, 0, 2,
+                                   address_of cert, null) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("duplicate keyUsage extensions are refused by OID identity",
+              tls_parse_extensions(duplicate_key_usage,
+                                   sizeof duplicate_key_usage, 0, 2,
+                                   address_of cert, null) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
         check("nonadjacent duplicate unknown extensions are refused",
               tls_parse_extensions(duplicate_unknown_nonadjacent,
                                    sizeof duplicate_unknown_nonadjacent, 0, 2,
@@ -51547,6 +51684,151 @@ static fn tls_certificate_identity_rules(void)
                       tls_parse_extensions(at_ceiling, sizeof at_ceiling, 0, 2,
                                            address_of cert, null) == TLS_OK &&
                           !cert.unsupported_critical);
+        }
+}
+
+/*
+        Adversarial DER byte-stream harness for tls_parse_extensions.
+
+        Empty, truncated-at-every-boundary, oversize length, indefinite BER
+        lengths (including nested), duplicate OID encodings, and off-by-one
+        length claims that would pass a confused `at + length` bound.  Run by
+        `sh test/run net` through CHECK_net.  The same fixture bytes are a
+        seed corpus for a future coverage-guided build; this lane is the
+        deterministic proving set that must stay green under ASan/UBSan.
+*/
+static fn tls_certificate_extension_adversarial(void)
+{
+        /* Minimal valid v3 extensions block: one unknown non-critical
+           extension whose OCTET STRING value is empty.
+             [3] {
+               SEQUENCE {
+                 SEQUENCE { OID 1.42, OCTET STRING {} }
+               }
+             }
+        */
+        static p8 fixture[] = {
+            0xa3, 0x09,
+            0x30, 0x07,
+            0x30, 0x05,
+            0x06, 0x01, 0x2a,
+            0x04, 0x00};
+        tls_cert cert = {0};
+        positive refused = 0;
+        p8 empty = 0;
+
+        check("an empty certificate extensions stream is valid",
+              tls_parse_extensions(address_of empty, 0, 0, 2, address_of cert,
+                                   null) == TLS_OK);
+
+        for (positive prefix = 1; prefix < sizeof fixture; prefix++)
+        {
+                memory_fill(address_of cert, 0, sizeof cert);
+                if (tls_parse_extensions(fixture, prefix, 0, 2, address_of cert,
+                                         null) == TLS_FAIL)
+                        refused++;
+        }
+        check("every proper prefix of a valid extensions fixture is refused",
+              refused == sizeof fixture - 1);
+
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("the complete minimal extensions fixture parses",
+              tls_parse_extensions(fixture, sizeof fixture, 0, 2,
+                                   address_of cert, null) == TLS_OK &&
+                  !cert.unsupported_critical);
+
+        {
+                static p8 oversize[] = {
+                    0xa3, 0x82, 0x01, 0x00,
+                    0x30, 0x00};
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("an oversize extensions length is refused",
+                      tls_parse_extensions(oversize, sizeof oversize, 0, 2,
+                                           address_of cert, null) == TLS_FAIL);
+        }
+
+        {
+                /* BER indefinite length (0x80) is not DER; the length reader
+                   rejects a zero count before any content is walked. */
+                static p8 indefinite_outer[] = {
+                    0xa3, 0x80,
+                    0x30, 0x07,
+                    0x30, 0x05,
+                    0x06, 0x01, 0x2a,
+                    0x04, 0x00,
+                    0x00, 0x00};
+                static p8 indefinite_nested[] = {
+                    0xa3, 0x0b,
+                    0x30, 0x80,
+                    0x30, 0x05,
+                    0x06, 0x01, 0x2a,
+                    0x04, 0x00,
+                    0x00, 0x00};
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("indefinite outer extensions length is refused",
+                      tls_parse_extensions(indefinite_outer,
+                                           sizeof indefinite_outer, 0, 2,
+                                           address_of cert, null) == TLS_FAIL);
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("nested indefinite extensions length is refused",
+                      tls_parse_extensions(indefinite_nested,
+                                           sizeof indefinite_nested, 0, 2,
+                                           address_of cert, null) == TLS_FAIL);
+        }
+
+        {
+                static p8 duplicate[] = {
+                    0xa3, 0x12, 0x30, 0x10,
+                    0x30, 0x05, 0x06, 0x01, 0x2a, 0x04, 0x00,
+                    0x30, 0x05, 0x06, 0x01, 0x2a, 0x04, 0x00};
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("duplicate OID encodings in one extensions stream are refused",
+                      tls_parse_extensions(duplicate, sizeof duplicate, 0, 2,
+                                           address_of cert, null) == TLS_FAIL);
+        }
+
+        /* Off-by-one / length confusion.  The complete fixture above already
+           proves a length that lands exactly on the buffer end is accepted
+           (`at + length > size`, not `>=`).  These complements must stay
+           refused: claiming one byte past the buffer, leaving one trailing
+           byte after a closed outer length, and an OCTET STRING whose length
+           overruns its enclosing extension by one while still sitting inside
+           the outer [3] window. */
+        {
+                static p8 claim_past_end[] = {
+                    0xa3, 0x0a,
+                    0x30, 0x07,
+                    0x30, 0x05,
+                    0x06, 0x01, 0x2a,
+                    0x04, 0x00};
+                static p8 trailing_after_short[] = {
+                    0xa3, 0x08,
+                    0x30, 0x06,
+                    0x30, 0x04,
+                    0x06, 0x01, 0x2a,
+                    0x04, 0x00,
+                    0xff};
+                static p8 octet_overrun[] = {
+                    0xa3, 0x0a,
+                    0x30, 0x08,
+                    0x30, 0x06,
+                    0x06, 0x01, 0x2a,
+                    0x04, 0x02, 0x00};
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("extensions length one past the buffer is refused",
+                      tls_parse_extensions(claim_past_end, sizeof claim_past_end,
+                                           0, 2, address_of cert, null) ==
+                          TLS_FAIL);
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("a trailing byte after a short extensions length is refused",
+                      tls_parse_extensions(trailing_after_short,
+                                           sizeof trailing_after_short, 0, 2,
+                                           address_of cert, null) == TLS_FAIL);
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("an OCTET STRING length that overruns its extension by one is refused",
+                      tls_parse_extensions(octet_overrun, sizeof octet_overrun,
+                                           0, 2, address_of cert, null) ==
+                          TLS_FAIL);
         }
 }
 
@@ -52011,6 +52293,36 @@ static fn tls_post_handshake_framing(void)
                           held, address_of held_length, ticket + 7,
                           sizeof ticket - 7) == TLS_OK &&
                           !held_length);
+        }
+
+        /* TLS_HS_MAX is both the hold buffer and the largest handshake body
+           the post-handshake path will accept.  A ticket whose body is the
+           inclusive bound must clear; one declared octet past it must not. */
+        {
+                p8 at_ceiling[TLS_HS_MAX];
+                p8 over[4];
+                positive ticket_length = TLS_HS_MAX - 17;
+
+                memory_fill(at_ceiling, 0, sizeof at_ceiling);
+                at_ceiling[0] = TLS_HS_NEW_SESSION_TICKET;
+                at_ceiling[1] = (p8)((TLS_HS_MAX - 4) >> 16);
+                at_ceiling[2] = (p8)((TLS_HS_MAX - 4) >> 8);
+                at_ceiling[3] = (p8)(TLS_HS_MAX - 4);
+                at_ceiling[12] = 0; /* empty nonce */
+                at_ceiling[13] = (p8)(ticket_length >> 8);
+                at_ceiling[14] = (p8)ticket_length;
+                at_ceiling[15] = 't';
+                /* ticket payload stays zero; extensions are the empty vector
+                   at the last two bytes. */
+                check("a post-handshake ticket at the handshake-size ceiling clears",
+                      tls_post_handshake_valid(at_ceiling, sizeof at_ceiling));
+
+                over[0] = TLS_HS_NEW_SESSION_TICKET;
+                over[1] = (p8)((TLS_HS_MAX - 3) >> 16);
+                over[2] = (p8)((TLS_HS_MAX - 3) >> 8);
+                over[3] = (p8)(TLS_HS_MAX - 3);
+                check("a post-handshake body past the handshake-size ceiling is refused",
+                      !tls_post_handshake_valid(over, sizeof over));
         }
         check("an unsupported TLS KeyUpdate is not silently ignored",
               !tls_post_handshake_valid(key_update, sizeof key_update));
@@ -53957,6 +54269,27 @@ static fn redirect_urls(void)
                   http_split_into(into, host, sizeof host, address_of port,
                                   address_of path, address_of tls) == HTTP_OK &&
                   !tls && !http_transport_allowed(address_of secure, tls));
+        {
+                p8 request[HTTP_HEAD_MAX];
+                positive used = 0;
+
+                check("a redirect Location nested percent CR is refused at the next hop",
+                      http_absolutize(false, "h", 80, "/old", "/%250d", into,
+                                      sizeof into) == HTTP_OK &&
+                          http_split_into(into, host, sizeof host,
+                                          address_of port, address_of path,
+                                          address_of tls) == HTTP_OK &&
+                          string_equals(path, "/%250d") &&
+                          http_get_request(request, sizeof request, host, port,
+                                           path, false, '1', "agent",
+                                           &used) == HTTP_BAD_URL);
+                check("a redirect Location with a TAB path is refused before the next hop",
+                      http_absolutize(false, "h", 80, "/old", "/\tx", into,
+                                      sizeof into) == HTTP_OK &&
+                          http_split_into(into, host, sizeof host,
+                                          address_of port, address_of path,
+                                          address_of tls) == HTTP_BAD_URL);
+        }
 }
 
 /*
@@ -55125,6 +55458,7 @@ b32 main(void)
         tls_sensitive_state_erasure();
         tls_certificate_dates();
         tls_certificate_identity_rules();
+        tls_certificate_extension_adversarial();
         tls_client_hello_bounds();
         tls_client_hello_groups();
         tls_server_hello_validation();
