@@ -20971,6 +20971,8 @@ static b32 file_sync()
         GNU's line-aware and round-robin schedulers walk.
 */
 #define SPLIT_SUFFIX_MAX 32
+// GNU counts in intmax_t: a count past it is that, not refused.
+#define SPLIT_COUNT_MAX ((positive)0x7fffffffffffffff)
 
 typedef struct
 {
@@ -21284,18 +21286,23 @@ static bool split_fixed(bipolar in, p64 length, positive measure,
         {
                 positive here = (positive)min(length, ordinary + (i < extra));
 
-                if (!split_output_open(output) ||
-                    (here && !(bytes ? split_output_write(output, bytes, here)
-                                : file_copy_stream(in, output->stage.handle,
-                                                   here, true,
-                                                   address_of range_copy,
-                                                   address_of send_copy, null, null))) ||
-                    !split_output_close(output))
+                // A name that could not be made, suffixes run out among
+                // them, has been said already; only a copy that failed is
+                // said here.
+                if (!split_output_open(output))
+                        return false;
+                if (here && !(bytes ? split_output_write(output, bytes, here)
+                              : file_copy_stream(in, output->stage.handle,
+                                                 here, true,
+                                                 address_of range_copy,
+                                                 address_of send_copy, null, null)))
                 {
                         if (!bytes)
                                 log_error("split: read or write error\n", 0);
                         return false;
                 }
+                if (!split_output_close(output))
+                        return false;
                 length -= here;
                 if (bytes)
                         bytes += here;
@@ -21959,6 +21966,44 @@ static b32 file_split()
                         suffix_fixed = true;
                 else
                         suffix_length = 2;
+        }
+
+        /*
+                -n says how many files there will be, so the suffix is as
+                wide as the last one's name needs and never widens, as GNU's
+                set_suffix_length has it: at least two, or what -a gave --
+                and an -a too narrow for them all is refused here, before
+                the input is opened or a file made, where it used to make
+                676 files for -a2 -n1000 and then run out. A decimal start
+                below the count widens the need by the start, the one run
+                case where its names still sort; a start at or past the
+                count leaves the width alone, and the start's own length is
+                checked against it below.
+        */
+        if (mode == 'n')
+        {
+                positive last = chunk.n - 1;
+                positive start;
+
+                if (split_suffix_start &&
+                    string_digits_checked_exact(split_suffix_start, 10, address_of start) &&
+                    start < chunk.n)
+                        last = start > SPLIT_COUNT_MAX - last ? SPLIT_COUNT_MAX : last + start;
+
+                positive base = suffix_kind == 'd' ? 10 : suffix_kind == 'x' ? 16 : 26;
+                positive needed = 0;
+
+                do
+                        needed++;
+                while (last /= base);
+
+                if (suffix_fixed && suffix_length < needed)
+                        return string_report(log_error, 1,
+                                             "split: the suffix length needs to be at least %p\n",
+                                             needed);
+                if (!suffix_fixed)
+                        suffix_length = max(needed, (positive)2);
+                suffix_fixed = true;
         }
 
         p8 separator = split_have_separator ? split_separator_byte : '\n';
