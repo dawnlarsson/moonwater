@@ -666,6 +666,156 @@ static PURE bool lex_parameter_pattern(string_address at)
         return string_is(step, '#') || string_is(step, '%');
 }
 
+/*
+        Where a case command inside $( ) stands, so that the ) closing an
+        unparenthesized pattern is not taken for the ) closing the
+        substitution. POSIX spells `$(case $x in a) echo a;; esac)` this way
+        and every shell reads it; counting parentheses alone ended the
+        substitution at `a)` and left `echo a;; esac)` a syntax error.
+
+        One entry per case still open, each remembering the parenthesis depth
+        it was opened at: a ( ) group inside an arm is ordinary nesting.
+*/
+#define LEX_CASES 16
+
+enum
+{
+        LEX_CASE_SUBJECT = 1, // after `case`, before its word
+        LEX_CASE_IN,          // after the word, before `in`
+        LEX_CASE_PATTERN,     // where a pattern (or esac) may stand
+        LEX_CASE_BODY         // the commands of an arm
+};
+
+typedef struct
+{
+        p8 state[LEX_CASES];
+        positive depth[LEX_CASES];
+        positive count;
+        positive pattern_parens;
+        bool pattern_started;
+        bool command; // the next word is in command position
+} lex_cases;
+
+static PURE bool lex_word_is(string_address at, const_string word,
+                             positive length)
+{
+        for (positive i = 0; i < length; i++)
+                if (string_get(at + i) != (p8)word[i])
+                        return false;
+
+        p8 after = string_get(at + length);
+
+        return !after || lex_is_space(after) || lex_operator[after];
+}
+
+// A word begins here, in a command substitution: what it does to the cases.
+static fn lex_cases_word(lex_cases address_to cases, string_address at,
+                         positive depth)
+{
+        p8 state = cases->count ? cases->state[cases->count - 1] : 0;
+        bool here = cases->count && cases->depth[cases->count - 1] == depth;
+        bool command = cases->command;
+
+        cases->command = false;
+
+        if (here && state == LEX_CASE_SUBJECT)
+        {
+                cases->state[cases->count - 1] = LEX_CASE_IN;
+                return;
+        }
+        if (here && state == LEX_CASE_IN)
+        {
+                if (lex_word_is(at, "in", 2))
+                {
+                        cases->state[cases->count - 1] = LEX_CASE_PATTERN;
+                        cases->pattern_started = false;
+                        cases->pattern_parens = 0;
+                }
+                return;
+        }
+        if (here && state == LEX_CASE_PATTERN)
+        {
+                if (!cases->pattern_started && lex_word_is(at, "esac", 4))
+                        cases->count--;
+                cases->pattern_started = true;
+                return;
+        }
+        if (!command)
+                return;
+
+        if (lex_word_is(at, "case", 4) && cases->count < LEX_CASES)
+        {
+                cases->state[cases->count] = LEX_CASE_SUBJECT;
+                cases->depth[cases->count] = depth;
+                cases->count++;
+                return;
+        }
+        if (here && state == LEX_CASE_BODY && lex_word_is(at, "esac", 4))
+        {
+                cases->count--;
+                return;
+        }
+
+        /* After a reserved word that begins a list the next word is a
+           command again: `if case ...`, `then case ...`. */
+        cases->command =
+            lex_word_is(at, "then", 4) || lex_word_is(at, "do", 2) ||
+            lex_word_is(at, "else", 4) || lex_word_is(at, "elif", 4) ||
+            lex_word_is(at, "if", 2) || lex_word_is(at, "while", 5) ||
+            lex_word_is(at, "until", 5) || lex_word_is(at, "!", 1) ||
+            lex_word_is(at, "{", 1) || lex_word_is(at, "time", 4);
+}
+
+/* An operator byte in a command substitution: whether it belongs to a case
+   pattern rather than to the nesting. Answers true when the byte is taken. */
+static bool lex_cases_operator(lex_cases address_to cases, string_address at,
+                               positive depth)
+{
+        p8 c = string_get(at);
+        bool here = cases->count && cases->depth[cases->count - 1] == depth;
+        p8 state = here ? cases->state[cases->count - 1] : 0;
+
+        cases->command = c != '<' && c != '>';
+
+        if (state == LEX_CASE_PATTERN)
+        {
+                if (c == '(')
+                {
+                        if (cases->pattern_started)
+                                cases->pattern_parens++;
+                        cases->pattern_started = true;
+                        return true;
+                }
+                if (c == ')')
+                {
+                        if (cases->pattern_parens)
+                        {
+                                cases->pattern_parens--;
+                                return true;
+                        }
+                        cases->state[cases->count - 1] = LEX_CASE_BODY;
+                        cases->command = true;
+                        return true;
+                }
+                return false;
+        }
+
+        if (state == LEX_CASE_BODY && c == ';' && string_is(at + 1, ';'))
+        {
+                cases->state[cases->count - 1] = LEX_CASE_PATTERN;
+                cases->pattern_started = false;
+                cases->pattern_parens = 0;
+        }
+        else if (state == LEX_CASE_BODY && c == ';' && string_is(at + 1, '&'))
+        {
+                cases->state[cases->count - 1] = LEX_CASE_PATTERN;
+                cases->pattern_started = false;
+                cases->pattern_parens = 0;
+        }
+
+        return false;
+}
+
 static string_address lex_nesting_at(string_address at, positive nesting,
                                      bool posix_double)
 {
@@ -686,6 +836,10 @@ static string_address lex_nesting_at(string_address at, positive nesting,
         bool maybe_here = false;
         bool raw_single = posix_double && open == '{' && shell_posix_on() &&
                           !lex_parameter_pattern(at + 1);
+        lex_cases cases;
+
+        cases.count = 0;
+        cases.command = true;
 
         if (nesting >= EXPAND_DEPTH)
                 return at;
@@ -728,6 +882,9 @@ static string_address lex_nesting_at(string_address at, positive nesting,
                         step++;
                         continue;
                 }
+
+                if (commands && fresh && !lex_is_space(c) && !lex_operator[c])
+                        lex_cases_word(&cases, step, depth);
 
                 if (c == '$' && string_is(step + 1, '\''))
                 {
@@ -835,6 +992,16 @@ static string_address lex_nesting_at(string_address at, positive nesting,
                 // another expansion. The opening brace still counts
                 // (depth is 0 only on that first byte). Parentheses in
                 // `$( )` / `$(( ))` keep nesting.
+                if (commands && depth && lex_operator[c] &&
+                    lex_cases_operator(&cases, step, depth))
+                {
+                        step++;
+                        fresh = true;
+                        continue;
+                }
+                if (commands && c == '\n')
+                        cases.command = true;
+
                 if (open == close)
                 {
                         if (c == open)

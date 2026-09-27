@@ -13065,6 +13065,43 @@ def shell_lang_command_substitution(rng):
                                                                     "echo \"status=$? x=$x\"")
 
 
+#       A case command inside $( ), with its patterns written the way POSIX
+#       allows: no opening parenthesis, so the ) after each pattern is one
+#       more than the ( before it. Counting parentheses ended the
+#       substitution at the first pattern and left the rest a syntax error.
+def shell_lang_case_in_substitution(rng):
+    subject = rng.choice(("a", "b7", "$x", "\"$x\"", "zz", "'a b'"))
+    patterns = [rng.choice(("a", "[0-9]*", "[a-z]", "b*|a", "*7", "'a b'", "\\)", "?", "a|b|c"))
+                for _ in range(rng.randint(1, 3))] + ["*"]
+    style = rng.choice(("bare", "bare", "open", "mixed"))
+    arms = []
+    for n, pattern in enumerate(patterns):
+        open_paren = style == "open" or (style == "mixed" and n % 2)
+        body = rng.choice(("echo arm%d" % n, "echo ')'", "(echo sub%d)" % n, "echo $((%d + 1))" % n,
+                           "for i in 1; do echo loop%d; done" % n))
+        arms.append(("(" if open_paren else "") + pattern + ") " + body)
+    separator = rng.choice((";; ", ";;\n", " ;; "))
+    command = "case " + subject + " in " + separator.join(arms) + rng.choice((";; esac", "\nesac", " ;;\nesac"))
+    place = rng.choice(("word", "assign", "quoted", "nested", "in-if", "in-loop", "function", "inner-case"))
+    if place == "word":
+        line = "echo $(" + command + ") tail"
+    elif place == "assign":
+        line = "v=$(" + command + "); echo \"[$v]\""
+    elif place == "quoted":
+        line = "echo \"$(" + command + ")\""
+    elif place == "nested":
+        line = "echo $(echo $(" + command + "))"
+    elif place == "in-if":
+        line = "echo $(if true; then " + command + "; fi)"
+    elif place == "in-loop":
+        line = "echo $(for k in 1 2; do " + command + "; done)"
+    elif place == "function":
+        line = "f() { echo $(" + command + "); }; f; f"
+    else:
+        line = "echo $(case q in q) " + command + ";; esac)"
+    return "case-in-substitution-" + style, shell_ALL, shell_program("x=a", line, "echo \"end=$?\"")
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -15670,6 +15707,7 @@ SHELL_FAMILIES = (
     shell_lang_brace_expansion,
     shell_lang_tilde,
     shell_lang_command_substitution,
+    shell_lang_case_in_substitution,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_lang_heredoc,
