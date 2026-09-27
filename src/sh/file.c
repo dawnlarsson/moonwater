@@ -26360,6 +26360,10 @@ static bipolar file_stage_claim_at(
 // destination that is already there, and a destination that is not there is
 // never in question. -u lets through only a source newer to the nanosecond.
 // --update=none-fail is -n that still fails.
+/* cp and mv's --debug, which implies -v; only it tells of a destination
+   skipped, as GNU 9.11's copy.c prints "skipped" under x->debug alone. */
+static bool file_debug;
+
 static bool file_overwrite_allowed(string_address program, string_address shown,
                                    bool exists, bool never, bool newer, bool ask,
                                    bool fail_skip, bool loud,
@@ -26386,7 +26390,7 @@ static bool file_overwrite_allowed(string_address program, string_address shown,
                                       shown);
                         address_to status = 1;
                 }
-                else if (loud && never)
+                else if (file_debug)
                         string_format(log, "skipped %w\n",
                                       writer_shell_quoted_name, shown);
                 return false;
@@ -26394,6 +26398,9 @@ static bool file_overwrite_allowed(string_address program, string_address shown,
 
         if (ask && !file_ask(program, (string_address)"overwrite", shown))
         {
+                if (file_debug)
+                        string_format(log, "skipped %w\n",
+                                      writer_shell_quoted_name, shown);
                 address_to status = 1;
                 return false;
         }
@@ -28926,7 +28933,7 @@ static const argument_option cp_options[] = {
     {"backup", 'B', ARGUMENT_LONG_OPTIONAL | ARGUMENT_LONG_ONLY},
     {"context", 'Z', ARGUMENT_LONG_OPTIONAL},
     {"copy-contents", 'C'},
-    {"debug", 'v'},
+    {"debug", 'G', ARGUMENT_LONG_ONLY},
     {"keep-directory-symlink", 'K', ARGUMENT_LONG_ONLY},
     {"no-preserve", 'N', ARGUMENT_REQUIRED},
     {"one-file-system", 'x'},
@@ -29043,7 +29050,8 @@ static b32 file_cp()
                  cp_update_policy != 'F';
         cp_hard = (flags & FILE_FLAG('l')) != 0;
         cp_symbolic = (flags & FILE_FLAG('s')) != 0;
-        cp_loud = (flags & FILE_FLAG('v')) != 0;
+        file_debug = (flags & FILE_FLAG('G')) != 0;
+        cp_loud = (flags & (FILE_FLAG('v') | FILE_FLAG('G'))) != 0;
         file_strip_trailing = (flags & FILE_FLAG('w')) != 0;
         cp_umask = file_umask();
 
@@ -30209,7 +30217,7 @@ finished:
 static const argument_option mv_options[] = {
     {"backup", 'B', ARGUMENT_LONG_OPTIONAL | ARGUMENT_LONG_ONLY},
     {"context", 'Z'},
-    {"debug", 'v'},
+    {"debug", 'G', ARGUMENT_LONG_ONLY},
     {"exchange", 'X'},
     {"force", 'f', 0, 1},
     {"no-copy", 'c'},
@@ -30271,7 +30279,8 @@ static b32 file_mv()
 
         mv_ask = mv_collision_option == 'i' && mv_update_policy != 'n' &&
                  mv_update_policy != 'F';
-        mv_loud = (taking.flags & FILE_FLAG('v')) != 0;
+        file_debug = (taking.flags & FILE_FLAG('G')) != 0;
+        mv_loud = (taking.flags & (FILE_FLAG('v') | FILE_FLAG('G'))) != 0;
         file_strip_trailing = (taking.flags & FILE_FLAG('w')) != 0;
         mv_exchange = (taking.flags & FILE_FLAG('X')) != 0;
         mv_no_copy = (taking.flags & FILE_FLAG('c')) != 0;

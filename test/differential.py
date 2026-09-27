@@ -6753,6 +6753,19 @@ def files_self_cases(tool, flags, pairs=files_SELF_PAIRS):
     return tuple(cases)
 
 
+def files_skip_cases(tool):
+    """A destination left alone, by each way of being told to leave it,
+    crossed with how loudly: GNU names a skipped destination only under
+    --debug, and -v alone says nothing of it."""
+    cases = []
+    for skip in (("-n",), ("-i",), ("-u",), ("--update=none",), ("--update=older",), ("--update=none-fail",)):
+        for loud in ((), ("-v",), ("--debug",), ("-v", "--debug")):
+            for operands in (("a.txt", "b.txt"), ("b.txt", "a.txt"), ("a.txt", "b.txt", "dir")):
+                for stdin in (("files_yes", "files_no") if skip == ("-i",) else ("files_yes",)):
+                    cases.append({"fixture": "files", "argv": loud + skip + operands, "stdin": stdin})
+    return tuple(cases)
+
+
 FILES_UTILITIES = (
     # yes is the one program here the engine cannot bound: it writes until
     # something stops it, so both sides die on the harness's file-size limit
@@ -7284,7 +7297,8 @@ FILES_UTILITIES = (
                     for words in (("-a", "--attributes-only"), ("-d", "--attributes-only"),
                                   ("-df", "--attributes-only"), ("-a", "--attributes-only", "--remove-destination"),
                                   ("-rd", "--attributes-only", "-b"))
-                    for pair in (("sl", "g"), ("d", "g"), ("sl", "sub/f"))),
+                    for pair in (("sl", "g"), ("d", "g"), ("sl", "sub/f")))
+            + files_skip_cases("cp"),
             normalize=files_sorted_lines),
     Utility("install", options=(Option("-b"), Option("-c"), Option("-C"), Option("-d"), Option("-D"), Option("-p"), Option("-s"),
                                 Option("-T"), Option("-v"), Option("-Z"), Option("--backup"),
@@ -7346,7 +7360,7 @@ FILES_UTILITIES = (
                 "mv", ("-f", "-n", "-u", "-v", "-b", "-T", "--update=none-fail", "--no-copy", "--debug"),
                 ("a.txt", "dir", "link", "dirlink", "dangling"))
                 if "dangling/" not in case)
-            + files_backup_cases("mv", ())),
+            + files_backup_cases("mv", ()) + files_skip_cases("mv")),
     Utility("rm", options=(Option("-f"), Option("-i"), Option("-I"), Option("-r"), Option("-R"), Option("-d"), Option("-v"),
                            Option("--force"), Option("--interactive"), Option("--interactive", ("always", "once", "never", "bogus"), True),
                            Option("--one-file-system"), Option("--no-preserve-root"), Option("--preserve-root"),
