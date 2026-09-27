@@ -8240,8 +8240,9 @@ static bipolar http_unchunk(p8 address_to bytes, positive size)
    through http_split_into.  Keeping the check at the serialization boundary
    is important: otherwise a later caller can turn a CR/LF in a target, Host,
    or User-Agent into a second header or a second request.  Origin-form
-   targets stay ASCII (no backslash, no high bytes); Host is the DNS-ish
-   allowlist; User-Agent may still carry obs-text. */
+   targets stay ASCII (no backslash, no high bytes) and refuse percent-
+   encodings of NUL/CR/LF; Host is the DNS-ish allowlist; User-Agent may
+   still carry obs-text. */
 enum
 {
         HTTP_REQUEST_FIELD,
@@ -8266,6 +8267,20 @@ static bool http_request_component_valid(string_address text, p8 kind)
                     (kind == HTTP_REQUEST_TARGET &&
                      (byte == '\\' || byte > 0x7f)))
                         return false;
+                if (kind == HTTP_REQUEST_TARGET && byte == '%')
+                {
+                        positive high = digit_known(string_get(text + 1), 16);
+                        positive low = digit_known(string_get(text + 2), 16);
+
+                        if (high < 16 && low < 16)
+                        {
+                                p8 decoded = (p8)((high << 4) | low);
+
+                                if (decoded == 0 || decoded == '\r' ||
+                                    decoded == '\n')
+                                        return false;
+                        }
+                }
                 if (kind == HTTP_REQUEST_HOST &&
                     !byte_is_alnum(byte) && byte != '-' && byte != '.' &&
                     byte != '_')

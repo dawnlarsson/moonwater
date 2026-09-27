@@ -50117,6 +50117,33 @@ static fn fetching(void)
                                                false, '1', high_agent,
                                                &used) == HTTP_OK);
                 }
+                /* A percent-encoded NUL/CR/LF is still a request-line
+                   injection after a peer's decoder.  Reject those three
+                   encodings case-insensitively; leave ordinary encodings
+                   such as %2f and %41 alone. */
+                check("request targets refuse percent-encoded CR LF and NUL",
+                      http_get_request(request, sizeof request,
+                                       "example.com", 80, "/%0d%0a", false,
+                                       '1', "agent", &used) == HTTP_BAD_URL &&
+                          http_get_request(request, sizeof request,
+                                           "example.com", 80, "/%0D%0A",
+                                           false, '1', "agent", &used) ==
+                              HTTP_BAD_URL &&
+                          http_get_request(request, sizeof request,
+                                           "example.com", 80, "/%00", false,
+                                           '1', "agent", &used) ==
+                              HTTP_BAD_URL);
+                check("request targets keep ordinary percent encodings",
+                      http_get_request(request, sizeof request,
+                                       "example.com", 80, "/%2f", false, '1',
+                                       "agent", &used) == HTTP_OK &&
+                          http_get_request(request, sizeof request,
+                                           "example.com", 80, "/%41", false,
+                                           '1', "agent", &used) == HTTP_OK);
+                check("request targets refuse embedded percent-encoded LF",
+                      http_get_request(request, sizeof request,
+                                       "example.com", 80, "/ok%0ax", false,
+                                       '1', "agent", &used) == HTTP_BAD_URL);
                 check("an empty request target becomes the origin-form root",
                       http_get_request(request, sizeof request,
                                        "example.com", 80, "", false, '1',
@@ -51334,6 +51361,14 @@ static fn tls_certificate_identity_rules(void)
             0xa3, 0x14, 0x30, 0x12,
             0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x01, 0x00,
             0x30, 0x07, 0x06, 0x02, 0x2a, 0x04, 0x04, 0x01, 0x00};
+        /* A, B, A: the second sighting of A is not adjacent to the first.
+           Seen-OID tracking must not only compare against the previous
+           extension. */
+        static p8 duplicate_unknown_nonadjacent[] = {
+            0xa3, 0x1d, 0x30, 0x1b,
+            0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x01, 0x00,
+            0x30, 0x07, 0x06, 0x02, 0x2a, 0x04, 0x04, 0x01, 0x00,
+            0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x01, 0x00};
         static p8 san_good[] = {
             0x30, 0x0d, 0x82, 0x0b,
             'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm'};
@@ -51401,6 +51436,11 @@ static fn tls_certificate_identity_rules(void)
         memory_fill(address_of cert, 0, sizeof cert);
         check("duplicate subjectAltName extensions are refused by OID identity",
               tls_parse_extensions(duplicate_san, sizeof duplicate_san, 0, 2,
+                                   address_of cert, null) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("nonadjacent duplicate unknown extensions are refused",
+              tls_parse_extensions(duplicate_unknown_nonadjacent,
+                                   sizeof duplicate_unknown_nonadjacent, 0, 2,
                                    address_of cert, null) == TLS_FAIL);
         memory_fill(address_of cert, 0, sizeof cert);
         check("distinct unknown non-critical certificate extensions remain valid",
@@ -69596,12 +69636,85 @@ static fn machine_stop_self(void)
         host_machine_ended = false;
 }
 
+/*
+        SNTP's originate nonce asks only for blocking getrandom. A seccomp
+        errno filter can refuse that ask without replacing the production
+        helper: the child must see sntp_put_stamp fail and sntp_exchange
+        return before any send, the way the old wall-clock fallback would
+        have kept going.
+*/
+typedef struct
+{
+        p16 code;
+        p8 yes;
+        p8 no;
+        p32 value;
+} sntp_test_filter_instruction;
+
+typedef struct
+{
+        p16 length;
+        sntp_test_filter_instruction address_to instructions;
+} sntp_test_filter_program;
+
+static bipolar sntp_test_refuse_blocking_random(void)
+{
+        sntp_test_filter_instruction instructions[] = {
+            {0x20, 0, 0, 0},
+            {0x15, 0, 4, syscall(getrandom)},
+            {0x20, 0, 0, 32},
+            {0x15, 1, 0, 0}, /* flags == 0 (blocking) */
+            {0x15, 0, 1, 0},
+            {0x06, 0, 0, 0x0005000b},
+            {0x06, 0, 0, 0x7fff0000},
+        };
+        sntp_test_filter_program program = {
+            array_count(instructions), instructions};
+
+        if (system_call_5(syscall(prctl), 38, 1, 0, 0, 0) < 0)
+                return -1;
+        return system_call_3(syscall(seccomp), 1, 0,
+                             (positive)address_of program);
+}
+
+static fn sntp_test_random_child(void)
+{
+        p8 field[8];
+        network_deadline deadline = {0};
+        p32 sequence = 0;
+        sntp_sample sample = {0};
+        bool ok;
+
+        if (sntp_test_refuse_blocking_random() < 0)
+                system_call_1(syscall(exit_group), 77);
+
+        ok = !sntp_put_stamp(field) &&
+             sntp_exchange(0, address_of deadline, false, address_of sequence,
+                           address_of sample) == SNTP_NO_REPLY &&
+             !sample.ok;
+        system_call_1(syscall(exit_group), ok ? 0 : 1);
+}
+
 static fn machine_sntp(void)
 {
+        bipolar child;
+        positive raw = 0;
+
         check("RFC 5905 offset, min-delay pick and poison guards hold",
               sntp_math_ok());
         check("the clock is stepped when far out and slewed when near",
               locale_discipline_ok());
+
+        child = system_call_2(syscall(clone), SIGCHLD, 0);
+        check("SNTP entropy-policy child starts", child >= 0);
+        if (!child)
+                sntp_test_random_child();
+        if (child > 0)
+                check("SNTP fails closed when blocking entropy is unavailable",
+                      system_wait4_retry((b32)child, address_of raw, 0, null) ==
+                              child &&
+                          (wait_status_code(raw) == 0 ||
+                           wait_status_code(raw) == 77));
 }
 
 /*

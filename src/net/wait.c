@@ -65,9 +65,9 @@ static bool network_deadline_left(
 }
 
 /* A DNS id is part of reply authentication, so its availability tradeoff is
-   stricter than DHCP's local-link tag and an exclusive temporary filename.
-   Refuse to send when the kernel CSPRNG is not ready rather than exposing a
-   timing/PID-derived 16-bit value. */
+   the same CSPRNG discipline DHCP and SNTP now use for their transaction
+   tags: refuse to send when the initialized kernel pool is not ready rather
+   than exposing a timing/PID-derived value. */
 static inline INLINE bool network_transaction_secure(address_any into,
                                                       positive width)
 {

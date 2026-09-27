@@ -33134,6 +33134,23 @@ def harness_tls_chains(argv):
         # objects with identical 2.5.29.17 contents on the wire.
         ("duplicate subjectAltName leaf extension", 2,
          good_leaf + "2.5.29.17=DER:30:03:82:01:61\n", {}),
+        # OpenSSL collapses identical extfile keys, so mint two distinct
+        # unknowns and rewrite the second OID on the wire before resigning.
+        ("leaf duplicate unknown extension", 2,
+         good_leaf + "1.2.3.4=DER:05:00\n1.2.3.5=DER:05:00\n",
+         {"der_dup_unknown": True}),
+        ("leaf nonadjacent duplicate unknown", 2,
+         good_leaf + "1.2.3.4=DER:05:00\n1.2.3.6=DER:05:00\n1.2.3.5=DER:05:00\n",
+         {"der_rewrite_oids": [(bytes([0x2a, 0x03, 0x05]), bytes([0x2a, 0x03, 0x04]))]}),
+        # OpenSSL may auto-insert subjectKeyIdentifier / authorityKeyIdentifier;
+        # pin them off so good_leaf's four named extensions plus sixty (or
+        # sixty-one) unknowns are exactly the wire count the ceiling uses.
+        ("leaf sixty-four extensions", 2,
+         good_leaf + "subjectKeyIdentifier=none\nauthorityKeyIdentifier=none\n" +
+         "".join("1.2.200.%d=DER:05:00\n" % n for n in range(60)), {}),
+        ("leaf sixty-five extensions", 2,
+         good_leaf + "subjectKeyIdentifier=none\nauthorityKeyIdentifier=none\n" +
+         "".join("1.2.200.%d=DER:05:00\n" % n for n in range(61)), {}),
         ("a stranger's root", 2, good_leaf, {"stranger": True}),
         ("an intermediate left out", 2, good_leaf, {"skip_second": True}),
         ("leaf is a CA", 2, good_leaf.replace("CA:FALSE", "CA:TRUE"), {}),
@@ -33147,12 +33164,16 @@ def harness_tls_chains(argv):
         "leaf is a CA": "a certificate that says CA:TRUE is not an end entity (tls_leaf_authorized)",
         "intermediate carries name constraints": "name constraints fail closed until implemented",
         "duplicate subjectAltName leaf extension": "RFC 5280 one-instance rule; OpenSSL may still accept",
+        "leaf duplicate unknown extension": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
+        "leaf nonadjacent duplicate unknown": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
+        "leaf sixty-five extensions": "explicit per-certificate extension work ceiling",
     }
     MUST_ACCEPT = {
         "good", "under the root", "one intermediate", "root served too",
         "leaf with only a subject alternative name",
         "intermediate constraints are noncritical", "intermediate has no key usage",
         "unknown noncritical intermediate extension", "unknown noncritical leaf extension",
+        "leaf sixty-four extensions",
     }
 
     checks = Checks()
@@ -33199,6 +33220,76 @@ def harness_tls_chains(argv):
                         "-startdate", when(dates[0]), "-enddate", when(dates[1]),
                         "-out", name + ".pem", "-notext", "-md", "sha384",
                         "-extfile", name + ".ext", "-extensions", "extensions")
+
+        def asn1_length(size):
+            if size < 0x80:
+                return bytes([size])
+            if size < 0x100:
+                return bytes([0x81, size])
+            return bytes([0x82, (size >> 8) & 0xff, size & 0xff])
+
+        def asn1_read_length(buf, at):
+            if buf[at] < 0x80:
+                return buf[at], at + 1
+            count = buf[at] & 0x7f
+            at += 1
+            value = 0
+            for _ in range(count):
+                value = (value << 8) | buf[at]
+                at += 1
+            return value, at
+
+        def rewrite_leaf_oids(issuer_name, rewrites):
+            # OpenSSL's extfile cannot emit two Extensions with the same OID.
+            # Issue distinct OIDs, then rewrite and re-sign so the wire has
+            # the duplicate Moonwater must refuse and OpenSSL still accepts.
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import ec, rsa
+
+            der = bytearray(subprocess.check_output(
+                ["openssl", "x509", "-in", "leaf.pem", "-outform", "DER"], cwd=work))
+            for old, new in rewrites:
+                if len(old) != len(new):
+                    raise RuntimeError("OID rewrite lengths must match")
+                at = der.find(old)
+                if at < 0 or der.find(old, at + 1) >= 0:
+                    raise RuntimeError("expected one OID occurrence to rewrite")
+                der[at:at + len(old)] = new
+            if der[0] != 0x30:
+                raise RuntimeError("certificate is not a SEQUENCE")
+            _, body_at = asn1_read_length(der, 1)
+            if der[body_at] != 0x30:
+                raise RuntimeError("TBSCertificate missing")
+            tbs_at = body_at
+            tbs_len, tbs_content = asn1_read_length(der, tbs_at + 1)
+            tbs = bytes(der[tbs_at:tbs_content + tbs_len])
+            alg_at = tbs_content + tbs_len
+            if der[alg_at] != 0x30:
+                raise RuntimeError("signature algorithm missing")
+            alg_len, alg_content = asn1_read_length(der, alg_at + 1)
+            alg = bytes(der[alg_at:alg_content + alg_len])
+            key = serialization.load_pem_private_key(
+                (work / (issuer_name + ".key")).read_bytes(), password=None)
+            if isinstance(key, ec.EllipticCurvePrivateKey):
+                signature = key.sign(tbs, ec.ECDSA(hashes.SHA384()))
+            elif isinstance(key, rsa.RSAPrivateKey):
+                from cryptography.hazmat.primitives.asymmetric import padding
+                signature = key.sign(tbs, padding.PKCS1v15(), hashes.SHA384())
+            else:
+                raise RuntimeError("unsupported issuer key type")
+            bit = bytes([0x03]) + asn1_length(len(signature) + 1) + bytes([0]) + signature
+            body = tbs + alg + bit
+            cert = bytes([0x30]) + asn1_length(len(body)) + body
+            (work / "leaf.der").write_bytes(cert)
+            openssl("x509", "-inform", "DER", "-in", "leaf.der", "-out", "leaf.pem")
+
+        def mutate_leaf_der(issuer_name, change):
+            rewrites = list(change.get("der_rewrite_oids") or ())
+            if change.get("der_dup_unknown"):
+                # 1.2.3.5 content bytes -> 1.2.3.4 (tag/length stay 06 03).
+                rewrites.append((bytes([0x2a, 0x03, 0x05]), bytes([0x2a, 0x03, 0x04])))
+            if rewrites:
+                rewrite_leaf_oids(issuer_name, rewrites)
 
         p384 = keys[1][1]
         for root in ("root", "stranger"):
@@ -33263,6 +33354,8 @@ def harness_tls_chains(argv):
                     issuer = "second"
                 issue("leaf", key, "/CN=127.0.0.1", issuer, leaf_ext,
                       change.get("leaf_dates", (-1, 90)))
+                if change.get("der_rewrite_oids") or change.get("der_dup_unknown"):
+                    mutate_leaf_der(issuer, change)
                 served = [c for c in chain if not (change.get("skip_second") and c == "second")]
                 if change.get("serve_root"):
                     served.append(top)

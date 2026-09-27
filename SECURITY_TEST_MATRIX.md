@@ -41,6 +41,9 @@ accept/refuse matrix for every mutation and key type as well as comparing the
 two implementations. Invalid SAN, validity, CA, path-length, key-usage, EKU,
 critical-extension, issuer, and trust-anchor cases must be rejected; valid
 depths, absent optional leaf/issuer constraints, non-critical basic constraints,
-a served root, and unknown non-critical extensions must be accepted. Extension
-policy is exercised at both leaves and intermediates. Deliberately stricter
-Moonwater policy is named at the individual case.
+a served root, unknown non-critical extensions, and an inclusive sixty-four
+extension ceiling must be accepted. Duplicate extension OIDs (including
+unknown and non-adjacent duplicates) and a sixty-five extension work ceiling
+are refused even when OpenSSL accepts them; those rows are named deliberate.
+Extension policy is exercised at both leaves and intermediates. Deliberately
+stricter Moonwater policy is named at the individual case.
