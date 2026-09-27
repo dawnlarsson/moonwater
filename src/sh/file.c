@@ -21014,9 +21014,58 @@ static const argument_option split_options[] = {
     {null},
 };
 
-static bool split_parse_size(string_address text, bool suffixes, bool bare_b,
-                             positive address_to out)
+/*
+        A count too large for GNU's intmax_t is not refused but taken as the
+        largest it holds: xstrtoimax answers LONGINT_OVERFLOW with INTMAX_MAX
+        and split's parse_n_units lets that through, so --lines past 2^64,
+        -C 1E, or an obsolete -99999999999999999991 all mean "no end", where
+        they were said to be invalid numbers here. The digits and a suffix's
+        scaling both stop at SPLIT_COUNT_MAX. shred and mcookie read their
+        sizes through here too and still refuse what does not fit.
+*/
+static bool split_overflowed;
+
+/*
+        Whether the digits of the count just refused had overflowed: strtoimax
+        left ERANGE in errno then, and strtoint_die says so after the quoted
+        count when the rest of it was wrong too.
+*/
+static string_address split_range_note()
 {
+        return split_overflowed ? (string_address) ": Numerical result out of range"
+                                : (string_address) "";
+}
+
+static bool split_digits(string_address address_to text, positive base,
+                         bool saturate, positive address_to value)
+{
+        string_address at = address_to text;
+        positive got = 0;
+
+        split_overflowed = false;
+        if (!saturate)
+                return string_digits_checked(text, base, value);
+
+        for (positive digit; (digit = digit_known(string_get(at), base)) < base; at++)
+        {
+                if (got > (SPLIT_COUNT_MAX - digit) / base)
+                        split_overflowed = true;
+                got = split_overflowed ? SPLIT_COUNT_MAX : got * base + digit;
+        }
+
+        if (at == address_to text)
+                return false;
+
+        address_to text = at;
+        address_to value = got;
+        return true;
+}
+
+static bool split_parse_size(string_address text, bool suffixes, bool bare_b,
+                             bool saturate, positive address_to out)
+{
+        positive ceiling = saturate ? SPLIT_COUNT_MAX : positive_max;
+
         string_address at = text;
         positive value;
         positive base = 10;
@@ -21030,7 +21079,7 @@ static bool split_parse_size(string_address text, bool suffixes, bool bare_b,
                 base = 16;
         }
 
-        if (!string_digits_checked(address_of at, base, address_of value))
+        if (!split_digits(address_of at, base, saturate, address_of value))
                 return false;
 
         p8 suffix = string_get(at);
@@ -21040,9 +21089,9 @@ static bool split_parse_size(string_address text, bool suffixes, bool bare_b,
 
         if (suffix == 'b' && !string_get(at + 1))
         {
-                if (value > positive_max / 512)
+                if (value > ceiling / 512 && !saturate)
                         return false;
-                value *= 512;
+                value = value > ceiling / 512 ? ceiling : value * 512;
                 at++;
         }
         else if (bare_b && suffix == 'B' && !string_get(at + 1))
@@ -21071,11 +21120,13 @@ static bool split_parse_size(string_address text, bool suffixes, bool bare_b,
                         return false;
 
                 p64 scaled;
-                if (!size_scale_power_checked(
-                        value, base, (p8)power, (p64)positive_max,
-                        address_of scaled))
+                if (size_scale_power_checked(value, base, (p8)power,
+                                             (p64)ceiling, address_of scaled))
+                        value = (positive)scaled;
+                else if (saturate)
+                        value = ceiling;
+                else
                         return false;
-                value = (positive)scaled;
         }
 
         if (string_get(at) || !value)
@@ -21087,7 +21138,7 @@ static bool split_parse_size(string_address text, bool suffixes, bool bare_b,
 
 static bool split_size(string_address text, positive address_to out)
 {
-        return split_parse_size(text, true, true, out);
+        return split_parse_size(text, true, true, false, out);
 }
 
 /*
@@ -21501,7 +21552,7 @@ static bool split_chunk_decimal(string_address text, string_address address_to r
 {
         string_address at = text;
 
-        if (!string_digits_checked(address_of at, 10, value) || at == text)
+        if (!split_digits(address_of at, 10, true, value))
                 return false;
         address_to rest = at;
         return true;
@@ -21528,23 +21579,32 @@ static bool split_chunks(string_address text, split_chunk address_to chunk)
         string_address after_k;
         positive first;
 
+        split_overflowed = false;
+
+        /* An overflowed K is not saturated: xstrtoimax answers overflow and
+           the / together, which is not the bare / that parse_chunk looks
+           for, so the whole word is refused as out of range. */
         if (!split_chunk_decimal(text, address_of rest, address_of first) ||
-            !first)
+            !first || (split_overflowed && string_get(rest)))
                 return string_report(log_error, false,
-                                     "split: invalid number of chunks: '%w'\n",
-                                     writer_terminal_quoted_name, text);
+                                     "split: invalid number of chunks: '%w'%s\n",
+                                     writer_terminal_quoted_name, text,
+                                     split_range_note());
 
         chunk->kind = kind;
         after_k = rest;
         if (string_is(rest, '/'))
         {
                 positive n;
+                string_address count = rest + 1;
 
-                if (!split_chunk_decimal(rest + 1, address_of rest, address_of n) ||
+                // N is its own number to GNU, quoted alone when refused.
+                if (!split_chunk_decimal(count, address_of rest, address_of n) ||
                     string_get(rest) || !n)
                         return string_report(log_error, false,
-                                             "split: invalid number of chunks: '%w'\n",
-                                             writer_terminal_quoted_name, text);
+                                             "split: invalid number of chunks: '%w'%s\n",
+                                             writer_terminal_quoted_name, count,
+                                             split_range_note());
                 if (first > n)
                 {
                         p8 shown[32];
@@ -21834,12 +21894,13 @@ static bool split_option_seen(p8 letter, string_address value)
                 bool lines = letter != 'b';
                 bool suffixes = letter != 'l' && letter != 'D';
 
-                if (!split_parse_size(value, suffixes, false, address_of piece))
+                if (!split_parse_size(value, suffixes, false, true, address_of piece))
                         return string_report(log_error, false,
-                                      "split: invalid number of %s: '%w'\n",
+                                      "split: invalid number of %s: '%w'%s\n",
                                       lines ? (string_address) "lines"
                                             : (string_address) "bytes",
-                                      writer_terminal_quoted_name, value ? value : (string_address) "");
+                                      writer_terminal_quoted_name, value ? value : (string_address) "",
+                                      split_range_note());
                 return true;
         }
 
@@ -21946,11 +22007,11 @@ static b32 file_split()
                 measure = file_option_value(address_of taking, 'D');
 
         if (measure && mode != 'n' &&
-            !split_parse_size(measure, mode != 'l', false, address_of piece))
-                return string_report(log_error, 1, "split: invalid number of %s: '%w'\n",
+            !split_parse_size(measure, mode != 'l', false, true, address_of piece))
+                return string_report(log_error, 1, "split: invalid number of %s: '%w'%s\n",
                               mode == 'b' ? (string_address) "bytes"
                                           : (string_address) "lines",
-                              writer_terminal_quoted_name, measure);
+                              writer_terminal_quoted_name, measure, split_range_note());
 
         split_chunk chunk = {0};
         if (mode == 'n' &&
@@ -22125,6 +22186,22 @@ static b32 file_split()
         {
                 output.protect_input = true;
                 output.input = facts;
+        }
+
+        /*
+                r/N with no K keeps every one of its N outputs open, and
+                GNU's lines_rr asks for a table of them first -- 32 bytes an
+                entry on a 64-bit machine -- so a count that saturated, or
+                any N whose table would pass PTRDIFF_MAX, is "memory
+                exhausted" there before a file is made. Going on would make
+                files until the directory could hold no more.
+        */
+        if (mode == 'n' && chunk.kind == SPLIT_CHUNK_RR && !chunk.k &&
+            chunk.n > SPLIT_COUNT_MAX / 32)
+        {
+                if (in != 0)
+                        system_close(in);
+                return string_report(log_error, 1, "split: memory exhausted\n");
         }
 
         bool complete = false;
