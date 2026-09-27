@@ -217,7 +217,8 @@ report = {
     "coverage_note": (
         "Seed inventory plus ASan/UBSan libFuzzer completion under the "
         "recorded budget. Not LLVM source-line coverage. Attach this file "
-        "and test/fuzz_corpus/ (or a tarball of it) to the release."
+        "and test/fuzz_corpus/generate_seeds.py (hex source of truth; "
+        "*.bin is gitignored) or a tarball of materialized seeds."
     ),
     "overall_exit": i("REPORT_OVERALL"),
 }

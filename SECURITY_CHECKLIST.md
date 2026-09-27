@@ -176,9 +176,10 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
 - [x] Publish fuzz corpus coverage and sanitizer versions with each release.
   Run `sh test/fuzz_net --report` (writes `artifacts/fuzz-report.txt` and
   stdout: clang/sanitizer version, seed counts, runs/duration/exit per
-  `tls_der_fuzz` / `tls_hs_fuzz`). Attach that report plus
-  `test/fuzz_corpus/generate_seeds.py` (hex source of truth; `*.bin` is
-  gitignored and materialized at run time) or a tarball of generated seeds.
-  Defaults match lane_net smoke (20k/5s); set `MOONWATER_FUZZ_*` for longer
-  evidence. Exit 2 means libFuzzer unavailable (NOT RUN) — still attach the
-  honest report. See `SECURITY_TEST_MATRIX.md`.
+  `tls_der_fuzz` / `tls_hs_fuzz` / `tls_verify_fuzz`). Attach that report
+  plus `test/fuzz_corpus/generate_seeds.py` (hex source of truth; `*.bin`
+  is gitignored and materialized at run time) or a tarball of generated
+  seeds — never commit `.bin` files. Defaults match lane_net smoke
+  (20k/5s); set `MOONWATER_FUZZ_*` or use `sh test/fuzz_campaign` for
+  longer evidence. Exit 2 means libFuzzer unavailable (NOT RUN) — still
+  attach the honest report. See `SECURITY_TEST_MATRIX.md`.

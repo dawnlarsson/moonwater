@@ -10,7 +10,8 @@
 #           sh test/fuzz_campaign artifacts/fuzz-campaign-report.txt
 #
 #       Report path is gitignored under artifacts/; do not commit huge
-#       campaign dumps. Seed inventory lives in test/fuzz_corpus/.
+#       campaign dumps or *.bin seeds. Hex source of truth:
+#       test/fuzz_corpus/generate_seeds.py.
 #
 set -eu
 
