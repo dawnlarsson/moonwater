@@ -6549,6 +6549,25 @@ static positive ls_tabsize_option;
 
 bool shell_match(string_address pattern, string_address text);
 
+/*
+        fnmatch as coreutils, findutils and util-linux have it from glibc:
+        a set that opens with ^ is the complement, as one that opens with !
+        is. The shell's matcher reads the caret that way only in bash mode,
+        so find -name '[^a]*', ls -I and du --exclude took [^a] for the set
+        of a caret and an a -- and find -delete removed the names it should
+        have kept. The tools ask it in that mode, and hand the mode back.
+*/
+static bool file_fnmatch(string_address pattern, string_address text)
+{
+        bool was = shell_bash_compat;
+
+        shell_bash_compat = true;
+        bool hit = shell_match(pattern, text);
+        shell_bash_compat = was;
+
+        return hit;
+}
+
 static fn ls_out(address_any text, positive length)
 {
         if (!length)
@@ -8353,14 +8372,14 @@ static fn ls_print(string_address directory)
 static bool ls_pattern_hidden(string_address name)
 {
         for (positive i = 0; i < ls_ignore_count; i++)
-                if (shell_match(ls_ignore_patterns[i], name))
+                if (file_fnmatch(ls_ignore_patterns[i], name))
                         return true;
 
         if (ls_hidden || ls_almost)
                 return false;
 
         for (positive i = 0; i < ls_hide_count; i++)
-                if (shell_match(ls_hide_patterns[i], name))
+                if (file_fnmatch(ls_hide_patterns[i], name))
                         return true;
 
         return false;
@@ -12163,12 +12182,12 @@ static __attribute__((noinline)) bool find_true_test(find_node address_to node)
         case 'n':
                 if (node->comparison)
                         return find_pattern_holds(node, find_name, false);
-                return shell_match(node->text, find_name);
+                return file_fnmatch(node->text, find_name);
 
         case 'p':
                 if (node->comparison)
                         return find_pattern_holds(node, find_path, false);
-                return shell_match(node->text, find_path);
+                return file_fnmatch(node->text, find_path);
 
         case 'N':
         case 'P':
@@ -12179,7 +12198,7 @@ static __attribute__((noinline)) bool find_true_test(find_node address_to node)
                                                   true);
 
                 find_lowered(node->kind == 'N' ? find_name : find_path, name);
-                return shell_match(node->text, name);
+                return file_fnmatch(node->text, name);
 
         case 'L':
         case 'I':
@@ -12198,7 +12217,7 @@ static __attribute__((noinline)) bool find_true_test(find_node address_to node)
                 if (node->kind == 'I')
                         memory_to_lower_ascii(name, (positive)length);
 
-                return shell_match(node->text, name);
+                return file_fnmatch(node->text, name);
         }
 
         case 't':
@@ -12773,17 +12792,17 @@ static __attribute__((noinline)) bool find_tree_test(
         case 'n':
                 if (node->comparison)
                         return find_pattern_holds(node, name, false);
-                return shell_match(node->text, name);
+                return file_fnmatch(node->text, name);
         case 'p':
                 if (node->comparison)
                         return find_pattern_holds(node, path, false);
-                return shell_match(node->text, path);
+                return file_fnmatch(node->text, path);
         case 'N':
         case 'P':
                 if (node->comparison)
                         return find_pattern_holds(node, node->kind == 'N' ? name : path, true);
                 find_lowered(node->kind == 'N' ? name : path, lowered);
-                return shell_match(node->text, lowered);
+                return file_fnmatch(node->text, lowered);
         case 't':
                 return find_type_holds(node->number, mode);
         case 'd':
@@ -14003,7 +14022,7 @@ static bool du_excluded(string_address path)
         path_tail_copy(name, FILE_PATH_MAX, path);
 
         for (positive i = 0; i < du_exclude_have; i++)
-                if (shell_match(du_excludes[i], path) || shell_match(du_excludes[i], name))
+                if (file_fnmatch(du_excludes[i], path) || file_fnmatch(du_excludes[i], name))
                         return true;
 
         return false;
@@ -18423,7 +18442,7 @@ static bool whereis_name_matches(positive kind, string_address query,
                                  string_address candidate, bool glob)
 {
         if (glob)
-                return shell_match(query, candidate);
+                return file_fnmatch(query, candidate);
         if (kind == WHEREIS_BINARY)
                 return string_equals(query, candidate);
         return whereis_suffix_match(kind, query, candidate);
@@ -24786,7 +24805,7 @@ static string_address dircolors_parse(string_address input, positive length,
 
                         gated = true;
                         gate_matches = gate_matches ||
-                                       (against && shell_match(pattern, against));
+                                       (against && file_fnmatch(pattern, against));
                         continue;
                 }
 

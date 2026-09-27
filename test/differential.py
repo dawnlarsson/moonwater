@@ -6690,6 +6690,16 @@ def files_backup_cases(tool, words):
     return tuple(cases)
 
 
+#       A set that opens with a caret is glibc fnmatch's complement, as one
+#       that opens with ! is; the shell's matcher once took it for a set of a
+#       caret and a letter here, and -delete then removed the names to keep.
+#       A caret anywhere after the first place is itself.
+files_FIND_CARET = (
+    (".", "-name", "[^a]*"), (".", "-name", "[!a]*"), (".", "-name", "[a^]*"), (".", "-name", "[]^]*"),
+    (".", "-name", "[^]a]*"), (".", "-path", "./[^d]*"), (".", "-iname", "[^A]*.TXT"),
+    (".", "-ipath", "./[^D]*/*"), (".", "-lname", "[^a]*"), ("dir", "-name", "[^s]*", "-delete"),
+)
+
 FILES_UTILITIES = (
     # yes is the one program here the engine cannot bound: it writes until
     # something stops it, so both sides die on the harness's file-size limit
@@ -6808,7 +6818,8 @@ FILES_UTILITIES = (
     Utility("find", options=(Option("-H"), Option("-L"), Option("-P"),
                              Option("-O", ("0", "1", "2", "3"), True)),
             operands=files_FIND_WALKED, stdin=("files_yes", "files_no"), fixture="files", stderr="exact",
-            normalize=files_listing, extra=files_find_expressions(360) + files_FIND_BROKEN, max_flags=2),
+            normalize=files_listing, extra=files_find_expressions(360) + files_FIND_BROKEN + files_FIND_CARET,
+            max_flags=2),
     Utility("stat", options=(Option("-L"), Option("-f"), Option("-t"), Option("--dereference"),
                              Option("--file-system"), Option("--terse"),
                              Option("--cached", ("never", "always", "default", "bogus"), True),
@@ -6832,7 +6843,8 @@ FILES_UTILITIES = (
                    ("-l", "--block-size=K"), ("-l", "--si", "-s"), ("-D", "-l"), ("--zero", "-1"), ("-g", "-o"),
                    ("-n", "-l"), ("--dired",), ("-I", "*.txt", "-a"), ("--hide=*.txt", "-A"), ("-B",),
                    ("--hyperlink=always", "-1"), ("-Z", "-l"), ("--author", "-l"), ("--full-time",),
-                   ("-l", "--time-style=+%b %e\n%H:%M"), ("-l", "-T", "1", "-x"), ("-l", "unreadable", "shut"))),
+                   ("-l", "--time-style=+%b %e\n%H:%M"), ("-l", "-T", "1", "-x"), ("-l", "unreadable", "shut"),
+                   ("-I", "[^a]*", "-a"), ("--hide=[^d]*", "-1"), ("-I", "[!^]*", "-1"), ("-I", "[a^]*", "-1"))),
     #       dir and vdir are ls with a different default format, so they
     #       answer for the same surface and are walked over it. A shorter
     #       list of their own left sixty-nine of ls's options untouched in
@@ -6877,7 +6889,8 @@ FILES_UTILITIES = (
                   (("-L", "dir"), ("-L", "."), ("-L", "dir/sub/back"), ("-aL", "dup"), ("-D", "dirlink"), ("-H", "dirlink"),
                     ("-Lx", "."), ("-a", "--time", "."), ("-sh", "."), ("-sb", "."), ("-c", "dir", "dup"), ("-s", "-a", "dir"),
                     ("-d", "1", "-s", "dir"), ("-b", "-m", "a.txt"), ("-m", "-b", "a.txt"), ("-k", "-m", "a.txt"),
-                   ("--inodes", "-a", "."), ("--apparent-size", "-a", "dir"), ("-l", "dup"), ("--files0-from=-",))
+                   ("--inodes", "-a", "."), ("--apparent-size", "-a", "dir"), ("-l", "dup"), ("--files0-from=-",),
+                   ("--exclude=[^d]*", "-a", "."), ("--exclude=[!d]*", "-a", "."), ("--exclude=[d^]*", "-ab", "."))
                   #   Patterns read from a file, a line each: every file in
                   #   the fixture that holds lines, holds none, holds no
                   #   newline at its end, or cannot be read, over each root
