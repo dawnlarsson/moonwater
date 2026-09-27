@@ -6960,17 +6960,60 @@ bool shell_match(string_address pattern, string_address text);
         is. The shell's matcher reads the caret that way only in bash mode,
         so find -name '[^a]*', ls -I and du --exclude took [^a] for the set
         of a caret and an a -- and find -delete removed the names it should
-        have kept. The tools ask it in that mode, and hand the mode back.
+        have kept. The pattern is respelled with ! for the call, on the
+        caller's stack: the mode is the shell's and shared by every thread of
+        a parallel walk, so it is never touched. Only a set that closes is
+        respelled, by the rule the matcher closes sets with; [^x with no ]
+        is a literal caret either way.
 */
 static bool file_fnmatch(string_address pattern, string_address text)
 {
-        bool was = shell_bash_compat;
+        if (!string_first_of(pattern, '^'))
+                return shell_match(pattern, text);
 
-        shell_bash_compat = true;
-        bool hit = shell_match(pattern, text);
-        shell_bash_compat = was;
+        p8 small[FILE_PATH_MAX];
+        positive length = string_length(pattern);
 
-        return hit;
+        if (length >= sizeof(small))
+                return shell_match(pattern, text);
+
+        memory_copy(small, pattern, length + 1);
+
+        for (positive at = 0; at < length; at++)
+        {
+                if (small[at] == '\\' && small[at + 1])
+                {
+                        at++;
+                        continue;
+                }
+                if (small[at] != '[')
+                        continue;
+
+                positive step = at + 1;
+                bool inverted = small[step] == '!' || small[step] == '^';
+
+                step += inverted;
+                if (small[step] == ']')
+                        step++;
+                while (small[step] && small[step] != ']')
+                {
+                        string_address past = byte_class_end(small + step, null);
+
+                        if (past)
+                                step = (positive)(past - small);
+                        else if (small[step] == '\\' && small[step + 1])
+                                step += 2;
+                        else
+                                step++;
+                }
+                if (!small[step])
+                        continue;
+                if (small[at + 1] == '^')
+                        small[at + 1] = '!';
+                at = step;
+        }
+
+        return shell_match(small, text);
 }
 
 static fn ls_out(address_any text, positive length)
