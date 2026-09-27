@@ -17812,6 +17812,10 @@ static bool file_backup_did;
 // ln's backup onto a hard link of the destination itself: renamed in name
 // only, so the destination is still there to be replaced.
 static bool file_backup_left;
+// The source a copy or move is about to write over the destination, told
+// to the backup so it can see the backup name is that very source.
+static string_address file_backup_source;
+static file_facts address_to file_backup_source_facts;
 static bool file_backup_made_at(string_address program, bipolar directory,
                                 string_address destination,
                                 string_address shown,
@@ -18190,6 +18194,25 @@ static bool ln_make(string_address target, string_address name)
                         system_close(source_handle);
                         ln_failed(target, name, there);
                         return ln_unbackup(name);
+                }
+                //      The backup went over the source's name -- ln -b b~ b
+                //      -- and the name is the old destination now, which
+                //      is what the reference links.
+                if (!file_same_identity(address_of still, address_of source))
+                {
+                        bipolar again = file_open_same(
+                            AT_FDCWD, target, address_of still,
+                            O_PATH | (ln_through ? 0 : O_NOFOLLOW));
+                        if (again < 0)
+                        {
+                                system_close(destination_directory);
+                                system_close(source_handle);
+                                ln_failed(target, name, again);
+                                return ln_unbackup(name);
+                        }
+                        system_close(source_handle);
+                        source_handle = again;
+                        source = still;
                 }
         }
 
@@ -26058,7 +26081,11 @@ static bool file_backup_made_at(string_address program, bipolar directory,
         p8 kept[FILE_PATH_MAX];
         positive length = string_length(destination);
         file_facts facts;
+        string_address source = file_backup_source;
+        file_facts address_to source_facts = file_backup_source_facts;
 
+        file_backup_source = null;
+        file_backup_source_facts = null;
         file_backup_did = false;
         if (!file_backup_kind)
                 return true;
@@ -26083,6 +26110,39 @@ static bool file_backup_made_at(string_address program, bipolar directory,
                               writer_terminal_quoted_name, shown);
                 return string_report(log_error, false, "': %s\n",
                                      file_reason(-ERROR_NOT_DIRECTORY));
+        }
+
+        /* GNU copy.c's source_is_dst_backup: a simple or existing backup of
+           the destination named exactly as the source is, and that source
+           -- mv --b=simple a~ a -- would be moved over by the backup and
+           then the destination written from nothing, so neither is done. */
+        if (source && source_facts && file_backup_kind != 'n')
+        {
+                string_address base = file_last_component(source);
+                positive base_length = string_length(base);
+                positive suffix_length = string_length(file_backup_suffix);
+                p8 name[FILE_PATH_MAX];
+                file_facts named;
+
+                if (!file_is_dot(base) && base_length == length + suffix_length &&
+                    !memory_compare(base, destination, length) &&
+                    string_equals(base + length, file_backup_suffix) &&
+                    length + suffix_length < FILE_PATH_MAX)
+                {
+                        memory_copy_apart(name, destination, length);
+                        memory_copy_apart_end(name + length, file_backup_suffix,
+                                              suffix_length);
+                        if (file_look(directory, name, 0, address_of named) &&
+                            file_same_identity(source_facts, address_of named))
+                                return string_report(
+                                    log_error, false,
+                                    "%s: backing up %w might destroy source;  %w not %s\n",
+                                    program, writer_shell_quoted_name, shown,
+                                    writer_shell_quoted_name, source,
+                                    string_equals(program, (string_address) "mv")
+                                        ? (string_address) "moved"
+                                        : (string_address) "copied");
+                }
         }
 
         p8 kind = file_backup_kind;
@@ -28805,6 +28865,8 @@ static fn cp_pair(string_address source, string_address destination)
                 return;
         }
 
+        file_backup_source = source;
+        file_backup_source_facts = address_of source_facts;
         if (!refuse_dangling &&
             !file_backup_made_at((string_address)"cp",
                                  destination_directory, destination_leaf,
@@ -29612,6 +29674,8 @@ static fn install_pair(string_address source, string_address destination)
                 string_format(log, "removed %w\n", writer_shell_quoted_name,
                               destination);
 
+        file_backup_source = source;
+        file_backup_source_facts = address_of from;
         if (!file_backup_made_at((string_address)"install",
                                  destination_directory, destination_leaf,
                                  destination,
@@ -30120,6 +30184,8 @@ static fn mv_one(string_address source, string_address destination)
                 }
         }
 
+        file_backup_source = source;
+        file_backup_source_facts = address_of from;
         if (!file_backup_made_at((string_address)"mv",
                                  destination_directory, destination_leaf,
                                  destination,
