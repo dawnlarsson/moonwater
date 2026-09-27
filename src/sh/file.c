@@ -33620,20 +33620,18 @@ static b32 file_tty()
 
 // seq ------------------------------------------------------------
 /*
-        seq LAST, seq FIRST LAST, seq FIRST INCREMENT LAST.
-
-        Decimal operands stay decimal.  Keeping an integer coefficient and a
-        power-of-ten scale is both smaller than bringing a floating-point
-        parser into every utility and, more importantly, means .1 added three
-        times ends at .3 exactly. Scale zero owns the complete signed 64-bit
-        range, so integers use the same parser, iterator and formatter.
+        The decimal road's number: an integer coefficient at a power of ten
+        scale, which counts exactly and prints without a single division by
+        anything but ten. It is not what the reference computes -- that is
+        long double, and .1 added three times is not .3 there -- so file_seq
+        only lets it print where the two provably agree; the wide road below
+        is the reference's arithmetic for everything else.
 */
 typedef struct
 {
         bipolar coefficient;
         positive scale;
         positive shown;
-        positive whole_width;
         bool negative_zero;
         bool infinite;
 } seq_decimal;
@@ -33641,12 +33639,12 @@ typedef struct
 /*
         Read the decimal grammar accepted by seq: a sign, digits with one
         optional point, and an optional decimal exponent.  Trailing fractional
-        zeroes are removed from the arithmetic coefficient but retained in
-        shown, because `seq 1.00 .5 2` promises two places in its output.
+        zeroes are removed from the arithmetic coefficient but kept in shown,
+        the places the text promises, which numfmt reads.
 
         Eighteen fractional places keep every scale and rescale inside one
-        native register.  Inputs outside that exact range are rejected rather
-        than silently rounded through binary floating point.
+        native register.  A word outside that range, or outside this grammar,
+        answers false and is left to the wide road.
 */
 static bool seq_decimal_number(string_address text, seq_decimal address_to out)
 {
@@ -33681,7 +33679,6 @@ static bool seq_decimal_number(string_address text, seq_decimal address_to out)
                 out->coefficient = minus ? -1 : 1;
                 out->scale = 0;
                 out->shown = 0;
-                out->whole_width = minus ? 4 : 3;
                 out->negative_zero = false;
                 out->infinite = true;
                 return true;
@@ -33703,7 +33700,6 @@ static bool seq_decimal_number(string_address text, seq_decimal address_to out)
                 out->coefficient = bipolar_from_magnitude(value, minus);
                 out->scale = 0;
                 out->shown = 0;
-                out->whole_width = 0;
                 out->negative_zero = minus && !value;
                 out->infinite = false;
                 return true;
@@ -33825,9 +33821,6 @@ static bool seq_decimal_number(string_address text, seq_decimal address_to out)
         }
 
         effective -= (bipolar)trim;
-        out->whole_width = max((positive)1,
-            (point == positive_max ? finish : point) - mantissa) +
-                (exponent > 0 ? (positive)exponent : 0);
 
         if (effective < 0)
         {
@@ -33887,135 +33880,119 @@ static bool seq_decimal_rescale(seq_decimal address_to number, positive scale)
         return true;
 }
 
-static positive seq_decimal_width(seq_decimal address_to number,
-                                  positive scale, positive precision)
-{
-        positive magnitude = (positive)number->coefficient;
+/*
+        A format, read the way coreutils' long_double_format reads one.
 
-        if (number->coefficient < 0)
-                magnitude = (positive)0 - magnitude;
+        Text up to the first % that is not %%, flags from "-+#0 '", a width,
+        a point and a precision, an optional L, and one of efgaEFGA; then no
+        second directive in the rest. prefix and suffix are the lengths the
+        reference counts -- a %% is one byte of output -- because its extra
+        number check cuts the printed text by exactly those counts.
 
-        if (scale > precision)
-                magnitude /= positive_power_ten(scale - precision);
-
-        magnitude /= positive_power_ten(min(scale, precision));
-
-        /* GNU scan_arg skips auto-width when the operand has x/X, so hex
-           integers keep whole_width 0 and -w pads to 1 rather than digits. */
-        positive whole = number->whole_width
-                             ? max(positive_digits(magnitude), number->whole_width)
-                             : 1;
-
-        return whole + (precision ? precision + 1 : 0) +
-               (number->coefficient < 0 || number->negative_zero);
-}
-
+        A width or a precision past what an int holds is kept as such rather
+        than refused here: the reference's printf is what fails on it, with
+        EOVERFLOW, and so it is reported when the first number is printed.
+*/
 typedef struct
 {
         string_address text;
         positive directive;
         positive after;
+        positive prefix;
+        positive suffix;
         positive width;
         positive precision;
         positive flags;
+        bool precise;
+        p8 conversion;
 } seq_format;
 
-// Which of the three ways a format can be wrong it was: a second
-// conversion, a conversion this one cannot render, or a % at the end.
+#define SEQ_INT_MAX ((positive)2147483647)
+
 enum
 {
         SEQ_FORMAT_GOOD,
+        SEQ_FORMAT_NONE,
         SEQ_FORMAT_MANY,
         SEQ_FORMAT_UNKNOWN,
-        SEQ_FORMAT_ENDS,
-        // A conversion the reference knows and this one cannot compute.
-        SEQ_FORMAT_FLOAT
+        SEQ_FORMAT_ENDS
 };
 
-static p8 seq_format_wrong;
 static p8 seq_format_letter;
 
-static bool seq_format_read(string_address text, seq_format address_to format)
+static positive seq_format_number(string_address text, positive address_to at)
 {
-        bool found = false;
+        positive value = 0;
 
-        seq_format_wrong = SEQ_FORMAT_GOOD;
-        seq_format_letter = 0;
+        while (text[address_to at] >= '0' && text[address_to at] <= '9')
+        {
+                if (value <= SEQ_INT_MAX)
+                        value = value * 10 + (positive)(text[address_to at] - '0');
+                (address_to at)++;
+        }
+
+        return value;
+}
+
+static p8 seq_format_read(string_address text, seq_format address_to format)
+{
+        positive at = 0;
 
         memory_fill(format, 0, sizeof(*format));
         format->text = text;
 
-        for (positive at = 0; text[at]; at++)
+        while (!(text[at] == '%' && text[at + 1] != '%'))
         {
-                if (text[at] != '%')
-                        continue;
-
-                if (text[at + 1] == '%')
-                {
-                        at++;
-                        continue;
-                }
-
-                if (found)
-                {
-                        seq_format_wrong = SEQ_FORMAT_MANY;
-                        return false;
-                }
-
-                found = true;
-                format->directive = at++;
-
-                string_address field = text + at;
-                while (string_first_of((string_address) "'", string_get(field)))
-                        field++;
-                conversion_spec parsed = conversion_spec_take_max(&field, positive_max);
-                // The former pre-digit limit of 100000 admits one final digit.
-                if (parsed.stars || parsed.overflow || parsed.field[0] > 1000009 ||
-                    parsed.field[1] > 1000009)
-                {
-                        seq_format_wrong = SEQ_FORMAT_UNKNOWN;
-                        seq_format_letter = string_get(text + at);
-                        return false;
-                }
-                format->flags = parsed.flags;
-                format->width = parsed.field[0];
-                format->precision = parsed.fields == 2 ? parsed.field[1] : 6;
-                at = (positive)(field - text);
-
-                // coreutils accepts an explicit long-double length here even
-                // though seq supplies that type itself.
-                if (text[at] == 'L')
-                        at++;
-
                 if (!text[at])
-                {
-                        seq_format_wrong = SEQ_FORMAT_ENDS;
-                        return false;
-                }
+                        return SEQ_FORMAT_NONE;
 
-                //      The conversions the reference knows and this one
-                //      cannot compute -- there is no floating point in this
-                //      file -- are read as conversions all the same, so that
-                //      what is said about them is said in the reference's
-                //      order and is about them rather than about the letter.
-                if (string_first_of((string_address) "eEgGaA", text[at]))
-                {
-                        seq_format_wrong = SEQ_FORMAT_FLOAT;
-                        seq_format_letter = text[at];
-                        return false;
-                }
-
-                if (text[at] != 'f' && text[at] != 'F')
-                {
-                        seq_format_wrong = SEQ_FORMAT_UNKNOWN;
-                        seq_format_letter = text[at];
-                        return false;
-                }
-
-                format->after = at + 1;
+                format->prefix++;
+                at += (text[at] == '%') + 1;
         }
 
-        return found;
+        format->directive = at++;
+
+        while (text[at] && string_first_of((string_address) "-+#0 '", text[at]))
+        {
+                if (text[at] != '\'')
+                        format->flags |= conversion_flag_bytes[text[at]];
+                at++;
+        }
+
+        format->width = seq_format_number(text, address_of at);
+
+        if (text[at] == '.')
+        {
+                at++;
+                format->precise = true;
+                format->precision = seq_format_number(text, address_of at);
+        }
+
+        if (text[at] == 'L')
+                at++;
+
+        if (!text[at])
+                return SEQ_FORMAT_ENDS;
+
+        if (!string_first_of((string_address) "efgaEFGA", text[at]))
+        {
+                seq_format_letter = text[at];
+                return SEQ_FORMAT_UNKNOWN;
+        }
+
+        format->conversion = text[at];
+        format->after = ++at;
+
+        for (;; at += (text[at] == '%') + 1)
+        {
+                if (text[at] == '%' && text[at + 1] != '%')
+                        return SEQ_FORMAT_MANY;
+                if (!text[at])
+                        break;
+                format->suffix++;
+        }
+
+        return SEQ_FORMAT_GOOD;
 }
 
 static fn seq_format_literal(writer write, string_address text, positive length)
@@ -34180,195 +34157,1352 @@ static b32 seq_count_digits(string_address first, string_address last,
         return log_failed() ? 1 : 0;
 }
 
-static const argument_option seq_options[] = {
-    {"equal-width", 'w'},
-    {"format", 'f', ARGUMENT_REQUIRED},
-    {"separator", 's', ARGUMENT_REQUIRED},
-    {null},
+/*
+        The reference's long double, in software.
+
+        GNU seq does its arithmetic in long double: first + i * step, compared
+        with last, printed through printf's %Lf, %Lg, %Le or %La. That type is
+        the x87 eighty bit format on x86_64 -- a sixty four bit significand --
+        and IEEE binary128 on arm64 and riscv64, with a hundred and thirteen.
+        Every number the reference prints is the rounded result of those two
+        operations in that format, which is why `seq -f %.20f 0 .1 .3` ends in
+        0.30000000000000000001 and why `seq -f %.1f .05 .1 .35` stops a line
+        early: the digits are the binary value's, not the decimal operand's.
+
+        So this does the same arithmetic, in the same format, by hand. A
+        -nostdlib link has no libgcc under it, and on arm64 and riscv64 a
+        single long double addition is a call to __addtf3 that would not
+        resolve; on x86_64 the x87 would do it, but one body for all three
+        machines means the x86_64 differential exercises the code the other
+        two run. SEQ_WIDE_BITS picks the significand and can be set from the
+        command line to build the other width anywhere.
+
+        A finite value is significand times two to the exponent, with the
+        significand's top bit always at SEQ_WIDE_BITS - 1, subnormals
+        included -- a subnormal is just a value whose exponent sits below the
+        format's normal range, and rounding is what keeps its low bits at or
+        above SEQ_WIDE_LOWEST, the place of the smallest subnormal's one bit.
+        Addition and multiplication round to nearest, ties to even, exactly as
+        the x87 in its default extended precision and glibc's soft-fp do: the
+        exact result is formed with three guard bits and a sticky bit below
+        them, which is enough for every case a correctly rounded add has.
+*/
+#ifndef SEQ_WIDE_BITS
+#if __LDBL_MANT_DIG__ == 64
+#define SEQ_WIDE_BITS 64
+#else
+#define SEQ_WIDE_BITS 113
+#endif
+#endif
+
+#define SEQ_WIDE_LOWEST (-16381 - SEQ_WIDE_BITS)
+#define SEQ_WIDE_CEILING 16384
+
+enum
+{
+        SEQ_WIDE_ZERO,
+        SEQ_WIDE_FINITE,
+        SEQ_WIDE_INFINITE,
+        SEQ_WIDE_NAN
 };
 
-static b32 file_seq()
+typedef struct
 {
-        file_taking taking = {
-            .program = (string_address) "seq",
-            .options = seq_options,
-            .numbers = true,
-        };
+        p128 significand;
+        bipolar exponent;
+        p8 kind;
+        bool negative;
+} seq_wide;
 
-        if (!file_take(address_of taking))
-                return 1;
+static b32 seq_wide_length(p128 value)
+{
+        positive high = (positive)(value >> 64);
 
-        positive count = (positive)program_argument_count();
-        positive index = taking.first;
-        bool pad = (taking.flags & FILE_FLAG('w')) != 0;
-        string_address separator = file_option_value(address_of taking, 's');
-        string_address format_text = file_option_value(address_of taking, 'f');
+        if (high)
+                return 128 - bits_leading_zeros(high);
 
-        if (!separator)
-                separator = (string_address) "\n";
+        return (positive)value ? 64 - bits_leading_zeros((positive)value) : 0;
+}
 
-        positive given = count - index;
+/*
+        Round value times two to the exponent into the format. The value has
+        at most a hundred and twenty seven bits, and when bits were dropped
+        on the way here its lowest bit is their sticky OR -- always at least
+        two places below where rounding cuts, so it can break a tie and can
+        never make one.
+*/
+static seq_wide seq_wide_round(p128 value, bipolar exponent, bool negative)
+{
+        seq_wide out = {0, 0, SEQ_WIDE_ZERO, negative};
 
-        //      Too few or too many numbers, said the way the reference says
-        //      it: nothing at all is a missing operand, and a fourth is the
-        //      extra one, named.
-        if (given < 1)
-                return string_report(log_error, 1, "seq: missing operand\n");
+        if (!value)
+                return out;
 
-        if (given > 3)
-                return string_report(log_error, 1, "seq: extra operand '%w'\n",
-                                     writer_terminal_quoted_name, program_argument((b32)(index + 3)));
+        bipolar length = seq_wide_length(value);
+        bipolar low = exponent + length - SEQ_WIDE_BITS;
 
-        seq_format format = {.text = "", .flags = CONVERSION_FLAG_ZERO};
+        if (low < SEQ_WIDE_LOWEST)
+                low = SEQ_WIDE_LOWEST;
 
-        //      A format is read before it is weighed against -w, because the
-        //      reference reports a format it cannot read whatever else was
-        //      asked -- but a conversion it can read and this one cannot
-        //      compute is weighed against -w first, as the reference does.
-        bool readable = !format_text || seq_format_read(format_text, address_of format);
+        bipolar shift = low - exponent;
+        p128 kept;
 
-        if (!readable && seq_format_wrong != SEQ_FORMAT_FLOAT)
+        if (shift <= 0)
+                kept = value << -shift;
+        else if (shift >= 128)
+                kept = 0;
+        else
         {
-                p8 named[2] = {seq_format_letter, end};
+                p128 rest = value & (((p128)1 << shift) - 1);
+                p128 half = (p128)1 << (shift - 1);
 
-                if (seq_format_wrong == SEQ_FORMAT_MANY)
-                        string_format(log_error,
-                                      "seq: format '%w' has too many %% directives\n",
-                                      writer_terminal_quoted_name, format_text);
-                else if (seq_format_wrong == SEQ_FORMAT_ENDS)
-                        string_format(log_error, "seq: format '%w' ends in %%\n", writer_terminal_quoted_name, format_text);
-                else
-                        string_format(log_error,
-                                      "seq: format '%w' has unknown %%%s directive\n",
-                                      writer_terminal_quoted_name, format_text, named);
+                kept = value >> shift;
 
-                return 1;
-        }
+                if (rest > half || (rest == half && (kept & 1)))
+                        kept++;
 
-        if (pad && format_text)
-        {
-                return string_report(log_error, 1,
-                                     "seq: format string may not be specified"
-                          " when printing equal width strings\n");
-        }
-
-        if (!readable)
-        {
-                p8 named[2] = {seq_format_letter, end};
-
-                return string_report(log_error, 1,
-                                     "seq: format '%w' asks for the %%%s conversion, which needs "
-                                     "floating point this seq has not got\n",
-                                     writer_terminal_quoted_name, format_text, named);
-        }
-
-        //      The reference's all-digit road, asked before any operand is
-        //      read as a number: a step of bare digits up to two hundred,
-        //      bare digit ends, and output nothing about which could differ.
-        if (!pad && !format_text && separator[0] && !separator[1] &&
-            seq_all_digits(program_argument((b32)index)) &&
-            (given == 1 || seq_all_digits(program_argument((b32)(index + 1)))) &&
-            (given < 3 || seq_all_digits(program_argument((b32)(index + 2)))))
-        {
-                string_address first = given == 1 ? (string_address) "1"
-                                                   : program_argument((b32)index);
-                string_address last = program_argument((b32)(index + given - 1));
-                string_address step_text = seq_trim_zeros(
-                    given == 3 ? program_argument((b32)(index + 1)) : (string_address) "1");
-                positive step = 0;
-
-                if (string_length(step_text) <= 3)
-                        for (positive at = 0; step_text[at]; at++)
-                                step = step * 10 + (positive)(step_text[at] - '0');
-
-                if (step && step <= 200 &&
-                    (!seq_digits_fit(seq_trim_zeros(first)) ||
-                     !seq_digits_fit(seq_trim_zeros(last))))
-                        return seq_count_digits(first, last, step, separator[0]);
-        }
-
-        seq_decimal number[3];
-
-        for (positive i = 0; i < given; i++)
-                if (!seq_decimal_number(program_argument((b32)(index + i)),
-                                         address_of number[i]))
+                if (kept >> SEQ_WIDE_BITS)
                 {
-                        string_address text = program_argument((b32)(index + i));
-                        string_address at = text;
+                        kept >>= 1;
+                        low++;
+                }
+        }
 
-                        if (string_is(at, '+') || string_is(at, '-'))
-                                at++;
+        if (!kept)
+                return out;
 
-                        //      A word that spells a number no decimal holds
-                        //      is named for what it spells, which is what the
-                        //      reference calls it.
-                        if ((string_is(at, 'n') || string_is(at, 'N')) &&
-                            (string_is(at + 1, 'a') || string_is(at + 1, 'A')) &&
-                            (string_is(at + 2, 'n') || string_is(at + 2, 'N')) &&
-                            !string_get(at + 3))
-                                return string_report(log_error, 1,
-                                                     "seq: invalid 'not-a-number' argument: '%w'\n",
-                                                     writer_terminal_quoted_name, text);
+        length = seq_wide_length(kept);
 
-                        return string_report(log_error, 1, "seq: invalid floating point argument: '%w'\n",
-                                      writer_terminal_quoted_name, text);
+        if (low + length > SEQ_WIDE_CEILING)
+        {
+                out.kind = SEQ_WIDE_INFINITE;
+                return out;
+        }
+
+        out.kind = SEQ_WIDE_FINITE;
+        out.significand = kept << (SEQ_WIDE_BITS - length);
+        out.exponent = low - (SEQ_WIDE_BITS - length);
+        return out;
+}
+
+//      What an invalid operation answers: the x87's default NaN is negative
+//      and glibc prints it "-nan"; soft-fp's on arm64 and riscv64 is not.
+static seq_wide seq_wide_invalid(void)
+{
+        return (seq_wide){0, 0, SEQ_WIDE_NAN, SEQ_WIDE_BITS == 64};
+}
+
+static seq_wide seq_wide_from(positive count)
+{
+        return seq_wide_round(count, 0, false);
+}
+
+static seq_wide seq_wide_add(seq_wide left, seq_wide right)
+{
+        if (left.kind == SEQ_WIDE_NAN)
+                return left;
+        if (right.kind == SEQ_WIDE_NAN)
+                return right;
+
+        if (left.kind == SEQ_WIDE_INFINITE || right.kind == SEQ_WIDE_INFINITE)
+        {
+                if (left.kind == right.kind && left.negative != right.negative)
+                        return seq_wide_invalid();
+                return left.kind == SEQ_WIDE_INFINITE ? left : right;
+        }
+
+        if (right.kind == SEQ_WIDE_ZERO)
+        {
+                if (left.kind == SEQ_WIDE_ZERO)
+                        left.negative = left.negative && right.negative;
+                return left;
+        }
+
+        if (left.kind == SEQ_WIDE_ZERO)
+                return right;
+
+        //      The larger magnitude on the left.
+        if (right.exponent > left.exponent ||
+            (right.exponent == left.exponent &&
+             right.significand > left.significand))
+        {
+                seq_wide swap = left;
+
+                left = right;
+                right = swap;
+        }
+
+        p128 big = left.significand << 3;
+        p128 small = right.significand << 3;
+        positive apart = (positive)(left.exponent - right.exponent);
+
+        if (apart >= 126)
+                small = small != 0;
+        else if (apart)
+                small = (small >> apart) |
+                        ((small & (((p128)1 << apart) - 1)) != 0);
+
+        if (left.negative == right.negative)
+                return seq_wide_round(big + small, left.exponent - 3,
+                                      left.negative);
+
+        //      An exact cancellation is a positive zero when rounding to
+        //      nearest, whatever the signs were.
+        return seq_wide_round(big - small, left.exponent - 3,
+                              big == small ? false : left.negative);
+}
+
+static seq_wide seq_wide_multiply(seq_wide left, seq_wide right)
+{
+        bool negative = left.negative != right.negative;
+
+        if (left.kind == SEQ_WIDE_NAN)
+                return left;
+        if (right.kind == SEQ_WIDE_NAN)
+                return right;
+
+        if (left.kind == SEQ_WIDE_INFINITE || right.kind == SEQ_WIDE_INFINITE)
+        {
+                if (left.kind == SEQ_WIDE_ZERO || right.kind == SEQ_WIDE_ZERO)
+                        return seq_wide_invalid();
+                return (seq_wide){0, 0, SEQ_WIDE_INFINITE, negative};
+        }
+
+        if (left.kind == SEQ_WIDE_ZERO || right.kind == SEQ_WIDE_ZERO)
+                return (seq_wide){0, 0, SEQ_WIDE_ZERO, negative};
+
+        //      The full product, up to two hundred and twenty six bits, as
+        //      two halves from four sixty four bit products.
+        p64 a0 = (p64)left.significand, a1 = (p64)(left.significand >> 64);
+        p64 b0 = (p64)right.significand, b1 = (p64)(right.significand >> 64);
+        p128 middle = (p128)a0 * b1 + (p128)a1 * b0;
+        p128 low = (p128)a0 * b0;
+        p128 sum = low + (middle << 64);
+        p128 high = (p128)a1 * b1 + (middle >> 64) + (sum < low);
+        bipolar exponent = left.exponent + right.exponent;
+        b32 length = high ? 128 + seq_wide_length(high) : seq_wide_length(sum);
+
+        low = sum;
+
+        if (length > 126)
+        {
+                b32 shift = length - 126;
+                bool sticky = (low & (((p128)1 << shift) - 1)) != 0;
+
+                low = (low >> shift) | (high << (128 - shift)) | sticky;
+                exponent += shift;
+        }
+
+        return seq_wide_round(low, exponent, negative);
+}
+
+//      -1, 0 or 1 as left is below, equal to or above right, 2 unordered.
+static b32 seq_wide_order(seq_wide left, seq_wide right)
+{
+        if (left.kind == SEQ_WIDE_NAN || right.kind == SEQ_WIDE_NAN)
+                return 2;
+
+        if (left.kind == SEQ_WIDE_ZERO && right.kind == SEQ_WIDE_ZERO)
+                return 0;
+
+        if (left.kind != SEQ_WIDE_ZERO && right.kind != SEQ_WIDE_ZERO &&
+            left.negative != right.negative)
+                return left.negative ? -1 : 1;
+
+        b32 magnitude;
+
+        if (left.kind != right.kind)
+                magnitude = left.kind == SEQ_WIDE_ZERO ? -1
+                            : right.kind == SEQ_WIDE_ZERO ? 1
+                            : left.kind == SEQ_WIDE_INFINITE ? 1 : -1;
+        else if (left.kind == SEQ_WIDE_INFINITE)
+                magnitude = 0;
+        else if (left.exponent != right.exponent)
+                magnitude = left.exponent < right.exponent ? -1 : 1;
+        else
+                magnitude = left.significand < right.significand ? -1
+                            : left.significand > right.significand;
+
+        bool negative = left.kind == SEQ_WIDE_ZERO ? right.negative
+                                                   : left.negative;
+
+        return negative ? -magnitude : magnitude;
+}
+
+/*
+        The bits string_to_extended returned, taken apart without a single
+        long double operation: the value is moved into an integer through a
+        union the moment it exists. On x86_64 the six bytes above the eighty
+        are whatever the x87 store left there, so only the low eighty are
+        read.
+*/
+static seq_wide seq_wide_unpack(p128 bits)
+{
+        seq_wide out = {0, 0, SEQ_WIDE_ZERO, false};
+        p128 fraction;
+        b32 field;
+
+#if __LDBL_MANT_DIG__ == 64
+        fraction = (p64)bits;
+        field = (b32)(bits >> 64) & 0x7fff;
+        out.negative = (bits >> 79) & 1;
+
+        if (field == 0x7fff)
+        {
+                out.kind = (p64)fraction << 1 ? SEQ_WIDE_NAN : SEQ_WIDE_INFINITE;
+                return out;
+        }
+#else
+        fraction = bits & (((p128)1 << 112) - 1);
+        field = (b32)(bits >> 112) & 0x7fff;
+        out.negative = (bits >> 127) & 1;
+
+        if (field == 0x7fff)
+        {
+                out.kind = fraction ? SEQ_WIDE_NAN : SEQ_WIDE_INFINITE;
+                return out;
+        }
+
+        if (field)
+                fraction |= (p128)1 << 112;
+#endif
+
+        if (!fraction)
+                return out;
+
+        //      The stored value is exact in the format, so this cannot round.
+        seq_wide exact = seq_wide_round(
+            fraction, (field ? field : 1) - 16383 - (__LDBL_MANT_DIG__ - 1),
+            out.negative);
+
+        return exact;
+}
+
+//      Read a word as the reference's xstrtold does: all of it, and an
+//      overflow is an error while an underflow is not.
+static bool seq_wide_read(string_address text, seq_wide address_to value)
+{
+        union
+        {
+                f128 value;
+                p128 bits;
+        } shape;
+        string_address stopped = null;
+
+        shape.bits = 0;
+        errno = 0;
+        shape.value = string_to_extended(text, address_of stopped);
+
+        p128 bits = shape.bits;
+
+#if __LDBL_MANT_DIG__ == 64
+        bits &= ((p128)1 << 80) - 1;
+#endif
+
+        address_to value = seq_wide_unpack(bits);
+
+        if (stopped == text || string_get(stopped))
+                return false;
+
+        return !(errno == ERANGE && value->kind == SEQ_WIDE_INFINITE);
+}
+
+/*
+        A wide value's exact decimal digits, the way lib.util.c's
+        format_expand makes a double's -- and not by calling it, because it
+        cannot take this width. Its note on L says the exact-decimal engine
+        would take a wider significand and exponent without complaint; the
+        method would, the storage would not: ninety limbs of 10^9 hold 810
+        integer digits, seventeen fraction limbs hold 1088 bits, and a run of
+        1120 digits is the most it keeps. A long double reaches 4933 integer
+        digits and a fraction of 16,494 bits, and making every printf carry
+        that on its stack is the wrong price for one program's format.
+
+        So the same two halves, sized for this format. The integer part is a
+        big integer in limbs of 10^9, doubled twenty nine places at a time.
+        The fraction is held in limbs of 2^64 with the point above the top
+        one and multiplied by 10^19, which carries nineteen digits out of the
+        top and leaves the rest exact; it stops at the first digit rounding
+        does not read and says whether anything was left. The run is
+
+              0 . d[0] d[1] ... d[count-1]   times ten to the exponent
+
+        with no leading or trailing zero, a zero value being the empty run
+        at exponent one, as format_number has it.
+*/
+#define SEQ_WIDE_LIMBS 560
+#define SEQ_WIDE_FRACTION_LIMBS 264
+#define SEQ_WIDE_DIGITS 16800
+
+static p8 seq_digit[SEQ_WIDE_DIGITS + 64];
+static positive seq_digit_count;
+static bipolar seq_digit_exponent;
+static bool seq_digit_inexact;
+
+//      A p128 as limbs of 10^9, least first, by long division in 32 bit
+//      steps: a p128 division would be a call to libgcc's __udivti3.
+static positive seq_wide_limbs(p128 value, p32 address_to limb)
+{
+        positive count = 0;
+
+        while (value)
+        {
+                p32 word[4] = {(p32)(value >> 96), (p32)(value >> 64),
+                               (p32)(value >> 32), (p32)value};
+                positive rest = 0;
+
+                for (b32 i = 0; i < 4; i++)
+                {
+                        positive part = rest << 32 | word[i];
+
+                        word[i] = (p32)(part / 1000000000);
+                        rest = part % 1000000000;
                 }
 
-        seq_decimal first = given == 1 ? (seq_decimal){.coefficient = 1} : number[0];
-        seq_decimal step = given == 3 ? number[1] : (seq_decimal){.coefficient = 1};
-        seq_decimal last = number[given - 1];
-        positive precision = max(first.shown, step.shown);
-        positive scale = max(first.scale, max(step.scale, last.scale));
-
-        if (!seq_decimal_rescale(address_of first, scale) ||
-            !seq_decimal_rescale(address_of step, scale) ||
-            !seq_decimal_rescale(address_of last, scale))
-                return string_report(log_error, 1, "seq: decimal range is too large\n");
-
-        if (!step.coefficient)
-        {
-                return string_report(log_error, 1, "seq: invalid Zero increment value: '%w'\n",
-                              writer_terminal_quoted_name, program_argument((b32)(index + 1)));
+                limb[count++] = (p32)rest;
+                value = (p128)word[0] << 96 | (p128)word[1] << 64 |
+                        (p128)word[2] << 32 | word[3];
         }
 
+        return count;
+}
+
+static positive seq_wide_limb_digits(p32 address_to limb, positive count,
+                                     p8 address_to into)
+{
+        if (!count)
+                return 0;
+
+        positive length = positive_into(into, limb[count - 1]);
+
+        for (positive index = count - 1; index > 0; index--)
+                length += positive_into_padded(into + length, limb[index - 1],
+                                               9, '0');
+
+        return length;
+}
+
+static fn seq_wide_digits(seq_wide value, positive significant, positive places)
+{
+        seq_digit_count = 0;
+        seq_digit_exponent = 1;
+        seq_digit_inexact = false;
+
+        if (value.kind != SEQ_WIDE_FINITE)
+                return;
+
+        //      The significand without its trailing zeros, so the exponent is
+        //      as high as it can be and the fraction as short.
+        p128 mantissa = value.significand;
+        bipolar power = value.exponent;
+
+        while (!(mantissa & 0xffff))
+                mantissa >>= 16, power += 16;
+        while (!(mantissa & 1))
+                mantissa >>= 1, power++;
+
+        if (power >= 0)
+        {
+                static p32 limb[SEQ_WIDE_LIMBS];
+                positive count = seq_wide_limbs(mantissa, limb);
+
+                while (power > 0)
+                {
+                        b32 step = power >= 29 ? 29 : (b32)power;
+                        positive carry = 0;
+
+                        for (positive index = 0; index < count; index++)
+                        {
+                                positive product = ((positive)limb[index] << step) + carry;
+
+                                limb[index] = (p32)(product % 1000000000);
+                                carry = product / 1000000000;
+                        }
+
+                        while (carry)
+                        {
+                                limb[count++] = (p32)(carry % 1000000000);
+                                carry /= 1000000000;
+                        }
+
+                        power -= step;
+                }
+
+                seq_digit_count = seq_wide_limb_digits(limb, count, seq_digit);
+                seq_digit_exponent = (bipolar)seq_digit_count;
+        }
+        else
+        {
+                static positive limb[SEQ_WIDE_FRACTION_LIMBS];
+                positive shift = (positive)-power;
+                positive limbs = (shift + 63) / 64;
+                positive count = 0;
+                positive made = 0;
+                bipolar exponent = 0;
+
+                if (shift < 128 && (mantissa >> shift))
+                {
+                        p32 whole[5];
+                        positive wholes = seq_wide_limbs(mantissa >> shift, whole);
+
+                        count = seq_wide_limb_digits(whole, wholes, seq_digit);
+                        exponent = (bipolar)count;
+                        mantissa &= ((p128)1 << shift) - 1;
+                }
+
+                //      The fraction moved up so its point is the top of limb
+                //      limbs - 1; it fills at most the three lowest.
+                positive gap = limbs * 64 - shift;
+                p64 low = (p64)mantissa, high = (p64)(mantissa >> 64);
+                positive lowest = 0;
+                positive highest = limbs < 3 ? limbs : 3;
+
+                limb[0] = low << gap;
+                if (limbs > 1)
+                        limb[1] = gap ? high << gap | low >> (64 - gap) : high;
+                if (limbs > 2)
+                        limb[2] = gap ? high >> (64 - gap) : 0;
+
+                while (highest > lowest && !limb[highest - 1])
+                        highest--;
+                while (lowest < highest && !limb[lowest])
+                        lowest++;
+
+                while (lowest < highest)
+                {
+                        positive carry = 0;
+                        positive chunk = 0;
+
+                        if (count >= significant || made >= places)
+                        {
+                                seq_digit_inexact = true;
+                                break;
+                        }
+
+                        for (positive index = lowest; index < highest; index++)
+                        {
+                                p128 product = (p128)limb[index] *
+                                                   10000000000000000000ull + carry;
+
+                                limb[index] = (positive)product;
+                                carry = (positive)(product >> 64);
+                        }
+
+                        if (highest < limbs)
+                        {
+                                if (carry)
+                                        limb[highest++] = carry;
+                        }
+                        else
+                                chunk = carry;
+
+                        while (lowest < highest && !limb[lowest])
+                                lowest++;
+
+                        made += 19;
+
+                        if (count)
+                                count += positive_into_padded(seq_digit + count,
+                                                              chunk, 19, '0');
+                        else if (chunk)
+                        {
+                                count = positive_into(seq_digit, chunk);
+                                exponent -= (bipolar)(19 - count);
+                        }
+                        else
+                                exponent -= 19;
+                }
+
+                seq_digit_count = count;
+                seq_digit_exponent = count ? exponent : 1;
+        }
+
+        while (seq_digit_count && seq_digit[seq_digit_count - 1] == '0')
+                seq_digit_count--;
+}
+
+//      Keep the leading keep digits, half to even, as format_round does.
+static fn seq_wide_round_digits(bipolar keep)
+{
+        if (keep < 0)
+        {
+                seq_digit_count = 0;
+                seq_digit_exponent = 1;
+                return;
+        }
+
+        if ((positive)keep >= seq_digit_count)
+                return;
+
+        positive index = (positive)keep;
+        bool up = seq_digit[index] > '5';
+
+        if (seq_digit[index] == '5')
+        {
+                up = seq_digit_inexact;
+
+                for (positive after = index + 1; !up && after < seq_digit_count; after++)
+                        up = seq_digit[after] != '0';
+
+                if (!up)
+                        up = index > 0 && ((seq_digit[index - 1] - '0') & 1);
+        }
+
+        seq_digit_count = index;
+
+        if (!up)
+        {
+                while (seq_digit_count && seq_digit[seq_digit_count - 1] == '0')
+                        seq_digit_count--;
+                if (!seq_digit_count)
+                        seq_digit_exponent = 1;
+                return;
+        }
+
+        while (seq_digit_count)
+        {
+                if (seq_digit[seq_digit_count - 1] != '9')
+                {
+                        seq_digit[seq_digit_count - 1]++;
+                        return;
+                }
+                seq_digit_count--;
+        }
+
+        seq_digit[0] = '1';
+        seq_digit_count = 1;
+        seq_digit_exponent++;
+}
+
+/*
+        Where a field goes. Numbers stream to the log; the extra number check
+        needs one printed into memory, as the reference's asprintf does, so
+        the same writers can collect instead. seq_emit takes no zero lengths,
+        because log reads a zero length as a string to measure.
+*/
+static bool seq_collecting;
+static p8 address_to seq_collected;
+static positive seq_collected_have;
+static positive seq_collected_used;
+static bool seq_short;
+
+static fn seq_emit(address_any data, positive length)
+{
+        if (!length)
+                return;
+
+        if (!seq_collecting)
+        {
+                log(data, length);
+                return;
+        }
+
+        if (!array_store_reserve(seq_collected, seq_collected_have,
+                                 seq_collected_used, seq_collected_used + length + 1,
+                                 4096))
+        {
+                seq_short = true;
+                return;
+        }
+
+        memory_copy_apart(seq_collected + seq_collected_used, data, length);
+        seq_collected_used += length;
+}
+
+static fn seq_emit_fill(p8 byte, positive count)
+{
+        p8 block[64];
+
+        memory_fill(block, byte, sizeof(block));
+
+        while (count)
+        {
+                positive part = min(count, (positive)sizeof(block));
+
+                seq_emit(block, part);
+                count -= part;
+        }
+}
+
+//      The spaces or zeros before a body of this length, the sign and the
+//      0x between them where the flags put them; answers the spaces left.
+static positive seq_emit_begin(seq_format address_to format, positive body,
+                               p8 sign, string_address prefix, positive prefix_length,
+                               bool zeros)
+{
+        positive spaces = difference_or_zero(format->width, body);
+        bool left = format->flags & CONVERSION_FLAG_LEFT;
+
+        zeros = zeros && (format->flags & CONVERSION_FLAG_ZERO) && !left;
+
+        if (!left && !zeros)
+                seq_emit_fill(' ', spaces);
+        if (sign)
+                seq_emit(address_of sign, 1);
+        seq_emit((address_any)prefix, prefix_length);
+        if (zeros)
+        {
+                seq_emit_fill('0', spaces);
+                spaces = 0;
+        }
+
+        return left ? spaces : 0;
+}
+
+/*
+        glibc refuses a field it cannot count in an int: printf answers -1
+        with EOVERFLOW and GNU seq reports a write error. A width or a
+        precision past INT_MAX is that, and so is a field that with its text
+        around it would be longer.
+*/
+static bool seq_too_long;
+
+static bool seq_field_fits(seq_format address_to format, positive body)
+{
+        positive length = max(format->width, body);
+
+        if (format->width > SEQ_INT_MAX || format->precision > SEQ_INT_MAX ||
+            length > SEQ_INT_MAX - format->prefix - format->suffix)
+        {
+                seq_too_long = true;
+                return false;
+        }
+
+        return true;
+}
+
+static p8 seq_wide_sign(seq_wide value, seq_format address_to format)
+{
+        return value.negative ? '-' : format->flags & CONVERSION_FLAG_PLUS ? '+'
+               : format->flags & CONVERSION_FLAG_SPACE ? ' ' : 0;
+}
+
+//      inf, nan and their capitals, which no zero flag pads.
+static fn seq_wide_word(seq_wide value, seq_format address_to format, bool upper)
+{
+        p8 sign = seq_wide_sign(value, format);
+        string_address word = value.kind == SEQ_WIDE_NAN
+                                  ? (string_address)(upper ? "NAN" : "nan")
+                                  : (string_address)(upper ? "INF" : "inf");
+
+        if (!seq_field_fits(format, 3 + (sign != 0)))
+                return;
+
+        positive spaces = seq_emit_begin(format, 3 + (sign != 0), sign, null, 0, false);
+
+        seq_emit((address_any)word, 3);
+        seq_emit_fill(' ', spaces);
+}
+
+/*
+        %f, %e and %g, the body measured before a byte is written because a
+        right aligned field pads first. This is format_decimal_field's
+        order of decisions over the wide digits, glibc's %g rules included:
+        the shape is chosen after rounding, and without # trailing zeros go.
+*/
+static fn seq_wide_decimal(seq_wide value, seq_format address_to format)
+{
+        p8 style = format->conversion;
+        bool upper = style == 'E' || style == 'F' || style == 'G';
+        bipolar precision = format->precise ? (bipolar)min(format->precision, SEQ_INT_MAX) : 6;
+
+        if (value.kind == SEQ_WIDE_INFINITE || value.kind == SEQ_WIDE_NAN)
+        {
+                seq_wide_word(value, format, upper);
+                return;
+        }
+
+        style |= 0x20;
+
+        positive significant = positive_max;
+        positive places = positive_max;
+
+        if (style == 'g')
+                significant = (positive)(precision ? precision : 1) + 1;
+        else if (style == 'e')
+                significant = (positive)precision + 2;
+        else
+                places = (positive)precision + 1;
+
+        seq_wide_digits(value, significant, places);
+
+        if (style == 'g')
+        {
+                bipolar kept = precision ? precision : 1;
+                bipolar before = seq_digit_exponent;
+
+                seq_wide_round_digits(kept);
+
+                bipolar shown = seq_digit_exponent - 1;
+
+                //      glibc's one %#g slip, reproduced because seq is held
+                //      to glibc: a number whose whole part already had all
+                //      the digits asked for, and that rounds up into one
+                //      more, is printed in e style with no digit after the
+                //      point -- %#.2g of 99.5 is 1.e+02, not 1.0e+02.
+                if ((format->flags & CONVERSION_FLAG_ALTERNATE) &&
+                    seq_digit_exponent > before && before == kept)
+                {
+                        style = 'e';
+                        precision = 0;
+                }
+                else if (shown < -4 || shown >= kept)
+                {
+                        style = 'e';
+                        precision = kept - 1;
+                }
+                else
+                {
+                        style = 'f';
+                        precision = kept - 1 - shown;
+                }
+
+                if (!(format->flags & CONVERSION_FLAG_ALTERNATE))
+                {
+                        bipolar reach = style == 'f'
+                                            ? (bipolar)seq_digit_count - seq_digit_exponent
+                                            : (bipolar)seq_digit_count - 1;
+
+                        if (reach < 0)
+                                reach = 0;
+                        if (reach < precision)
+                                precision = reach;
+                }
+        }
+        else if (style == 'e')
+                seq_wide_round_digits(precision + 1);
+        else
+                seq_wide_round_digits(seq_digit_exponent + precision);
+
+        bool point = precision > 0 || (format->flags & CONVERSION_FLAG_ALTERNATE);
+        p8 sign = seq_wide_sign(value, format);
+        p8 tail[24];
+        positive tail_length = 0;
+        positive whole;
+
+        if (style == 'e')
+        {
+                bipolar shown = seq_digit_count ? seq_digit_exponent - 1 : 0;
+                positive magnitude = (positive)(shown < 0 ? -shown : shown);
+
+                tail[0] = upper ? 'E' : 'e';
+                tail[1] = shown < 0 ? '-' : '+';
+                if (magnitude < 10)
+                        tail[2] = '0', tail[3] = (p8)('0' + magnitude), tail_length = 4;
+                else
+                        tail_length = 2 + positive_into(tail + 2, magnitude);
+                whole = 1;
+        }
+        else
+                whole = seq_digit_exponent > 0 ? (positive)seq_digit_exponent : 1;
+
+        positive body = (sign != 0) + whole + point + (positive)precision + tail_length;
+
+        if (!seq_field_fits(format, body))
+                return;
+
+        positive spaces = seq_emit_begin(format, body, sign, null, 0, true);
+
+        if (style == 'e')
+        {
+                p8 lead = seq_digit_count ? seq_digit[0] : '0';
+                positive run = seq_digit_count > 1 ? seq_digit_count - 1 : 0;
+
+                run = min(run, (positive)precision);
+                seq_emit(address_of lead, 1);
+                if (point)
+                        seq_emit(".", 1);
+                seq_emit(seq_digit + 1, run);
+                seq_emit_fill('0', (positive)precision - run);
+                seq_emit(tail, tail_length);
+        }
+        else
+        {
+                if (seq_digit_exponent > 0)
+                {
+                        positive run = min(seq_digit_count, whole);
+
+                        seq_emit(seq_digit, run);
+                        seq_emit_fill('0', whole - run);
+                }
+                else
+                        seq_emit("0", 1);
+
+                if (point)
+                        seq_emit(".", 1);
+
+                bipolar reach = seq_digit_exponent + precision;
+                bipolar begin = seq_digit_exponent < 0 ? 0 : seq_digit_exponent;
+                bipolar stop = min(reach, (bipolar)seq_digit_count);
+                bipolar cut = min(begin, reach);
+                positive lead_zeros = (positive)(cut - seq_digit_exponent);
+                positive run = (positive)difference_or_zero(stop, begin);
+
+                seq_emit_fill('0', lead_zeros);
+                seq_emit(seq_digit + begin, run);
+                seq_emit_fill('0', (positive)precision - lead_zeros - run);
+        }
+
+        seq_emit_fill(' ', spaces);
+}
+
+/*
+        %a, which glibc spells differently on the two formats.
+
+        On x86_64 it prints the x87's sixty four stored bits as sixteen hex
+        digits with the first one before the point -- so one is 0x8p-3 -- and
+        an exponent counted for that nibble: the stored exponent less the
+        bias less three, and a subnormal's fixed at -16385. On binary128 the
+        digit before the point is the implied bit, 1 or for a subnormal 0,
+        the twenty eight after it are the fraction, and the exponent is the
+        plain unbiased one, -16382 for a subnormal. A precision rounds the
+        digits half to even; a carry that runs out of them lands on the
+        digit before the point, and on x86_64 an f there becomes 1 with the
+        exponent four higher. None of this renormalises, because glibc does
+        not.
+*/
+static fn seq_wide_hex(seq_wide value, seq_format address_to format)
+{
+        bool upper = format->conversion == 'A';
+        string_address alphabet = upper ? (string_address) "0123456789ABCDEF"
+                                        : (string_address) "0123456789abcdef";
+
+        if (value.kind == SEQ_WIDE_INFINITE || value.kind == SEQ_WIDE_NAN)
+        {
+                seq_wide_word(value, format, upper);
+                return;
+        }
+
+        //      Back to the stored fields.
+        p128 stored = 0;
+        bipolar field = 0;
+
+        if (value.kind == SEQ_WIDE_FINITE)
+        {
+                bipolar normal = value.exponent + (SEQ_WIDE_BITS - 1) + 16383;
+
+                if (normal >= 1)
+                        stored = value.significand, field = normal;
+                else
+                        stored = value.significand >> (1 - normal);
+        }
+
+        p8 nibble[32];
+        positive digits;
+        p8 lead;
+        bool negative_exponent = false;
+        positive exponent;
+
+#if SEQ_WIDE_BITS == 64
+        for (positive i = 0; i < 16; i++)
+                nibble[i] = (p8)((stored >> (60 - 4 * i)) & 15);
+        lead = nibble[0];
+        memory_copy(nibble, nibble + 1, 15);
+        digits = 15;
+
+        if (!field)
+        {
+                exponent = stored ? 16385 : 0;
+                negative_exponent = stored != 0;
+        }
+        else if (field >= 16383 + 3)
+                exponent = (positive)(field - 16386);
+        else
+        {
+                exponent = (positive)(16386 - field);
+                negative_exponent = true;
+        }
+#else
+        for (positive i = 0; i < 28; i++)
+                nibble[i] = (p8)((stored >> (108 - 4 * i)) & 15);
+        lead = field != 0;
+        digits = 28;
+
+        if (!field)
+        {
+                exponent = stored ? 16382 : 0;
+                negative_exponent = stored != 0;
+        }
+        else if (field >= 16383)
+                exponent = (positive)(field - 16383);
+        else
+        {
+                exponent = (positive)(16383 - field);
+                negative_exponent = true;
+        }
+#endif
+
+        positive used = digits;
+
+        while (used && !nibble[used - 1])
+                used--;
+
+        positive precision = format->precise ? format->precision : used;
+
+        if (format->precise && precision < used)
+        {
+                p8 last = precision ? nibble[precision - 1] : lead;
+                p8 next = nibble[precision];
+                bool more = used > precision + 1 || (next & 7);
+
+                used = precision;
+
+                if (next >= 8 && ((last & 1) || more))
+                {
+                        positive at = precision;
+
+                        while (at && nibble[at - 1] == 15)
+                                nibble[--at] = 0;
+
+                        if (at)
+                                nibble[at - 1]++;
+                        else if (lead < 15)
+                                lead++;
+                        else
+                        {
+                                lead = 1;
+
+                                if (negative_exponent)
+                                {
+                                        //      Four toward zero, through it
+                                        //      if need be.
+                                        if (exponent <= 4)
+                                        {
+                                                exponent = 4 - exponent;
+                                                negative_exponent = false;
+                                        }
+                                        else
+                                                exponent -= 4;
+                                }
+                                else
+                                        exponent += 4;
+                        }
+                }
+        }
+
+        p8 text[32];
+        p8 tail[24];
+        positive tail_length;
+        p8 sign = seq_wide_sign(value, format);
+        bool point = precision > 0 || (format->flags & CONVERSION_FLAG_ALTERNATE);
+        positive shown = min(used, precision);
+
+        for (positive i = 0; i < shown; i++)
+                text[i] = alphabet[nibble[i]];
+
+        tail[0] = upper ? 'P' : 'p';
+        tail[1] = negative_exponent ? '-' : '+';
+        tail_length = 2 + positive_into(tail + 2, exponent);
+
+        positive body = (sign != 0) + 2 + 1 + point + precision + tail_length;
+
+        if (!seq_field_fits(format, body))
+                return;
+
+        positive spaces = seq_emit_begin(format, body, sign,
+                                         upper ? (string_address) "0X" : (string_address) "0x",
+                                         2, true);
+        p8 first = alphabet[lead];
+
+        seq_emit(address_of first, 1);
+        if (point)
+                seq_emit(".", 1);
+        seq_emit(text, shown);
+        seq_emit_fill('0', precision - shown);
+        seq_emit(tail, tail_length);
+        seq_emit_fill(' ', spaces);
+}
+
+static fn seq_wide_field(seq_wide value, seq_format address_to format)
+{
+        if ((format->conversion | 0x20) == 'a')
+                seq_wide_hex(value, format);
+        else
+                seq_wide_decimal(value, format);
+}
+
+/*
+        An operand as the reference's scan_arg sees it: the value, and the
+        width and precision its spelling implies, which is what the default
+        format and -w are built from. The arithmetic is C's own -- the width
+        is a size_t and the precision an int that a long is added to -- so
+        both are kept in those widths here, wrapping as they wrap, because
+        `seq 1e-9223372036854775808` is in coreutils' own tests and its
+        precision really is minus one there.
+*/
+typedef struct
+{
+        seq_wide value;
+        positive width;
+        b32 precision;
+} seq_operand;
+
+#define SEQ_PRECISION_NONE 2147483647
+
+static bool seq_space(p8 byte)
+{
+        return byte == ' ' || (byte >= '\t' && byte <= '\r');
+}
+
+//      strtol's answer for the text after an e, saturated as strtol does.
+static bipolar seq_exponent_of(string_address text)
+{
+        bool minus = false;
+        positive magnitude = 0;
+
+        while (seq_space(*text))
+                text++;
+        if (*text == '+' || *text == '-')
+                minus = *text++ == '-';
+
+        for (; *text >= '0' && *text <= '9'; text++)
+                magnitude = magnitude > (positive)bipolar_max / 10
+                                ? (positive)bipolar_max + 1
+                                : min(magnitude * 10 + (positive)(*text - '0'),
+                                      (positive)bipolar_max + 1);
+
+        if (minus)
+                return magnitude > (positive)bipolar_max ? bipolar_min
+                                                         : -(bipolar)magnitude;
+        return magnitude > (positive)bipolar_max ? bipolar_max : (bipolar)magnitude;
+}
+
+static fn seq_operand_shape(string_address text, seq_operand address_to operand)
+{
+        while (seq_space(*text) || *text == '+')
+                text++;
+
+        operand->width = 0;
+        operand->precision = SEQ_PRECISION_NONE;
+
+        string_address point = string_first_of(text, '.');
+
+        if (!point && !string_first_of(text, 'p'))
+                operand->precision = 0;
+
+        if (text[string_span_without_set(text, "xX")] ||
+            operand->value.kind == SEQ_WIDE_INFINITE ||
+            operand->value.kind == SEQ_WIDE_NAN)
+                return;
+
+        positive length = string_length(text);
+        positive fraction = 0;
+
+        operand->width = length;
+
+        if (point)
+        {
+                fraction = string_span_without_set(point + 1, "eE");
+                if (fraction <= SEQ_INT_MAX)
+                        operand->precision = (b32)fraction;
+                operand->width += fraction == 0 ? (positive)-1
+                                  : (point == text || point[-1] < '0' || point[-1] > '9');
+        }
+
+        string_address e = string_first_of(text, 'e');
+
+        if (!e)
+                e = string_first_of(text, 'E');
+        if (!e)
+                return;
+
+        bipolar exponent = seq_exponent_of(e + 1);
+
+        if (exponent < -bipolar_max)
+                exponent = -bipolar_max;
+
+        operand->precision = (b32)((bipolar)operand->precision +
+                                   (exponent < 0 ? -exponent
+                                                 : -min((bipolar)operand->precision, exponent)));
+        operand->width -= length - (positive)(e - text);
+
+        if (exponent < 0)
+        {
+                if (point ? e == point + 1 : true)
+                        operand->width++;
+                exponent = -exponent;
+        }
+        else
+        {
+                if (point && operand->precision == 0 && fraction)
+                        operand->width--;
+                exponent -= (bipolar)min(fraction, (positive)exponent);
+        }
+
+        operand->width += (positive)exponent;
+}
+
+static COLD b32 seq_usage(void)
+{
+        return string_report(log_error, 1, "Try 'seq --help' for more information.\n");
+}
+
+//      false after saying why, the way the reference's scan_arg says it.
+static bool seq_operand_read(string_address text, seq_operand address_to operand)
+{
+        if (!seq_wide_read(text, address_of operand->value))
+        {
+                string_format(log_error, "seq: invalid floating point argument: '%w'\n",
+                              writer_terminal_quoted_name, text);
+                seq_usage();
+                return false;
+        }
+
+        if (operand->value.kind == SEQ_WIDE_NAN)
+        {
+                string_format(log_error,
+                              "seq: invalid 'not-a-number' argument: '%w'\n",
+                              writer_terminal_quoted_name, text);
+                seq_usage();
+                return false;
+        }
+
+        seq_operand_shape(text, operand);
+        return true;
+}
+
+//      The value as %0.Lf spells it, for the reference's second try at its
+//      all-digit road: a finite value, so at most 4933 digits.
+static p8 seq_integer_text[2][4960];
+
+static string_address seq_wide_integer_text(seq_wide value, b32 slot)
+{
+        seq_format whole = {.conversion = 'f', .precise = true};
+
+        seq_collecting = true;
+        seq_collected_used = 0;
+        seq_wide_field(value, address_of whole);
+        seq_collecting = false;
+
+        if (seq_short || seq_collected_used >= sizeof(seq_integer_text[0]))
+                return null;
+
+        memory_copy_apart(seq_integer_text[slot], seq_collected, seq_collected_used);
+        seq_integer_text[slot][seq_collected_used] = end;
+        return seq_integer_text[slot];
+}
+
+static fn seq_wide_print(seq_format address_to format, seq_wide value)
+{
+        //      glibc gives up on such a field before writing any of it.
+        if (format->width > SEQ_INT_MAX || format->precision > SEQ_INT_MAX)
+        {
+                seq_too_long = true;
+                return;
+        }
+
+        seq_format_literal(seq_emit, format->text, format->directive);
+        seq_wide_field(value, format);
+        seq_format_literal(seq_emit, format->text + format->after,
+                           string_length(format->text + format->after));
+}
+
+//      The field alone, collected, as the reference's asprintf and its cut
+//      of prefix and suffix leave it; null if it could not be held.
+static string_address seq_wide_printed(seq_format address_to format, seq_wide value)
+{
+        seq_collecting = true;
+        seq_collected_used = 0;
+        seq_short = false;
+        seq_wide_field(value, format);
+        seq_emit("", 1);
+        seq_collecting = false;
+        return seq_short || seq_too_long ? null : seq_collected;
+}
+
+/*
+        The reference's print_numbers: x is first + i * step in the wide
+        format, never a running sum, and the loop ends when x passes last --
+        except that a number just past last that prints as last, and prints
+        unlike the number before it, is printed after all. That is how
+        `seq 0 0.000001 0.000003` reaches its last line on an x87 whose
+        0.000003 is a hair short of three steps.
+*/
+static p8 address_to seq_kept;
+static positive seq_kept_have;
+
+static b32 seq_wide_numbers(seq_format address_to format, seq_wide first,
+                            seq_wide step, seq_wide last,
+                            string_address separator)
+{
+        bool down = step.negative;
+        bool beyond = seq_wide_order(down ? first : last, down ? last : first) == -1;
+        positive separator_length = string_length(separator);
+        seq_wide value = first;
+        positive count = 1;
+
+        if (beyond)
+        {
+                log_flush();
+                return 0;
+        }
+
+        while (true)
+        {
+                seq_wide before = value;
+
+                seq_wide_print(format, value);
+
+                if (seq_too_long)
+                        return string_report(log_error, 1,
+                                             "seq: write error: Value too large for"
+                                             " defined data type\n");
+                if (log_failed())
+                        return 1;
+                if (beyond)
+                        break;
+
+                value = seq_wide_add(first, seq_wide_multiply(seq_wide_from(count++), step));
+                beyond = seq_wide_order(down ? value : last, down ? last : value) == -1;
+
+                if (beyond)
+                {
+                        string_address printed = seq_wide_printed(format, value);
+                        seq_wide again;
+                        bool extra = false;
+
+                        if (printed && seq_wide_read(printed, address_of again) &&
+                            seq_wide_order(again, last) == 0)
+                        {
+                                positive length = seq_collected_used;
+
+                                if (array_store_reserve(seq_kept, seq_kept_have, 0,
+                                                        length, length))
+                                {
+                                        memory_copy_apart(seq_kept, printed, length);
+                                        printed = seq_wide_printed(format, before);
+                                        extra = printed && (seq_collected_used != length ||
+                                                            memory_compare(seq_kept, printed, length));
+                                }
+                        }
+
+                        if (!extra)
+                                break;
+                }
+
+                if (separator_length)
+                        log(separator, separator_length);
+        }
+
+        log("\n", 1);
+        log_flush();
+        return log_failed() ? 1 : 0;
+}
+
+/*
+        The decimal road: the coefficient walks by the step at the common
+        scale, and whole blocks of lines that differ only in their last
+        digits are written at once by memory_decimal_series.
+*/
+static b32 seq_decimal_numbers(seq_format address_to format, seq_decimal first,
+                               seq_decimal step, seq_decimal last, positive scale,
+                               positive precision, string_address separator,
+                               bool exact, seq_wide wide_first, seq_wide wide_step,
+                               seq_wide wide_last)
+{
         bool step_negative = step.coefficient < 0;
         bool out_of_range = step_negative ? seq_less(first, last)
                                           : seq_less(last, first);
-
-        bool step_infinite = step.infinite && !first.infinite;
-
-        if (first.infinite)
-        {
-                if (out_of_range)
-                {
-                        log_flush();
-                        return 0;
-                }
-
-                string_address word = first.coefficient < 0
-                                          ? (string_address) "-inf"
-                                          : (string_address) "inf";
-                positive word_length = first.coefficient < 0 ? 4 : 3;
-
-                while (1)
-                {
-                        log(word, word_length);
-                        log(separator, 0);
-                        if (log_failed())
-                                return 1;
-                }
-        }
-
-        if (step_infinite)
-        {
-                if (out_of_range)
-                {
-                        log_flush();
-                        return 0;
-                }
-                last.coefficient = first.coefficient;
-                last.infinite = false;
-        }
 
         if (last.infinite)
         {
@@ -34380,17 +35514,10 @@ static b32 file_seq()
                 last.coefficient = step_negative ? bipolar_min : bipolar_max;
         }
 
-        if (!format_text)
-                format.precision = precision;
-        if (pad)
-                format.width = max(
-                    seq_decimal_width(address_of first, scale, precision),
-                    seq_decimal_width(address_of last, scale, precision));
-
         bipolar value = first.coefficient;
         bool written = false;
         positive separator_length = string_length(separator);
-        string_address suffix = format.text + format.after;
+        string_address suffix = format->text + format->after;
         positive suffix_length = string_length(suffix);
         positive stride = step.coefficient < 0
                               ? (positive)0 - (positive)step.coefficient
@@ -34399,25 +35526,51 @@ static b32 file_seq()
         while (step.coefficient > 0 ? value <= last.coefficient
                                     : value >= last.coefficient)
         {
+                positive magnitude = value < 0 ? (positive)0 - (positive)value
+                                               : (positive)value;
+                bool negative_zero = !written && first.negative_zero;
+                seq_wide landed = wide_first;
+
+                //      Where the steps are not exact in binary, the wide sum
+                //      the reference computes lands a hair to one side of
+                //      the decimal one. Off zero and off last that changes
+                //      nothing printed; on zero it is the sign, below which
+                //      the reference prints -0; on last it is whether the
+                //      line comes as a number inside the range or as its
+                //      extra number, and an extra number whose field ends
+                //      in padding does not read back and is not printed.
+                if (!exact && written && (!value || value == last.coefficient))
+                        landed = seq_wide_add(
+                            wide_first,
+                            seq_wide_multiply(
+                                seq_wide_from((positive)((value - first.coefficient) /
+                                                         step.coefficient)),
+                                wide_step));
+
+                if (!exact && written && !value)
+                        negative_zero = landed.negative;
+
+                fixed_decimal field = fixed_decimal_prepare(
+                    magnitude, scale, value < 0 || negative_zero,
+                    format->width, precision, format->flags);
+
+                if (!exact && written && value == last.coefficient &&
+                    field.left && field.padding &&
+                    seq_wide_order(landed, wide_last) == (step_negative ? -1 : 1))
+                        break;
+
                 if (written)
                         log(separator, 0);
 
-                positive magnitude = value < 0 ? (positive)0 - (positive)value
-                                               : (positive)value;
-                bool negative_zero = (!written && first.negative_zero) ||
-                                     (!value && step_negative);
-                fixed_decimal field = fixed_decimal_prepare(
-                    magnitude, scale, value < 0 || negative_zero,
-                    format.width, format.precision, format.flags);
                 positive records = 1;
                 positive length = field.length + field.zeroes + field.padding;
-                if (format.directive + suffix_length + separator_length <=
+                if (format->directive + suffix_length + separator_length <=
                         sizeof(file_transfer) &&
-                    length <= sizeof(file_transfer) - format.directive -
+                    length <= sizeof(file_transfer) - format->directive -
                                   suffix_length - separator_length)
                 {
                         positive prefix = seq_format_literal_into(
-                            file_transfer, format.text, format.directive);
+                            file_transfer, format->text, format->directive);
                         fixed_decimal_into(file_transfer + prefix,
                                            sizeof(file_transfer) - prefix,
                                            address_of field);
@@ -34427,7 +35580,7 @@ static b32 file_seq()
                         memory_copy_apart(file_transfer + length, separator,
                                           separator_length);
                         length += separator_length;
-                        if (format.precision >= scale && !negative_zero &&
+                        if (precision >= scale && !negative_zero &&
                             stride <= (positive)bipolar_max)
                         {
                                 records = sizeof(file_transfer) / length;
@@ -34436,6 +35589,11 @@ static b32 file_seq()
                                     : (positive)value - (positive)last.coefficient;
                                 if (distance / stride < records - 1)
                                         records = distance / stride + 1;
+                                //      Last is a line of its own when its
+                                //      wide value has something to say.
+                                if (!exact && distance / stride &&
+                                    distance / stride + 1 == records)
+                                        records--;
                                 bool decreasing = (value < 0) !=
                                                   (step.coefficient < 0);
                                 positive boundary = positive_power_ten(scale + 1);
@@ -34447,9 +35605,10 @@ static b32 file_seq()
                                                       : boundary - 1 - magnitude;
                                 if (distance / stride < records - 1)
                                         records = distance / stride + 1;
-                                if (value < 0 && step.coefficient > 0 &&
-                                    (magnitude - 1) / stride < records - 1)
-                                        records = (magnitude - 1) / stride + 1;
+                                if ((value < 0 && step.coefficient > 0) ||
+                                    (!exact && value > 0 && step.coefficient < 0))
+                                        if ((magnitude - 1) / stride < records - 1)
+                                                records = (magnitude - 1) / stride + 1;
                                 positive offset = prefix +
                                     (field.left ? 0 : field.padding);
                                 bipolar increment = decreasing ? -(bipolar)stride
@@ -34464,7 +35623,7 @@ static b32 file_seq()
                 }
                 else
                 {
-                        seq_format_literal(log, format.text, format.directive);
+                        seq_format_literal(log, format->text, format->directive);
                         fixed_decimal_write(log, address_of field);
                         seq_format_literal(log, suffix, suffix_length);
                 }
@@ -34489,26 +35648,315 @@ static b32 file_seq()
                 value += step.coefficient;
         }
 
-        if (step_infinite && written)
-        {
-                string_address word = step.coefficient < 0
-                                          ? (string_address) "-inf"
-                                          : (string_address) "inf";
-                positive word_length = step.coefficient < 0 ? 4 : 3;
-
-                while (1)
-                {
-                        log(separator, 0);
-                        log(word, word_length);
-                        if (log_failed())
-                                return 1;
-                }
-        }
-
         if (written)
                 log("\n", 1);
         log_flush();
         return 0;
+}
+
+
+static const argument_option seq_options[] = {
+    {"equal-width", 'w'},
+    {"format", 'f', ARGUMENT_REQUIRED},
+    {"separator", 's', ARGUMENT_REQUIRED},
+    {null},
+};
+
+/*
+        Whether a decimal that is not exact in binary still prints the
+        reference's digits. Its first + i * step carries three roundings in
+        the wide format, each at most half a unit in the last of sixty four
+        bits, on terms no bigger than M = max(|first|, |last|) + |step|; so
+        the wide value is within 6M/2^64 of the decimal one. Below 2^60 units
+        of the printed place that is under three eighths of a unit: %f rounds
+        it back to the decimal's own digits, comparisons with last come out
+        the same, and a value that is not zero keeps its sign. Only an exact
+        zero can differ, by its sign, and the decimal road asks the wide
+        arithmetic about that one line.
+*/
+static positive seq_decimal_magnitude(seq_decimal number)
+{
+        return number.coefficient < 0 ? (positive)0 - (positive)number.coefficient
+                                      : (positive)number.coefficient;
+}
+
+static bool seq_decimal_close(seq_decimal address_to number, positive places)
+{
+        if (number[2].infinite)
+                return false;
+
+        //      Both below 2^63, so the sum fits.
+        positive reach = max(seq_decimal_magnitude(number[0]),
+                             seq_decimal_magnitude(number[2])) +
+                         seq_decimal_magnitude(number[1]);
+
+        for (; places; places--)
+        {
+                if (reach > ((positive)1 << 60) / 10)
+                        return false;
+                reach *= 10;
+        }
+
+        return reach < (positive)1 << 60;
+}
+
+//      A decimal whose value is a whole number of halvings: first + i * step
+//      is then exact in the wide format whenever it is exact here.
+static bool seq_decimal_dyadic(seq_decimal number)
+{
+        positive magnitude = seq_decimal_magnitude(number);
+
+        for (positive i = 0; i < number.scale; i++, magnitude /= 5)
+                if (magnitude % 5)
+                        return false;
+
+        return !number.infinite;
+}
+
+/*
+        seq LAST, seq FIRST LAST, seq FIRST INCREMENT LAST.
+
+        Everything the reference decides is decided in its order: the format,
+        then -w against it, then its all-digit road, then each operand in
+        turn -- a zero step is refused before the last operand is read --
+        then its second try at the digit road, then the default format.
+
+        What prints the numbers is one of three roads. The digit road above
+        counts in text. The decimal road counts in a signed word at a power
+        of ten scale, which is exact, fast, and batched through
+        memory_decimal_series; it is taken only where it provably prints the
+        reference's bytes -- a %f of first and step that are exact in binary,
+        at a precision that shows every digit they have, where the wide
+        arithmetic is exact too and nothing rounds. Everything else takes
+        the wide road, which is the reference's own arithmetic.
+*/
+static b32 file_seq()
+{
+        file_taking taking = {
+            .program = (string_address) "seq",
+            .options = seq_options,
+            .numbers = true,
+        };
+
+        if (!file_take(address_of taking))
+                return 1;
+
+        positive count = (positive)program_argument_count();
+        positive index = taking.first;
+        bool pad = (taking.flags & FILE_FLAG('w')) != 0;
+        string_address separator = file_option_value(address_of taking, 's');
+        string_address format_text = file_option_value(address_of taking, 'f');
+
+        if (!separator)
+                separator = (string_address) "\n";
+
+        positive given = count - index;
+
+        if (given < 1)
+        {
+                log_error("seq: missing operand\n", 0);
+                return seq_usage();
+        }
+
+        if (given > 3)
+        {
+                string_format(log_error, "seq: extra operand '%w'\n",
+                              writer_terminal_quoted_name,
+                              program_argument((b32)(index + 3)));
+                return seq_usage();
+        }
+
+        seq_format format = {.text = (string_address) ""};
+
+        if (format_text)
+        {
+                p8 wrong = seq_format_read(format_text, address_of format);
+                p8 named[2] = {seq_format_letter, end};
+
+                if (wrong == SEQ_FORMAT_NONE)
+                        return string_report(log_error, 1,
+                                             "seq: format '%w' has no %% directive\n",
+                                             writer_terminal_quoted_name, format_text);
+                if (wrong == SEQ_FORMAT_ENDS)
+                        return string_report(log_error, 1, "seq: format '%w' ends in %%\n",
+                                             writer_terminal_quoted_name, format_text);
+                if (wrong == SEQ_FORMAT_UNKNOWN)
+                        return string_report(log_error, 1,
+                                             "seq: format '%w' has unknown %%%s directive\n",
+                                             writer_terminal_quoted_name, format_text, named);
+                if (wrong == SEQ_FORMAT_MANY)
+                        return string_report(log_error, 1,
+                                             "seq: format '%w' has too many %% directives\n",
+                                             writer_terminal_quoted_name, format_text);
+        }
+
+        if (pad && format_text)
+        {
+                log_error("seq: format string may not be specified"
+                          " when printing equal width strings\n", 0);
+                return seq_usage();
+        }
+
+        bool one_byte = separator[0] && !separator[1];
+
+        //      The reference's all-digit road, asked before any operand is
+        //      read as a number: a step of bare digits up to two hundred,
+        //      bare digit ends, and output nothing about which could differ.
+        if (!pad && !format_text && one_byte &&
+            seq_all_digits(program_argument((b32)index)) &&
+            (given == 1 || seq_all_digits(program_argument((b32)(index + 1)))) &&
+            (given < 3 || seq_all_digits(program_argument((b32)(index + 2)))))
+        {
+                string_address first = given == 1 ? (string_address) "1"
+                                                   : program_argument((b32)index);
+                string_address last = program_argument((b32)(index + given - 1));
+                string_address step_text = seq_trim_zeros(
+                    given == 3 ? program_argument((b32)(index + 1)) : (string_address) "1");
+                positive step = 0;
+
+                if (string_length(step_text) <= 3)
+                        for (positive at = 0; step_text[at]; at++)
+                                step = step * 10 + (positive)(step_text[at] - '0');
+
+                if (step && step <= 200 &&
+                    (!seq_digits_fit(seq_trim_zeros(first)) ||
+                     !seq_digits_fit(seq_trim_zeros(last))))
+                        return seq_count_digits(first, last, step, separator[0]);
+        }
+
+        seq_operand operand[3];
+
+        for (positive i = 0; i < given; i++)
+        {
+                if (!seq_operand_read(program_argument((b32)(index + i)),
+                                      address_of operand[i]))
+                        return 1;
+
+                if (given == 3 && i == 1 && operand[1].value.kind == SEQ_WIDE_ZERO)
+                {
+                        string_format(log_error, "seq: invalid Zero increment value: '%w'\n",
+                                      writer_terminal_quoted_name,
+                                      program_argument((b32)(index + 1)));
+                        return seq_usage();
+                }
+        }
+
+        seq_operand unit = {seq_wide_from(1), 1, 0};
+        seq_operand first = given == 1 ? unit : operand[0];
+        seq_operand step = given == 3 ? operand[1] : unit;
+        seq_operand last = operand[given - 1];
+
+        //      Parsed as decimals too, for the decimal road below; a word the
+        //      decimal grammar cannot hold simply leaves that road closed.
+        seq_decimal number[3];
+        bool decimal = true;
+
+        for (positive i = 0; i < given && decimal; i++)
+                decimal = seq_decimal_number(program_argument((b32)(index + i)),
+                                             address_of number[i]);
+
+        //      The reference's second try at its digit road: whole operands
+        //      spelled some other way -- 1e3, 0x10, a leading blank, inf as
+        //      last -- that it prints as %0.Lf and counts as text.
+        if (!pad && !format_text && one_byte && !decimal &&
+            !first.precision && !step.precision && !last.precision &&
+            (first.value.kind == SEQ_WIDE_ZERO ||
+             (first.value.kind == SEQ_WIDE_FINITE && !first.value.negative)) &&
+            (last.value.kind == SEQ_WIDE_ZERO || !last.value.negative) &&
+            step.value.kind == SEQ_WIDE_FINITE && !step.value.negative &&
+            seq_wide_order(step.value, seq_wide_from(200)) <= 0)
+        {
+                string_address step_text = seq_wide_integer_text(step.value, 0);
+                positive stride = 0;
+
+                for (positive at = 0; step_text && step_text[at]; at++)
+                        stride = stride * 10 + (positive)(step_text[at] - '0');
+
+                string_address start = seq_all_digits(program_argument((b32)index)) && given > 1
+                                           ? program_argument((b32)index)
+                                           : seq_wide_integer_text(first.value, 0);
+                string_address stop = last.value.kind == SEQ_WIDE_INFINITE
+                                          ? null
+                                          : seq_wide_integer_text(last.value, 1);
+
+                if (step_text && start && *start != '-' &&
+                    (last.value.kind == SEQ_WIDE_INFINITE || (stop && *stop != '-')))
+                        return seq_count_digits(start, stop, stride, separator[0]);
+        }
+
+        if (!format_text)
+        {
+                b32 precision = max(first.precision, step.precision);
+
+                format.conversion = 'g';
+
+                if (precision != SEQ_PRECISION_NONE &&
+                    last.precision != SEQ_PRECISION_NONE)
+                {
+                        //      get_default_format's widths, in its size_t.
+                        positive first_width = first.width +
+                            (positive)(bipolar)(b32)((p32)precision - (p32)first.precision);
+                        positive last_width = last.width +
+                            (positive)(bipolar)(b32)((p32)precision - (p32)last.precision);
+
+                        if (last.precision && !precision)
+                                last_width--;
+                        if (!last.precision && precision)
+                                last_width++;
+                        if (!first.precision && precision)
+                                first_width++;
+
+                        positive width = max(first_width, last_width);
+
+                        if (!pad || width <= SEQ_INT_MAX)
+                        {
+                                format.conversion = 'f';
+                                format.precise = true;
+                                format.precision = (positive)(p32)precision;
+
+                                if (pad)
+                                {
+                                        format.flags = CONVERSION_FLAG_ZERO;
+                                        format.width = width;
+                                }
+                        }
+                }
+        }
+
+        //      The decimal road, where it prints the same bytes.
+        positive scale = 0;
+        positive shown = format.precise ? format.precision : 6;
+        bool exact = false;
+
+        if (decimal)
+        {
+                seq_decimal one = {.coefficient = 1};
+
+                if (given == 1)
+                        number[2] = number[0], number[0] = one;
+                else if (given == 2)
+                        number[2] = number[1];
+                if (given < 3)
+                        number[1] = one;
+
+                scale = max(number[0].scale, max(number[1].scale, number[2].scale));
+                exact = seq_decimal_dyadic(number[0]) && seq_decimal_dyadic(number[1]);
+                decimal = (format.conversion | 0x20) == 'f' &&
+                          format.width <= SEQ_INT_MAX && shown <= SEQ_INT_MAX &&
+                          shown >= scale && !number[0].infinite && !number[1].infinite &&
+                          seq_decimal_rescale(address_of number[0], scale) &&
+                          seq_decimal_rescale(address_of number[1], scale) &&
+                          seq_decimal_rescale(address_of number[2], scale) &&
+                          (exact || seq_decimal_close(number, shown - scale));
+        }
+
+        if (!decimal)
+                return seq_wide_numbers(address_of format, first.value, step.value,
+                                        last.value, separator);
+
+        return seq_decimal_numbers(address_of format, number[0], number[1],
+                                   number[2], scale, shown, separator, exact,
+                                   first.value, step.value, last.value);
 }
 
 // yes ------------------------------------------------------------
