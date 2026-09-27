@@ -10324,7 +10324,16 @@ static COLD fn shell_marked(writer write, p8 mark)
                 string_address value = string_first_of(word, '=');
                 positive length = value ? (positive)(value - word)
                                         : string_length(word);
+                /* export PATH+=:dir and readonly v+=x append, as the
+                   assignment they spell does; bash takes them and this
+                   refused the name. */
+                bool append = shell_bash_compat && value && length > 1 &&
+                              value[-1] == '+';
+                string_address cut = append ? value - 1 : value;
                 bool kept;
+
+                if (append)
+                        length--;
 
                 if (!shell_valid_name(word, length))
                 {
@@ -10356,13 +10365,19 @@ static COLD fn shell_marked(writer write, p8 mark)
                 // The name on its own while it is looked up and marked; the
                 // word is argv's and goes back the way it was.
                 if (value)
-                        address_to value = end;
+                        address_to cut = end;
 
                 shell_pipe_status_wanted(word, length);
 
                 if (value && env_readonly(word))
                 {
-                        address_to value = '=';
+                        /* bash refuses the value and still marks the name:
+                           readonly v=ro; export v=x leaves v in the
+                           environment. */
+                        if (shell_bash_compat && !shell_posix_on() &&
+                            mark == DECLARE_EXPORT && !unmark)
+                                env_export_mark(word);
+                        address_to cut = append ? '+' : '=';
                         shell_readonly_refused(null, command, word, length);
                         exec_special_error_note();
                         shell_answer(shell_bash_compat ? 1 : 2);
@@ -10372,20 +10387,42 @@ static COLD fn shell_marked(writer write, p8 mark)
                 // A name on its own is already marked here: every value
                 // assigned to it later inherits the attribute. `export -n`
                 // deliberately does not create a missing variable.
+                string_address assigned = value ? value + 1 : null;
+
+                if (append)
+                {
+                        string_address old = env_get(word);
+                        positive before = old ? string_length(old) : 0;
+                        positive after = string_length(value + 1);
+                        p8 address_to joined = shell_store_take(
+                            address_of expand_store, before + after + 1);
+
+                        if (!joined)
+                        {
+                                address_to cut = '+';
+                                return shell_answered(2, "%s: no room\n",
+                                                      command);
+                        }
+                        if (before)
+                                memory_copy(joined, old, before);
+                        memory_copy_end(joined + before, value + 1, after);
+                        assigned = joined;
+                }
+
                 if (mark == DECLARE_EXPORT && unmark)
                 {
-                        kept = !value || env_assign(word, value + 1);
+                        kept = !value || env_assign(word, assigned);
                         if (kept)
                                 kept = env_export_unmark(word);
                 }
                 else
-                        kept = (!value || env_assign(word, value + 1)) &&
+                        kept = (!value || env_assign(word, assigned)) &&
                                (mark == DECLARE_EXPORT
                                     ? env_export_mark(word)
                                     : readonly_add_mode(word, length, false));
 
                 if (value)
-                        address_to value = '=';
+                        address_to cut = append ? '+' : '=';
 
                 if (!kept)
                         return shell_answered(2, "%s: no room\n", command);

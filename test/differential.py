@@ -13760,6 +13760,22 @@ def shell_lang_positional_each(rng):
         "set -- " + params, ifs + "printf '<%s>' " + word + " end; echo", 'echo "end=$?"'))
 
 
+#       NAME+=value handed to export, readonly, declare and local: the
+#       append the assignment spells. export PATH+=:dir was refused as no
+#       identifier.
+def shell_lang_declaration_append(rng):
+    builtin = rng.choice(("export", "readonly", "declare", "export -n", "declare -x", "typeset", "local"))
+    before = rng.choice(("v=base", "unset v", "v=", "readonly v=ro", "export v=ex"))
+    value = rng.choice(("+=:x", "+=", "+='a b'", "+=$v", "=plain"))
+    name = rng.choice(("v", "v", "1v", "v w"))
+    line = builtin + " " + name + value
+    if builtin == "local":
+        line = "f() { " + line + "; echo \"in=[$v] $?\"; }; f"
+    return ("declaration-append", shell_BASH, shell_program(
+        before, line + " 2>/dev/null; echo \"s=$?\"", 'echo "[${v-unset}]"',
+        "env | grep -c '^v='"))
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16390,6 +16406,7 @@ SHELL_FAMILIES = (
     shell_lang_trap_numeric_reset,
     shell_lang_array_literal_lines,
     shell_lang_positional_each,
+    shell_lang_declaration_append,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),
