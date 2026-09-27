@@ -13299,6 +13299,32 @@ def shell_lang_backquote_quoting(rng):
     return "backquote-quoting-" + place, shell_ALL, shell_program("x='v w'", line, 'echo "end=$?"')
 
 
+#       A quoted parenthesis or bar in a pattern is that byte. case and
+#       [[ ]] read extended groups with extglob off, and quote removal took
+#       the backslash from \( so *\(\) became the group *( ), which matches
+#       only nothing: case 'foo()' in *\(\)) did not match.
+shell_ESCAPED_PATTERNS = ("*\\(\\)", "*'()'", '*"(x)"', "?oo\\(*", "@\\(x\\)", "+'(a)'", "!\\(a\\)", "*\\|*",
+                          "f*'|'*", "'*('*", "*\\(?\\)", "\\(*\\)")
+shell_ESCAPED_SUBJECTS = ("foo()", "foo(x)", "(a)", "a|b", "@(x)", "+(a)", "!(a)", "*(y", "f|g")
+
+
+def shell_lang_escaped_pattern_bytes(rng):
+    pattern = rng.choice(shell_ESCAPED_PATTERNS)
+    subject = rng.choice(shell_ESCAPED_SUBJECTS)
+    context = rng.choice(("case", "case", "double-bracket", "strip", "replace"))
+    quoted = shell_quote(subject)
+    if context == "case":
+        line = "case " + quoted + " in " + pattern + ") echo match;; *) echo no;; esac"
+    elif context == "double-bracket":
+        line = "[[ " + quoted + " == " + pattern + " ]] && echo match || echo no"
+    elif context == "strip":
+        line = "v=" + quoted + "; echo \"<${v#" + pattern + "}>\""
+    else:
+        line = "v=" + quoted + "; echo \"<${v/" + pattern + "/R}>\""
+    modes = shell_BASH if context == "double-bracket" else shell_ALL
+    return "escaped-pattern-" + context, modes, shell_program(line, 'echo "end=$?"')
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -15921,6 +15947,7 @@ SHELL_FAMILIES = (
     shell_lang_command_substitution,
     shell_delivered(shell_lang_case_in_substitution),
     shell_lang_backquote_quoting,
+    shell_lang_escaped_pattern_bytes,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),

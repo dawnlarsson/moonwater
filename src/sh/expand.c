@@ -2063,8 +2063,13 @@ static CONST bool expand_quoted_metacharacter(p8 value, bool regex)
         //      is the range. They are the pattern language's alone -- a
         //      backslash before either in an ERE is not defined -- so the
         //      regex right-hand side does not take them from here.
-        const p64 glob_low = ((p64)1 << '-');
-        const p64 glob_high = ((p64)1 << (']' - 64));
+        //      Parentheses and a bar are the extended groups' own, which
+        //      case and [[ ]] read with extglob off: *'()' is a star and two
+        //      parentheses, not the group *( ) that matches only nothing.
+        const p64 glob_low = ((p64)1 << '-') | ((p64)1 << '(') |
+                             ((p64)1 << ')');
+        const p64 glob_high = ((p64)1 << (']' - 64)) |
+                              ((p64)1 << ('|' - 64));
         const p64 regex_low = ((p64)1 << '$') | ((p64)1 << '(') |
                               ((p64)1 << ')') | ((p64)1 << '+') |
                               ((p64)1 << '.');
