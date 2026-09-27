@@ -16938,7 +16938,21 @@ TEXT_UTILITIES = (
             operands=_TEXT_HEAD_TAIL_OPERANDS, stdin=_TEXT_HEAD_TAIL_STDIN, fixture="text",
             extra=(("--nosuchflag",), ("-Q",), ("-n", "2", "-c", "5"), ("-c", "5", "-n", "2"), ("-c", "9", "-c", "3"),
                    ("-n", "9", "-n", "3"), ("-n", "-1", "a.txt", "repeats"), ("-c", "-4", "a.txt"),
-                   ("-c", "-1", "empty"), ("-c", "-3", "big"), ("-n", "-1", "big"), ("-z", "-n", "-1"))),
+                   ("-c", "-1", "empty"), ("-c", "-3", "big"), ("-n", "-1", "big"), ("-z", "-n", "-1"),
+                   #       The obsolete first word takes letters after
+                   #       its digits -- b, k and m are bytes times 512,
+                   #       1024 and 1048576, c bytes, l lines, q v z the
+                   #       options -- and xstrtol reads a lower m and a D
+                   #       in any count. big is 60000 bytes, so each
+                   #       multiplier lands somewhere else in it.
+                   ("-2b", "big"), ("-1k", "big"), ("-1m", "big"), ("-14c", "a.txt"), ("-5l", "fifteen"),
+                   ("-2bl", "big"), ("-1c", "a.txt"), ("-2qv", "a.txt", "b.txt"), ("-3z", "a.txt"),
+                   ("-3x", "a.txt"), ("-3cx",), ("-2", "-c", "5", "a.txt"), ("-5", "-3", "a.txt"),
+                   ("-c", "1m", "big"), ("-n", "1m", "big"), ("-c", "1KD", "big"), ("-c", "1bB", "big"),
+                   ("-c", "1g", "big"), ("-n", "--5", "a.txt"),
+                   ("---presume-input-pipe", "-c", "-3", "big"), ("---presume-input-pipe", "-n", "-2", "a.txt"),
+                   *({"fixture": "text", "stdin": "many_lines", "argv": argv}
+                     for argv in (("-2b",), ("-1k",), ("-3c",), ("-1l",), ("-2m",))))),
     Utility("tail",
             options=(Option("-n", _TEXT_COUNT_VALUES, None), Option("--lines", ("3", "+3", "+12"), True),
                      Option("-c", _TEXT_BYTE_VALUES, None), Option("--bytes", ("10", "+30"), True),
@@ -16950,7 +16964,21 @@ TEXT_UTILITIES = (
             operands=_TEXT_HEAD_TAIL_OPERANDS, stdin=_TEXT_HEAD_TAIL_STDIN, fixture="text",
             extra=(("--nosuchflag",), ("-Q",), ("-n", "2", "-c", "3"), ("-c", "3", "-n", "2"), ("-c", "9", "-c", "3"),
                    ("-n", "+1", "fifteen"), ("-c", "+30", "big"), ("-c", "1", "wide"), ("-n", "5", "empty", "fifteen"),
-                   ("-n", "2", "a.txt", "b.txt", "repeats"), ("-q", "-c", "5", "a.txt", "b.txt"))),
+                   ("-n", "2", "a.txt", "b.txt", "repeats"), ("-q", "-c", "5", "a.txt", "b.txt"),
+                   #       The obsolete first word, which counts only with
+                   #       at most one file after it: +N from the start, -N
+                   #       from the end, b c or l, then f. Past one file,
+                   #       or with anything else after the letters, getopt
+                   #       reads the leading digit as out of place.
+                   ("+2", "fifteen"), ("+2c", "a.txt"), ("-2c", "a.txt"), ("-2l", "fifteen"), ("-l", "big"),
+                   ("-b", "big"), ("+18", "fifteen"), ("+c", "big"), ("+l", "big"), ("-cl", "a.txt"),
+                   ("-2cX", "a.txt"), ("-5", "a.txt", "b.txt"), ("+5", "a.txt", "b.txt"), ("-3", "--", "a.txt"),
+                   ("+2", "-", "a.txt"), ("-c", "--"), ("-2b", "big"), ("+2", "-n", "3", "fifteen"),
+                   ("-c", "1m", "big"), ("-c", "1KD", "big"), ("-n", "--5", "a.txt"),
+                   ("---presume-input-pipe", "-c", "7", "big"), ("---presume-input-pipe", "-n", "2", "a.txt"),
+                   *({"fixture": "text", "stdin": "many_lines", "argv": argv}
+                     for argv in (("+2",), ("+2c",), ("-2c",), ("-2l",), ("-l",), ("-b",), ("+18",),
+                                  ("-c",), ("-",))))),
     Utility("join",
             options=(Option("-a", ("1", "2", "3", "0", "x"), None, repeat=True), Option("-e", ("EMPTY", ""), None),
                      Option("-i"), Option("--ignore-case"), Option("-j", ("1", "2", "0", "x"), None),

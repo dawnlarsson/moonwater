@@ -1201,11 +1201,16 @@ static fn text_file_add(b32 which)
         that array will hold, and the answer is the refusal GNU prints rather
         than a tail quietly left off.
 */
-static bool text_took(file_taking address_to taking)
+static bool text_took_from(file_taking address_to taking, positive first)
 {
-        return file_take(taking) &&
+        return file_take_from(taking, first) &&
                !(text_files_failed &&
                  string_diagnostic(&text_diagnostic, 1, null, "too many operands"));
+}
+
+static bool text_took(file_taking address_to taking)
+{
+        return text_took_from(taking, 1);
 }
 
 static string_address text_file_name(positive which)
@@ -1244,9 +1249,12 @@ static bool text_word_of(string_address said, const string_address address_to na
 /*
         A count with GNU's multiplier behind it: head -c 1K, tail -n 2kB. b is
         512, a lower k is a thousand only with a B behind it, and the rest run
-        K M G T P E Z Y R Q with K meaning 1024 and KB a thousand. Too large a
-        count saturates rather than wrapping, because "all of it" is what a
-        count past the address space asks for.
+        K M G T P E Z Y R Q with K meaning 1024 and KB a thousand. xstrtol
+        takes a lower m as M and an obsolescent D as B -- head -c 1m is a
+        MiB and 1KD a thousand -- so those two are read here as well, and a
+        caller whose reference refuses one steps over it before asking, as
+        cmp does. Too large a count saturates rather than wrapping, because
+        "all of it" is what a count past the address space asks for.
 */
 static bool text_count_suffixed(string_address said, positive address_to count)
 {
@@ -1275,13 +1283,14 @@ static bool text_count_suffixed(string_address said, positive address_to count)
         }
 
         for (positive step = 0; letters[step]; step++)
-                if (said[0] == letters[step] || (step == 0 && said[0] == 'k'))
+                if (said[0] == letters[step] || (step == 0 && said[0] == 'k') ||
+                    (step == 1 && said[0] == 'm'))
                         power = step + 1;
 
         if (!power)
                 return false;
 
-        if (said[1] == 'B' && !said[2])
+        if ((said[1] == 'B' || said[1] == 'D') && !said[2])
                 by = 1000;
         else if (said[1] == 'i' && said[2] == 'B' && !said[3])
                 by = 1024;
@@ -1352,12 +1361,23 @@ static b32 text_input_count()
         return text_files_count ? (b32)text_files_count : 1;
 }
 
-static fn text_banner(b32 which, bool first)
+/*
+        head's and tail's ==> name <== line. The blank line in front of it
+        belongs to every header but the first one written, not to every file
+        but the first named: GNU keeps a static first_file, so when the first
+        operand would not open the second file's header opens the output.
+        tail -f writes one again whenever a different file has more to say.
+*/
+static bool text_banner_written;
+
+static fn text_banner(b32 which)
 {
         string_address name = text_file_name(which);
 
-        if (!first)
+        if (text_banner_written)
                 text_put_character('\n');
+
+        text_banner_written = true;
 
         text_put_string("==> ");
         text_put_string(name && !string_equals(name, "-")
@@ -6166,6 +6186,12 @@ static fn text_head_records(positive count)
                             FILE_SEEK_CUR);
 }
 
+/*
+        ---presume-input-pipe is GNU's own undocumented switch, spelled with
+        a third dash so that no user types it by accident: the test suite
+        runs head -c -N and tail against seekable files through the code a
+        pipe gets. Taken here for the same use; it moves nothing else.
+*/
 static const argument_option head_options[] = {
     {"bytes", 'c', ARGUMENT_REQUIRED},
     {"lines", 'n', ARGUMENT_REQUIRED},
@@ -6173,8 +6199,11 @@ static const argument_option head_options[] = {
     {"silent", 'q'},
     {"verbose", 'v'},
     {"zero-terminated", 'z'},
+    {"-presume-input-pipe", 'U', ARGUMENT_LONG_ONLY},
     {null},
 };
+
+static bool head_tail_pipe_presumed;
 
 /*
         A count written with a minus in front of it names what to leave off
@@ -6187,7 +6216,8 @@ static fn text_head_short(positive count, bool by_bytes)
 
         utility_arena.used = 0;
 
-        if (text_regular_size(text_input.handle, address_of size))
+        if (!head_tail_pipe_presumed &&
+            text_regular_size(text_input.handle, address_of size))
         {
                 positive floor = text_stream_floor();
 
@@ -6240,31 +6270,39 @@ static bool text_count_parse(string_address said, p8 marked,
         return text_count_suffixed(said, count);
 }
 
-static bool text_count_option(string_address said, p8 marked,
-                              bool address_to special, positive address_to count)
-{
-        if (!said)
-                return true;
-
-        if (text_count_parse(said, marked, special, count))
-                return true;
-
-        return string_diagnostic(&text_diagnostic, 0, null, "invalid number of lines");
-}
-
 // The last of -c and -n decides bytes or lines, and the last of -q and -v
 // decides the headers; -s and the others tail drops must not count as last.
 static p8 text_count_last;
 static p8 text_banner_last;
 static bool text_count_tail;
 static bool text_count_marked;
+static positive text_count_value;
+
+/*
+        A count neither tool could read, in xnumtoumax's words: what was
+        wanted, then the word quoted as it stood once the tool had stepped
+        over its one leading -. tail reads the count signed, so a second
+        minus in front of digits is a number below its floor rather than no
+        number at all, and gnulib says so with the reason it chose for it.
+*/
+static bool text_count_refused(string_address said, p8 letter)
+{
+        string_address shown = said + (said[0] == '-');
+        string_address after = shown + string_span(shown, string_set_space);
+        bool below = text_count_tail && after[0] == '-' && byte_is_digit(after[1]);
+
+        text_flush();
+        string_format(writer_stderr, "%s: invalid number of %s: '%w'%s\n",
+                      text_name, letter == 'c' ? "bytes" : "lines",
+                      writer_terminal_quoted_name, shown,
+                      below ? ": Value too large for defined data type" : "");
+        return false;
+}
 
 static bool head_tail_seen(p8 letter, string_address value)
 {
         if (letter == 'c' || letter == 'n')
         {
-                positive count;
-
                 text_count_last = letter;
 
                 // tail keeps a sign it was once given; head's belongs to the
@@ -6273,15 +6311,184 @@ static bool head_tail_seen(p8 letter, string_address value)
                         text_count_marked = false;
 
                 if (!text_count_parse(value, text_count_tail ? '+' : '-',
-                                      address_of text_count_marked, address_of count))
-                        return string_diagnostic(&text_diagnostic, 0, value,
-                                                 letter == 'c' ? "invalid number of bytes"
-                                                               : "invalid number of lines");
+                                      address_of text_count_marked,
+                                      address_of text_count_value))
+                        return text_count_refused(value, letter);
         }
         else if (letter == 'q' || letter == 'v')
                 text_banner_last = letter;
 
         return true;
+}
+
+/*
+        What an obsolete first word said, before getopt is shown the rest:
+        head -2b, tail +3c, tail -5f. Every field starts as the default an
+        ordinary command line would have left, so a later -n, -c, -q or -v
+        overrides it exactly as getopt's later options override GNU's.
+*/
+typedef struct
+{
+        positive count;
+        bool by_bytes;
+        bool from_start;
+        bool follow;
+        bool zero;
+        p8 banner;
+} head_tail_old;
+
+// A count's digits, saturating, then scaled by what its letter multiplies
+// by: GNU's string_to_integer quietly answers its maximum for either.
+static positive head_tail_old_count(string_address digits, positive length,
+                                    positive by)
+{
+        positive total = 0;
+
+        for (positive i = 0; i < length; i++)
+                total = total > (positive_max - 9) / 10 ? positive_max
+                                                        : total * 10 + (positive)(digits[i] - '0');
+
+        return total > positive_max / by ? positive_max : total * by;
+}
+
+/*
+        head's obsolete word is any first argument that is a minus and a
+        digit: the digits, then letters in any number and any order. c counts
+        bytes, b k and m count bytes and multiply by 512, 1024 and 1048576,
+        l counts lines, and q, v and z are those options. The last of the
+        count letters wins, the multiplier with it. Anything else is GNU's
+        "invalid trailing option", whatever came before it.
+*/
+static b32 head_obsolete(head_tail_old address_to old)
+{
+        string_address word = program_argument_count() > 1 ? program_argument(1)
+                                                             : null;
+
+        if (!word || word[0] != '-' || !byte_is_digit(word[1]))
+                return 0;
+
+        positive length = string_span(word + 1, string_set_digits);
+        positive by = 1;
+
+        for (string_address at = word + 1 + length; *at; at++)
+        {
+                p8 letter = (p8)*at;
+
+                if (letter == 'c' || letter == 'b' || letter == 'k' || letter == 'm')
+                {
+                        old->by_bytes = true;
+                        by = letter == 'b' ? 512 : letter == 'k' ? 1024
+                           : letter == 'm' ? 1048576 : 1;
+                }
+                else if (letter == 'l')
+                        old->by_bytes = false;
+                else if (letter == 'q' || letter == 'v')
+                        old->banner = letter;
+                else if (letter == 'z')
+                        old->zero = true;
+                else
+                        return -(b32)text_invalid_context("invalid trailing option",
+                                                          letter, true);
+        }
+
+        old->count = head_tail_old_count(word + 1, length, by);
+        return 1;
+}
+
+/*
+        The POSIX edition the user asked tail to follow, which decides
+        whether the obsolete +N is a count or a file name: gnulib's
+        posix2_version, a whole decimal in _POSIX2_VERSION or else the
+        200809 coreutils is built for.
+*/
+static bipolar tail_posix_version()
+{
+        string_address said = env_get("_POSIX2_VERSION");
+
+        if (!said || !said[0])
+                return 200809;
+
+        string_address at = said + string_span(said, string_set_space);
+        bool negative = at[0] == '-';
+
+        at += at[0] == '-' || at[0] == '+';
+
+        positive digits = string_span(at, string_set_digits);
+
+        if (at[digits])
+                return 200809;
+
+        positive value = head_tail_old_count(at, digits, 1);
+        bipolar ceiling = 0x7fffffff;
+
+        if (value > (positive)ceiling)
+                return negative ? -ceiling - 1 : ceiling;
+
+        return negative ? -(bipolar)value : (bipolar)value;
+}
+
+/*
+        tail's obsolete word, taken the way parse_obsolete_option takes it:
+        only with at most one file after it (a - or a -- is allowed there),
+        a + only where the POSIX edition keeps the traditional form, and a -
+        followed by anything but -c or nothing at all. Digits (ten when
+        there are none), then b for 512-byte blocks, c for bytes or l for
+        lines, then f, and nothing else. Anything that does not fit leaves
+        the word to getopt, which reads a leading digit as the letter it has
+        not got.
+*/
+static b32 tail_obsolete(head_tail_old address_to old)
+{
+        b32 argc = program_argument_count();
+        string_address word = argc > 1 ? program_argument(1) : null;
+        string_address second = argc > 2 ? program_argument(2) : null;
+
+        if (!(argc == 2 || (argc == 3 && !(second[0] == '-' && second[1])) ||
+              ((argc == 3 || argc == 4) && string_equals(second, "--"))))
+                return 0;
+
+        bipolar edition = tail_posix_version();
+        bool obsolete_usage = edition < 200112;
+        bool traditional = obsolete_usage || edition >= 200809;
+        string_address at = word + 1;
+
+        if (word[0] == '+')
+        {
+                if (!traditional)
+                        return 0;
+                old->from_start = true;
+        }
+        else if (word[0] != '-' || (!obsolete_usage && !at[at[0] == 'c']))
+                return 0;
+
+        positive length = string_span(at, string_set_digits);
+        positive count = length ? head_tail_old_count(at, length, 1) : 10;
+        bool by_bytes = false;
+
+        at += length;
+
+        if (at[0] == 'b' || at[0] == 'c')
+        {
+                by_bytes = true;
+                if (at[0] == 'b')
+                        count = count > positive_max / 512 ? positive_max
+                                                           : count * 512;
+        }
+
+        at += at[0] == 'b' || at[0] == 'c' || at[0] == 'l';
+
+        bool follow = at[0] == 'f';
+
+        if (at[follow])
+        {
+                old->from_start = false;
+                return 0;
+        }
+
+        old->count = count;
+        old->by_bytes = by_bytes;
+        old->follow = follow;
+        return 1;
 }
 
 /*
@@ -6312,6 +6519,7 @@ static const argument_option tail_options[] = {
     {"max-unchanged-stats", 'M', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"debug", 'D', ARGUMENT_LONG_ONLY},
     {"zero-terminated", 'z'},
+    {"-presume-input-pipe", 'U', ARGUMENT_LONG_ONLY},
     {"f", 0},
     {null},
 };
@@ -6335,28 +6543,37 @@ static inline INLINE b32 text_head_tail(bool tail)
         text_count_last = 0;
         text_banner_last = 0;
         text_count_tail = tail;
-        text_count_marked = false;
+        text_banner_written = false;
 
-        if (!text_took(address_of taking))
+        head_tail_old old = {.count = 10};
+        b32 obsolete = tail ? tail_obsolete(address_of old)
+                            : head_obsolete(address_of old);
+
+        if (obsolete < 0)
                 return text_done(1);
 
-        string_address misplaced = text_digits_misplaced(address_of taking);
-
         /*
-                tail reads the obsolete -N before getopt is given a look, and
-                only when that word comes first and at most one file follows
-                it: GNU counts the words and gives the form up above three.
-                Anything more and getopt sees -N as a letter tail has not
-                got, which is the invalid context it names. head counts
-                nothing -- its obsolete word only has to come first.
+                A first word that begins with a digit and was not the
+                obsolete form is getopt's to read, and tail's getopt knows
+                the digits only to say they are out of place: tail -5 a b,
+                tail -2cX.
         */
-        if (!misplaced && tail && program_argument_count() > 3)
+        if (tail && !obsolete && program_argument_count() > 1)
         {
                 string_address first = program_argument(1);
 
                 if (first[0] == '-' && byte_is_digit(first[1]))
-                        misplaced = first;
+                        return text_done(text_invalid_context(
+                            "option used in invalid context", first[1], false));
         }
+
+        text_count_marked = old.from_start;
+        text_banner_last = old.banner;
+
+        if (!text_took_from(address_of taking, 1 + (positive)obsolete))
+                return text_done(1);
+
+        string_address misplaced = text_digits_misplaced(address_of taking);
 
         if (misplaced)
                 return text_done(text_invalid_context(
@@ -6369,28 +6586,16 @@ static inline INLINE b32 text_head_tail(bool tail)
         if (tail && (taking.flags & FILE_FLAG('P')))
                 string_diagnostic(&text_diagnostic, 0, null, "warning: PID ignored; --pid=PID is useful only when following");
 
-        positive count = 10;
-        bool by_bytes = text_count_last ? text_count_last == 'c'
-                                        : (taking.flags & FILE_FLAG('c')) != 0 &&
-                                              !(taking.flags & FILE_FLAG('n'));
+        positive count = text_count_last ? text_count_value : old.count;
+        bool by_bytes = text_count_last ? text_count_last == 'c' : old.by_bytes;
         bool marked = text_count_marked;
-        bool quiet = (taking.flags & FILE_FLAG('q')) != 0;
-        bool loud = (taking.flags & FILE_FLAG('v')) != 0;
-        string_address said = file_option_value(address_of taking,
-                                                by_bytes ? 'c' : 'n');
+        bool quiet = text_banner_last == 'q';
+        bool loud = text_banner_last == 'v';
 
-        if (text_banner_last)
-        {
-                quiet = text_banner_last == 'q';
-                loud = !quiet;
-        }
-
-        if (taking.flags & FILE_FLAG('z'))
+        if ((taking.flags & FILE_FLAG('z')) || old.zero)
                 text_delimiter = '\0';
 
-        if (!text_count_option(said, tail ? '+' : '-', address_of marked,
-                               address_of count))
-                return text_done(1);
+        head_tail_pipe_presumed = (taking.flags & FILE_FLAG('U')) != 0;
 
         /*
                 tail asked for nothing from the end, and not following, reads
@@ -6399,7 +6604,7 @@ static inline INLINE b32 text_head_tail(bool tail)
                 left where it stood. Measured with -n 0, -c 0 and -0, with and
                 without -q, -v and the following-only words warned about above.
         */
-        if (tail && !marked && !count &&
+        if (tail && !marked && !count && !old.follow &&
             !(taking.flags & (FILE_FLAG('f') | FILE_FLAG('F'))))
                 return text_done(0);
 
@@ -6412,7 +6617,7 @@ static inline INLINE b32 text_head_tail(bool tail)
                         continue;
 
                 if (headers)
-                        text_banner(i, i == 0);
+                        text_banner(i);
 
                 if (!tail)
                 {
@@ -6429,7 +6634,7 @@ static inline INLINE b32 text_head_tail(bool tail)
                 utility_arena.used = 0;
 
                 positive size = 0;
-                bool seekable = !marked &&
+                bool seekable = !marked && !head_tail_pipe_presumed &&
                                 text_regular_size(text_input.handle, address_of size);
 
                 if (seekable)
@@ -27604,8 +27809,8 @@ static fn cmp_pass(text_reader address_to side, positive count)
         }
 }
 
-// A skip or a limit: head's count after blanks and a plus, without the b, R
-// and Q GNU cmp refuses.
+// A skip or a limit: head's count after blanks and a plus, without the b, m,
+// R and Q GNU cmp refuses.
 static bool cmp_count_of(string_address value, positive address_to result)
 {
         if (!value)
@@ -27619,8 +27824,8 @@ static bool cmp_count_of(string_address value, positive address_to result)
 
         suffix += string_span(suffix, string_set_digits);
 
-        return *suffix != 'b' && *suffix != 'R' && *suffix != 'Q' &&
-               text_count_suffixed(value, result);
+        return *suffix != 'b' && *suffix != 'm' && *suffix != 'R' &&
+               *suffix != 'Q' && text_count_suffixed(value, result);
 }
 
 static fn cmp_octal(positive value)
