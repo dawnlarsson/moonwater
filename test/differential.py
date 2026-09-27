@@ -18135,7 +18135,12 @@ TEXT_UTILITIES = (
                    ("-C", "unsorted"), ("-cu", "repeats"), ("-c", "-C"), ("-o", "a.txt", "a.txt"), ("-o", "a.txt", "a.txt", "a.txt"),
                    ("-z", "-t", ":", "-k2,2n"), ("-t:", "-k2,2n"), ("-t:", "-k2,2nr", "-s"), ("-t:", "-k2,2n", "-u"),
                    ("-t:", "-k3,3", "-k2,2n"), ("-t:", "-k2.2,2.7n"), ("-k3n", "big"), ("-u", "big"), ("-n", "big"),
-                   ("--sort=random",), ("-g",), ("--debug",), ("--random-source=a.txt", "-R"))),
+                   ("--sort=random",), ("-g",), ("--debug",), ("--random-source=a.txt", "-R"),
+                   #   -o again is refused only for a different name, and as
+                   #   the second is read, before a later bad option.
+                   ("-o", "out", "-o", "out", "a.txt"), ("-o", "out", "--output=out", "a.txt"),
+                   ("-o", "out", "-o", "out2", "a.txt"), ("-o", "out", "-o", "out2", "-S", "x", "a.txt"),
+                   ("-S", "x", "-o", "out", "-o", "out2", "a.txt"), ("-o", "out", "-o", "out", "-c", "a.txt"))),
     Utility("sum",
             options=(Option("-r"), Option("-s"), Option("--sysv")),
             operands=((), ("a.txt",), ("a.txt", "b.txt"), ("-",), ("missing",), ("empty",), ("binary",), ("dir",), ("big",),

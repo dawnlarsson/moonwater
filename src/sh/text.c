@@ -29320,8 +29320,9 @@ static bool sort_size_valid(string_address said)
 }
 
 // -k comes as many times as there are keys, and one value per letter cannot
-// hold them: they are parsed as the options arrive. -o may come once.
-static positive sort_outputs;
+// hold them: they are parsed as the options arrive. -o may come again only
+// naming the same file, as GNU compares each -o with the one before it.
+static string_address sort_output_said;
 
 static b32 sort_option_status;
 static bool sort_tab_seen;
@@ -29340,7 +29341,12 @@ static string_address sort_sort_list =
 static bool sort_key_seen(p8 letter, string_address value)
 {
         if (letter == 'o')
-                sort_outputs++;
+        {
+                if (sort_output_said && !string_equals(sort_output_said, value))
+                        return string_diagnostic(&text_diagnostic, 0, null,
+                                                 "multiple output files specified");
+                sort_output_said = value;
+        }
 
         /*
                 --check reads its word where it is written and refuses a
@@ -29777,7 +29783,7 @@ static b32 text_sort()
 
         text_begin("sort");
         utility_arena.used = 0;
-        sort_outputs = 0;
+        sort_output_said = null;
         sort_option_status = 2;
         sort_tab_seen = false;
         sort_key_count = 0;
@@ -29820,9 +29826,6 @@ static b32 text_sort()
         checking = check_loud || check_quiet;
         checking_quiet = check_quiet;
         string_address output = file_option_value(address_of taking, 'o');
-
-        if (sort_outputs > 1)
-                return text_done(string_diagnostic(&text_diagnostic, 2, null, "multiple output files specified"));
 
         if (check_loud && check_quiet)
                 return text_done(string_diagnostic(&text_diagnostic, 2, null, "options '-cC' are incompatible"));
