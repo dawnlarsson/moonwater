@@ -2818,6 +2818,17 @@ static b32 join_separator;
    settles the output for every spelling, whichever order they came in. */
 static b32 join_output_written;
 
+/*
+        Where each input stands, for the one warning GNU gives per input:
+        "join: NAME:N: is not sorted: LINE", the name as given, the record's
+        number counting from one, and the record itself. Checking in the
+        default mode begins only once an unpairable line has been seen, and
+        a side that has been warned about is not checked again.
+*/
+static string_address join_names[2];
+static positive join_lines[2];
+static bool join_warned[2];
+
 static bool join_order_check(bool unpaired)
 {
         return join_order_mode == RELATION_ORDER_FORCE ||
@@ -2841,10 +2852,29 @@ static bool join_number(string_address value, positive address_to number)
 // same side are the incompatible join fields GNU refuses.
 static bool join_key_said[2];
 
+// Set once an option's refusal has been said in GNU's words, so the generic
+// one after the walk is not said as well.
+static bool join_complained;
+
+static bool join_complain(string_address format, string_address word)
+{
+        text_flush();
+        string_format(writer_stderr, format, word);
+        join_complained = true;
+        return false;
+}
+
 static bool join_key_set(positive side, positive field)
 {
+        //      GNU names the two fields as it holds them, from zero.
         if (join_key_said[side] && join_key[side] != field)
-                return string_diagnostic(&text_diagnostic, 0, null, "incompatible join fields");
+        {
+                text_flush();
+                string_format(writer_stderr, "join: incompatible join fields %p, %p\n",
+                              join_key[side], field);
+                join_complained = true;
+                return false;
+        }
 
         join_key_said[side] = true;
         join_key[side] = field;
@@ -2932,10 +2962,10 @@ static bool join_option_seen(p8 letter, string_address value)
                 bool zero = value[0] == '\\' && value[1] == '0' && !value[2];
 
                 if (value[0] && value[1] && !zero)
-                        return false;
+                        return join_complain("join: multi-character tab '%s'\n", value);
                 b32 separator = zero ? 0 : value[0] ? value[0] : '\n';
                 if (join_separator >= 0 && join_separator != separator)
-                        return false;
+                        return join_complain("join: incompatible tabs\n", null);
                 join_separator = separator;
                 if (value[0])
                         join_output_written = separator;
@@ -2944,27 +2974,29 @@ static bool join_option_seen(p8 letter, string_address value)
         {
                 positive field;
 
-                if (!join_number(value, address_of field) ||
-                    !join_key_set((positive)(letter - '1'), field))
+                if (!join_number(value, address_of field))
+                        return join_complain("join: invalid field number: '%s'\n", value);
+                if (!join_key_set((positive)(letter - '1'), field))
                         return false;
         }
         else if (letter == 'j')
         {
                 positive field;
 
-                if (!join_number(value, address_of field) ||
-                    !join_key_set(0, field) || !join_key_set(1, field))
+                if (!join_number(value, address_of field))
+                        return join_complain("join: invalid field number: '%s'\n", value);
+                if (!join_key_set(0, field) || !join_key_set(1, field))
                         return false;
         }
         else if (letter == 'a')
         {
                 if (!join_side(value, address_of join_unpaired))
-                        return false;
+                        return join_complain("join: invalid file number: '%s'\n", value);
         }
         else if (letter == 'v')
         {
                 if (!join_side(value, address_of join_only))
-                        return false;
+                        return join_complain("join: invalid file number: '%s'\n", value);
         }
         else if (letter == 'o')
         {
@@ -3407,18 +3439,28 @@ static bool join_advance(text_record_cursor address_to cursor,
         positive key_offset = cursor->key
             ? (positive)(cursor->key - cursor->record) : 0;
         positive old_key_length = cursor->key_length;
+        check = check && !join_warned[side];
+
         bool more = text_record_next(
             cursor, delimiter, check ? address_of old : null,
             old_length, text_record_hold);
 
         if (more)
         {
+                join_lines[side]++;
                 join_cursor_key(cursor, side, separated, separator);
 
                 if (check && sort_compare_bytes(
                         old + key_offset, old_key_length,
                         cursor->key, cursor->key_length, fold) > 0)
                 {
+                        text_flush();
+                        string_format(writer_stderr, "join: %s:%p: is not sorted: ",
+                                      join_names[side], join_lines[side]);
+                        if (cursor->length)
+                                writer_stderr((string_address)cursor->record, cursor->length);
+                        writer_stderr("\n", 0);
+                        join_warned[side] = true;
                         address_to disorder = true;
                 }
         }
@@ -3496,9 +3538,12 @@ static b32 text_join()
         join_order_mode = RELATION_ORDER_DEFAULT;
         join_separator = -1;
         join_output_written = -1;
+        join_complained = false;
 
         if (!text_took(address_of taking))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "invalid option value"));
+                return text_done(join_complained
+                                     ? 1
+                                     : string_diagnostic(&text_diagnostic, 1, null, "invalid option value"));
 
         if (text_files_count < 2)
                 return text_done(text_operand_trouble(text_files_count ? "missing operand after" : "missing operand",
@@ -3542,9 +3587,14 @@ static b32 text_join()
         bool have[2];
         //      As comm: the first input that cannot be read is the only one
         //      named.
+        join_names[0] = left_name;
+        join_names[1] = right_name;
+        join_warned[0] = join_warned[1] = false;
         have[0] = text_record_next(sides, text_delimiter, null, 0, null);
         have[1] = !sides[0].reader.failed &&
                   text_record_next(sides + 1, text_delimiter, null, 0, null);
+        join_lines[0] = have[0];
+        join_lines[1] = have[1];
 
         if (have[0])
                 join_cursor_key(sides, 0, separated, separator);
@@ -3596,8 +3646,10 @@ static b32 text_join()
 
                 if (order)
                 {
+                        //      The line that is unpairable is read past
+                        //      before GNU says it has seen one, so the
+                        //      record after it is not yet checked.
                         positive side = order > 0;
-                        unpaired = true;
                         if ((join_unpaired | join_only) & (1 << side))
                                 join_emit(side ? null : sides[0].record,
                                           side ? 0 : sides[0].length,
@@ -3609,6 +3661,7 @@ static b32 text_join()
                             sides + side, side, text_delimiter,
                             join_order_check(unpaired),
                             separated, separator, fold, address_of disorder);
+                        unpaired = true;
                         if (disorder &&
                             join_order_mode == RELATION_ORDER_FORCE)
                                 break;
@@ -3667,13 +3720,10 @@ static b32 text_join()
                                  next_right_key, next_right_key_length,
                                  fold) > 0);
 
-                        disorder |= next_disorder;
-
-                        if (next_disorder &&
-                            join_order_mode == RELATION_ORDER_FORCE)
-                        {
-                                break;
-                        }
+                        //      Out of order is the general path's to
+                        //      find and say, record by record.
+                        if (next_disorder)
+                                goto general;
 
                         if (!join_only)
                                 join_emit(sides[0].record, sides[0].length,
@@ -3691,15 +3741,21 @@ static b32 text_join()
                                                 next_right_length);
                         sides[1].key = next_right_key;
                         sides[1].key_length = next_right_key_length;
+                        join_lines[0]++;
+                        join_lines[1]++;
 
                         continue;
                 }
+
+        general:;
 
                 /* The right run is always buffered for the Cartesian walk.
                    Forced checking also retains the left run until both next
                    keys are validated, so a bad boundary emits no partial run. */
                 positive group_used = 0;
+                positive right_from = 0;
                 positive right_used = 0;
+                positive left_used = 0;
                 p8 address_to group_key = null;
                 positive group_key_length = 0;
                 bool checked = join_order_mode == RELATION_ORDER_FORCE;
@@ -3708,8 +3764,15 @@ static b32 text_join()
                 group = null;
                 group_room = 0;
 
-                for (b32 side = 1; side >= (checked ? 0 : 1); side--)
+                //      Checked, both runs are held, and the left one is read
+                //      first as GNU reads it, so a disorder in each is found
+                //      and named in GNU's order. Unchecked, only the right
+                //      run is held and the left streams past it.
+                for (b32 turn = 0; turn < (checked ? 2 : 1); turn++)
                 {
+                        b32 side = checked ? turn : 1;
+                        positive run_from = group_used;
+
                         do
                         {
                                 positive next = join_store(
@@ -3730,7 +3793,7 @@ static b32 text_join()
                                         join_stored address_to first =
                                             (join_stored address_to)group;
                                         join_view_key((p8 address_to)(first + 1),
-                                                      first->length, 1, separated,
+                                                      first->length, (positive)side, separated,
                                                       separator, address_of group_key,
                                                       address_of group_key_length);
                                 }
@@ -3745,7 +3808,12 @@ static b32 text_join()
                                      group_key, group_key_length,
                                      sides[side].key, sides[side].key_length, fold));
                         if (side)
+                        {
+                                right_from = run_from;
                                 right_used = group_used;
+                        }
+                        else
+                                left_used = group_used;
                         if (trouble || (disorder && checked))
                                 break;
                 }
@@ -3753,13 +3821,13 @@ static b32 text_join()
                 if (trouble || (disorder && checked))
                         break;
 
-                positive left_at = right_used;
+                positive left_at = 0;
                 do
                 {
                         join_stored address_to left = checked
                             ? (join_stored address_to)(group + left_at) : null;
                         if (!join_only)
-                                for (positive at = 0; at < right_used;)
+                                for (positive at = right_from; at < right_used;)
                                 {
                                         join_stored address_to stored =
                                             (join_stored address_to)(group + at);
@@ -3781,7 +3849,7 @@ static b32 text_join()
                                     sides, 0, text_delimiter,
                                     join_order_check(unpaired),
                                     separated, separator, fold, address_of disorder);
-                } while (checked ? left_at < group_used
+                } while (checked ? left_at < left_used
                                  : have[0] && !sort_compare_bytes(
                                        sides[0].key, sides[0].key_length,
                                        group_key, group_key_length, fold));
@@ -3800,7 +3868,8 @@ static b32 text_join()
                                 break;
                         }
 
-                        unpaired = true;
+                        //      A tail line is not an unpairable line to
+                        //      GNU: only the loop above sets that.
                         if ((join_unpaired | join_only) & (1 << side))
                                 join_emit(side ? null : sides[0].record,
                                           side ? 0 : sides[0].length,
@@ -3816,10 +3885,11 @@ static b32 text_join()
         }
 
         bool failed = sides[0].reader.failed || sides[1].reader.failed;
-        bool order_failed = disorder &&
-            (join_order_mode == RELATION_ORDER_FORCE || unpaired);
+        //      Every warning given fails join, and in the default mode it
+        //      ends with GNU's summary; --check-order stopped at its first.
+        bool order_failed = disorder;
 
-        if (order_failed)
+        if (order_failed && join_order_mode != RELATION_ORDER_FORCE)
                 string_diagnostic(&text_diagnostic, 0, null, "input is not in sorted order");
 
         text_record_close(sides);

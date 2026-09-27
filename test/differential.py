@@ -16521,6 +16521,9 @@ INPUTS.update({
     "text_tac_runs": b"1._2.__3.___4._5{_6__{7\n8._",
     "text_nl_long_delimiters": (b"head\nfoofoofoo\nh1\nfoofoo\nb1\nb2\nfoo\nf1\nfoofoofoofoo\n"
                                 b"xyz\nfoofo\n\\:\\:\nfoo\nx\n"),
+    "text_join_reversed": b"2 a\n1 b\n",
+    "text_join_late_disorder": b"1 a\n3 b\n2 c\n5 d\n",
+    "text_join_blank_tail": b"a\nx\n\n",
     "text_names0_empty": b"a.txt\x00\x00b.txt\x00",
     "text_names0_only_empty": b"\x00\x00",
     "text_names0_big": b"big\x00a.txt\x00",
@@ -18137,7 +18140,23 @@ TEXT_UTILITIES = (
                    ("-o", "auto", "-z", "-a1", "-a2", "zleft", "zright"), ("-a1", "-e", "EMPTY", "-o", "0,1.2,2.3", "left", "right"),
                    ("--check-order", "-a1", "-", "goodrun"), ("-v1", "-v2", "left", "right"), ("-a1", "-a2", "left", "right"),
                    ("-z", "--nocheck-order", "-t", "", "zleft", "zleft"), ("--nocheck-order", "-t", "", "-t", "", "left", "left"),
-                   ("--nocheck-order", "-t", "", "-t", ":", "left", "left"), ("--nocheck-order", "-t", ":", "-t", ",", "fleft", "fleft"))),
+                   ("--nocheck-order", "-t", "", "-t", ":", "left", "left"), ("--nocheck-order", "-t", ":", "-t", ",", "fleft", "fleft"),
+                   #   GNU checks order by default only once a line has been
+                   #   unpairable, and not the line that made it so; a warning
+                   #   names the file and line, once a file; the tail after
+                   #   the other file ends is not unpairable to it.
+                   *({"argv": argv, "stdin": stdin, "fixture": "text"} for argv, stdin in (
+                       (("-", "empty"), "text_join_reversed"), (("-12", "-", "right"), "text_join_reversed"),
+                       (("-", "unordered"), "text_join_reversed"), (("-", "right"), "text_join_late_disorder"),
+                       (("--check-order", "-", "right"), "text_join_late_disorder"),
+                       (("right", "-"), "text_join_late_disorder"), (("-a1", "-", "right"), "text_join_late_disorder"),
+                       (("-", "unordered2"), "text_join_blank_tail"), (("unordered2", "-"), "text_join_blank_tail"),
+                       (("--check-order", "-", "unordered"), "text_join_reversed"),
+                       (("-a1", "-a2", "-j3", "-e", ".", "-o", "auto", "-", "right"), "text_join_late_disorder"),
+                       (("--header", "--check-order", "-", "right"), "text_join_late_disorder"))),
+                   ("--check-order", "unordered", "unordered"), ("--check-order", "badrun", "goodrun"),
+                   ("-j", "x", "left", "right"), ("-1", "1", "-1", "2", "left", "right"), ("-a", "3", "left", "right"),
+                   ("-t", "ab", "left", "right"), ("-t", "a", "-t", "b", "left", "right"))),
     Utility("line", operands=((), ("a.txt",)), stdin=("text", "empty", "nonl", "newline", "nul", "edge_65535", "edge_65536", "edge_65537", "text_utf8"), fixture="text"),
     Utility("look",
             options=(Option("-a"), Option("--alternative"), Option("-d"), Option("--alphanum"), Option("-f"),
