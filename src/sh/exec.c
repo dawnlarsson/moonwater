@@ -335,20 +335,31 @@ static bool exec_condition_inside;
 
 /* A line run inside the one being run, with lexer storage of its own or
    only parser marks of its own. */
-static fn exec_run_nested(string_address text, bool lexer)
+static fn exec_run_nested(string_address text, bool lexer, positive start)
 {
         lex_frame frame;
+
+        /* A trap action's lines are not the script's: counting them moved
+           $LINENO on by one for good each time a trap ran. The action counts
+           its own from start, the line before its first. */
+        positive line = shell_line_number;
 
         if (lexer)
                 lex_nest_enter(address_of frame);
         else
+        {
                 parse_nest_enter();
+                shell_line_number = start;
+        }
         run_lines(text);
         shell_input_end();
         if (lexer)
                 lex_nest_leave(address_of frame);
         else
+        {
                 parse_nest_leave();
+                shell_line_number = line;
+        }
 }
 
 static COLD fn exec_trap_condition(positive number)
@@ -366,7 +377,14 @@ static COLD fn exec_trap_condition(positive number)
         exec_condition_inside = true;
         exec_signal = EXEC_SIGNAL_NONE;
         exec_tested = false;
-        exec_run_nested(action, false);
+        /* An ERR, DEBUG or RETURN action reads the line of the command that
+           raised it, as bash's does. */
+        {
+                positive line = exec_line ? (positive)exec_line
+                                          : shell_line_number;
+
+                exec_run_nested(action, false, line ? line - 1 : 0);
+        }
         exec_condition_inside = false;
 
         shell_status = kept_status;
@@ -2189,7 +2207,7 @@ static COLD fn shell_jobs_replaced(positive at)
         //      the middle of the jobs that asked for this, and a line fed to
         //      it without its own lexer storage is a second sentence written
         //      over the first.
-        exec_run_nested((string_address)joined.bytes, true);
+        exec_run_nested((string_address)joined.bytes, true, 0);
 }
 
 /* A spec that names no job, or more than one. jobs and disown handed a bare
@@ -5186,7 +5204,7 @@ static fn history_run_text(writer write, string_address text)
         (void)write;
         string_format(log_error, "%s\n", text);
         log_flush();
-        exec_run_nested(text, true);
+        exec_run_nested(text, true, 0);
 }
 
 /* A name another user cannot prepare before fc gets there.  Entropy failure
@@ -5288,7 +5306,7 @@ static b32 history_edit_run_editor(string_address command)
                 shell_child_default(SIGNAL_INTERRUPT);
                 shell_child_default(SIGNAL_QUIT);
                 exec_child_began();
-                exec_run_nested(command, true);
+                exec_run_nested(command, true, 0);
                 exec_child_leave(shell_status);
         }
 
@@ -9844,7 +9862,9 @@ fn exec_traps()
                 // the same two calls eval makes. One line at a time used to
                 // be one line only, and the second command of an action was
                 // never run.
-                exec_run_nested(action, false);
+                // A signal's action counts its lines from one, as both
+                // references do.
+                exec_run_nested(action, false, 0);
 
                 if (exec_line_aborted())
                 {
@@ -13853,6 +13873,10 @@ static b32 exec_node_kind(b32 index)
                 if (shell_bash_compat)
                         exec_pipe_status_one(status);
 
+                /* A function the command called ran lines of its own; an ERR
+                   action for the call reads the line of the call. */
+                if (parse_nodes[index].line)
+                        exec_line = parse_nodes[index].line;
                 exec_errexit(status);
 
                 /* failglob (and other command-level expansion failures)

@@ -13482,6 +13482,27 @@ def shell_lang_command_lookup(rng):
     return "command-lookup-" + shape, shell_ALL, shell_program(setup, "{ " + line + "\n} 2>&1 | sed \"s|$PWD|DIR|g; s|^[^ ]*: line [0-9]*: ||; s|^[^ ]*: [0-9]*: ||\"")
 
 
+#       $LINENO around trap actions. An action's lines were counted as the
+#       script's, so every trap that ran moved $LINENO on by one for good,
+#       and an ERR action read the line after the failing command, or the
+#       line inside the function it called.
+def shell_lang_lineno_traps(rng):
+    err = rng.random() < 0.5
+    lines = ["f() {", "  false", "}", "g() { return 3; }"]
+    if err:
+        lines.append(rng.choice(("trap 'echo \"err=$LINENO\"' ERR",
+                                 "trap 'echo \"err=$LINENO\"\necho \"two=$LINENO\"' ERR")))
+    lines.append(rng.choice(("trap 'echo \"sig=$LINENO\"' USR1", "trap : USR1",
+                             "trap 'echo \"sig=$LINENO\"\n: two\necho \"third=$LINENO\"' USR1")))
+    for _ in range(rng.randint(3, 7)):
+        lines.append(rng.choice(("kill -USR1 $$", "echo \"at=$LINENO\"", "false", "f", "g", "true",
+                                 "kill -USR1 $$; echo \"same=$LINENO\"", "if false; then :; fi",
+                                 "false || true", "x=$(false)")))
+    lines.append('echo "end=$LINENO"')
+    return ("lineno-traps-" + ("err" if err else "signal"), shell_BASH if err else shell_ALL,
+            shell_program(*lines), ("command", "stdin", "file"))
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16107,6 +16128,7 @@ SHELL_FAMILIES = (
     shell_lang_escaped_pattern_bytes,
     shell_lang_nul_bytes,
     shell_lang_command_lookup,
+    shell_lang_lineno_traps,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),
