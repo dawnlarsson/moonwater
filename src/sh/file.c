@@ -28152,6 +28152,8 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         file_facts destination_entry;
         bool destination_exists = false;
         bool destination_entry_exists = false;
+        bipolar there_looked = -ERROR_NO_ENTRY;
+        bipolar entry_looked = -ERROR_NO_ENTRY;
 
         if (fresh)
         {
@@ -28161,12 +28163,14 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         }
         else
         {
-                destination_exists =
-                    file_look_code(destination_directory, destination,
-                                   destination_flags, address_of there) == 0;
-                destination_entry_exists = file_look(
+                there_looked = file_look_code(destination_directory,
+                                              destination, destination_flags,
+                                              address_of there);
+                destination_exists = there_looked == 0;
+                entry_looked = file_look_code(
                     destination_directory, destination, AT_SYMLINK_NOFOLLOW,
                     address_of destination_entry);
+                destination_entry_exists = entry_looked == 0;
         }
         bool destination_is_link = destination_entry_exists &&
             (destination_entry.mode & MODE_FORMAT) == MODE_LINK;
@@ -28262,9 +28266,27 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                     address_of there, address_of cp_status))
                 return true;
 
+        /* GNU looks at the destination before anything is said: a name it
+           cannot look at for want of search permission, the name or the
+           link it holds, is refused as the stat that failed. */
+        if (!moving && !fresh && entry_looked < 0 &&
+            entry_looked != -ERROR_NO_ENTRY)
+                return string_report(log_error, false, "cp: cannot stat %w: %s\n",
+                                     writer_shell_quoted_name, destination_shown,
+                                     file_reason(entry_looked));
+        if (!moving && destination_is_link && !destination_exists &&
+            kind != MODE_DIRECTORY && !cp_replace && !cp_hard && !cp_symbolic &&
+            there_looked != -ERROR_NO_ENTRY &&
+            !(there_looked == -ERROR_LOOP && cp_force))
+                return string_report(log_error, false, "cp: cannot stat %w: %s\n",
+                                     writer_shell_quoted_name, destination_shown,
+                                     file_reason(there_looked));
+
         /* GNU copy.c emit_verbose before the copy, so a later open/create
-           failure still writes the arrow. -n skip above does not. */
-        if (!moving && cp_loud)
+           failure still writes the arrow. -n skip above does not. A
+           directory is announced only when it is made, not when it is
+           there to copy into. */
+        if (!moving && cp_loud && kind != MODE_DIRECTORY)
                 file_backup_told(source_shown, destination_shown,
                                  (string_address) "'",
                                  (string_address) "' -> '");
@@ -28272,12 +28294,18 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         /* GNU copy.c refuses a dangling destination symlink unless
            POSIXLY_CORRECT; a live one is the thing written through.
            Verbose already fired so -v still prints the arrow. */
-        if (!moving && destination_is_link && !cp_force && !cp_replace &&
-            kind != MODE_DIRECTORY && !destination_exists)
+        /* -f does not change that: GNU's open of the new name meets the
+           link, and only a failed open of an existing destination is
+           retried after removing it. A link that is not dangling but could
+           not be followed -- a search permission missing on the way -- is
+           GNU's failed stat, named for what it was. */
+        if (!moving && destination_is_link && !cp_replace && !cp_hard &&
+            !cp_symbolic && kind != MODE_DIRECTORY && !destination_exists)
         {
-                return string_report(log_error, false,
-                                     "cp: not writing through dangling symlink %w\n",
-                              writer_shell_quoted_name, destination_shown);
+                if (there_looked == -ERROR_NO_ENTRY)
+                        return string_report(log_error, false,
+                                             "cp: not writing through dangling symlink %w\n",
+                                             writer_shell_quoted_name, destination_shown);
         }
 
         if (!moving && (cp_hard || cp_symbolic) && kind != MODE_DIRECTORY)
@@ -28614,12 +28642,18 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         {
                 if (!facts_held)
                         system_close(source_handle);
-                string_format(log_error, "%s: cannot open directory %w: %s\n", program,
+                string_format(log_error, "%s: cannot %s directory %w: %s\n", program,
+                              destination_exists ? (string_address) "open"
+                                                 : (string_address) "create",
                               writer_shell_quoted_name, destination_shown,
                               file_reason(destination_handle));
                 mv_across_said |= moving;
                 return false;
         }
+        if (!moving && cp_loud && !destination_exists)
+                file_backup_told(source_shown, destination_shown,
+                                 (string_address) "'",
+                                 (string_address) "' -> '");
 
         file_walk walk = {
             .handle = source_handle,
@@ -28738,12 +28772,53 @@ static bool file_copy_one(bipolar source_directory, string_address source,
            the source goes once the copy is out. */
         bool publish = staged && attributed >= 0 && (complete || !moving);
         bipolar published = 0;
+
+        /* The stage is renamed into place, and renaming a directory to
+           another parent rewrites its "..", which the directory's own mode
+           must allow. One whose mode leaves its owner no write -- cp -a of
+           a dr-x directory -- stays writable until it is in place and is
+           given its mode there; given it first, the rename was refused, the
+           tree stayed behind in the stage where nothing could remove it,
+           and cp answered 1 without a word. */
+        file_facts made;
+        bool lock_after = publish &&
+                          file_look_code(destination_handle, (string_address)"",
+                                         AT_EMPTY_PATH, address_of made) >= 0 &&
+                          !(made.mode & 0200);
+        if (lock_after &&
+            file_change_mode_handle(destination_handle,
+                                    (made.mode & 07777) | 0200) < 0)
+                lock_after = false;
         if (publish)
-                published = file_copy_publish(
-                    address_of protected, destination_directory,
-                    destination, destination_handle, attributed, moving,
-                    destination_entry_exists, address_of destination_entry,
-                    AT_REMOVEDIR);
+        {
+                bipolar placed = -1;
+
+                published = file_stage_publish_protected_keep_at(
+                    address_of protected, destination_directory, destination,
+                    destination_handle, attributed, !destination_entry_exists,
+                    destination_entry_exists ? address_of destination_entry
+                                             : null,
+                    AT_REMOVEDIR, lock_after ? address_of placed : null, true);
+                if (moving && (published == -ERROR_EXISTS ||
+                               published == -ERROR_AGAIN))
+                        mv_collision_seen = true;
+                if (placed >= 0)
+                {
+                        bipolar locked = file_change_mode_handle(
+                            placed, made.mode & 07777);
+                        system_close(placed);
+                        if (locked < 0)
+                                attributed = locked;
+                }
+                if (published < 0 && !mv_collision_seen)
+                {
+                        string_format(log_error,
+                                      "%s: cannot create directory %w: %s\n",
+                                      program, writer_shell_quoted_name,
+                                      destination_shown, file_reason(published));
+                        mv_across_said |= moving;
+                }
+        }
 
         if (attributed < 0)
                 string_format(
@@ -29055,7 +29130,7 @@ static fn cp_pair(string_address source, string_address destination)
             (destination_entry.mode & MODE_FORMAT) == MODE_LINK &&
             !destination_exists;
         bool refuse_dangling = kind != MODE_DIRECTORY && dangling_dest &&
-                               !cp_force && !cp_replace &&
+                               !cp_replace &&
                                cp_update_policy != 'n' &&
                                cp_update_policy != 'F' &&
                                !file_backup_kind;

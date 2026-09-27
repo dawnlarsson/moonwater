@@ -6809,6 +6809,41 @@ def files_made_cases(tool, flags):
     return tuple(cases)
 
 
+#       Directories whose modes leave their owner no write, copied whole: the
+#       copy is made writable to be filled and given the source's mode at the
+#       end, and a copy made in a stage and renamed into place must get the
+#       rename done first -- cp -a of a dr-x directory once failed without a
+#       word and left its stage behind. Beside them, links into a directory
+#       that cannot be searched, which are not dangling.
+FIXTURES["files_readonly"] = {
+    "D/f": files_file(b"x\n", 1000000000),
+    "D/sub/g": files_file(b"g\n", 1010000000),
+    "D/sub": files_dir(1020000000, 0o555),
+    "D": files_dir(1030000000, 0o555),
+    "E/h": files_file(b"h\n", 1040000000, 0o444),
+    "E": files_dir(1050000000, 0o500),
+    "F": files_dir(1060000000, 0o555),
+    "T": files_dir(1070000000),
+    "shut/in": files_file(b"in\n", 1080000000),
+    "shut": files_dir(1090000000, 0o000),
+    "into": files_link("shut/in", 1100000000),
+    "gone": files_link("nowhere", 1110000000),
+    "a": files_file(b"a\n", 1120000000),
+}
+
+
+def files_readonly_cases():
+    cases = []
+    for flags in ((), ("-a",), ("-r",), ("-rp",), ("-rv",), ("-rl",), ("-a", "-u"), ("-rT",), ("-av",)):
+        for operands in (("D", "DD"), ("D", "T"), ("E", "EE"), ("F", "FF"), ("D", "E", "T"), ("D/sub", "S"),
+                         ("D/.", "T"), ("D", "F")):
+            cases.append({"fixture": "files_readonly", "argv": flags + operands})
+    for flags in ((), ("-f",), ("--remove-destination",), ("-b",), ("-v",), ("-d",)):
+        for operands in (("a", "into"), ("a", "gone"), ("into", "c"), ("a", "shut/in")):
+            cases.append({"fixture": "files_readonly", "argv": flags + operands})
+    return tuple(cases)
+
+
 FILES_UTILITIES = (
     # yes is the one program here the engine cannot bound: it writes until
     # something stops it, so both sides die on the harness's file-size limit
@@ -7376,7 +7411,7 @@ FILES_UTILITIES = (
                                   ("-df", "--attributes-only"), ("-a", "--attributes-only", "--remove-destination"),
                                   ("-rd", "--attributes-only", "-b"))
                     for pair in (("sl", "g"), ("d", "g"), ("sl", "sub/f")))
-            + files_skip_cases("cp")
+            + files_skip_cases("cp") + files_readonly_cases()
             + files_made_cases("cp", ("-f", "-b", "--backup=numbered", "-d", "-R", "-l", "-s", "-v", "-a",
                                       "-dR", "--remove-destination", "-n")),
             normalize=files_sorted_lines),
@@ -40501,13 +40536,11 @@ PINNED = r"""
 {"candidate":{"effects":"4e3b26fe227d564cc2f9e0a2a8f0adfb9cf5f7f0fae7e0ccd5d97f25d3275142","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-rl","dir","linked"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_yes","utility":"cp"},"domain":"files","id":"4e63308a788e0c8e","kind":"bug","list":"ledger","reason_id":"r89","utility":"cp"},
 {"candidate":{"effects":"d762b55273765bb2f40aa068c884810f76f43f0a19baf5c6be8d1111757d219b","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--backup=numbered","d/f","f"],"domain":"files","family":null,"fixture":"files_self","input_kind":"command","mode":null,"stdin":"files_yes","tier":"pinned","utility":"cp"},"domain":"files","id":"507d39422ad77d00","kind":"deliberate","list":"ledger","reason":"cp pins its source before it removes or backs up the destination, so a destination that is the source under another spelling (d/f through d -> ., the source link itself) is copied from the pinned inode; the reference reopens the source by name after removing it and fails with the name gone, losing a link it was asked to copy","reference":{"effects":"f44c708a8a5259935c3b29ad292e0c7043a158821509b875716bb9d8d1abfade","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"cp"},
 {"candidate":{"effects":"d762b55273765bb2f40aa068c884810f76f43f0a19baf5c6be8d1111757d219b","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--backup=numbered","f","d/f"],"domain":"files","family":null,"fixture":"files_self","input_kind":"command","mode":null,"stdin":"files_yes","tier":"pinned","utility":"cp"},"domain":"files","id":"591b56ab5ccf539b","kind":"deliberate","list":"ledger","reason":"cp pins its source before it removes or backs up the destination, so a destination that is the source under another spelling (d/f through d -> ., the source link itself) is copied from the pinned inode; the reference reopens the source by name after removing it and fails with the name gone, losing a link it was asked to copy","reference":{"effects":"f44c708a8a5259935c3b29ad292e0c7043a158821509b875716bb9d8d1abfade","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"cp"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["a.txt","shut/copy"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_no","utility":"cp"},"domain":"files","id":"5c9504e57d731e77","kind":"bug","list":"ledger","reason_id":"r89","utility":"cp"},
 {"candidate":{"effects":"3c4fe9ea9b6736596fc6ec58392feb4ec7aeb9637118141192fad3114761bb16","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--backup=numbered","-f","sl","d/sl"],"domain":"files","family":null,"fixture":"files_self","input_kind":"command","mode":null,"stdin":"files_yes","tier":"pinned","utility":"cp"},"domain":"files","id":"65f69084e7bcddb3","kind":"deliberate","list":"ledger","reason":"cp pins its source before it removes or backs up the destination, so a destination that is the source under another spelling (d/f through d -> ., the source link itself) is copied from the pinned inode; the reference reopens the source by name after removing it and fails with the name gone, losing a link it was asked to copy","reference":{"effects":"f44c708a8a5259935c3b29ad292e0c7043a158821509b875716bb9d8d1abfade","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"cp"},
 {"candidate":{"effects":"7b650e3d0a68dff02b1f9a5995b2fc766664e7b5c56ca4bdf9dd5fd8d67cfea0","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--preserve=xattr","a.txt","copy"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_yes","utility":"cp"},"domain":"files","id":"6b6ac395ddbaa51c","kind":"bug","list":"ledger","reason_id":"r89","utility":"cp"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-r","dir","dir/sub/x"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_yes","utility":"cp"},"domain":"files","id":"71e8b022021c1bbe","kind":"bug","list":"ledger","reason_id":"r89","utility":"cp"},
 {"candidate":{"effects":"ba3650474f19c657b3291dcdfaeded56227dca45a9797b777fd3abf45c1914a9","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--remove-destination","sl","sl"],"domain":"files","family":null,"fixture":"files_self","input_kind":"command","mode":null,"stdin":"files_yes","tier":"pinned","utility":"cp"},"domain":"files","id":"8ad6052b0f20591d","kind":"deliberate","list":"ledger","reason":"cp pins its source before it removes or backs up the destination, so a destination that is the source under another spelling (d/f through d -> ., the source link itself) is copied from the pinned inode; the reference reopens the source by name after removing it and fails with the name gone, losing a link it was asked to copy","reference":{"effects":"3fee76e75b2eec4c046657ca3f6a51d7fa93faba7d2258daa9bf823fa8a4ef04","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"cp"},
 {"candidate":{"effects":"7bfab7e3652b9d326d7683bd837c569ade325e6704cf72bac8ec0821ade9c634","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a","-b","-L","sl","sl"],"domain":"files","family":null,"fixture":"files_self","input_kind":"command","mode":null,"stdin":"files_yes","tier":"pinned","utility":"cp"},"domain":"files","id":"96c76bc9b904ab6c","kind":"deliberate","list":"ledger","reason":"cp pins its source before it removes or backs up the destination, so a destination that is the source under another spelling (d/f through d -> ., the source link itself) is copied from the pinned inode; the reference reopens the source by name after removing it and fails with the name gone, losing a link it was asked to copy","reference":{"effects":"f44c708a8a5259935c3b29ad292e0c7043a158821509b875716bb9d8d1abfade","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"cp"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["a.txt","shut/copy"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_yes","utility":"cp"},"domain":"files","id":"9abca83535ae8cc4","kind":"bug","list":"ledger","reason_id":"r89","utility":"cp"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["unreadable","copy"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_yes","utility":"cp"},"domain":"files","id":"aee1b8ae22d63ba9","kind":"bug","list":"ledger","reason_id":"r89","utility":"cp"},
 {"candidate":{"effects":"669bddb331f7d74f373c8d177c2eece617f782ed5c7344fe9b65f85926151a4a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-rL","dir","copied"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_yes","utility":"cp"},"domain":"files","id":"b09e10cff4a5fadb","kind":"bug","list":"ledger","reason_id":"r89","utility":"cp"},
 {"candidate":{"effects":"e77110b43e72fa10ce1850b42f4057e35be5abcaef52c7d36d6976ae8262f0df","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--attributes-only","--remove-destination","f","d/f"],"domain":"files","family":null,"fixture":"files_self","input_kind":"command","mode":null,"stdin":"files_yes","tier":"pinned","utility":"cp"},"domain":"files","id":"b59191c3e078d387","kind":"deliberate","list":"ledger","reason":"cp pins its source before it removes or backs up the destination, so a destination that is the source under another spelling (d/f through d -> ., the source link itself) is copied from the pinned inode; the reference reopens the source by name after removing it and fails with the name gone, losing a link it was asked to copy","reference":{"effects":"10666ea854f690373d865e9bdc3bdbe3bbbd9ea44ecfbdf0fca2ca7541f8ea7c","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"cp"},
