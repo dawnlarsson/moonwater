@@ -13891,6 +13891,34 @@ def shell_lang_regex_operand(rng):
         "[[ " + subject + " =~ " + pattern + " && -n x ]] && echo both || echo not"))
 
 
+#       break and continue with operands bash does not take: a word that is
+#       no number ends the shell, a second word too, and -- ends options.
+#       `while :; do echo hi; break oops; done` printed the complaint on
+#       every pass and never stopped.
+def shell_lang_loop_control_arguments(rng):
+    verb = rng.choice(("break", "continue"))
+    operands = rng.choice(("oops", "-- 1", "--", "1 2", "0", "-1", "2", "1x", "'' ", "-- oops"))
+    wrapper = rng.choice(("", "command ", "eval "))
+    command = verb + " " + operands
+    if wrapper == "eval ":
+        command = "eval " + shell_quote(command)
+    else:
+        command = wrapper + command
+    loop = rng.choice(("while", "for", "nested", "function", "subshell"))
+    if loop == "while":
+        body = "n=0; while [ $n -lt 3 ]; do n=$((n+1)); echo \"pass=$n\"; " + command + "; done"
+    elif loop == "for":
+        body = "for i in 1 2 3; do echo \"i=$i\"; " + command + "; echo after-$i; done"
+    elif loop == "nested":
+        body = "for i in 1 2; do for j in a b; do echo \"$i$j\"; " + command + "; done; done"
+    elif loop == "function":
+        body = "f() { for i in 1 2; do echo \"f$i\"; " + command + "; done; echo f-end; }; f"
+    else:
+        body = "for i in 1 2; do ( " + command + " ); echo \"sub=$?\"; done"
+    return ("loop-control-arguments", shell_BASH, shell_program(
+        "{ " + body + "; } 2>/dev/null", 'echo "end=$?"'))
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16526,6 +16554,7 @@ SHELL_FAMILIES = (
     shell_lang_indirect_elements,
     shell_lang_cfor_forms,
     shell_lang_regex_operand,
+    shell_lang_loop_control_arguments,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),

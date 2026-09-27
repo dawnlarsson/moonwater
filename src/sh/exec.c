@@ -9637,13 +9637,27 @@ bool exec_control_builtin(string_address name, bool run)
                         return true;
                 }
 
-                if (shell_argc > 1 &&
-                    !exec_control_number(shell_argv[1], false,
+                positive first = 1;
+
+                //      bash takes an end of options, and one count at most:
+                //      a second word ends the shell with 1.
+                if (shell_bash_compat && first < shell_argc &&
+                    word_is(shell_argv[first], "--"))
+                        first++;
+                if (shell_bash_compat && shell_argc > first + 1)
+                {
+                        shell_told("%s: too many arguments\n", name);
+                        expand_fatal_status(1);
+                        return true;
+                }
+
+                if (shell_argc > first &&
+                    !exec_control_number(shell_argv[first], false,
                                          address_of levels))
                 {
                         bipolar counted = 0;
                         bool numeric = shell_bash_compat &&
-                                       exec_control_integer(shell_argv[1],
+                                       exec_control_integer(shell_argv[first],
                                                             address_of counted);
 
                         //      A count past the field is still a count, and
@@ -9655,7 +9669,7 @@ bool exec_control_builtin(string_address name, bool run)
                         else if (numeric)
                         {
                                 shell_told("%s: %s: loop count out of "
-                                    "range\n", name, shell_argv[1]);
+                                    "range\n", name, shell_argv[first]);
                                 exec_signal = EXEC_SIGNAL_BREAK;
                                 exec_signal_level = (b32)exec_loop_depth;
                                 shell_status = 1;
@@ -9668,12 +9682,20 @@ bool exec_control_builtin(string_address name, bool run)
                                       "argument required\n"
                                     : "%s: Illegal number: "
                                       "%s\n",
-                                    name, shell_argv[1]);
-                                //      A non-integer is a special-builtin
-                                //      error. Aborting the line here made
-                                //      `command continue bad` fatal, and
-                                //      let eval of `break bad` return so
-                                //      the next -c line still printed end=.
+                                    name, shell_argv[first]);
+                                /* bash leaves on a count that is no number,
+                                   command and eval or not; carrying on went
+                                   round `while :; do break oops; done` for
+                                   ever. For dash it is a special-builtin
+                                   error. Aborting the line here made
+                                   `command continue bad` fatal, and let eval
+                                   of `break bad` return so the next -c line
+                                   still printed end=. */
+                                if (shell_bash_compat)
+                                {
+                                        expand_fatal_status(2);
+                                        return true;
+                                }
                                 shell_status = 2;
                                 exec_special_error_note();
                                 return true;
@@ -12380,6 +12402,11 @@ static bipolar exec_spawn_node(b32 index, bool background)
                    is the exception and keeps them, because `$(jobs -p)` is
                    how a script asks this shell what it is running. */
                 job_forget();
+
+                /* A subshell is outside every loop of the shell that made
+                   it: bash's (break) there says it is only meaningful in a
+                   loop, whatever its operand. */
+                exec_loop_depth = 0;
 
                 /* The async environment is already a subshell. Turning an
                    explicit (...) node into its equivalent group avoids a
