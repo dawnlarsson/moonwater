@@ -17977,6 +17977,12 @@ _TEXT_WRITE_CASES = (
     ("pr", "small", "full"), ("pr", "yes", "full"), ("pr", "smallin", "closed"), ("pr", "small", "filled"),
     ("fmt", "small", "full"), ("fmt", "smallin", "closed"), ("fmt", "small", "filled"),
     ("ptx", "small", "full"), ("ptx", "smallin", "closed"),
+    #       seq and shuf name the reason of a refused write, as GNU's do.
+    ("seq", "args", "full", "3"), ("seq", "args", "full", "100000"), ("seq", "args", "closed", "3"),
+    ("seq", "args", "full", "1", "0.5", "3"), ("seq", "args", "tmpfs", "1", "200000"),
+    ("shuf", "args", "full", "-e", "a", "b"), ("shuf", "args", "full", "-i", "1-5"),
+    ("shuf", "args", "closed", "-e", "a"),
+    ("shuf", "numbers", "tmpfs"),
     ("od", "small", "errfull", "-w1"), ("tail", "args", "errfull", "-n0", "--retry", "small"),
     ("numfmt", "args", "errfull", "--debug", "1000"), ("cut", "small", "errfull", "-c1", "missing"),
 )
@@ -17984,7 +17990,7 @@ _TEXT_WRITE_CASES = (
 
 _TEXT_WRITE_TOOLS = ("cat", "head", "tail", "tr", "cut", "sed", "sort", "base64", "base32", "basenc",
                      "grep", "paste", "nl", "expand", "unexpand", "fold", "od", "uniq", "comm",
-                     "join", "tac", "wc", "rev", "tee", "pr", "fmt", "ptx", "numfmt")
+                     "join", "tac", "wc", "rev", "tee", "pr", "fmt", "ptx", "seq", "shuf", "numfmt")
 
 
 def _text_write_valid(argv):

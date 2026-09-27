@@ -25551,13 +25551,33 @@ static const argument_option shuf_options[] = {
     {null},
 };
 
+/*
+        GNU's shuf writes through stdio, -o included (it reopens standard
+        output on the name), and closes it at exit, so a refused write is
+        "write error" and the reason whatever the output was. The reason is
+        the one the kernel gave the write here; the buffering below writes
+        through system_write_all_checked so that it is kept.
+*/
+static bipolar shuf_write_reason;
+
 static bool shuf_write_failed(shuf_output address_to output)
 {
-        if (output->name)
-                string_format(log_error, "shuf: write error on %w\n", writer_terminal_name,
-                              output->name);
-        else
-                log_error("shuf: write error\n", 0);
+        (void)output;
+        string_format(log_error, "shuf: write error: %s\n",
+                      file_reason(shuf_write_reason ? shuf_write_reason : -5));
+        return false;
+}
+
+static bool shuf_output_write(shuf_output address_to output,
+                              string_address bytes, positive length)
+{
+        system_write_result wrote = system_write_all_checked(
+            (positive)output->handle, bytes, length);
+
+        if (wrote.bytes == length)
+                return true;
+
+        shuf_write_reason = wrote.error ? wrote.error : -5;
         return false;
 }
 
@@ -25602,39 +25622,34 @@ static positive shuf_uniform(file_random_state address_to random,
 
 static bool shuf_output_flush(shuf_output address_to output)
 {
-        return buffered_flush((positive)output->handle, file_transfer,
-                               address_of output->used) ||
+        positive used = output->used;
+
+        output->used = 0;
+        return !used || shuf_output_write(output, (string_address)file_transfer, used) ||
                shuf_write_failed(output);
 }
 
 static bool shuf_output_send(shuf_output address_to output,
                              string_address bytes, positive length)
 {
-        return buffered_write((positive)output->handle, file_transfer,
-                               sizeof(file_transfer), address_of output->used,
-                               bytes, length) ||
-               shuf_write_failed(output);
+        if (output->used + length > sizeof(file_transfer) &&
+            !shuf_output_flush(output))
+                return false;
+
+        if (length >= sizeof(file_transfer))
+                return shuf_output_write(output, bytes, length) ||
+                       shuf_write_failed(output);
+
+        memory_copy_apart(file_transfer + output->used, bytes, length);
+        output->used += length;
+        return true;
 }
 
 static bool shuf_output_record(shuf_output address_to output,
                                shuf_record address_to record, p8 delimiter)
 {
-        if (record->length < sizeof(file_transfer))
-        {
-                p8 address_to bytes = buffered_reserve(
-                    (positive)output->handle, file_transfer, sizeof(file_transfer),
-                    address_of output->used, record->length + 1);
-                if (!bytes)
-                        return shuf_write_failed(output);
-                memory_copy_apart(bytes, record->text, record->length);
-                bytes[record->length] = delimiter;
-                return true;
-        }
         return shuf_output_send(output, record->text, record->length) &&
-               (buffered_write_byte((positive)output->handle, file_transfer,
-                                     sizeof(file_transfer), address_of output->used,
-                                     delimiter) ||
-                shuf_write_failed(output));
+               shuf_output_send(output, (string_address)address_of delimiter, 1);
 }
 
 static bool shuf_output_number(shuf_output address_to output, positive number,
@@ -34682,6 +34697,22 @@ static p8 address_to seq_count_room;
 static positive seq_count_have;
 
 //      last is null for an unbounded count, which the reference spells inf.
+/*
+        A refused write, said as GNU's seq says it at exit: "write error"
+        and the reason. The log writer keeps only that a write failed, so the
+        reason is asked again of standard output with an empty write, which
+        a closed or read-only descriptor and /dev/full still refuse with
+        theirs; a file that has simply filled takes an empty write, and its
+        reason is the full disk that stopped it.
+*/
+static b32 seq_write_failed()
+{
+        bipolar probe = system_call_3(syscall(write), 1, (positive)"", 0);
+
+        return string_report(log_error, 1, "seq: write error: %s\n",
+                             file_reason(probe < 0 ? probe : -28));
+}
+
 static b32 seq_count_digits(string_address first, string_address last,
                             positive step, p8 separator)
 {
@@ -34714,7 +34745,7 @@ static b32 seq_count_digits(string_address first, string_address last,
                 written = true;
 
                 if (log_failed())
-                        return 1;
+                        return seq_write_failed();
 
                 positive carry = step;
                 positive at = stop;
@@ -34753,7 +34784,7 @@ static b32 seq_count_digits(string_address first, string_address last,
         if (written)
                 log("\n", 1);
         log_flush();
-        return log_failed() ? 1 : 0;
+        return log_failed() ? seq_write_failed() : 0;
 }
 
 /*
@@ -36047,7 +36078,7 @@ static b32 seq_wide_numbers(seq_format address_to format, seq_wide first,
                                              "seq: write error: Value too large for"
                                              " defined data type\n");
                 if (log_failed())
-                        return 1;
+                        return seq_write_failed();
                 if (beyond)
                         break;
 
@@ -36085,7 +36116,7 @@ static b32 seq_wide_numbers(seq_format address_to format, seq_wide first,
 
         log("\n", 1);
         log_flush();
-        return log_failed() ? 1 : 0;
+        return log_failed() ? seq_write_failed() : 0;
 }
 
 /*
@@ -36232,7 +36263,7 @@ static b32 seq_decimal_numbers(seq_format address_to format, seq_decimal first,
                 //      inf, or a last number past what anyone could read,
                 //      would otherwise count on for ever into nothing.
                 if (log_failed())
-                        return 1;
+                        return seq_write_failed();
 
                 value = (bipolar)((positive)value +
                                  (positive)step.coefficient * (records - 1));
@@ -36250,7 +36281,7 @@ static b32 seq_decimal_numbers(seq_format address_to format, seq_decimal first,
         if (written)
                 log("\n", 1);
         log_flush();
-        return 0;
+        return log_failed() ? seq_write_failed() : 0;
 }
 
 
