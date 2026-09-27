@@ -21,6 +21,7 @@
 | TLS net fuzz continuous (local) | same harnesses; longer budget | `sh test/fuzz_net` (`MOONWATER_FUZZ_*`) |
 | TLS net fuzz deeper campaign (local) | same harnesses; bounded deeper-than-smoke | `sh test/fuzz_campaign` (200k/120s + report; see `test/fuzz_corpus/README.md`) |
 | Release fuzz attach | machine-readable sanitizer + corpus inventory + run exits | `sh test/fuzz_net --report` → `artifacts/fuzz-report.txt` |
+| Security test hygiene (procedural) | literal `check()` names in CHECK_net; no tracked corpus `*.bin`; harness wiring; soft-skip lanes; seed generator | `python3 test/security_hygiene.py` (also at start of `lane_net` / `lane_tar`) |
 
 ## Fuzz corpora and release publish
 

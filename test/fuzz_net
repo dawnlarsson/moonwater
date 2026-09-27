@@ -71,8 +71,8 @@ count_seeds() {
                 echo 0
                 return
         fi
-        # Portable: one seed file per line; empty dir → 0.
-        find "$dir" -type f ! -name '.*' | wc -l | tr -d ' '
+        # Only materialized *.bin seeds (ignore stray README/pyc).
+        find "$dir" -type f -name '*.bin' ! -name '.*' | wc -l | tr -d ' '
 }
 
 clang_bin=$(command -v clang || true)

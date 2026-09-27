@@ -3590,12 +3590,9 @@ lane_socket() { freestanding_checks_lane socket socket; }
 #       http_response_framing holds the response parser to a written
 #       accept/refuse matrix (and names deliberate disagreements with
 #       Python's http.client).
-#       tls_der_fuzz is a bounded libFuzzer ASan/UBSan run over
-#       tls_parse_extensions / tls_parse_cert (seed corpus under
-#       test/fuzz_corpus/tls_der/); NOT RUN (2) when clang/libFuzzer is absent.
-#       tls_hs_fuzz is the same bounded pattern over handshake fragmentation
-#       (tls_handshake_one_append / tls_encrypted_flight_append; corpus under
-#       test/fuzz_corpus/tls_hs/).
+#       tls_der_fuzz / tls_hs_fuzz are bounded libFuzzer ASan/UBSan runs
+#       (seeds materialized from test/fuzz_corpus/generate_seeds.py; *.bin
+#       gitignored). NOT RUN (2) when clang/libFuzzer is absent.
 #       MSan is opt-in only (`sh test/msan_net` / MOONWATER_MSAN=1); not part of
 #       lane_net and not a CI push job. Scope is hosted wire-parser lifts +
 #       pad/uninit proves + short DER/HS under MSan — not full CHECK_net.
@@ -3603,8 +3600,11 @@ lane_socket() { freestanding_checks_lane socket socket; }
 #       oracle lane into "did not run". Exit 1 from fuzz stays a hard fail.
 #       Oracle harnesses (tls_chains / https_downgrade / http_response_framing)
 #       still propagate exit 2 into net_outcome when the lane was otherwise 0.
+#       security_hygiene.py folds procedural guards (literal check() names,
+#       no tracked corpus bins, harness wiring, seed generator).
 lane_net()
 {
+        python3 test/security_hygiene.py || return 1
         freestanding_checks_lane net net
         net_outcome=$?
         python3 test/differential.py --harness tls_chains
@@ -3649,6 +3649,7 @@ lane_bowl() { freestanding_checks_lane bowl bowl; }
 #       MOONWATER_PATHNAME_RACE_SECONDS (lane leaves both unset).
 lane_tar()
 {
+        python3 test/security_hygiene.py || return 1
         freestanding_checks_lane tar tar
         tar_outcome=$?
         if ! need_shell; then
