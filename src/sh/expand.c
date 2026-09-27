@@ -3787,6 +3787,8 @@ static bipolar arith_evaluate(string_address text)
         return value;
 }
 
+static string_address arith_subscripts_held(string_address text);
+
 /*
         Parameter, command and quote expansion of an arithmetic body.
 
@@ -3798,7 +3800,8 @@ static string_address arith_expand_body(string_address text)
         if (!string_get(text + string_span_without_set(text, "$`\"'\\")))
                 return text;
 
-        return expand_capture(text, true, EXPAND_CAPTURE_TEXT);
+        return expand_capture(arith_subscripts_held(text), true,
+                              EXPAND_CAPTURE_TEXT);
 }
 
 /*
@@ -4006,6 +4009,79 @@ static PURE string_address expand_bracket_end(string_address at, p8 open,
         expand_bracket_end_mode((at), '{', '}', false, false)
 #define expand_parameter_end(at, posix_double) \
         expand_bracket_end_mode((at), '{', '}', (posix_double), true)
+
+/*
+        An array subscript is expanded once, by the evaluator as it reads the
+        element (arith_element_name), which is where bash expands it. The
+        body used to be expanded whole first, so the subscript was expanded
+        twice and data became code: with i='$(cmd)', $(( a[$i] )) ran cmd
+        where bash stops at an operand it cannot read, and (( m[$k]++ )) read
+        quotes and brackets out of an associative key. Each subscript is
+        carried through the body's expansion as text, its $, `, " and \
+        escaped, and the evaluator expands it the one time.
+
+        Answers the body unchanged when it has no subscript to carry.
+*/
+static string_address arith_subscripts_held(string_address text)
+{
+        p8 address_to made;
+        p8 address_to out;
+        string_address at = text;
+
+        if (!string_first_of(text, '['))
+                return text;
+
+        made = shell_store_take(address_of expand_store,
+                                string_length(text) * 2 + 1);
+        if (!made)
+                return text;
+        out = made;
+
+        while (string_get(at))
+        {
+                p8 value = string_get(at);
+                string_address stop = null;
+
+                if (value == '\\' && string_get(at + 1))
+                        stop = at + 2;
+                else if (value == '\'' || value == '"')
+                        stop = expand_quoted_run(at, value);
+                else if (value == '`')
+                        stop = lex_nesting(at);
+                else if (value == '$' &&
+                         (string_is(at + 1, '(') || string_is(at + 1, '{')))
+                        stop = lex_nesting(at + 1);
+                else if (value == '[' && at > text &&
+                         expand_name_character(string_get(at - 1)))
+                {
+                        string_address close =
+                            expand_bracket_end(at + 1, '[', ']');
+
+                        if (close)
+                        {
+                                *out++ = '[';
+                                for (at++; at < close; at++)
+                                {
+                                        p8 inner = string_get(at);
+
+                                        if (inner == '$' || inner == '`' ||
+                                            inner == '"' || inner == '\\')
+                                                *out++ = '\\';
+                                        *out++ = inner;
+                                }
+                                continue;
+                        }
+                }
+
+                if (!stop || stop <= at)
+                        stop = at + 1;
+                while (at < stop)
+                        *out++ = string_get(at++);
+        }
+
+        *out = 0;
+        return made;
+}
 
 /*
         Whether this process is a substitution's child.
@@ -4820,6 +4896,27 @@ static PURE b32 expand_nounset_status(b32 indirect)
         return indirect ? 1 : 2;
 }
 
+/*
+        What bash calls discarding the command: the error ends the command
+        being read, not the shell. A script read from a file or from standard
+        input goes on at its next command; a -c string is a single command to
+        that reader and ends, and so does a subshell. dash keeps its fatal
+        answer, and so does an interactive shell's own line recovery.
+*/
+static COLD fn expand_discard(b32 status)
+{
+        if (!shell_bash_compat || shell_is_interactive ||
+            string_is(shell_option_flags, 'c'))
+        {
+                expand_fatal_status(status);
+                return;
+        }
+
+        shell_status = status;
+        expand_failed = true;
+        exec_expand_input_error();
+}
+
 static COLD fn expand_fatal_status(b32 status)
 {
         shell_status = status;
@@ -4893,7 +4990,9 @@ static HOT string_address expand_arithmetic_finish(string_address ready,
 
                 if (arith_bad)
                 {
-                        if (!arith_unset)
+                        /* A subscript that could not be read has already
+                           said so and ended what it had to end. */
+                        if (!arith_unset && !expand_failed)
                         {
                                 shell_arith_report(writer_stderr_once, null,
                                                    ready);
@@ -5521,7 +5620,8 @@ static COLD fn expand_indirect_error()
 
 static bool expand_slice_number(string_address text, bipolar address_to value)
 {
-        string_address ready = expand_capture(text, true, EXPAND_CAPTURE_TEXT);
+        string_address ready = expand_capture(arith_subscripts_held(text), true,
+                                              EXPAND_CAPTURE_TEXT);
 
         if (expand_failed)
                 return false;
@@ -6833,7 +6933,7 @@ static COLD string_address expand_subscript_key(string_address base,
                         if (!arith_unset)
                                 shell_arith_report(writer_stderr_once, null,
                                                    key);
-                        expand_fatal_status(shell_bash_compat ? 1 : 2);
+                        expand_discard(shell_bash_compat ? 1 : 2);
                         return null;
                 }
 

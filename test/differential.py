@@ -13827,6 +13827,32 @@ def shell_lang_errexit_redirect(rng):
         "f() { echo in-f; }", options, "echo start", body + " 2>/dev/null", "echo \"after=$?\"")
 
 
+#       A subscript inside arithmetic is expanded once, when the element is
+#       read. A value that looks like code stays data: `$(...)` in an
+#       indexed subscript is an operand the expression cannot read, and in
+#       an associative one it is the key's bytes, as are quotes and
+#       brackets. Expanding the whole expression first and the subscript
+#       again ran what a variable held.
+shell_SUBSCRIPT_VALUES = ("'$(: > ran)'", "'`: > ran`'", "'a]b'", "\"x'y\"", "'x\"y'", "'1+1'", "i", "'a b'",
+                          "'$i'", "'k'", "'${i}'", "'$((1))'")
+shell_SUBSCRIPT_CONTEXTS = ("echo $(( a[$v] ))", "(( a[$v] )); echo $?", "(( a[$v]++ )); echo $?",
+                            "(( a[$v] = 7 )); echo $?", "(( a[$v] += 2 )); echo $?", "echo $(( a[$v] + a[i] ))",
+                            "for (( j = a[$v]; j < 1; j++ )); do :; done; echo $?", "[[ a[$v] -eq 0 ]]; echo $?",
+                            "[[ 1 -lt a[$v] ]]; echo $?", "s=abcdef; echo \"${s:a[$v]:2}\"",
+                            "echo \"${a[@]:a[$v]:1}\"", "echo $(( a[\"$v\"] ))")
+
+
+def shell_lang_arithmetic_subscripts(rng):
+    kind = rng.choice(("indexed", "associative"))
+    value = rng.choice(shell_SUBSCRIPT_VALUES)
+    context = rng.choice(shell_SUBSCRIPT_CONTEXTS)
+    setup = "a=(0 5 9)" if kind == "indexed" else "declare -A a=([k]=4 [i]=2)"
+    return ("arithmetic-subscripts-" + kind, shell_BASH, shell_program(
+        "rm -f ran; i=1; v=" + value, setup, context + " 2>/dev/null",
+        "echo \"status=$? count=${#a[@]}\"", "[ -e ran ] && echo RAN || echo data",
+        "printf '<%s>' \"${a[$v]-unset}\"; echo"))
+
+
 def shell_lang_nounset_forms(rng):
     form = rng.choice(("$x", "${x}", "${x-}", "${x:-d}", "${x+set}", "${#x}", "${x#a}", "${x%a}", "${x/a/b}", "${x:0:1}",
                        "${x^^}", "${x@Q}", "$1", "${10}", "$@", "$*", "\"$@\"", "\"$*\"", "${@}", "$#", "$!", "${!x}", "${a[0]}",
@@ -15689,6 +15715,7 @@ SHELL_FAMILIES = (
     shell_lang_errexit_functions,
     shell_lang_heredoc_expansion,
     shell_lang_arithmetic_edges,
+    shell_lang_arithmetic_subscripts,
     shell_lang_read_field_edges,
     shell_lang_nested_parameter,
     shell_lang_dynamic_names,

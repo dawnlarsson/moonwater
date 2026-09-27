@@ -11135,7 +11135,8 @@ static bool exec_arithmetic_value(string_address text,
                 return true;
         }
 
-        if (!arith_unset)
+        /* A subscript that could not be read has said so already. */
+        if (!arith_unset && !expand_failed)
                 shell_arith_report(log_error, command, ready);
         shell_store_rewind(address_of expand_store, mark);
         return false;
@@ -11779,14 +11780,23 @@ static bool conditional_primary(bool invert)
                 {
                         string_address left;
                         string_address right;
+                        bool integer;
                         bool value;
 
                         if (!conditional_binary_ready())
                                 return false;
 
-                        left = conditional_expand(raw, false);
+                        /* An integer operand is arithmetic, whose subscripts
+                           the evaluator expands: expanding them here too
+                           ran a $(...) that a value held. */
+                        integer = kind >= TEST_EQUAL &&
+                                  kind <= TEST_GREATER_EQUAL;
+                        left = conditional_expand(
+                            integer ? arith_subscripts_held(raw) : raw, false);
+                        right = conditional_word[conditional_at++];
                         right = conditional_expand(
-                            conditional_word[conditional_at++], pattern);
+                            integer ? arith_subscripts_held(right) : right,
+                            pattern);
 
                         if (expand_failed)
                                 return false;
@@ -11807,7 +11817,7 @@ static bool conditional_primary(bool invert)
                                 return word_is(op, "!=") ? !value : value;
                         }
 
-                        if (kind >= TEST_EQUAL && kind <= TEST_GREATER_EQUAL)
+                        if (integer)
                                 return conditional_integer(kind, left, right);
 
                         test_bad = false;
