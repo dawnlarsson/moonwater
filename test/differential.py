@@ -9607,7 +9607,19 @@ MISC_UTILITIES = (
                    ("--format=x1z", "--skip-bytes=2", "--read-bytes=7", "--output-duplicates", "--address-radix=x", "a.txt"),
                    ("--width=4", "-c", "a.txt"), ("--width", "-c", "long"), ("--width=5", "-t", "x2", "a.txt"),
                    ("--strings=4", "binary"), ("--strings", "binary"), ("--endian=little", "-t", "x2", "binary"),
-                   ("-w128", "-t", "x1", "-v", "long"), ("-w256", "-c", "-v", "long"))),
+                   ("-w128", "-t", "x1", "-v", "long"), ("-w256", "-c", "-v", "long"),
+                   #   Any width that is a multiple of the widest type, as
+                   #   GNU takes it; -N cutting a string -S still prints;
+                   #   an offset operand too large for intmax_t stops od,
+                   #   and one that is no offset at all is a file name.
+                   ("-w300", "-t", "x1", "-v", "long"), ("-w512", "-c", "long"), ("-w65537", "-a", "-An", "a.txt"),
+                   ("-w65537", "-t", "x1", "-An", "binary"), ("-w1000", "-t", "x2", "long"), ("-w70000", "-c", "-v", "long"),
+                   ("-w1002", "-t", "x4", "-t", "c", "long"),
+                   ("-N10", "-S10", "long"), ("-N9", "-S10", "long"), ("-N11", "-S10", "-j5", "long"), ("-N4", "-S4", "a.txt"),
+                   ("-", "7" * 255), ("-", "9" * 254 + "."), ("-", "0x" + "f" * 253), ("+" + "7" * 30,),
+                   ("a.txt", "7" * 30 + "x"), ("++0",), ("+-0",), ("+ 0",), ("--", "-0"), ("a.txt", "0x"),
+                   ("a.txt", "1.b"), ("a.txt", "1.B"), ("long", "1B"), ("a.txt", "12."), ("a.txt", "0x1b"),
+                   ("a.txt", "1a."), ("a.txt", "8"), ("+0x1",), ("+1..",))),
 
     Utility("hexdump",
             options=(Option("-b"), Option("-c"), Option("-C"), Option("-d"), Option("-o"), Option("-x"),
@@ -17038,13 +17050,16 @@ _TEXT_STREAM_CASES = (
     ("tac", "pipe"), ("tac", "file"), ("tac", "offset"), ("tac", "big"), ("tac", "full"),
     ("tac", "pipe", "-b"), ("tac", "big", "-s", "0"), ("tac", "full", "-r", "-s", "[05]"),
     ("tac", "sharedpipe"),
+    ("od", "shared", "-An", "-N3", "-c"), ("od", "shared", "-N4", "-tx1"),
+    ("od", "shared", "-An", "-j2", "-N2", "-c"), ("od", "shared", "-An", "-N3", "-S1"),
+    ("od", "sharedpipe", "-An", "-N3", "-c"), ("od", "offset", "-An", "-tx1"),
     ("cat", "live"), ("cat", "live", "-v"), ("cat", "live", "-n"), ("cat", "live", "-E"),
     ("cat", "live", "-A"), ("cat", "live", "-s"), ("cat", "live", "-b"), ("cat", "live", "-T"),
     ("cat", "pipe", "-n"), ("cat", "big", "-v"), ("cat", "offset", "-n"),
     ("head", "shared", "-c", "3"), ("head", "shared", "-n", "1"),
     ("wc", "offset"), ("wc", "offset", "-c"), ("nl", "pipe"),
 )
-_TEXT_STREAM_TOOLS = ("tac", "cat", "head", "wc", "nl")
+_TEXT_STREAM_TOOLS = ("tac", "cat", "od", "head", "wc", "nl")
 
 
 def _text_stream_valid(argv):

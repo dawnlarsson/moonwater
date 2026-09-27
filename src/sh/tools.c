@@ -8873,52 +8873,116 @@ static bool dump_number(string_address source, positive address_to value)
         return dd_size(source, value);
 }
 
-/* od's traditional offset operand: octal unless a 0x prefix (hex) or a
-   trailing . (decimal) says otherwise, and a trailing b counts blocks. */
-static bool dump_od_offset(string_address text, positive address_to value)
+/*
+        od's traditional offset operand, read as GNU's parse_old_offset reads
+        it: one + may lead, and then a digit must. A dot followed by nothing,
+        or by b or B and nothing, makes the digits before it decimal; else a
+        0x or 0X makes them hexadecimal, and anything else is octal. What
+        follows the digits may be one b (512 bytes) or B (1024), and nothing
+        after it -- which is xstrtol with "bB" as its suffixes, so a hex b is
+        a digit and an 8 in octal ends the number where the suffix is refused.
+
+        Three answers rather than two, because GNU has three: a word that is
+        no offset at all is a file name, but one that is an offset too large
+        for an intmax_t stops od there, naming it with ERANGE's reason.
+*/
+#define DUMP_OFFSET_OK 0
+#define DUMP_OFFSET_NOT 1
+#define DUMP_OFFSET_LARGE 2
+
+static p8 dump_od_offset_read(string_address text, positive address_to value)
 {
-        positive base = 8;
+        string_address s = text + (text[0] == '+');
+
+        if (!byte_is_digit((p8)s[0]))
+                return DUMP_OFFSET_NOT;
+
+        string_address dot = null;
+
+        for (string_address at = s; *at; at++)
+                if (*at == '.')
+                {
+                        dot = at;
+                        break;
+                }
+
+        if (dot && dot[(dot[1] == 'b' || dot[1] == 'B') + 1])
+                dot = null;
+
+        positive base = dot ? 10 : s[0] == '0' && (s[1] == 'x' || s[1] == 'X') ? 16 : 8;
+        string_address at = base == 16 ? s + 2 : s;
+        positive parsed = 0;
+        bool large = false;
+        bool any = false;
+
+        for (;; at++)
+        {
+                p8 byte = (p8)*at;
+                positive digit;
+
+                if (byte >= '0' && byte <= '9')
+                        digit = (positive)(byte - '0');
+                else if (base == 16 && (byte | 0x20) >= 'a' && (byte | 0x20) <= 'f')
+                        digit = (positive)((byte | 0x20) - 'a' + 10);
+                else
+                        break;
+
+                if (digit >= base)
+                        break;
+
+                any = true;
+
+                if (parsed > ((positive)1 << 63) / base ||
+                    parsed * base + digit >= ((positive)1 << 63))
+                        large = true;
+                else
+                        parsed = parsed * base + digit;
+        }
+
+        // "0x" with no digit after it is strtol's 0 followed by an x.
+        if (!any)
+        {
+                if (base != 16)
+                        return DUMP_OFFSET_NOT;
+                at = s + 1;
+        }
+
+        if (dot && at == dot)
+                at++;
+
         positive multiple = 1;
-        p8 digits[64];
-        positive length;
 
-        if (string_is(text, '+'))
-                text++;
-        length = string_length(text);
-        if (!length || length >= sizeof(digits))
-                return false;
-        memory_copy(digits, text, length + 1);
-
-        if (digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X'))
+        if (*at == 'b' || *at == 'B')
         {
-                base = 16;
-                memory_copy(digits, digits + 2, length - 1);
-                length -= 2;
+                multiple = *at == 'b' ? 512 : 1024;
+                at++;
         }
-        if (length && digits[length - 1] == 'b')
-        {
-                multiple = 512;
-                digits[--length] = end;
-        }
-        if (length && digits[length - 1] == '.')
-        {
-                if (base == 16)
-                        return false;
-                base = 10;
-                digits[--length] = end;
-        }
-        if (!length)
-                return false;
 
-        string_address at = digits;
-        positive parsed;
+        if (*at)
+                return DUMP_OFFSET_NOT;
 
-        if (!string_digits_checked(address_of at, base, address_of parsed) ||
-            string_get(at) || parsed > positive_max / multiple)
-                return false;
+        if (large || parsed > (((positive)1 << 63) - 1) / multiple)
+                return DUMP_OFFSET_LARGE;
 
         address_to value = parsed * multiple;
-        return true;
+        return DUMP_OFFSET_OK;
+}
+
+/* The same, where a word too large is a failure already reported. */
+static bool dump_od_offset(string_address text, positive address_to value,
+                           bool address_to failed)
+{
+        p8 answer = dump_od_offset_read(text, value);
+
+        if (answer == DUMP_OFFSET_LARGE)
+        {
+                text_flush();
+                string_format(writer_stderr, "od: %w: Numerical result out of range\n",
+                              writer_shell_name, text);
+                address_to failed = true;
+        }
+
+        return answer == DUMP_OFFSET_OK;
 }
 
 /* GNU's integer type widths are the width of the widest value, including a
@@ -9119,8 +9183,7 @@ static bool dump_od_row_width()
                 return true;
         }
 
-        if (dump_arguments.width > DUMP_BLOCK ||
-            dump_arguments.width % unit)
+        if (dump_arguments.width % unit)
         {
                 dump_od_warn_width = dump_arguments.width;
                 dump_od_warn_unit = unit;
@@ -9491,11 +9554,44 @@ static fn dump_canonical_line(p8 address_to bytes, positive length,
         text_out_used -= 96 - made;
 }
 
+/*
+        A row wider than DUMP_BLOCK, which GNU's od takes at any width: -w is
+        a multiple of the widest type and nothing else. The common widths
+        keep their buffers on the stack; a wider one gets its row, the row
+        before it, the formatted line (seven bytes a byte covers the widest
+        field, its gap and the z column) and the hex spelling here, once.
+*/
+static byte_store dump_wide;
+static p8 address_to dump_wide_previous;
+static p8 address_to dump_wide_line;
+static p8 address_to dump_wide_hex;
+
+static bool dump_wide_ready(positive width)
+{
+        if (width <= DUMP_BLOCK)
+                return true;
+
+        if (width > positive_max / 16 ||
+            !byte_store_reserve(address_of dump_wide, width * 11 + 64, 4096))
+        {
+                text_flush();
+                writer_stderr("od: memory exhausted\n", 0);
+                return false;
+        }
+
+        dump_wide_previous = dump_wide.bytes + width;
+        dump_wide_hex = dump_wide.bytes + width * 2;
+        dump_wide_line = dump_wide.bytes + width * 4;
+        return true;
+}
+
 static fn dump_regular_line(dump_format address_to format,
                             p8 address_to bytes, positive length,
                             positive address, bool first)
 {
-        p8 line[DUMP_LINE_MAX];
+        p8 stack_line[DUMP_LINE_MAX];
+        p8 address_to line = dump_arguments.width > DUMP_BLOCK ? dump_wide_line
+                                                               : stack_line;
         positive made = 0;
         positive fields = (length + format->size - 1) / format->size;
         positive full_fields = dump_arguments.width / format->size;
@@ -9544,7 +9640,10 @@ static fn dump_regular_line(dump_format address_to format,
         // integer/character field loop unchanged for all other formats.
         if (format->kind == DUMP_HEX_BYTES)
         {
-                p8 hex[DUMP_BLOCK * 2];
+                p8 stack_hex[DUMP_BLOCK * 2];
+                p8 address_to hex = dump_arguments.width > DUMP_BLOCK
+                                        ? dump_wide_hex
+                                        : stack_hex;
                 memory_into_hex(hex, bytes, length);
 
                 for (positive field = 0; field < fields; field++)
@@ -9620,6 +9719,25 @@ static fn dump_row(p8 address_to bytes, positive length, positive address)
         }
 }
 
+/*
+        GNU's od turns its input's buffering off when -N limits it, so it
+        reads no byte past the last one it formats: `cat f | { od -N3 -c;
+        cat; }` leaves the rest of f for the cat after it. The same read,
+        asked for no more than is still wanted, whenever a limit was given;
+        without one, and for hexdump, the input is read in whole buffers.
+*/
+static bool text_fill_amount_od(positive wanted)
+{
+        if (text_input.position < text_input.filled)
+                return true;
+
+        if (dump_arguments.od && dump_arguments.limit != TEXT_UNSET &&
+            wanted < TEXT_READ_MAX)
+                return text_fill_amount(wanted);
+
+        return text_fill_amount(TEXT_READ_MAX);
+}
+
 /* Skip with one seek for an ordinary file.  procfs' size-zero regular files
    fail text_regular_size's probe and fall back to the same buffered read as a
    pipe, so the optimization never turns a dynamic pseudo-file into EOF. */
@@ -9644,7 +9762,7 @@ static positive dump_skip_input(positive wanted)
 
         positive taken = 0;
 
-        while (taken < wanted && text_fill())
+        while (taken < wanted && text_fill_amount_od(wanted - taken))
         {
                 positive available = text_input.filled - text_input.position;
                 positive take = wanted - taken < available ? wanted - taken
@@ -9682,11 +9800,36 @@ static bool dump_input_is_directory(string_address name)
         return true;
 }
 
+/*
+        Put back what was read and not used before letting an input go.
+        GNU's od reads through stdio and closes standard input at exit, and
+        glibc's fclose moves a seekable descriptor back to where the reader
+        stopped, so `(od -N3 -c; od -N3 -c) < file` shows abc and then def.
+        A pipe cannot be put back and is not asked to be.
+*/
+static fn dump_close()
+{
+        positive unread = text_input.filled - text_input.position;
+
+        if (unread && text_input.opened == false && !text_input.failed)
+                system_seek(text_input.handle, (positive)-(bipolar)unread,
+                            FILE_SEEK_CUR);
+
+        text_close();
+}
+
 static b32 dump_run(positive first, positive count)
 {
-        p8 block[DUMP_BLOCK];
-        p8 previous[DUMP_BLOCK];
+        p8 stack_block[DUMP_BLOCK];
+        p8 stack_previous[DUMP_BLOCK];
         positive width = dump_arguments.width;
+
+        if (!dump_wide_ready(width))
+                return text_done(1);
+
+        p8 address_to block = width > DUMP_BLOCK ? dump_wide.bytes : stack_block;
+        p8 address_to previous = width > DUMP_BLOCK ? dump_wide_previous
+                                                    : stack_previous;
         positive held = 0;
         positive offset = 0;
         positive skip = dump_arguments.skip;
@@ -9767,11 +9910,12 @@ static b32 dump_run(positive first, positive count)
 
                 if (!left)
                 {
-                        text_close();
+                        dump_close();
                         break;
                 }
 
-                while (!skip && left && !text_out_failed && text_fill())
+                while (!skip && left && !text_out_failed &&
+                       text_fill_amount_od(left))
                 {
                         positive available = text_input.filled - text_input.position;
 
@@ -9831,7 +9975,7 @@ static b32 dump_run(positive first, positive count)
                 if (text_input.failed)
                         read_failed = true;
 
-                text_close();
+                dump_close();
         }
 
         /* A skip that outlived every input is only worth complaining about
@@ -9938,7 +10082,7 @@ static b32 dump_strings(positive first, positive count, positive minimum)
 
                         while (available && !done)
                         {
-                                if (!have && limited && left <= minimum)
+                                if (!have && limited && left < minimum)
                                 {
                                         done = true;
                                         break;
@@ -9970,7 +10114,7 @@ static b32 dump_strings(positive first, positive count, positive minimum)
                         }
                 }
 
-                text_close();
+                dump_close();
         }
 
         if (skip)
@@ -10046,29 +10190,25 @@ static b32 tools_od(void)
         {
                 string_address last = program_argument((b32)(stop - 1));
                 positive offset;
+                bool failed = false;
 
-                if (string_is(last, '+'))
+                //      One operand is an offset only when it says so with a
+                //      +; two are a file and an offset when the second
+                //      starts with + or a digit. A word that is no offset
+                //      after all is a file name, as the reference has it.
+                bool candidate = traditional || string_is(last, '+') ||
+                                 (operands == 2 && byte_is_digit((p8)last[0]));
+
+                if (candidate && dump_od_offset(last, address_of offset,
+                                                address_of failed))
                 {
-                        if (!dump_od_offset(last, address_of offset))
-                        {
-                                string_format(writer_stderr,
-                                              "od: invalid offset '%w'\n", writer_terminal_quoted_name, last);
-                                return text_done(1);
-                        }
                         dump_arguments.skip = offset;
                         stop--;
                         operands--;
                 }
-                else if (operands == 2 &&
-                         dump_od_offset(last, address_of offset))
-                {
-                        //      Two operands and the second reads as an
-                        //      offset: `od FILE OFFSET`, in octal unless it
-                        //      says otherwise.
-                        dump_arguments.skip = offset;
-                        stop--;
-                        operands--;
-                }
+
+                if (failed)
+                        return text_done(1);
         }
 
         if (traditional && operands > 1)
