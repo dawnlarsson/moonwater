@@ -90,6 +90,11 @@ static bool utility_hold(address_any address_to held, positive bytes,
         if (!got)
                 return string_report(log_error, false, "%s: memory exhausted\n",
                                      program);
+        /* Small pages: with transparent huge pages always on, the first
+           touch of a large mapping zeroes two megabytes, and ls, which
+           touches a few kilobytes of each table, started 80 us slower than
+           from bss. */
+        (void)system_call_3(syscall(madvise), (positive)got, bytes, 15);
         address_to held = got;
         return true;
 }
@@ -9857,16 +9862,40 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
 {
         positive count = (positive)program_argument_count();
 
-        if (!utility_hold((address_any address_to)&ls_entries_held, sizeof(ls_entries), program) ||
-            !utility_hold((address_any address_to)&ls_sorted_held, sizeof(ls_sorted), program) ||
-            !utility_hold((address_any address_to)&ls_sort_spare_held, sizeof(ls_sort_spare), program) ||
-            !utility_hold((address_any address_to)&ls_arena_held, sizeof(ls_arena), program) ||
-            !utility_hold((address_any address_to)&ls_below_names_held, sizeof(ls_below_names), program) ||
-            !utility_hold((address_any address_to)&ls_operand_order_held, sizeof(ls_operand_order), program) ||
-            !utility_hold((address_any address_to)&ls_operand_names_held, sizeof(ls_operand_names), program) ||
-            !utility_hold((address_any address_to)&ls_dired_marks_held, sizeof(ls_dired_marks), program) ||
-            !utility_hold((address_any address_to)&ls_column_widths_held, sizeof(ls_column_widths), program))
-                return 2;
+        //      ls's tables in one mapping, cut in order: one mmap and one
+        //      madvise where nine of each cost a listing 17 us to start.
+        if (!ls_entries_held)
+        {
+                address_any address_to slots[] = {
+                    (address_any address_to)&ls_entries_held,
+                    (address_any address_to)&ls_sorted_held,
+                    (address_any address_to)&ls_sort_spare_held,
+                    (address_any address_to)&ls_arena_held,
+                    (address_any address_to)&ls_below_names_held,
+                    (address_any address_to)&ls_operand_order_held,
+                    (address_any address_to)&ls_operand_names_held,
+                    (address_any address_to)&ls_dired_marks_held,
+                    (address_any address_to)&ls_column_widths_held,
+                };
+                const positive sizes[] = {
+                    sizeof(ls_entries), sizeof(ls_sorted), sizeof(ls_sort_spare),
+                    sizeof(ls_arena), sizeof(ls_below_names), sizeof(ls_operand_order),
+                    sizeof(ls_operand_names), sizeof(ls_dired_marks),
+                    sizeof(ls_column_widths),
+                };
+                positive total = 0;
+                for (positive i = 0; i < array_count(sizes); i++)
+                        total += (sizes[i] + 63) & ~(positive)63;
+                address_any whole = null;
+                if (!utility_hold(address_of whole, total, program))
+                        return 2;
+                p8 address_to at = whole;
+                for (positive i = 0; i < array_count(sizes); i++)
+                {
+                        address_to slots[i] = at;
+                        at += (sizes[i] + 63) & ~(positive)63;
+                }
+        }
 
         ls_program = program;
         ls_selected = (ls_selection){};
