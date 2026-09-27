@@ -30832,10 +30832,17 @@ static expr_value expr_matched(expr_value address_to subject,
         string_address rule = expr_shown(pattern);
         positive length = string_length(text);
 
-        if (!regex_compile(rule, false, false, false, REGEX_POLICY_DEFAULT))
+        if (!regex_compile(rule, false, false, false, REGEX_POLICY_EXPR))
         {
+                //      regcomp's own reasons for a malformed interval, as
+                //      GNU's expr says them.
                 if (!expr_dead)
-                        expr_stop("invalid expression");
+                        expr_stop(regex_failure == REGEX_FAILED_BRACE ? "Unmatched \\{"
+                                  : regex_failure == REGEX_FAILED_CONTENT ? "Invalid content of \\{\\}"
+                                  : regex_failure == REGEX_FAILED_SIZE ? "Regular expression too big"
+                                  : regex_failure == REGEX_FAILED_OPEN ? "Unmatched ( or \\("
+                                  : regex_failure == REGEX_FAILED_CLOSE ? "Unmatched ) or \\)"
+                                                                        : "invalid expression");
 
                 return made;
         }

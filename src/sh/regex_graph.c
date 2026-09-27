@@ -35,7 +35,15 @@ enum { REGEX_DOT_NEWLINE = 1, REGEX_LINE_ANCHORS = 2, REGEX_BASIC_REPEATS = 4,
           backslash, and there are no intervals, so { is itself. tac -r is
           that program: `\._+` is a dot and one underscore or more. */
        REGEX_PLAIN_REPEATS = 16,
-       REGEX_POLICY_DEFAULT = 5, REGEX_POLICY_TAC = 2 | 16 };
+       /* An interval is read as regcomp reads one in POSIX basic syntax:
+          \{ where nothing precedes it to repeat is a literal brace, and one
+          that is malformed is refused with regcomp's reason, which
+          regex_failure keeps -- expr says it in regcomp's words. */
+       REGEX_STRICT_INTERVALS = 32,
+       REGEX_POLICY_DEFAULT = 5, REGEX_POLICY_TAC = 2 | 16,
+       REGEX_POLICY_EXPR = 5 | 32 };
+enum { REGEX_FAILED_OTHER = 1, REGEX_FAILED_BRACE, REGEX_FAILED_CONTENT,
+       REGEX_FAILED_SIZE, REGEX_FAILED_OPEN, REGEX_FAILED_CLOSE };
 enum { REGEX_BOUNDARY_NONE, REGEX_BOUNDARY_WORD, REGEX_BOUNDARY_LINE };
 enum { REGEX_EDGE_WORD, REGEX_EDGE_NOT_WORD, REGEX_EDGE_START, REGEX_EDGE_STOP };
 
@@ -100,6 +108,7 @@ typedef struct
         */
         b32 wide_ascii, wide_two, wide_three, wide_four, wide_tail;
         bool extended, escapes, broken;
+        p8 failure;
 } rx_compiler;
 
 static p8 rx_peek(rx_compiler *c, positive ahead)
@@ -376,7 +385,11 @@ static rx_fragment rx_atom(rx_compiler *c)
                 c->at += c->extended ? 1 : 2;
                 child = rx_alternation(c);
                 if (!rx_operator(c, ')'))
+                {
+                        if (!c->broken)
+                                c->failure = REGEX_FAILED_OPEN;
                         c->broken = true;
+                }
                 else
                         c->at += c->extended ? 1 : 2;
                 if (!byte)
@@ -513,8 +526,102 @@ static rx_fragment rx_atom(rx_compiler *c)
         return (rx_fragment){at, at};
 }
 
+/*
+        An interval under REGEX_STRICT_INTERVALS, as glibc's parse_dup_op
+        reads one: each bound is digits saturating at one past RE_DUP_MAX, a
+        byte that is not a digit spoils the bound but reading goes on to the
+        comma or the close, and the end of the pattern first is an unmatched
+        brace. No lower bound is the content refused unless a comma says it
+        is zero; a lower bound above the upper one is refused too; and a bound
+        past RE_DUP_MAX is a pattern too big.
+*/
+static bool rx_interval_strict(rx_compiler *c, b32 *low, b32 *high)
+{
+        positive at = c->at + (c->extended ? 1 : 2);
+        bool closed = false;
+        bipolar bounds[2] = {-1, -1};
+        b32 which = 0;
+        bool comma = false;
+
+        while (at < c->length)
+        {
+                bool close = c->extended ? c->pattern[at] == '}'
+                                         : c->pattern[at] == '\\' && at + 1 < c->length &&
+                                               c->pattern[at + 1] == '}';
+
+                if (close)
+                {
+                        at += c->extended ? 1 : 2;
+                        closed = true;
+                        break;
+                }
+
+                p8 byte = (p8)c->pattern[at];
+
+                if (byte == ',' && !which)
+                {
+                        comma = true;
+                        which = 1;
+                        at++;
+                        continue;
+                }
+
+                if (byte == '\\' && at + 1 < c->length)
+                        at++, byte = 0;
+
+                bipolar made = bounds[which];
+
+                bounds[which] = byte < '0' || byte > '9' || made == -2 ? -2
+                                : made == -1 ? byte - '0'
+                                : min(32768, made * 10 + (byte - '0'));
+                at++;
+        }
+
+        c->broken = true;
+
+        if (!closed)
+        {
+                c->failure = REGEX_FAILED_BRACE;
+                return false;
+        }
+
+        bipolar first = bounds[0];
+        bipolar second = comma ? bounds[1] : first;
+
+        if (first == -1)
+        {
+                if (!comma)
+                {
+                        c->failure = REGEX_FAILED_CONTENT;
+                        return false;
+                }
+                first = 0;
+        }
+
+        if (first == -2 || second == -2 || (second != -1 && first > second))
+        {
+                c->failure = REGEX_FAILED_CONTENT;
+                return false;
+        }
+
+        if ((second == -1 ? first : second) > 32767)
+        {
+                c->failure = REGEX_FAILED_SIZE;
+                return false;
+        }
+
+        c->broken = false;
+        *low = (b32)first;
+        *high = second == -1 ? RX_UNBOUNDED : (b32)second;
+        c->at = at;
+        return true;
+}
+
 static bool rx_interval(rx_compiler *c, b32 *low, b32 *high)
 {
+        if (c->program.policy & REGEX_STRICT_INTERVALS)
+                return rx_interval_strict(c, low, high);
+
         positive at = c->at + (c->extended ? 1 : 2), used;
         if (at >= c->length)
                 return false;
@@ -577,6 +684,11 @@ static rx_fragment rx_piece(rx_compiler *c)
                 }
                 else if ((c->extended || (c->program.policy & REGEX_BASIC_REPEATS)) && rx_operator(c, '{'))
                 {
+                        //      Nothing before it to repeat: in basic syntax
+                        //      regcomp takes the brace as itself.
+                        if ((c->program.policy & REGEX_STRICT_INTERVALS) && !c->extended &&
+                            (!body.first || c->pool->nodes[body.first].kind == RX_BEGIN))
+                                break;
                         if (!rx_interval(c, address_of low, address_of high))
                                 break;
                 }
@@ -594,6 +706,7 @@ static rx_fragment rx_piece(rx_compiler *c)
                         }
                         if (high >= 0 && high < low)
                                 high = low;
+
                         if (high == low && (!body.first || low == 1))
                                 continue;
                 }
@@ -776,6 +889,9 @@ static bool rx_fixed(const rx_node *nodes, p16 first, rx_hints *hints, positive 
 
 /* Compile above the current mark. Neither a failed compile nor its scratch
    metadata changes a published descriptor or the pool's ownership cursor. */
+// Why the last compile refused its pattern, when it did.
+static p8 regex_failure;
+
 static bool rx_compile(rx_pool *pool, regex_program *out, string_address pattern,
                        bool extended, bool icase, bool escapes, p8 policy)
 {
@@ -796,8 +912,15 @@ static bool rx_compile(rx_pool *pool, regex_program *out, string_address pattern
                                 .hints = hints, .policy = policy, .flags = icase ? RX_IGNORE_CASE : 0};
         rx_fragment root = rx_alternation(address_of c);
         c.program.first = root.first;
+        if (!c.broken && c.at != c.length && rx_operator(address_of c, ')'))
+                c.failure = REGEX_FAILED_CLOSE;
+        regex_failure = c.failure;
         if (c.at != c.length || c.broken)
+        {
+                if (!regex_failure)
+                        regex_failure = REGEX_FAILED_OTHER;
                 return false;
+        }
         bool literal = root.first && c.cursor.nodes - first <= RX_LITERAL_MAX;
         for (p16 i = first; i < c.cursor.nodes; i++)
         {
