@@ -737,7 +737,10 @@ def grammar_cases(domain, utility, budget, rng):
 
 
 def family_cases(domain, families, budget, seed):
-    """rng-driven generators: each yields (family, modes, script)."""
+    """rng-driven generators: each yields (family, modes, script), or
+    (family, modes, script, deliveries) for a script that is also handed to
+    the shell as its standard input or as a file operand -- the readers a
+    `curl | sh` and a `sh script` go through, which -c never reaches."""
     counts = {"singles": 24, "quick": 48, "default": 96, "full": 512}
     per = counts[budget]
     for name, generator in families:
@@ -748,16 +751,21 @@ def family_cases(domain, families, budget, seed):
         attempts = 0
         while made < per and attempts < per * 4:
             attempts += 1
-            family, modes, script = generator(rng)
+            family, modes, script, *deliveries = generator(rng)
             for mode in modes:
-                case = Case(domain, "shell", ["-c", script], "empty", "shell",
-                            mode=mode, family=family, tier="family")
-                key = case.identity()
-                if key in seen:
-                    continue
-                seen.add(key)
-                made += 1
-                yield case
+                #   The budget counts scripts, not how many ways each is
+                #   delivered, so a family keeps its reach when it opts in.
+                ways = deliveries[0] if deliveries else ("command",)
+                for delivery in ways:
+                    case = Case(domain, "shell", ["-c", script], "empty", "shell",
+                                mode=mode, family=family, input_kind=delivery,
+                                tier="family")
+                    key = case.identity()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    made += delivery == ways[0]
+                    yield case
 
 
 def shell_grammar_cases(domain, utility, budget, rng):
@@ -1419,7 +1427,8 @@ def main(argv=None):
     parser.add_argument("--locale", default="C")
     parser.add_argument("--emulator", type=Path)
     parser.add_argument("--input", dest="input_kind", choices=("command", "file", "stdin"),
-                        default="command", help="how a shell case is handed its program")
+                        help="hand every shell case its program this way, rather "
+                             "than the way its family names")
     parser.add_argument("--replay", type=Path, action="append",
                         help="run the case saved in an artifact JSON")
     parser.add_argument("--artifacts", type=Path, default=os.environ.get("MW_ARTIFACTS"))
@@ -1488,7 +1497,7 @@ def main(argv=None):
             cases.extend(made)
             utilities.update(found)
     for case in cases:
-        if case.mode:
+        if case.mode and args.input_kind:
             case.input_kind = args.input_kind
 
     ledger = [] if args.no_pinned else load_rows("ledger")
@@ -13365,6 +13374,33 @@ def shell_lang_double_bracket(rng):
         "printf '<%s>' \"${BASH_REMATCH[@]}\"; echo", "if [[ " + expression + " ]] 2>/dev/null; then echo T; else echo F; fi")
 
 
+#       [[ as the first command a script runs, with an operator token where
+#       an operand goes, read from -c, from standard input and from a file.
+#       Until a simple command had run there was no argument vector, and a
+#       unary test wrote the name it reports under into slot zero of none:
+#       `printf '[[ -f x ]]\n' | bash` died of SIGSEGV where -c worked.
+shell_DB_UNARY = ("-a", "-b", "-c", "-d", "-e", "-f", "-g", "-h", "-k", "-p", "-r", "-s", "-t", "-u", "-w", "-x",
+                  "-G", "-L", "-N", "-O", "-S", "-z", "-n", "-o", "-v", "-R")
+shell_DB_OPERANDS = ("x", "-f", "-z", "'>'", "'<'", "'('", "')'", "'!'", "==", "'&&'", "-a", "''", "\"$u\"", "5", "junk")
+
+
+def shell_lang_double_bracket_first(rng):
+    shape = rng.choice(("unary", "unary", "binary", "negated", "grouped"))
+    operator = rng.choice(shell_DB_UNARY)
+    operand = rng.choice(shell_DB_OPERANDS)
+    if shape == "unary":
+        expression = operator + " " + operand
+    elif shape == "binary":
+        expression = operand + " " + rng.choice(("==", "!=", "-eq", "-nt", "<", ">")) + " " + rng.choice(shell_DB_OPERANDS)
+    elif shape == "negated":
+        expression = "! " + operator + " " + operand
+    else:
+        expression = "( " + operator + " " + operand + " )"
+    return ("double-bracket-first", shell_BASH,
+            shell_program("[[ " + expression + " ]]", "echo \"s=$?\"", "[[ " + expression + " ]] && echo T || echo F"),
+            ("command", "stdin", "file"))
+
+
 def shell_lang_functions(rng):
     shape = rng.choice(("posix", "keyword", "keyword-parens", "newline-body", "recursion", "local-dynamic", "return-codes",
                         "positional", "shift-inside", "unset-f", "redefine", "redirect-def", "redirect-call", "funcname",
@@ -15594,6 +15630,7 @@ SHELL_FAMILIES = (
     shell_lang_lists,
     shell_lang_compound_commands,
     shell_lang_double_bracket,
+    shell_lang_double_bracket_first,
     shell_lang_functions,
     shell_lang_traps,
     shell_lang_subshells,

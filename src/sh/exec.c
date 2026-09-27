@@ -11746,11 +11746,15 @@ static bool conditional_primary(bool invert)
 
                 test_bad = false;
                 {
-                        string_address held = shell_argv[0];
+                        /* A diagnostic names the command through
+                           shell_argv[0], and before any simple command has
+                           run there is no argument array to write into. */
+                        string_address address_to held = shell_argv;
+                        string_address named[2] = {(string_address) "[[", null};
 
-                        shell_argv[0] = (string_address) "[[";
+                        shell_argv = named;
                         value = test_unary(string_get(raw + 1), operand);
-                        shell_argv[0] = held;
+                        shell_argv = held;
                 }
                 if (test_bad)
                         conditional_runtime = true;
