@@ -734,6 +734,10 @@ typedef struct file_made_entry
         p64 inode;
         p32 device_major;
         p32 device_minor;
+        // file_linked's: the copy that made it, and how much of the name
+        // is that copy's top, which stays in its stage until it is done.
+        positive root;
+        positive skip;
         p8 name[];
 } file_made_entry;
 
@@ -806,6 +810,81 @@ static bool file_made_seen(string_address name, file_facts address_to facts)
 static fn file_made_record(string_address name, file_facts address_to facts)
 {
         file_set_record(address_of file_made_buckets, name, facts);
+}
+
+/* GNU's remember_copied: a file with more than one name that a move
+   across devices or a copy keeping links has already copied, by the
+   source's identity, and where it went -- so its other names become links
+   to that copy rather than copies of their own. */
+static file_made_entry address_to address_to file_linked_buckets;
+// The directory a named copy is building, open, while it is built in its
+// stage: a name below it is reached through it until it is published.
+static bipolar file_linked_root = -1;
+static string_address file_linked_root_shown;
+static positive file_linked_generation;
+
+static file_made_entry address_to file_linked_find(file_facts address_to facts)
+{
+        if (!file_linked_buckets)
+                return null;
+        for (file_made_entry address_to entry =
+                 file_linked_buckets[file_made_bucket((string_address) "", facts)];
+             entry; entry = entry->next)
+                if (entry->inode == facts->inode &&
+                    entry->device_major == facts->device_major &&
+                    entry->device_minor == facts->device_minor)
+                        return entry;
+        return null;
+}
+
+static bipolar file_linked_make(file_made_entry address_to earlier,
+                                bipolar directory, string_address name)
+{
+        if (earlier->root && earlier->root == file_linked_generation &&
+            file_linked_root >= 0)
+                return system_link_at(file_linked_root,
+                                      (string_address)earlier->name + earlier->skip,
+                                      directory, name, 0);
+        return system_link_at(AT_FDCWD, (string_address)earlier->name,
+                              directory, name, 0);
+}
+
+static fn file_linked_record(file_facts address_to facts, string_address to)
+{
+        if (!file_linked_buckets)
+        {
+                file_linked_buckets = utility_arena_take(
+                    FILE_MADE_BUCKETS * sizeof(file_made_entry address_to));
+                if (!file_linked_buckets)
+                        return;
+                memory_fill(file_linked_buckets, 0,
+                            FILE_MADE_BUCKETS * sizeof(file_made_entry address_to));
+        }
+        positive length = string_length(to);
+        file_made_entry address_to entry =
+            utility_arena_take(sizeof(file_made_entry) + length + 1);
+        if (!entry)
+                return;
+        positive bucket = file_made_bucket((string_address) "", facts);
+        entry->root = 0;
+        entry->skip = 0;
+        if (file_linked_root >= 0 && file_linked_root_shown)
+        {
+                positive top = string_length(file_linked_root_shown);
+                if (length > top + 1 &&
+                    !memory_compare(to, file_linked_root_shown, top) &&
+                    to[top] == '/')
+                {
+                        entry->root = file_linked_generation;
+                        entry->skip = top + 1;
+                }
+        }
+        entry->inode = facts->inode;
+        entry->device_major = facts->device_major;
+        entry->device_minor = facts->device_minor;
+        memory_copy_apart_end(entry->name, to, length);
+        entry->next = file_linked_buckets[bucket];
+        file_linked_buckets[bucket] = entry;
 }
 
 // After the destination was made: record it as it now stands.
@@ -26215,6 +26294,9 @@ static string_address file_into_seen;
 static bool cp_hard;
 static bool cp_symbolic;
 static bool cp_loud;
+// --preserve=links, as -a and -d ask for it and --no-preserve takes it away,
+// in the order they were given.
+static bool cp_keep_links;
 static p8 cp_sparse_policy;
 static p8 cp_reflink_policy;
 static b32 cp_status;
@@ -26955,12 +27037,103 @@ static bool cp_linked(bipolar source_directory, string_address source,
         return true;
 }
 
+/* A directory's whole listing, each record copied to the arena, in the
+   order of the records' inode numbers; null (and the walk's error set) when
+   it cannot be read or held, which the caller's reading then reports. */
+static struct linux_dirent64 address_to address_to file_listing_by_inode(
+    file_walk address_to walk, positive address_to count)
+{
+        struct linux_dirent64 address_to address_to list = null;
+        positive room = 0;
+        struct linux_dirent64 address_to entry;
+
+        address_to count = 0;
+        while ((entry = file_walk_next(walk)))
+        {
+                if (address_to count == room)
+                {
+                        positive grown = room ? room * 2 : 64;
+                        struct linux_dirent64 address_to address_to wider =
+                            utility_arena_take(grown * sizeof(address_any));
+                        if (!wider)
+                        {
+                                walk->error = -ERROR_NO_MEMORY;
+                                return null;
+                        }
+                        if (room)
+                                memory_copy_apart(wider, list, room * sizeof(address_any));
+                        list = wider;
+                        room = grown;
+                }
+                struct linux_dirent64 address_to kept =
+                    utility_arena_take(entry->d_reclen);
+                if (!kept)
+                {
+                        walk->error = -ERROR_NO_MEMORY;
+                        return null;
+                }
+                memory_copy_apart(kept, entry, entry->d_reclen);
+                list[address_to count] = kept;
+                address_to count += 1;
+        }
+
+        // Heap sort by inode: no second allocation, and no worst case.
+        positive n = address_to count;
+        for (positive start = n / 2; start-- > 0;)
+                for (positive root = start;;)
+                {
+                        positive child = root * 2 + 1;
+                        if (child >= n)
+                                break;
+                        if (child + 1 < n && list[child + 1]->d_ino > list[child]->d_ino)
+                                child++;
+                        if (list[root]->d_ino >= list[child]->d_ino)
+                                break;
+                        struct linux_dirent64 address_to swap = list[root];
+                        list[root] = list[child];
+                        list[child] = swap;
+                        root = child;
+                }
+        for (positive end_at = n; end_at-- > 1;)
+        {
+                struct linux_dirent64 address_to swap = list[0];
+                list[0] = list[end_at];
+                list[end_at] = swap;
+                for (positive root = 0;;)
+                {
+                        positive child = root * 2 + 1;
+                        if (child >= end_at)
+                                break;
+                        if (child + 1 < end_at && list[child + 1]->d_ino > list[child]->d_ino)
+                                child++;
+                        if (list[root]->d_ino >= list[child]->d_ino)
+                                break;
+                        swap = list[root];
+                        list[root] = list[child];
+                        list[child] = swap;
+                        root = child;
+                }
+        }
+        return list ? list : (struct linux_dirent64 address_to address_to)walk;
+}
+
+/* mv -v across devices tells each name it removes once the copy is out,
+   in rm -v's words, as GNU does; shown is null for a removal nobody
+   asked about. */
+static bool file_move_loud;
+
 static bipolar file_move_remove_tree(
     bipolar directory, string_address source,
-    file_facts address_to expected, positive depth)
+    file_facts address_to expected, positive depth, string_address shown)
 {
         if ((expected->mode & MODE_FORMAT) != MODE_DIRECTORY)
-                return file_remove_same(directory, source, 0, expected);
+        {
+                bipolar gone = file_remove_same(directory, source, 0, expected);
+                if (gone >= 0 && shown && file_move_loud)
+                        string_format(log, "removed %w\n",
+                                      writer_shell_quoted_name, shown);
+                return gone;
+        }
         if (!depth)
                 return -ERROR_TOO_MANY_LEVELS;
 
@@ -27005,8 +27178,11 @@ static bipolar file_move_remove_tree(
                         break;
                 }
 
+                p8 below[FILE_PATH_MAX];
+                bool named = shown && file_path_join(below, shown, entry->d_name);
                 result = file_move_remove_tree(
-                    inside, entry->d_name, address_of child, depth - 1);
+                    inside, entry->d_name, address_of child, depth - 1,
+                    named ? below : null);
                 if (result == -ERROR_NO_ENTRY)
                         result = 0;
         }
@@ -27014,6 +27190,9 @@ static bipolar file_move_remove_tree(
         if (result >= 0)
                 result = file_remove_same(directory, source, AT_REMOVEDIR,
                                           expected);
+        if (result >= 0 && shown && file_move_loud)
+                string_format(log, "removed directory %w\n",
+                              writer_shell_quoted_name, shown);
         system_close(inside);
         return result;
 }
@@ -27024,9 +27203,13 @@ static bool file_move_remove(bipolar directory, string_address source,
 {
         bipolar gone = flags & AT_REMOVEDIR
                            ? file_move_remove_tree(
-                                 directory, source, expected, FILE_MAX_DEPTH)
+                                 directory, source, expected, FILE_MAX_DEPTH,
+                                 shown)
                            : file_remove_same(
                                  directory, source, flags, expected);
+        if (gone >= 0 && !(flags & AT_REMOVEDIR) && file_move_loud)
+                string_format(log, "removed %w\n", writer_shell_quoted_name,
+                              shown);
         if (gone < 0)
         {
                 string_format(log_error, "mv: cannot remove %w: %s\n",
@@ -27125,6 +27308,11 @@ static fn cp_copy_job(address_any context, positive index)
 
         bipolar looked = file_look_code(in, (string_address)"", AT_EMPTY_PATH, facts);
 
+        /* A file with other names, where links are kept, is left to the
+           ordinary copy in walk order, which links the names after the
+           first to the first one's copy. */
+        if (looked >= 0 && cp_keep_links && facts->hard_links > 1)
+                looked = -ERROR_AGAIN;
         if (looked < 0 || (facts->mode & MODE_FORMAT) != MODE_FILE)
         {
                 system_close(in);
@@ -27394,7 +27582,10 @@ static bool cp_tree_file(bipolar source, bipolar copy, string_address name)
 
         bipolar looked = file_look_code(in, (string_address)"", AT_EMPTY_PATH, address_of facts);
 
-        if (looked < 0 || (facts.mode & MODE_FORMAT) != MODE_FILE)
+        //      A file with other names, where links are kept, goes the
+        //      serial way, which links its later names to its first copy.
+        if (looked < 0 || (facts.mode & MODE_FORMAT) != MODE_FILE ||
+            (cp_keep_links && facts.hard_links > 1))
         {
                 system_close(in);
                 return false;
@@ -28028,6 +28219,24 @@ added:
 static bool cp_copy_contents;
 static bool cp_keep_directory_link;
 
+static bool cp_words_name_links(string_address value)
+{
+        for (positive at = 0; value && value[at];)
+        {
+                positive start = at;
+
+                while (value[at] && value[at] != ',')
+                        at++;
+                positive length = at - start;
+                if ((length == 5 && !memory_compare(value + start, "links", 5)) ||
+                    (length == 3 && !memory_compare(value + start, "all", 3)))
+                        return true;
+                if (value[at] == ',')
+                        at++;
+        }
+        return false;
+}
+
 static bool cp_same_file_look(positive kind)
 {
         bool as_regular = !cp_recursive || cp_copy_contents;
@@ -28389,6 +28598,39 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                              writer_shell_quoted_name, destination_shown);
         }
 
+        /* A file with other names that this copy has already met is linked
+           to what it made of it the first time, when a move across devices
+           or a copy keeping links is asked for: mv h /dev/shm/x of a
+           directory holding a and b, one file, gave two files. */
+        if (kind != MODE_DIRECTORY && facts.hard_links > 1 &&
+            (moving || cp_keep_links) && !cp_hard && !cp_symbolic)
+        {
+                file_made_entry address_to earlier =
+                    file_linked_find(address_of facts);
+
+                if (earlier && !destination_entry_exists)
+                {
+                        bipolar linked = file_linked_make(
+                            earlier, destination_directory, destination);
+                        if (linked >= 0)
+                                goto copied_without_metadata;
+                        string_format(log_error,
+                                      "%s: cannot create hard link %w to %w: %s\n",
+                                      program, writer_shell_quoted_name,
+                                      destination_shown, writer_shell_quoted_name,
+                                      (string_address)earlier->name,
+                                      file_reason(linked));
+                        mv_across_said |= moving;
+                        return false;
+                }
+                if (!earlier)
+                        file_linked_record(address_of facts, destination_shown);
+        }
+        if (moving && file_move_loud && kind != MODE_DIRECTORY)
+                file_backup_told(source_shown, destination_shown,
+                                 (string_address) "copied '",
+                                 (string_address) "' -> '");
+
         if (!moving && (cp_hard || cp_symbolic) && kind != MODE_DIRECTORY)
                 return cp_linked(source_directory, source, source_shown,
                                  known_source_handle,
@@ -28735,6 +28977,17 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 file_backup_told(source_shown, destination_shown,
                                  (string_address) "'",
                                  (string_address) "' -> '");
+        if (moving && file_move_loud && !destination_exists)
+                string_format(log, "created directory %w\n",
+                              writer_shell_quoted_name, destination_shown);
+
+        bool linked_root = named && file_linked_root < 0;
+        if (linked_root)
+        {
+                file_linked_root = destination_handle;
+                file_linked_root_shown = destination_shown;
+                file_linked_generation++;
+        }
 
         file_walk walk = {
             .handle = source_handle,
@@ -28757,8 +29010,21 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 walk.have = walk.at = 0;
         }
 
+        /* A move across devices copies a directory's names in the order of
+           their inodes, as GNU's savedir does for a fast read, so the name
+           of a file with several that is copied, and not linked, is the one
+           GNU copies. The listing is held on the arena, which gives it back
+           when this directory is done. */
+        positive listed_mark = utility_arena.used;
+        struct linux_dirent64 address_to address_to listed = null;
+        positive listed_count = 0;
+        positive listed_at = 0;
+        if (moving)
+                listed = file_listing_by_inode(address_of walk,
+                                               address_of listed_count);
         while (!(staged && !moving && !cp_hard && !cp_symbolic && !cp_attributes_only) &&
-               (child = file_walk_next(address_of walk)))
+               (child = listed ? (listed_at < listed_count ? listed[listed_at++] : null)
+                               : file_walk_next(address_of walk)))
         {
                 if (file_is_dot(child->d_name))
                         continue;
@@ -28820,6 +29086,13 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                         system_close(held);
         }
 
+        if (listed)
+                utility_arena.used = listed_mark;
+        if (linked_root)
+        {
+                file_linked_root = -1;
+                file_linked_root_shown = null;
+        }
         if (walk.error < 0)
         {
                 string_format(log_error, "%s: cannot read directory %w: %s\n", program,
@@ -28917,7 +29190,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                               address_of staged_facts))
                         (void)file_move_remove_tree(
                             protected.directory, SYSTEM_PATH_STAGE_LEAF,
-                            address_of staged_facts, FILE_MAX_DEPTH);
+                            address_of staged_facts, FILE_MAX_DEPTH, null);
                 system_path_stage_release(address_of protected);
         }
         bipolar closed = publish ? 0 : system_close(destination_handle);
@@ -29420,6 +29693,12 @@ static bool cp_option_seen(p8 letter, string_address value)
                 return false;
         if (!file_into_option_seen((string_address) "cp", letter, value))
                 return false;
+        if (letter == 'a' || letter == 'd')
+                cp_keep_links = true;
+        if (letter == 'p' && cp_words_name_links(value))
+                cp_keep_links = true;
+        if (letter == 'N' && cp_words_name_links(value))
+                cp_keep_links = false;
         if (letter == 'p')
         {
                 cp_wants_context = false;
@@ -29537,6 +29816,7 @@ static b32 file_cp()
 
         cp_update_policy = 0;
         cp_wants_context = false;
+        cp_keep_links = false;
         file_into_seen = null;
         file_join_source_path = false;
         file_backup_control_named = null;
@@ -30728,14 +31008,11 @@ static fn mv_one(string_address source, string_address destination)
 
                 if (copied)
                 {
+                        //      The copy and the removal have each said what
+                        //      they did, name by name.
                         if (!file_made_last)
                                 file_made_now(destination_directory,
                                               destination_leaf);
-                        if (mv_loud)
-                                file_backup_told(source, destination,
-                                                 (string_address) "renamed '",
-                                                 (string_address) "' -> '");
-
                         goto finished;
                 }
 
@@ -30862,6 +31139,7 @@ static b32 file_mv()
                  mv_update_policy != 'F';
         file_debug = (taking.flags & FILE_FLAG('G')) != 0;
         mv_loud = (taking.flags & (FILE_FLAG('v') | FILE_FLAG('G'))) != 0;
+        file_move_loud = mv_loud;
         file_strip_trailing = (taking.flags & FILE_FLAG('w')) != 0;
         mv_exchange = (taking.flags & FILE_FLAG('X')) != 0;
         mv_no_copy = (taking.flags & FILE_FLAG('c')) != 0;

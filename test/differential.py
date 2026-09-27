@@ -6844,6 +6844,109 @@ def files_readonly_cases():
     return tuple(cases)
 
 
+def files_move_across(farm):
+    """Which names of one file stay one file: mv from one file system to
+    another, which is a copy and a removal, and cp keeping links (-a, -d,
+    --preserve=links) or not, over trees with names that share a file,
+    links, nested directories and a lone file. The reference and the
+    candidate each run in a fresh copy, moving from the box's disk to
+    /dev/shm, and are held to the same status, words and tree, a tree
+    being names, kinds, contents and which names are one file -- what the
+    grammar's effects cannot see. A move across devices once gave each
+    name of a shared file its own copy and told only the top name under
+    -v, and cp -a did the same inside one file system."""
+    import subprocess
+    import tempfile
+
+    candidate = Path(farm) / "mv"
+    reference = shutil.which("mv", path="/usr/bin:/bin")
+    copier = Path(farm) / "cp"
+    copier_reference = shutil.which("cp", path="/usr/bin:/bin")
+    other = Path("/dev/shm")
+    if not candidate.exists() or not reference or not other.is_dir() or \
+            not copier.exists() or not copier_reference:
+        return 0, 1, ["cross-device mv checks need both mv and cp programs and /dev/shm"]
+    passed = total = 0
+    notes = []
+
+    def build(root):
+        (root / "h" / "s").mkdir(parents=True)
+        (root / "h" / "a").write_bytes(b"A\n")
+        os.link(root / "h" / "a", root / "h" / "b")
+        os.link(root / "h" / "a", root / "h" / "s" / "c")
+        (root / "h" / "s" / "d").write_bytes(b"D\n")
+        os.link(root / "h" / "s" / "d", root / "h" / "e")
+        (root / "h" / "l").symlink_to("a")
+        (root / "f").write_bytes(b"F\n")
+        (root / "g").symlink_to("f")
+
+    def tree(path):
+        seen = {}
+        rows = []
+        if not os.path.lexists(path):
+            return rows
+        for item in sorted([path] + list(path.rglob("*")) if path.is_dir() and not path.is_symlink() else [path]):
+            info = os.lstat(item)
+            name = str(item.relative_to(path.parent))
+            kind = "l" if item.is_symlink() else "d" if item.is_dir() else "f"
+            group = seen.setdefault((info.st_dev, info.st_ino), len(seen)) if kind == "f" else None
+            body = os.readlink(item) if kind == "l" else item.read_bytes() if kind == "f" else None
+            rows.append((name, kind, info.st_nlink if kind == "f" else None, group, body))
+        return rows
+
+    base = Path(os.environ.get("TMPDIR", "/tmp"))
+    for flags in ((), ("-v",), ("-b",), ("-v", "-f"), ("-n",), ("-u",)):
+        for source in ("h", "f", "g", "h/s"):
+            total += 1
+            answers = []
+            for program in (reference, str(candidate)):
+                work = Path(tempfile.mkdtemp(dir=base))
+                target = Path(tempfile.mkdtemp(dir=other))
+                try:
+                    if os.stat(work).st_dev == os.stat(target).st_dev:
+                        return 0, 1, ["cross-device mv checks need /dev/shm on another file system"]
+                    build(work)
+                    done = subprocess.run([program, *flags, source, str(target / "x")], cwd=work,
+                                          capture_output=True, timeout=10)
+                    words = (done.stdout + done.stderr).replace(str(target).encode(), b"<T>")
+                    words = re.sub(rb"^(?:/[^\s:]*/)?mv: ", b"mv: ", words, flags=re.M)
+                    #   The order a directory is read in is the file
+                    #   system's, and GNU copies by inode where this walks
+                    #   the listing: the lines are held as a set.
+                    words = b"".join(sorted(words.splitlines(keepends=True)))
+                    left = tree(work / "h") if (work / "h").exists() else []
+                    answers.append((done.returncode, words, tree(target / "x") if os.path.lexists(target / "x") else [],
+                                    left, os.path.lexists(work / source)))
+                finally:
+                    shutil.rmtree(work, ignore_errors=True)
+                    shutil.rmtree(target, ignore_errors=True)
+            if answers[0] == answers[1]:
+                passed += 1
+            else:
+                notes.append(f"mv {' '.join(flags)} {source} across devices: {answers[0]!r} against {answers[1]!r}"[:600])
+    for flags in (("-a",), ("-r",), ("-rd",), ("-R", "--preserve=links"), ("-a", "--no-preserve=links"), ("-rp",),
+                  ("-av",), ("-rL",), ("--no-preserve=links", "-a"), ("-r", "--preserve=all"), ("-d",)):
+        for operands in (("h", "u"), ("h/a", "h/b", "T"), ("h/a", "h/s/c", "h/e", "h/s/d", "T"), ("h/s", "h/a", "T")):
+            total += 1
+            answers = []
+            for program in (copier_reference, str(copier)):
+                work = Path(tempfile.mkdtemp(dir=base))
+                try:
+                    build(work)
+                    (work / "T").mkdir()
+                    done = subprocess.run([program, *flags, *operands], cwd=work, capture_output=True, timeout=10)
+                    words = re.sub(rb"^(?:/[^\s:]*/)?cp: ", b"cp: ", done.stdout + done.stderr, flags=re.M)
+                    words = b"".join(sorted(words.splitlines(keepends=True)))
+                    answers.append((done.returncode, words, tree(work / operands[-1])))
+                finally:
+                    shutil.rmtree(work, ignore_errors=True)
+            if answers[0] == answers[1]:
+                passed += 1
+            else:
+                notes.append(f"cp {' '.join(flags + operands)}: {answers[0]!r} against {answers[1]!r}"[:600])
+    return passed, total, notes
+
+
 FILES_UTILITIES = (
     # yes is the one program here the engine cannot bound: it writes until
     # something stops it, so both sides die on the harness's file-size limit
@@ -8774,7 +8877,7 @@ def files_hostname_set(farm):
 
 
 FILES_CHECKS = (files_column_layout, files_xargs_parallel, files_zones, files_tar,
-                files_find_terminal, files_zone_names, files_hostname_set)
+                files_find_terminal, files_zone_names, files_hostname_set, files_move_across)
 
 # ---- domain: misc (from spec_misc.py) ----
 
