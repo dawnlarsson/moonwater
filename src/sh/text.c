@@ -554,9 +554,18 @@ static bool text_again_ends;
    TEXT_LINE_MAX moves text_line to a heap store of its own (see
    text_spill_room), which text_line_moved names once it has. */
 static p8 (address_to text_line_held)[TEXT_LINE_MAX + 1];
+/* Where text_line is: nothing until first touched, then the array, then
+   wherever it moved. One pointer, so a use costs the one test it did when
+   the array alone was mapped on first touch. */
 static p8 address_to text_line_moved;
-#define text_line (text_line_moved ? text_line_moved \
-                                   : (p8 address_to)UTILITY_HELD(text_line))
+
+static COLD p8 address_to text_line_touch()
+{
+        text_line_moved = (p8 address_to)UTILITY_HELD(text_line);
+        return text_line_moved;
+}
+
+#define text_line (text_line_moved ? text_line_moved : text_line_touch())
 static positive text_line_length;
 static bool text_line_ended;
 
@@ -859,14 +868,27 @@ static inline INLINE bool text_fill()
 */
 static p8 (address_to relation_spill_held)[TEXT_LINE_MAX + 1];
 static p8 address_to relation_spill_moved;
-#define relation_spill (relation_spill_moved ? relation_spill_moved \
-                                             : (p8 address_to)UTILITY_HELD(relation_spill))
+
+static COLD p8 address_to relation_spill_touch()
+{
+        relation_spill_moved = (p8 address_to)UTILITY_HELD(relation_spill);
+        return relation_spill_moved;
+}
+
+#define relation_spill (relation_spill_moved ? relation_spill_moved : relation_spill_touch())
 /* uniq already needed one retained record.  The merge walkers use the same
    mutually-exclusive store for the one prior record crossing a refill. */
 static p8 (address_to text_record_hold_held)[TEXT_LINE_MAX + 1];
 static p8 address_to text_record_hold_moved;
+
+static COLD p8 address_to text_record_hold_touch()
+{
+        text_record_hold_moved = (p8 address_to)UTILITY_HELD(text_record_hold);
+        return text_record_hold_moved;
+}
+
 #define text_record_hold (text_record_hold_moved ? text_record_hold_moved \
-                                                 : (p8 address_to)UTILITY_HELD(text_record_hold))
+                                                 : text_record_hold_touch())
 static byte_store text_line_grown;
 static byte_store relation_spill_grown;
 static byte_store text_record_hold_grown;
@@ -921,15 +943,20 @@ static bool text_spill_room(p8 address_to address_to storage, positive used,
 
 /* The copying edge shared by ordinary lines and multi-input record views.
    Complete views bypass this; split records retain exact NUL/delimiter bytes.
-   *storage may move to a larger store: see text_spill_room. */
+   A record that outgrows its store moves it (see text_spill_room), and where
+   it went is left in text_spill_moved for a caller that holds the store's
+   address itself; it is null after any spill that moved nothing. */
+static p8 address_to text_spill_moved;
+
 static bool text_reader_spill(text_reader address_to reader, p8 delimiter,
-                               p8 address_to address_to storage_at,
+                               p8 address_to storage,
                                byte_store address_to own,
                                positive address_to length,
                                bool address_to ended, string_address about)
 {
         positive used = address_to length;
-        p8 address_to storage = address_to storage_at;
+
+        text_spill_moved = null;
         if (!text_reader_fill(reader))
                 return used != 0;
 
@@ -944,7 +971,7 @@ static bool text_reader_spill(text_reader address_to reader, p8 delimiter,
                 //      past that asks whether its store can grow.
                 if (unlikely(used + take > TEXT_LINE_MAX))
                 {
-                        if (!text_spill_room(storage_at, used, used + take, own))
+                        if (!text_spill_room(address_of storage, used, used + take, own))
                         {
                                 // A later sed N must not mistake the rejected
                                 // tail for another record, nor expose a
@@ -956,7 +983,7 @@ static bool text_reader_spill(text_reader address_to reader, p8 delimiter,
                                 return string_diagnostic(&text_diagnostic, 0, about, "line too long");
                         }
 
-                        storage = address_to storage_at;
+                        text_spill_moved = storage;
                 }
 
                 memory_copy(storage + used, at, take);
@@ -979,19 +1006,14 @@ static bool text_reader_spill(text_reader address_to reader, p8 delimiter,
         }
 }
 
-// Where the last text_line_next put its line: the store it was given, or the
-// one that store moved to when the line outgrew it.
-static p8 address_to text_line_store;
-
 static inline INLINE bool text_line_next(p8 address_to storage, positive used)
 {
         text_line_length = used;
         text_line_ended = false;
         bool have = text_reader_spill(address_of text_input, text_delimiter,
-                                      address_of storage, null,
+                                      storage, null,
                                       address_of text_line_length,
                                       address_of text_line_ended, null);
-        text_line_store = storage;
         if (text_input.failed)
                 text_status = text_status ? text_status : 1;
         return have;
@@ -2356,11 +2378,13 @@ static bool text_record_next(text_record_cursor address_to cursor,
                 memory_copy(cursor->spill, at, left);
                 cursor->length = left;
                 reader->position = reader->filled;
-                if (!text_reader_spill(reader, delimiter, address_of cursor->spill,
+                if (!text_reader_spill(reader, delimiter, cursor->spill,
                                        address_of cursor->grown,
                                        address_of cursor->length,
                                        address_of cursor->ended, reader->name))
                         return false;
+                if (unlikely(text_spill_moved != null))
+                        cursor->spill = text_spill_moved;
                 cursor->record = cursor->spill;
         }
         cursor->have = true;
@@ -10344,7 +10368,11 @@ static bool fmt_read_line(fmt_line address_to line)
         if (!text_line_next(fmt_hold, 0))
                 return false;
 
-        line->at = text_line_store;
+        //      A line past the store moved it: read from where it went.
+        if (unlikely(text_spill_moved != null))
+                fmt_hold = text_spill_moved;
+
+        line->at = fmt_hold;
         line->length = text_line_length;
         line->ended = text_line_ended;
         line->suitable = false;
@@ -11283,7 +11311,9 @@ static b32 pr_source_record(pr_record address_to record)
                 if (!text_line_next(pr_hold_base, 0))
                         return 0;
 
-                pr_hold_base = text_line_store;
+                if (unlikely(text_spill_moved != null))
+                        pr_hold_base = text_spill_moved;
+
                 bytes = pr_hold_base;
                 length = text_line_length;
         }
@@ -23779,8 +23809,7 @@ static fn sed_put_reader_line(b32 which)
         positive length = 0;
         bool ended = false;
 
-        p8 address_to line = sed_reader_line;
-        bool spilled = text_reader_spill(reader, '\n', address_of line, null,
+        bool spilled = text_reader_spill(reader, '\n', sed_reader_line, null,
                                          address_of length, address_of ended, null);
 
         text_quiet_read = false;
