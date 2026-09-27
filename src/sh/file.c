@@ -29900,7 +29900,9 @@ static b32 file_cp()
         // A link named as a source is followed, because copying a file is
         // what cp was asked for; a link found inside a tree being walked is
         // not, because the tree is what -R was asked for.
-        cp_dereference = cp_recursive ? 0 : 1;
+        // GNU follows every link under -R -l, as FreeBSD does: a hard link
+        // to a symbolic link is not what --link was asked to make.
+        cp_dereference = cp_recursive && !cp_hard ? 0 : 1;
 
         if (cp_selected.dereference == 'H')
                 cp_dereference = 2;

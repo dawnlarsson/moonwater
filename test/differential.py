@@ -6944,7 +6944,8 @@ def files_move_across(farm):
             else:
                 notes.append(f"mv {' '.join(flags)} {source} across devices: {answers[0]!r} against {answers[1]!r}"[:600])
     for flags in (("-a",), ("-r",), ("-rd",), ("-R", "--preserve=links"), ("-a", "--no-preserve=links"), ("-rp",),
-                  ("-av",), ("-rL",), ("--no-preserve=links", "-a"), ("-r", "--preserve=all"), ("-d",)):
+                  ("-av",), ("-rL",), ("--no-preserve=links", "-a"), ("-r", "--preserve=all"), ("-d",),
+                  ("-rl",), ("-rlP",), ("-rlH",), ("--link", "-a")):
         for operands in (("h", "u"), ("h/a", "h/b", "T"), ("h/a", "h/s/c", "h/e", "h/s/d", "T"), ("h/s", "h/a", "T")):
             total += 1
             answers = []
@@ -7571,6 +7572,9 @@ FILES_UTILITIES = (
                                   ("-df", "--attributes-only"), ("-a", "--attributes-only", "--remove-destination"),
                                   ("-rd", "--attributes-only", "-b"))
                     for pair in (("sl", "g"), ("d", "g"), ("sl", "sub/f")))
+            + tuple({"fixture": "files_self", "argv": words + ("sl", "x")}
+                    for words in (("-rl",), ("--link", "-R"), ("-rlP",), ("-rlH",), ("-rld",), ("-al",),
+                                  ("-rlL",), ("-l",), ("-lP",)))
             + files_skip_cases("cp") + files_readonly_cases()
             + files_made_cases("cp", ("-f", "-b", "--backup=numbered", "-d", "-R", "-l", "-s", "-v", "-a",
                                       "-dR", "--remove-destination", "-n")),
