@@ -33740,6 +33740,21 @@ static b32 file_rm()
                 file_facts facts;
                 bipolar looked;
 
+                /* gnulib's fts_open trims two or more trailing slashes on a
+                   root to exactly one, so rm -rv a/// says 'a/x' and 'a/'
+                   where the name as given would have said 'a///x'. */
+                static p8 rm_trimmed[FILE_PATH_MAX];
+                positive length = string_length(path);
+                if (length > 2 && path[length - 1] == '/' &&
+                    path[length - 2] == '/' && length < FILE_PATH_MAX)
+                {
+                        while (length > 1 && path[length - 2] == '/')
+                                length--;
+                        memory_copy_apart(rm_trimmed, path, length);
+                        rm_trimmed[length] = end;
+                        path = rm_trimmed;
+                }
+
                 if (rm_recursive && rm_dot_operand(path))
                 {
                         string_format(log_error, "rm: refusing to remove '.' or '..' directory: skipping %w\n",

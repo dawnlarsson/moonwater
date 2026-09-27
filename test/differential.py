@@ -7805,7 +7805,12 @@ FILES_UTILITIES = (
                    #   A slash on the end of a link to a directory: the
                    #   contents go, the link stays and the removal of the
                    #   name itself is an ENOTDIR that -f forgives.
-                   ("-rf", "dirlink/"), ("-rfv", "dirlink/"), ("-Rf", "dirlink/"))),
+                   ("-rf", "dirlink/"), ("-rfv", "dirlink/"), ("-Rf", "dirlink/"))
+            #   Two or more slashes on the end of a root are trimmed to one
+            #   before the walk names anything, as gnulib's fts_open does.
+            + tuple(flags + (name,) for flags in (("-rv",), ("-dv",), ("-rfv",), ("-v",), ("-r",))
+                    for name in ("dir///", "dir//sub//", "hollow//", "missing///", "a.txt//", "dirlink///",
+                                 "nest/a//", "dir/sub///deep"))),
     Utility("mktemp", options=(Option("-d"), Option("-u"), Option("-q"), Option("-t"), Option("--directory"), Option("--dry-run"),
                                Option("--quiet"), Option("--tmpdir"),
                                Option("-p", ("dir", ".", "missing", "", "a.txt", "hollow"), None),
