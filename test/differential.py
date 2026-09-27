@@ -15034,7 +15034,10 @@ def shell_lang_aliases(rng):
                         #       the spelling a defined function retained, and a
                         #       held document, across a redefinition.
                         "wrapped-redefinition", "reuse-keeps-function-spelling",
-                        "heredoc-survives-replacement"))
+                        "heredoc-survives-replacement",
+                        #       alias -p and the bare listing, which had a
+                        #       branch below and no way to be drawn.
+                        "listing"))
     enable = "shopt -s expand_aliases 2>/dev/null; "
     if shape == "define-run":
         script = "alias a='echo aliased'; a"
@@ -15633,7 +15636,8 @@ def shell_lang_job_control_script(rng):
     shape = rng.choice(("jobs-running", "jobs-markers", "jobs-done-once", "waited-forgotten", "jobs-p", "jobs-l", "jobs-r-s", "jobs-n",
                         "pipeline-one-job", "stopped", "killed", "exit-status-line", "bg-announce", "fg-status", "fg-spec", "fg-ambiguous",
                         "disown", "disown-h", "disown-a", "kill-spec", "kill-pipeline", "wait-f-stopped", "wait-n",
-                        "pipestatus-monitored", "subshell-jobs", "without-monitor", "job-number-reuse", "jobs-after-exit"))
+                        "pipestatus-monitored", "subshell-jobs", "without-monitor", "job-number-reuse", "jobs-after-exit",
+                        "wait-stopped", "suspend"))
     pre = "set -m; "
     if shape == "jobs-running":
         script = pre + "sleep 0.3 & jobs; wait"
