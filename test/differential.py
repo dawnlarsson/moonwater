@@ -7529,6 +7529,7 @@ FILES_SCENES = {
              "cd / || exit 9\n"),
     "fifo": ("env mkfifo fifo || exit 9\n", "", "env ls -l fifo | env cut -c1\n"),
     "closed": ("", " >&-", ""),
+    "full": ("", " 2>/dev/full", ""),
 }
 FILES_SCENE_CASES = (
     ("gone", "readlink", "-e", "."), ("gone", "readlink", "-f", "."), ("gone", "readlink", "-m", "."),
@@ -7540,6 +7541,9 @@ FILES_SCENE_CASES = (
     ("fifo", "touch", "fifo"), ("fifo", "touch", "-c", "fifo"), ("fifo", "touch", "-a", "fifo", "new"),
     ("fifo", "touch", "-h", "fifo"),
     ("closed", "touch", "-c", "-"), ("closed", "touch", "-"), ("closed", "touch", "--no-create", "-", "a.txt"),
+    # A warning that cannot be written is not gone on past.
+    ("full", "nice", "-n", "-5", "true"), ("full", "nice", "-n", "5", "true"), ("full", "nice", "-n", "x", "true"),
+    ("full", "stat", "missing"), ("full", "touch", "missing/x"),
 )
 
 

@@ -9864,6 +9864,16 @@ static bool nice_current(bipolar address_to current)
         return true;
 }
 
+static bool nice_warning_lost;
+
+static fn nice_warning(address_any data, positive length)
+{
+        if (!length)
+                length = string_length((string_address)data);
+        if (system_write_all(2, data, length) != length)
+                nice_warning_lost = true;
+}
+
 static b32 file_nice()
 {
         positive count = (positive)program_argument_count();
@@ -9991,12 +10001,20 @@ static b32 file_nice()
         bipolar changed = system_call_3(syscall(setpriority), NICE_PROCESS, 0,
                                         (positive)wanted);
 
+        /*
+                A refusal the program goes on past is a warning, and one
+                nobody could be told of is not gone on past: GNU gives up
+                with 125 when the warning did not reach standard error,
+                rather than run the command as if it had been said.
+        */
         if (changed < 0)
         {
-                string_format(log_error, "nice: cannot set niceness: %s\n",
+                nice_warning_lost = false;
+                string_format(nice_warning, "nice: cannot set niceness: %s\n",
                               file_reason(changed));
 
-                if (changed != -ERROR_ACCESS && changed != -ERROR_NOT_PERMITTED)
+                if ((changed != -ERROR_ACCESS && changed != -ERROR_NOT_PERMITTED) ||
+                    nice_warning_lost)
                         return 125;
         }
 
