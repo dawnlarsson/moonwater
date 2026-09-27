@@ -17636,6 +17636,54 @@ static bool floodlight_external_final(
         So the answer is opt-in. A caller that says nothing gets no filter, and
         the callers that say yes are the three that exit immediately after.
 */
+/*
+        --help and --version, first, for every tool that does not answer them
+        itself: a short usage or "<tool> from moonwater", the form gzip, xz,
+        tar and the util-linux set already print, and 0. Most tools called
+        them unrecognized options and failed. The tools below answer with
+        their own synopsis and are left to it, as are moonwater, init and
+        bowl, which are not command-line tools of that kind.
+        Two byte compares on the first operand when it is not one of these,
+        which is every ordinary start.
+*/
+static const string_address shell_tool_own_meta[] = {
+    "tar", "gzip", "gunzip", "zcat", "xz", "unxz", "xzcat", "unzstd", "zstd",
+    "zstdcat", "addpart", "blockdev", "cal", "choom", "chrt", "copyfilerange",
+    "coresched", "ctrlaltdel", "delpart", "exch", "fadvise", "fallocate",
+    "fincore", "flock", "getino", "getopt", "hardlink", "ipcmk", "ipcrm",
+    "ipcs", "isosize", "wget", "ionice", "lsblk", "lsclocks", "lscpu", "lsfd",
+    "lsipc", "lslocks", "lsmem", "lsns", "mesg", "mkswap", "namei", "nsenter",
+    "pipesz", "pivot_root", "prlimit", "renice", "rename", "resizepart",
+    "rfkill", "scriptreplay", "setpgid", "setpriv", "setsid", "swaplabel",
+    "taskset", "uclampset", "unshare", "utmpdump", "waitpid", "wall",
+    "whereis", "wipefs", "write", "moonwater", "init", "bowl", null};
+
+static bool shell_tool_meta(positive which, string_address address_to arguments,
+                            positive count)
+{
+        string_address name = shell_tools[which].name;
+        string_address word;
+        bool help;
+
+        if (count < 2 || !(word = arguments[1]) || !string_is(word, '-') ||
+            !string_is(word + 1, '-'))
+                return false;
+
+        help = word_is(word, "--help");
+        if (!help && !word_is(word, "--version"))
+                return false;
+
+        for (positive at = 0; shell_tool_own_meta[at]; at++)
+                if (word_is(name, shell_tool_own_meta[at]))
+                        return false;
+
+        string_format(log, help ? "Usage: %s [OPTION]... [ARGUMENT]...\n"
+                                : "%s from moonwater\n",
+                      name);
+        log_flush();
+        return true;
+}
+
 static b32 shell_tool_call_in(positive which, bool own_process)
 {
         string_address address_to arguments = program_argument_list();
@@ -17649,6 +17697,11 @@ static b32 shell_tool_call_in(positive which, bool own_process)
                                      own_process, true, null) !=
             FLOODLIGHT_LAUNCH_ALLOW)
                 return 126;
+
+        /* After the launch decision: a tool that policy refuses is refused
+           for --version as for anything else. */
+        if (shell_tool_meta(which, arguments, count))
+                return 0;
 
         log_failure_reset();
         answered = shell_tools[which].function() & 0xff;
