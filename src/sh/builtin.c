@@ -2561,10 +2561,11 @@ fn shell_env_init(string_address address_to process_environment)
         // read it, save it and put it back, and under set -u one that is
         // absent rather than defaulted is an error where every other shell
         // hands over the three bytes. XDG_RUNTIME_DIR is the directory
-        // Weston, GTK, Qt and PipeWire refuse to start without.
+        // Weston, GTK, Qt and PipeWire refuse to start without. HOME is not
+        // made up: a cron job or a unit without one got /root, exported,
+        // whoever it ran as; everything Moonwater starts hands one over.
         string_address defaults[] = {"PATH=" BOWL_DEFAULT_PATH,
                                      "SHELL=/bin/sh",
-                                     "HOME=/root",
                                      "LANG=C.UTF-8",
                                      "IFS= \t\n",
                                      "OPTIND=1",
