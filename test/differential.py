@@ -16701,6 +16701,9 @@ INPUTS.update({
     "text_join_reversed": b"2 a\n1 b\n",
     "text_join_late_disorder": b"1 a\n3 b\n2 c\n5 d\n",
     "text_join_blank_tail": b"a\nx\n\n",
+    "text_b64_plus_slash": b"VA/c8A+vSg==\n",
+    "text_b64url_long_slash": b"QUJD" * 1400 + b"QUJD" * 10 + b"/QUJD\n",
+    "text_b64url_garbage": b"VAx%y\n",
     "text_names0_empty": b"a.txt\x00\x00b.txt\x00",
     "text_names0_only_empty": b"\x00\x00",
     "text_names0_big": b"big\x00a.txt\x00",
@@ -18010,7 +18013,12 @@ TEXT_UTILITIES = (
             operands=_TEXT_ENCODING_OPERANDS, stdin=_TEXT_ENCODING_STDIN, fixture="text",
             valid=text_basenc_valid,
             extra=(("--base64", "--base32"), ("--nosuchflag",), ("--z85", "-w4"), ("--z85", "-w1"),
-                   ("--base2lsbf", "-di"), ("--base16", "-d", "-i"))),
+                   ("--base2lsbf", "-di"), ("--base16", "-d", "-i"),
+                   #   base64url refuses a 5600-byte block holding base64's
+                   #   own + or / before decoding any of it; -i drops them.
+                   *({"argv": argv, "stdin": stdin, "fixture": "text"}
+                     for stdin in ("text_b64_plus_slash", "text_b64url_long_slash", "text_b64url_garbage")
+                     for argv in (("--base64url", "-d"), ("--base64url", "-di"), ("--base64", "-d"))))),
     Utility("cat",
             options=(Option("-A"), Option("--show-all"), Option("-b"), Option("--number-nonblank"),
                      Option("-e"), Option("-E"), Option("--show-ends"), Option("-n"), Option("--number"),

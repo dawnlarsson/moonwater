@@ -1659,6 +1659,8 @@ static bool encoding_padding(const encoding_codec address_to codec,
         return !padding || padding == expected;
 }
 
+#define ENCODING_URL_BLOCK 5600
+
 static b32 encoding_decode(const encoding_codec address_to codec,
                            bool ignore_garbage)
 {
@@ -1682,8 +1684,38 @@ static b32 encoding_decode(const encoding_codec address_to codec,
                 for (positive value = 10; value < 16; value++)
                         values['a' + value - 10] = (p8)value;
 
-        while (valid && text_fill())
+        /*
+                GNU's basenc decodes base64url a block of 5600 input bytes at
+                a time, and refuses a block holding a + or a / -- base64's
+                own letters -- before decoding any of it, so nothing that
+                block would have made is written. Without -i, which drops
+                those two as garbage, the input here is read a block at a
+                time and what a block makes is held until the block is whole.
+        */
+        bool url_blocks = codec == encoding_codecs + ENCODING_BASE64URL &&
+                          !ignore_garbage;
+        positive offset = 0;
+
+        while (valid && (url_blocks ? text_input.position < text_input.filled ||
+                                          text_fill_amount(ENCODING_URL_BLOCK -
+                                                           offset % ENCODING_URL_BLOCK)
+                                    : text_fill()))
         {
+                if (url_blocks)
+                {
+                        p8 address_to at = text_input.buffer + text_input.position;
+                        positive left = text_input.filled - text_input.position;
+
+                        if (memory_first_of(at, '+', left) || memory_first_of(at, '/', left))
+                        {
+                                made = 0;
+                                valid = false;
+                                break;
+                        }
+
+                        offset += left;
+                }
+
                 while (text_input.position < text_input.filled)
                 {
                         if (!held && !padded)
@@ -1778,6 +1810,12 @@ static b32 encoding_decode(const encoding_codec address_to codec,
                                 valid = false;
                                 break;
                         }
+                }
+
+                if (url_blocks && valid && !(offset % ENCODING_URL_BLOCK) && made)
+                {
+                        text_put(text_line, made);
+                        made = 0;
                 }
         }
 
