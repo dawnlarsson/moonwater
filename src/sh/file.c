@@ -33060,11 +33060,115 @@ static bool file_duration_read(string_address text, bool units,
         return true;
 }
 
+/*
+        strtod's other spellings, which GNU's sleep reads through it: inf and
+        infinity in any case (forever), and a hexadecimal float, 0x digits,
+        an optional point and more, an optional p and a binary exponent --
+        0x1p-3 is an eighth of a second. Answers false when text is neither.
+*/
+static bool sleep_read_other(string_address text, positive address_to total)
+{
+        string_address at = text;
+        p8 lowered[16];
+        positive length = 0;
+
+        if (string_is(at, '+'))
+                at++;
+        while (length < sizeof(lowered) - 1 && string_get(at + length))
+        {
+                lowered[length] = byte_to_lower(string_get(at + length));
+                length++;
+        }
+        lowered[length] = end;
+        if (string_equals(lowered, "inf") || string_equals(lowered, "infinity") ||
+            string_equals(lowered, "infs") || string_equals(lowered, "infinitys"))
+        {
+                address_to total = positive_max;
+                return true;
+        }
+
+        if (!string_is(at, '0') || (at[1] != 'x' && at[1] != 'X'))
+                return false;
+        at += 2;
+
+        unsigned __int128 mantissa = 0;
+        bipolar exponent = 0;
+        bool any = false;
+        bool point = false;
+
+        while (digit_known(string_get(at), 16) < 16 || (!point && string_is(at, '.')))
+        {
+                if (string_is(at, '.'))
+                {
+                        point = true;
+                        at++;
+                        continue;
+                }
+                any = true;
+                if (mantissa >> 100)
+                        exponent += point ? 0 : 4;
+                else
+                {
+                        mantissa = mantissa << 4 | digit_known(string_get(at), 16);
+                        exponent -= point ? 4 : 0;
+                }
+                at++;
+        }
+        if (!any)
+                return false;
+        if (string_is(at, 'p') || string_is(at, 'P'))
+        {
+                bool negative = false;
+                positive power = 0;
+
+                at++;
+                if (string_is(at, '+') || string_is(at, '-'))
+                        negative = string_get(at++) == '-';
+                if (!byte_is_digit(string_get(at)))
+                        return false;
+                while (byte_is_digit(string_get(at)))
+                        if ((power = power * 10 + (positive)(string_get(at++) - '0')) > 100000)
+                                power = 100000;
+                exponent += negative ? -(bipolar)power : (bipolar)power;
+        }
+
+        positive unit = 1;
+
+        if (string_get(at) && string_first_of("smhd", string_get(at)))
+        {
+                p8 suffix = string_get(at++);
+
+                unit = suffix == 'm' ? 60 : suffix == 'h' ? 3600 : suffix == 'd' ? 86400 : 1;
+        }
+        if (string_get(at))
+                return false;
+
+        unsigned __int128 nanoseconds = mantissa * 1000000000u * unit;
+
+        while (exponent < 0 && nanoseconds)
+        {
+                nanoseconds >>= 1;
+                exponent++;
+        }
+        while (exponent > 0 && nanoseconds && !(nanoseconds >> 126))
+        {
+                nanoseconds <<= 1;
+                exponent--;
+        }
+        address_to total = exponent > 0 || nanoseconds > positive_max
+                               ? positive_max : (positive)nanoseconds;
+        if (!address_to total && mantissa)
+                address_to total = 1;
+        return true;
+}
+
 static bool sleep_read(string_address text, p64 address_to seconds,
                        p64 address_to nanoseconds)
 {
         positive total;
-        if (!file_duration_read(text, true, address_of total))
+        if (sleep_read_other(text, address_of total))
+                ;
+        else if (!file_duration_read(text, true, address_of total))
         {
                 if (!file_duration_overflowed)
                         return false;
@@ -33083,6 +33187,8 @@ static b32 file_sleep()
                 return string_report(log_error, 1, "%s: missing operand\n", (string_address) "sleep");
 
         bool intervals_only = false;
+        bool refused = false;
+        positive total = 0;
 
         for (positive i = 1; i < count; i++)
         {
@@ -33120,25 +33226,41 @@ static b32 file_sleep()
                             "Try 'sleep --help' for more information.\n");
                 }
 
+                /*
+                        Every interval is read before any is slept, as GNU
+                        reads them: sleep 2 x waited two seconds to refuse
+                        the x. Each bad one is named, and the sum is slept
+                        once, saturating at forever.
+                */
                 if (!sleep_read(word, address_of wanted[0],
                                 address_of wanted[1]))
                 {
-                        return string_report(log_error, 1, "sleep: invalid time interval '%w'\n",
+                        string_format(log_error, "sleep: invalid time interval '%w'\n",
                                       writer_terminal_quoted_name, program_argument((b32)i));
+                        refused = true;
+                        continue;
                 }
 
-                // A signal that arrives partway through leaves the remainder
-                // in the second timespec, and the sleep goes on from there.
-                p64 left[2] = {wanted[0], wanted[1]};
+                positive span = wanted[0] > positive_max / 1000000000u
+                                    ? positive_max : wanted[0] * 1000000000u + wanted[1];
 
-                bipolar slept;
-                do
-                        slept = system_call_2(syscall(nanosleep),
-                                               (positive)left, (positive)left);
-                while (slept == -4);
-                if (slept < 0)
-                        return string_report(log_error, 1, "sleep: %s\n", file_reason(slept));
+                total = span > positive_max - total ? positive_max : total + span;
         }
+
+        if (refused)
+                return string_report(log_error, 1,
+                                     "Try 'sleep --help' for more information.\n");
+
+        // A signal that arrives partway through leaves the remainder in the
+        // second timespec, and the sleep goes on from there.
+        p64 left[2] = {total / 1000000000u, total % 1000000000u};
+
+        bipolar slept;
+        do
+                slept = system_call_2(syscall(nanosleep), (positive)left, (positive)left);
+        while (slept == -4);
+        if (slept < 0)
+                return string_report(log_error, 1, "sleep: %s\n", file_reason(slept));
 
         return 0;
 }

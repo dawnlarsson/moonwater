@@ -1412,6 +1412,14 @@ static fn process_timeout_signal(b32 child, bipolar pidfd, b32 signal,
 static bool process_timeout_duration(string_address text,
                                      positive address_to duration)
 {
+        // strtod's hexadecimal floats, 0x1p-3 among them, as sleep reads them.
+        if (string_is(text, '0') && (text[1] == 'x' || text[1] == 'X') &&
+            sleep_read_other(text, duration))
+        {
+                if (address_to duration == positive_max)
+                        address_to duration = 0;
+                return true;
+        }
         if (string_equals(text, "inf") || string_equals(text, "INF") ||
             string_equals(text, "infinity") || string_equals(text, "+inf"))
         {

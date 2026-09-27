@@ -7517,7 +7517,11 @@ FILES_UTILITIES = (
             normalize=files_normal(lambda data: re.sub(rb"(?<=(?:run|tmp)\.)[A-Za-z0-9]{3,}", b"#", data))),
     Utility("sleep", operands=(("0",), ("0.1",), ("0.3",), ("1",), ("1s",), ("0.5s",), ("0.01m",), ("0.0003h",), ("0.00001d",),
                                ("1", "0.5"), ("nonsense",), ("",), (), ("-1",), ("1x",), ("1e-1",), ("nan",), ("0x1",), ("0.1", "x"),
-                               ("1.5.2",), ("0s", "0m", "0h", "0d"), ("+1",), (".5",), ("1.",), ("1 s",), ("s",), ("1ss",), ("0", "-1")),
+                               ("1.5.2",), ("0s", "0m", "0h", "0d"), ("+1",), (".5",), ("1.",), ("1 s",), ("s",), ("1ss",), ("0", "-1"),
+                               # strtod's hex floats, every operand read before any
+                               # sleep, and each bad one named.
+                               ("0x1p-3",), ("0x.1",), ("0X1P-4s",), ("0x1p-3", "0x.1"), ("2", "x"), ("x", "y"),
+                               ("0x",), ("0x1q",), ("1e-10000",), ("1e400", "x")),
             stdin=("empty",), fixture="files", stderr="exact", timeout=8.0),
     Utility("xargs", options=(Option("-0"), Option("-r"), Option("-t"), Option("-x"), Option("--null"),
                               Option("--no-run-if-empty"), Option("--verbose"), Option("--exit"),
@@ -10005,7 +10009,8 @@ MISC_UTILITIES = (
                    # A span too short to count still times out; one too long
                    # to count is forever, not a mistake.
                    ("1e-10000", "sleep", "2"), ("1e400", "true"), ("99999999999999999999", "true"),
-                   ("-k", "1e400", ".1", "true"), ("1e-10000s", "true"))),
+                   ("-k", "1e400", ".1", "true"), ("1e-10000s", "true"), ("0x1p-4", "sleep", "1"),
+                   (".2", "sleep", "inf"), (".2", "sleep", "INFINITY"))),
     #       timeout between the command and signals from outside: an ALRM
     #       is the timeout come early and answers 124, the others are sent
     #       on, and none of them may end timeout and leave the command
