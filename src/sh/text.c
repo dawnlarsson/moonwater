@@ -3931,6 +3931,36 @@ static fn cat_release_cr()
                 *field = '\r';
 }
 
+/*
+        Before cat waits on an input, it writes what it holds, as GNU's does:
+        `tail -f log | cat -v` must show each line as it comes rather than
+        whenever a buffer fills or the input ends. GNU asks the kernel with
+        FIONREAD how much is waiting and writes out only when the answer is
+        nothing -- or when the question is refused, as it is for a terminal
+        on some systems -- so a pipe that is streaming fast is still copied
+        in whole buffers. A regular file never makes anyone wait, and it is
+        not asked: its end is the end of cat or the start of the next input,
+        and a next input that waits is asked then.
+*/
+#define CAT_UNREAD 0x541b
+
+static bool cat_input_waits;
+
+static inline INLINE bool cat_fill()
+{
+        if (cat_input_waits && text_input.position >= text_input.filled &&
+            !text_input.finished)
+        {
+                b32 unread = 0;
+
+                if (system_control(text_input.handle, CAT_UNREAD,
+                                   address_of unread) < 0 || !unread)
+                        text_flush();
+        }
+
+        return text_fill();
+}
+
 // A byte as -v spells it: control characters as ^X, the high half as M- and
 // then the same rule again. Tab and newline are touched separately by -T.
 static fn cat_walked()
@@ -3944,7 +3974,7 @@ static fn cat_walked()
                                   ((cat_flags & (CAT_NUMBER | CAT_NUMBER_FULL |
                                                  CAT_SQUEEZE | CAT_ENDS)) != 0)];
 
-        while (!text_out_failed && text_fill())
+        while (!text_out_failed && cat_fill())
         {
                 // Room for a line number, its tab and the widest byte -v
                 // writes with its terminator. A reservation fails only when
@@ -4232,6 +4262,8 @@ static fn cat_one(string_address shown)
         if (known && cat_same_file(address_of in, shown))
                 return;
 
+        cat_input_waits = !known || (in.mode & MODE_FORMAT) != MODE_FILE;
+
         if (cat_flags)
         {
                 cat_walked();
@@ -4248,7 +4280,12 @@ static fn cat_one(string_address shown)
                         return;
         }
 
-        text_put_rest();
+        while (!text_out_failed && cat_fill())
+        {
+                text_put(text_input.buffer + text_input.position,
+                         text_input.filled - text_input.position);
+                text_input.position = text_input.filled;
+        }
 }
 
 static const argument_option cat_options[] = {

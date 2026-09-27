@@ -16926,6 +16926,55 @@ def _text_write_script(argv, stdin_name):
     return ul_live(argv[0], body, wrap="unshare -Urm")
 
 
+#       Inputs a regular file in the fixture cannot stand for: a pipe, a pipe
+#       that pauses until the tool has written what it holds, a file two
+#       tools read in turn through one descriptor, a file read from an offset
+#       another tool left, and a pipe too large to hold in memory, into a
+#       temporary directory that has room and one that has not. The engine
+#       feeds every other case from a seekable file, so none of these shapes
+#       was ever reached. The words are the tool, the shape, and then its own
+#       options; each case runs in a mount namespace of its own.
+_TEXT_STREAM_PROLOGUE = ("env mkdir m && env mount -t tmpfs -o size=64k tmpfs m || "
+                         "{ echo 'no tmpfs here'; exit 0; }\n"
+                         "env seq 1 300000 > numbers\n"
+                         "printf 'abcdef\\nghij\\001kl\\tm\\n' > six\n")
+_TEXT_STREAM_SOURCES = {
+    "pipe": "env cat numbers | {{ run {words}; echo \"status $?\"; }} | env md5sum",
+    "file": "{{ run {words} numbers; echo \"status $?\"; }} | env md5sum",
+    "offset": "{{ env head -n 7 > /dev/null; run {words}; echo \"status $?\"; }} < numbers | env md5sum",
+    "shared": "{{ run {words}; run {words}; echo \"status $?\"; }} < six",
+    "sharedpipe": "env cat six | {{ run {words}; echo \"status $?\"; env cat; }}",
+    "big": "env seq 1 1000000 | {{ run {words}; echo \"status $?\"; }} | env md5sum",
+    "full": ("export TMPDIR=$PWD/m\n"
+             "env seq 1 1000000 | {{ run {words}; echo \"status $?\"; }} | env md5sum"),
+    #   The writer pauses after its first line until the reader has had
+    #   that line, so a tool that keeps what it has read until the input
+    #   ends never gives it, and the case runs out of time.
+    "live": ("env mkfifo go\n"
+             "{{ printf 'one\\t\\001\\n'; read -r x < go; printf 'two\\n'; }} | "
+             "{{ run {words}; echo \"status $?\"; }} | {{ env head -n 1; echo > go; env cat; }}"),
+}
+_TEXT_STREAM_CASES = (
+    ("cat", "live"), ("cat", "live", "-v"), ("cat", "live", "-n"), ("cat", "live", "-E"),
+    ("cat", "live", "-A"), ("cat", "live", "-s"), ("cat", "live", "-b"), ("cat", "live", "-T"),
+    ("cat", "pipe", "-n"), ("cat", "big", "-v"), ("cat", "offset", "-n"),
+    ("head", "shared", "-c", "3"), ("head", "shared", "-n", "1"),
+    ("wc", "offset"), ("wc", "offset", "-c"), ("nl", "pipe"),
+)
+_TEXT_STREAM_TOOLS = ("cat", "head", "wc", "nl")
+
+
+def _text_stream_valid(argv):
+    return (len(argv) >= 2 and argv[0] in _TEXT_STREAM_TOOLS and
+            argv[1] in _TEXT_STREAM_SOURCES)
+
+
+def _text_stream_script(argv, stdin_name):
+    command = _TEXT_STREAM_SOURCES[argv[1]].format(words=ul_words(argv[2:]))
+    body = _TEXT_STREAM_PROLOGUE + command + "\n"
+    return ul_live(argv[0], body, wrap="unshare -Urm")
+
+
 # ----------------------------------------------------------------------------
 #       The programs.
 # ----------------------------------------------------------------------------
@@ -16933,6 +16982,8 @@ def _text_write_script(argv, stdin_name):
 TEXT_UTILITIES = (
     Utility("write_errors", operands=_TEXT_WRITE_CASES, stdin=("empty",), fixture="text",
             stderr="exact", modes=BASH, script=_text_write_script, valid=_text_write_valid),
+    Utility("streams", operands=_TEXT_STREAM_CASES, stdin=("empty",), fixture="text",
+            modes=BASH, script=_text_stream_script, valid=_text_stream_valid),
     Utility("base64", options=_TEXT_ENCODING_OPTIONS, operands=_TEXT_ENCODING_OPERANDS,
             stdin=_TEXT_ENCODING_STDIN, fixture="text",
             extra=(("--nosuchflag",), ("-Q",), ("-d", "-w", "0"), ("-di",))),
