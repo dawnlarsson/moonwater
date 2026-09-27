@@ -20897,6 +20897,24 @@ static void check_machine_events(void) {
           (control.flags & MOONWATER_ATTACHED) && atomic_read(&bind_machine_live),
           "a machine process attaches and owns its rows");
 
+    /* Canvas on is handed over once per start. A new on clears the latch an
+       attach replays on, and the machine process reading the event sets it,
+       so a process that attaches again after reading it opens nothing more. */
+    bind_machine.count=0;
+    atomic_set(&bind_canvas_told,1);
+    bind_fire(SPARK_BIND_CANVAS_ON);
+    check(!atomic_read(&bind_canvas_told) && bind_machine.count==1 &&
+          bind_machine.event[0]==SPARK_BIND_CANVAS_ON,
+          "a canvas on is queued for the machine process and not yet told");
+    memset(&control,0,sizeof control);
+    control.op=MOONWATER_WAIT;
+    check(!report_machine(&machine,&control) && atomic_read(&bind_canvas_told) &&
+          !bind_machine.count,
+          "reading canvas on marks this start told");
+    bind_fire(SPARK_BIND_CANVAS_OFF);
+    check(!atomic_read(&bind_canvas_told),
+          "canvas off clears it for the next start");
+
     bind_idle(power); queued=bind_queued; bind_machine.count=0;
     bind_queue(power);
     check(bind_queued==queued && bind_machine.count==1 &&

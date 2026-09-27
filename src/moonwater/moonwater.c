@@ -710,6 +710,20 @@ static atomic_t bind_alt;
 static unsigned bind_held_n;
 static _Bool bind_handler_registered;
 static struct work_struct bind_canvas_work;
+
+/*
+        Whether this Canvas start has been handed to anyone.
+
+        Canvas starts during the initcalls, before system_state is running,
+        so the canvas on it fires at boot is dropped, and the machine process
+        that opens a desktop's windows attaches seconds later. Each canvas
+        on or off clears it; handing canvas on to the machine process, or
+        queueing its image line, sets it; and an attach that finds Canvas on
+        and this clear fires canvas on again. A machine process that crashes
+        and attaches again after it read the event does not get a second one,
+        so it does not open a second set of windows.
+*/
+static atomic_t bind_canvas_told;
 static atomic_t bind_alive;
 static atomic_t bind_machine_live;
 
@@ -1062,6 +1076,8 @@ static void bind_queue(struct bind_row *row)
                         return;
                 atomic_set(&on->busy, 1);
                 atomic_set(&off->busy, 1);
+                if (row->event == SPARK_BIND_CANVAS_ON)
+                        atomic_set(&bind_canvas_told, 1);
                 work = &bind_canvas_work;
         } else {
                 if ((row->flags & BIND_DROP) &&
@@ -1082,6 +1098,9 @@ static _Bool bind_row_bound(struct bind_row *row)
 static void bind_fire(unsigned int event)
 {
         struct bind_row *row = bind_row(event);
+
+        if (event == SPARK_BIND_CANVAS_ON || event == SPARK_BIND_CANVAS_OFF)
+                atomic_set(&bind_canvas_told, 0);
 
         if (bind_row_bound(row))
                 bind_queue(row);
@@ -1158,6 +1177,8 @@ static long bind_machine_wait(struct file *file, struct machine_control *request
                 if (bind_machine.count) {
                         event = bind_machine.event[0];
                         bind_machine_shift(0);
+                        if (event == SPARK_BIND_CANVAS_ON)
+                                atomic_set(&bind_canvas_told, 1);
                         bind_machine_fill(request, event);
                         spin_unlock_irqrestore(&bind_machine_lock, flags);
                         return 0;
@@ -1262,6 +1283,10 @@ static long report_machine(struct file *file, struct machine_control __user *out
                 atomic_set(&bind_machine_live, 1);
                 spin_unlock_irqrestore(&bind_machine_lock, flags);
                 bind_machine_watch_all(true);
+#ifdef CONFIG_MOONWATER_CANVAS
+                if (!atomic_read(&bind_canvas_told) && canvas_is_on())
+                        bind_fire(SPARK_BIND_CANVAS_ON);
+#endif
                 request.flags = MOONWATER_ATTACHED;
                 break;
         case MOONWATER_DETACH:
