@@ -50005,6 +50005,83 @@ static fn fetching(void)
                                        address_of used) == HTTP_OK &&
                           used == sizeof root_query - 1 &&
                           !memory_compare(request, root_query, used));
+
+                /* The serializer is a trust boundary of its own.  Exercise
+                   every HTTP control byte in every caller-provided request
+                   component, rather than relying on today's URL parser and
+                   constant User-Agent to have screened them first. */
+                for (positive byte = 1; byte <= 127; byte++)
+                {
+                        if (byte > 31 && byte != 127)
+                                continue;
+
+                        p8 hostile_host[] = "example.com";
+                        p8 hostile_path[] = "/safe";
+                        p8 hostile_agent[] = "agent";
+
+                        hostile_host[3] = (p8)byte;
+                        hostile_path[2] = (p8)byte;
+                        hostile_agent[2] = (p8)byte;
+                        check("request builder refuses header injection in every component",
+                              http_get_request(request, sizeof request,
+                                               hostile_host, 80, "/safe",
+                                               false, '1', "agent", &used) ==
+                                      HTTP_BAD_URL &&
+                                  http_get_request(request, sizeof request,
+                                                   "example.com", 80,
+                                                   hostile_path, false, '1',
+                                                   "agent", &used) ==
+                                      HTTP_BAD_URL &&
+                                  http_get_request(request, sizeof request,
+                                                   "example.com", 80, "/safe",
+                                                   false, '1', hostile_agent,
+                                                   &used) == HTTP_BAD_URL);
+                }
+
+                check("request targets cannot contain a raw request-line space",
+                      http_get_request(request, sizeof request,
+                                       "example.com", 80, "/one two", false,
+                                       '1', "agent", &used) == HTTP_BAD_URL);
+                check("request hosts cannot contain header whitespace",
+                      http_get_request(request, sizeof request,
+                                       "example .com", 80, "/safe", false,
+                                       '1', "agent", &used) == HTTP_BAD_URL);
+                check("request targets cannot contain proxy-ambiguous backslashes",
+                      http_get_request(request, sizeof request,
+                                       "example.com", 80, "/one\\two", false,
+                                       '1', "agent", &used) == HTTP_BAD_URL);
+                for (positive byte = 1; byte <= 255; byte++)
+                {
+                        p8 candidate[] = {'a', (p8)byte, 'z', 0};
+                        bool host_byte = byte_is_alnum((p8)byte) || byte == '-' ||
+                                         byte == '.' || byte == '_';
+
+                        check("request Host serialization has one complete byte grammar",
+                              (http_get_request(request, sizeof request,
+                                                candidate, 80, "/safe", false,
+                                                '1', "agent", &used) == HTTP_OK) ==
+                                  host_byte);
+                }
+                check("request components must all be present",
+                      http_get_request(request, sizeof request, null, 80,
+                                       "/safe", false, '1', "agent", &used) ==
+                              HTTP_BAD_URL &&
+                          http_get_request(request, sizeof request,
+                                           "example.com", 80, null, false,
+                                           '1', "agent", &used) ==
+                              HTTP_BAD_URL &&
+                          http_get_request(request, sizeof request,
+                                           "example.com", 80, "/safe", false,
+                                           '1', null, &used) == HTTP_BAD_URL);
+                check("an empty request Host is absent, not an authority",
+                      http_get_request(request, sizeof request, "", 80,
+                                       "/safe", false, '1', "agent", &used) ==
+                          HTTP_BAD_URL);
+                check("ordinary spaces remain valid inside User-Agent",
+                      http_get_request(request, sizeof request,
+                                       "example.com", 80, "/safe", false,
+                                       '1', "Moonwater test", &used) ==
+                          HTTP_OK);
         }
 
         {
@@ -51192,6 +51269,14 @@ static fn tls_certificate_identity_rules(void)
             0x30, 0x09,             // one extension
             0x06, 0x03, 0x55, 0x1d, 0x1e, // nameConstraints
             0x04, 0x02, 0x30, 0x00};      // empty constraints sequence
+        static p8 duplicate_unknown[] = {
+            0xa3, 0x14, 0x30, 0x12,
+            0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x01, 0x00,
+            0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x01, 0x00};
+        static p8 distinct_unknown[] = {
+            0xa3, 0x14, 0x30, 0x12,
+            0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x01, 0x00,
+            0x30, 0x07, 0x06, 0x02, 0x2a, 0x04, 0x04, 0x01, 0x00};
         static p8 san_good[] = {
             0x30, 0x0d, 0x82, 0x0b,
             'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm'};
@@ -51211,6 +51296,7 @@ static fn tls_certificate_identity_rules(void)
             'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm',
             0x87, 0x05, 192, 0, 2, 1, 0};
         tls_cert cert = {0};
+        p8 too_many[593];
         bool matched = false;
 
         check("an exact dNSName identifies a named host",
@@ -51244,6 +51330,38 @@ static fn tls_certificate_identity_rules(void)
                              "example.com", address_of matched));
         check("name constraints are refused even when non-critical",
               tls_parse_extensions(constrained, sizeof constrained, 0, 2,
+                                   address_of cert, null) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("duplicate unknown certificate extensions are refused",
+              tls_parse_extensions(duplicate_unknown,
+                                   sizeof duplicate_unknown, 0, 2,
+                                   address_of cert, null) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("distinct unknown non-critical certificate extensions remain valid",
+              tls_parse_extensions(distinct_unknown,
+                                   sizeof distinct_unknown, 0, 2,
+                                   address_of cert, null) == TLS_OK &&
+                  !cert.unsupported_critical);
+
+        /* Sixty-five distinct, otherwise valid unknown extensions. The DER
+           lengths are long-form because this also reaches the parser's
+           multi-byte length path before it reaches the work ceiling. */
+        too_many[0] = 0xa3; too_many[1] = 0x82;
+        too_many[2] = 0x02; too_many[3] = 0x4d;
+        too_many[4] = 0x30; too_many[5] = 0x82;
+        too_many[6] = 0x02; too_many[7] = 0x49;
+        for (positive extension = 0; extension < 65; extension++)
+        {
+                positive at = 8 + extension * 9;
+                static const p8 shape[] = {
+                    0x30, 0x07, 0x06, 0x02, 0x2a, 0, 0x04, 0x01, 0};
+
+                memory_copy(too_many + at, shape, sizeof shape);
+                too_many[at + 5] = (p8)extension;
+        }
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("certificate extension work stops at its explicit ceiling",
+              tls_parse_extensions(too_many, sizeof too_many, 0, 2,
                                    address_of cert, null) == TLS_FAIL);
 }
 
@@ -54524,6 +54642,54 @@ static fn leasing(void)
         }
 }
 
+/* Exhaust the policy boundary between renewing and rebinding independently of
+   packet parsing.  The axes are the message kind, whether the reply identifies
+   a server, whether it is the selected server, whether an ACK retains the held
+   address, and whether the client has entered REBINDING.  This is the complete
+   state input to dhcp_reacquisition_answer_matches, not a few examples from it. */
+static fn dhcp_reacquisition_state_matrix(void)
+{
+        static const p8 kinds[] = {0, DHCP_DISCOVER, DHCP_OFFER, DHCP_REQUEST,
+                                   DHCP_ACK, DHCP_NAK, 7, 255};
+        static const p32 servers[] = {0, 0x0a000202, 0x0a0002fe};
+        static const p32 addresses[] = {0, 0x0a00020f, 0x0a000263};
+        const dhcp_lease held = {
+            .address = 0x0a00020f, .mask = 0xffffff00,
+            .server = 0x0a000202, .seconds = 3600,
+        };
+
+        for (positive rebinding = 0; rebinding < 2; rebinding++)
+        for (positive kind_at = 0; kind_at < array_count(kinds); kind_at++)
+        for (positive server_at = 0; server_at < array_count(servers); server_at++)
+        for (positive address_at = 0; address_at < array_count(addresses); address_at++)
+        {
+                p8 kind = kinds[kind_at];
+                dhcp_lease answer = {
+                    .address = addresses[address_at],
+                    .server = servers[server_at],
+                };
+                bool reply_kind = kind == DHCP_ACK || kind == DHCP_NAK;
+                bool server_known = answer.server != 0;
+                bool server_allowed = rebinding || answer.server == held.server;
+                bool address_allowed = kind != DHCP_ACK ||
+                                       answer.address == held.address;
+                bool expected = reply_kind && server_known && server_allowed &&
+                                address_allowed;
+
+                check("every DHCP reacquisition state has the declared authorization",
+                      dhcp_reacquisition_answer_matches(
+                          kind, address_of answer, address_of held,
+                          rebinding != 0) == expected);
+        }
+
+        check("a DHCP state decision requires both answer and held state",
+              !dhcp_reacquisition_answer_matches(DHCP_ACK, null,
+                                                  address_of held, false) &&
+                  !dhcp_reacquisition_answer_matches(DHCP_ACK,
+                                                      address_of held, null,
+                                                      false));
+}
+
 static fn leasing_datagrams(void)
 {
         p8 packet[301], received[300], hardware[6] = {1, 2, 3, 4, 5, 6};
@@ -54609,11 +54775,12 @@ static fn leasing_datagrams(void)
                                   accepted.host == sender_at.host);
         }
 
-        /* Invalid traffic consumes elapsed time, not a receive attempt.  A
-           wrong transaction and an oversized datagram queued before the real
-           offer must both be discarded inside the same fixed budget. */
+        /* Invalid traffic consumes elapsed time, not a receive attempt. A
+           late reply from transaction 124 is a replay during transaction 123;
+           it and an oversized datagram queued before the real offer must both
+           be discarded inside the same fixed budget. */
         network_store_32(packet + 4, 124);
-        check("wrong-transaction DHCP datagram queues",
+        check("a replay from an earlier DHCP transaction queues",
               socket_send((b32)sender, packet, 300, 0, address_of receiver_at,
                           sizeof receiver_at) == 300);
         check("empty DHCP junk queues",
@@ -54631,7 +54798,7 @@ static fn leasing_datagrams(void)
                           sizeof receiver_at) == 300);
         check("DHCP junk budget starts",
               network_deadline_begin(address_of deadline, 0, 100000000));
-        check("DHCP discards junk and wrong peers before the valid reply",
+        check("DHCP discards replay, junk and wrong peers before the valid reply",
               dhcp_receive(receiver, received, sizeof received, 123, hardware,
                            &lease, &kind, address_of sender_at, false, null,
                            address_of deadline));
@@ -54644,10 +54811,10 @@ static fn leasing_datagrams(void)
                 socket_close(invalid);
 }
 
-/* Exercise DHCP's two intentional kernel entropy policies independently.  A
-   seccomp errno filter can distinguish getrandom's flags without replacing
-   the production helper: one child refuses only the early-boot stream, one
-   refuses only initialized nonblocking randomness, and one refuses both.
+/* Exercise DHCP's two secure kernel entropy paths independently. A seccomp
+   errno filter can distinguish getrandom's flags without replacing the
+   production helper: one child refuses only blocking randomness, one refuses
+   only initialized nonblocking randomness, and one refuses both.
    The last child also calls the public acquisition and renewal paths with a
    nonexistent interface; DHCP_NO_RANDOM proves they returned before opening
    that socket (and therefore before sending a packet). */
@@ -54687,8 +54854,14 @@ static bipolar dhcp_test_random_filter(p32 first, p32 second)
 
 static fn dhcp_test_random_child(positive which)
 {
-        p32 first = which == 0 ? 4 : 1;
-        p32 second = which == 2 ? 4 : first;
+        static const p32 refused[][2] = {
+            {0, 0}, /* blocking fails; initialized nonblocking succeeds */
+            {1, 1}, /* nonblocking fails; blocking succeeds */
+            {1, 4}, /* insecure fails too; blocking still succeeds */
+            {1, 0}, /* both secure paths fail; insecure would succeed */
+        };
+        p32 first = refused[which][0];
+        p32 second = refused[which][1];
         p32 transaction = 0;
         p8 hardware[6] = {1, 2, 3, 4, 5, 6};
         dhcp_lease lease = {
@@ -54704,8 +54877,8 @@ static fn dhcp_test_random_child(positive which)
         if (dhcp_test_random_filter(first, second) < 0)
                 system_call_1(syscall(exit_group), 77);
 
-        ok = dhcp_transaction_early(address_of transaction) == (which != 2);
-        if (which == 2)
+        ok = dhcp_transaction_early(address_of transaction) == (which != 3);
+        if (which == 3)
         {
                 dhcp_lease empty = {0};
 
@@ -54722,7 +54895,7 @@ static fn dhcp_test_random_child(positive which)
 
 static fn dhcp_transaction_randomness(void)
 {
-        for (positive which = 0; which < 3; which++)
+        for (positive which = 0; which < 4; which++)
         {
                 bipolar child = system_call_2(syscall(clone), SIGCHLD, 0);
                 positive raw = 0;
@@ -54733,7 +54906,7 @@ static fn dhcp_transaction_randomness(void)
                 if (!child)
                         dhcp_test_random_child(which);
 
-                check("DHCP uses secure and early-boot kernel entropy and fails before I/O",
+                check("DHCP uses only secure kernel entropy and fails before I/O",
                       system_wait4_retry((b32)child, address_of raw, 0, null) ==
                               child &&
                           (wait_status_code(raw) == 0 ||
@@ -54783,6 +54956,7 @@ b32 main(void)
         redirect_urls();
         fetching_for_real();
         leasing();
+        dhcp_reacquisition_state_matrix();
         leasing_datagrams();
         dhcp_transaction_randomness();
         userspace_route_source_in_namespace();

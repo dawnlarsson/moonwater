@@ -7089,7 +7089,6 @@ static b32 host_radio(string_address address_to arguments, positive count)
 #define SNTP_TIMESPEC_SECONDS_MOST 9223372035ull
 #define SNTP_ERA ((bipolar)4294967296)
 #define SNTP_SHORT_SECOND 0x10000u
-#define SNTP_RANDOM_NONBLOCK 1
 #define SNTP_TIMESTAMPNS 35
 #define SNTP_TIMESTAMPING 37
 #define SNTP_TIMESTAMPING_WANT 2194u /* TX_SOFTWARE|SOFTWARE|OPT_ID|TSONLY */
@@ -7158,31 +7157,21 @@ static inline INLINE bipolar sntp_now_ns(void)
 
 /*
         The transmit stamp goes out to be echoed back, and the echo is the
-        only thing telling us a reply is ours. Sending the clock puts a
-        number an off-path attacker can estimate into the one field it has
-        to guess, and its low half is the whole of the guess: the seconds
-        it already knows.
+        only thing telling us a reply is ours. Nothing reads this field as a
+        clock: t1 comes from the kernel's transmit timespec. It is therefore
+        an authenticator, not a timestamp, and every one of its 64 bits can
+        and must be unpredictable.
 
-        Nothing reads this field back. t1 is taken from the timespec the
-        trap filled, never from the packet, so the fraction carries no
-        accuracy and a random one costs none. Thirty-two bits of it, on
-        top of the source port the connected socket already randomises,
-        is what the forgery has to match. The clock's own fraction is the
-        fallback if the pool has no bytes to give, which is where this
-        started.
+        This used to put the public wall-clock seconds in the high half and
+        ask for the low half with GRND_NONBLOCK. On a machine whose pool was
+        not ready it fell back to the equally public clock fraction, leaving
+        only the UDP source port between an off-path forged reply and a clock
+        change. Blocking for the CSPRNG is the same policy DNS uses for its
+        transaction id: no entropy means no security-sensitive transaction.
 */
-static inline INLINE fn sntp_put_stamp(p8 address_to field, p64 unix_seconds,
-                                       p64 unix_nsec)
+static inline INLINE bool sntp_put_stamp(p8 address_to field)
 {
-        p32 ntp_seconds = (p32)(unix_seconds + SNTP_UNIX);
-        p32 ntp_frac;
-
-        if (system_random_fill(address_of ntp_frac, sizeof(ntp_frac),
-                               SNTP_RANDOM_NONBLOCK) < 0)
-                ntp_frac = (p32)(((p64)unix_nsec << 32) / SNTP_NANOSECONDS);
-
-        network_store_32(field, ntp_seconds);
-        network_store_32(field + 4, ntp_frac);
+        return system_random_fill(field, 8, 0) >= 0;
 }
 
 static inline INLINE PURE bipolar sntp_load_stamp(p8 address_to field)
@@ -7977,9 +7966,26 @@ static COLD bool sntp_math_ok(void)
         reply[0] = 0x24;
         reply[1] = 2;
         memory_copy(reply + 24, request + 40, 8);
-        reply[31] ^= 1;
-        if (sntp_reply_ok(reply, request) != SNTP_NO_REPLY)
-                return false;
+        /* Every bit of the full random nonce is reply identity. A parser
+           that compares only the old random low half recreates the weak
+           predictable-clock authenticator this test is meant to prevent. */
+        for (positive byte = 0; byte < 8; byte++)
+        {
+                reply[24 + byte] ^= 1;
+                if (sntp_reply_ok(reply, request) != SNTP_NO_REPLY)
+                        return false;
+                reply[24 + byte] ^= 1;
+        }
+        {
+                p8 later[SNTP_PACKET];
+
+                memory_copy(later, request, sizeof later);
+                later[40] ^= 1;
+                /* A valid reply to the preceding exchange is a replay, not a
+                   reply to this one, even when every server field is valid. */
+                if (sntp_reply_ok(reply, later) != SNTP_NO_REPLY)
+                        return false;
+        }
 
         /*
                 The root distance: half of a 20 ms round trip, half of a
@@ -8049,7 +8055,8 @@ static HOT bipolar sntp_exchange(b32 handle,
         if_rare (system_call_2(syscall(clock_gettime), CLOCK_REALTIME,
                                (positive)sent) < 0)
                 return SNTP_NO_REPLY;
-        sntp_put_stamp(request + 40, sent[0], sent[1]);
+        if_rare (!sntp_put_stamp(request + 40))
+                return SNTP_NO_REPLY;
         if_rare (socket_send(handle, request, SNTP_PACKET, 0, 0, 0) < 0)
                 return SNTP_NO_REPLY;
         mine = address_to sequence;

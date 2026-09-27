@@ -5380,6 +5380,10 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                                     tls_cert address_to cert,
                                     string_address host)
 {
+        enum { TLS_CERT_EXTENSIONS_MAX = 64 };
+        p8 address_to seen_oid[TLS_CERT_EXTENSIONS_MAX];
+        positive seen_length[TLS_CERT_EXTENSIONS_MAX];
+        positive seen_count = 0;
         bool issuer_unique = false;
         bool subject_unique = false;
         positive extensions_stop = 0;
@@ -5429,6 +5433,21 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                 if (tls_asn1_enter(der, extension_stop, 0x06, address_of oid_at,
                                    address_of oid_stop))
                         return TLS_FAIL;
+                /* RFC 5280 permits one instance of an extension in a
+                   certificate. Track unknown OIDs too: accepting two merely
+                   because this client does not currently interpret them
+                   creates a parser differential the day another component
+                   does. The ceiling also bounds comparison work for a signed
+                   but hostile certificate. */
+                if (seen_count == TLS_CERT_EXTENSIONS_MAX)
+                        return TLS_FAIL;
+                for (positive seen = 0; seen < seen_count; seen++)
+                        if (seen_length[seen] == oid_stop - oid_at &&
+                            !memory_compare(seen_oid[seen], der + oid_at,
+                                            seen_length[seen]))
+                                return TLS_FAIL;
+                seen_oid[seen_count] = der + oid_at;
+                seen_length[seen_count++] = oid_stop - oid_at;
                 at = oid_stop;
                 if (at < extension_stop && der[at] == 0x01)
                 {
@@ -8216,6 +8235,43 @@ static bipolar http_unchunk(p8 address_to bytes, positive size)
         return (bipolar)(body.output - bytes);
 }
 
+/* Bytes copied into an HTTP/1 request must be safe for the grammar position
+   they occupy even when this low-level builder is called without first going
+   through http_split_into.  Keeping the check at the serialization boundary
+   is important: otherwise a later caller can turn a CR/LF in a target, Host,
+   or User-Agent into a second header or a second request. */
+enum
+{
+        HTTP_REQUEST_FIELD,
+        HTTP_REQUEST_TARGET,
+        HTTP_REQUEST_HOST,
+};
+
+static bool http_request_component_valid(string_address text, p8 kind)
+{
+        if (!text)
+                return false;
+
+        if (kind == HTTP_REQUEST_HOST && !string_get(text))
+                return false;
+
+        for (; string_get(text); text++)
+        {
+                p8 byte = string_get(text);
+
+                if (byte_is_control(byte) || byte == 0x7f ||
+                    (kind != HTTP_REQUEST_FIELD && byte == ' ') ||
+                    (kind == HTTP_REQUEST_TARGET && byte == '\\'))
+                        return false;
+                if (kind == HTTP_REQUEST_HOST &&
+                    !byte_is_alnum(byte) && byte != '-' && byte != '.' &&
+                    byte != '_')
+                        return false;
+        }
+
+        return true;
+}
+
 
 static bipolar http_get_request(p8 address_to request, positive room,
                                 string_address host, p16 port,
@@ -8230,7 +8286,10 @@ static bipolar http_get_request(p8 address_to request, positive room,
                           (!tls && port != HTTP_PORT);
         bool ok;
 
-        if (http_origin_form(path, target, sizeof target) ||
+        if (!http_request_component_valid(host, HTTP_REQUEST_HOST) ||
+            !http_request_component_valid(path, HTTP_REQUEST_TARGET) ||
+            !http_request_component_valid(agent, HTTP_REQUEST_FIELD) ||
+            http_origin_form(path, target, sizeof target) ||
             version_minor < '0' || version_minor > '9')
                 return HTTP_BAD_URL;
 
@@ -8685,15 +8744,15 @@ typedef struct
 } dhcp_lease;
 
 /* A transaction id is visible beside the client's public hardware address and
-   is the only unpredictable field an off-path reply must guess.  Prefer the
-   initialized CSPRNG.  Early boot still needs DHCP before that pool is ready,
-   so retain Linux's explicit GRND_INSECURE stream; unlike system_nonce(), do
-   not fall through to a timing/PID/ASLR value if both kernel entropy policies
-   are unavailable. */
+   is the only unpredictable field an off-path reply must guess. Prefer the
+   initialized CSPRNG without waiting; if early boot has not initialized it,
+   wait for that same CSPRNG rather than drawing from GRND_INSECURE. DHCP runs
+   as root and controls the address, gateway and resolver, so boot-time
+   availability must not turn its reply identity into a predictable value. */
 static bool dhcp_transaction_early(p32 address_to transaction)
 {
         return network_transaction_secure(transaction, sizeof(*transaction)) ||
-               system_random_fill(transaction, sizeof(*transaction), 4) == 0;
+               system_random_fill(transaction, sizeof(*transaction), 0) == 0;
 }
 
 /* A subnet mask is a run of one bits followed by a run of zero bits.  Zero is

@@ -33095,13 +33095,39 @@ def harness_tls_chains(argv):
         ("leaf expired", 2, good_leaf, {"leaf_dates": (-400, -1)}),
         ("leaf not yet valid", 2, good_leaf, {"leaf_dates": (2, 90)}),
         ("intermediate expired", 2, good_leaf, {"second_dates": (-400, -1)}),
+        ("first intermediate expired", 2, good_leaf, {"first_dates": (-400, -1)}),
         ("name is another address", 2, good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.2"), {}),
         ("name is only a DNS name", 2, good_leaf.replace("IP:127.0.0.1", "DNS:localhost"), {}),
         ("no subject alternative name", 2, good_leaf.replace("subjectAltName=IP:127.0.0.1\n", ""), {}),
+        ("leaf with only a subject alternative name", 2,
+         "subjectAltName=IP:127.0.0.1\n", {}),
         ("intermediate is not a CA", 2, good_leaf, {"second_ca": "CA:FALSE"}),
+        ("intermediate has no basic constraints", 2, good_leaf,
+         {"second_extensions": "keyUsage=critical,keyCertSign,cRLSign\n"}),
+        ("intermediate may not sign certificates", 2, good_leaf,
+         {"second_key_usage": "digitalSignature"}),
+        ("intermediate constraints are noncritical", 2, good_leaf,
+         {"second_extensions": "basicConstraints=CA:TRUE,pathlen:0\n"
+                               "keyUsage=critical,keyCertSign,cRLSign\n"}),
+        ("intermediate has no key usage", 2, good_leaf,
+         {"second_extensions": "basicConstraints=critical,CA:TRUE,pathlen:0\n"}),
+        ("intermediate is restricted to client auth", 2, good_leaf,
+         {"second_extensions": "basicConstraints=critical,CA:TRUE,pathlen:0\n"
+                               "keyUsage=critical,keyCertSign,cRLSign\n"
+                               "extendedKeyUsage=clientAuth\n"}),
+        ("unknown critical intermediate extension", 2, good_leaf,
+         {"second_extra": "1.2.3.4=critical,DER:05:00\n"}),
+        ("unknown noncritical intermediate extension", 2, good_leaf,
+         {"second_extra": "1.2.3.4=DER:05:00\n"}),
+        ("intermediate carries name constraints", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;IP:127.0.0.0/255.0.0.0\n"}),
         ("path length exceeded", 2, good_leaf, {"first_pathlen": 0}),
         ("leaf for clients only", 2, good_leaf.replace("serverAuth", "clientAuth"), {}),
         ("leaf may only sign certificates", 2, good_leaf.replace("digitalSignature", "keyCertSign"), {}),
+        ("unknown critical leaf extension", 2,
+         good_leaf + "1.2.3.4=critical,DER:05:00\n", {}),
+        ("unknown noncritical leaf extension", 2,
+         good_leaf + "1.2.3.4=DER:05:00\n", {}),
         ("a stranger's root", 2, good_leaf, {"stranger": True}),
         ("an intermediate left out", 2, good_leaf, {"skip_second": True}),
         ("leaf is a CA", 2, good_leaf.replace("CA:FALSE", "CA:TRUE"), {}),
@@ -33113,6 +33139,13 @@ def harness_tls_chains(argv):
     DELIBERATE = {
         "no subject alternative name": "a name is taken from subjectAltName only, never the CN",
         "leaf is a CA": "a certificate that says CA:TRUE is not an end entity (tls_leaf_authorized)",
+        "intermediate carries name constraints": "name constraints fail closed until implemented",
+    }
+    MUST_ACCEPT = {
+        "good", "under the root", "one intermediate", "root served too",
+        "leaf with only a subject alternative name",
+        "intermediate constraints are noncritical", "intermediate has no key usage",
+        "unknown noncritical intermediate extension", "unknown noncritical leaf extension",
     }
 
     checks = Checks()
@@ -33123,18 +33156,42 @@ def harness_tls_chains(argv):
             subprocess.run(["openssl", *arguments], check=True, cwd=work,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+        x509_help = subprocess.run(["openssl", "x509", "-help"], cwd=work,
+                                   capture_output=True, text=True)
+        x509_can_set_dates = "-not_before" in (x509_help.stdout + x509_help.stderr)
+
+        # OpenSSL 3.4 added x509 -not_before/-not_after.  The supported ca
+        # command has always exposed -startdate/-enddate, so older hosts use
+        # a fresh throwaway CA database for each generated certificate.  A
+        # security oracle must not disappear merely because the host's CLI
+        # predates the convenience spelling.
+        (work / "ca.conf").write_text(
+            "[ca]\ndefault_ca=local\n[local]\ndatabase=index\n"
+            "new_certs_dir=.\nserial=serial\ndefault_md=sha384\n"
+            "policy=names\nunique_subject=no\n[names]\ncommonName=supplied\n")
+
         def when(days):
             moment = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days)
             return moment.strftime("%Y%m%d%H%M%SZ")
 
         def issue(name, key, subject, issuer, extensions, dates=(-1, 90)):
-            (work / (name + ".ext")).write_text(extensions)
+            (work / (name + ".ext")).write_text("[extensions]\n" + extensions)
             openssl("req", "-new", *key, "-nodes", "-keyout", name + ".key", "-out",
                     name + ".csr", "-subj", subject)
-            openssl("x509", "-req", "-in", name + ".csr", "-CA", issuer + ".pem", "-CAkey",
-                    issuer + ".key", "-set_serial", str(abs(hash(name)) % (1 << 62)),
-                    "-not_before", when(dates[0]), "-not_after", when(dates[1]),
-                    "-out", name + ".pem", "-sha384", "-extfile", name + ".ext")
+            if x509_can_set_dates:
+                openssl("x509", "-req", "-in", name + ".csr", "-CA", issuer + ".pem",
+                        "-CAkey", issuer + ".key", "-set_serial",
+                        str(abs(hash(name)) % (1 << 62)), "-not_before", when(dates[0]),
+                        "-not_after", when(dates[1]), "-out", name + ".pem", "-sha384",
+                        "-extfile", name + ".ext", "-extensions", "extensions")
+            else:
+                (work / "index").write_text("")
+                (work / "serial").write_text("01\n")
+                openssl("ca", "-batch", "-config", "ca.conf", "-in", name + ".csr",
+                        "-cert", issuer + ".pem", "-keyfile", issuer + ".key",
+                        "-startdate", when(dates[0]), "-enddate", when(dates[1]),
+                        "-out", name + ".pem", "-notext", "-md", "sha384",
+                        "-extfile", name + ".ext", "-extensions", "extensions")
 
         p384 = keys[1][1]
         for root in ("root", "stranger"):
@@ -33168,13 +33225,19 @@ def harness_tls_chains(argv):
                 if depth >= 1:
                     issue("first", p384, "/CN=tls chains first", top,
                           "basicConstraints=critical,CA:TRUE,pathlen:%d\n"
-                          "keyUsage=critical,keyCertSign,cRLSign\n" % change.get("first_pathlen", 1))
+                          "keyUsage=critical,keyCertSign,cRLSign\n" % change.get("first_pathlen", 1),
+                          change.get("first_dates", (-1, 90)))
                     chain.insert(0, "first")
                     issuer = "first"
                 if depth >= 2:
+                    second_extensions = change.get(
+                        "second_extensions",
+                        "basicConstraints=critical,%s\nkeyUsage=critical,%s\n" %
+                        (change.get("second_ca", "CA:TRUE,pathlen:0"),
+                         change.get("second_key_usage", "keyCertSign,cRLSign")))
+                    second_extensions += change.get("second_extra", "")
                     issue("second", p384, "/CN=tls chains second", "first",
-                          "basicConstraints=critical,%s\nkeyUsage=critical,keyCertSign,cRLSign\n"
-                          % change.get("second_ca", "CA:TRUE,pathlen:0"),
+                          second_extensions,
                           change.get("second_dates", (-1, 90)))
                     chain.insert(0, "second")
                     issuer = "second"
@@ -33229,6 +33292,16 @@ def harness_tls_chains(argv):
                 listener.close()
                 ours_ok = fetched.returncode == 0 and fetched.stdout.startswith(b"truste")
                 name = "%s with a %s leaf" % (mutation, key_name)
+                expected = mutation in MUST_ACCEPT
+                checks(openssl_ok == expected or mutation in DELIBERATE,
+                       "%s: the OpenSSL oracle %s a chain the standards matrix says to %s" % (
+                           name, "accepts" if openssl_ok else "refuses",
+                           "accept" if expected else "refuse"))
+                checks(ours_ok == expected,
+                       "%s: wget %s a chain the standards matrix says to %s (%s)" % (
+                           name, "accepts" if ours_ok else "refuses",
+                           "accept" if expected else "refuse",
+                           fetched.stderr.decode(errors="replace").strip()[:200]))
                 if mutation in DELIBERATE and openssl_ok and not ours_ok:
                     checks(True, name)
                     continue
