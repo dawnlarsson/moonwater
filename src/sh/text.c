@@ -29250,6 +29250,33 @@ static positive sort_key_flags(sort_key address_to key, string_address spec,
         return at;
 }
 
+/*
+        A field number or character offset in a key: digits read as GNU's
+        parse_field_count reads them, where one too large for size_t is
+        SIZE_MAX rather than a mistake -- sort -k 99999999999999999999 sorts,
+        keying every line on the nothing past its end. The ceiling here is a
+        quarter of the word, past any line there can be and still far enough
+        from the top that a key's start plus its offset cannot wrap.
+*/
+#define SORT_FIELD_MAX (positive_max / 4)
+
+static positive sort_field_count(string_address spec, positive address_to taken)
+{
+        positive value = 0;
+        positive at = 0;
+
+        for (; byte_is_digit(spec[at]); at++)
+        {
+                positive digit = (positive)(spec[at] - '0');
+
+                value = value > (SORT_FIELD_MAX - digit) / 10 ? SORT_FIELD_MAX
+                                                               : value * 10 + digit;
+        }
+
+        address_to taken = at;
+        return value;
+}
+
 static bool sort_parse_key(string_address spec)
 {
         if (sort_key_count >= SORT_KEYS_MAX)
@@ -29262,7 +29289,7 @@ static bool sort_parse_key(string_address spec)
 
         address_to key = (sort_key){0};
 
-        key->first_field = string_digits(spec + at, address_of taken);
+        key->first_field = sort_field_count(spec + at, address_of taken);
         at += taken;
 
         if (!key->first_field)
@@ -29271,7 +29298,7 @@ static bool sort_parse_key(string_address spec)
         if (spec[at] == '.')
         {
                 at++;
-                key->first_char = string_digits(spec + at, address_of taken);
+                key->first_char = sort_field_count(spec + at, address_of taken);
 
                 if (!taken || !key->first_char)
                         return false;
@@ -29287,7 +29314,7 @@ static bool sort_parse_key(string_address spec)
         if (spec[at] == ',')
         {
                 at++;
-                key->second_field = string_digits(spec + at, address_of taken);
+                key->second_field = sort_field_count(spec + at, address_of taken);
 
                 if (!taken || !key->second_field)
                         return false;
@@ -29297,7 +29324,7 @@ static bool sort_parse_key(string_address spec)
                 if (spec[at] == '.')
                 {
                         at++;
-                        key->second_char = string_digits(spec + at, address_of taken);
+                        key->second_char = sort_field_count(spec + at, address_of taken);
 
                         if (!taken)
                                 return false;

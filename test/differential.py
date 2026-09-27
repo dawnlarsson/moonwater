@@ -18151,7 +18151,12 @@ TEXT_UTILITIES = (
                    #   the second is read, before a later bad option.
                    ("-o", "out", "-o", "out", "a.txt"), ("-o", "out", "--output=out", "a.txt"),
                    ("-o", "out", "-o", "out2", "a.txt"), ("-o", "out", "-o", "out2", "-S", "x", "a.txt"),
-                   ("-S", "x", "-o", "out", "-o", "out2", "a.txt"), ("-o", "out", "-o", "out", "-c", "a.txt"))),
+                   ("-S", "x", "-o", "out", "-o", "out2", "a.txt"), ("-o", "out", "-o", "out", "-c", "a.txt"),
+                   #   A field or offset past size_t is SIZE_MAX, not an error.
+                   ("-k", "99999999999999999999", "fields"), ("-k", "18446744073709551616,1", "fields"),
+                   ("-k", "18446744073709551617", "fields"), ("-k", "1.99999999999999999999", "fields"),
+                   ("-k", "2,99999999999999999999.99999999999999999999", "fields"),
+                   ("-t", ":", "-k", "2.18446744073709551616,3", "fields"), ("-k", "99999999999999999999n", "-u", "fields"))),
     Utility("sum",
             options=(Option("-r"), Option("-s"), Option("--sysv")),
             operands=((), ("a.txt",), ("a.txt", "b.txt"), ("-",), ("missing",), ("empty",), ("binary",), ("dir",), ("big",),
