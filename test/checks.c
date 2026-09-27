@@ -49718,10 +49718,30 @@ static fn fetching(void)
               http_split_into((string_address) "http://allowed\\@127.0.0.1/", name,
                          sizeof name, address_of port, address_of path,
                          address_of tls) == HTTP_BAD_URL);
-        check("raw non-ASCII and URI punctuation are not DNS host bytes",
-              http_split_into((string_address) "http://bad_name/", name,
+        check("URI punctuation is not a DNS host byte",
+              http_split_into((string_address) "http://bad!name/", name,
                          sizeof name, address_of port, address_of path,
                          address_of tls) == HTTP_BAD_URL);
+        check("raw non-ASCII is not a DNS host byte",
+              http_split_into((string_address) "http://bad\xe9name/", name,
+                         sizeof name, address_of port, address_of path,
+                         address_of tls) == HTTP_BAD_URL);
+        check("an underscore is a DNS host byte, as wget and curl take it",
+              http_split_into((string_address) "http://my_host.example/", name,
+                         sizeof name, address_of port, address_of path,
+                         address_of tls) == HTTP_OK &&
+                  string_equals(name, (string_address) "my_host.example"));
+        check("a URL in a schemeless URL's query is not its scheme",
+              http_split_into((string_address) "h/?next=http://x", name,
+                         sizeof name, address_of port, address_of path,
+                         address_of tls) == HTTP_OK &&
+                  string_equals(name, (string_address) "h") && port == 80 &&
+                  string_equals(path, (string_address) "/?next=http://x"));
+        check("a schemeless host with a port still parses",
+              http_split_into((string_address) "h:81/x", name,
+                         sizeof name, address_of port, address_of path,
+                         address_of tls) == HTTP_OK && port == 81 &&
+                  string_equals(path, (string_address) "/x"));
         {
                 p8 rejected_name[8];
                 string_address rejected_path = (string_address)"sentinel";
@@ -49844,10 +49864,14 @@ static fn fetching(void)
                       http_response_framing((p8 address_to)folded,
                                             sizeof folded - 1, address_of header,
                                             address_of response) == HTTP_MALFORMED);
-                check("HTTP response framing requires CRLF",
+                /* The lookup, the status line and the block's end all take a
+                   lone LF as a line end, so the validator does too. */
+                check("HTTP response framing takes a lone LF as the lookup does",
                       http_response_framing((p8 address_to)bare_lf,
                                             sizeof bare_lf - 1, address_of header,
-                                            address_of response) == HTTP_MALFORMED);
+                                            address_of response) == HTTP_OK &&
+                          header == sizeof bare_lf - 1 &&
+                          response.code == 200);
                 check("HTTP response values reject embedded controls",
                       http_response_framing((p8 address_to)bare_cr,
                                             sizeof bare_cr - 1, address_of header,
@@ -53768,9 +53792,9 @@ static fn fetching_for_real(void)
                     (string_address)answer_use_proxy,
                     (string_address)answer_unused,
                     (string_address)answer_folded,
-                    (string_address)answer_bare_lf,
                     (string_address)answer_control,
-                    (string_address)answer_bad_name};
+                    (string_address)answer_bad_name,
+                    (string_address)answer_bare_lf};
                 positive sizes[] = {
                     sizeof(answer_good) - 1,
                     sizeof(answer_split) - 1,
@@ -53789,9 +53813,9 @@ static fn fetching_for_real(void)
                     sizeof(answer_use_proxy) - 1,
                     sizeof(answer_unused) - 1,
                     sizeof(answer_folded) - 1,
-                    sizeof(answer_bare_lf) - 1,
                     sizeof(answer_control) - 1,
-                    sizeof(answer_bad_name) - 1};
+                    sizeof(answer_bad_name) - 1,
+                    sizeof(answer_bare_lf) - 1};
 
                 for (positive at = 0;
                      at < array_count(answers) + array_count(status_mutations) +
@@ -53975,7 +53999,7 @@ static fn fetching_for_real(void)
                    validation they reached HTTP_STATUS or HTTP_OK: these
                    assertions therefore reproduce the parser differential,
                    rather than merely testing its new predicate. */
-                for (positive attack = 0; attack < 4; attack++)
+                for (positive attack = 0; attack < 3; attack++)
                 {
                         status = http_get(url, address_of body,
                                           address_of code);
@@ -53984,6 +54008,14 @@ static fn fetching_for_real(void)
                         check("a refused ambiguous response publishes no body",
                               !body.used);
                 }
+
+                /* A head whose every line ends at a lone LF is not
+                   ambiguous: every reader of it splits the same lines. */
+                status = http_get(url, address_of body, address_of code);
+                check("a lone-LF response is read end to end",
+                      status == HTTP_OK && code == 200 && body.used == 5 &&
+                          body.bytes &&
+                          !memory_compare(body.bytes, "hello", 5));
 
                 check("the preservation sentinel is restored",
                       byte_store_reserve(address_of body, 6, 16));
@@ -65336,20 +65368,39 @@ b32 main(void)
         string_address arguments[8] = {0};
         shell_argv = arguments;
 
-        /* Dash and bash both serialize an alias as name='value', so the
-           listing can be sourced again.  Quoting the complete name=value
-           word is valid shell but not parity with either reference. */
-        shell_bash_compat = false;
-        check("dash alias regression records", alias_record(
-                  (string_address)"mw_a", 4,
-                  (string_address)"echo one"));
-        captured_used = 0;
-        captured[0] = end;
-        alias_written(capture, 0);
-        check("dash alias listing quotes only its value",
-              string_equals(captured,
-                            (string_address)"mw_a='echo one'\n"));
-        shell_bash_compat = true;
+        /* dash 0.5.13 lists an alias as one quoted word, 'mw_a=echo one',
+           and bash as mw_a='echo one'; each reads back in its own shell.  A
+           quote in the value is closed and double quoted as dash does it:
+           'mw_q=it'"'"'s', never the unbalanced 'mw_q=it's'. */
+        {
+                static const struct
+                {
+                        string_address value;
+                        bool bash;
+                        string_address listed;
+                } aliases[] = {
+                    {"echo one", false, "'mw_a=echo one'\n"},
+                    {"it's", false, "'mw_a=it'\"'\"'s'\n"},
+                    {"y''", false, "'mw_a=y'\"''\"\n"},
+                    {"", false, "'mw_a='\n"},
+                    {"echo one", true, "mw_a='echo one'\n"},
+                    {"it's", true, "mw_a='it'\\''s'\n"},
+                };
+
+                for (positive at = 0; at < array_count(aliases); at++)
+                {
+                        shell_bash_compat = aliases[at].bash;
+                        check("alias regression records",
+                              alias_record((string_address)"mw_a", 4,
+                                           aliases[at].value));
+                        captured_used = 0;
+                        captured[0] = end;
+                        alias_written(capture, 0);
+                        check("an alias lists as its reference shell lists it",
+                              string_equals(captured, aliases[at].listed));
+                }
+                shell_bash_compat = true;
+        }
 
         /* Spark's fast path must reject oversized vectors before reserving or
            copying their flat representation.  Otherwise fallback remains

@@ -7148,7 +7148,11 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
            same string while naming different destinations. */
         else
         {
-                string_address scheme = string_first_of(url, ':');
+                /* Only a colon ahead of the first '/', '?' or '#' can end a
+                   scheme: "host/?next=http://x" is a schemeless URL whose
+                   query holds another. */
+                string_address scheme = (string_address)memory_first_of(
+                    url, ':', string_span_without_set(url, "/?#"));
 
                 if (scheme && scheme[1] == '/' && scheme[2] == '/')
                         return HTTP_BAD_URL;
@@ -7167,11 +7171,13 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
                 return HTTP_BAD_URL;
 
         /* HTTP Host and DNS have narrower syntax than an arbitrary URI
-           reg-name.  Validate before touching the caller's output so a
-           rejected URL cannot leave a plausible partial destination there. */
+           reg-name: letters, digits and the unreserved '-', '.' and '_'
+           (DNS carries the underscore, and wget and curl reach such hosts).
+           Validate before touching the caller's output so a rejected URL
+           cannot leave a plausible partial destination there. */
         for (positive byte = 0; byte < length; byte++)
                 if (!byte_is_alnum(at[byte]) && at[byte] != '-' &&
-                    at[byte] != '.')
+                    at[byte] != '.' && at[byte] != '_')
                         return HTTP_BAD_URL;
 
         if (!length)
@@ -7282,7 +7288,10 @@ static PURE bipolar http_header_end(p8 address_to bytes, positive size)
 /* Validate the complete response head before assigning meaning to any field.
    In particular, do not let a NUL, a bare carriage return, or obsolete line
    folding give this client a different field boundary from a proxy in front
-   of it.  Response splitting is still relevant to a client: a poisoned
+   of it.  A line ends at LF with one CR before it dropped, which is where
+   http_header_end, http_status_code and http_header end it too (RFC 9112
+   2.2 lets a recipient take a lone LF): a validator that split lines
+   anywhere else would itself be the differential.  Response splitting is still relevant to a client: a poisoned
    keep-alive cache or an intercepting proxy can otherwise make the bytes
    authenticated by TLS describe a different response from the one consumed
    here. */
@@ -7304,13 +7313,14 @@ static bool http_header_block_valid(p8 address_to bytes, positive size)
                     bytes + at, '\n', size - at);
                 positive colon = line;
 
-                if (stop == size || stop == line || bytes[stop - 1] != '\r')
+                if (stop == size)
                         return false;
-                stop--;
-                at = stop + 2;
+                at = stop + 1;
+                if (stop > line && bytes[stop - 1] == '\r')
+                        stop--;
 
                 if (stop == line)
-                        return at == size;
+                        return !status && at == size;
 
                 if (status)
                 {
