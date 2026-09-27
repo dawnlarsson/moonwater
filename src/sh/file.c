@@ -25707,6 +25707,21 @@ static const dircolors_keyword dircolors_keywords[] = {
     {(string_address) "LEFTCODE", (string_address) "lc"},
     {(string_address) "RIGHTCODE", (string_address) "rc"},
     {(string_address) "ENDCODE", (string_address) "ec"},
+    // The other spellings coreutils' slack_codes takes for the same keys.
+    {(string_address) "NORM", (string_address) "no"},
+    {(string_address) "LNK", (string_address) "ln"},
+    {(string_address) "SYMLINK", (string_address) "ln"},
+    {(string_address) "PIPE", (string_address) "pi"},
+    {(string_address) "BLOCK", (string_address) "bd"},
+    {(string_address) "CHAR", (string_address) "cd"},
+    {(string_address) "LEFT", (string_address) "lc"},
+    {(string_address) "RIGHT", (string_address) "rc"},
+    {(string_address) "END", (string_address) "ec"},
+    {(string_address) "SUID", (string_address) "su"},
+    {(string_address) "SGID", (string_address) "sg"},
+    {(string_address) "OWR", (string_address) "ow"},
+    {(string_address) "OWT", (string_address) "tw"},
+    {(string_address) "CLRTOEOL", (string_address) "cl"},
     {null, null},
 };
 

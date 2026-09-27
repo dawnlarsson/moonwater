@@ -6967,6 +6967,12 @@ def files_move_across(farm):
     return passed, total, notes
 
 
+#   Every other spelling coreutils' dircolors takes for a key, upper and
+#   lower case; OWT alone was once dropped without a word.
+INPUTS["files_colors_aliases"] = (b"OWT 1;2\nowt 3\nOWR 4\nNORM 0\nLNK 01;36\nSYMLINK 01;35\nPIPE 33\n"
+                                  b"BLOCK 01;33\nCHAR 01;32\nLEFT \\033[\nRIGHT m\nEND 0\nSUID 37;41\n"
+                                  b"sgid 30;43\nClrToEol \\033[K\n.x 1\n")
+
 FILES_UTILITIES = (
     # yes is the one program here the engine cannot bound: it writes until
     # something stops it, so both sides die on the harness's file-size limit
@@ -7167,7 +7173,8 @@ FILES_UTILITIES = (
                                   Option("--print-ls-colors")),
             operands=((), ("colors",), ("colors_quote",), ("colors_colon",), ("missing",), ("colors", "colors_quote"),
                       ("a.txt",), ("empty",), ("-",), ("dir",), ("unreadable",)),
-            stdin=("files_colors", "empty"), fixture="files", stderr="exact",
+            stdin=("files_colors", "empty", "files_colors_aliases"), fixture="files", stderr="exact",
+            valid=lambda argv, stdin: stdin != "files_colors_aliases" or "-" in argv,
             env=(("TERM", "xterm-256color"), ("COLORTERM", "no"), ("SHELL", "/bin/sh"))),
     Utility("du", options=(Option("-a"), Option("-s"), Option("-c"), Option("-h"), Option("-k"), Option("-m"),
                            Option("-b"), Option("-l"), Option("-L"), Option("-P"), Option("-x"), Option("-S"),
