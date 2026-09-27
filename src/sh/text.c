@@ -29681,6 +29681,277 @@ static const argument_option sort_options[] = {
     {null},
 };
 
+/*
+        The obsolete key syntax, +POS1 [-POS2], as GNU's sort still reads it
+        whenever POSIX 1003.1-2001 is not asked for: +A.x starts the key at
+        field A and character x counted from zero, so it is -k A+1.x+1, and
+        -B.y ends it after character y of field B+1, or at the end of field
+        B when y is zero (the end of the first field for -0) -- -k ,B or
+        ,B+1.y. Ordering letters follow either. A +POS1 that is not a whole
+        key of that shape is a file after all, and so is every +POS1 when
+        _POSIX2_VERSION names 2001 (200112 up to 200809) unless a -POS2
+        follows it and POSIXLY_CORRECT is not set. A -POS2 that is wrong is
+        refused, as GNU's badfieldspec refuses it.
+
+        The words are found before the options are read, by walking them as
+        getopt would -- an option's own argument is never a key -- and the
+        scan then reads a copy of the vector in which each -POS2 is an empty
+        word, so it arrives as an operand and is passed over, and the key is
+        made when its +POS1 arrives, in its place among the -k keys.
+*/
+enum { SORT_WORD_PLAIN, SORT_WORD_KEY, SORT_WORD_KEY_END };
+
+static string_address address_to sort_words;
+static positive sort_words_room;
+static p8 address_to sort_word_roles;
+static positive sort_word_roles_room;
+static bool sort_obsolete_failed;
+// Whether this run's scan reads sort_words, so the roles are this run's.
+static bool sort_words_active;
+
+// The start of an obsolete key into key, true when all of plus is one.
+static bool sort_obsolete_start(sort_key address_to key, string_address plus,
+                                p8 address_to kind)
+{
+        positive taken;
+        positive at = 1;
+        positive field = sort_field_count(plus + at, address_of taken);
+        positive offset = 0;
+
+        if (!taken)
+                return false;
+        at += taken;
+
+        if (plus[at] == '.')
+        {
+                at++;
+                offset = sort_field_count(plus + at, address_of taken);
+                if (!taken)
+                        return false;
+                at += taken;
+        }
+
+        address_to key = (sort_key){0};
+        key->first_field = field < SORT_FIELD_MAX ? field + 1 : SORT_FIELD_MAX;
+        key->first_char = offset < SORT_FIELD_MAX ? offset + 1 : SORT_FIELD_MAX;
+
+        positive stop = sort_key_flags(key, plus, at, kind, false);
+
+        return stop != positive_max && !plus[stop];
+}
+
+static fn sort_obsolete_refuse(string_address what, string_address word)
+{
+        text_flush();
+        string_format(writer_stderr, "%s: %s: %w\n", text_name, what,
+                      writer_shell_quoted_name, word);
+        sort_obsolete_failed = true;
+}
+
+// The +POS1 at index, and the -POS2 after it when there is one, as a key.
+static fn sort_obsolete_key(string_address plus, string_address minus)
+{
+        p8 kind = 0;
+
+        if (sort_key_count >= SORT_KEYS_MAX)
+        {
+                sort_obsolete_failed = true;
+                string_diagnostic(&text_diagnostic, 0, null, "invalid key");
+                return;
+        }
+
+        sort_key address_to key = sort_keys + sort_key_count;
+
+        (void)sort_obsolete_start(key, plus, address_of kind);
+
+        if (minus)
+        {
+                positive taken;
+                positive at = 1;
+                positive field = sort_field_count(minus + at, address_of taken);
+                positive offset = 0;
+
+                at += taken;
+                if (minus[at] == '.')
+                {
+                        at++;
+                        offset = sort_field_count(minus + at, address_of taken);
+                        if (!taken)
+                        {
+                                text_flush();
+                                string_format(writer_stderr,
+                                              "%s: invalid number after '.': invalid count at start of %w\n",
+                                              text_name, writer_shell_quoted_name, minus + at);
+                                sort_obsolete_failed = true;
+                                return;
+                        }
+                        at += taken;
+                }
+
+                key->second_field = offset ? (field < SORT_FIELD_MAX ? field + 1 : SORT_FIELD_MAX)
+                                           : (field ? field : 1);
+                key->second_char = offset;
+
+                positive stop = sort_key_flags(key, minus, at, address_of kind, true);
+
+                if (stop == positive_max || minus[stop])
+                {
+                        text_flush();
+                        string_format(writer_stderr,
+                                      "%s: stray character in field spec: invalid field specification %w\n",
+                                      text_name, writer_shell_quoted_name, minus);
+                        sort_obsolete_failed = true;
+                        return;
+                }
+        }
+
+        sort_key_count++;
+}
+
+// Whether an option word of sort's takes the next word as its argument.
+static bool sort_word_takes_next(string_address word)
+{
+        if (word[1] == '-')
+        {
+                positive length = 0;
+
+                while (word[2 + length] && word[2 + length] != '=')
+                        length++;
+                if (word[2 + length] == '=')
+                        return false;
+
+                const argument_option address_to option =
+                    argument_option_long(sort_options, word + 2, length, true);
+
+                return option && (option->mode & ARGUMENT_REQUIRED);
+        }
+
+        for (positive at = 1; word[at]; at++)
+                for (const argument_option address_to option = sort_options; option->name; option++)
+                        if (option->letter == word[at] && (option->mode & ARGUMENT_REQUIRED) &&
+                            !(option->mode & ARGUMENT_LONG_ONLY))
+                                return !word[at + 1];
+
+        return false;
+}
+
+/*
+        Find the obsolete keys among the words, and when there are any, hand
+        the scan a copy of the vector to read instead. False only when there
+        was no room for the copy.
+*/
+static bool sort_obsolete_words(file_taking address_to taking)
+{
+        positive count = (positive)program_argument_count();
+        string_address address_to argv = (string_address address_to)program_argument_list();
+        bool any = false;
+
+        for (positive at = 1; at < count && !any; at++)
+                any = argv[at][0] == '+';
+
+        if (!any)
+                return true;
+
+        if (!array_store_reserve(sort_words, sort_words_room, 0, count, 16) ||
+            !array_store_reserve(sort_word_roles, sort_word_roles_room, 0, count, 64))
+                return false;
+
+        string_address version = file_environment("_POSIX2_VERSION");
+        bipolar posix = 200809;
+
+        if (version && version[0])
+        {
+                positive number;
+                bool negative = version[0] == '-';
+
+                if (string_digits_checked_exact(version + negative, 10, address_of number) &&
+                    number <= 0x7fffffff)
+                        posix = negative ? -(bipolar)number : (bipolar)number;
+        }
+
+        bool traditional = !(200112 <= posix && posix < 200809);
+        bool correct = file_environment("POSIXLY_CORRECT") != null;
+
+        memory_fill(sort_word_roles, SORT_WORD_PLAIN, count);
+
+        for (positive at = 0; at < count; at++)
+                sort_words[at] = argv[at];
+
+        // Under POSIXLY_CORRECT a file ends the keys: GNU takes every word
+        // after the first one as a file.
+        bool files = false;
+
+        for (positive at = 1; at < count && !(correct && files); at++)
+        {
+                string_address word = argv[at];
+
+                if (word[0] == '-' && word[1] == '-' && !word[2])
+                        break;
+
+                if (word[0] == '-' && word[1])
+                {
+                        if (sort_word_takes_next(word))
+                                at++;
+                        continue;
+                }
+
+                if (word[0] != '+')
+                {
+                        files = true;
+                        continue;
+                }
+
+                sort_key scratch;
+                p8 kind = 0;
+                bool minus = at + 1 < count && argv[at + 1][0] == '-' &&
+                             byte_is_digit(argv[at + 1][1]);
+
+                // A -POS2 once seen makes the old syntax stand for the
+                // rest of the line, as GNU's traditional_usage does.
+                traditional |= minus && !correct;
+
+                if (!traditional ||
+                    !sort_obsolete_start(address_of scratch, word, address_of kind))
+                {
+                        files = true;
+                        continue;
+                }
+
+                sort_word_roles[at] = SORT_WORD_KEY;
+
+                if (minus)
+                {
+                        sort_word_roles[++at] = SORT_WORD_KEY_END;
+                        sort_words[at] = (string_address) "";
+                }
+        }
+
+        taking->argv = sort_words;
+        taking->argc = count;
+        sort_words_active = true;
+        return true;
+}
+
+// Operands in order: a file, or an obsolete key made where it stands.
+static fn sort_operand(b32 which)
+{
+        positive count = (positive)program_argument_count();
+
+        if (!sort_words_active || (positive)which >= count ||
+            sort_word_roles[which] == SORT_WORD_PLAIN)
+        {
+                text_file_add(which);
+                return;
+        }
+
+        if (sort_word_roles[which] == SORT_WORD_KEY)
+                sort_obsolete_key(program_argument(which),
+                                  (positive)which + 1 < count &&
+                                          sort_word_roles[which + 1] == SORT_WORD_KEY_END
+                                      ? program_argument(which + 1)
+                                      : null);
+}
+
 // -S takes a count with GNU's suffixes or a percentage; the number is not
 // used, but a script that misspells it is told so.
 static bool sort_size_valid(string_address said)
@@ -30396,11 +30667,13 @@ static b32 text_sort()
             // -g wants a floating point number parsed, and there is no
             // floating point anywhere in this file.
             .options = sort_options,
-            .operand = text_file_add,
+            .operand = sort_operand,
             .seen = sort_key_seen,
         };
 
         text_begin("sort");
+        sort_words_active = false;
+        sort_obsolete_failed = false;
         utility_arena.used = 0;
         sort_output_said = null;
         sort_option_status = 2;
@@ -30413,8 +30686,14 @@ static b32 text_sort()
         sort_directories_count = 0;
         sort_directory_next = 0;
 
+        if (!sort_obsolete_words(address_of taking))
+                return text_done(string_diagnostic(&text_diagnostic, 2, null, "out of memory"));
+
         if (!file_take(address_of taking))
                 return text_done(sort_option_status);
+
+        if (sort_obsolete_failed)
+                return text_done(2);
 
         if (text_files_failed && string_diagnostic(&text_diagnostic, 1, null, "too many operands"))
                 return text_done(2);

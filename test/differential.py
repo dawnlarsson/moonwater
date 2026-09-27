@@ -18669,7 +18669,21 @@ TEXT_UTILITIES = (
                    ("--batch-size=0", "a.txt"), ("--batch-size=99999999999999999999", "a.txt"),
                    ("--batch-size=4294967296", "a.txt"), ("--batch-size=100000000", "a.txt"),
                    ("--batch-size= 5", "a.txt"), ("--batch-size=+5", "a.txt"), ("--batch-size=5k", "a.txt"),
-                   ("--batch-size=-1", "a.txt"), ("--batch-size=99999999999999999999x", "a.txt"))),
+                   ("--batch-size=-1", "a.txt"), ("--batch-size=99999999999999999999x", "a.txt"),
+                   #   The obsolete +POS1 [-POS2] keys, in their place among
+                   #   -k keys, a file when they are not whole keys, and as
+                   #   _POSIX2_VERSION and POSIXLY_CORRECT decide.
+                   ("+1", "fields"), ("+1", "-2", "fields"), ("+1.2", "-1.0", "fields"), ("+x", "fields"),
+                   ("--", "+1", "fields"), ("+1n", "fields"), ("+1", "-2n", "fields"), ("+0", "-1", "+2r", "fields"),
+                   ("+1", "-2x", "fields"), ("+1", "-2.x", "fields"), ("fields", "+1"), ("-r", "+1", "fields"),
+                   ("+1", "-0", "fields"), ("-t", ":", "+1", "-2", "fields"), ("-t", ":", "+2", "-3", "-k1,1", "fields"),
+                   ("-k3", "+1", "-2", "fields"), ("+1,2", "fields"), ("+99999999999999999999", "fields"),
+                   ("+0.99999999999999999999", "fields"), ("-t", ":", "+1.1b", "-2.2", "fields"), ("-o", "+1", "fields"),
+                   *({"argv": argv, "stdin": "text", "fixture": "text", "env": env} for env in (
+                       (("_POSIX2_VERSION", "200112"),), (("POSIXLY_CORRECT", "1"),),
+                       (("_POSIX2_VERSION", "200112"), ("POSIXLY_CORRECT", "1")), (("_POSIX2_VERSION", "x"),))
+                     for argv in (("+1", "fields"), ("+1", "-2", "fields"), ("+0", "-1", "+2r", "fields"),
+                                  ("fields", "+1"))))),
     Utility("sum",
             options=(Option("-r"), Option("-s"), Option("--sysv")),
             operands=((), ("a.txt",), ("a.txt", "b.txt"), ("-",), ("missing",), ("empty",), ("binary",), ("dir",), ("big",),
