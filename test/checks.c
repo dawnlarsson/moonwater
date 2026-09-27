@@ -48648,6 +48648,57 @@ static bool http_writev_short_hit;
 static bipolar http_writev_error;
 static bool http_writev_error_hit;
 
+/*
+        DNS/DHCP (and wait.c stream helpers) call ASM socket_send/socket_receive,
+        which trap sendto/recvfrom directly and never pass through system_call_N.
+        Parallel thin wrappers around the net.c include arm mid-path faults after
+        the socket already exists: EINTR-once-then-fail, EAGAIN, short progress,
+        hard ENOSPC/EIO, and sticky EINTR for deadline exhaustion.
+*/
+static bipolar net_send_error;
+static bool net_send_error_hit;
+static bool net_send_eintr_once;
+static bool net_send_eintr_hit;
+static positive net_send_short_limit;
+static bool net_send_short_hit;
+static bool net_send_eintr_sticky;
+static positive net_send_arm_after;
+
+static bipolar net_recv_error;
+static bool net_recv_error_hit;
+static bool net_recv_eintr_once;
+static bool net_recv_eintr_hit;
+static positive net_recv_short_limit;
+static bool net_recv_short_hit;
+static bool net_recv_eintr_sticky;
+static positive net_recv_arm_after;
+static positive net_recv_fill_length;
+static p8 net_recv_fill[64];
+
+/*
+        Soft RLIMIT_AS is ignored under qemu-user (guest mmaps land inside a
+        host VMA reserved before the limit dropped). Arm this once so the next
+        memory_reserve growth through byte_store_reserve / net_room / array_store
+        refuses closed on every architecture — native Lima aarch64 still proves
+        the real AS path separately (see net_as_emulated).
+*/
+static bool net_memory_reserve_fail;
+static bool net_memory_reserve_fail_hit;
+
+static bool net_test_memory_reserve(address_any address_to held,
+                                    positive address_to have, positive used,
+                                    positive want, positive unit,
+                                    positive first)
+{
+        if (net_memory_reserve_fail)
+        {
+                net_memory_reserve_fail = false;
+                net_memory_reserve_fail_hit = true;
+                return false;
+        }
+        return (memory_reserve)(held, have, used, want, unit, first);
+}
+
 typedef struct
 {
         address_any base;
@@ -48696,9 +48747,125 @@ static bipolar http_net_call3(positive number, positive one, positive two,
         return (system_call_3)(number, one, two, three);
 }
 
+static bipolar net_test_socket_send(b32 handle, address_any data, positive size,
+                                    b32 flags, address_any to, positive to_size)
+{
+        if (net_send_arm_after)
+        {
+                net_send_arm_after--;
+                return system_call_6(syscall(sendto), (positive)handle,
+                                     (positive)data, size, (positive)flags,
+                                     (positive)to, to_size);
+        }
+        if (net_send_eintr_sticky || net_send_eintr_once)
+        {
+                net_send_eintr_once = false;
+                net_send_eintr_hit = true;
+                return -EINTR;
+        }
+        if (net_send_short_limit)
+        {
+                positive want = net_send_short_limit;
+
+                net_send_short_limit = 0;
+                net_send_short_hit = true;
+                if (want > size)
+                        want = size;
+                if (!want)
+                        return 0;
+                return system_call_6(syscall(sendto), (positive)handle,
+                                     (positive)data, want, (positive)flags,
+                                     (positive)to, to_size);
+        }
+        if (net_send_error)
+        {
+                bipolar fault = net_send_error;
+
+                net_send_error = 0;
+                net_send_error_hit = true;
+                return fault;
+        }
+        return system_call_6(syscall(sendto), (positive)handle, (positive)data,
+                             size, (positive)flags, (positive)to, to_size);
+}
+
+static bipolar net_test_socket_receive(b32 handle, address_any data,
+                                       positive size, b32 flags,
+                                       address_any from, address_any from_size)
+{
+        if (net_recv_arm_after)
+        {
+                net_recv_arm_after--;
+                return system_call_6(syscall(recvfrom), (positive)handle,
+                                    (positive)data, size, (positive)flags,
+                                    (positive)from, (positive)from_size);
+        }
+        if (net_recv_eintr_sticky || net_recv_eintr_once)
+        {
+                net_recv_eintr_once = false;
+                net_recv_eintr_hit = true;
+                return -EINTR;
+        }
+        if (net_recv_fill_length)
+        {
+                positive want = net_recv_fill_length;
+
+                net_recv_fill_length = 0;
+                net_recv_short_hit = true;
+                if (want > size)
+                        want = size;
+                if (want > sizeof net_recv_fill)
+                        want = sizeof net_recv_fill;
+                if (data && want)
+                        memory_copy(data, net_recv_fill, want);
+                if (from && from_size)
+                        memory_fill(from, 0, *(p32 address_to)from_size);
+                return (bipolar)want;
+        }
+        if (net_recv_short_limit)
+        {
+                positive want = net_recv_short_limit;
+                bipolar got;
+
+                net_recv_short_limit = 0;
+                net_recv_short_hit = true;
+                got = system_call_6(syscall(recvfrom), (positive)handle,
+                                    (positive)data, size, (positive)flags,
+                                    (positive)from, (positive)from_size);
+                if (got > 0 && (positive)got > want)
+                        return (bipolar)want;
+                return got;
+        }
+        if (net_recv_error)
+        {
+                bipolar fault = net_recv_error;
+
+                net_recv_error = 0;
+                net_recv_error_hit = true;
+                return fault;
+        }
+        return system_call_6(syscall(recvfrom), (positive)handle, (positive)data,
+                             size, (positive)flags, (positive)from,
+                             (positive)from_size);
+}
+
 #define system_call_3(...) http_net_call3(__VA_ARGS__)
+#define socket_send(...) net_test_socket_send(__VA_ARGS__)
+#define socket_receive(...) net_test_socket_receive(__VA_ARGS__)
+#define memory_reserve(...) net_test_memory_reserve(__VA_ARGS__)
 #include "../src/net/net.c"
+#undef memory_reserve
+#undef socket_receive
+#undef socket_send
 #undef system_call_3
+
+/* qemu-user arches get --emulated from test/run; native host arch does not. */
+static bool net_as_emulated(void)
+{
+        return program_argument_count() > 1 &&
+               !string_compare(program_argument(1),
+                               (string_address)"--emulated");
+}
 
 /*
         Per-parser resource-budget ledger (length / item-count / recursion).
@@ -48767,19 +48934,37 @@ static bipolar http_net_call3(positive number, positive one, positive two,
         Resource exhaustion (descriptor / mapping) — soft RLIMIT sweeps
           HTTP/TLS     http_tls_resource_exhaustion
           DNS/DHCP/NL  dns_dhcp_netlink_resource_exhaustion
+            Soft RLIMIT_AS → mmap refuse: native host arch only (Lima
+            aarch64 / Linux arm64 when that lane has no qemu-user).
+            qemu-user arches get --emulated → NOT RUN for AS; once-armed
+            memory_reserve still proves fail-closed on every arch.
 
         Mid-path fail-closed (past open-time EMFILE / first reserve)
           HTTP body    http_body_store_midpath_exhaustion
-            connected socketpair; store filled to capacity; next
-            byte_store_reserve under soft RLIMIT_AS → HTTP_NO_REPLY
-            (honest NOT RUN when guest AS limits are ignored)
+            capacity fill then soft RLIMIT_AS → HTTP_NO_REPLY
+            (NOT RUN under --emulated / when prlimit unavailable)
+          HTTP body    http_body_store_midpath_reserve_fault
+            capacity fill then once-armed memory_reserve → HTTP_NO_REPLY
+          HTTP body    http_body_store_large_growth_reserve_fault
+            grow past first quantum; next expansion once-armed refuse
+          netlink      net_room_midpath_reserve_fault
+            net_room once, then once-armed refuse → failed
           HTTP copy    http_body_copy_midpath_fault
             connected socketpair body → writev once-armed -ENOSPC → HTTP_WRITE
           writev       http_write_spans_midpath_fault
             short writev prefix then once-armed -ENOSPC → HTTP write refuse
           TLS framing  tls_midpath_append_refusal
             plaintext ServerHello / encrypted-flight append past a tight
-            hold room after a retained prefix → TLS_FAIL (no hang)
+            hold room after a retained prefix → TLS_FAIL (no hang).
+            TLS flight/hs buffers are fixed (TLS_HS_MAX); no mmap/heap path.
+          DNS TCP      stack frame/reply only (DNS_MAX_MESSAGE); no heap
+            growth — oversized frame is refused without byte_store_reserve.
+          DNS/DHCP IO  dns_dhcp_midpath_faults
+            thin socket_send/socket_receive hooks (ASM bypasses system_call_N):
+            UDP send EINTR→ENOSPC; UDP recv EINTR→EIO / EAGAIN / short-then-
+            ENOSPC; sticky EINTR×deadline; TCP fallback short send→ENOSPC;
+            DHCP recv same class + junk-before-fault. Open-time EMFILE stays
+            in dns_dhcp_netlink_resource_exhaustion.
 */
 
 /*
@@ -51550,11 +51735,7 @@ static fn http_tls_resource_exhaustion(void)
                 }
         }
 
-        asked = system_call_4(syscall(prlimit64), 0, 9, 0,
-                              (positive)address_of as_limit);
-        if (asked)
-                log_direct(str("net: HTTP body store reserve exhaustion NOT RUN -- prlimit unavailable\n"));
-        else
+        /* First-reserve refuse via once-armed memory_reserve (every arch). */
         {
                 static p8 bytes[] = "body bytes that need a reserved mapping";
                 http_buffer store = {0};
@@ -51564,34 +51745,63 @@ static fn http_tls_resource_exhaustion(void)
                     .store = address_of store,
                     .store_limit = HTTP_FETCH_MAX,
                 };
-                positive constrained[2];
-                bipolar status = HTTP_OK;
 
-                constrained[0] = 0;
-                constrained[1] = as_limit[1];
-                asked = system_call_4(syscall(prlimit64), 0, 9,
-                                      (positive)address_of constrained, 0);
-                check("HTTP body store address space can be constrained",
-                      asked == 0);
-                if (!asked)
-                {
-                        status = http_copy(address_of body, -1,
-                                           sizeof bytes - 1, true);
-                        asked = system_call_4(syscall(prlimit64), 0, 9,
-                                              (positive)address_of as_limit, 0);
-                        check("HTTP body store address-space limit is restored",
-                              asked == 0);
-                }
+                net_memory_reserve_fail_hit = false;
+                net_memory_reserve_fail = true;
+                check("HTTP body store fails closed when memory_reserve is refused",
+                      http_copy(address_of body, -1, sizeof bytes - 1, true) ==
+                              HTTP_NO_REPLY &&
+                          net_memory_reserve_fail_hit &&
+                          !net_memory_reserve_fail && !store.used &&
+                          !store.bytes);
+                http_forget(address_of store);
+        }
 
-                /* User-mode emulators can still satisfy guest mmaps inside a
-                   host VMA reserved before the limit was lowered. */
-                if (status == HTTP_OK && store.used)
-                        log_direct(str("net: HTTP body store reserve exhaustion NOT RUN -- address-space limit ignored (likely emulation)\n"));
+        if (net_as_emulated())
+                log_direct(str("net: HTTP body store reserve exhaustion NOT RUN -- under emulation (native host arch proves soft RLIMIT_AS)\n"));
+        else
+        {
+                asked = system_call_4(syscall(prlimit64), 0, 9, 0,
+                                      (positive)address_of as_limit);
+                if (asked)
+                        log_direct(str("net: HTTP body store reserve exhaustion NOT RUN -- prlimit unavailable\n"));
                 else
-                        check("HTTP body store fails closed when byte_store_reserve cannot grow",
+                {
+                        static p8 bytes[] =
+                            "body bytes that need a reserved mapping";
+                        http_buffer store = {0};
+                        http_body body = {
+                            .stash = bytes,
+                            .stash_used = sizeof bytes - 1,
+                            .store = address_of store,
+                            .store_limit = HTTP_FETCH_MAX,
+                        };
+                        positive constrained[2];
+                        bipolar status = HTTP_OK;
+
+                        constrained[0] = 0;
+                        constrained[1] = as_limit[1];
+                        asked = system_call_4(syscall(prlimit64), 0, 9,
+                                              (positive)address_of constrained,
+                                              0);
+                        check("HTTP body store address space can be constrained",
+                              asked == 0);
+                        if (!asked)
+                        {
+                                status = http_copy(address_of body, -1,
+                                                   sizeof bytes - 1, true);
+                                asked = system_call_4(
+                                    syscall(prlimit64), 0, 9,
+                                    (positive)address_of as_limit, 0);
+                                check("HTTP body store address-space limit is restored",
+                                      asked == 0);
+                        }
+
+                        check("HTTP body store fails closed when byte_store_reserve cannot grow under soft RLIMIT_AS",
                               status == HTTP_NO_REPLY && !store.used &&
                                   !store.bytes);
-                http_forget(address_of store);
+                        http_forget(address_of store);
+                }
         }
 }
 
@@ -51607,8 +51817,8 @@ static fn http_tls_resource_exhaustion(void)
         net_room → array_store_reserve → memory_reserve → mmap.
 
         Soft RLIMIT_NOFILE / RLIMIT_AS match http_tls_resource_exhaustion.
-        User-mode emulators that ignore guest limits log NOT RUN rather than
-        counting a false pass.
+        Soft RLIMIT_AS is skipped under --emulated; once-armed memory_reserve
+        proves fail-closed on every arch.
 */
 static fn dns_dhcp_netlink_resource_exhaustion(void)
 {
@@ -51670,40 +51880,55 @@ static fn dns_dhcp_netlink_resource_exhaustion(void)
                 }
         }
 
-        asked = system_call_4(syscall(prlimit64), 0, 9, 0,
-                              (positive)address_of as_limit);
-        if (asked)
-                log_direct(str("net: netlink buffer reserve exhaustion NOT RUN -- prlimit unavailable\n"));
-        else
         {
                 netlink_buffer buffer = {0};
-                positive constrained[2];
-                bool reserved = true;
 
-                constrained[0] = 0;
-                constrained[1] = as_limit[1];
-                asked = system_call_4(syscall(prlimit64), 0, 9,
-                                      (positive)address_of constrained, 0);
-                check("netlink buffer address space can be constrained",
-                      asked == 0);
-                if (!asked)
-                {
-                        reserved = net_room(address_of buffer, 64);
-                        asked = system_call_4(syscall(prlimit64), 0, 9,
-                                              (positive)address_of as_limit, 0);
-                        check("netlink buffer address-space limit is restored",
-                              asked == 0);
-                }
+                net_memory_reserve_fail_hit = false;
+                net_memory_reserve_fail = true;
+                check("netlink buffer fails closed when memory_reserve is refused",
+                      !net_room(address_of buffer, 64) &&
+                          net_memory_reserve_fail_hit &&
+                          !net_memory_reserve_fail && buffer.failed &&
+                          !buffer.bytes && !buffer.room);
+                netlink_forget(address_of buffer);
+        }
 
-                /* Guest mmaps may still land inside a host VMA reserved
-                   before the soft limit dropped (qemu-user and similar). */
-                if (reserved && buffer.bytes)
-                        log_direct(str("net: netlink buffer reserve exhaustion NOT RUN -- address-space limit ignored (likely emulation)\n"));
+        if (net_as_emulated())
+                log_direct(str("net: netlink buffer reserve exhaustion NOT RUN -- under emulation (native host arch proves soft RLIMIT_AS)\n"));
+        else
+        {
+                asked = system_call_4(syscall(prlimit64), 0, 9, 0,
+                                      (positive)address_of as_limit);
+                if (asked)
+                        log_direct(str("net: netlink buffer reserve exhaustion NOT RUN -- prlimit unavailable\n"));
                 else
-                        check("netlink buffer fails closed when net_room cannot grow",
+                {
+                        netlink_buffer buffer = {0};
+                        positive constrained[2];
+                        bool reserved = true;
+
+                        constrained[0] = 0;
+                        constrained[1] = as_limit[1];
+                        asked = system_call_4(syscall(prlimit64), 0, 9,
+                                              (positive)address_of constrained,
+                                              0);
+                        check("netlink buffer address space can be constrained",
+                              asked == 0);
+                        if (!asked)
+                        {
+                                reserved = net_room(address_of buffer, 64);
+                                asked = system_call_4(
+                                    syscall(prlimit64), 0, 9,
+                                    (positive)address_of as_limit, 0);
+                                check("netlink buffer address-space limit is restored",
+                                      asked == 0);
+                        }
+
+                        check("netlink buffer fails closed when net_room cannot grow under soft RLIMIT_AS",
                               !reserved && buffer.failed && !buffer.bytes &&
                                   !buffer.room);
-                netlink_forget(address_of buffer);
+                        netlink_forget(address_of buffer);
+                }
         }
 }
 
@@ -51711,7 +51936,8 @@ static fn dns_dhcp_netlink_resource_exhaustion(void)
         Mid-path body-store growth after a connected stream already delivered
         a prefix: open-time EMFILE / first-reserve RLIMIT_AS are covered
         above. Here the socket exists, the store is already at capacity, and
-        the next byte that needs byte_store_reserve must refuse closed.
+        the next byte that needs byte_store_reserve must refuse closed under
+        soft RLIMIT_AS on the native host arch.
 */
 static fn http_body_store_midpath_exhaustion(void)
 {
@@ -51729,6 +51955,12 @@ static fn http_body_store_midpath_exhaustion(void)
         positive held_room;
         bipolar status = HTTP_OK;
         positive constrained[2];
+
+        if (net_as_emulated())
+        {
+                log_direct(str("net: HTTP mid-path body store exhaustion NOT RUN -- under emulation (native host arch proves soft RLIMIT_AS)\n"));
+                return;
+        }
 
         asked = system_call_4(syscall(prlimit64), 0, 9, 0,
                               (positive)address_of as_limit);
@@ -51770,8 +52002,8 @@ static fn http_body_store_midpath_exhaustion(void)
         }
         memory_fill(fill, 'b', fill_length + 1);
         check("HTTP mid-path body fill queues on the connected peer",
-              socket_send(pair[1], fill, fill_length, 0, null, 0) ==
-                  (bipolar)fill_length);
+              system_call_6(syscall(sendto), (positive)pair[1], (positive)fill,
+                            fill_length, 0, 0, 0) == (bipolar)fill_length);
 
         body = (http_body){
             .link = address_of link,
@@ -51792,8 +52024,9 @@ static fn http_body_store_midpath_exhaustion(void)
         if (!asked)
         {
                 check("HTTP mid-path overflow byte queues on the connected peer",
-                      socket_send(pair[1], fill + fill_length, 1, 0, null, 0) ==
-                          1);
+                      system_call_6(syscall(sendto), (positive)pair[1],
+                                    (positive)(fill + fill_length), 1, 0, 0,
+                                    0) == 1);
                 socket_shutdown(pair[1], SHUT_WRITE);
                 status = http_copy(address_of body, -1, 1, true);
                 asked = system_call_4(syscall(prlimit64), 0, 9,
@@ -51801,19 +52034,204 @@ static fn http_body_store_midpath_exhaustion(void)
                 check("HTTP mid-path body store address-space limit is restored",
                       asked == 0);
 
-                if (status == HTTP_OK && store.used > held_room - 1)
-                        log_direct(str("net: HTTP mid-path body store exhaustion NOT RUN -- address-space limit ignored (likely emulation)\n"));
-                else
-                        check("HTTP body store fails closed mid-stream when reserve cannot grow past capacity",
-                              status == HTTP_NO_REPLY &&
-                                  store.used == held_room - 1 &&
-                                  store.room == held_room && store.bytes);
+                check("HTTP body store fails closed mid-stream when reserve cannot grow past capacity under soft RLIMIT_AS",
+                      status == HTTP_NO_REPLY && store.used == held_room - 1 &&
+                          store.room == held_room && store.bytes);
         }
 
         memory_free(fill, fill_length + 1);
         http_forget(address_of store);
         socket_close(pair[0]);
         socket_close(pair[1]);
+}
+
+/*
+        Same mid-path capacity fill as above, but refuse the next
+        byte_store_reserve with once-armed memory_reserve so qemu-user
+        arches prove fail-closed without soft RLIMIT_AS.
+*/
+static fn http_body_store_midpath_reserve_fault(void)
+{
+        b32 pair[2];
+        bipolar opened;
+        http_buffer store = {0};
+        p8 scratch[HTTP_HEAD_MAX];
+        http_link link;
+        http_body body;
+        static p8 seed[] = "S";
+        p8 address_to fill = null;
+        positive fill_length;
+        positive held_room;
+        bipolar status;
+
+        opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM, 0,
+                               (positive)pair);
+        check("HTTP mid-path reserve-fault socket pair opens", opened == 0);
+        if (opened)
+                return;
+
+        link = (http_link){.handle = pair[0], .tls = false};
+        body = (http_body){
+            .stash = seed,
+            .stash_used = sizeof seed - 1,
+            .store = address_of store,
+            .store_limit = HTTP_FETCH_MAX,
+            .link = address_of link,
+            .scratch = scratch,
+        };
+        check("HTTP mid-path reserve-fault grows from a connected stream's first byte",
+              http_copy(address_of body, -1, sizeof seed - 1, true) == HTTP_OK &&
+                  store.used == sizeof seed - 1 && store.room > store.used + 1);
+        held_room = store.room;
+        fill_length = held_room - store.used - 1;
+        fill = memory(fill_length + 1);
+        check("HTTP mid-path reserve-fault fill buffer allocates",
+              fill && (positive)fill < (positive)-4095);
+        if (!fill || (positive)fill >= (positive)-4095)
+        {
+                http_forget(address_of store);
+                socket_close(pair[0]);
+                socket_close(pair[1]);
+                return;
+        }
+        memory_fill(fill, 'b', fill_length + 1);
+        check("HTTP mid-path reserve-fault fill queues on the connected peer",
+              system_call_6(syscall(sendto), (positive)pair[1], (positive)fill,
+                            fill_length, 0, 0, 0) == (bipolar)fill_length);
+
+        body = (http_body){
+            .link = address_of link,
+            .scratch = scratch,
+            .store = address_of store,
+            .store_limit = HTTP_FETCH_MAX,
+        };
+        check("HTTP mid-path reserve-fault fills to capacity without another map",
+              http_copy(address_of body, -1, fill_length, true) == HTTP_OK &&
+                  store.used == held_room - 1 && store.room == held_room);
+
+        check("HTTP mid-path reserve-fault overflow byte queues",
+              system_call_6(syscall(sendto), (positive)pair[1],
+                            (positive)(fill + fill_length), 1, 0, 0, 0) == 1);
+        socket_shutdown(pair[1], SHUT_WRITE);
+        net_memory_reserve_fail_hit = false;
+        net_memory_reserve_fail = true;
+        status = http_copy(address_of body, -1, 1, true);
+        check("HTTP body store fails closed mid-stream when memory_reserve is refused past capacity",
+              status == HTTP_NO_REPLY && net_memory_reserve_fail_hit &&
+                  !net_memory_reserve_fail && store.used == held_room - 1 &&
+                  store.room == held_room && store.bytes);
+
+        memory_free(fill, fill_length + 1);
+        http_forget(address_of store);
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+}
+
+/*
+        Large body growth: expand through the first quantum successfully,
+        then once-arm memory_reserve so the next expansion fails closed with
+        a non-empty retained prefix (deeper than first-reserve / capacity-edge).
+*/
+static fn http_body_store_large_growth_reserve_fault(void)
+{
+        enum { FIRST = 3000, SECOND = 5000 };
+        static p8 first_chunk[FIRST];
+        static p8 second_chunk[SECOND];
+        http_buffer store = {0};
+        http_body body;
+        positive after_first;
+
+        memory_fill(first_chunk, '1', FIRST);
+        memory_fill(second_chunk, '2', SECOND);
+
+        body = (http_body){
+            .stash = first_chunk,
+            .stash_used = FIRST,
+            .store = address_of store,
+            .store_limit = HTTP_FETCH_MAX,
+        };
+        check("HTTP large body store grows through the first reserve quantum",
+              http_copy(address_of body, -1, FIRST, true) == HTTP_OK &&
+                  store.used == FIRST && store.room >= FIRST + 1);
+        after_first = store.used;
+        check("HTTP large body store still has headroom after the first quantum",
+              store.room > after_first + 1);
+
+        body = (http_body){
+            .stash = second_chunk,
+            .stash_used = SECOND,
+            .store = address_of store,
+            .store_limit = HTTP_FETCH_MAX,
+        };
+        /* Force a second growth: fill to capacity-1 then ask for more via
+           a stash that needs another map. */
+        {
+                positive need = store.room - store.used;
+                p8 address_to pad = null;
+
+                check("HTTP large body second growth needs more than remaining room",
+                      SECOND + 1 > need);
+                pad = memory(need);
+                check("HTTP large body pad to capacity allocates",
+                      pad && (positive)pad < (positive)-4095);
+                if (!pad || (positive)pad >= (positive)-4095)
+                {
+                        http_forget(address_of store);
+                        return;
+                }
+                memory_fill(pad, 'p', need);
+                body = (http_body){
+                    .stash = pad,
+                    .stash_used = need - 1,
+                    .store = address_of store,
+                    .store_limit = HTTP_FETCH_MAX,
+                };
+                check("HTTP large body store fills first quantum to capacity",
+                      http_copy(address_of body, -1, need - 1, true) ==
+                              HTTP_OK &&
+                          store.used == store.room - 1);
+                memory_free(pad, need);
+
+                body = (http_body){
+                    .stash = second_chunk,
+                    .stash_used = SECOND,
+                    .store = address_of store,
+                    .store_limit = HTTP_FETCH_MAX,
+                };
+                net_memory_reserve_fail_hit = false;
+                net_memory_reserve_fail = true;
+                check("HTTP large body store fails closed on the next quantum when memory_reserve is refused",
+                      http_copy(address_of body, -1, SECOND, true) ==
+                              HTTP_NO_REPLY &&
+                          net_memory_reserve_fail_hit &&
+                          !net_memory_reserve_fail &&
+                          store.used == store.room - 1 && store.bytes &&
+                          store.used > after_first);
+        }
+        http_forget(address_of store);
+}
+
+/*
+        Mid-path net_room growth after a successful first reserve: once-armed
+        memory_reserve refuses the next expansion and marks the buffer failed.
+*/
+static fn net_room_midpath_reserve_fault(void)
+{
+        netlink_buffer buffer = {0};
+        positive held_room;
+
+        check("netlink mid-path reserve-fault first net_room grows",
+              net_room(address_of buffer, 64) && buffer.bytes &&
+                  buffer.room >= 64 && !buffer.failed);
+        held_room = buffer.room;
+        buffer.used = held_room;
+        net_memory_reserve_fail_hit = false;
+        net_memory_reserve_fail = true;
+        check("netlink mid-path reserve-fault refuses the next net_room growth",
+              !net_room(address_of buffer, held_room + 64) &&
+                  net_memory_reserve_fail_hit && !net_memory_reserve_fail &&
+                  buffer.failed && buffer.bytes && buffer.room == held_room);
+        netlink_forget(address_of buffer);
 }
 
 /*
@@ -51918,6 +52336,447 @@ static fn http_write_spans_midpath_fault(void)
         http_writev_short_limit = 0;
         http_writev_error = 0;
         system_close(sink);
+}
+
+static fn net_io_faults_clear(void)
+{
+        net_send_error = 0;
+        net_send_error_hit = false;
+        net_send_eintr_once = false;
+        net_send_eintr_hit = false;
+        net_send_short_limit = 0;
+        net_send_short_hit = false;
+        net_send_eintr_sticky = false;
+        net_send_arm_after = 0;
+        net_recv_error = 0;
+        net_recv_error_hit = false;
+        net_recv_eintr_once = false;
+        net_recv_eintr_hit = false;
+        net_recv_short_limit = 0;
+        net_recv_short_hit = false;
+        net_recv_eintr_sticky = false;
+        net_recv_arm_after = 0;
+        net_recv_fill_length = 0;
+        memory_fill(net_recv_fill, 0, sizeof net_recv_fill);
+}
+
+/* Loopback UDP peer: answer one query with a short junk datagram so the
+   client's poll becomes readable before injected recv faults run. */
+static fn dns_midpath_junk_peer(bipolar datagram)
+{
+        p8 request[DNS_MAX_MESSAGE];
+        p8 junk[8];
+        socket_address_internet client;
+        p32 client_size = sizeof client;
+        network_deadline fixture_deadline;
+        bipolar got;
+
+        if (!network_deadline_begin(address_of fixture_deadline, 5, 0) ||
+            network_wait_readable_until(datagram,
+                                        address_of fixture_deadline) <= 0)
+                system_call_1(syscall(exit_group), 1);
+        got = socket_receive((b32)datagram, request, sizeof request, 0,
+                             address_of client, address_of client_size);
+        if (got < DNS_HEADER || client_size != sizeof client)
+                system_call_1(syscall(exit_group), 1);
+        memory_fill(junk, 0xa5, sizeof junk);
+        if (socket_send((b32)datagram, junk, sizeof junk, 0, address_of client,
+                        sizeof client) != (bipolar)sizeof junk)
+                system_call_1(syscall(exit_group), 1);
+        socket_close((b32)datagram);
+        system_call_1(syscall(exit_group), 0);
+}
+
+static bipolar dns_midpath_loopback(positive seconds, p32 address_to found,
+                                    positive address_to elapsed)
+{
+        socket_address_internet where = {
+            .family = AF_INET, .host = network_order_32(HOST_LOOPBACK)};
+        p32 size = sizeof where;
+        bipolar datagram = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        bipolar child;
+        bipolar result;
+        positive began;
+        positive raw = 0;
+
+        if (datagram < 0 ||
+            socket_bind((b32)datagram, address_of where, sizeof where) < 0)
+                goto setup_failed;
+        memory_fill(address_of where, 0, sizeof where);
+        if (socket_name((b32)datagram, address_of where, address_of size) < 0 ||
+            size != sizeof where || !where.port)
+                goto setup_failed;
+
+        child = system_call_2(syscall(clone), SIGCHLD, 0);
+        if (child < 0)
+                goto setup_failed;
+        if (!child)
+                dns_midpath_junk_peer(datagram);
+
+        socket_close((b32)datagram);
+        began = clock_monotonic_nanoseconds();
+        result = dns_resolve_at(HOST_LOOPBACK, network_order_16(where.port),
+                                (string_address)"midpath.example", found,
+                                seconds);
+        if (elapsed)
+                address_to elapsed = clock_monotonic_nanoseconds() - began;
+        if (system_wait4_retry((b32)child, address_of raw, 0, null) != child ||
+            wait_status_code(raw) != 0)
+                return DNS_NO_SERVER;
+        return result;
+
+setup_failed:
+        if (datagram >= 0)
+                socket_close((b32)datagram);
+        return DNS_NO_SERVER;
+}
+
+/*
+        Mid-path DNS/DHCP send/recv faults after the client socket exists.
+        Distinct from open-time EMFILE in dns_dhcp_netlink_resource_exhaustion
+        and from MSG_TRUNC oversize transport cases in resolving_truncated /
+        leasing_datagrams.
+*/
+static fn dns_dhcp_midpath_faults(void)
+{
+        p32 found = 0;
+        positive elapsed = 0;
+        bipolar status;
+        p8 packet[301], received[300], hardware[6] = {1, 2, 3, 4, 5, 6};
+        dhcp_lease lease = {0};
+        network_deadline deadline;
+        p8 kind = 0;
+        socket_address_internet receiver_at = {
+            .family = AF_INET, .host = network_order_32(HOST_LOOPBACK)};
+        socket_address_internet sender_at = receiver_at;
+        socket_address_internet any_sender;
+        p32 address_size;
+        bipolar receiver;
+        bipolar sender;
+
+        /* --- DNS UDP: send path after connect (no peer required) --- */
+        net_io_faults_clear();
+        net_send_error = -ENOSPC;
+        found = 0;
+        status = dns_resolve_at(HOST_LOOPBACK, DNS_PORT,
+                                (string_address)"send.fault.example",
+                                address_of found, 1);
+        check("DNS UDP send ENOSPC fails closed mid-path after the socket exists",
+              status == DNS_NO_REPLY && !found && net_send_error_hit &&
+                  !net_send_error);
+        net_io_faults_clear();
+
+        /* UDP send does not retry EINTR; a single interrupted send refuses. */
+        net_send_eintr_once = true;
+        found = 0;
+        status = dns_resolve_at(HOST_LOOPBACK, DNS_PORT,
+                                (string_address)"send.eintr.example",
+                                address_of found, 1);
+        check("DNS UDP send EINTR fails closed mid-path without retrying",
+              status == DNS_NO_REPLY && !found && net_send_eintr_hit &&
+                  !net_send_eintr_once);
+        net_io_faults_clear();
+
+        /* --- DNS UDP: recv EINTR then hard I/O refuse after a junk peer --- */
+        net_recv_eintr_once = true;
+        net_recv_error = -EIO;
+        found = 0;
+        status = dns_midpath_loopback(1, address_of found, null);
+        check("DNS UDP recv EINTR then EIO fails closed mid-path",
+              status == DNS_NO_SERVER && !found && net_recv_eintr_hit &&
+                  net_recv_error_hit && !net_recv_error);
+        net_io_faults_clear();
+
+        /* --- DNS UDP: EAGAIN is fail-closed (not a retry) --- */
+        net_recv_error = -EAGAIN;
+        found = 0;
+        status = dns_midpath_loopback(1, address_of found, null);
+        check("DNS UDP recv EAGAIN fails closed mid-path",
+              status == DNS_NO_SERVER && !found && net_recv_error_hit);
+        net_io_faults_clear();
+
+        /* --- DNS UDP: synthetic short junk then ENOSPC (past MSG_TRUNC) --- */
+        memory_fill(net_recv_fill, 0, sizeof net_recv_fill);
+        net_recv_fill_length = 3;
+        net_recv_error = -ENOSPC;
+        found = 0;
+        status = dns_midpath_loopback(1, address_of found, null);
+        check("DNS UDP short mid-stream junk then ENOSPC fails closed",
+              status == DNS_NO_SERVER && !found && net_recv_short_hit &&
+                  net_recv_error_hit);
+        net_io_faults_clear();
+
+        /* --- Cross-product: sticky EINTR consumes the absolute deadline --- */
+        net_recv_eintr_sticky = true;
+        found = 0;
+        elapsed = 0;
+        status = dns_midpath_loopback(1, address_of found, address_of elapsed);
+        check("DNS UDP sticky EINTR fails closed inside the absolute deadline",
+              status == DNS_NO_REPLY && !found && net_recv_eintr_hit &&
+                  elapsed < NETWORK_NANOSECONDS + NETWORK_NANOSECONDS / 2);
+        net_io_faults_clear();
+
+        /* --- Cross-product: TCP fallback short/EINTR then ENOSPC ---
+           Client-side send faults leave the fixture child blocked on its
+           accept/read; reap with SIGKILL so wait status does not hide the
+           client's fail-closed result. One child per arming. */
+        {
+                positive which;
+
+                for (which = 0; which < 2; which++)
+                {
+                        socket_address_internet where = {
+                            .family = AF_INET,
+                            .host = network_order_32(HOST_LOOPBACK)};
+                        p32 size = sizeof where;
+                        bipolar listening =
+                            socket_new(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+                        bipolar datagram =
+                            socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                        bipolar child;
+                        positive raw = 0;
+
+                        if (listening < 0 || datagram < 0 ||
+                            socket_bind((b32)listening, address_of where,
+                                        sizeof where) < 0 ||
+                            socket_listen((b32)listening, 1) < 0)
+                        {
+                                if (datagram >= 0)
+                                        socket_close((b32)datagram);
+                                if (listening >= 0)
+                                        socket_close((b32)listening);
+                                /* check() needs a string literal name. */
+                                if (which)
+                                        check("DNS TCP EINTR/ENOSPC fixture opens",
+                                              false);
+                                else
+                                        check("DNS TCP short/ENOSPC fixture opens",
+                                              false);
+                                continue;
+                        }
+                        memory_fill(address_of where, 0, sizeof where);
+                        if (socket_name((b32)listening, address_of where,
+                                        address_of size) < 0 ||
+                            size != sizeof where || !where.port ||
+                            socket_bind((b32)datagram, address_of where,
+                                        sizeof where) < 0)
+                        {
+                                socket_close((b32)datagram);
+                                socket_close((b32)listening);
+                                if (which)
+                                        check("DNS TCP EINTR/ENOSPC fixture binds",
+                                              false);
+                                else
+                                        check("DNS TCP short/ENOSPC fixture binds",
+                                              false);
+                                continue;
+                        }
+                        child = system_call_2(syscall(clone), SIGCHLD, 0);
+                        if (child < 0)
+                        {
+                                socket_close((b32)datagram);
+                                socket_close((b32)listening);
+                                if (which)
+                                        check("DNS TCP EINTR/ENOSPC fixture clones",
+                                              false);
+                                else
+                                        check("DNS TCP short/ENOSPC fixture clones",
+                                              false);
+                                continue;
+                        }
+                        if (!child)
+                                dns_tcp_test_server(datagram, listening,
+                                                    DNS_TCP_SPLIT);
+                        socket_close((b32)datagram);
+                        socket_close((b32)listening);
+
+                        net_io_faults_clear();
+                        net_send_arm_after = 1;
+                        if (!which)
+                        {
+                                net_send_short_limit = 1;
+                                net_send_error = -ENOSPC;
+                        }
+                        else
+                        {
+                                net_send_eintr_once = true;
+                                net_send_error = -ENOSPC;
+                        }
+                        found = 0;
+                        status = dns_resolve_at(
+                            HOST_LOOPBACK, network_order_16(where.port),
+                            (string_address)"split.example", address_of found,
+                            1);
+                        if (!which)
+                                check("DNS TCP fallback short send then ENOSPC fails closed mid-path",
+                                      status == DNS_NO_REPLY && !found &&
+                                          net_send_short_hit &&
+                                          net_send_error_hit &&
+                                          !net_send_short_limit &&
+                                          !net_send_error);
+                        else
+                                check("DNS TCP fallback EINTR then ENOSPC fails closed mid-path",
+                                      status == DNS_NO_REPLY && !found &&
+                                          net_send_eintr_hit &&
+                                          net_send_error_hit && !net_send_error);
+                        net_io_faults_clear();
+                        system_call_2(syscall(kill), (positive)child, 9);
+                        (void)system_wait4_retry((b32)child, address_of raw, 0,
+                                                 null);
+                }
+        }
+
+        /* --- DHCP recv mid-path on an already-bound client socket --- */
+        receiver = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+        sender = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+        check("DHCP mid-path receiver opens", receiver >= 0);
+        check("DHCP mid-path sender opens", sender >= 0);
+        if (receiver < 0 || sender < 0)
+        {
+                if (receiver >= 0)
+                        socket_close((b32)receiver);
+                if (sender >= 0)
+                        socket_close((b32)sender);
+                return;
+        }
+        check("DHCP mid-path receiver binds",
+              socket_bind((b32)receiver, address_of receiver_at,
+                          sizeof receiver_at) == 0);
+        check("DHCP mid-path sender binds",
+              socket_bind((b32)sender, address_of sender_at,
+                          sizeof sender_at) == 0);
+        address_size = sizeof receiver_at;
+        check("DHCP mid-path receiver address is known",
+              socket_name((b32)receiver, address_of receiver_at,
+                          address_of address_size) == 0 &&
+                  address_size == sizeof receiver_at && receiver_at.port);
+        address_size = sizeof sender_at;
+        check("DHCP mid-path sender address is known",
+              socket_name((b32)sender, address_of sender_at,
+                          address_of address_size) == 0 &&
+                  address_size == sizeof sender_at && sender_at.port);
+        any_sender = sender_at;
+        any_sender.host = 0;
+
+        dhcp_build(packet, sizeof packet, DHCP_OFFER, 123, hardware, 0, 0, 0,
+                   true);
+        packet[0] = 2;
+
+        check("DHCP mid-path datagram queues before EINTR/ENOSPC",
+              socket_send((b32)sender, packet, 300, 0, address_of receiver_at,
+                          sizeof receiver_at) == 300);
+        net_recv_eintr_once = true;
+        net_recv_error = -ENOSPC;
+        check("DHCP mid-path deadline starts for EINTR then ENOSPC",
+              network_deadline_begin(address_of deadline, 0, 200000000));
+        check("DHCP recv EINTR then ENOSPC fails closed mid-path",
+              !dhcp_receive(receiver, received, sizeof received, 123, hardware,
+                            address_of lease, address_of kind,
+                            address_of any_sender, true, null,
+                            address_of deadline) &&
+                  net_recv_eintr_hit && net_recv_error_hit);
+        net_io_faults_clear();
+        while (socket_receive((b32)receiver, received, sizeof received,
+                              MSG_DONTWAIT, null, null) > 0)
+        {
+        }
+
+        check("DHCP mid-path datagram queues before EAGAIN",
+              socket_send((b32)sender, packet, 300, 0, address_of receiver_at,
+                          sizeof receiver_at) == 300);
+        net_recv_error = -EAGAIN;
+        check("DHCP mid-path deadline starts for EAGAIN",
+              network_deadline_begin(address_of deadline, 0, 200000000));
+        check("DHCP recv EAGAIN fails closed mid-path",
+              !dhcp_receive(receiver, received, sizeof received, 123, hardware,
+                            address_of lease, address_of kind,
+                            address_of any_sender, true, null,
+                            address_of deadline) &&
+                  net_recv_error_hit);
+        net_io_faults_clear();
+        while (socket_receive((b32)receiver, received, sizeof received,
+                              MSG_DONTWAIT, null, null) > 0)
+        {
+        }
+
+        /* Junk (real oversized) then injected short fill then hard refuse. */
+        check("DHCP mid-path oversized junk queues before short/fault",
+              socket_send((b32)sender, packet, 301, 0, address_of receiver_at,
+                          sizeof receiver_at) == 301);
+        check("DHCP mid-path valid-looking datagram follows junk",
+              socket_send((b32)sender, packet, 300, 0, address_of receiver_at,
+                          sizeof receiver_at) == 300);
+        memory_fill(net_recv_fill, 0, sizeof net_recv_fill);
+        net_recv_arm_after = 1; /* consume oversized with real recv first */
+        net_recv_fill_length = 8;
+        net_recv_error = -EIO;
+        check("DHCP mid-path junk/short deadline starts",
+              network_deadline_begin(address_of deadline, 0, 200000000));
+        check("DHCP discards junk then fails closed on short/EIO mid-path",
+              !dhcp_receive(receiver, received, sizeof received, 123, hardware,
+                            address_of lease, address_of kind,
+                            address_of sender_at, false, null,
+                            address_of deadline) &&
+                  net_recv_short_hit && net_recv_error_hit);
+        net_io_faults_clear();
+        while (socket_receive((b32)receiver, received, sizeof received,
+                              MSG_DONTWAIT, null, null) > 0)
+        {
+        }
+
+        check("DHCP mid-path datagram queues before sticky EINTR",
+              socket_send((b32)sender, packet, 300, 0, address_of receiver_at,
+                          sizeof receiver_at) == 300);
+        net_recv_eintr_sticky = true;
+        check("DHCP mid-path sticky EINTR deadline starts",
+              network_deadline_begin(address_of deadline, 0, 150000000));
+        check("DHCP sticky EINTR fails closed inside the absolute deadline",
+              !dhcp_receive(receiver, received, sizeof received, 123, hardware,
+                            address_of lease, address_of kind,
+                            address_of any_sender, true, null,
+                            address_of deadline) &&
+                  net_recv_eintr_hit);
+        net_io_faults_clear();
+        while (socket_receive((b32)receiver, received, sizeof received,
+                              MSG_DONTWAIT, null, null) > 0)
+        {
+        }
+
+        /* DHCP send mid-path: reacquire after a bound socket would send.
+           BINDTODEVICE needs a real device; prove the REQUEST send refuse
+           when open succeeds on lo, else honest NOT RUN. */
+        {
+                p8 lo_hardware[6] = {2, 0, 0, 0, 0, 9};
+                dhcp_lease held = {
+                    .address = 0x0a00020f,
+                    .mask = 0xffffff00,
+                    .router = 0x0a000202,
+                    .nameserver = 0x01010101,
+                    .server = 0x7f000001,
+                    .seconds = 60,
+                    .renewal = 30,
+                    .rebinding = 52,
+                };
+                bipolar probe = dhcp_open((string_address)"lo", held.address,
+                                          false);
+
+                if (probe < 0)
+                        log_direct(str("net: DHCP mid-path send ENOSPC NOT RUN -- BINDTODEVICE lo unavailable\n"));
+                else
+                {
+                        socket_close((b32)probe);
+                        net_send_error = -ENOSPC;
+                        status = dhcp_reacquire((string_address)"lo", lo_hardware,
+                                                address_of held, false, 1);
+                        check("DHCP reacquire send ENOSPC fails closed mid-path",
+                              status == DHCP_NO_SOCKET && net_send_error_hit &&
+                                  !net_send_error);
+                        net_io_faults_clear();
+                }
+        }
+
+        socket_close((b32)receiver);
+        socket_close((b32)sender);
 }
 
 /*
@@ -57953,9 +58812,13 @@ b32 main(void)
         http_tls_resource_exhaustion();
         dns_dhcp_netlink_resource_exhaustion();
         http_body_store_midpath_exhaustion();
+        http_body_store_midpath_reserve_fault();
+        http_body_store_large_growth_reserve_fault();
+        net_room_midpath_reserve_fault();
         http_body_copy_midpath_fault();
         http_write_spans_partial();
         http_write_spans_midpath_fault();
+        dns_dhcp_midpath_faults();
         network_stream_sigpipe();
         tls_closure_boundaries();
         tls_record_payload_ceiling();

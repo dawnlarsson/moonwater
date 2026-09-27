@@ -20,11 +20,15 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
   `python3 test/differential.py --harness msan_net`; also
   `MOONWATER_MSAN=1` on `tls_der_fuzz` / `tls_hs_fuzz`. Scope under
   `-fsanitize=memory`: intentional ABI pad proves (generic wire header and
-  a netlink-attr-shaped hole), thin hosted lifts of `dns_copy_name` and TLS
-  record-header open over fully-initialized hostile buffers, plus short
-  DER/HS corpus smoke. Not a full `CHECK_net` under MSan. Exercised on Lima
-  aarch64 Linux clang; Apple clang and many qemu images: NOT RUN. CI remains
-  parked — no push auto-job).
+  a netlink-attr-shaped hole); hosted freestanding lifts of `dns_copy_name`,
+  TLS record-header open, HTTP header/chunk framing, `dhcp_walk`,
+  `netlink_find_span`, and TLS `tls_parse_extensions`/`tls_parse_cert` (fuzz
+  lift without libFuzzer) over fully-initialized hostile buffers with an
+  intentional uninit catch per new surface; thin CHECK_net-equivalent
+  align/sizeof/parser probes (not a full freestanding `CHECK_net` under
+  MSan — that binary needs the moonwater runtime/syscalls); plus short
+  DER/HS corpus smoke. Exercised on Lima aarch64 Linux clang; Apple clang
+  and many qemu images: NOT RUN. CI remains parked — no push auto-job).
 - [x] Record per-parser length, item-count, and recursion ceilings.
   Ledger of those ceilings lives in `test/checks.c` (CHECK_net) and
   `SECURITY_TEST_MATRIX.md` (no CPU-work budgets); exact-limit and one-over
@@ -78,8 +82,10 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
   supported host CLI versions cannot silently disable the oracle.
 - [x] Bounded lane-smoke coverage-guided fuzzing for DER (5s / 20k runs via
       `python3 test/differential.py --harness tls_der_fuzz`; ASan/UBSan via
-      clang libFuzzer when available, else NOT RUN). Local continuous: see
-      `test/fuzz_net` / `MOONWATER_FUZZ_*`.
+      clang libFuzzer when available, else NOT RUN). Lifts also hit EKU/SAN/BC/KU
+      value parsers (magic C2–C5), host-aware SAN (C6–C7), ECDSA sig / alg-id
+      junk (C8–C9), and pure path policy (`names_chain`, leaf/issuer auth).
+      Local continuous: see `test/fuzz_net` / `MOONWATER_FUZZ_*`.
 - [x] Bounded lane-smoke coverage-guided fuzzing for certificate-list framing
       (same `tls_der_fuzz` 5s/20k smoke: seeds plus `tls_certificate_body_open` /
       list walk with `tls_parse_cert` on slices, then the same empty-list /
@@ -91,6 +97,10 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
       framing; seeds under `test/fuzz_corpus/tls_hs/`; ASan/UBSan via clang
       libFuzzer when available, else NOT RUN). Local continuous: see
       `test/fuzz_net` / `MOONWATER_FUZZ_*`.
+- [x] Optional verify early-reject fuzz (`tls_verify_fuzz`; not lane_net smoke):
+      same `tls_der` corpus; mirrors `tls_verify_chain` through parse/policy/names
+      with signatures mocked refuse. Wired into `sh test/fuzz_net`; hand-run via
+      `python3 test/differential.py --harness tls_verify_fuzz`.
 
 ## Shell and operating-system boundary
 
@@ -106,13 +116,19 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
   `PATH`, `IFS`, `PS4`, `ENV`, `BASH_ENV`, exported functions, option imports,
   mismatched real/effective/saved IDs, and closed standard descriptors.
 - [x] Run race tests under a scheduler which continuously exchanges every
-  checked pathname between file, directory, and symlink forms
+  checked pathname between file, directory, and symlink-to-dir forms
   (`python3 test/differential.py --harness pathname_race --binary ours=…`,
-  also `sh test/run tar`). Sibling thread cycles contested names through
-  regular file ↔ directory ↔ symlink-to-outside via renameat2/rename while
-  tar extract (and O_EXCL|O_NOFOLLOW create) run; effect-based: outside
-  victim unchanged, no nested escape. Honest NOT RUN (2) without
-  threads/rename.
+  also `sh test/run tar`). Sibling threads cycle contested names
+  (`flip`/`parent`/`mid`/`deep`) through regular file ↔ directory ↔
+  symlink-to-outside-keep via renameat2/rename while tar extract walks
+  leaf/nested/burst/deep member trees; exclusive-create probes cover
+  O_EXCL|O_NOFOLLOW leaf, private-edit style dirfd+O_EXCL, shell
+  noclobber (`set -C`), and `install -D` through a raced parent.
+  Effect-based: outside victim unchanged, keep/ stays empty (no
+  nested/deep escape). Lane smoke leaves budget unset (80/2s); longer
+  local stress via `MOONWATER_PATHNAME_RACE_ROUNDS` /
+  `MOONWATER_PATHNAME_RACE_SECONDS` with the same effect asserts. Honest
+  NOT RUN (2) without threads/rename (soft in `lane_tar`).
 
 ## Faults, resources, and portability
 
@@ -126,25 +142,37 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
 - [x] Descriptor- and mmap/`byte_store_reserve`-exhaustion sweeps for the
   HTTP fetch / TLS client open loops (`EMFILE` → `HTTP_NO_ROUTE`; reserve
   failure → `HTTP_NO_REPLY`). Accept N/A (client connect only); TLS
-  handshake has no separate mmap. Mid-path additions (not open-time only):
-  connected-stream body store at capacity then soft `RLIMIT_AS` on the next
-  `byte_store_reserve` (`http_body_store_midpath_exhaustion`; honest NOT RUN
-  when guest AS limits are ignored); connected-stream body copy with
-  once-armed writev `-ENOSPC` (`http_body_copy_midpath_fault`); writev short
-  prefix then once-armed `-ENOSPC` (`http_write_spans_midpath_fault`); TLS
-  plaintext/encrypted-flight append past a tight hold room after a retained
-  prefix (`tls_midpath_append_refusal`).
+  handshake has no separate mmap (fixed `TLS_HS_MAX` holds —
+  `tls_midpath_append_refusal` covers tight-room refuse, not AS). Soft
+  `RLIMIT_AS` mmap refuse is proved on the native host arch only (Lima
+  aarch64 / Linux arm64 when that lane has no qemu-user); qemu-user arches
+  get `--emulated` and log NOT RUN for AS. Once-armed `memory_reserve`
+  (shim before `net.c`) proves fail-closed on every arch: first-reserve
+  HTTP body / netlink, mid-path capacity
+  (`http_body_store_midpath_reserve_fault`), large body next-quantum
+  (`http_body_store_large_growth_reserve_fault`), mid-path `net_room`
+  (`net_room_midpath_reserve_fault`). Soft-AS mid-path capacity remains
+  `http_body_store_midpath_exhaustion` (native only). Also: once-armed
+  writev `-ENOSPC` (`http_body_copy_midpath_fault` /
+  `http_write_spans_midpath_fault`).
 - [x] Descriptor-, mapping-, and allocation-exhaustion sweeps for every
   remaining externally reachable service loop in `src/net` (inventory: DNS
   client only, DHCP client only, rtnetlink request/reply — no DNS/DHCP/HTTP
   servers, no netlink multicast listener). DNS `EMFILE` → `DNS_NO_SERVER`
-  (stack messages; no separate map); DHCP `EMFILE` → `DHCP_NO_SOCKET`
-  (stack packet; no separate map); netlink open `EMFILE` and
-  `net_room`/`array_store_reserve` under soft `RLIMIT_AS` → failed/empty.
-  Honest NOT RUN when `prlimit` is unavailable or address-space limits are
-  ignored under emulation (`dns_dhcp_netlink_resource_exhaustion`). DNS/DHCP
-  mid-path send/recv fault injection remains open-time-only at the socket
-  open gate (no new mid-path DNS proofs).
+  (stack messages / TCP frame; no separate map or `byte_store_reserve`);
+  DHCP `EMFILE` → `DHCP_NO_SOCKET` (stack packet; no separate map); netlink
+  open `EMFILE` and `net_room`/`array_store_reserve` under soft `RLIMIT_AS`
+  → failed/empty on native host arch; `--emulated` / missing `prlimit` →
+  NOT RUN for AS, with once-armed `memory_reserve` covering first- and
+  mid-path `net_room` refuse (`dns_dhcp_netlink_resource_exhaustion` /
+  `net_room_midpath_reserve_fault`). Mid-path
+  DNS/DHCP send/recv (after the client socket exists) is covered by thin
+  `socket_send`/`socket_receive` hooks in `dns_dhcp_midpath_faults`: UDP send
+  `ENOSPC`/`EINTR`; UDP recv `EINTR`→`EIO`, `EAGAIN`, short junk→`ENOSPC`,
+  sticky `EINTR`×deadline; TCP fallback short-send→`ENOSPC` and
+  `EINTR`→`ENOSPC`; DHCP recv same class plus junk-before-fault; DHCP
+  reacquire send `ENOSPC` when `BINDTODEVICE lo` works (else honest NOT RUN).
+  Open-time `EMFILE` remains the socket-open gate only.
 - [x] Publish fuzz corpus coverage and sanitizer versions with each release.
   Run `sh test/fuzz_net --report` (writes `artifacts/fuzz-report.txt` and
   stdout: clang/sanitizer version, seed counts, runs/duration/exit per

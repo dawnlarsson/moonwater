@@ -88,7 +88,7 @@ host_arch=$(uname -m)
 der_seeds=$(count_seeds test/fuzz_corpus/tls_der)
 hs_seeds=$(count_seeds test/fuzz_corpus/tls_hs)
 
-echo "fuzz_net: der then hs (runs=$MOONWATER_FUZZ_RUNS seconds=$MOONWATER_FUZZ_SECONDS)"
+echo "fuzz_net: der then hs then verify (runs=$MOONWATER_FUZZ_RUNS seconds=$MOONWATER_FUZZ_SECONDS)"
 
 # Harness chatter stays on this process's stdout/stderr; only the status
 # triple (name exit duration) is captured from the helper's stdout.
@@ -106,6 +106,7 @@ run_harness() {
 
 der_line=$(run_harness tls_der_fuzz)
 hs_line=$(run_harness tls_hs_fuzz)
+verify_line=$(run_harness tls_verify_fuzz)
 
 der_exit=${der_line#* }
 der_exit=${der_exit%% *}
@@ -113,9 +114,12 @@ der_duration=${der_line##* }
 hs_exit=${hs_line#* }
 hs_exit=${hs_exit%% *}
 hs_duration=${hs_line##* }
-# Overall: hard fail (1) wins; else NOT RUN (2) if either skipped; else 0.
+verify_exit=${verify_line#* }
+verify_exit=${verify_exit%% *}
+verify_duration=${verify_line##* }
+# Overall: hard fail (1) wins; else NOT RUN (2) if any skipped; else 0.
 overall=0
-for code in "$der_exit" "$hs_exit"; do
+for code in "$der_exit" "$hs_exit" "$verify_exit"; do
         if [ "$code" = 1 ]; then
                 overall=1
                 break
@@ -143,6 +147,8 @@ report=$(MOONWATER_FUZZ_RUNS="$MOONWATER_FUZZ_RUNS" \
         REPORT_DER_DURATION="$der_duration" \
         REPORT_HS_EXIT="$hs_exit" \
         REPORT_HS_DURATION="$hs_duration" \
+        REPORT_VERIFY_EXIT="$verify_exit" \
+        REPORT_VERIFY_DURATION="$verify_duration" \
         REPORT_OVERALL="$overall" \
         python3 - <<'PY'
 import json, os, time
@@ -197,6 +203,15 @@ report = {
             "max_total_time_seconds": i("MOONWATER_FUZZ_SECONDS"),
             "duration_seconds": i("REPORT_HS_DURATION"),
             "exit": i("REPORT_HS_EXIT"),
+        },
+        {
+            "name": "tls_verify_fuzz",
+            "seeds": i("REPORT_DER_SEEDS"),
+            "runs": i("MOONWATER_FUZZ_RUNS"),
+            "max_total_time_seconds": i("MOONWATER_FUZZ_SECONDS"),
+            "duration_seconds": i("REPORT_VERIFY_DURATION"),
+            "exit": i("REPORT_VERIFY_EXIT"),
+            "note": "early-reject path; signatures mocked; not lane_net smoke",
         },
     ],
     "coverage_note": (

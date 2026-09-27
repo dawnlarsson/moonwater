@@ -82,6 +82,176 @@ SEEDS: dict[str, dict[str, str]] = {
 }
 
 
+
+def _der_len(n: int) -> bytes:
+    if n < 128:
+        return bytes([n])
+    if n < 256:
+        return bytes([0x81, n])
+    return bytes([0x82, (n >> 8) & 0xff, n & 0xff])
+
+
+def _seq(tag: int, *parts: bytes) -> bytes:
+    body = b"".join(parts)
+    return bytes([tag]) + _der_len(len(body)) + body
+
+
+def _oid(*content: int) -> bytes:
+    raw = bytes(content)
+    return bytes([0x06]) + _der_len(len(raw)) + raw
+
+
+def _one_ext(oid_content: bytes, value: bytes, critical: bool = False) -> bytes:
+    parts = [_oid(*oid_content)]
+    if critical:
+        parts.append(bytes([0x01, 0x01, 0xff]))
+    parts.append(bytes([0x04]) + _der_len(len(value)) + value)
+    return _seq(0x30, *parts)
+
+
+def _ext_block(*exts: bytes) -> bytes:
+    return _seq(0xa3, _seq(0x30, *exts))
+
+
+def _cert_list(*entries: tuple[bytes, bytes]) -> bytes:
+    blob = b""
+    for cert, ext in entries:
+        blob += bytes([(len(cert) >> 16) & 0xff, (len(cert) >> 8) & 0xff,
+                       len(cert) & 0xff]) + cert
+        blob += bytes([(len(ext) >> 8) & 0xff, len(ext) & 0xff]) + ext
+    return (bytes([0x00]) +
+            bytes([(len(blob) >> 16) & 0xff, (len(blob) >> 8) & 0xff,
+                   len(blob) & 0xff]) + blob)
+
+
+def build_hostile_tls_der_seeds() -> dict[str, str]:
+    """Hostile NC/EKU/SAN/ceiling/alg/BMPString/chain seeds as hex."""
+    minimal = bytes.fromhex(SEEDS["tls_der"]["minimal_cert.bin"])
+    server_auth = (0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01)
+    client_auth = (0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02)
+    eku_server = _seq(0x30, _oid(*server_auth))
+    eku_client = _seq(0x30, _oid(*client_auth))
+    eku_both = _seq(0x30, _oid(*server_auth), _oid(*client_auth))
+    eku_empty = _seq(0x30)
+    eku_many = _seq(0x30, *[_oid(0x2a, i) for i in range(40)])
+    nc_empty = _seq(0x30)
+    nc_perm = _seq(0x30, _seq(0xa0, _seq(0x30, bytes([0x82, 0x07]) + b"foo.com")))
+    nc_excl = _seq(0x30, _seq(0xa1, _seq(0x30, bytes([0x82, 0x07]) + b"bad.com")))
+    nc_both = _seq(0x30,
+                   _seq(0xa0, _seq(0x30, bytes([0x82, 0x03]) + b"a.b")),
+                   _seq(0xa1, _seq(0x30, bytes([0x82, 0x03]) + b"x.y")))
+    san_dns = _seq(0x30, bytes([0x82, 0x0b]) + b"example.com")
+    san_wild = _seq(0x30, bytes([0x82, 0x0b]) + b"*.example.com")
+    san_ip4 = _seq(0x30, bytes([0x87, 0x04, 192, 0, 2, 1]))
+    san_ip6 = _seq(0x30, bytes([0x87, 0x10]) + b"\0" * 16)
+    san_ctrl = _seq(0x30, bytes([0x82, 0x05, ord("a"), 0x01, ord("b"),
+                                 ord("."), ord("c")]))
+    san_multi = _seq(0x30,
+                     bytes([0x82, 0x0b]) + b"example.com",
+                     bytes([0x82, 0x07]) + b"foo.com",
+                     bytes([0x87, 0x04, 192, 0, 2, 1]))
+    san_uri = _seq(0x30, bytes([0x86, 0x0f]) + b"https://evil.test")
+    shape = bytearray([0x30, 0x07, 0x06, 0x02, 0x2a, 0x00, 0x04, 0x01, 0x00])
+    ceiling = []
+    for i in range(64):
+        e = bytearray(shape)
+        e[5] = i
+        ceiling.append(bytes(e))
+    bmp = bytes([0x1e]) + _der_len(2048) + (b"\x00A" * 1024)
+    huge_name = _seq(0x30, _seq(0x31, _seq(0x30, _oid(0x55, 0x04, 0x03), bmp)))
+    two = _cert_list((minimal, b""), (minimal, b""))
+    out = {
+        "ext_eku_server_auth.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x25]), eku_server)),
+        "ext_eku_client_only.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x25]), eku_client)),
+        "ext_eku_server_and_client.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x25]), eku_both)),
+        "ext_eku_empty.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x25]), eku_empty)),
+        "ext_eku_many_oids.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x25]), eku_many)),
+        "ext_eku_critical_client.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x25]), eku_client, True)),
+        "ext_eku_duplicate.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x25]), eku_server),
+            _one_ext(bytes([0x55, 0x1d, 0x25]), eku_server)),
+        "ext_nc_empty.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x1e]), nc_empty)),
+        "ext_nc_permitted_dns.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x1e]), nc_perm)),
+        "ext_nc_excluded_dns.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x1e]), nc_excl)),
+        "ext_nc_both.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x1e]), nc_both)),
+        "ext_nc_critical.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x1e]), nc_perm, True)),
+        "ext_san_dns.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x11]), san_dns)),
+        "ext_san_wildcard.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x11]), san_wild)),
+        "ext_san_ipv4.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x11]), san_ip4)),
+        "ext_san_ipv6.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x11]), san_ip6)),
+        "ext_san_control.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x11]), san_ctrl)),
+        "ext_san_multi.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x11]), san_multi)),
+        "ext_san_uri.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x11]), san_uri)),
+        "ext_ceiling_64.bin": _seq(0xa3, _seq(0x30, *ceiling)),
+        "ext_bc_pathlen_without_ca.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x13]),
+                     _seq(0x30, bytes([0x02, 0x01, 0x00])))),
+        "ext_bc_pathlen_huge.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x13]),
+                     _seq(0x30, bytes([0x01, 0x01, 0xff, 0x02, 0x05,
+                                       0x01, 0x00, 0x00, 0x00, 0x00])))),
+        "ext_bc_bool_bad.bin": _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x13]),
+                     _seq(0x30, bytes([0x01, 0x01, 0x01])))),
+        "ext_unknown_critical.bin": _ext_block(
+            _one_ext(bytes([0x2a, 0x03]), _seq(0x30, bytes([0x02, 0x01, 0x01])),
+                     True)),
+        "magic_eku_server.bin": b"\xc2" + eku_server,
+        "magic_eku_many.bin": b"\xc2" + eku_many,
+        "magic_san_dns.bin": b"\xc3" + san_dns,
+        "magic_san_multi.bin": b"\xc3" + san_multi,
+        "magic_bc_ca.bin": b"\xc4" + _seq(
+            0x30, bytes([0x01, 0x01, 0xff, 0x02, 0x01, 0x00])),
+        "magic_ku_ds.bin": b"\xc5" + bytes([0x03, 0x02, 0x07, 0x80]),
+        "magic_cert_host.bin": b"\xc6" + minimal,
+        "magic_ext_host.bin": b"\xc7" + _ext_block(
+            _one_ext(bytes([0x55, 0x1d, 0x11]), san_dns)),
+        "magic_ecdsa_sig.bin": b"\xc8" + bytes(
+            [0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x02]),
+        "magic_alg_ecdsa.bin": b"\xc9" + bytes(
+            [0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04,
+             0x03, 0x02]),
+        "magic_alg_ecdsa_null.bin": b"\xc9" + bytes(
+            [0x30, 0x0c, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04,
+             0x03, 0x02, 0x05, 0x00]),
+        "magic_alg_rsa_missing_null.bin": b"\xc9" + bytes(
+            [0x30, 0x0b, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d,
+             0x01, 0x01, 0x0b]),
+        "magic_alg_unknown.bin": b"\xc9" + bytes(
+            [0x30, 0x07, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a]),
+        "magic_alg_oid_long_form.bin": b"\xc9" + bytes(
+            [0x30, 0x0b, 0x06, 0x81, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d,
+             0x04, 0x03, 0x02]),
+        "name_huge_bmpstring.bin": huge_name,
+        "magic_name_huge_bmp.bin": b"\xc9" + huge_name,
+        "cert_list_two_minimal.bin": two,
+        "cert_list_two_trunc_second.bin": two[: len(two) // 2],
+        "cert_list_two_host.bin": b"\xc1" + two,
+    }
+    return {name: data.hex() for name, data in out.items()}
+
+
+# Merge built hostile seeds (hex source of truth; never commit *.bin).
+SEEDS["tls_der"].update(build_hostile_tls_der_seeds())
+
 def materialize(clean: bool = False) -> None:
     for sub, seeds in SEEDS.items():
         directory = ROOT / sub

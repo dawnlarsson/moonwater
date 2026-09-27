@@ -14,14 +14,20 @@ python3 test/fuzz_corpus/generate_seeds.py
 
 | Directory | Harness | Parsers |
 | --- | --- | --- |
-| `tls_der/` | `tls_der_fuzz` | `tls_parse_extensions`, `tls_parse_cert`, Certificate-list framing (`tls_certificate_body_open` walk) |
+| `tls_der/` | `tls_der_fuzz` | `tls_parse_extensions`, `tls_parse_cert`, Certificate-list framing, EKU/SAN/BC/KU value lanes, names_chain + leaf/issuer policy |
+| `tls_der/` | `tls_verify_fuzz` (hand / `fuzz_net`) | Same corpus; `tls_verify_chain` early-reject walker (parse/policy/names; signatures mocked refuse) |
 | `tls_hs/` | `tls_hs_fuzz` | `tls_handshake_one_append`, `tls_encrypted_flight_append` (`tls=null`) |
 
+Magic prefixes on `tls_der` seeds (first byte): `C1` list body, `C2` EKU
+value, `C3` SAN value, `C4` basicConstraints, `C5` keyUsage, `C6` cert+host,
+`C7` extensions+host, `C8` ECDSA sig DER, `C9` AlgorithmIdentifier.
+
 Seeds are hostile/truncated/overlong/leftover fixtures derived from the
-deterministic refuse cases in `test/checks.c`. Empty stubs are not useful;
+deterministic refuse cases in `test/checks.c`, plus built NC/EKU/SAN/ceiling/
+BMPString/alg-id junk from `build_hostile_tls_der_seeds()`. Empty stubs are not useful;
 keep non-empty bytes except the intentional `empty.bin` controls. To add a
-seed, append hex to `SEEDS` in `generate_seeds.py` — do not commit `.bin`
-files.
+seed, append hex to `SEEDS` in `generate_seeds.py` (or extend the builder) —
+do not commit `.bin` files.
 
 ## Budgets (do not change lane_net smoke)
 

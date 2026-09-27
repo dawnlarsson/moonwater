@@ -2289,7 +2289,7 @@ def self_test():
             #      and without the redirect hop, byte-compared. Measured on the
             #      box as an ordinary user: 66 of 66 in 84 s, 78 s of it the
             #      anchored build, which no lane should pay on every run.
-            BY_HAND = {"https_bench"}
+            BY_HAND = {"https_bench", "tls_verify_fuzz"}
 
             unrun = sorted(set(registered) - asked - BY_HAND)
             self.assertEqual(unrun, [],
@@ -33699,48 +33699,130 @@ def harness_https_downgrade(argv):
                 capture_output=True, timeout=30,
                 env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
 
+        def expect_downgrade(url, routes, accepts, label):
+            port, done = serve_map(routes, accepts)
+            fetched = wget(url % port)
+            done.wait(25)
+            err = fetched.stderr.decode(errors="replace")
+            checks(fetched.returncode != 0 and
+                   "refused an HTTPS to HTTP redirect" in err and
+                   "too many redirects" not in err,
+                   "%s (%s)" % (label, err.strip()[:200]))
+            return err
+
+        def expect_ok(url, routes, accepts, label):
+            port, done = serve_map(routes, accepts)
+            fetched = wget(url % port)
+            done.wait(25)
+            err = fetched.stderr.decode(errors="replace")
+            checks(fetched.returncode == 0 and fetched.stdout == b"ok",
+                   "%s (%s)" % (label, err.strip()[:200]))
+
+        def expect_refuse_not_downgrade(url, routes, accepts, label):
+            port, done = serve_map(routes, accepts)
+            fetched = wget(url % port)
+            done.wait(25)
+            err = fetched.stderr.decode(errors="replace")
+            checks(fetched.returncode != 0 and
+                   "refused an HTTPS to HTTP redirect" not in err and
+                   fetched.stdout != b"ok",
+                   "%s (%s)" % (label, err.strip()[:200]))
+
         # 1. First hop already HTTPS; Location is plain HTTP — refuse before
         #    connecting to the http:// target (hop budget still has room).
-        port, done = serve_map({
-            b"/": lambda p: redirect(b"http://127.0.0.1:9/"),
-        }, 1)
-        fetched = wget("https://127.0.0.1:%d/" % port)
-        done.wait(25)
-        err = fetched.stderr.decode(errors="replace")
-        checks(fetched.returncode != 0 and
-               "refused an HTTPS to HTTP redirect" in err and
-               "too many redirects" not in err,
-               "HTTPS Location to http://127.0.0.1 is refused as a downgrade (%s)" %
-               err.strip()[:200])
+        expect_downgrade(
+            "https://127.0.0.1:%d/",
+            {b"/": lambda p: redirect(b"http://127.0.0.1:9/")},
+            1,
+            "HTTPS Location to http://127.0.0.1 is refused as a downgrade")
 
         # 2. After an HTTPS→HTTPS upgrade hop, a later http:// Location is
         #    still refused (secure sticky across hops).
-        port, done = serve_map({
-            b"/up": lambda p: redirect(
-                ("https://127.0.0.1:%d/then" % p).encode()),
-            b"/then": lambda p: redirect(b"http://127.0.0.1:9/"),
-        }, 2)
-        fetched = wget("https://127.0.0.1:%d/up" % port)
-        done.wait(25)
-        err = fetched.stderr.decode(errors="replace")
-        checks(fetched.returncode != 0 and
-               "refused an HTTPS to HTTP redirect" in err and
-               "too many redirects" not in err,
-               "HTTP Location after an HTTPS hop is still refused (%s)" %
-               err.strip()[:200])
+        expect_downgrade(
+            "https://127.0.0.1:%d/up",
+            {
+                b"/up": lambda p: redirect(
+                    ("https://127.0.0.1:%d/then" % p).encode()),
+                b"/then": lambda p: redirect(b"http://127.0.0.1:9/"),
+            },
+            2,
+            "HTTP Location after an HTTPS hop is still refused")
 
         # 3. Same-scheme HTTPS redirects still succeed — proves follow works
         #    and the refuse above is the downgrade guard, not hop budget.
-        port, done = serve_map({
-            b"/hop": lambda p: redirect(
-                ("https://127.0.0.1:%d/ok" % p).encode()),
-            b"/ok": body_ok,
-        }, 2)
-        fetched = wget("https://127.0.0.1:%d/hop" % port)
-        done.wait(25)
-        checks(fetched.returncode == 0 and fetched.stdout == b"ok",
-               "an HTTPS to HTTPS redirect is still followed (%s)" %
-               fetched.stderr.decode(errors="replace").strip()[:200])
+        expect_ok(
+            "https://127.0.0.1:%d/hop",
+            {
+                b"/hop": lambda p: redirect(
+                    ("https://127.0.0.1:%d/ok" % p).encode()),
+                b"/ok": body_ok,
+            },
+            2,
+            "an HTTPS to HTTPS redirect is still followed")
+
+        # 4. Nested HTTPS hops then http:// — sticky across three hops.
+        expect_downgrade(
+            "https://127.0.0.1:%d/a",
+            {
+                b"/a": lambda p: redirect(
+                    ("https://127.0.0.1:%d/b" % p).encode()),
+                b"/b": lambda p: redirect(
+                    ("https://127.0.0.1:%d/c" % p).encode()),
+                b"/c": lambda p: redirect(b"http://127.0.0.1:9/"),
+            },
+            3,
+            "HTTP Location after nested HTTPS hops is still refused")
+
+        # 5. Scheme case: uppercase HTTP:// is not the absolute-http path
+        #    (absolutize is case-sensitive on the scheme spelling); treated as
+        #    a same-origin relative target and followed over HTTPS.
+        expect_ok(
+            "https://127.0.0.1:%d/",
+            {
+                b"/": lambda p: redirect(b"HTTP://127.0.0.1:9/"),
+                b"/HTTP://127.0.0.1:9/": body_ok,
+            },
+            2,
+            "uppercase HTTP:// Location stays on HTTPS as a relative path")
+
+        # 6. Network-path //host keeps the current (HTTPS) scheme — not a
+        #    downgrade; same-host follow still succeeds.
+        expect_ok(
+            "https://127.0.0.1:%d/np",
+            {
+                b"/np": lambda p: redirect(
+                    ("//127.0.0.1:%d/ok" % p).encode()),
+                b"/ok": body_ok,
+            },
+            2,
+            "network-path Location keeps HTTPS and is followed")
+
+        # 7. Credentialed http://user@host — absolutize yields absolute http,
+        #    but http_split_into refuses userinfo (BAD_URL) before the
+        #    downgrade guard; still must not fetch successfully.
+        expect_refuse_not_downgrade(
+            "https://127.0.0.1:%d/cred",
+            {b"/cred": lambda p: redirect(b"http://user@127.0.0.1:9/")},
+            1,
+            "credentialed http:// Location is refused without a silent fetch")
+
+        # 8. http:/// (missing host) — BAD_URL after absolutize, not a
+        #    successful hop and not the HTTPS→HTTP downgrade line alone.
+        expect_refuse_not_downgrade(
+            "https://127.0.0.1:%d/nohost",
+            {b"/nohost": lambda p: redirect(b"http:///")},
+            1,
+            "http:/// Location with no host is refused")
+
+        # 9. http:// without a path still downgrades (authority-only URL).
+        expect_downgrade(
+            "https://127.0.0.1:%d/authonly",
+            {b"/authonly": lambda p: redirect(b"http://127.0.0.1:9")},
+            1,
+            "authority-only http:// Location is refused as a downgrade")
+
+        # Refresh / meta-refresh are not wget redirect inputs in this tree
+        # (only Location on 3xx); no harness row for those shapes.
 
     return checks.verdict("https downgrade", "https-downgrade")
 
@@ -34112,12 +34194,98 @@ int main(void)
         ("malformed-trailer-field", "unchunk",
          b"0\r\nnot-a-field\r\n\r\n", None),
         ("oversize-header", "oversize", b"", None),
+        # --- depth: 1xx, HTTP/1.0, duplicate non-framing fields ---
+        ("1xx-then-200", "full",
+         b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n"
+         b"Content-Length: 2\r\n\r\nok", b"ok"),
+        ("1xx-with-cl", "frame",
+         b"HTTP/1.1 100 Continue\r\nContent-Length: 0\r\n\r\n"
+         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", None),
+        ("101-switch", "frame",
+         b"HTTP/1.1 101 Switching Protocols\r\n\r\n", None),
+        ("http10-length", "full",
+         b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok", b"ok"),
+        ("dup-date-ok", "frame",
+         b"HTTP/1.1 200 OK\r\nDate: a\r\nDate: b\r\n"
+         b"Content-Length: 0\r\n\r\n", b""),
+        ("dup-host-ok", "frame",
+         b"HTTP/1.1 200 OK\r\nHost: a\r\nHost: b\r\n"
+         b"Content-Length: 0\r\n\r\n", b""),
+        ("close-delimited", "frame",
+         b"HTTP/1.1 200 OK\r\n\r\nhello", None),
+        # --- depth: NUL / bare CR / obs-fold outside Location ---
+        ("nul-in-cl-value", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 0\x00\r\n\r\n", None),
+        ("nul-in-location", "frame",
+         b"HTTP/1.1 302 Found\r\nLocation: /sa\x00fe\r\n\r\n", None),
+        ("bare-cr-status-line", "frame",
+         b"HTTP/1.1 200 OK\rContent-Length: 0\r\n\r\n", None),
+        ("obs-fold-date", "frame",
+         b"HTTP/1.1 200 OK\r\nDate: Mon,\r\n 01 Jan\r\n"
+         b"Content-Length: 0\r\n\r\n", None),
+        ("obs-fold-cl", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length:\r\n 0\r\n\r\n", None),
+        ("tab-before-colon", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length\t: 0\r\n\r\n", None),
+        ("empty-field-name", "frame",
+         b"HTTP/1.1 200 OK\r\n: empty\r\nContent-Length: 0\r\n\r\n", None),
+        # --- depth: smuggle-ish TE/CL variants ---
+        ("cl-then-te", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n"
+         b"Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n", None),
+        ("dup-te", "frame",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+         b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n", None),
+        ("te-chunked-gzip", "frame",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\n\r\n"
+         b"0\r\n\r\n", None),
+        ("te-identity", "frame",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: identity\r\n\r\nok", None),
+        ("te-chunked-case", "full",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n"
+         b"5\r\nhello\r\n0\r\n\r\n", b"hello"),
+        ("te-chunked-trail-ws", "full",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked \t\r\n\r\n"
+         b"0\r\n\r\n", b""),
+        ("cl-leading-zero", "full",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 05\r\n\r\nhello", b"hello"),
+        ("cl-plus-sign", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: +5\r\n\r\nhello", None),
+        ("cl-trailing-junk", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5x\r\n\r\nhello", None),
+        # --- depth: trailers and chunk-extension edges ---
+        ("trailer-ok", "full",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+         b"5\r\nhello\r\n0\r\nFoo: bar\r\n\r\n", b"hello"),
+        ("trailer-after-final", "unchunk", b"0\r\n\r\nextra", None),
+        ("trailer-obs-fold", "unchunk", b"0\r\n Foo: bar\r\n\r\n", None),
+        ("trailer-space-before-colon", "unchunk",
+         b"0\r\nFoo : bar\r\n\r\n", None),
+        ("trailer-nul", "unchunk", b"0\r\nFoo: ba\x00r\r\n\r\n", None),
+        ("chunk-ext-quoted", "unchunk",
+         b"5;ext=\"hi\"\r\nhello\r\n0\r\n\r\n", b"hello"),
+        ("chunk-ext-ctrl", "unchunk",
+         b"5;ext=\"h\x01\"\r\nhello\r\n0\r\n\r\n", None),
+        ("chunk-ext-empty-name", "unchunk",
+         b"5;=x\r\nhello\r\n0\r\n\r\n", None),
+        ("chunk-ext-bare-semi", "unchunk",
+         b"5;\r\nhello\r\n0\r\n\r\n", None),
+        ("chunk-size-leading-zeros", "unchunk",
+         b"0000000000000005\r\nhello\r\n0\r\n\r\n", b"hello"),
+        ("chunk-size-line-overlong", "unchunk",
+         b"5" + b"0" * 120 + b"\r\nhello\r\n0\r\n\r\n", None),
+        ("chunk-lf-only-delim", "unchunk",
+         b"5\nhello\n0\n\n", b"hello"),
     ]
     MUST_ACCEPT = {
         "simple-length", "empty-length", "bare-lf-headers", "chunked-full",
         "chunked-extension", "redirect-location",
+        "1xx-then-200", "http10-length", "dup-date-ok", "dup-host-ok",
+        "close-delimited", "te-chunked-case", "te-chunked-trail-ws",
+        "cl-leading-zero", "trailer-ok", "chunk-ext-quoted",
+        "chunk-size-leading-zeros", "chunk-lf-only-delim",
     }
-    #       Moonwater policy where http.client accepts the same bytes.
+    #       Moonwater policy where http.client disagrees on the same bytes.
     DELIBERATE = {
         "te-cl-conflict":
             "RFC 9112 forbids TE with Content-Length; Moonwater refuses both",
@@ -34139,6 +34307,54 @@ int main(void)
             "trailer fields share the response header token grammar",
         "oversize-header":
             "HTTP_HEAD_MAX is an explicit response-head work ceiling",
+        "1xx-with-cl":
+            "informational responses cannot carry message framing",
+        "101-switch":
+            "101 protocol switch is outside this connection-close client",
+        "nul-in-cl-value":
+            "response field values reject embedded controls (NUL/CR/LF)",
+        "nul-in-location":
+            "response field values reject embedded controls (NUL/CR/LF)",
+        "bare-cr-status-line":
+            "a bare CR mid-status-line is not a field separator",
+        "obs-fold-date":
+            "obsolete line folding is refused so a proxy cannot split views",
+        "obs-fold-cl":
+            "obsolete line folding is refused so a proxy cannot split views",
+        "tab-before-colon":
+            "field names are exact tokens; whitespace before ':' is not a name",
+        "empty-field-name":
+            "an empty field name is not a token",
+        "cl-then-te":
+            "RFC 9112 forbids TE with Content-Length; Moonwater refuses both",
+        "dup-te":
+            "duplicate framing fields are refused before a coding is chosen",
+        "te-chunked-gzip":
+            "only a lone transfer-coding chunked is implemented",
+        "te-identity":
+            "only transfer-coding chunked is implemented; anything else is refuse",
+        "te-chunked-trail-ws":
+            "trailing blanks after chunked are ignored; http.client misreads the coding",
+        "cl-plus-sign":
+            "Content-Length is plain DIGIT; a leading sign is malformed",
+        "cl-trailing-junk":
+            "Content-Length must be DIGIT then optional blanks only",
+        "trailer-after-final":
+            "bytes after the final blank trailer line are leftover framing",
+        "trailer-obs-fold":
+            "trailer fields share the response header token grammar",
+        "trailer-space-before-colon":
+            "trailer fields share the response header token grammar",
+        "trailer-nul":
+            "trailer field values reject embedded controls",
+        "chunk-ext-ctrl":
+            "chunk-extension quoted values reject embedded controls",
+        "chunk-ext-empty-name":
+            "chunk-extension names must be non-empty tokens",
+        "chunk-ext-bare-semi":
+            "a bare ';' is not a valid chunk-extension",
+        "chunk-lf-only-delim":
+            "chunk framing allows LF-only delimiters like response headers",
     }
 
     def python_oracle(mode, wire):
@@ -34213,7 +34429,10 @@ int main(void)
             if name in DELIBERATE:
                 checks(True, "%s: deliberate vs http.client (%s)" % (
                     name, DELIBERATE[name]))
-                if py_ok == ours_ok:
+                same_verdict = py_ok == ours_ok
+                same_body = (not ours_ok or want_body is None or
+                             (py_ok and py_body == ours_body))
+                if same_verdict and same_body:
                     checks(False,
                            "%s: listed deliberate but http.client now agrees; "
                            "remove it from DELIBERATE" % name)
@@ -34305,69 +34524,42 @@ def ensure_tls_fuzz_seeds():
     return True, None
 
 
-def harness_tls_der_fuzz(argv):
-    """Coverage-guided libFuzzer over DER certs and Certificate HS framing.
+def tls_fuzz_sec(text, first, following):
+    """Slice net.c from the first occurrence of first through before following."""
+    i = text.index(first)
+    return text[i:text.index(following, i)]
 
-    Lifts the DER readers and tls_certificate_body_open from src/net/net.c the
-    way http_response_framing lifts response framing: a hosted shim, the OIDs
-    and ASN.1/cert parsers, certificate-list open/walk, and
-    LLVMFuzzerTestOneInput. Seed bytes are materialized (gitignored) under
-    test/fuzz_corpus/tls_der/ from generate_seeds.py. Bounded fixed-seed run
-    so a lane cannot hang; return 2 (NOT RUN) when clang/libFuzzer is
-    unavailable. Expected TLS_FAIL is ignored; only ASan/UBSan aborts fail
-    the lane (or MSan when MOONWATER_MSAN=1). Override MOONWATER_FUZZ_RUNS /
-    MOONWATER_FUZZ_SECONDS for longer local runs (see test/fuzz_net and
-    test/msan_net).
 
-        python3 test/differential.py --harness tls_der_fuzz
+def tls_der_fuzz_lift_parts(net):
+    """OIDs, ASN.1/cert parsers, pure path-policy helpers, list framing, shim.
+
+    Policy lifts cover names_chain and leaf/issuer authorization (no crypto).
+    Shared by tls_der_fuzz and tls_verify_fuzz so both stay on the same
+    production slices.
     """
-    del argv
-    import shutil
-    import tempfile
-
-    runs, seconds, timeout = tls_fuzz_budget()
-    clang = shutil.which("clang")
-    if not clang:
-        print("tls der fuzz: NOT RUN -- no clang")
-        return 2
-    sanitize, environment, san_label = tls_fuzz_sanitize_config(clang)
-    if sanitize is None:
-        print("tls der fuzz: NOT RUN -- " + san_label)
-        return 2
-
-    ok, why = ensure_tls_fuzz_seeds()
-    if not ok:
-        print("tls der fuzz: NOT RUN -- " + why)
-        return 2
-
-    net = (HARNESS_ROOT / "src/net/net.c").read_text()
-    corpus = HARNESS_ROOT / "test/fuzz_corpus/tls_der"
-    if not corpus.is_dir():
-        print("tls der fuzz: NOT RUN -- missing seed corpus at " + str(corpus))
-        return 2
-    seeds = sorted(p for p in corpus.iterdir() if p.is_file() and p.suffix == ".bin")
-    if not seeds:
-        print("tls der fuzz: NOT RUN -- seed corpus is empty")
-        return 2
-
-    def sec(text, first, following):
-        i = text.index(first)
-        return text[i:text.index(following, i)]
-
-    oids = sec(net, "static const p8 tls_oid_ec[7] = {",
-               "typedef struct\n{\n        bipolar handle;")
-    # Drop the blank line that trailed the last OID before tls_conn.
+    oids = tls_fuzz_sec(net, "static const p8 tls_oid_ec[7] = {",
+                        "typedef struct\n{\n        bipolar handle;")
     oids = oids[:oids.rfind("};\n") + 3]
-    parsers = sec(
+    parsers = tls_fuzz_sec(
         net,
         "static COLD bipolar tls_asn1_length(p8 address_to bytes, positive size,",
         "/* An anchor's key laid out the way tls_parse_cert lays out a served one. */")
-    framing = sec(
+    # Pure Name compare; skip tls_verify_one crypto.
+    policy = tls_fuzz_sec(
+        net,
+        "static COLD bool tls_certificate_names_chain(const tls_cert address_to child,",
+        "static COLD bool tls_verify_one(tls_cert address_to child, tls_cert address_to issuer)")
+    # Date/path-length/EKU authorization without tls_date_now / keep_leaf.
+    policy += "\n" + tls_fuzz_sec(
+        net,
+        "static COLD bool tls_cert_current(tls_cert address_to cert, p64 now)",
+        "// A TLS handshake length: three bytes, most significant first.\n"
+        "static PURE positive tls_load_24")
+    framing = tls_fuzz_sec(
         net,
         "// A TLS handshake length: three bytes, most significant first.\n"
         "static PURE positive tls_load_24",
         "static COLD bool tls_verify_chain")
-
     shim = r"""
 #include <stdio.h>
 #include <stdlib.h>
@@ -34446,26 +34638,87 @@ static p32 network_load_32(const p8 *bytes)
         return ((p32)bytes[0] << 24) | ((p32)bytes[1] << 16) |
                ((p32)bytes[2] << 8) | (p32)bytes[3];
 }
-/* Host matching is only reached when the fuzzer passes a non-null host;
-   the entry below always passes null. */
+/* Named hosts take the dNSName path (return < 0). A dotted-decimal IPv4
+   host is recognized so iPAddress SANs exercise tls_general_name_match. */
 static bipolar string_to_host(string_address host)
 {
-        (void)host;
+        unsigned a, b, c, d;
+        char tail;
+
+        if (!host)
+                return -1;
+        if (sscanf(host, "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) == 4 &&
+            a < 256 && b < 256 && c < 256 && d < 256)
+                return (bipolar)(((p32)a << 24) | ((p32)b << 16) |
+                                 ((p32)c << 8) | (p32)d);
         return -1;
 }
 """
+    return oids, parsers, policy, framing, shim
+
+
+def harness_tls_der_fuzz(argv):
+    """Coverage-guided libFuzzer over DER certs and Certificate HS framing.
+
+    Lifts DER readers, certificate-list framing, and pure verify-path policy
+    (names_chain, leaf/issuer authorization) from src/net/net.c. Magic-prefix
+    lanes hit EKU/SAN/BC/KU value parsers, host-aware SAN, ECDSA sig DER, and
+    AlgorithmIdentifier junk. Seed bytes under test/fuzz_corpus/tls_der/ from
+    generate_seeds.py. Bounded fixed-seed run; return 2 (NOT RUN) when
+    clang/libFuzzer is unavailable. Expected TLS_FAIL is ignored; only
+    ASan/UBSan aborts fail (or MSan when MOONWATER_MSAN=1). Override
+    MOONWATER_FUZZ_RUNS / MOONWATER_FUZZ_SECONDS for longer local runs.
+
+        python3 test/differential.py --harness tls_der_fuzz
+    """
+    del argv
+    import shutil
+    import tempfile
+
+    runs, seconds, timeout = tls_fuzz_budget()
+    clang = shutil.which("clang")
+    if not clang:
+        print("tls der fuzz: NOT RUN -- no clang")
+        return 2
+    sanitize, environment, san_label = tls_fuzz_sanitize_config(clang)
+    if sanitize is None:
+        print("tls der fuzz: NOT RUN -- " + san_label)
+        return 2
+
+    ok, why = ensure_tls_fuzz_seeds()
+    if not ok:
+        print("tls der fuzz: NOT RUN -- " + why)
+        return 2
+
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    corpus = HARNESS_ROOT / "test/fuzz_corpus/tls_der"
+    if not corpus.is_dir():
+        print("tls der fuzz: NOT RUN -- missing seed corpus at " + str(corpus))
+        return 2
+    seeds = sorted(p for p in corpus.iterdir() if p.is_file() and p.suffix == ".bin")
+    if not seeds:
+        print("tls der fuzz: NOT RUN -- seed corpus is empty")
+        return 2
+
+    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
 
     driver = r"""
+/* Fixed "now" for leaf/issuer policy without calling tls_date_now / libc time. */
+enum { FUZZ_TLS_NOW = 20200101000000ull };
+
 /* Walk a Certificate handshake body the way tls_verify_chain frames the
-   list, but only call tls_parse_cert on each slice. After the walk, apply
-   the same empty-list / leftover refuse as production (`!count ||
-   at != list_end`). No abort on TLS_FAIL. */
-static void fuzz_certificate_list(p8 *body, positive body_length)
+   list. Parse each cert, then run the pure verify-path checks that do not
+   need signatures: names_chain between adjacent entries, leaf/issuer
+   authorization against a fixed now. Same empty-list / leftover refuse as
+   production. No abort on TLS_FAIL. */
+static void fuzz_certificate_list(p8 *body, positive body_length,
+                                  string_address host)
 {
-        tls_cert cert;
+        tls_cert certs[8];
         positive at;
         positive list_end;
         positive count = 0;
+        positive i;
 
         if (!tls_certificate_body_open(body, body_length,
                                        address_of at, address_of list_end))
@@ -34479,9 +34732,10 @@ static void fuzz_certificate_list(p8 *body, positive body_length)
                 at += 3;
                 if (at + cert_length + 2 > list_end)
                         return;
-                memory_fill(address_of cert, 0, sizeof cert);
-                (void)tls_parse_cert(body + at, cert_length, address_of cert,
-                                     null);
+                memory_fill(address_of certs[count], 0, sizeof(certs[0]));
+                (void)tls_parse_cert(body + at, cert_length,
+                                     address_of certs[count],
+                                     count ? null : host);
                 at += cert_length;
                 ext_length = network_load_16(body + at);
                 at += 2;
@@ -34495,13 +34749,33 @@ static void fuzz_certificate_list(p8 *body, positive body_length)
            past the last framed entry (including a 9th entry past certs[8]). */
         if (!count || at != list_end)
                 return;
+
+        (void)tls_leaf_authorized(address_of certs[0], FUZZ_TLS_NOW);
+        for (i = 1; i < count; i++)
+        {
+                (void)tls_certificate_names_chain(address_of certs[i - 1],
+                                                  address_of certs[i]);
+                (void)tls_issuer_authorized(address_of certs[i], i - 1,
+                                            FUZZ_TLS_NOW);
+        }
 }
 
+/* Magic-prefix lanes deepen pure parsers the list walk alone under-hits:
+   EKU OID walks, SAN GeneralNames, BC/KU values, host-aware SAN, ECDSA
+   signature DER, AlgorithmIdentifier junk. Prefixes: C1 list, C2 EKU,
+   C3 SAN+host, C4 BC, C5 KU, C6 cert+host, C7 exts+host, C8 ECDSA sig,
+   C9 AlgorithmIdentifier. */
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         tls_cert cert;
         p8 *buf;
         positive length;
+        p8 *oid;
+        positive oid_length;
+        positive alg_at;
+        p8 r[48], s[48];
+        positive r_length, s_length;
+        bool matched;
 
         if (size > 65536)
                 size = 65536;
@@ -34514,23 +34788,91 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
         memory_fill(address_of cert, 0, sizeof cert);
         (void)tls_parse_extensions(buf, length, 0, 2, address_of cert, null);
+        (void)tls_leaf_authorized(address_of cert, FUZZ_TLS_NOW);
+        (void)tls_issuer_authorized(address_of cert, 0, FUZZ_TLS_NOW);
 
         memory_fill(address_of cert, 0, sizeof cert);
         (void)tls_parse_cert(buf, length, address_of cert, null);
+        (void)tls_leaf_authorized(address_of cert, FUZZ_TLS_NOW);
+        (void)tls_issuer_authorized(address_of cert, 0, FUZZ_TLS_NOW);
 
-        /* Also interpret the input as a TLS 1.3 Certificate HS body. */
-        fuzz_certificate_list(buf, length);
+        fuzz_certificate_list(buf, length, null);
 
-        /* Magic prefix 0xC1: remainder is Certificate-list framing only. */
-        if (length > 1 && buf[0] == 0xc1)
-                fuzz_certificate_list(buf + 1, length - 1);
+        if (length > 1)
+        {
+                p8 *rest = buf + 1;
+                positive rest_len = length - 1;
+
+                switch (buf[0])
+                {
+                case 0xc1:
+                        fuzz_certificate_list(rest, rest_len, null);
+                        fuzz_certificate_list(rest, rest_len,
+                                              (string_address)"example.com");
+                        break;
+                case 0xc2:
+                        memory_fill(address_of cert, 0, sizeof cert);
+                        (void)tls_parse_extended_key_usage(rest, rest_len,
+                                                           address_of cert);
+                        break;
+                case 0xc3:
+                        matched = false;
+                        (void)tls_parse_san(rest, rest_len,
+                                            (string_address)"example.com",
+                                            address_of matched);
+                        matched = false;
+                        (void)tls_parse_san(rest, rest_len,
+                                            (string_address)"192.0.2.1",
+                                            address_of matched);
+                        break;
+                case 0xc4:
+                        memory_fill(address_of cert, 0, sizeof cert);
+                        (void)tls_parse_basic_constraints(rest, rest_len,
+                                                          address_of cert);
+                        break;
+                case 0xc5:
+                        memory_fill(address_of cert, 0, sizeof cert);
+                        (void)tls_parse_key_usage(rest, rest_len,
+                                                  address_of cert);
+                        break;
+                case 0xc6:
+                        memory_fill(address_of cert, 0, sizeof cert);
+                        (void)tls_parse_cert(rest, rest_len, address_of cert,
+                                             (string_address)"example.com");
+                        (void)tls_leaf_authorized(address_of cert, FUZZ_TLS_NOW);
+                        break;
+                case 0xc7:
+                        memory_fill(address_of cert, 0, sizeof cert);
+                        (void)tls_parse_extensions(
+                            rest, rest_len, 0, 2, address_of cert,
+                            (string_address)"example.com");
+                        break;
+                case 0xc8:
+                        r_length = s_length = 0;
+                        (void)tls_parse_ecdsa_sig(rest, rest_len, r,
+                                                  address_of r_length, s,
+                                                  address_of s_length);
+                        break;
+                case 0xc9:
+                        alg_at = 0;
+                        oid = null;
+                        oid_length = 0;
+                        (void)tls_signature_algorithm(rest, rest_len,
+                                                      address_of alg_at,
+                                                      address_of oid,
+                                                      address_of oid_length);
+                        break;
+                default:
+                        break;
+                }
+        }
 
         free(buf);
         return 0;
 }
 """
 
-    source = shim + oids + "\n" + parsers + framing + driver
+    source = shim + oids + "\n" + parsers + policy + framing + driver
 
     with tempfile.TemporaryDirectory(prefix="tls-der-fuzz-") as temporary:
         work = Path(temporary)
@@ -34981,16 +35323,211 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0
 
 
+def harness_tls_verify_fuzz(argv):
+    """libFuzzer over tls_verify_chain early-reject (parse/policy; mocked sigs).
+
+    Lifts the same DER parsers and path-policy helpers as tls_der_fuzz, plus a
+    hosted walker that mirrors tls_verify_chain through Certificate-list open,
+    parse_cert, SAN host gate, leaf/issuer authorization, and names_chain —
+    then refuses every signature (no crypto). Seed corpus is tls_der/ (same
+    hex source). Not in lane_net smoke; hand-run / fuzz_net only. Bounded
+    fixed-seed; return 2 when clang/libFuzzer is unavailable.
+
+        python3 test/differential.py --harness tls_verify_fuzz
+    """
+    del argv
+    import shutil
+    import tempfile
+
+    runs, seconds, timeout = tls_fuzz_budget()
+    clang = shutil.which("clang")
+    if not clang:
+        print("tls verify fuzz: NOT RUN -- no clang")
+        return 2
+    sanitize, environment, san_label = tls_fuzz_sanitize_config(clang)
+    if sanitize is None:
+        print("tls verify fuzz: NOT RUN -- " + san_label)
+        return 2
+
+    ok, why = ensure_tls_fuzz_seeds()
+    if not ok:
+        print("tls verify fuzz: NOT RUN -- " + why)
+        return 2
+
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    corpus = HARNESS_ROOT / "test/fuzz_corpus/tls_der"
+    if not corpus.is_dir():
+        print("tls verify fuzz: NOT RUN -- missing seed corpus at " + str(corpus))
+        return 2
+    seeds = sorted(p for p in corpus.iterdir() if p.is_file() and p.suffix == ".bin")
+    if not seeds:
+        print("tls verify fuzz: NOT RUN -- seed corpus is empty")
+        return 2
+
+    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
+
+    driver = r"""
+enum { FUZZ_TLS_NOW = 20200101000000ull };
+
+/* Mirror tls_verify_chain through parse + path policy; signatures always
+   refuse (mocked). check_cert selects the SAN host gate. */
+static bool fuzz_verify_early(p8 *body, positive body_length,
+                              string_address host, bool check_cert)
+{
+        tls_cert certs[8];
+        positive count = 0;
+        positive at;
+        positive list_end;
+        positive i;
+
+        if (!tls_certificate_body_open(body, body_length,
+                                       address_of at, address_of list_end))
+                return false;
+
+        while (at + 3 <= list_end && count < 8)
+        {
+                positive cert_length = tls_load_24(body + at);
+                positive ext_length;
+
+                at += 3;
+                if (at + cert_length + 2 > list_end)
+                        return false;
+                memory_fill(address_of certs[count], 0, sizeof(certs[0]));
+                if (tls_parse_cert(body + at, cert_length,
+                                   address_of certs[count],
+                                   count ? null : host))
+                        return false;
+                at += cert_length;
+                ext_length = network_load_16(body + at);
+                at += 2;
+                if (at + ext_length > list_end)
+                        return false;
+                at += ext_length;
+                count++;
+        }
+
+        if (!count || at != list_end)
+                return false;
+
+        if (check_cert && (!certs[0].san || !certs[0].san_match))
+                return false;
+        if (!check_cert)
+                return true;
+
+        if (!tls_leaf_authorized(address_of certs[0], FUZZ_TLS_NOW))
+                return false;
+        for (i = 1; i < count; i++)
+        {
+                if (!tls_issuer_authorized(address_of certs[i], i - 1,
+                                           FUZZ_TLS_NOW))
+                        return false;
+        }
+        for (i = 0; i + 1 < count; i++)
+        {
+                if (!tls_certificate_names_chain(address_of certs[i],
+                                                 address_of certs[i + 1]))
+                        return false;
+                /* Mocked signature refuse: production would call tls_verify_one
+                   here; early-reject path stops without crypto. */
+                return false;
+        }
+        /* Single-cert chain: would need anchor verify; mocked refuse. */
+        return false;
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        p8 *buf;
+        positive length;
+
+        if (size > 65536)
+                size = 65536;
+        length = (positive)size;
+        buf = (p8 *)malloc(length ? length : 1);
+        if (!buf)
+                return 0;
+        if (length)
+                memcpy(buf, data, length);
+
+        (void)fuzz_verify_early(buf, length, null, false);
+        (void)fuzz_verify_early(buf, length, (string_address)"example.com",
+                                true);
+        (void)fuzz_verify_early(buf, length, (string_address)"192.0.2.1",
+                                true);
+
+        /* 0xC1: remainder is Certificate HS body only. */
+        if (length > 1 && buf[0] == 0xc1)
+        {
+                (void)fuzz_verify_early(buf + 1, length - 1, null, false);
+                (void)fuzz_verify_early(buf + 1, length - 1,
+                                        (string_address)"example.com", true);
+        }
+
+        free(buf);
+        return 0;
+}
+"""
+
+    source = shim + oids + "\n" + parsers + policy + framing + driver
+
+    with tempfile.TemporaryDirectory(prefix="tls-verify-fuzz-") as temporary:
+        work = Path(temporary)
+        unit = work / "tls_verify_fuzz.c"
+        binary = work / "tls_verify_fuzz"
+        unit.write_text(source)
+        built = subprocess.run(
+            [clang, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
+             "-fno-sanitize-recover=all", sanitize,
+             str(unit), "-o", str(binary)],
+            capture_output=True, text=True)
+        if built.returncode:
+            need = "fuzzer,memory" if moonwater_msan_requested() else "fuzzer"
+            print("tls verify fuzz: NOT RUN -- clang lacks libFuzzer "
+                  "(need -fsanitize=%s):\n" % need + built.stderr[-2000:])
+            return 2
+
+        run_corpus = work / "corpus"
+        run_corpus.mkdir()
+        for seed in seeds:
+            (run_corpus / seed.name).write_bytes(seed.read_bytes())
+
+        ran = subprocess.run(
+            [str(binary), str(run_corpus),
+             "-seed=1", "-runs=%d" % runs, "-max_total_time=%d" % seconds,
+             "-max_len=4096",
+             "-artifact_prefix=" + str(work) + "/",
+             "-print_final_stats=0"],
+            capture_output=True, text=True, env=environment, timeout=timeout)
+        ok = ran.returncode == 0 and "ERROR" not in ran.stderr and \
+            "Sanitizer" not in ran.stderr and "runtime error" not in ran.stderr
+        if not ok:
+            print("  FAIL tls verify libFuzzer:\n" +
+                  (ran.stderr or ran.stdout)[-3000:])
+            write_tally("tls-verify-fuzz", 0, 1)
+            return 1
+        print("  tls verify fuzz: %d seeds, %s "
+              "(-runs=%d -max_total_time=%d) clean" %
+              (len(seeds), san_label, runs, seconds))
+        write_tally("tls-verify-fuzz", 1, 1)
+        return 0
+
+
 def harness_msan_net(argv):
     """Local/hosted MemorySanitizer lane for net wire parsers.
 
     Opt-in only (not lane_net, not CI push). Under clang -fsanitize=memory:
       1. intentional ABI pad proves (generic wire header + netlink-attr-shaped)
-      2. thin hosted lifts of dns_copy_name and tls_record_version_valid over
-         fully-initialized hostile buffers (clean under MSan)
-      3. short tls_der_fuzz / tls_hs_fuzz seed smokes with MOONWATER_MSAN=1
-    Not a full CHECK_net under MSan. Returns 2 (NOT RUN) when MSan is
-    unavailable (Apple clang, many qemu images).
+      2. thin hosted lifts of freestanding wire parsers from net.c over
+         fully-initialized hostile buffers (dns_copy_name, TLS record header,
+         HTTP header/chunk framing, DHCP option gather, netlink attribute walk)
+         plus one intentional uninit catch per new surface
+      3. TLS extension/cert parse seed replay under MSan without libFuzzer
+         (same lift pieces as tls_der_fuzz)
+      4. thin CHECK_net-equivalent probes (align/sizeof + parser shape checks);
+         not a full freestanding CHECK_net under MSan
+      5. short tls_der_fuzz / tls_hs_fuzz seed smokes with MOONWATER_MSAN=1
+    Returns 2 (NOT RUN) when MSan is unavailable (Apple clang, many qemu
+    images).
 
         sh test/msan_net
         MOONWATER_MSAN=1 python3 test/differential.py --harness tls_der_fuzz
@@ -35010,10 +35547,10 @@ def harness_msan_net(argv):
 
     checks = Checks()
     msan_env = dict(os.environ, MSAN_OPTIONS="halt_on_error=1:exitcode=1")
-    msan_cc = [clang, "-O1", "-g", "-std=gnu11", "-fno-sanitize-recover=all",
-               "-fsanitize=memory"]
+    msan_cc = [clang, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
+               "-fno-sanitize-recover=all", "-fsanitize=memory"]
 
-    def msan_build_run(work, name, source):
+    def msan_build_run(work, name, source, run_args=None):
         unit = work / (name + ".c")
         binary = work / name
         unit.write_text(source)
@@ -35021,11 +35558,14 @@ def harness_msan_net(argv):
                                capture_output=True, text=True)
         if built.returncode:
             return None, built.stderr
-        ran = subprocess.run([str(binary)], capture_output=True, text=True,
+        cmd = [str(binary)]
+        if run_args:
+            cmd.extend(run_args)
+        ran = subprocess.run(cmd, capture_output=True, text=True,
                              env=msan_env)
         return ran, built.stderr
 
-    def msan_expect_pad_fire(ran, label):
+    def msan_expect_fire(ran, label):
         fired = (ran is not None and ran.returncode != 0 and
                  "uninitialized" in (ran.stderr or "").lower())
         if ran is not None and ran.stderr:
@@ -35036,6 +35576,170 @@ def harness_msan_net(argv):
                 "(rc=%d):\n" % ran.returncode + (ran.stderr or "")[-1500:])
             print("  FAIL %s did not fire %s" % (label, detail))
         return fired
+
+    def msan_expect_clean(ran, label, err=None):
+        if ran is None:
+            print("msan net: NOT RUN -- cannot link %s:\n" % label +
+                  (err or "")[-2000:])
+            return False
+        if ran.stderr:
+            print(ran.stderr, end="" if ran.stderr.endswith("\n") else "\n")
+        clean = (ran.returncode == 0 and
+                 "uninitialized" not in (ran.stderr or "").lower() and
+                 "Sanitizer" not in (ran.stderr or "") and
+                 "ERROR" not in (ran.stderr or ""))
+        checks(clean, label)
+        if not clean:
+            print("  FAIL %s (rc=%d):\n" % (label, ran.returncode) +
+                  (ran.stderr or ran.stdout or "")[-2000:])
+        return clean
+
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+
+    def sec(text, first, following):
+        i = text.index(first)
+        return text[i:text.index(following, i)]
+
+    # Shared hosted typedefs/macros for freestanding net.c lifts.
+    base_shim = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include <ctype.h>
+typedef uint8_t p8;
+typedef uint8_t b8;
+typedef uint16_t p16;
+typedef uint32_t p32;
+typedef uint64_t p64;
+typedef int32_t b32;
+typedef long bipolar;
+typedef unsigned long positive;
+typedef void *address_any;
+typedef char *string_address;
+typedef const char *const_string;
+#define COLD
+#define CONST
+#define PURE
+#define fn void
+#define address_to *
+#define address_of &
+#define null NULL
+#define end ((p8)0)
+#define positive_max (~(positive)0)
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define memory_compare memcmp
+#define memory_copy memcpy
+#define memory_copy_apart memcpy
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define memory_zero(at, size) memset((at), 0, (size))
+#define string_get(s) (*(const unsigned char *)(s))
+static inline p8 byte_is_alnum(p8 b) { return isalnum(b) != 0; }
+static inline p8 byte_is_digit(p8 b) { return isdigit(b) != 0; }
+static inline p8 byte_is_control(p8 b) { return b < 0x20 || b == 0x7f; }
+static inline p8 byte_is_blank(p8 b) { return b == ' ' || b == '\t'; }
+static positive string_length(const_string s) { return (positive)strlen(s); }
+static string_address string_first_of(string_address s, int c)
+{
+        return (string_address)strchr(s, c);
+}
+static address_any memory_first_of(address_any block, b8 value, positive size)
+{
+        return memchr(block, value, size);
+}
+static positive memory_span_without_byte(const void *block, p8 byte,
+                                         positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[i] != byte)
+                i++;
+        return i;
+}
+static address_any memory_search(address_any block, positive size,
+                                 address_any needle, positive needle_size)
+{
+        if (!needle_size || needle_size > size)
+                return null;
+        const p8 *hay = block, *ndl = needle;
+        for (positive i = 0; i + needle_size <= size; i++)
+                if (!memcmp(hay + i, ndl, needle_size))
+                        return (address_any)(hay + i);
+        return null;
+}
+static b32 memory_compare_ascii_case(const void *one, const void *two,
+                                     positive size)
+{
+        const p8 *a = one, *b = two;
+        for (positive i = 0; i < size; i++) {
+                p8 x = a[i], y = b[i];
+                if (x >= 'A' && x <= 'Z')
+                        x = (p8)(x - 'A' + 'a');
+                if (y >= 'A' && y <= 'Z')
+                        y = (p8)(y - 'A' + 'a');
+                if (x != y)
+                        return (b32)(x - y);
+        }
+        return 0;
+}
+static unsigned char string_set_blanks[256];
+static positive string_span_max(const_string source, positive bound,
+                                const b8 *set)
+{
+        (void)set;
+        positive i = 0;
+        while (i < bound && (source[i] == ' ' || source[i] == '\t'))
+                i++;
+        return i;
+}
+static positive digit_known(p8 character, positive base)
+{
+        positive v;
+        if (character >= '0' && character <= '9')
+                v = character - '0';
+        else if (character >= 'a' && character <= 'z')
+                v = 10 + character - 'a';
+        else if (character >= 'A' && character <= 'Z')
+                v = 10 + character - 'A';
+        else
+                return base;
+        return v < base ? v : base;
+}
+static bool string_digits_checked(string_address *text, positive base,
+                                  positive *value)
+{
+        string_address at = *text;
+        positive got = 0;
+        bool any = false;
+        while (1) {
+                positive digit = digit_known(string_get(at), base);
+                positive scaled;
+                if (digit >= base)
+                        break;
+                if (__builtin_mul_overflow(got, base, &scaled) ||
+                    __builtin_add_overflow(scaled, digit, &got))
+                        return false;
+                at++;
+                any = true;
+        }
+        if (!any)
+                return false;
+        *text = at;
+        *value = got;
+        return true;
+}
+static p16 network_load_16(const p8 *bytes)
+{
+        return (p16)(((p16)bytes[0] << 8) | (p16)bytes[1]);
+}
+static p32 network_load_32(const p8 *bytes)
+{
+        return ((p32)bytes[0] << 24) | ((p32)bytes[1] << 16) |
+               ((p32)bytes[2] << 8) | (p32)bytes[3];
+}
+"""
 
     # --- 1a. Generic wire-header pad prove (original). ---
     pad_source = r"""
@@ -35077,9 +35781,6 @@ int main(void)
 }
 """
     # --- 1b. CHECK_net-adjacent: netlink-attr-shaped hole (distinct). ---
-    # Production netlink_attribute is {p16 length; p16 type} with no hole;
-    # this hosted stand-in widens type to a byte then a u32 value so ABI pad
-    # appears the way a careless sizeof-memcpy serializer would leak it.
     nlattr_pad_source = r"""
 #include <stdint.h>
 #include <stdio.h>
@@ -35122,7 +35823,7 @@ int main(void)
             print("msan net: NOT RUN -- cannot link MSan probe:\n" +
                   (err or "")[-2000:])
             return 2
-        msan_expect_pad_fire(
+        msan_expect_fire(
             ran, "intentional ABI wire-header padding is visible to MSan")
 
         ran, err = msan_build_run(work, "nlattr_pad", nlattr_pad_source)
@@ -35130,17 +35831,11 @@ int main(void)
             print("msan net: NOT RUN -- cannot link nlattr pad probe:\n" +
                   (err or "")[-2000:])
             return 2
-        msan_expect_pad_fire(
+        msan_expect_fire(
             ran,
             "intentional netlink-attr-shaped ABI padding is visible to MSan")
 
     # --- 2. Thin hosted lifts: dns_copy_name + TLS record header. ---
-    net = (HARNESS_ROOT / "src/net/net.c").read_text()
-
-    def sec(text, first, following):
-        i = text.index(first)
-        return text[i:text.index(following, i)]
-
     dns_copy = sec(
         net,
         "static COLD bipolar dns_copy_name(",
@@ -35150,32 +35845,8 @@ int main(void)
         "static bool tls_record_version_valid(p8 address_to header)",
         "/* Receive behind receive_end.")
 
-    wire_lift_source = r"""
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
-#include <stddef.h>
-#include <stdbool.h>
-typedef uint8_t p8;
-typedef uint16_t p16;
-typedef uint32_t p32;
-typedef long bipolar;
-typedef unsigned long positive;
-typedef void *address_any;
-#define COLD
-#define PURE
-#define address_to *
-#define address_of &
-#define null NULL
+    wire_lift_source = base_shim + r"""
 #define DNS_MALFORMED (-3)
-#define memory_copy_apart memcpy
-#define memory_copy memcpy
-#define memory_fill(at, v, n) memset((at), (int)(v), (n))
-static p16 network_load_16(const p8 *bytes)
-{
-        return (p16)(((p16)bytes[0] << 8) | (p16)bytes[1]);
-}
 """ + dns_copy + "\n" + tls_ver + r"""
 /* Thin stand-in for the header half of tls_record_whole / tls_next_record:
    version check + length load against a fully-initialized buffer. */
@@ -35229,13 +35900,11 @@ int main(void)
         p8 simple[] = {3, 'w', 'w', 'w', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
                        3, 'c', 'o', 'm', 0};
         p8 compress[] = {
-                /* offset 0: example.com. */
                 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0,
-                /* offset 13: pointer back to offset 0 */
                 0xc0, 0x00
         };
-        p8 forward_ptr[] = {0xc0, 0x02, 0x00}; /* pointer at/after self */
-        p8 truncated[] = {3, 'a', 'b'}; /* label claims 3, only 2 bytes */
+        p8 forward_ptr[] = {0xc0, 0x02, 0x00};
+        p8 truncated[] = {3, 'a', 'b'};
         p8 loop_labels[8];
         p8 tls_ok[5 + 4];
         p8 tls_bad_ver[5];
@@ -35243,7 +35912,6 @@ int main(void)
         p8 tls_claim[5];
 
         memory_fill(loop_labels, 0, sizeof loop_labels);
-        /* Two labels that each jump forward via a pointer past themselves. */
         loop_labels[0] = 0xc0;
         loop_labels[1] = 0x04;
         loop_labels[4] = 0xc0;
@@ -35256,7 +35924,7 @@ int main(void)
         expect_dns("forward_loop", loop_labels, sizeof loop_labels, 0, 0);
 
         memory_fill(tls_ok, 0, sizeof tls_ok);
-        tls_ok[0] = 22; /* handshake */
+        tls_ok[0] = 22;
         tls_ok[1] = 0x03;
         tls_ok[2] = 0x03;
         tls_ok[3] = 0x00;
@@ -35266,7 +35934,7 @@ int main(void)
         memory_fill(tls_bad_ver, 0x41, sizeof tls_bad_ver);
         tls_bad_ver[0] = 23;
         tls_bad_ver[1] = 0x03;
-        tls_bad_ver[2] = 0x01; /* TLS 1.0 record version — refused */
+        tls_bad_ver[2] = 0x01;
         tls_bad_ver[3] = 0x00;
         tls_bad_ver[4] = 0x00;
         expect_tls("bad_ver", tls_bad_ver, sizeof tls_bad_ver, 0);
@@ -35279,7 +35947,7 @@ int main(void)
         tls_claim[1] = 0x03;
         tls_claim[2] = 0x03;
         tls_claim[3] = 0xff;
-        tls_claim[4] = 0xff; /* claims 65535, buffer only 5 */
+        tls_claim[4] = 0xff;
         expect_tls("overclaim", tls_claim, sizeof tls_claim, 0);
 
         if (failures) {
@@ -35295,24 +35963,641 @@ int main(void)
     with tempfile.TemporaryDirectory(prefix="msan-wire-") as temporary:
         work = Path(temporary)
         ran, err = msan_build_run(work, "wire_lift", wire_lift_source)
+        msan_expect_clean(
+            ran,
+            "dns_copy_name + tls record header clean under MSan "
+            "(fully-initialized hostile buffers)",
+            err)
+
+    # --- 3. HTTP header / chunk framing lift. ---
+    http_framing = sec(
+        net,
+        "static PURE bipolar http_header_end(",
+        "static bipolar http_unchunk(p8 address_to bytes, positive size);")
+
+    http_clean_source = base_shim + r"""
+#define HTTP_OK 0
+#define HTTP_MALFORMED (-5)
+""" + http_framing + r"""
+static int failures;
+
+static void expect_chunk(const char *label, const char *line, int want_ok,
+                         positive want_len)
+{
+        positive chunk = 0;
+        positive n = (positive)strlen(line);
+        bipolar st = http_chunk_line((p8 address_to)line, n, address_of chunk);
+        int ok = st == HTTP_OK;
+        if (ok != want_ok || (want_ok && chunk != want_len)) {
+                fprintf(stderr, "msan http: FAIL chunk %s st=%ld chunk=%lu\n",
+                        label, (long)st, (unsigned long)chunk);
+                failures++;
+        }
+}
+
+int main(void)
+{
+        const char *ok_head =
+                "HTTP/1.1 200 OK\r\nHost: a\r\nContent-Length: 0\r\n\r\n";
+        const char *fold =
+                "HTTP/1.1 200 OK\r\nX: y\r\n folded\r\n\r\n";
+        p8 bare[] = {
+                'H','T','T','P','/','1','.','1',' ','2','0','0',' ','O','K','\n',
+                'A',':',' ','b','\n','\n'
+        };
+        p8 chunk_body[] = {
+                '5','\r','\n','h','e','l','l','o','\r','\n',
+                '0','\r','\n','\r','\n'
+        };
+        bipolar hend;
+        positive clen = 0;
+        /* Avoid the moonwater `end` null-pointer macro as a local name. */
+        static const p8 nul_head[] = {
+                'H','T','T','P','/','1','.','1',' ','2','0','0',' ','O','K','\r','\n',
+                'X',0,'Y',':',' ','z','\r','\n','\r','\n'
+        };
+
+        hend = http_header_end((p8 *)ok_head, (positive)strlen(ok_head));
+        if (hend < 0) {
+                fprintf(stderr, "msan http: FAIL header_end ok\n");
+                failures++;
+        } else if (!http_header_block_valid((p8 *)ok_head, (positive)hend)) {
+                fprintf(stderr, "msan http: FAIL block_valid ok\n");
+                failures++;
+        }
+
+        hend = http_header_end((p8 *)fold, (positive)strlen(fold));
+        if (hend < 0 || http_header_block_valid((p8 *)fold, (positive)hend)) {
+                fprintf(stderr, "msan http: FAIL obs-fold must refuse\n");
+                failures++;
+        }
+
+        /* NUL in field name: walk still bounded; validity refuses. */
+        hend = http_header_end((p8 *)nul_head, sizeof nul_head);
+        (void)hend;
+        if (http_header_block_valid((p8 *)nul_head, sizeof nul_head)) {
+                fprintf(stderr, "msan http: FAIL nul name must refuse\n");
+                failures++;
+        }
+
+        hend = http_header_end(bare, sizeof bare);
+        if (hend != (bipolar)sizeof bare ||
+            !http_header_block_valid(bare, (positive)hend)) {
+                fprintf(stderr, "msan http: FAIL bare LF head\n");
+                failures++;
+        }
+
+        expect_chunk("plain", "a\r\n", 1, 10);
+        expect_chunk("ext", "3;foo=bar\r\n", 1, 3);
+        expect_chunk("bad_ext", "1;=\r\n", 0, 0);
+        expect_chunk("overflow",
+                     "ffffffffffffffffffffffffffffffff\r\n", 0, 0);
+
+        if (http_trailer_line((p8 *)"\r\n", 2) != 1) {
+                fprintf(stderr, "msan http: FAIL blank trailer\n");
+                failures++;
+        }
+        if (http_trailer_line((p8 *)"X-Trail: v\r\n", 12) != 0) {
+                fprintf(stderr, "msan http: FAIL trailer field\n");
+                failures++;
+        }
+        if (http_trailer_line((p8 *)":bad\r\n", 6) >= 0) {
+                fprintf(stderr, "msan http: FAIL empty trailer name\n");
+                failures++;
+        }
+
+        /* Touch chunk_body so hostile framing bytes stay initialized. */
+        if (http_chunk_line(chunk_body, 3, address_of clen) != HTTP_OK ||
+            clen != 5) {
+                fprintf(stderr, "msan http: FAIL chunk size line\n");
+                failures++;
+        }
+
+        if (failures) {
+                fprintf(stderr, "msan http: %d failure(s)\n", failures);
+                return 1;
+        }
+        fprintf(stderr, "msan http: header/chunk framing clean on "
+                "fully-initialized hostile buffers\n");
+        return 0;
+}
+"""
+
+    http_uninit_source = (
+        '#include <sanitizer/msan_interface.h>\n' + base_shim + r"""
+#define HTTP_OK 0
+#define HTTP_MALFORMED (-5)
+""" + http_framing + r"""
+int main(void)
+{
+        /* Claim a full header block; poison the unread tail so the line walk
+           must load uninitialized bytes — intentional MSan catch. */
+        p8 buf[64];
+        volatile int sink;
+
+        memcpy(buf, "HTTP/1.1 200 OK\r\n", 17);
+        __msan_poison(buf + 17, sizeof buf - 17);
+        sink = http_header_block_valid(buf, sizeof buf);
+        (void)sink;
+        fprintf(stderr, "msan http uninit: REACHED (MSan missed)\n");
+        return 0;
+}
+""")
+
+    with tempfile.TemporaryDirectory(prefix="msan-http-") as temporary:
+        work = Path(temporary)
+        ran, err = msan_build_run(work, "http_clean", http_clean_source)
         if ran is None:
-            print("msan net: NOT RUN -- cannot link wire-parser lift:\n" +
+            print("msan net: NOT RUN -- cannot link HTTP framing lift:\n" +
                   (err or "")[-2000:])
             return 2
-        if ran.stderr:
-            print(ran.stderr, end="" if ran.stderr.endswith("\n") else "\n")
-        clean = (ran.returncode == 0 and
-                 "uninitialized" not in (ran.stderr or "").lower() and
-                 "Sanitizer" not in (ran.stderr or "") and
-                 "ERROR" not in (ran.stderr or ""))
-        checks(clean,
-               "dns_copy_name + tls record header clean under MSan "
-               "(fully-initialized hostile buffers)")
-        if not clean:
-            print("  FAIL msan wire lift (rc=%d):\n" % ran.returncode +
-                  (ran.stderr or ran.stdout or "")[-2000:])
+        msan_expect_clean(
+            ran,
+            "HTTP header/chunk framing clean under MSan "
+            "(fully-initialized hostile buffers)",
+            err)
+        ran, err = msan_build_run(work, "http_uninit", http_uninit_source)
+        if ran is None:
+            print("msan net: NOT RUN -- cannot link HTTP uninit probe:\n" +
+                  (err or "")[-2000:])
+            return 2
+        msan_expect_fire(
+            ran,
+            "intentional HTTP header-block uninit read is visible to MSan")
 
-    # --- 3. Seed-corpus TLS fuzz smokes under MSan. ---
+    # --- 4. DHCP option gather (dhcp_walk). ---
+    dhcp_walk = sec(
+        net,
+        "static COLD bipolar dhcp_walk(",
+        "static COLD bipolar dhcp_read(")
+
+    dhcp_clean_source = base_shim + r"""
+#define DHCP_OPTION_PAD 0
+#define DHCP_OPTION_END 255
+#define DHCP_OPTION_TYPE 53
+#define DHCP_OPTION_OVERLOAD 52
+#define DHCP_OPTION_MASK 1
+""" + """
+typedef struct
+{
+        p8 first[4];
+        positive length;
+} dhcp_gathered;
+
+""" + dhcp_walk + r"""
+static int failures;
+
+int main(void)
+{
+        dhcp_gathered gathered[256];
+        p8 overload = 0;
+        p8 ok[] = {
+                DHCP_OPTION_TYPE, 1, 2,
+                DHCP_OPTION_MASK, 4, 255, 255, 255, 0,
+                DHCP_OPTION_PAD, DHCP_OPTION_PAD,
+                DHCP_OPTION_END
+        };
+        p8 overrun[] = {DHCP_OPTION_TYPE, 5, 1, 2, 3};
+        p8 overload_opt[] = {
+                DHCP_OPTION_OVERLOAD, 1, 3,
+                DHCP_OPTION_TYPE, 1, 5,
+                DHCP_OPTION_END
+        };
+        p8 huge[] = {DHCP_OPTION_TYPE, 8, 1, 2, 3, 4, 5, 6, 7, 8,
+                     DHCP_OPTION_END};
+
+        memory_zero(gathered, sizeof gathered);
+        if (dhcp_walk(ok, sizeof ok, gathered, address_of overload) != 0 ||
+            gathered[DHCP_OPTION_TYPE].length != 1 ||
+            gathered[DHCP_OPTION_TYPE].first[0] != 2 ||
+            gathered[DHCP_OPTION_MASK].length != 4) {
+                fprintf(stderr, "msan dhcp: FAIL ok walk\n");
+                failures++;
+        }
+
+        memory_zero(gathered, sizeof gathered);
+        if (dhcp_walk(overrun, sizeof overrun, gathered, null) >= 0) {
+                fprintf(stderr, "msan dhcp: FAIL overrun must refuse\n");
+                failures++;
+        }
+
+        memory_zero(gathered, sizeof gathered);
+        overload = 0;
+        if (dhcp_walk(overload_opt, sizeof overload_opt, gathered,
+                      address_of overload) != 0 || overload != 3) {
+                fprintf(stderr, "msan dhcp: FAIL overload gather\n");
+                failures++;
+        }
+
+        memory_zero(gathered, sizeof gathered);
+        if (dhcp_walk(huge, sizeof huge, gathered, null) != 0 ||
+            gathered[DHCP_OPTION_TYPE].length != 8 ||
+            gathered[DHCP_OPTION_TYPE].first[0] != 1 ||
+            gathered[DHCP_OPTION_TYPE].first[3] != 4) {
+                fprintf(stderr, "msan dhcp: FAIL first-4 gather cap\n");
+                failures++;
+        }
+
+        if (failures) {
+                fprintf(stderr, "msan dhcp: %d failure(s)\n", failures);
+                return 1;
+        }
+        fprintf(stderr, "msan dhcp: dhcp_walk clean on fully-initialized "
+                "hostile option regions\n");
+        return 0;
+}
+"""
+
+    dhcp_uninit_source = (
+        '#include <sanitizer/msan_interface.h>\n' + base_shim + r"""
+#define DHCP_OPTION_PAD 0
+#define DHCP_OPTION_END 255
+#define DHCP_OPTION_TYPE 53
+#define DHCP_OPTION_OVERLOAD 52
+""" + """
+typedef struct
+{
+        p8 first[4];
+        positive length;
+} dhcp_gathered;
+
+""" + dhcp_walk + r"""
+int main(void)
+{
+        dhcp_gathered gathered[256];
+        p8 buf[16];
+        bipolar st;
+
+        memory_zero(gathered, sizeof gathered);
+        memory_fill(buf, 0xcc, sizeof buf);
+        /* Type + length claim 10 payload bytes; poison the payload. */
+        buf[0] = DHCP_OPTION_TYPE;
+        buf[1] = 10;
+        __msan_poison(buf + 2, 10);
+        st = dhcp_walk(buf, 12, gathered, null);
+        if (st != 0 || gathered[DHCP_OPTION_TYPE].length != 10) {
+                fprintf(stderr, "msan dhcp uninit: walk did not gather "
+                        "(st=%ld len=%lu)\n",
+                        (long)st,
+                        (unsigned long)gathered[DHCP_OPTION_TYPE].length);
+                return 2;
+        }
+        /* dhcp_walk copies poisoned payload into first[]; ask MSan. */
+        __msan_check_mem_is_initialized(gathered[DHCP_OPTION_TYPE].first, 1);
+        fprintf(stderr, "msan dhcp uninit: REACHED (MSan missed)\n");
+        return 0;
+}
+""")
+
+    with tempfile.TemporaryDirectory(prefix="msan-dhcp-") as temporary:
+        work = Path(temporary)
+        ran, err = msan_build_run(work, "dhcp_clean", dhcp_clean_source)
+        if ran is None:
+            print("msan net: NOT RUN -- cannot link DHCP walk lift:\n" +
+                  (err or "")[-2000:])
+            return 2
+        msan_expect_clean(
+            ran,
+            "dhcp_walk option gather clean under MSan "
+            "(fully-initialized hostile buffers)",
+            err)
+        ran, err = msan_build_run(work, "dhcp_uninit", dhcp_uninit_source)
+        if ran is None:
+            print("msan net: NOT RUN -- cannot link DHCP uninit probe:\n" +
+                  (err or "")[-2000:])
+            return 2
+        msan_expect_fire(
+            ran,
+            "intentional DHCP option-payload uninit read is visible to MSan")
+
+    # --- 5. Netlink attribute walk (netlink_find_span). ---
+    nl_find = sec(
+        net,
+        "static COLD address_any netlink_find_span(",
+        "static COLD address_any netlink_find(")
+
+    nl_clean_source = base_shim + r"""
+#define NLA_TYPE_MASK 0x3fff
+#define netlink_align(value) (((value) + 3) & ~(positive)3)
+typedef struct
+{
+        p16 length;
+        p16 type;
+} netlink_attribute;
+""" + nl_find + r"""
+static int failures;
+
+static void put_attr(p8 *at, p16 length, p16 type, const void *payload,
+                     positive payload_n)
+{
+        at[0] = (p8)(length & 0xff);
+        at[1] = (p8)(length >> 8);
+        at[2] = (p8)(type & 0xff);
+        at[3] = (p8)(type >> 8);
+        if (payload_n)
+                memcpy(at + 4, payload, payload_n);
+}
+
+int main(void)
+{
+        p8 buf[64];
+        p8 value[4] = {1, 2, 3, 4};
+        positive size = 0;
+        address_any got;
+
+        memory_fill(buf, 0, sizeof buf);
+        put_attr(buf, 8, 1, value, 4);
+        put_attr(buf + 8, 8, 2, value, 4);
+
+        got = netlink_find_span(buf, 16, 2, address_of size);
+        if (!got || size != 4 || memory_compare(got, value, 4)) {
+                fprintf(stderr, "msan nl: FAIL find type 2\n");
+                failures++;
+        }
+
+        got = netlink_find_span(buf, 16, 9, address_of size);
+        if (got) {
+                fprintf(stderr, "msan nl: FAIL missing type\n");
+                failures++;
+        }
+
+        /* Short length (< header): walk must stop, not run forever. */
+        memory_fill(buf, 0, sizeof buf);
+        put_attr(buf, 2, 1, null, 0);
+        got = netlink_find_span(buf, 8, 1, address_of size);
+        if (got) {
+                fprintf(stderr, "msan nl: FAIL short attr length\n");
+                failures++;
+        }
+
+        /* Length past buffer end. */
+        memory_fill(buf, 0, sizeof buf);
+        put_attr(buf, 32, 1, value, 4);
+        got = netlink_find_span(buf, 8, 1, address_of size);
+        if (got) {
+                fprintf(stderr, "msan nl: FAIL oversize attr\n");
+                failures++;
+        }
+
+        /* Nested-looking chain with align hole (payload 1 byte → pad to 8). */
+        memory_fill(buf, 0xaa, sizeof buf);
+        put_attr(buf, 5, 7, "Z", 1);
+        put_attr(buf + 8, 8, 8, value, 4);
+        got = netlink_find_span(buf, 16, 8, address_of size);
+        if (!got || size != 4) {
+                fprintf(stderr, "msan nl: FAIL align walk\n");
+                failures++;
+        }
+
+        if (failures) {
+                fprintf(stderr, "msan nl: %d failure(s)\n", failures);
+                return 1;
+        }
+        fprintf(stderr, "msan nl: netlink_find_span clean on "
+                "fully-initialized hostile attributes\n");
+        return 0;
+}
+"""
+
+    nl_uninit_source = (
+        '#include <sanitizer/msan_interface.h>\n' + base_shim + r"""
+#define NLA_TYPE_MASK 0x3fff
+#define netlink_align(value) (((value) + 3) & ~(positive)3)
+typedef struct
+{
+        p16 length;
+        p16 type;
+} netlink_attribute;
+""" + nl_find + r"""
+int main(void)
+{
+        positive size = 0;
+        p8 buf[16];
+        volatile address_any sink;
+
+        memory_fill(buf, 0, sizeof buf);
+        /* Poison the attribute header fields the walk must load. */
+        __msan_poison(buf, 4);
+        sink = netlink_find_span(buf, 16, 1, address_of size);
+        (void)sink;
+        fprintf(stderr, "msan nl uninit: REACHED (MSan missed)\n");
+        return 0;
+}
+""")
+
+    with tempfile.TemporaryDirectory(prefix="msan-nl-") as temporary:
+        work = Path(temporary)
+        ran, err = msan_build_run(work, "nl_clean", nl_clean_source)
+        if ran is None:
+            print("msan net: NOT RUN -- cannot link netlink walk lift:\n" +
+                  (err or "")[-2000:])
+            return 2
+        msan_expect_clean(
+            ran,
+            "netlink_find_span clean under MSan "
+            "(fully-initialized hostile buffers)",
+            err)
+        ran, err = msan_build_run(work, "nl_uninit", nl_uninit_source)
+        if ran is None:
+            print("msan net: NOT RUN -- cannot link netlink uninit probe:\n" +
+                  (err or "")[-2000:])
+            return 2
+        msan_expect_fire(
+            ran,
+            "intentional netlink attribute-header uninit read is visible to MSan")
+
+    # --- 6. TLS extension/cert parse under MSan without libFuzzer. ---
+    # Reuse fuzz lift slices (oids/parsers/framing); skip path-policy helpers
+    # that need extra date stubs for this thin seed replay.
+    oids, parsers, _policy, framing, tls_der_shim = tls_der_fuzz_lift_parts(net)
+
+    tls_der_driver = r"""
+static void feed(p8 *buf, positive length)
+{
+        tls_cert cert;
+
+        memory_fill(address_of cert, 0, sizeof cert);
+        (void)tls_parse_extensions(buf, length, 0, 2, address_of cert, null);
+        memory_fill(address_of cert, 0, sizeof cert);
+        (void)tls_parse_cert(buf, length, address_of cert, null);
+}
+
+int main(int argc, char **argv)
+{
+        positive i;
+        /* Fully-initialized hostile seeds (subset of fuzz corpus shapes). */
+        static const p8 empty[] = {0};
+        static const p8 ext_minimal[] = {
+                0xa3, 0x09, 0x30, 0x07, 0x30, 0x05, 0x06, 0x01, 0x2a, 0x04, 0x00
+        };
+        static const p8 ext_indefinite[] = {
+                0xa3, 0x80, 0x30, 0x07, 0x30, 0x05, 0x06, 0x01, 0x2a, 0x04, 0x00,
+                0x00, 0x00
+        };
+        static const p8 ext_dup[] = {
+                0xa3, 0x14, 0x30, 0x12, 0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04,
+                0x01, 0x00, 0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x01, 0x00
+        };
+        static const p8 trunc[] = {0x30, 0x81, 0xc0, 0x30, 0x81};
+        static const p8 list_empty[] = {0x00, 0x00, 0x00, 0x00};
+
+        feed((p8 *)empty, 0);
+        feed((p8 *)ext_minimal, sizeof ext_minimal);
+        feed((p8 *)ext_indefinite, sizeof ext_indefinite);
+        feed((p8 *)ext_dup, sizeof ext_dup);
+        feed((p8 *)trunc, sizeof trunc);
+        feed((p8 *)list_empty, sizeof list_empty);
+
+        /* Also replay materialized corpus files when a directory is passed. */
+        if (argc > 1) {
+                /* Directory walk kept trivial: argv[1..] are file paths. */
+                for (i = 1; i < (positive)argc; i++) {
+                        FILE *f = fopen(argv[i], "rb");
+                        p8 buf[8192];
+                        size_t n;
+                        if (!f)
+                                continue;
+                        n = fread(buf, 1, sizeof buf, f);
+                        fclose(f);
+                        feed(buf, (positive)n);
+                }
+        }
+
+        fprintf(stderr, "msan tls der: extension/cert parse clean on "
+                "fully-initialized hostile seeds\n");
+        return 0;
+}
+"""
+
+    tls_der_uninit = tls_der_shim + oids + "\n" + parsers + framing + r"""
+int main(void)
+{
+        tls_cert cert;
+        p8 *buf = (p8 *)malloc(64);
+        if (!buf)
+                return 2;
+        /* SEQUENCE tag + long-form length claiming a body into poison. */
+        buf[0] = 0x30;
+        buf[1] = 0x3a; /* 58 more bytes */
+        memory_fill(address_of cert, 0, sizeof cert);
+        (void)tls_parse_cert(buf, 60, address_of cert, null);
+        fprintf(stderr, "msan tls der uninit: REACHED (MSan missed)\n");
+        free(buf);
+        return 0;
+}
+"""
+
+    ok_seeds, seed_why = ensure_tls_fuzz_seeds()
+    seed_paths = []
+    if ok_seeds:
+        corpus = HARNESS_ROOT / "test/fuzz_corpus/tls_der"
+        seed_paths = sorted(
+            str(p) for p in corpus.iterdir()
+            if p.is_file() and p.suffix == ".bin")[:24]
+
+    with tempfile.TemporaryDirectory(prefix="msan-tlsder-") as temporary:
+        work = Path(temporary)
+        der_clean_source = tls_der_shim + oids + "\n" + parsers + framing + tls_der_driver
+        ran, err = msan_build_run(work, "tls_der_clean", der_clean_source,
+                                  run_args=seed_paths)
+        if ran is None:
+            print("msan net: NOT RUN -- cannot link TLS DER MSan lift:\n" +
+                  (err or "")[-2000:])
+            return 2
+        label = ("tls_parse_extensions/cert clean under MSan without fuzzer "
+                 "(fully-initialized hostile seeds")
+        if seed_paths:
+            label += ", %d corpus files)" % len(seed_paths)
+        else:
+            label += "; corpus unavailable: %s)" % (seed_why or "none")
+        msan_expect_clean(ran, label, err)
+
+        ran, err = msan_build_run(work, "tls_der_uninit", tls_der_uninit)
+        if ran is None:
+            print("msan net: NOT RUN -- cannot link TLS DER uninit probe:\n" +
+                  (err or "")[-2000:])
+            return 2
+        msan_expect_fire(
+            ran,
+            "intentional TLS DER body uninit read is visible to MSan")
+
+    # --- 7. Thin CHECK_net-equivalent probes (honest limits). ---
+    # Full freestanding CHECK_net cannot host under MSan: it needs the
+    # moonwater freestanding runtime, syscall layer, and CHECK harness
+    # macros. These are the wire-shape probes that lift cleanly.
+    check_net_thin = base_shim + r"""
+#define NLA_TYPE_MASK 0x3fff
+#define netlink_align(value) (((value) + 3) & ~(positive)3)
+#define HTTP_OK 0
+#define HTTP_MALFORMED (-5)
+#define DHCP_OPTION_PAD 0
+#define DHCP_OPTION_END 255
+#define DHCP_OPTION_TYPE 53
+#define DHCP_OPTION_OVERLOAD 52
+typedef struct { p16 length; p16 type; } netlink_attribute;
+typedef struct { p8 first[4]; positive length; } dhcp_gathered;
+""" + nl_find + "\n" + http_framing + "\n" + dhcp_walk + r"""
+static int failures;
+#define CHECK(cond, label) do { \
+        if (!(cond)) { fprintf(stderr, "msan check_net thin: FAIL %s\n", label); \
+                       failures++; } \
+} while (0)
+
+int main(void)
+{
+        dhcp_gathered gathered[256];
+        p8 opts[] = {DHCP_OPTION_TYPE, 1, 5, DHCP_OPTION_END};
+        p8 attrs[8];
+        positive size = 0;
+        positive chunk = 0;
+
+        CHECK(netlink_align(0) == 0, "align 0");
+        CHECK(netlink_align(1) == 4, "align 1");
+        CHECK(netlink_align(3) == 4, "align 3");
+        CHECK(netlink_align(4) == 4, "align 4");
+        CHECK(netlink_align(5) == 8, "align 5");
+        CHECK(sizeof(netlink_attribute) == 4, "attribute is 4");
+
+        memory_fill(attrs, 0, sizeof attrs);
+        attrs[0] = 8; attrs[2] = 1;
+        attrs[4] = 0x11; attrs[5] = 0x22; attrs[6] = 0x33; attrs[7] = 0x44;
+        CHECK(netlink_find_span(attrs, 8, 1, address_of size) == attrs + 4 &&
+              size == 4, "find_span value");
+
+        CHECK(http_chunk_line((p8 *)"10\r\n", 4, address_of chunk) ==
+              HTTP_OK && chunk == 16, "chunk hex 10");
+        CHECK(http_chunk_line((p8 *)"G\r\n", 3, address_of chunk) ==
+              HTTP_MALFORMED, "chunk non-hex");
+
+        memory_zero(gathered, sizeof gathered);
+        CHECK(dhcp_walk(opts, sizeof opts, gathered, null) == 0 &&
+              gathered[DHCP_OPTION_TYPE].first[0] == 5, "dhcp type gather");
+
+        if (failures) {
+                fprintf(stderr, "msan check_net thin: %d failure(s)\n", failures);
+                return 1;
+        }
+        fprintf(stderr, "msan check_net thin: align/sizeof + http_chunk/"
+                "dhcp_walk/netlink_find_span probes clean under MSan "
+                "(not full CHECK_net)\n");
+        return 0;
+}
+"""
+
+    with tempfile.TemporaryDirectory(prefix="msan-checknet-") as temporary:
+        work = Path(temporary)
+        ran, err = msan_build_run(work, "check_net_thin", check_net_thin)
+        if ran is None:
+            print("msan net: NOT RUN -- cannot link CHECK_net-thin probes:\n" +
+                  (err or "")[-2000:])
+            return 2
+        msan_expect_clean(
+            ran,
+            "CHECK_net-equivalent thin probes clean under MSan "
+            "(not full freestanding CHECK_net)",
+            err)
+
+    # --- 8. Seed-corpus TLS fuzz smokes under MSan. ---
     prior = os.environ.get("MOONWATER_MSAN")
     os.environ["MOONWATER_MSAN"] = "1"
     try:
@@ -35325,7 +36610,6 @@ int main(void)
             os.environ["MOONWATER_MSAN"] = prior
 
     if der == 2 or hs == 2:
-        # MSan compile of the fuzz targets failed after the probe worked.
         print("msan net: NOT RUN -- tls fuzz under MSan unavailable "
               "(der=%s hs=%s)" % (der, hs))
         return 2
@@ -35334,18 +36618,38 @@ int main(void)
     return checks.verdict("msan net", "msan-net")
 
 
+def pathname_race_budget(default_rounds=80, default_seconds=2.0):
+    """Lane smoke defaults; longer local runs via MOONWATER_PATHNAME_RACE_*.
+
+    MOONWATER_PATHNAME_RACE_ROUNDS / MOONWATER_PATHNAME_RACE_SECONDS override
+    the argparse defaults (CLI flags still win when passed explicitly).
+    lane_tar leaves them unset (80 rounds / 2s). Effect asserts are the same
+    at any budget: outside victim unchanged, no escape past the extract root.
+    """
+    rounds = int(os.environ.get("MOONWATER_PATHNAME_RACE_ROUNDS",
+                                str(default_rounds)))
+    seconds = float(os.environ.get("MOONWATER_PATHNAME_RACE_SECONDS",
+                                   str(default_seconds)))
+    return rounds, seconds
+
+
 def harness_pathname_race(argv):
     """Continuous file↔directory↔symlink exchange race against tar extract.
 
-    While moonwater tar extracts into a staged tree, a sibling thread rapidly
-    cycles every contested pathname through regular file, empty directory, and
-    symlink-to-outside forms (renameat2 RENAME_EXCHANGE when available, else a
-    rename dance). Effect-based fail-closed checks: an outside victim's bytes
-    stay unchanged, no nested escape appears outside the extract root, and the
-    scheduler must actually exchange forms (not a vacuous sleep).
+    While moonwater tar extracts into a staged tree, sibling threads rapidly
+    cycle every contested pathname through regular file, empty directory, and
+    symlink-to-outside-dir forms (renameat2 RENAME_EXCHANGE when available,
+    else a rename dance). Contested names include shallow leaves and parents
+    of deeper extract trees so dir↔symlink-to-dir swaps hit mid-walk pins.
+    Effect-based fail-closed checks: an outside victim's bytes stay unchanged,
+    the outside keep/ dir stays empty (no nested/deep escape), and private-edit
+    style exclusive creates (O_EXCL|O_NOFOLLOW leaf, dirfd+leaf, shell
+    noclobber, install -D) do not follow swaps through to outside.
 
         python3 test/differential.py --harness pathname_race --binary ours=PATH
         sh test/run tar   # freestanding CHECK_tar then this harness
+        MOONWATER_PATHNAME_RACE_SECONDS=30 MOONWATER_PATHNAME_RACE_ROUNDS=800 \\
+            python3 test/differential.py --harness pathname_race --binary ours=PATH
 
     Returns 2 (NOT RUN) when threads or rename primitives are unavailable.
     """
@@ -35356,16 +36660,23 @@ def harness_pathname_race(argv):
     import time
     from pathlib import Path
 
+    budget_rounds, budget_seconds = pathname_race_budget()
     parser = argparse.ArgumentParser(prog="pathname_race")
     parser.add_argument("--binary", action="append", required=True,
                         metavar="LABEL=PATH")
-    parser.add_argument("--rounds", type=int, default=80,
-                        help="extract iterations while the scheduler runs")
-    parser.add_argument("--seconds", type=float, default=2.0,
-                        help="minimum wall time to keep exchanging")
+    parser.add_argument("--rounds", type=int, default=budget_rounds,
+                        help="extract iterations while the scheduler runs "
+                             "(default from MOONWATER_PATHNAME_RACE_ROUNDS "
+                             "or 80)")
+    parser.add_argument("--seconds", type=float, default=budget_seconds,
+                        help="minimum wall time to keep exchanging "
+                             "(default from MOONWATER_PATHNAME_RACE_SECONDS "
+                             "or 2.0)")
     opts = parser.parse_args(argv)
     if opts.rounds < 1:
         parser.error("--rounds must be positive")
+    if opts.seconds < 0:
+        parser.error("--seconds must be non-negative")
 
     binaries = []
     for specification in opts.binary:
@@ -35433,6 +36744,7 @@ def harness_pathname_race(argv):
     VICTIM = b"VICTIM_UNCHANGED\n"
     ESCAPE_LEAF = b"ESCAPE_THROUGH_LEAF\n"
     ESCAPE_NEST = b"ESCAPE_THROUGH_NEST\n"
+    ESCAPE_DEEP = b"ESCAPE_THROUGH_DEEP\n"
 
     def ustar_header(name, size, typeflag=b"0", linkname=b"", mode=0o644):
         block = bytearray(512)
@@ -35472,8 +36784,6 @@ def harness_pathname_race(argv):
         return (ustar_header(name, len(data), typeflag=flag, linkname=link) +
                 padded(data))
 
-    # Two archive shapes per contested name: overwrite the leaf as a file,
-    # and write a nested member through it as a directory walk.
     def archive_leaf(name):
         return ustar_archive([member(name, "0", ESCAPE_LEAF)])
 
@@ -35493,8 +36803,33 @@ def harness_pathname_race(argv):
                                 ("burst-%02d\n" % i).encode()))
         return ustar_archive(parts)
 
+    # Deep tree under the raced parent: dir↔symlink-to-dir swaps must not
+    # let mid-walk creation escape through the swapped component.
+    def archive_deep(name, depth=5):
+        parts = [member(name + "/", "5")]
+        prefix = name
+        for level in range(depth):
+            prefix = "%s/d%d" % (prefix, level)
+            parts.append(member(prefix + "/", "5"))
+        parts.append(member(prefix + "/payload", "0", ESCAPE_DEEP))
+        return ustar_archive(parts)
+
+    def archive_deep_burst(name, depth=4, count=8):
+        parts = [member(name + "/", "5")]
+        prefix = name
+        for level in range(depth):
+            prefix = "%s/l%d" % (prefix, level)
+            parts.append(member(prefix + "/", "5"))
+        for i in range(count):
+            parts.append(member("%s/b%02d" % (prefix, i), "0",
+                                ("deep-burst-%02d\n" % i).encode()))
+        return ustar_archive(parts)
+
     checks = Checks()
-    contested_names = ("flip", "parent")
+    # flip/parent: shallow leaf + one-level nest (historical). mid/deep: same
+    # scheduler forms but archives walk several components under the raced
+    # name so symlink-to-dir swaps hit pinned parents mid-extract.
+    contested_names = ("flip", "parent", "mid", "deep")
 
     with tempfile.TemporaryDirectory(prefix="pathname-race-") as temporary:
         root = Path(temporary)
@@ -35506,22 +36841,23 @@ def harness_pathname_race(argv):
         staging.mkdir()
         victim = outside / "victim"
         victim.write_bytes(VICTIM)
-        # Directory the symlink form points at (escape target for nested).
-        (outside / "keep").mkdir()
+        # Directory the symlink form points at (escape target for nested/deep).
+        keep = outside / "keep"
+        keep.mkdir()
+        install_source = root / "install-source"
+        install_source.write_bytes(b"install-payload\n")
 
         # Per contested name: three prepared forms under staging/, live under
         # extract/. Scheduler exchanges live with the next form in round-robin.
+        # link → outside/keep (directory): dir↔symlink-to-dir is the contested
+        # swap that would let a nested/deep member escape if pins slip.
         forms = ("file", "dir", "link")
         for name in contested_names:
             (staging / (name + ".file")).write_bytes(b"race-file\n")
             (staging / (name + ".dir")).mkdir()
-            # Symlink to the outside directory — nested writes would escape
-            # here if the extractor followed a dir→symlink swap past its pin.
-            os.symlink(os.path.relpath(outside, extract),
+            os.symlink(os.path.relpath(keep, extract),
                        staging / (name + ".link"))
-            # Install the first live form (directory) under extract/.
             os.rename(staging / (name + ".dir"), extract / name)
-            # Recreate the staging dir slot so the cycle has three peers.
             (staging / (name + ".dir")).mkdir()
 
         stop = threading.Event()
@@ -35555,7 +36891,7 @@ def harness_pathname_race(argv):
                 os.symlink(link_target, slot_path)
 
         def scheduler(name):
-            link_target = os.path.relpath(outside, extract)
+            link_target = os.path.relpath(keep, extract)
             live = extract / name
             while not stop.is_set():
                 nxt = forms[(form_index[name] + 1) % len(forms)]
@@ -35626,30 +36962,63 @@ def harness_pathname_race(argv):
             for kind, builder in (
                     ("leaf", archive_leaf),
                     ("nested", archive_nested),
-                    ("burst", archive_burst)):
+                    ("burst", archive_burst),
+                    ("deep", archive_deep),
+                    ("deep_burst", archive_deep_burst)):
                 path = archives / ("%s-%s.tar" % (name, kind))
                 path.write_bytes(builder(name))
                 shapes.append(path)
 
+        def outside_escaped():
+            """True if extract wrote anything outside beyond victim + empty keep."""
+            if not victim.exists() or victim.read_bytes() != VICTIM:
+                return True
+            try:
+                names = {entry.name for entry in outside.iterdir()}
+            except OSError:
+                return True
+            if names - {"victim", "keep"}:
+                return True
+            try:
+                if any(keep.iterdir()):
+                    return True
+            except OSError:
+                return True
+            return False
+
+        def farm_applet(binary, label, applet):
+            native = Path(binary).parent / applet
+            if Path(binary).name == applet:
+                return str(Path(binary).resolve())
+            if native.is_file():
+                return str(native.resolve())
+            farm = root / ("bin-" + label)
+            farm.mkdir(exist_ok=True)
+            link = farm / applet
+            if not link.exists():
+                link.symlink_to(binary)
+            return str(link)
+
         extract_results = []
         exclusive_ok = True
         exclusive_detail = ""
+        private_edit_ok = True
+        private_edit_detail = ""
+        noclobber_ok = True
+        noclobber_detail = ""
+        install_ok = True
+        install_detail = ""
         started = time.monotonic()
         round_at = 0
+        # Syscall probes are cheap; subprocess probes stay modest on lane
+        # smoke and grow with an explicit longer stress budget.
+        probe_iters = max(40, min(400, opts.rounds // 2))
+        sub_iters = max(12, min(120, int(opts.seconds * 6) + opts.rounds // 20))
+
         for label, binary in binaries:
-            tar = [binary]
-            # Farm-style: accept a multipurpose shell applet named tar.
-            farm_tar = Path(binary).parent / "tar"
-            if Path(binary).name != "tar" and farm_tar.is_file():
-                tar = [str(farm_tar)]
-            elif Path(binary).name != "tar":
-                # Shell binary: argv0 selection via symlink farm.
-                farm = root / ("bin-" + label)
-                farm.mkdir(exist_ok=True)
-                link = farm / "tar"
-                if not link.exists():
-                    link.symlink_to(binary)
-                tar = [str(link)]
+            tar = [farm_applet(binary, label, "tar")]
+            shell = farm_applet(binary, label, "sh")
+            install = farm_applet(binary, label, "install")
 
             while (round_at < opts.rounds or
                    time.monotonic() - started < opts.seconds):
@@ -35663,15 +37032,12 @@ def harness_pathname_race(argv):
                     timeout=30)
                 extract_results.append(ran.returncode)
                 round_at += 1
-                if victim.read_bytes() != VICTIM:
-                    break
-                if (outside / "nested").exists():
+                if outside_escaped():
                     break
 
-            # Private-edit style exclusive create under the same scheduler:
             # O_EXCL|O_NOFOLLOW on a contested leaf must not follow a symlink
-            # swap through to the outside victim.
-            for _ in range(40):
+            # swap through to the outside victim / keep tree.
+            for _ in range(probe_iters):
                 for name in contested_names:
                     path = extract / name
                     try:
@@ -35681,9 +37047,75 @@ def harness_pathname_race(argv):
                         os.close(fd)
                     except OSError:
                         pass
-                if victim.read_bytes() != VICTIM:
+                if outside_escaped():
                     exclusive_ok = False
-                    exclusive_detail = "victim changed during O_EXCL probe"
+                    exclusive_detail = "escape during O_EXCL leaf probe"
+                    break
+
+            # Private-edit style (fc history_edit): open contested name as a
+            # directory with O_NOFOLLOW|O_DIRECTORY, then exclusive-create a
+            # leaf inside via dirfd. A dir→symlink-to-dir swap must not let
+            # the create land under outside/keep.
+            for _ in range(probe_iters):
+                for name in contested_names:
+                    dfd = -1
+                    fd = -1
+                    try:
+                        dfd = os.open(extract / name,
+                                      os.O_RDONLY | os.O_DIRECTORY |
+                                      os.O_NOFOLLOW)
+                        fd = os.open("commands",
+                                     os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                                     os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+                        os.write(fd, b"private-edit\n")
+                    except OSError:
+                        pass
+                    finally:
+                        if fd >= 0:
+                            os.close(fd)
+                        if dfd >= 0:
+                            os.close(dfd)
+                if outside_escaped():
+                    private_edit_ok = False
+                    private_edit_detail = (
+                        "escape during private-edit dirfd+O_EXCL probe")
+                    break
+
+            # Shell noclobber (set -C) exclusive create onto contested names —
+            # moonwater's O_EXCL redirect path under the same scheduler.
+            for _ in range(sub_iters):
+                for name in contested_names:
+                    target = extract / name
+                    try:
+                        # argv after -c is $0/$1; noclobber create onto target.
+                        subprocess.run(
+                            [shell, "-c",
+                             "set -C; printf noclobber > \"$1\"",
+                             "pathname-race", str(target)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            timeout=5)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                if outside_escaped():
+                    noclobber_ok = False
+                    noclobber_detail = "escape during shell noclobber probe"
+                    break
+
+            # install -D through a raced parent: secure creation must refuse
+            # symlink parents; effect check is outside/keep stays clean.
+            for _ in range(sub_iters):
+                for name in contested_names:
+                    dest = extract / name / "installed"
+                    try:
+                        subprocess.run(
+                            [install, "-D", str(install_source), str(dest)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            timeout=5)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                if outside_escaped():
+                    install_ok = False
+                    install_detail = "escape during install -D probe"
                     break
 
         stop.set()
@@ -35691,40 +37123,72 @@ def harness_pathname_race(argv):
             thread.join(timeout=2.0)
 
         total_exchanges = sum(exchanges.values())
+        elapsed = time.monotonic() - started
         print("pathname race: %d exchanges across %s in %d extract rounds "
-              "(errors=%s)" %
-              (total_exchanges, exchanges, round_at, exchange_errors))
+              "(%.2fs, errors=%s, shapes=%d)" %
+              (total_exchanges, exchanges, round_at, elapsed,
+               exchange_errors, len(shapes)))
 
-        checks(total_exchanges >= 30,
+        # Floor stays fixed so longer env budgets tighten wall time / rounds
+        # without weakening the continuity proof required of a short smoke.
+        min_total = 30
+        min_each = 5
+        checks(total_exchanges >= min_total,
                "scheduler exchanged forms continuously "
                "(%d exchanges)" % total_exchanges)
         for name in contested_names:
-            checks(exchanges[name] >= 5,
+            checks(exchanges[name] >= min_each,
                    "pathname %r exchanged through file/dir/symlink "
                    "(%d)" % (name, exchanges[name]))
 
         victim_bytes = victim.read_bytes() if victim.exists() else b""
+        keep_entries = []
+        try:
+            keep_entries = sorted(p.name for p in keep.iterdir())
+        except OSError as error:
+            keep_entries = ["<unreadable:%s>" % error]
+        outside_extra = sorted(
+            p.name for p in outside.iterdir()
+            if p.name not in ("victim", "keep"))
+
         checks(victim_bytes == VICTIM,
-               "outside victim unchanged under leaf/nested race "
+               "outside victim unchanged under leaf/nested/deep race "
                "(now=%r)" % victim_bytes[:40])
-        checks(not (outside / "nested").exists(),
-               "no nested escape written outside the extract root")
+        checks(not keep_entries,
+               "symlink-to-dir keep/ stays empty under dir↔link swaps "
+               "(found=%r)" % keep_entries)
+        checks(not outside_extra,
+               "no escape entries beside victim/keep outside extract "
+               "(found=%r)" % outside_extra)
         checks(ESCAPE_LEAF not in victim_bytes and
-               ESCAPE_NEST not in victim_bytes,
+               ESCAPE_NEST not in victim_bytes and
+               ESCAPE_DEEP not in victim_bytes,
                "escape payloads never reached the outside victim")
-        checks(round_at >= opts.rounds or
-               time.monotonic() - started >= opts.seconds,
+        checks(round_at >= opts.rounds or elapsed >= opts.seconds,
                "subject extract ran under the scheduler "
-               "(%d rounds)" % round_at)
+               "(%d rounds, %.2fs)" % (round_at, elapsed))
         checks(len(extract_results) > 0 and
                all(isinstance(code, int) for code in extract_results),
                "every extract completed without hang/timeout")
-        checks(exclusive_ok and victim_bytes == VICTIM,
+        checks(exclusive_ok and victim_bytes == VICTIM and not keep_entries,
                "O_EXCL|O_NOFOLLOW exclusive create does not follow "
                "symlink swaps" +
                ((": " + exclusive_detail) if exclusive_detail else ""))
+        checks(private_edit_ok and victim_bytes == VICTIM and not keep_entries,
+               "private-edit dirfd+O_EXCL|O_NOFOLLOW create does not "
+               "follow dir↔symlink-to-dir swaps" +
+               ((": " + private_edit_detail) if private_edit_detail else ""))
+        checks(noclobber_ok and victim_bytes == VICTIM and not keep_entries,
+               "shell noclobber (set -C) exclusive create does not "
+               "follow symlink swaps" +
+               ((": " + noclobber_detail) if noclobber_detail else ""))
+        checks(install_ok and victim_bytes == VICTIM and not keep_entries,
+               "install -D through raced parent does not escape to "
+               "outside keep/" +
+               ((": " + install_detail) if install_detail else ""))
 
     return checks.verdict("pathname race", "pathname-race")
+
 
 
 def harness_machine_scan(argv):
@@ -39616,6 +41080,7 @@ HARNESS_CHECKS = {
     "http_response_framing": harness_http_response_framing,
     "tls_der_fuzz": harness_tls_der_fuzz,
     "tls_hs_fuzz": harness_tls_hs_fuzz,
+    "tls_verify_fuzz": harness_tls_verify_fuzz,
     "msan_net": harness_msan_net,
     "pathname_race": harness_pathname_race,
     "machine_scan": harness_machine_scan,

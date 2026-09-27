@@ -3500,7 +3500,11 @@ freestanding_checks_one()
         *)   target_build freestanding_check "$source" "$work/$suite.$name" "$name" ;;
         esac || return 1
 
-        if { [ "$suite" = reserve ] || [ "$suite" = lock ]; } && [ -n "$runner" ]; then
+        #       Soft RLIMIT_AS is ignored under qemu-user; native host arch
+        #       proves it. Pass --emulated so CHECK_reserve / CHECK_lock /
+        #       CHECK_net log honest NOT RUN for AS rather than a false pass.
+        if { [ "$suite" = reserve ] || [ "$suite" = lock ] ||
+             [ "$suite" = net ]; } && [ -n "$runner" ]; then
                 $runner "$work/$suite.$name" --emulated > "$work/$suite.$name.out" 2>&1
                 status=$?
         elif [ -n "${check_input-}" ]; then
@@ -3593,7 +3597,8 @@ lane_socket() { freestanding_checks_lane socket socket; }
 #       (tls_handshake_one_append / tls_encrypted_flight_append; corpus under
 #       test/fuzz_corpus/tls_hs/).
 #       MSan is opt-in only (`sh test/msan_net` / MOONWATER_MSAN=1); not part of
-#       lane_net and not a CI push job.
+#       lane_net and not a CI push job. Scope is hosted wire-parser lifts +
+#       pad/uninit proves + short DER/HS under MSan — not full CHECK_net.
 #       Fuzz exit 2 is soft: missing clang must not turn a green freestanding+
 #       oracle lane into "did not run". Exit 1 from fuzz stays a hard fail.
 #       Oracle harnesses (tls_chains / https_downgrade / http_response_framing)
@@ -3636,9 +3641,12 @@ lane_net()
 }
 lane_bowl() { freestanding_checks_lane bowl bowl; }
 #       Freestanding CHECK_tar (paths, pax, magics), then a continuous
-#       file↔directory↔symlink pathname race against tar extract. The race
-#       harness needs the shell applet farm; exit 2 (threads/rename missing)
-#       is soft and does not downgrade a green freestanding lane.
+#       file↔directory↔symlink-to-dir pathname race against tar extract
+#       (shallow + deep trees, private-edit / noclobber / install probes).
+#       The race harness needs the shell applet farm; exit 2 (threads/rename
+#       missing) is soft and does not downgrade a green freestanding lane.
+#       Longer local stress: MOONWATER_PATHNAME_RACE_ROUNDS /
+#       MOONWATER_PATHNAME_RACE_SECONDS (lane leaves both unset).
 lane_tar()
 {
         freestanding_checks_lane tar tar
