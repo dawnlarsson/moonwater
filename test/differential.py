@@ -16384,6 +16384,8 @@ INPUTS.update({
     "text_a": b"alpha\nbeta\ngamma\n",
     "text_a_prefix": b"alpha\nbe",
     "text_tac_runs": b"1._2.__3.___4._5{_6__{7\n8._",
+    "text_nl_long_delimiters": (b"head\nfoofoofoo\nh1\nfoofoo\nb1\nb2\nfoo\nf1\nfoofoofoofoo\n"
+                                b"xyz\nfoofo\n\\:\\:\nfoo\nx\n"),
     "text_names0_empty": b"a.txt\x00\x00b.txt\x00",
     "text_names0_only_empty": b"\x00\x00",
     "text_names0_big": b"big\x00a.txt\x00",
@@ -18003,7 +18005,12 @@ TEXT_UTILITIES = (
                    "many_lines", "text_fifteen", "text_random_lines", "edge_65535", "edge_65536", "edge_65537", "text_utf8"),
             fixture="text", extra=(("-Z",), ("--nosuchflag",), ("-w", "3", "-w", "6"), ("-b", "a", "-n", "rn", "nonl"),
                                    ("-w", "4", "-s", ";", "nonl"), ("-nln", "-w6"), ("-ha", "-fa", "sections"),
-                                   ("-p", "-ha", "-fa", "sections"), ("-ba", "-l3"), ("-ba", "-l2"))),
+                                   ("-p", "-ha", "-fa", "sections"), ("-ba", "-l3"), ("-ba", "-l2"),
+                                   #   A delimiter of any length is the whole of it,
+                                   #   written three, two or one times over.
+                                   *({"argv": argv, "stdin": "text_nl_long_delimiters", "fixture": "text"} for argv in (
+                                       ("-d", "foo"), ("-d", "foo", "-ha", "-fa"), ("-p", "-d", "foo"), ("-d", "fo"),
+                                       ("-d", "xyz", "-ha"), ("-d", "\\"), ("-d", "f"), ("-d", ""), ("--section-delimiter=foo", "-ba"))))),
     Utility("paste",
             options=(Option("-d", (",", ",:", "\\n\\t\\b", "", "\\0", "ab", "\\", "\\x", "\t", ":"), None),
                      Option("--delimiters", (",",), True), Option("-s"), Option("--serial"), Option("-z"),

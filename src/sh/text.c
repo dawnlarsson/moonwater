@@ -8853,23 +8853,25 @@ static fn nl_put_number(bipolar number, positive width, p8 justify, bool zeros)
         text_put(digits, length);
 }
 
-// How many times over the delimiter is written, and nothing else on the line.
-// An empty delimiter -- nl -d '' -- makes an empty line the header marker,
-// which is what GNU does with it whatever its manual says.
-static b32 nl_section_of(p8 address_to delimiter, const p8 address_to line,
-                         positive length)
+// How many times over the delimiter is written, and nothing else on the line:
+// three for a header, two for a body, one for a footer. The delimiter is any
+// length, as GNU's is -- nl -d foo starts a body at foofoo. An empty one --
+// nl -d '' -- makes an empty line the header marker, which is what GNU does
+// with it whatever its manual says.
+static b32 nl_section_of(string_address delimiter, positive size,
+                         const p8 address_to line, positive length)
 {
-        if (!delimiter[0])
+        if (!size)
                 return length ? 0 : 3;
 
-        if (length != 2 && length != 4 && length != 6)
+        if (length != size && length != size * 2 && length != size * 3)
                 return 0;
 
-        for (positive c = 0; c < length; c += 2)
-                if (line[c] != delimiter[0] || line[c + 1] != delimiter[1])
+        for (positive c = 0; c < length; c += size)
+                if (memory_compare(line + c, delimiter, size))
                         return 0;
 
-        return (b32)(length / 2);
+        return (b32)(length / size);
 }
 
 // GNU checks every occurrence of an option, not only the last: nl -hx with
@@ -8951,7 +8953,8 @@ static b32 text_nl()
         b32 patterns[3] = {-1, -1, -1};
         b32 pattern_count = 0;
         b32 section = 1;
-        p8 delimiter[2] = {'\\', ':'};
+        p8 delimiter_pair[3] = {'\\', ':', 0};
+        string_address delimiter = (string_address)delimiter_pair;
         string_address separator = "\t";
         p8 justify = 'r';
         bool zeros = false;
@@ -8987,12 +8990,15 @@ static b32 text_nl()
         if (said)
         {
                 // One character given leaves the second as it was, so nl -d @
-                // looks for @: and not for @@.
-                delimiter[0] = said[0];
-
-                if (said[0] && said[1])
-                        delimiter[1] = said[1];
+                // looks for @: and not for @@; any other length is the whole
+                // delimiter, nothing at all included.
+                if (said[0] && !said[1])
+                        delimiter_pair[0] = said[0];
+                else
+                        delimiter = said;
         }
+
+        positive delimiter_size = string_length(delimiter);
 
         said = file_option_value(address_of taking, 'n');
 
@@ -9025,7 +9031,7 @@ static b32 text_nl()
                 // copied out first.
                 while (text_line_view(address_of line, address_of length, null, 0, null))
                 {
-                        b32 marker = nl_section_of(delimiter, line, length);
+                        b32 marker = nl_section_of(delimiter, delimiter_size, line, length);
 
                         if (marker)
                         {
