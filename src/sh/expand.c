@@ -5379,6 +5379,10 @@ static fn expand_replace_literal(p8 address_to source, positive length,
         search over the remainder. # and % immediately after the operator
         anchor the match to the beginning or end respectively.
 */
+static fn expand_replace_value(p8 address_to source, positive length,
+                               string_address pattern,
+                               string_address replacement, bool global, p8 mark);
+
 static fn expand_replace(expand_reference reference, string_address pattern_text,
                          string_address replacement_text, bool quoted,
                          bool global, b32 parameter_mode)
@@ -5388,11 +5392,7 @@ static fn expand_replace(expand_reference reference, string_address pattern_text
         p8 address_to source;
         string_address pattern;
         string_address replacement;
-        positive at = 0;
-        positive copied = 0;
-        p8 anchor = 0;
         p8 mark = quoted ? MARK_QUOTED : MARK_FIELD;
-        bool fold = shell_shopt_on(NOCASEMATCH);
 
         // This also applies nounset and the special-parameter rules before
         // the value is lifted out of the shared expansion buffer.
@@ -5420,6 +5420,21 @@ static fn expand_replace(expand_reference reference, string_address pattern_text
 
         if (expand_failed || !pattern || !replacement)
                 return;
+
+        expand_replace_value(source, length, pattern, replacement, global,
+                             mark);
+}
+
+/* One value's replacement, pushed: the parameter's, or one positional
+   parameter's when $@ and $* are replaced one parameter at a time. */
+static fn expand_replace_value(p8 address_to source, positive length,
+                               string_address pattern,
+                               string_address replacement, bool global, p8 mark)
+{
+        positive at = 0;
+        positive copied = 0;
+        p8 anchor = 0;
+        bool fold = shell_shopt_on(NOCASEMATCH);
 
         // // selects global replacement, so its leading #/% is a literal
         // pattern member. Only the single-slash operator admits anchors.
@@ -7302,6 +7317,74 @@ static COLD fn expand_dash_at_trim(string_address pattern, bool prefix,
         expand_push_nul_fields(startp, loc, quoted);
 }
 
+static PURE bool expand_positional_list(expand_reference reference)
+{
+        return string_get(reference.name + 1) == end &&
+               (string_is(reference.name, '@') || string_is(reference.name, '*'));
+}
+
+/*
+        Replacement and case change on $@ and $*: bash applies the operator
+        to each positional parameter and then joins them the way the name
+        joins, as it does for # and %. This applied it to the joined string, so
+        "${@/#/-I}" was one word -I a b, and ${@^} changed only $1.
+*/
+static COLD fn expand_positional_each(p8 form, p8 operation,
+                                      string_address word,
+                                      string_address replacement_text,
+                                      bool doubled, bool quoted)
+{
+        p8 mark = quoted ? MARK_QUOTED : MARK_FIELD;
+        p8 between = string_get(expand_ifs());
+        bool fields = quoted ? form == '@' : !between;
+        bool default_pattern = !string_get(word);
+        string_address pattern;
+        string_address replacement = null;
+
+        if (operation == '/')
+        {
+                pattern = expand_capture(word, false, EXPAND_CAPTURE_PATTERN);
+                replacement = expand_capture(replacement_text, false,
+                                             EXPAND_CAPTURE_REPLACEMENT);
+        }
+        else
+                pattern = default_pattern
+                              ? (string_address) "?"
+                              : expand_capture(word, false,
+                                               EXPAND_CAPTURE_PATTERN);
+
+        if (expand_failed || !pattern || (operation == '/' && !replacement))
+                return;
+
+        if (!shell_parameter_count)
+        {
+                if (quoted && form == '@')
+                        expand_name_at_empty = true;
+                return;
+        }
+
+        for (positive at = 0; at < shell_parameter_count && !expand_failed;
+             at++)
+        {
+                positive start;
+
+                if (at)
+                        expand_sequence_between(fields, between, mark);
+                start = expand_length;
+                if (operation == '/')
+                        expand_replace_value(
+                            (p8 address_to)shell_parameter[at],
+                            string_length(shell_parameter[at]), pattern,
+                            replacement, doubled, mark);
+                else
+                {
+                        expand_push_string(shell_parameter[at], mark);
+                        expand_case_span(start, operation == '^', doubled,
+                                         pattern, default_pattern);
+                }
+        }
+}
+
 static fn expand_modifier(expand_reference reference, p8 operation, bool doubled,
                            string_address word, bool quoted, b32 parameter_mode)
 {
@@ -7374,13 +7457,22 @@ static fn expand_modifier(expand_reference reference, p8 operation, bool doubled
                         *separator = end;
                         replacement = separator + 1;
                 }
-                expand_replace(reference, word, replacement, quoted, doubled,
-                               parameter_mode);
+                if (expand_positional_list(reference) && shell_bash_compat)
+                        expand_positional_each(string_get(reference.name),
+                                               operation, word, replacement,
+                                               doubled, quoted);
+                else
+                        expand_replace(reference, word, replacement, quoted,
+                                       doubled, parameter_mode);
                 if (separator)
                         *separator = '/';
         }
         else if (operation == ':')
                 expand_substring(reference, word, quoted, parameter_mode);
+        else if ((operation == '^' || operation == ',') &&
+                 expand_positional_list(reference) && shell_bash_compat)
+                expand_positional_each(string_get(reference.name), operation,
+                                       word, null, doubled, quoted);
         else if (operation == '^' || operation == ',')
                 expand_case_change(reference, word, quoted, operation == '^',
                                    doubled, parameter_mode);

@@ -13744,6 +13744,22 @@ def shell_lang_array_literal_lines(rng):
             shell_program("v='m n'", old, line, report, 'echo "end=$?"'), ("command", "stdin", "file"))
 
 
+#       Replacement and case change on $@ and $*, one parameter at a time.
+#       They were applied to the joined string: "${@/#/-I}" was the single
+#       word -I a b, and ${@^} changed only $1.
+def shell_lang_positional_each(rng):
+    params = rng.choice(("a b", "ab ab", "'x y' z", "", "aa bb 'c c'", "'b c' d", "A bB", "'' a"))
+    op = rng.choice(("/#/-I", "/a/A", "//b/Y", "/%a/Z", "//?/.", "/b c/ghi", "^", "^^", ",", ",,", "^^[ab]", "/a", "//[ab]/-"))
+    form = rng.choice(("@", "*"))
+    quoted = rng.random() < 0.6
+    ifs = rng.choice(("", "", "IFS=:; ", "IFS=; "))
+    word = "${" + form + op + "}"
+    if quoted:
+        word = '"' + word + '"'
+    return ("positional-each", shell_BASH, shell_program(
+        "set -- " + params, ifs + "printf '<%s>' " + word + " end; echo", 'echo "end=$?"'))
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16373,6 +16389,7 @@ SHELL_FAMILIES = (
     shell_lang_lineno_traps,
     shell_lang_trap_numeric_reset,
     shell_lang_array_literal_lines,
+    shell_lang_positional_each,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),
