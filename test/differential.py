@@ -17577,8 +17577,14 @@ _TEXT_WRITE_TARGETS = {
     "gone": ("trap '' PIPE\nenv mkfifo p\nenv head -c 1 p > /dev/null &\n", "> p", "wait\n"),
     "copyfull": ("", "> /dev/full", 'echo "copy $(env wc -c < copy)"\n'),
     "copyout": ("", "> out", 'echo "out $(env wc -c < out) copy $(env wc -c < copy)"\n'),
-    #       gone without the trap: SIGPIPE as the tool was started with it.
-    "broken": ("env mkfifo p\nenv head -c 1 p > /dev/null &\n", "> p", "wait\n"),
+    #       A pipe with no reader from the start, so the first write is
+    #       EPIPE whole: the fifo is opened for both ends, the write end kept
+    #       and the read end closed. A reader that leaves after a byte races
+    #       the write, and GNU's tee words a write it only half made without
+    #       a reason. broken leaves SIGPIPE as the tool was started with it,
+    #       brokenign ignores it first.
+    "broken": ("env mkfifo p\nexec 3<>p 4>p 3<&-\n", ">&4", ""),
+    "brokenign": ("trap '' PIPE\nenv mkfifo p\nexec 3<>p 4>p 3<&-\n", ">&4", ""),
     "none": ("", "", ""),
     # a bound over a/b, in a namespace of the scene's own: a directory that
     # is its own ancestor.
@@ -17643,7 +17649,9 @@ _TEXT_WRITE_CASES = (
     ("tee", "yes", "broken", "--output-error=warn"), ("tee", "yes", "broken", "--output-error=warn-nopipe"),
     ("tee", "yes", "broken", "--output-error=exit"), ("tee", "yes", "broken", "--output-error=exit-nopipe"),
     ("tee", "yes", "broken", "--output-error=exit", "/dev/null"), ("tee", "yes", "broken", "-p", "--output-error=exit"),
-    ("tee", "yes", "broken", "--output-error=warn", "-p"), ("tee", "yes", "gone"),
+    ("tee", "yes", "broken", "--output-error=warn", "-p"), ("tee", "yes", "brokenign"),
+    ("tee", "numbersin", "brokenign", "--output-error=warn-nopipe", "/dev/null"),
+    ("tee", "numbersin", "brokenign", "/dev/null"),
     ("tee", "yes", "full", "--output-error=exit", "/dev/full"), ("tee", "yes", "full", "-p", "/dev/full"),
     ("tee", "idle", "none", "-p"), ("tee", "idle", "none", "--output-error=exit-nopipe"),
 )
