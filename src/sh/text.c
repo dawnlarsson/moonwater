@@ -29654,26 +29654,69 @@ static bool sort_key_seen(p8 letter, string_address value)
         if (letter == 'T')
                 sort_directories[sort_directories_count++] = value;
 
+        /*
+                --batch-size as GNU's specify_nmerge reads it: an unsigned
+                number, at least 2, and no more than the descriptors the
+                soft RLIMIT_NOFILE leaves once standard input, output and
+                error are counted, with that maximum named when it is
+                passed -- an unsigned int, as GNU keeps it, so an unlimited
+                soft limit is 2^32 - 4. A number too large for anything is
+                too large, not invalid.
+        */
         if (letter == 'B')
         {
-                positive number;
+                string_address at = value + string_span(value, string_set_space);
+                positive number = 0;
+                bool over = false;
+                positive limits[2];
+                b32 most = (b32)((system_call_4(syscall(prlimit64), 0, 7, 0,
+                                                (positive)limits) >= 0
+                                      ? limits[0]
+                                      : 1024) -
+                                 3);
 
-                if (!text_unsigned_option(value, false, address_of number) || !number ||
-                    number > 1021)
+                if (string_is(at, '+'))
+                        at++;
+
+                if (!byte_is_digit(at[0]))
                 {
                         text_flush();
                         return string_report(writer_stderr, false,
-                                      "%s: invalid --batch-size argument '%s'\n",
-                                      text_name, value);
+                                             "%s: invalid --batch-size argument '%s'\n",
+                                             text_name, value);
                 }
 
-                if (number < 2)
+                for (; byte_is_digit(at[0]); at++)
+                {
+                        if (number > (positive_max - 9) / 10)
+                                over = true;
+                        number = over ? positive_max : number * 10 + (positive)(at[0] - '0');
+                }
+
+                if (at[0])
+                {
+                        text_flush();
+                        return string_report(writer_stderr, false,
+                                             "%s: invalid suffix in --batch-size argument '%s'\n",
+                                             text_name, value);
+                }
+
+                if (!over && number < 2)
                 {
                         text_flush();
                         return string_report(writer_stderr, false,
                                       "%s: invalid --batch-size argument '%s'\n"
                                       "%s: minimum --batch-size argument is '2'\n",
                                       text_name, value, text_name);
+                }
+
+                if (over || number > (positive)most)
+                {
+                        text_flush();
+                        return string_report(writer_stderr, false,
+                                             "%s: --batch-size argument '%s' too large\n"
+                                             "%s: maximum --batch-size argument with current rlimit is %p\n",
+                                             text_name, value, text_name, (positive)most);
                 }
 
                 sort_batch = number;

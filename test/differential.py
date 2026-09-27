@@ -17560,6 +17560,8 @@ _TEXT_WRITE_SOURCES = {
     "zerobound": "env head -c 1M /dev/zero | env tr '\\0' '\\n' | run {words} {target}",
     "numbers": "env seq 1 400000 > big\nrun {words} big {target}",
     "numbersin": "env seq 1 400000 > big\nrun {words} < big {target}",
+    #       A descriptor limit of twenty, for what sort's --batch-size may be.
+    "lim20": "(ulimit -n 20; run {words} < small {target})",
     #       An input that says nothing until the tool is done, or five
     #       seconds have gone: tee -p watching a standard output whose reader
     #       has left ends at once, and one that only notices at its next
@@ -17658,6 +17660,10 @@ _TEXT_WRITE_CASES = (
     ("tee", "numbersin", "brokenign", "/dev/null"),
     ("tee", "yes", "full", "--output-error=exit", "/dev/full"), ("tee", "yes", "full", "-p", "/dev/full"),
     ("tee", "idle", "none", "-p"), ("tee", "idle", "none", "--output-error=exit-nopipe"),
+    ("sort", "lim20", "none", "--batch-size=17"), ("sort", "lim20", "none", "--batch-size=18"),
+    ("sort", "lim20", "none", "--batch-size=1000"), ("sort", "lim20", "none", "--batch-size=1"),
+    ("sort", "lim20", "none", "--batch-size=0"), ("sort", "lim20", "none", "--batch-size=5k"),
+    ("sort", "lim20", "none", "--batch-size=99999999999999999999"),
 )
 
 
@@ -18347,7 +18353,13 @@ TEXT_UTILITIES = (
                    ("-k", "99999999999999999999", "fields"), ("-k", "18446744073709551616,1", "fields"),
                    ("-k", "18446744073709551617", "fields"), ("-k", "1.99999999999999999999", "fields"),
                    ("-k", "2,99999999999999999999.99999999999999999999", "fields"),
-                   ("-t", ":", "-k", "2.18446744073709551616,3", "fields"), ("-k", "99999999999999999999n", "-u", "fields"))),
+                   ("-t", ":", "-k", "2.18446744073709551616,3", "fields"), ("-k", "99999999999999999999n", "-u", "fields"),
+                   #   --batch-size is at least 2 and at most the descriptor
+                   #   limit less three, with GNU's words for each side.
+                   ("--batch-size=0", "a.txt"), ("--batch-size=99999999999999999999", "a.txt"),
+                   ("--batch-size=4294967296", "a.txt"), ("--batch-size=100000000", "a.txt"),
+                   ("--batch-size= 5", "a.txt"), ("--batch-size=+5", "a.txt"), ("--batch-size=5k", "a.txt"),
+                   ("--batch-size=-1", "a.txt"), ("--batch-size=99999999999999999999x", "a.txt"))),
     Utility("sum",
             options=(Option("-r"), Option("-s"), Option("--sysv")),
             operands=((), ("a.txt",), ("a.txt", "b.txt"), ("-",), ("missing",), ("empty",), ("binary",), ("dir",), ("big",),
