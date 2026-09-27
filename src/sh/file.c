@@ -33059,6 +33059,128 @@ static bool seq_less(seq_decimal left, seq_decimal right)
         return left.coefficient < right.coefficient;
 }
 
+/*
+        The road GNU takes when every number is a run of decimal digits.
+
+        coreutils does not read `seq 1 99999999999999999999999` as numbers at
+        all when the three operands are bare digits, the step is at most two
+        hundred, and nothing asks for a format, a width or a separator longer
+        than one byte: it counts in the digits themselves, as long as they
+        are, and never asks whether they would fit a long double. That is
+        also why it never complains about them -- a last of five thousand
+        nines is not an overflow there, it is a long count.
+
+        So this is taken before any operand is read, in the reference's own
+        order, and only when some operand is past what the decimal road below
+        holds; inside that the two print the same bytes and the decimal road
+        is the one built for speed. The digits are kept at the right end of a
+        buffer with the room to grow on their left, and the step is added as
+        a number rather than counted in ones.
+*/
+static bool seq_all_digits(string_address text)
+{
+        return text[0] >= '0' && text[0] <= '9' &&
+               !text[string_span_of_set(text, "0123456789")];
+}
+
+static string_address seq_trim_zeros(string_address text)
+{
+        string_address at = text;
+
+        while (*at == '0')
+                at++;
+
+        return *at || at == text ? at : at - 1;
+}
+
+//      Whether trimmed digits fit the decimal road's signed word.
+static bool seq_digits_fit(string_address digits)
+{
+        positive length = string_length(digits);
+
+        return length < 19 ||
+               (length == 19 &&
+                memory_compare(digits, "9223372036854775807", 19) <= 0);
+}
+
+static p8 address_to seq_count_room;
+static positive seq_count_have;
+
+//      last is null for an unbounded count, which the reference spells inf.
+static b32 seq_count_digits(string_address first, string_address last,
+                            positive step, p8 separator)
+{
+        first = seq_trim_zeros(first);
+
+        positive length = string_length(first);
+        positive last_length = last ? string_length(last) : 0;
+        positive have = max(max(length, last_length) + 2, (positive)64);
+
+        if (last)
+                last = seq_trim_zeros(last), last_length = string_length(last);
+
+        if (!array_store_reserve(seq_count_room, seq_count_have, 0, have, have))
+                return string_report(log_error, 1, "seq: memory exhausted\n");
+
+        positive start = seq_count_have - length;
+        positive stop = seq_count_have;
+        bool written = false;
+
+        memory_copy_apart(seq_count_room + start, first, length);
+
+        while (!last || stop - start < last_length ||
+               (stop - start == last_length &&
+                memory_compare(seq_count_room + start, last, last_length) <= 0))
+        {
+                if (written)
+                        log(address_of separator, 1);
+
+                log(seq_count_room + start, stop - start);
+                written = true;
+
+                if (log_failed())
+                        return 1;
+
+                positive carry = step;
+                positive at = stop;
+
+                while (carry && at > start)
+                {
+                        positive digit = (positive)(seq_count_room[--at] - '0') + carry;
+
+                        seq_count_room[at] = (p8)('0' + digit % 10);
+                        carry = digit / 10;
+                }
+
+                while (carry)
+                {
+                        //      Only an unbounded count reaches the left
+                        //      wall; move the digits right into more room.
+                        if (!start)
+                        {
+                                positive used = stop;
+
+                                if (!array_store_reserve(seq_count_room, seq_count_have,
+                                                         used, used * 2, used * 2))
+                                        return string_report(log_error, 1,
+                                                             "seq: memory exhausted\n");
+
+                                start = seq_count_have - used;
+                                memory_copy(seq_count_room + start, seq_count_room, used);
+                                stop = seq_count_have;
+                        }
+
+                        seq_count_room[--start] = (p8)('0' + carry % 10);
+                        carry /= 10;
+                }
+        }
+
+        if (written)
+                log("\n", 1);
+        log_flush();
+        return log_failed() ? 1 : 0;
+}
+
 static const argument_option seq_options[] = {
     {"equal-width", 'w'},
     {"format", 'f', ARGUMENT_REQUIRED},
@@ -33139,6 +33261,31 @@ static b32 file_seq()
                                      "seq: format '%w' asks for the %%%s conversion, which needs "
                                      "floating point this seq has not got\n",
                                      writer_terminal_quoted_name, format_text, named);
+        }
+
+        //      The reference's all-digit road, asked before any operand is
+        //      read as a number: a step of bare digits up to two hundred,
+        //      bare digit ends, and output nothing about which could differ.
+        if (!pad && !format_text && separator[0] && !separator[1] &&
+            seq_all_digits(program_argument((b32)index)) &&
+            (given == 1 || seq_all_digits(program_argument((b32)(index + 1)))) &&
+            (given < 3 || seq_all_digits(program_argument((b32)(index + 2)))))
+        {
+                string_address first = given == 1 ? (string_address) "1"
+                                                   : program_argument((b32)index);
+                string_address last = program_argument((b32)(index + given - 1));
+                string_address step_text = seq_trim_zeros(
+                    given == 3 ? program_argument((b32)(index + 1)) : (string_address) "1");
+                positive step = 0;
+
+                if (string_length(step_text) <= 3)
+                        for (positive at = 0; step_text[at]; at++)
+                                step = step * 10 + (positive)(step_text[at] - '0');
+
+                if (step && step <= 200 &&
+                    (!seq_digits_fit(seq_trim_zeros(first)) ||
+                     !seq_digits_fit(seq_trim_zeros(last))))
+                        return seq_count_digits(first, last, step, separator[0]);
         }
 
         seq_decimal number[3];

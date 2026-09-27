@@ -6805,7 +6805,20 @@ FILES_UTILITIES = (
                       ("0x10",), ("1", "3", "0x10"), ("1e3",), ("-.5", ".5"), ("3", "1"), ("1", "1", "1"),
                       ("0.1", "0.1", "0.5"), ("1", "2", "1"), ("--", "-3"), ("1", "-", "3"), ("1.5", "1", "1"),
                       ("-inf", "1", "-inf"),),
-            stdin=("empty",), fixture="files", stderr="exact"),
+            stdin=("empty",), fixture="files", stderr="exact",
+            #   Bare digits past the signed word, which GNU counts as digit
+            #   strings without reading them as numbers: across the 2^63 and
+            #   2^64 edges, a carry that lengthens the number, the largest
+            #   step the digit road takes, leading zeros, an empty range, and
+            #   the one-byte separators it allows.
+            extra=(("9223372036854775807", "9223372036854775809"), ("18446744073709551615", "18446744073709551618"),
+                   ("99999999999999999999999999999", "100000000000000000000000000002"),
+                   ("18446744073709551616", "200", "18446744073709552816"),
+                   ("18446744073709551616", "0199", "18446744073709552816"),
+                   ("0018446744073709551616", "018446744073709551618"), ("18446744073709551617", "18446744073709551616"),
+                   ("-s", ",", "99999999999999999999", "100000000000000000001"),
+                   ("--separator=|", "99999999999999999998", "3", "100000000000000000007"),
+                   ("170141183460469225450570946617781744489", "170141183460469225450570946617781744489"))),
     Utility("readlink", options=(Option("-f"), Option("-e"), Option("-m"), Option("-n"), Option("-q"),
                                  Option("-s"), Option("-v"), Option("-z"), Option("--canonicalize"),
                                  Option("--canonicalize-existing"), Option("--canonicalize-missing"),
