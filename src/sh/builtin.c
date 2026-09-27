@@ -19191,6 +19191,8 @@ fn shell_hash(writer write, string_address input)
         run anything typed without a slash -- and had no way to ask, so every
         program had to be named by its full path.
 */
+static bool shell_find_directories;
+
 static b32 shell_find_in_path_mode(string_address name, p8 address_to into,
                                    positive room, positive access,
                                    bool use_hash, string_address value)
@@ -19218,6 +19220,12 @@ static b32 shell_find_in_path_mode(string_address name, p8 address_to into,
                 string_address known = use_hash && shell_hashall_on()
                                            ? hash_find(name) : null;
 
+                /* bash --posix looks again when the remembered file has
+                   gone; bash itself and dash try the stale path. */
+                if (known && shell_bash_compat && shell_posix_on() &&
+                    system_access_at(AT_FDCWD, known, access))
+                        known = null;
+
                 if (known)
                 {
                         positive known_length = string_length(known);
@@ -19243,6 +19251,19 @@ static b32 shell_find_in_path_mode(string_address name, p8 address_to into,
 
                 if (system_access_at(AT_FDCWD, into, access))
                         continue;
+
+                /* A directory is never a command, though it passes an
+                   execute test: both references search on past d/hello to
+                   the program in the next directory of PATH. When nothing
+                   else is found, dash still names the directory's refusal. */
+                if (!shell_find_directories)
+                {
+                        file_facts facts;
+
+                        if (test_facts(into, address_of facts, true) &&
+                            (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                                continue;
+                }
 
                 // Remembered only as the executor's answer: a query asks
                 // with access 0 and may name a file nobody could run.
@@ -19333,9 +19354,17 @@ static bipolar shell_find_in_path_alloc_mode(string_address name,
                                     !fixed_path, fixed_path))
                 return 1;
 
-        if (!query && shell_find_in_path_mode(name, *into, *room, 0, false,
-                                              fixed_path))
-                return 2;
+        if (!query)
+        {
+                bool found;
+
+                shell_find_directories = !shell_bash_compat;
+                found = shell_find_in_path_mode(name, *into, *room, 0, false,
+                                                fixed_path);
+                shell_find_directories = false;
+                if (found)
+                        return 2;
+        }
 
         if (!fixed_path && !string_first_of(name, '/') &&
             bowl_fill_command(name, *into, *room))

@@ -9758,10 +9758,25 @@ static b32 exec_dispatch(b32 command_word)
                         return shell_status;
                 }
 
+                /* A file of that name that is not executable. bash tries
+                   it and reports what execve said about the path, 126;
+                   dash reports the name, and its search ends at 127. */
                 if (located == 2)
                 {
-                        shell_status = 126;
-                        string_format(log_error, "%s: cannot run\n", name);
+                        file_facts facts;
+                        bool slash = string_first_of(name, '/') != null;
+                        bool directory =
+                            test_facts(found, address_of facts, true) &&
+                            (facts.mode & MODE_FORMAT) == MODE_DIRECTORY;
+
+                        shell_status = shell_bash_compat || slash ? 126 : 127;
+                        shell_diagnostic_where();
+                        string_format(log_error, "%s: %s\n",
+                                      shell_bash_compat ? (string_address)found
+                                                        : name,
+                                      shell_bash_compat && directory
+                                          ? (string_address) "Is a directory"
+                                          : (string_address) "Permission denied");
                         return shell_status;
                 }
 
@@ -9782,8 +9797,10 @@ static b32 exec_dispatch(b32 command_word)
         //      do not write it the same: bash says the command was not
         //      found, dash says only that it was not.
         string_format(log_error,
-                      shell_bash_compat ? "%s: command not found\n"
-                                        : "%s: not found\n", name);
+                      !shell_bash_compat ? "%s: not found\n"
+                      : string_first_of(name, '/')
+                          ? "%s: No such file or directory\n"
+                          : "%s: command not found\n", name);
 
         return shell_status;
 }

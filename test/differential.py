@@ -13446,6 +13446,42 @@ def shell_lang_nul_bytes(rng):
     return "nul-bytes-" + consumer, modes, shell_program(line + " 2>/dev/null", 'echo "end=$?"')
 
 
+#       Looking a command up: a directory of the command's name earlier in
+#       PATH is passed over, a file there that is not executable is reported
+#       as the kernel refused it, a remembered path that has gone is not
+#       found, and a name with a slash says what exec said. The directory was
+#       run, and every failure wrote "failed with error: ..." to standard
+#       output and left 126.
+def shell_lang_command_lookup(rng):
+    setup = ("mkdir -p early/cmd late plain noexec/cmd2 dir; printf 'echo late\\n' > late/cmd; chmod +x late/cmd; "
+             "printf 'echo x\\n' > plain/cmd2; printf 'echo n\\n' > nx; : > noexec/cmd3; "
+             "printf 'echo two\\n' > late/gone; chmod +x late/gone")
+    shape = rng.choice(("dir-first", "dir-only", "nonexec", "nonexec-then-exec", "stale-hash", "slash-dir",
+                        "slash-nonexec", "slash-missing", "query", "prefix-path"))
+    order = rng.choice(("$PWD/early:$PWD/late", "$PWD/late:$PWD/early", "$PWD/noexec:$PWD/plain:$PWD/late"))
+    if shape == "dir-first":
+        line = "PATH=\"$PWD/early:$PWD/late:$PATH\"; cmd; echo \"s=$?\"; cmd; echo \"s=$?\""
+    elif shape == "dir-only":
+        line = "PATH=\"$PWD/noexec:$PATH\"; cmd2; echo \"s=$?\""
+    elif shape == "nonexec":
+        line = "PATH=\"$PWD/plain:$PATH\"; cmd2; echo \"s=$?\""
+    elif shape == "nonexec-then-exec":
+        line = "chmod +x plain/cmd2; PATH=\"" + order + ":$PATH\"; cmd2; echo \"s=$?\"; cmd; echo \"s=$?\""
+    elif shape == "stale-hash":
+        line = "PATH=\"$PWD/late:$PATH\"\ngone\nrm late/gone\ngone\necho \"s=$?\""
+    elif shape == "slash-dir":
+        line = "./dir; echo \"s=$?\""
+    elif shape == "slash-nonexec":
+        line = "./nx; echo \"s=$?\"; \"$PWD/nx\"; echo \"s=$?\""
+    elif shape == "slash-missing":
+        line = "./missing; echo \"s=$?\""
+    elif shape == "query":
+        line = "PATH=\"" + order + ":$PATH\"; command -v cmd >/dev/null; echo \"v=$?\"; type cmd >/dev/null; echo \"t=$?\""
+    else:
+        line = "PATH=\"" + order + ":$PATH\" cmd; echo \"s=$?\""
+    return "command-lookup-" + shape, shell_ALL, shell_program(setup, "{ " + line + "\n} 2>&1 | sed \"s|$PWD|DIR|g; s|^[^ ]*: line [0-9]*: ||; s|^[^ ]*: [0-9]*: ||\"")
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16070,6 +16106,7 @@ SHELL_FAMILIES = (
     shell_lang_backquote_quoting,
     shell_lang_escaped_pattern_bytes,
     shell_lang_nul_bytes,
+    shell_lang_command_lookup,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),

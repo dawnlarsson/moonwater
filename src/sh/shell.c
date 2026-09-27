@@ -1389,18 +1389,41 @@ DEAD_END fn shell_thread_instance_mode(bool preserve_ignored)
                 exit(126);
         }
 
-        bipolar exec_result = shell_exec_file(
-            shell_exec_path ? shell_exec_path : shell_argv[0], shell_argv,
-            shell_argc, environment);
+        string_address path = shell_exec_path ? shell_exec_path : shell_argv[0];
+        bipolar exec_result = shell_exec_file(path, shell_argv, shell_argc,
+                                              environment);
 
         if (floodlight_inplace_terminal)
                 floodlight_silent_stop();
 
-        string_format(log, "failed with error: %s\n",
-                      file_reason(exec_result));
-        log_flush();
+        /* What execve said, on standard error and in the references' words:
+           bash names the file it tried, dash the command and "not found"
+           for a file that is not there. A file that vanished after it was
+           found -- a stale hashed path -- is not found, 127; anything else
+           the kernel refused is 126. This wrote "failed with error: ..." to
+           standard output and left 126 either way. */
+        {
+                bipolar code = exec_result < 0 ? -exec_result : exec_result;
+                string_address why = system_error_message(code);
 
-        exit(126);
+                file_facts facts;
+
+                if (!why)
+                        why = (string_address) "No such file or directory";
+                if (shell_bash_compat && code == ERROR_ACCESS &&
+                    test_facts(path, address_of facts, true) &&
+                    (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                        why = (string_address) "Is a directory";
+
+                shell_diagnostic_where();
+                string_format(log_error, "%s: %s\n",
+                              shell_bash_compat ? path : shell_argv[0],
+                              !shell_bash_compat && code == ERROR_NO_ENTRY
+                                  ? (string_address) "not found"
+                                  : why);
+                log_flush();
+                exit(code == ERROR_NO_ENTRY ? 127 : 126);
+        }
 }
 
 DEAD_END fn shell_thread_instance()
@@ -1785,7 +1808,7 @@ fn shell_execute_command()
 
                 if (waited < 0)
                 {
-                        string_format(log, "failed with error: %s\n",
+                        string_format(log_error, "failed with error: %s\n",
                                       file_reason(waited));
                         shell_status = 125;
                 }
@@ -1807,7 +1830,7 @@ fn shell_execute_command()
                 */
         }
         else
-                string_format(log, "failed with error: %s\n",
+                string_format(log_error, "failed with error: %s\n",
                               file_reason(child));
 
         log_flush();
