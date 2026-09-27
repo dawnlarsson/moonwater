@@ -11718,32 +11718,6 @@ static bool conditional_primary(bool invert)
                                shell_option_on(option);
                 }
 
-                /*
-                        Bash 5.2 [[ -t WORD ]] reads a file descriptor as
-                        digits. A non-integer is false, not an error, and
-                        not a reason to abort the script.
-                */
-                if (string_is(raw + 1, 't') && !string_get(raw + 2))
-                {
-                        bipolar descriptor;
-                        positive used;
-                        string_address step;
-                        p8 settings[64];
-
-                        if (!operand || !string_get(operand))
-                                return false;
-
-                        step = operand + string_span(operand, string_set_blanks);
-                        descriptor = string_bipolar(step, address_of used);
-                        step += used;
-                        step += string_span(step, string_set_blanks);
-                        if (!used || string_get(step))
-                                return false;
-
-                        return system_control(descriptor, BUILTIN_TCGETS,
-                                              settings) == 0;
-                }
-
                 test_bad = false;
                 {
                         /* A diagnostic names the command through
@@ -11867,7 +11841,21 @@ static bool conditional_negation()
                 invert = !invert;
         }
 
+        /* An operand bash cannot read makes its term answer 2 rather than
+           true or false, and the answer is a status like any other: `!`
+           turns it into 0, && stops at it and || goes past it to the right
+           hand side, whose answer is the one that stands. */
+        bool before = conditional_runtime;
+
+        conditional_runtime = false;
         bool value = conditional_primary(invert);
+
+        if (invert && conditional_runtime)
+        {
+                conditional_runtime = before;
+                return true;
+        }
+        conditional_runtime = conditional_runtime || before;
         return invert ? !value : value;
 }
 
@@ -11880,6 +11868,8 @@ static bool conditional_negation()
                 {                                                            \
                         bool held = conditional_active;                      \
                                                                              \
+                        if (held && (wanted) && !value)                     \
+                                conditional_runtime = false;                \
                         conditional_at++;                                   \
                         conditional_active = held && (wanted);              \
                         bool other = lower();                               \
