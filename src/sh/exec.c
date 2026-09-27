@@ -8704,6 +8704,46 @@ static string_address address_to exec_compound_word;
 static positive exec_compound_room;
 
 /*
+        One element of a compound assignment, held until every piece has
+        been expanded. Bash expands the whole list before it empties or
+        extends the array, so ar=("${ar[@]}" c) is the old elements and c;
+        emptying first left c alone, and ar+=(x "${ar[@]}") saw its own x.
+*/
+typedef struct exec_compound_held
+{
+        string_address key;
+        positive key_length;
+        string_address value;
+        struct exec_compound_held address_to next;
+} exec_compound_held;
+
+static bool exec_compound_put(string_address name, positive name_length,
+                              string_address key, positive key_length,
+                              string_address value,
+                              exec_compound_held address_to address_to tail)
+{
+        exec_compound_held address_to held;
+
+        if (!tail)
+                return shell_array_set(name, name_length, key, key_length,
+                                       value, false);
+
+        held = (exec_compound_held address_to)shell_store_take(
+            address_of exec_store, sizeof(*held));
+        if (!held)
+                return false;
+        held->key = shell_store_copy(address_of exec_store, key, key_length);
+        held->key_length = key_length;
+        held->value = shell_store_copy(address_of exec_store, value,
+                                       string_length(value));
+        held->next = null;
+        if (!held->key || !held->value)
+                return false;
+        *tail = held;
+        return true;
+}
+
+/*
         NAME=(...) and NAME+=(...).
 
         Bash replaces an array rather than merging into one, so a plain
@@ -8741,12 +8781,14 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                 name, name_length,
                 (p8)((keyed ? SHELL_ARRAY_ASSOCIATIVE : SHELL_ARRAY_INDEXED) |
                      SHELL_ARRAY_ASSIGNED),
-                0) ||
-            (!append && !shell_array_clear(name, name_length)))
+                0))
         {
                 shell_store_rewind(address_of exec_store, held);
                 return false;
         }
+
+        exec_compound_held address_to first = null;
+        exec_compound_held address_to address_to tail = address_of first;
 
         if (append && shell_array_length(name, name_length))
                 next = shell_array_highest(name, name_length) + 1;
@@ -8818,9 +8860,11 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                         }
 
                         value = shell_expand_assignment(piece, value_at);
-                        answer = shell_array_set(name, name_length, key,
-                                                 key_length, value + value_at,
-                                                 false);
+                        answer = exec_compound_put(name, name_length, key,
+                                                   key_length, value + value_at,
+                                                   tail);
+                        if (tail && *tail)
+                                tail = address_of (*tail)->next;
 
                         if (!keyed)
                                 next = array_index_of(key, key_length) + 1;
@@ -8853,12 +8897,24 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                         {
                                 key_length = positive_into_string(written,
                                                                   next++);
-                                answer = shell_array_set(name, name_length,
-                                                         written, key_length,
-                                                         exec_compound_word[one],
-                                                         false);
+                                answer = exec_compound_put(
+                                    name, name_length, written, key_length,
+                                    exec_compound_word[one], tail);
+                                if (tail && *tail)
+                                        tail = address_of (*tail)->next;
                         }
                 }
+        }
+
+        if (answer)
+        {
+                if (!append)
+                        answer = shell_array_clear(name, name_length);
+                for (exec_compound_held address_to one = first;
+                     one && answer; one = one->next)
+                        answer = shell_array_set(name, name_length, one->key,
+                                                 one->key_length, one->value,
+                                                 false);
         }
 
         shell_store_rewind(address_of exec_store, held);
