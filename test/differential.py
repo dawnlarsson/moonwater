@@ -9601,7 +9601,14 @@ MISC_UTILITIES = (
                       ("1e3",), ("0x10",), ("1,000",), ("--", "-"), ("nan",), ("inf",)),
             stdin=("numbers", "misc_numfmt_table", "misc_numfmt_units", "misc_numfmt_fields", "misc_numfmt_widths",
                    "misc_numfmt_random", "fields", "empty", "spaces", "tabs", "nul", "long", "text", "nonl"),
-            fixture="misc", stderr="exact", max_flags=5),
+            fixture="misc", stderr="exact", max_flags=5,
+            #   A field list is pieces split at commas or blanks, and a dash
+            #   alone is every field wherever it stands. A second --field is
+            #   refused whatever it says.
+            extra=(("--field", "1,2 4", "--to=si", "1000", "2000"), ("--field=3,-", "--to=si"),
+                   ("--field=-,1", "--to=si"), ("--field", "1,,2"), ("--field", " 1"), ("--field", "1 "),
+                   ("--field", "1\t2", "--to=si"), ("--field", "1", "--field", "1"),
+                   ("--field=-", "--field=1-"), ("--field", "1,2", "--field", "bad"))),
 
     Utility("tsort",
             operands=((), ("tsort.dag",), ("tsort.cycle",), ("tsort.odd",), ("tsort.chain",), ("a.txt",), ("missing",),
@@ -16819,7 +16826,10 @@ TEXT_UTILITIES = (
                    ("--complement", "-c", "3,5,4000-", "wide"), ("-b", "5,1-2,70000-", "wide"),
                    ("-b", "18446744073709551614-", "a.txt"), ("--complement", "-b", "99999999999-", "a.txt"),
                    ("-c5000", "wide"), ("-c4999-5001", "wide"), ("-c1-", "wide"), ("-c", "1", "nonl"),
-                   (), ("-d", ":"), ("--complement",))),
+                   (), ("-d", ":"), ("--complement",),
+                   #   Pieces of a list are split at blanks as well as commas.
+                   ("-d", ":", "-f", "1 3", "fields"), ("-d", ":", "-f", "1\t3", "fields"), ("-c", "1 3"),
+                   ("-d", ":", "-f", "1  3"), ("-d", ":", "-f", "1,"), ("-d", ":", "-f", " 1"), ("-d", ":", "-f", "1,-"))),
     Utility("expand",
             options=(Option("-i"), Option("--initial"), Option("-t", _TEXT_TAB_LISTS, None, repeat=True),
                      Option("--tabs", ("3,5", "4"), True), Option("-4"), Option("-3,5"), Option("-8"),

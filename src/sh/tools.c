@@ -5722,13 +5722,23 @@ static bool numfmt_option_seen(p8 letter, string_address value)
         }
         if (letter == 'f' && value)
         {
-                /* A lone dash is every field. */
-                string_address list = string_equals(value, "-")
-                                          ? (string_address) "1-"
-                                          : value;
+                /* One list is all there is: a second --field is refused
+                   before its words are read, even when it says the same. */
+                if (numfmt.fields_given)
+                {
+                        text_flush();
+                        return string_report(writer_stderr, false,
+                                             "numfmt: multiple field specifications\n");
+                }
 
+                /* A dash with nothing either side is every field, alone or
+                   as one piece of a list. */
                 numfmt_fields_begin();
-                if (!text_list_parse(list))
+                text_list_dash_all = true;
+                bool parsed = text_list_parse(value);
+                text_list_dash_all = false;
+
+                if (!parsed)
                         return numfmt_fields_refuse(value);
                 numfmt.fields_given = true;
         }

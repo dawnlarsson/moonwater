@@ -13283,6 +13283,9 @@ static positive text_list_single_last;
 // A position at or past the largest count is one no line can reach, and GNU
 // says so rather than treating the whole list as malformed.
 static bool text_list_too_large;
+// numfmt reads a piece that is a dash alone as every field, where cut
+// refuses it as a range with no end.
+static bool text_list_dash_all;
 
 /*
         The ranges as written, kept so the range starts can be settled the way
@@ -13393,7 +13396,7 @@ static bool text_list_parse(string_address spec)
 
                         at = (positive)(cursor - spec);
 
-                        if (!have_first && !have_last)
+                        if (!have_first && !have_last && !text_list_dash_all)
                                 return false;
 
                         if (!have_first)
@@ -13452,7 +13455,12 @@ static bool text_list_parse(string_address spec)
                         }
                 }
 
-                if (spec[at] == ',')
+                //      A piece ends at a comma or a blank, as GNU's
+                //      set_fields has it: `-f "1 3"` is two fields. There is
+                //      exactly one separator between pieces, so a doubled
+                //      one, a leading one or a trailing one is an empty
+                //      piece and refused.
+                if (spec[at] == ',' || spec[at] == ' ' || spec[at] == '\t')
                 {
                         at++;
 
