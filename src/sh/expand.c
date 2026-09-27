@@ -714,10 +714,12 @@ static bipolar expand_base_number(string_address address_to at, bool address_to 
         walk have to agree, because [^]] is "not a bracket" in bash and the
         class of a caret, then a leftover bracket, in dash.
 */
+/* A bracket set opened by ! or ^ is the complement. dash 0.5.13 negates on
+   ^ too, in case and in globs, so the caret is not bash's alone:
+   case b in [^a]) matched nothing under the dash and sh names. */
 static inline INLINE bool expand_set_inverts(string_address at)
 {
-        return string_is(at, '!') ||
-               (shell_bash_compat && string_is(at, '^'));
+        return string_is(at, '!') || string_is(at, '^');
 }
 
 static PURE string_address expand_set_end(string_address at)
@@ -2074,10 +2076,13 @@ static CONST bool expand_quoted_metacharacter(p8 value, bool regex)
         //      Parentheses and a bar are the extended groups' own, which
         //      case and [[ ]] read with extglob off: *'()' is a star and two
         //      parentheses, not the group *( ) that matches only nothing.
+        //      A quoted ! or ^ right after [ is a member, not the
+        //      complement: [\^a] matches a caret.
         const p64 glob_low = ((p64)1 << '-') | ((p64)1 << '(') |
-                             ((p64)1 << ')');
+                             ((p64)1 << ')') | ((p64)1 << '!');
         const p64 glob_high = ((p64)1 << (']' - 64)) |
-                              ((p64)1 << ('|' - 64));
+                              ((p64)1 << ('|' - 64)) |
+                              ((p64)1 << ('^' - 64));
         const p64 regex_low = ((p64)1 << '$') | ((p64)1 << '(') |
                               ((p64)1 << ')') | ((p64)1 << '+') |
                               ((p64)1 << '.');
@@ -9545,7 +9550,7 @@ static inline INLINE bool glob_quoted_special(p8 byte)
         //      the backslash with the rest of the quoting turned the one into
         //      the other, so the set matched b and not the hyphen.
         return byte == '*' || byte == '?' || byte == '[' || byte == '\\' ||
-               byte == '-' || byte == ']' ||
+               byte == '-' || byte == ']' || byte == '^' || byte == '!' ||
                (shell_extglob_on && (lex_extended_head(byte) || byte == '(' ||
                                      byte == ')' || byte == '|'));
 }
@@ -9572,8 +9577,7 @@ static bool expand_emit(positive at, positive stop, shell_words address_to out)
                 million system calls against thirty three.
 
                 What is allowed to close it comes from the same page. After
-                the '[' an optional '!' does not end it -- bash also takes
-                '^' here, dash does not -- and a ']' standing immediately
+                the '[' an optional '!' or '^' does not end it -- and a ']' standing immediately
                 after that invert is itself literal -- "[]]" is the bracket
                 expression that matches a bracket. So the first ']' that can
                 close is the one after that, and the three states below are
@@ -9629,7 +9633,7 @@ static bool expand_emit(positive at, positive stop, shell_words address_to out)
                                 bracket = 1;
                 }
                 else if (bracket == 1 &&
-                         (value == '!' || (shell_bash_compat && value == '^')))
+                         (value == '!' || value == '^'))
                         bracket = 2;
                 else if (bracket == 3 && value == ']')
                         magic = true;

@@ -14074,6 +14074,26 @@ def shell_lang_trap_child_ignore(rng):
     return ("trap-child-ignore-" + place, shell_ALL, shell_program(line, 'echo "end=$?"'))
 
 
+#       A bracket set opened by ^ is the complement under every name, as it
+#       is in dash 0.5.13 as well as bash, and a quoted ^ or ! there is a
+#       member. dash mode and sh read [^a] as the set of ^ and a.
+def shell_lang_bracket_caret(rng):
+    pattern = rng.choice(("[^a]", "[^]]", "[^[z]", "[\\^a]", "['^'a]", "[!a]", "[\\!a]", "[^a-c]*", "*[^x]", "[^^]",
+                          "[a^]", "[]^]"))
+    subject = rng.choice(("a", "b", "^", "!", "]", "[", "x", "ab", "za"))
+    context = rng.choice(("case", "case", "glob", "strip", "replace"))
+    if context == "case":
+        line = "case " + shell_quote(subject) + " in " + pattern + ") echo match;; *) echo no;; esac"
+    elif context == "glob":
+        line = "mkdir g && cd g && : > a && : > b && : > '^' && : > '!' && : > x && echo " + pattern
+    elif context == "strip":
+        line = "v=" + shell_quote(subject) + "; echo \"<${v#" + pattern + "}>\""
+    else:
+        line = "v=" + shell_quote(subject) + "; echo \"<${v/" + pattern + "/R}>\""
+    modes = shell_BASH if context == "replace" else shell_ALL
+    return ("bracket-caret-" + context, modes, shell_program(line, 'echo "end=$?"'))
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16720,6 +16740,7 @@ SHELL_FAMILIES = (
     shell_lang_source_frames,
     shell_lang_redirect_save_scope,
     shell_lang_trap_child_ignore,
+    shell_lang_bracket_caret,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),
