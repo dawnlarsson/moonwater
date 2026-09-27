@@ -18045,6 +18045,8 @@ _TEXT_WRITE_SOURCES = {
     "numbers": "env seq 1 400000 > big\nrun {words} big {target}",
     "numbersin": "env seq 1 400000 > big\nrun {words} < big {target}",
     "args": "run {words} {target}",
+    "shellerr": ("exec 3>&2 2>/dev/full\nenv printf x | nosuchcommand_here\nexec 2>&3\n"
+                 "echo a | run {words} {target}"),
     #       Thirty inputs, each in order, merged under a descriptor limit
     #       too low to hold them all: GNU merges what opens. The unordered
     #       set shows the batch schedule in the answer.
@@ -18179,11 +18181,14 @@ _TEXT_WRITE_CASES = (
     #       seq and shuf name the reason of a refused write, as GNU's do.
     ("seq", "args", "full", "3"), ("seq", "args", "full", "100000"), ("seq", "args", "closed", "3"),
     ("seq", "args", "full", "1", "0.5", "3"), ("seq", "args", "tmpfs", "1", "200000"),
+    ("seq", "args", "limit", "1", "100000"), ("seq", "args", "gone", "1", "100000"),
     ("shuf", "args", "full", "-e", "a", "b"), ("shuf", "args", "full", "-i", "1-5"),
     ("shuf", "args", "closed", "-e", "a"),
     ("shuf", "numbers", "tmpfs"),
     ("od", "small", "errfull", "-w1"), ("tail", "args", "errfull", "-n0", "--retry", "small"),
     ("numfmt", "args", "errfull", "--debug", "1000"), ("cut", "small", "errfull", "-c1", "missing"),
+    #       A refusal the shell met before the tool ran is not the tool's.
+    ("cat", "shellerr", "none"), ("od", "shellerr", "none", "-An", "-c"),
 )
 
 

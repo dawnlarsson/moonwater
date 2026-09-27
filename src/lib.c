@@ -53416,9 +53416,10 @@ __asm__(
 
 // A writer-compatible stderr span. Zero length means a terminated string;
 // positive lengths remain exact, including embedded NUL. No output is flushed.
-// A span the kernel would not take whole sets writer_stderr_failed, which is
-// never cleared: GNU's tools end with status 1 when a diagnostic could not be
-// written, whatever else went right, and a tool asks this at its end.
+// A span the kernel would not take whole sets writer_stderr_failed, which
+// writer_stderr never clears: GNU's tools end with status 1 when a diagnostic
+// could not be written, whatever else went right, so a tool clears it where it
+// starts and asks it at its end.
 fn writer_stderr(address_any data, positive length);
 extern p8 writer_stderr_failed;
 

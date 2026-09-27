@@ -1217,6 +1217,10 @@ static fn text_begin(string_address name)
         text_out_error_buffer = 0;
         text_out_stdio_size = 0;
         text_status = 0;
+        //      Only this tool's own diagnostics decide its status: the shell
+        //      that runs it, or a tool before it in the same process, may
+        //      have written to a standard error that refused them.
+        writer_stderr_failed = 0;
         text_name = name;
         text_argument_count = program_argument_count();
         text_files_count = 0;

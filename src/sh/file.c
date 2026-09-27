@@ -35069,17 +35069,38 @@ static positive seq_count_have;
 /*
         A refused write, said as GNU's seq says it at exit: "write error"
         and the reason. The log writer keeps only that a write failed, so the
-        reason is asked again of standard output with an empty write, which
-        a closed or read-only descriptor and /dev/full still refuse with
-        theirs; a file that has simply filled takes an empty write, and its
-        reason is the full disk that stopped it.
+        reason is asked again of standard output: an empty write, which a
+        closed or read-only descriptor and /dev/full still refuse with
+        theirs; failing that, what standard output is -- a pipe or socket
+        that took nothing had no reader, a file at the size limit was too
+        large -- and otherwise the full disk that stopped a file.
 */
 static b32 seq_write_failed()
 {
-        bipolar probe = system_call_3(syscall(write), 1, (positive)"", 0);
+        bipolar reason = system_call_3(syscall(write), 1, (positive)"", 0);
+        file_facts facts;
+
+        if (reason >= 0)
+        {
+                reason = -28;
+
+                if (file_look(1, (string_address)"", AT_EMPTY_PATH, address_of facts))
+                {
+                        positive format = facts.mode & MODE_FORMAT;
+                        positive limit[2];
+
+                        if (format == MODE_PIPE || format == MODE_SOCKET)
+                                reason = -32;
+                        else if (format == MODE_FILE &&
+                                 system_call_4(syscall(prlimit64), 0, 1, 0,
+                                               (positive)limit) >= 0 &&
+                                 facts.size >= limit[0])
+                                reason = -27;
+                }
+        }
 
         return string_report(log_error, 1, "seq: write error: %s\n",
-                             file_reason(probe < 0 ? probe : -28));
+                             file_reason(reason));
 }
 
 static b32 seq_count_digits(string_address first, string_address last,
