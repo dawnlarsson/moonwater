@@ -3635,7 +3635,28 @@ lane_net()
         return "$net_outcome"
 }
 lane_bowl() { freestanding_checks_lane bowl bowl; }
-lane_tar() { freestanding_checks_lane tar tar; }
+#       Freestanding CHECK_tar (paths, pax, magics), then a continuous
+#       file↔directory↔symlink pathname race against tar extract. The race
+#       harness needs the shell applet farm; exit 2 (threads/rename missing)
+#       is soft and does not downgrade a green freestanding lane.
+lane_tar()
+{
+        freestanding_checks_lane tar tar
+        tar_outcome=$?
+        if ! need_shell; then
+                note "pathname_race: NOT RUN -- shell farm unavailable"
+                [ "$tar_outcome" != 0 ] || tar_outcome=2
+                return "$tar_outcome"
+        fi
+        python3 test/differential.py --harness pathname_race \
+                --binary "ours=$shell_binary"
+        case $? in
+        0) ;;
+        2) note "pathname_race: skipped (soft) -- threads/rename unavailable" ;;
+        *) tar_outcome=1 ;;
+        esac
+        return "$tar_outcome"
+}
 lane_zstd() { freestanding_checks_lane zstd zstd; }
 lane_gzip() { freestanding_checks_lane gzip gzip; }
 lane_xz() { freestanding_checks_lane xz xz; }

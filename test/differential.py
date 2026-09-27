@@ -34288,19 +34288,36 @@ def tls_fuzz_sanitize_config(clang):
             "libFuzzer ASan/UBSan")
 
 
+def ensure_tls_fuzz_seeds():
+    """Materialize gitignored *.bin seeds from test/fuzz_corpus/generate_seeds.py."""
+    import importlib.util
+
+    generator = HARNESS_ROOT / "test/fuzz_corpus/generate_seeds.py"
+    if not generator.is_file():
+        return False, "missing " + str(generator)
+    spec = importlib.util.spec_from_file_location(
+        "moonwater_fuzz_generate_seeds", generator)
+    if spec is None or spec.loader is None:
+        return False, "cannot load " + str(generator)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.materialize()
+    return True, None
+
+
 def harness_tls_der_fuzz(argv):
     """Coverage-guided libFuzzer over DER certs and Certificate HS framing.
 
     Lifts the DER readers and tls_certificate_body_open from src/net/net.c the
     way http_response_framing lifts response framing: a hosted shim, the OIDs
     and ASN.1/cert parsers, certificate-list open/walk, and
-    LLVMFuzzerTestOneInput. Seed corpus lives under test/fuzz_corpus/tls_der/
-    (extension fixtures from checks.c plus Certificate handshake bodies).
-    Bounded fixed-seed run so a lane cannot hang; return 2 (NOT RUN) when
-    clang/libFuzzer is unavailable. Expected TLS_FAIL is ignored; only
-    ASan/UBSan aborts fail the lane (or MSan when MOONWATER_MSAN=1). Override
-    MOONWATER_FUZZ_RUNS / MOONWATER_FUZZ_SECONDS for longer local runs (see
-    test/fuzz_net and test/msan_net).
+    LLVMFuzzerTestOneInput. Seed bytes are materialized (gitignored) under
+    test/fuzz_corpus/tls_der/ from generate_seeds.py. Bounded fixed-seed run
+    so a lane cannot hang; return 2 (NOT RUN) when clang/libFuzzer is
+    unavailable. Expected TLS_FAIL is ignored; only ASan/UBSan aborts fail
+    the lane (or MSan when MOONWATER_MSAN=1). Override MOONWATER_FUZZ_RUNS /
+    MOONWATER_FUZZ_SECONDS for longer local runs (see test/fuzz_net and
+    test/msan_net).
 
         python3 test/differential.py --harness tls_der_fuzz
     """
@@ -34318,12 +34335,17 @@ def harness_tls_der_fuzz(argv):
         print("tls der fuzz: NOT RUN -- " + san_label)
         return 2
 
+    ok, why = ensure_tls_fuzz_seeds()
+    if not ok:
+        print("tls der fuzz: NOT RUN -- " + why)
+        return 2
+
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     corpus = HARNESS_ROOT / "test/fuzz_corpus/tls_der"
     if not corpus.is_dir():
         print("tls der fuzz: NOT RUN -- missing seed corpus at " + str(corpus))
         return 2
-    seeds = sorted(p for p in corpus.iterdir() if p.is_file())
+    seeds = sorted(p for p in corpus.iterdir() if p.is_file() and p.suffix == ".bin")
     if not seeds:
         print("tls der fuzz: NOT RUN -- seed corpus is empty")
         return 2
@@ -34581,12 +34603,17 @@ def harness_tls_hs_fuzz(argv):
         print("tls hs fuzz: NOT RUN -- " + san_label)
         return 2
 
+    ok, why = ensure_tls_fuzz_seeds()
+    if not ok:
+        print("tls hs fuzz: NOT RUN -- " + why)
+        return 2
+
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     corpus = HARNESS_ROOT / "test/fuzz_corpus/tls_hs"
     if not corpus.is_dir():
         print("tls hs fuzz: NOT RUN -- missing seed corpus at " + str(corpus))
         return 2
-    seeds = sorted(p for p in corpus.iterdir() if p.is_file())
+    seeds = sorted(p for p in corpus.iterdir() if p.is_file() and p.suffix == ".bin")
     if not seeds:
         print("tls hs fuzz: NOT RUN -- seed corpus is empty")
         return 2
@@ -34957,10 +34984,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 def harness_msan_net(argv):
     """Local/hosted MemorySanitizer lane for net wire parsers.
 
-    Opt-in only (not lane_net, not CI push). Proves clang MSan can see
-    uninitialized ABI padding in a wire-style header, then runs the TLS DER
-    and handshake fuzz smokes under MOONWATER_MSAN=1. Returns 2 (NOT RUN)
-    when -fsanitize=memory is unavailable.
+    Opt-in only (not lane_net, not CI push). Under clang -fsanitize=memory:
+      1. intentional ABI pad proves (generic wire header + netlink-attr-shaped)
+      2. thin hosted lifts of dns_copy_name and tls_record_version_valid over
+         fully-initialized hostile buffers (clean under MSan)
+      3. short tls_der_fuzz / tls_hs_fuzz seed smokes with MOONWATER_MSAN=1
+    Not a full CHECK_net under MSan. Returns 2 (NOT RUN) when MSan is
+    unavailable (Apple clang, many qemu images).
 
         sh test/msan_net
         MOONWATER_MSAN=1 python3 test/differential.py --harness tls_der_fuzz
@@ -34979,6 +35009,35 @@ def harness_msan_net(argv):
         return 2
 
     checks = Checks()
+    msan_env = dict(os.environ, MSAN_OPTIONS="halt_on_error=1:exitcode=1")
+    msan_cc = [clang, "-O1", "-g", "-std=gnu11", "-fno-sanitize-recover=all",
+               "-fsanitize=memory"]
+
+    def msan_build_run(work, name, source):
+        unit = work / (name + ".c")
+        binary = work / name
+        unit.write_text(source)
+        built = subprocess.run(msan_cc + [str(unit), "-o", str(binary)],
+                               capture_output=True, text=True)
+        if built.returncode:
+            return None, built.stderr
+        ran = subprocess.run([str(binary)], capture_output=True, text=True,
+                             env=msan_env)
+        return ran, built.stderr
+
+    def msan_expect_pad_fire(ran, label):
+        fired = (ran is not None and ran.returncode != 0 and
+                 "uninitialized" in (ran.stderr or "").lower())
+        if ran is not None and ran.stderr:
+            print(ran.stderr, end="" if ran.stderr.endswith("\n") else "\n")
+        checks(fired, label)
+        if not fired:
+            detail = "" if ran is None else (
+                "(rc=%d):\n" % ran.returncode + (ran.stderr or "")[-1500:])
+            print("  FAIL %s did not fire %s" % (label, detail))
+        return fired
+
+    # --- 1a. Generic wire-header pad prove (original). ---
     pad_source = r"""
 #include <stdint.h>
 #include <stdio.h>
@@ -35017,34 +35076,243 @@ int main(void)
         return 0;
 }
 """
+    # --- 1b. CHECK_net-adjacent: netlink-attr-shaped hole (distinct). ---
+    # Production netlink_attribute is {p16 length; p16 type} with no hole;
+    # this hosted stand-in widens type to a byte then a u32 value so ABI pad
+    # appears the way a careless sizeof-memcpy serializer would leak it.
+    nlattr_pad_source = r"""
+#include <stdint.h>
+#include <stdio.h>
+#include <stddef.h>
+#include <sanitizer/msan_interface.h>
+
+struct nlattr_hosted {
+        uint16_t nla_len;
+        uint8_t nla_type;
+        uint32_t value;
+};
+
+int main(void)
+{
+        struct nlattr_hosted attr;
+        size_t pad_off;
+
+        attr.nla_len = 8;
+        attr.nla_type = 1;
+        attr.value = 0x11223344;
+        pad_off = offsetof(struct nlattr_hosted, nla_type) + 1;
+        fprintf(stderr,
+                "msan nlattr pad: sizeof=%zu type@%zu value@%zu pad@%zu\n",
+                sizeof attr, offsetof(struct nlattr_hosted, nla_type),
+                offsetof(struct nlattr_hosted, value), pad_off);
+        if (pad_off >= offsetof(struct nlattr_hosted, value)) {
+                fprintf(stderr, "msan nlattr pad: no padding on this ABI\n");
+                return 2;
+        }
+        __msan_check_mem_is_initialized((char *)&attr + pad_off, 1);
+        fprintf(stderr, "msan nlattr pad: REACHED (MSan missed padding)\n");
+        return 0;
+}
+"""
+
     with tempfile.TemporaryDirectory(prefix="msan-pad-") as temporary:
         work = Path(temporary)
-        unit = work / "pad_prove.c"
-        binary = work / "pad_prove"
-        unit.write_text(pad_source)
-        built = subprocess.run(
-            [clang, "-O1", "-g", "-std=gnu11", "-fno-sanitize-recover=all",
-             "-fsanitize=memory", str(unit), "-o", str(binary)],
-            capture_output=True, text=True)
-        if built.returncode:
+        ran, err = msan_build_run(work, "pad_prove", pad_source)
+        if ran is None:
             print("msan net: NOT RUN -- cannot link MSan probe:\n" +
-                  built.stderr[-2000:])
+                  (err or "")[-2000:])
             return 2
-        environment = dict(os.environ,
-                           MSAN_OPTIONS="halt_on_error=1:exitcode=1")
-        ran = subprocess.run([str(binary)], capture_output=True, text=True,
-                             env=environment)
-        fired = (ran.returncode != 0 and
-                 "uninitialized" in (ran.stderr or "").lower())
+        msan_expect_pad_fire(
+            ran, "intentional ABI wire-header padding is visible to MSan")
+
+        ran, err = msan_build_run(work, "nlattr_pad", nlattr_pad_source)
+        if ran is None:
+            print("msan net: NOT RUN -- cannot link nlattr pad probe:\n" +
+                  (err or "")[-2000:])
+            return 2
+        msan_expect_pad_fire(
+            ran,
+            "intentional netlink-attr-shaped ABI padding is visible to MSan")
+
+    # --- 2. Thin hosted lifts: dns_copy_name + TLS record header. ---
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+
+    def sec(text, first, following):
+        i = text.index(first)
+        return text[i:text.index(following, i)]
+
+    dns_copy = sec(
+        net,
+        "static COLD bipolar dns_copy_name(",
+        "//      Where a name ends, for a caller")
+    tls_ver = sec(
+        net,
+        "static bool tls_record_version_valid(p8 address_to header)",
+        "/* Receive behind receive_end.")
+
+    wire_lift_source = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+typedef uint8_t p8;
+typedef uint16_t p16;
+typedef uint32_t p32;
+typedef long bipolar;
+typedef unsigned long positive;
+typedef void *address_any;
+#define COLD
+#define PURE
+#define address_to *
+#define address_of &
+#define null NULL
+#define DNS_MALFORMED (-3)
+#define memory_copy_apart memcpy
+#define memory_copy memcpy
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+static p16 network_load_16(const p8 *bytes)
+{
+        return (p16)(((p16)bytes[0] << 8) | (p16)bytes[1]);
+}
+""" + dns_copy + "\n" + tls_ver + r"""
+/* Thin stand-in for the header half of tls_record_whole / tls_next_record:
+   version check + length load against a fully-initialized buffer. */
+static bool tls_record_header_open(p8 address_to header, positive have,
+                                   p8 address_to type,
+                                   positive address_to payload_length)
+{
+        if (have < 5)
+                return false;
+        if (!tls_record_version_valid(header))
+                return false;
+        address_to type = header[0];
+        address_to payload_length = network_load_16(header + 3);
+        return have - 5 >= address_to payload_length;
+}
+
+static int failures;
+
+static void expect_dns(const char *label, const p8 *msg, positive size,
+                       positive at, int want_ok)
+{
+        p8 into[256];
+        positive ended = 0;
+        bipolar used = dns_copy_name((p8 address_to)msg, size, at, into,
+                                     sizeof into, address_of ended);
+        int ok = used >= 0;
+        if (ok != want_ok) {
+                fprintf(stderr, "msan wire lift: FAIL dns %s (used=%ld)\n",
+                        label, (long)used);
+                failures++;
+        }
+}
+
+static void expect_tls(const char *label, const p8 *hdr, positive have,
+                       int want_ok)
+{
+        p8 type = 0;
+        positive plen = 0;
+        int ok = tls_record_header_open((p8 address_to)hdr, have,
+                                        address_of type, address_of plen);
+        if (ok != want_ok) {
+                fprintf(stderr, "msan wire lift: FAIL tls %s\n", label);
+                failures++;
+        }
+}
+
+int main(void)
+{
+        /* Every buffer is fully initialized before any parse. Hostile shapes
+           must refuse or accept without MSan complaints. */
+        p8 simple[] = {3, 'w', 'w', 'w', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+                       3, 'c', 'o', 'm', 0};
+        p8 compress[] = {
+                /* offset 0: example.com. */
+                7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0,
+                /* offset 13: pointer back to offset 0 */
+                0xc0, 0x00
+        };
+        p8 forward_ptr[] = {0xc0, 0x02, 0x00}; /* pointer at/after self */
+        p8 truncated[] = {3, 'a', 'b'}; /* label claims 3, only 2 bytes */
+        p8 loop_labels[8];
+        p8 tls_ok[5 + 4];
+        p8 tls_bad_ver[5];
+        p8 tls_short[4];
+        p8 tls_claim[5];
+
+        memory_fill(loop_labels, 0, sizeof loop_labels);
+        /* Two labels that each jump forward via a pointer past themselves. */
+        loop_labels[0] = 0xc0;
+        loop_labels[1] = 0x04;
+        loop_labels[4] = 0xc0;
+        loop_labels[5] = 0x00;
+
+        expect_dns("simple", simple, sizeof simple, 0, 1);
+        expect_dns("compress", compress, sizeof compress, 13, 1);
+        expect_dns("forward_ptr", forward_ptr, sizeof forward_ptr, 0, 0);
+        expect_dns("truncated", truncated, sizeof truncated, 0, 0);
+        expect_dns("forward_loop", loop_labels, sizeof loop_labels, 0, 0);
+
+        memory_fill(tls_ok, 0, sizeof tls_ok);
+        tls_ok[0] = 22; /* handshake */
+        tls_ok[1] = 0x03;
+        tls_ok[2] = 0x03;
+        tls_ok[3] = 0x00;
+        tls_ok[4] = 0x04;
+        expect_tls("whole", tls_ok, sizeof tls_ok, 1);
+
+        memory_fill(tls_bad_ver, 0x41, sizeof tls_bad_ver);
+        tls_bad_ver[0] = 23;
+        tls_bad_ver[1] = 0x03;
+        tls_bad_ver[2] = 0x01; /* TLS 1.0 record version — refused */
+        tls_bad_ver[3] = 0x00;
+        tls_bad_ver[4] = 0x00;
+        expect_tls("bad_ver", tls_bad_ver, sizeof tls_bad_ver, 0);
+
+        memory_fill(tls_short, 0, sizeof tls_short);
+        expect_tls("short", tls_short, sizeof tls_short, 0);
+
+        memory_fill(tls_claim, 0, sizeof tls_claim);
+        tls_claim[0] = 23;
+        tls_claim[1] = 0x03;
+        tls_claim[2] = 0x03;
+        tls_claim[3] = 0xff;
+        tls_claim[4] = 0xff; /* claims 65535, buffer only 5 */
+        expect_tls("overclaim", tls_claim, sizeof tls_claim, 0);
+
+        if (failures) {
+                fprintf(stderr, "msan wire lift: %d failure(s)\n", failures);
+                return 1;
+        }
+        fprintf(stderr, "msan wire lift: dns_copy_name + tls record header "
+                "clean on fully-initialized hostile buffers\n");
+        return 0;
+}
+"""
+
+    with tempfile.TemporaryDirectory(prefix="msan-wire-") as temporary:
+        work = Path(temporary)
+        ran, err = msan_build_run(work, "wire_lift", wire_lift_source)
+        if ran is None:
+            print("msan net: NOT RUN -- cannot link wire-parser lift:\n" +
+                  (err or "")[-2000:])
+            return 2
         if ran.stderr:
             print(ran.stderr, end="" if ran.stderr.endswith("\n") else "\n")
-        checks(fired,
-               "intentional ABI wire-header padding is visible to MSan")
-        if not fired:
-            print("  FAIL msan pad prove did not fire "
-                  "(rc=%d):\n" % ran.returncode + (ran.stderr or "")[-1500:])
+        clean = (ran.returncode == 0 and
+                 "uninitialized" not in (ran.stderr or "").lower() and
+                 "Sanitizer" not in (ran.stderr or "") and
+                 "ERROR" not in (ran.stderr or ""))
+        checks(clean,
+               "dns_copy_name + tls record header clean under MSan "
+               "(fully-initialized hostile buffers)")
+        if not clean:
+            print("  FAIL msan wire lift (rc=%d):\n" % ran.returncode +
+                  (ran.stderr or ran.stdout or "")[-2000:])
 
-    # Seed-corpus smokes under MSan (short lane defaults unless overridden).
+    # --- 3. Seed-corpus TLS fuzz smokes under MSan. ---
     prior = os.environ.get("MOONWATER_MSAN")
     os.environ["MOONWATER_MSAN"] = "1"
     try:
@@ -35064,6 +35332,399 @@ int main(void)
     checks(der == 0, "tls_der_fuzz clean under MSan")
     checks(hs == 0, "tls_hs_fuzz clean under MSan")
     return checks.verdict("msan net", "msan-net")
+
+
+def harness_pathname_race(argv):
+    """Continuous file↔directory↔symlink exchange race against tar extract.
+
+    While moonwater tar extracts into a staged tree, a sibling thread rapidly
+    cycles every contested pathname through regular file, empty directory, and
+    symlink-to-outside forms (renameat2 RENAME_EXCHANGE when available, else a
+    rename dance). Effect-based fail-closed checks: an outside victim's bytes
+    stay unchanged, no nested escape appears outside the extract root, and the
+    scheduler must actually exchange forms (not a vacuous sleep).
+
+        python3 test/differential.py --harness pathname_race --binary ours=PATH
+        sh test/run tar   # freestanding CHECK_tar then this harness
+
+    Returns 2 (NOT RUN) when threads or rename primitives are unavailable.
+    """
+    import argparse
+    import ctypes
+    import tempfile
+    import threading
+    import time
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(prog="pathname_race")
+    parser.add_argument("--binary", action="append", required=True,
+                        metavar="LABEL=PATH")
+    parser.add_argument("--rounds", type=int, default=80,
+                        help="extract iterations while the scheduler runs")
+    parser.add_argument("--seconds", type=float, default=2.0,
+                        help="minimum wall time to keep exchanging")
+    opts = parser.parse_args(argv)
+    if opts.rounds < 1:
+        parser.error("--rounds must be positive")
+
+    binaries = []
+    for specification in opts.binary:
+        label, sep, binary = specification.partition("=")
+        if (not sep or not label or not Path(binary).is_file()):
+            parser.error("--binary requires LABEL=existing-file")
+        binaries.append((label, str(Path(binary).resolve())))
+
+    try:
+        import _thread  # noqa: F401
+    except ImportError:
+        print("pathname race: NOT RUN -- no thread support")
+        return 2
+
+    RENAME_EXCHANGE = 2
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is not None:
+        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p,
+                              ctypes.c_int, ctypes.c_char_p,
+                              ctypes.c_uint]
+        renameat2.restype = ctypes.c_int
+
+    def exchange_names(directory, left, right):
+        """Swap two directory entries via renameat2 or a rename dance."""
+        left_b = os.fsencode(left)
+        right_b = os.fsencode(right)
+        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            if renameat2 is not None:
+                if renameat2(dir_fd, left_b, dir_fd, right_b,
+                             RENAME_EXCHANGE) == 0:
+                    return True
+            hold = right + ".hold"
+            try:
+                os.rename(left, hold, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                os.rename(right, left, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                os.rename(hold, right, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                return True
+            except OSError:
+                for src, dst in ((hold, left), (left, right), (right, hold)):
+                    try:
+                        os.rename(src, dst, src_dir_fd=dir_fd,
+                                  dst_dir_fd=dir_fd)
+                    except OSError:
+                        pass
+                return False
+        finally:
+            os.close(dir_fd)
+
+    # Probe rename support once in a throwaway tree.
+    with tempfile.TemporaryDirectory(prefix="pathname-race-probe-") as probe:
+        probe_path = Path(probe)
+        (probe_path / "a").write_bytes(b"a")
+        (probe_path / "b").write_bytes(b"b")
+        if not exchange_names(str(probe_path), "a", "b"):
+            print("pathname race: NOT RUN -- rename exchange unavailable")
+            return 2
+        # Confirm the probe actually swapped (not a no-op).
+        if ((probe_path / "a").read_bytes() != b"b" or
+                (probe_path / "b").read_bytes() != b"a"):
+            print("pathname race: NOT RUN -- rename exchange is a no-op")
+            return 2
+
+    VICTIM = b"VICTIM_UNCHANGED\n"
+    ESCAPE_LEAF = b"ESCAPE_THROUGH_LEAF\n"
+    ESCAPE_NEST = b"ESCAPE_THROUGH_NEST\n"
+
+    def ustar_header(name, size, typeflag=b"0", linkname=b"", mode=0o644):
+        block = bytearray(512)
+
+        def put(off, width, data):
+            data = data[:width]
+            block[off:off + len(data)] = data
+
+        def octal(off, width, value):
+            put(off, width,
+                ("%0*o" % (width - 1, value)).encode("ascii") + b"\0")
+
+        put(0, 100, name if isinstance(name, bytes) else name.encode())
+        octal(100, 8, mode)
+        octal(108, 8, 0)
+        octal(116, 8, 0)
+        octal(124, 12, size)
+        octal(136, 12, 0)
+        block[156:157] = (typeflag if isinstance(typeflag, bytes)
+                          else bytes([ord(typeflag)]))
+        put(157, 100,
+            linkname if isinstance(linkname, bytes) else linkname.encode())
+        put(257, 6, b"ustar\0")
+        put(263, 2, b"00")
+        put(148, 8, b"        ")
+        put(148, 8, ("%06o" % sum(block)).encode("ascii") + b"\0 ")
+        return bytes(block)
+
+    def padded(payload):
+        return payload + bytes((512 - (len(payload) % 512)) % 512)
+
+    def ustar_archive(members):
+        return b"".join(members) + bytes(1024)
+
+    def member(name, typeflag, data=b"", link=b""):
+        flag = typeflag.encode() if isinstance(typeflag, str) else typeflag
+        return (ustar_header(name, len(data), typeflag=flag, linkname=link) +
+                padded(data))
+
+    # Two archive shapes per contested name: overwrite the leaf as a file,
+    # and write a nested member through it as a directory walk.
+    def archive_leaf(name):
+        return ustar_archive([member(name, "0", ESCAPE_LEAF)])
+
+    def archive_nested(name):
+        return ustar_archive([
+            member(name + "/", "5"),
+            member(name + "/nested", "0", ESCAPE_NEST),
+        ])
+
+    # Several small members under a raced parent keep extract in the walk
+    # while the scheduler flips the parent form. Keep the count modest so
+    # clearing the directory between exchanges stays cheap.
+    def archive_burst(name, count=16):
+        parts = [member(name + "/", "5")]
+        for i in range(count):
+            parts.append(member("%s/m%02d" % (name, i), "0",
+                                ("burst-%02d\n" % i).encode()))
+        return ustar_archive(parts)
+
+    checks = Checks()
+    contested_names = ("flip", "parent")
+
+    with tempfile.TemporaryDirectory(prefix="pathname-race-") as temporary:
+        root = Path(temporary)
+        outside = root / "outside"
+        extract = root / "extract"
+        staging = root / "staging"
+        outside.mkdir()
+        extract.mkdir()
+        staging.mkdir()
+        victim = outside / "victim"
+        victim.write_bytes(VICTIM)
+        # Directory the symlink form points at (escape target for nested).
+        (outside / "keep").mkdir()
+
+        # Per contested name: three prepared forms under staging/, live under
+        # extract/. Scheduler exchanges live with the next form in round-robin.
+        forms = ("file", "dir", "link")
+        for name in contested_names:
+            (staging / (name + ".file")).write_bytes(b"race-file\n")
+            (staging / (name + ".dir")).mkdir()
+            # Symlink to the outside directory — nested writes would escape
+            # here if the extractor followed a dir→symlink swap past its pin.
+            os.symlink(os.path.relpath(outside, extract),
+                       staging / (name + ".link"))
+            # Install the first live form (directory) under extract/.
+            os.rename(staging / (name + ".dir"), extract / name)
+            # Recreate the staging dir slot so the cycle has three peers.
+            (staging / (name + ".dir")).mkdir()
+
+        stop = threading.Event()
+        exchanges = {name: 0 for name in contested_names}
+        exchange_errors = {name: 0 for name in contested_names}
+        form_index = {name: 0 for name in contested_names}
+        lock = threading.Lock()
+
+        def clear_tree(path):
+            if not path.exists() and not path.is_symlink():
+                return
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+                return
+            for child in list(path.iterdir()):
+                clear_tree(child)
+            try:
+                path.rmdir()
+            except OSError:
+                pass
+
+        def ensure_form(slot_path, kind, link_target):
+            """Make staging slot hold exactly the requested form."""
+            if slot_path.exists() or slot_path.is_symlink():
+                clear_tree(slot_path)
+            if kind == "file":
+                slot_path.write_bytes(b"race-file\n")
+            elif kind == "dir":
+                slot_path.mkdir()
+            else:
+                os.symlink(link_target, slot_path)
+
+        def scheduler(name):
+            link_target = os.path.relpath(outside, extract)
+            live = extract / name
+            while not stop.is_set():
+                nxt = forms[(form_index[name] + 1) % len(forms)]
+                slot = staging / (name + "." + nxt)
+                try:
+                    if not (live.exists() or live.is_symlink()):
+                        # Extract or a failed dance removed the live name;
+                        # re-seed so the cycle can continue.
+                        ensure_form(live, "dir", link_target)
+                    ensure_form(slot, nxt, link_target)
+                    hold = staging / (name + ".hold")
+                    if hold.exists() or hold.is_symlink():
+                        clear_tree(hold)
+                    dir_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        live_rel = os.path.relpath(live, root)
+                        slot_rel = os.path.relpath(slot, root)
+                        hold_rel = os.path.relpath(hold, root)
+                        swapped = False
+                        if renameat2 is not None:
+                            # RENAME_EXCHANGE swaps even a non-empty directory
+                            # with a file/symlink — no need to clear children.
+                            if renameat2(
+                                    dir_fd, os.fsencode(live_rel),
+                                    dir_fd, os.fsencode(slot_rel),
+                                    RENAME_EXCHANGE) == 0:
+                                swapped = True
+                        if not swapped:
+                            # Rename dance needs an empty directory.
+                            if live.is_dir() and not live.is_symlink():
+                                for child in list(live.iterdir()):
+                                    clear_tree(child)
+                            os.rename(live_rel, hold_rel, src_dir_fd=dir_fd,
+                                      dst_dir_fd=dir_fd)
+                            os.rename(slot_rel, live_rel, src_dir_fd=dir_fd,
+                                      dst_dir_fd=dir_fd)
+                            os.rename(hold_rel, slot_rel, src_dir_fd=dir_fd,
+                                      dst_dir_fd=dir_fd)
+                            swapped = True
+                        if swapped:
+                            with lock:
+                                exchanges[name] += 1
+                                form_index[name] = (
+                                    form_index[name] + 1) % len(forms)
+                    finally:
+                        os.close(dir_fd)
+                except OSError:
+                    with lock:
+                        exchange_errors[name] += 1
+                # No vacuous sleep: yield only so extract can make progress.
+                time.sleep(0)
+
+        threads = [threading.Thread(target=scheduler, args=(name,),
+                                    name="race-" + name, daemon=True)
+                   for name in contested_names]
+        for thread in threads:
+            thread.start()
+
+        # Give the scheduler a moment to prove it exchanges before extract.
+        deadline = time.monotonic() + 0.2
+        while time.monotonic() < deadline and sum(exchanges.values()) < 3:
+            time.sleep(0.001)
+
+        archives = root / "archives"
+        archives.mkdir()
+        shapes = []
+        for name in contested_names:
+            for kind, builder in (
+                    ("leaf", archive_leaf),
+                    ("nested", archive_nested),
+                    ("burst", archive_burst)):
+                path = archives / ("%s-%s.tar" % (name, kind))
+                path.write_bytes(builder(name))
+                shapes.append(path)
+
+        extract_results = []
+        exclusive_ok = True
+        exclusive_detail = ""
+        started = time.monotonic()
+        round_at = 0
+        for label, binary in binaries:
+            tar = [binary]
+            # Farm-style: accept a multipurpose shell applet named tar.
+            farm_tar = Path(binary).parent / "tar"
+            if Path(binary).name != "tar" and farm_tar.is_file():
+                tar = [str(farm_tar)]
+            elif Path(binary).name != "tar":
+                # Shell binary: argv0 selection via symlink farm.
+                farm = root / ("bin-" + label)
+                farm.mkdir(exist_ok=True)
+                link = farm / "tar"
+                if not link.exists():
+                    link.symlink_to(binary)
+                tar = [str(link)]
+
+            while (round_at < opts.rounds or
+                   time.monotonic() - started < opts.seconds):
+                archive = shapes[round_at % len(shapes)]
+                # Keep the extract root; the scheduler owns contested names.
+                # Escape detection is effect-based on outside/, not on a
+                # pristine tree.
+                ran = subprocess.run(
+                    tar + ["-xf", str(archive), "-C", str(extract)],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    timeout=30)
+                extract_results.append(ran.returncode)
+                round_at += 1
+                if victim.read_bytes() != VICTIM:
+                    break
+                if (outside / "nested").exists():
+                    break
+
+            # Private-edit style exclusive create under the same scheduler:
+            # O_EXCL|O_NOFOLLOW on a contested leaf must not follow a symlink
+            # swap through to the outside victim.
+            for _ in range(40):
+                for name in contested_names:
+                    path = extract / name
+                    try:
+                        fd = os.open(path, os.O_WRONLY | os.O_CREAT |
+                                     os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                        os.write(fd, b"exclusive\n")
+                        os.close(fd)
+                    except OSError:
+                        pass
+                if victim.read_bytes() != VICTIM:
+                    exclusive_ok = False
+                    exclusive_detail = "victim changed during O_EXCL probe"
+                    break
+
+        stop.set()
+        for thread in threads:
+            thread.join(timeout=2.0)
+
+        total_exchanges = sum(exchanges.values())
+        print("pathname race: %d exchanges across %s in %d extract rounds "
+              "(errors=%s)" %
+              (total_exchanges, exchanges, round_at, exchange_errors))
+
+        checks(total_exchanges >= 30,
+               "scheduler exchanged forms continuously "
+               "(%d exchanges)" % total_exchanges)
+        for name in contested_names:
+            checks(exchanges[name] >= 5,
+                   "pathname %r exchanged through file/dir/symlink "
+                   "(%d)" % (name, exchanges[name]))
+
+        victim_bytes = victim.read_bytes() if victim.exists() else b""
+        checks(victim_bytes == VICTIM,
+               "outside victim unchanged under leaf/nested race "
+               "(now=%r)" % victim_bytes[:40])
+        checks(not (outside / "nested").exists(),
+               "no nested escape written outside the extract root")
+        checks(ESCAPE_LEAF not in victim_bytes and
+               ESCAPE_NEST not in victim_bytes,
+               "escape payloads never reached the outside victim")
+        checks(round_at >= opts.rounds or
+               time.monotonic() - started >= opts.seconds,
+               "subject extract ran under the scheduler "
+               "(%d rounds)" % round_at)
+        checks(len(extract_results) > 0 and
+               all(isinstance(code, int) for code in extract_results),
+               "every extract completed without hang/timeout")
+        checks(exclusive_ok and victim_bytes == VICTIM,
+               "O_EXCL|O_NOFOLLOW exclusive create does not follow "
+               "symlink swaps" +
+               ((": " + exclusive_detail) if exclusive_detail else ""))
+
+    return checks.verdict("pathname race", "pathname-race")
 
 
 def harness_machine_scan(argv):
@@ -38956,6 +39617,7 @@ HARNESS_CHECKS = {
     "tls_der_fuzz": harness_tls_der_fuzz,
     "tls_hs_fuzz": harness_tls_hs_fuzz,
     "msan_net": harness_msan_net,
+    "pathname_race": harness_pathname_race,
     "machine_scan": harness_machine_scan,
     "waterlink_noise": harness_waterlink_noise,
     "waterlink_mdns": harness_waterlink_mdns,

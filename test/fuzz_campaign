@@ -1,0 +1,25 @@
+#!/bin/sh
+#
+#       Deeper-than-smoke local TLS fuzz campaign (ASan/UBSan libFuzzer).
+#
+#       Defaults: 200000 runs / 120 seconds per harness, with --report.
+#       Does not change lane_net smoke bounds (those leave MOONWATER_FUZZ_*
+#       unset at 20k/5s). Override either knob as usual.
+#
+#           sh test/fuzz_campaign
+#           sh test/fuzz_campaign artifacts/fuzz-campaign-report.txt
+#
+#       Report path is gitignored under artifacts/; do not commit huge
+#       campaign dumps. Seed inventory lives in test/fuzz_corpus/.
+#
+set -eu
+
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd -- "$root"
+
+: "${MOONWATER_FUZZ_SECONDS:=120}"
+: "${MOONWATER_FUZZ_RUNS:=200000}"
+export MOONWATER_FUZZ_SECONDS MOONWATER_FUZZ_RUNS
+
+out=${1:-artifacts/fuzz-campaign-report.txt}
+exec sh test/fuzz_net --report "$out"

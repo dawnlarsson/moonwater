@@ -6,10 +6,14 @@
 #
 #       Opt-in only: not wired into lane_net or CI push (CI remains parked).
 #       Requires clang -fsanitize=memory (Linux clang; Apple clang and many
-#       qemu images report NOT RUN). Proves intentional ABI wire-header
-#       padding is visible, then runs tls_der_fuzz + tls_hs_fuzz under
-#       MOONWATER_MSAN=1 (libFuzzer + MSan). Override smoke budget with
-#       MOONWATER_FUZZ_RUNS / MOONWATER_FUZZ_SECONDS like test/fuzz_net.
+#       qemu images report NOT RUN). Scope (not full CHECK_net under MSan):
+#         - intentional ABI pad proves (generic wire header + netlink-attr-
+#           shaped hole, distinct from production packed layouts)
+#         - thin hosted lifts of dns_copy_name + TLS record header open over
+#           fully-initialized hostile buffers
+#         - short tls_der_fuzz + tls_hs_fuzz under MOONWATER_MSAN=1
+#       Override smoke budget with MOONWATER_FUZZ_RUNS / MOONWATER_FUZZ_SECONDS
+#       like test/fuzz_net.
 #
 set -eu
 
@@ -21,5 +25,5 @@ export MOONWATER_MSAN=1
 : "${MOONWATER_FUZZ_SECONDS:=5}"
 export MOONWATER_FUZZ_RUNS MOONWATER_FUZZ_SECONDS
 
-echo "msan_net: pad prove + der/hs under MSan (runs=$MOONWATER_FUZZ_RUNS seconds=$MOONWATER_FUZZ_SECONDS)"
+echo "msan_net: pad proves + wire lifts + der/hs under MSan (runs=$MOONWATER_FUZZ_RUNS seconds=$MOONWATER_FUZZ_SECONDS)"
 exec python3 test/differential.py --harness msan_net

@@ -48638,9 +48638,15 @@ b32 main(void)
         Arm this once around production http_write_spans so the first writev
         really transfers a mid-iovec prefix and returns that count; the next
         writev is the ordinary kernel path.
+
+        http_writev_error is a once-armed refuse for the next writev that is
+        not already claimed by the short-limit arm: mid-stream ENOSPC after a
+        short prefix, without needing /dev/full or a peer.
 */
 static positive http_writev_short_limit;
 static bool http_writev_short_hit;
+static bipolar http_writev_error;
+static bool http_writev_error_hit;
 
 typedef struct
 {
@@ -48678,6 +48684,14 @@ static bipolar http_net_call3(positive number, positive one, positive two,
                 }
                 http_writev_short_hit = true;
                 return (system_call_3)(number, one, (positive)trimmed, used);
+        }
+        if (number == syscall(writev) && http_writev_error)
+        {
+                bipolar fault = http_writev_error;
+
+                http_writev_error = 0;
+                http_writev_error_hit = true;
+                return fault;
         }
         return (system_call_3)(number, one, two, three);
 }
@@ -48753,6 +48767,19 @@ static bipolar http_net_call3(positive number, positive one, positive two,
         Resource exhaustion (descriptor / mapping) — soft RLIMIT sweeps
           HTTP/TLS     http_tls_resource_exhaustion
           DNS/DHCP/NL  dns_dhcp_netlink_resource_exhaustion
+
+        Mid-path fail-closed (past open-time EMFILE / first reserve)
+          HTTP body    http_body_store_midpath_exhaustion
+            connected socketpair; store filled to capacity; next
+            byte_store_reserve under soft RLIMIT_AS → HTTP_NO_REPLY
+            (honest NOT RUN when guest AS limits are ignored)
+          HTTP copy    http_body_copy_midpath_fault
+            connected socketpair body → writev once-armed -ENOSPC → HTTP_WRITE
+          writev       http_write_spans_midpath_fault
+            short writev prefix then once-armed -ENOSPC → HTTP write refuse
+          TLS framing  tls_midpath_append_refusal
+            plaintext ServerHello / encrypted-flight append past a tight
+            hold room after a retained prefix → TLS_FAIL (no hang)
 */
 
 /*
@@ -51681,6 +51708,219 @@ static fn dns_dhcp_netlink_resource_exhaustion(void)
 }
 
 /*
+        Mid-path body-store growth after a connected stream already delivered
+        a prefix: open-time EMFILE / first-reserve RLIMIT_AS are covered
+        above. Here the socket exists, the store is already at capacity, and
+        the next byte that needs byte_store_reserve must refuse closed.
+*/
+static fn http_body_store_midpath_exhaustion(void)
+{
+        positive as_limit[2] = {0, 0};
+        bipolar asked;
+        b32 pair[2];
+        bipolar opened;
+        http_buffer store = {0};
+        p8 scratch[HTTP_HEAD_MAX];
+        http_link link;
+        http_body body;
+        static p8 seed[] = "S";
+        p8 address_to fill = null;
+        positive fill_length;
+        positive held_room;
+        bipolar status = HTTP_OK;
+        positive constrained[2];
+
+        asked = system_call_4(syscall(prlimit64), 0, 9, 0,
+                              (positive)address_of as_limit);
+        if (asked)
+        {
+                log_direct(str("net: HTTP mid-path body store exhaustion NOT RUN -- prlimit unavailable\n"));
+                return;
+        }
+
+        opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM, 0,
+                               (positive)pair);
+        check("HTTP mid-path body store socket pair opens", opened == 0);
+        if (opened)
+                return;
+
+        link = (http_link){.handle = pair[0], .tls = false};
+        body = (http_body){
+            .stash = seed,
+            .stash_used = sizeof seed - 1,
+            .store = address_of store,
+            .store_limit = HTTP_FETCH_MAX,
+            .link = address_of link,
+            .scratch = scratch,
+        };
+        check("HTTP mid-path body store grows from a connected stream's first byte",
+              http_copy(address_of body, -1, sizeof seed - 1, true) == HTTP_OK &&
+                  store.used == sizeof seed - 1 && store.room > store.used + 1);
+        held_room = store.room;
+        fill_length = held_room - store.used - 1;
+        fill = memory(fill_length + 1);
+        check("HTTP mid-path body fill buffer allocates",
+              fill && (positive)fill < (positive)-4095);
+        if (!fill || (positive)fill >= (positive)-4095)
+        {
+                http_forget(address_of store);
+                socket_close(pair[0]);
+                socket_close(pair[1]);
+                return;
+        }
+        memory_fill(fill, 'b', fill_length + 1);
+        check("HTTP mid-path body fill queues on the connected peer",
+              socket_send(pair[1], fill, fill_length, 0, null, 0) ==
+                  (bipolar)fill_length);
+
+        body = (http_body){
+            .link = address_of link,
+            .scratch = scratch,
+            .store = address_of store,
+            .store_limit = HTTP_FETCH_MAX,
+        };
+        check("HTTP mid-path body store fills to capacity without another map",
+              http_copy(address_of body, -1, fill_length, true) == HTTP_OK &&
+                  store.used == held_room - 1 && store.room == held_room);
+
+        constrained[0] = 0;
+        constrained[1] = as_limit[1];
+        asked = system_call_4(syscall(prlimit64), 0, 9,
+                              (positive)address_of constrained, 0);
+        check("HTTP mid-path body store address space can be constrained",
+              asked == 0);
+        if (!asked)
+        {
+                check("HTTP mid-path overflow byte queues on the connected peer",
+                      socket_send(pair[1], fill + fill_length, 1, 0, null, 0) ==
+                          1);
+                socket_shutdown(pair[1], SHUT_WRITE);
+                status = http_copy(address_of body, -1, 1, true);
+                asked = system_call_4(syscall(prlimit64), 0, 9,
+                                      (positive)address_of as_limit, 0);
+                check("HTTP mid-path body store address-space limit is restored",
+                      asked == 0);
+
+                if (status == HTTP_OK && store.used > held_room - 1)
+                        log_direct(str("net: HTTP mid-path body store exhaustion NOT RUN -- address-space limit ignored (likely emulation)\n"));
+                else
+                        check("HTTP body store fails closed mid-stream when reserve cannot grow past capacity",
+                              status == HTTP_NO_REPLY &&
+                                  store.used == held_room - 1 &&
+                                  store.room == held_room && store.bytes);
+        }
+
+        memory_free(fill, fill_length + 1);
+        http_forget(address_of store);
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+}
+
+/*
+        Mid-response body copy after a connected stream already has payload:
+        arm writev to return -ENOSPC so http_copy refuses with HTTP_WRITE
+        rather than hanging. Distinct from /dev/full (whole-body) and from
+        open-time EMFILE.
+*/
+static fn http_body_copy_midpath_fault(void)
+{
+        enum { BODY_BYTES = 4096 };
+        static p8 payload[BODY_BYTES];
+        p8 scratch[HTTP_HEAD_MAX];
+        b32 pair[2];
+        bipolar opened;
+        bipolar sink;
+        http_link link;
+        http_body body;
+
+        memory_fill(payload, 'm', BODY_BYTES);
+        opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM, 0,
+                               (positive)pair);
+        check("HTTP mid-path body copy socket pair opens", opened == 0);
+        if (opened)
+                return;
+
+        sink = system_open_at(AT_FDCWD, (string_address)"/dev/null",
+                              FILE_WRITE | O_CLOEXEC);
+        check("HTTP mid-path body copy sink opens", sink >= 0);
+        if (sink < 0)
+        {
+                socket_close(pair[0]);
+                socket_close(pair[1]);
+                return;
+        }
+
+        check("HTTP mid-path body copy payload queues",
+              socket_send(pair[1], payload, BODY_BYTES, 0, null, 0) ==
+                  BODY_BYTES);
+        socket_shutdown(pair[1], SHUT_WRITE);
+
+        link = (http_link){.handle = pair[0], .tls = false};
+        body = (http_body){
+            .link = address_of link,
+            .scratch = scratch,
+        };
+        http_write_failure = 0;
+        http_writev_error_hit = false;
+        http_writev_error = -ENOSPC;
+        check("HTTP body copy fails closed mid-stream when writev returns ENOSPC",
+              http_copy(address_of body, sink, BODY_BYTES, true) == HTTP_WRITE &&
+                  http_writev_error_hit && !http_writev_error &&
+                  http_write_failure == -ENOSPC);
+        http_writev_error = 0;
+        system_close(sink);
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+}
+
+/*
+        Mid-stream writev refuse after a positive short prefix: the short arm
+        lands progress, then the once-armed error returns -ENOSPC so
+        http_write_spans fail-closes with the disk errno rather than hanging.
+*/
+static fn http_write_spans_midpath_fault(void)
+{
+        enum
+        {
+                SPAN_BYTES = 3000,
+                SPAN_COUNT = 3,
+                SPAN_TOTAL = SPAN_BYTES * SPAN_COUNT,
+                SHORT_BYTES = SPAN_BYTES + SPAN_BYTES / 2
+        };
+        static p8 spans_bytes[SPAN_COUNT][SPAN_BYTES];
+        http_span spans[SPAN_COUNT];
+        bipolar sink;
+        positive at;
+
+        for (at = 0; at < SPAN_COUNT; at++)
+        {
+                memory_fill(spans_bytes[at], (p8)(at + 1), SPAN_BYTES);
+                spans[at].base = spans_bytes[at];
+                spans[at].length = SPAN_BYTES;
+        }
+
+        sink = system_open_at(AT_FDCWD, (string_address)"/dev/null",
+                              FILE_WRITE | O_CLOEXEC);
+        check("a sink for mid-stream writev ENOSPC opens", sink >= 0);
+        if (sink < 0)
+                return;
+
+        http_write_failure = 0;
+        http_writev_short_hit = false;
+        http_writev_error_hit = false;
+        http_writev_short_limit = SHORT_BYTES;
+        http_writev_error = -ENOSPC;
+        check("a mid-iovec short writev then ENOSPC fail-closes without hanging",
+              !http_write_spans(sink, spans, SPAN_COUNT, SPAN_TOTAL) &&
+                  http_writev_short_hit && http_writev_error_hit &&
+                  !http_writev_short_limit && !http_writev_error &&
+                  http_write_failure == -ENOSPC);
+        http_writev_short_limit = 0;
+        http_writev_error = 0;
+        system_close(sink);
+}
+
+/*
         http_write_spans must survive a positive short writev mid-iovec, refuse
         a count larger than the remaining total, and fail-close when the next
         write would block.
@@ -53882,6 +54122,55 @@ static fn tls_flight_hs_put_header(p8 address_to at, p8 type, positive body)
         at[1] = (p8)(body >> 16);
         at[2] = (p8)(body >> 8);
         at[3] = (p8)body;
+}
+
+/*
+        Mid-path framing refuse after a retained handshake prefix: open-time
+        TLS EMFILE is covered elsewhere; these prove a tight hold room refuses
+        the next fragment closed once some bytes are already kept.
+*/
+static fn tls_midpath_append_refusal(void)
+{
+        {
+                p8 held[16];
+                positive used = 0;
+                p8 fragment[12];
+
+                memory_fill(fragment, 0xee, sizeof fragment);
+                check("a plaintext ServerHello prefix is retained in a tight room",
+                      tls_handshake_one_append(held, 8, address_of used,
+                                               fragment, 3) ==
+                              TLS_HANDSHAKE_MORE &&
+                          used == 3);
+                check("a plaintext ServerHello fragment past the hold room is refused mid-reassembly",
+                      tls_handshake_one_append(held, 8, address_of used,
+                                               fragment + 3, 6) == TLS_FAIL &&
+                          used == 3);
+        }
+
+        {
+                p8 hs[16];
+                positive used = 0;
+                p8 flight = TLS_SERVER_FLIGHT_CERTIFICATE;
+                positive messages = 0;
+                p8 fragment[20];
+
+                tls_flight_hs_put_header(fragment, TLS_HS_CERTIFICATE, 100);
+                memory_fill(fragment + 4, 0xab, sizeof fragment - 4);
+                check("an encrypted-flight Certificate prefix is retained in a tight room",
+                      tls_encrypted_flight_append(
+                          null, hs, sizeof hs, address_of used,
+                          address_of flight, fragment, 10,
+                          address_of messages) == TLS_OK &&
+                          used == 10 && !messages);
+                check("an encrypted-flight fragment past the hold room is refused mid-reassembly",
+                      tls_encrypted_flight_append(
+                          null, hs, sizeof hs, address_of used,
+                          address_of flight, fragment + 10, 7,
+                          address_of messages) == TLS_FAIL &&
+                          used == 10 && !messages &&
+                          flight == TLS_SERVER_FLIGHT_CERTIFICATE);
+        }
 }
 
 static fn tls_encrypted_flight_hs_reassembly(void)
@@ -57663,7 +57952,10 @@ b32 main(void)
         http_body_write_failure();
         http_tls_resource_exhaustion();
         dns_dhcp_netlink_resource_exhaustion();
+        http_body_store_midpath_exhaustion();
+        http_body_copy_midpath_fault();
         http_write_spans_partial();
+        http_write_spans_midpath_fault();
         network_stream_sigpipe();
         tls_closure_boundaries();
         tls_record_payload_ceiling();
@@ -57677,6 +57969,7 @@ b32 main(void)
         tls_client_hello_groups();
         tls_server_hello_validation();
         tls_server_flight_validation();
+        tls_midpath_append_refusal();
         tls_encrypted_flight_hs_reassembly();
         tls_post_handshake_framing();
         tls_certificate_framing();
