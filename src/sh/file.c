@@ -4295,6 +4295,9 @@ typedef struct
            "invalid -B argument" for the letter and "invalid --block-size
            argument" for the word, and only the scan knows which arrived. */
         bool long_written;
+        /* getopt's order under POSIXLY_CORRECT: the first operand ends the
+           options, and every word after it is an operand too. */
+        bool posix_order;
 } file_taking;
 
 /* Help wins over version; callers retain their writer and flush/status policy. */
@@ -4359,6 +4362,8 @@ static p8 file_long_letter(file_taking address_to taking, string_address name,
         return option ? option->letter : 0;
 }
 
+static string_address file_environment(string_address name);
+
 static bool file_take_from(file_taking address_to taking, positive index)
 {
         argument_cursor cursor = {
@@ -4406,6 +4411,9 @@ static bool file_take_from(file_taking address_to taking, positive index)
                                 break;
                         }
                         taking->operand((b32)(cursor.at - 1));
+                        if (taking->posix_order &&
+                            file_environment((string_address) "POSIXLY_CORRECT"))
+                                cursor.operands_only = true;
                         continue;
                 }
                 bool long_option = cursor.long_option;
@@ -35958,6 +35966,33 @@ static fn mktemp_operand(b32 index)
                 mktemp_template = program_argument(index);
 }
 
+/*
+        The name, told. A name nobody could be told is a name nobody will
+        clean up, so what was made for it is taken away again and the
+        refusal said, as GNU's mktemp does: mktemp -p a > /dev/full left a
+        file in a and answered 1 without a word.
+*/
+static b32 mktemp_told(p8 address_to path, bool directory, bool made, bool quiet)
+{
+        positive length = string_length(path);
+
+        path[length] = '\n';
+        system_write_result wrote = system_write_all_checked(1, path, length + 1);
+        path[length] = end;
+
+        if (!wrote.error && wrote.bytes == length + 1)
+                return 0;
+
+        if (made)
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path,
+                              directory ? AT_REMOVEDIR : 0);
+
+        if (quiet)
+                return 1;
+        return string_report(log_error, 1, "mktemp: write error: %s\n",
+                             file_reason(wrote.error ? wrote.error : -28));
+}
+
 static fn mktemp_failed(bool directory, string_address shown,
                          bipolar reason)
 {
@@ -36025,6 +36060,7 @@ static b32 file_mktemp()
             .options = mktemp_options,
             .operand = mktemp_operand,
             .selection = address_of mktemp_where_option,
+            .posix_order = true,
         };
 
         mktemp_where_option = 0;
@@ -36218,11 +36254,7 @@ static b32 file_mktemp()
                 }
 
                 if (answer >= 0)
-                {
-                        file_line(path);
-                        log_flush();
-                        return 0;
-                }
+                        return mktemp_told(path, directory, true, quiet);
 
                 if (answer != -ERROR_EXISTS)
                 {
@@ -36234,11 +36266,7 @@ static b32 file_mktemp()
         }
 
         if (dry)
-        {
-                file_line(path);
-                log_flush();
-                return 0;
-        }
+                return mktemp_told(path, directory, false, quiet);
 
         if (!quiet)
                 mktemp_failed(directory, shown, -ERROR_EXISTS);

@@ -7573,6 +7573,8 @@ FILES_SCENES = {
     "fifo": ("env mkfifo fifo || exit 9\n", "", "env ls -l fifo | env cut -c1\n"),
     "closed": ("", " >&-", ""),
     "full": ("", " 2>/dev/full", ""),
+    "full_out": ("", " >/dev/full", ""),
+    "posix": ("export POSIXLY_CORRECT=1\n", "", ""),
 }
 FILES_SCENE_CASES = (
     ("gone", "readlink", "-e", "."), ("gone", "readlink", "-f", "."), ("gone", "readlink", "-m", "."),
@@ -7587,6 +7589,11 @@ FILES_SCENE_CASES = (
     # A warning that cannot be written is not gone on past.
     ("full", "nice", "-n", "-5", "true"), ("full", "nice", "-n", "5", "true"), ("full", "nice", "-n", "x", "true"),
     ("full", "stat", "missing"), ("full", "touch", "missing/x"),
+    # A name nobody could be told is taken away again.
+    ("full_out", "mktemp", "-p", "dir"), ("full_out", "mktemp", "-d", "-p", "dir"),
+    ("closed", "mktemp", "-p", "dir"), ("full_out", "mktemp", "-u", "-p", "dir"),
+    ("full_out", "mktemp", "-q", "-p", "dir", "x.XXXX"),
+    ("posix", "mktemp", "-u", "aXXXX", "--suffix=b"), ("posix", "mktemp", "-u", "aXXXX", "-d"),
 )
 
 
