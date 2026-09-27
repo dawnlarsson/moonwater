@@ -17938,7 +17938,23 @@ TEXT_UTILITIES = (
                                    ("-cs", "a"), ("-d", "-c", "0-9\\n"), ("-c", "o\\n", "X"), ("-cd", "a-z\\n"),
                                    ("-s", "\\000-\\377"), ("-ds", "a", "B"), ("-s", "a", "B"), ("-cs", "a", "B"),
                                    ("-ct", "a-z", "X"), ("-c", "-t", "a-z", "XY"), ("-d", "a", "A"), ("-s", "a", "b", "c"),
-                                   ("-d", "abc", "-s"), ("-t", "a-z", "A-M"), ("-t", "abc", "xy"), ("-t", "abc", ""))),
+                                   ("-d", "abc", "-s"), ("-t", "a-z", "A-M"), ("-t", "abc", "xy"), ("-t", "abc", ""),
+                                   #   Sets as GNU's tr reads them: an escaped byte
+                                   #   is never syntax, a [:...:] that names no class
+                                   #   may still be a repeat, a repeat may be longer
+                                   #   than any expanded array, and [:upper:] and
+                                   #   [:lower:] line up by the construct, not by
+                                   #   the byte.
+                                   ("-cs", "[:alnum:]", "[\\n*]"), ("-c", "[:alpha:]", "[\\012*]"),
+                                   ("[:*3][:digit:]", "a-m"), ("[=*2]x", "ab"), ("abc", "[b*\\9]"), ("abc", "[b*1\\]x]"),
+                                   ("-c", "[a*65536]\\n", "[b*]"), ("a", "[b*4294967296]"), ("[a*0]b", "x"),
+                                   ("[==]", "x"), ("[::]", "x"), ("[=ab=]", "x"), ("[:foo:]", "x"), ("[a*x]", "x"),
+                                   ("[a*09]", "x"), ("[a*18446744073709551616]", "x"), ("z-a", "x"), ("\\n-\\001", "x"),
+                                   ("[:upper:][:lower:]", "a-z[:upper:]"), ("[:lower:][:upper:]", "[:upper:][:lower:]"),
+                                   ("a-z", "[:upper:]"), ("[:upper:]a", "[:lower:]"), ("-c", "a", "[:upper:]"),
+                                   ("[:upper:]", "[:upper:]"), ("-t", "[:lower:]x", "[:upper:]"),
+                                   ("-c", "[:print:]", "?"), ("-c", "[:alpha:]", "xy"), ("\\400", "x"), ("a\\", "x"),
+                                   ("-d", "[:digit:][=a=]"), ("-ds", "[:space:]", "[:alpha:]"), ("-s", "[a*3]b"))),
     Utility("ul",
             options=(Option("-t", ("dumb", "xterm", "vt100", "bogus", "", "ansi"), None), Option("-T", ("xterm",), None),
                      Option("--terminal", ("dumb", "xterm"), True), Option("-i"), Option("--indicated")),

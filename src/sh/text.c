@@ -16267,347 +16267,838 @@ static b32 text_cut()
 /*
         tr's sets.
 
-        Expanded once into a plain array of bytes, because everything tr does
-        -- translate, delete, squeeze -- is an index into the first set and a
-        lookup at the same index in the second, and a set that has been
-        expanded makes both of those a subscript.
+        Read the way GNU's tr reads them, in the same two passes. The first
+        turns every backslash escape into its byte and remembers which bytes
+        came from one, because an escaped byte is never syntax: [b*\9] is five
+        plain characters, not a repeat with a bad count. The second cuts the
+        bytes into constructs -- a character, a range, a class, an
+        equivalence class, a repeat -- and keeps them as constructs rather
+        than expanding them, since a repeat may be [a*65536] and a set is
+        only ever walked, once for what is in it and once beside the other
+        set for what maps to what. Every check GNU makes before it reads a
+        byte is made here in its order and with its words, and the walk
+        answers exactly what GNU's get_next answers, [:upper:] and [:lower:]
+        marked where they stand so case conversion can be lined up.
 */
-/*
-        How long a set tr will build. GNU has no limit but memory; this one
-        is a fixed array, and eight thousand is far past any set a person
-        writes and past [a*1024] besides.
-*/
-#define TEXT_SET_MAX 8192
-
-static p8 text_set_one[TEXT_SET_MAX];
-static positive text_set_one_length;
-static p8 text_set_two[TEXT_SET_MAX];
-static positive text_set_two_length;
-static bool text_set_broken;
-
-static fn text_set_put(p8 address_to into, positive address_to have, p8 character)
+enum
 {
-        if (address_to have < TEXT_SET_MAX)
-        {
-                into[address_to have] = character;
-                address_to have += 1;
-        }
-        else
-                text_set_broken = true;
-}
+        TR_NORMAL,
+        TR_RANGE,
+        TR_CLASS,
+        TR_EQUIV,
+        TR_REPEAT,
+};
 
-/*
-        What a set says about itself, beyond its bytes: the facts GNU checks
-        before it translates anything. The class flag beside each expanded
-        byte is what lets [:lower:] and [:upper:] be checked for alignment.
-*/
+enum
+{
+        TR_NONE,
+        TR_UPPER,
+        TR_LOWER,
+};
+
+// A repeat count or a set length past this is GNU's "too many".
+#define TR_COUNT_MAX (positive_max - 1)
+#define TR_NEW (positive_max)
+
 typedef struct
 {
-        bool has_class;
-        bool has_other_class;
-        bool has_upper_lower;
-        bool has_equiv;
-        bool ends_with_class;
-        positive repeats;
-        positive repeat_at;
-        p8 repeat_char;
-        string_address complaint;
-        string_address about;
-} text_set_facts;
+        p8 kind;
+        p8 first;
+        p8 last;
+        p8 case_class;
+        b32 class;
+        positive count;
+} tr_item;
 
-static p8 text_set_one_class[TEXT_SET_MAX];
-static p8 text_set_two_class[TEXT_SET_MAX];
-static p8 text_set_about[64];
-static bool text_set_warned_backslash;
-static bool text_set_warned_octal;
-
-static fn text_set_note(text_set_facts address_to facts, string_address complaint,
-                        string_address from, positive length)
+typedef struct
 {
-        if (facts->complaint)
-                return;
+        tr_item address_to items;
+        positive used;
+        positive room;
+        positive length;
+        positive indefinite;
+        positive indefinite_at;
+        bool has_class;
+        bool has_restricted_class;
+        bool has_equiv;
+        // Where a walk stands: the construct, and within it the last byte
+        // given or the number of repeats given, TR_NEW before the first.
+        positive at;
+        positive state;
+} tr_list;
 
-        if (length >= sizeof(text_set_about))
-                length = sizeof(text_set_about) - 1;
+static tr_list tr_one;
+static tr_list tr_two;
+static p8 address_to tr_text;
+static p8 address_to tr_escaped;
+static positive tr_text_room;
 
-        memory_copy(text_set_about, from, length);
-        text_set_about[length] = '\0';
-        facts->complaint = complaint;
-        facts->about = length ? (string_address)text_set_about : null;
+static bool tr_add(tr_list address_to list, tr_item item)
+{
+        if (!array_store_reserve(list->items, list->room, list->used, 1, 64))
+                return string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+
+        list->items[list->used++] = item;
+        return true;
 }
 
-// One character of a set, escapes included. An octal escape stops before it
-// passes 255 -- \400 is \040 and then a 0, as GNU reads it, with a warning
-// -- and a backslash with nothing after it is itself, also with a warning.
-static p8 text_escape(string_address spec, positive address_to at, positive length)
+// A byte as GNU's make_printable_str spells it in a complaint.
+static fn tr_printable(p8 address_to into, positive address_to made, p8 c)
 {
-        p8 character = spec[address_to at];
+        static const p8 simple[] = {'\a', 'a', '\b', 'b', '\f', 'f', '\n', 'n',
+                                    '\r', 'r', '\t', 't', '\v', 'v', '\\', 0};
 
-        if (character != '\\')
-        {
-                address_to at += 1;
-                return character;
-        }
-
-        if (address_to at + 1 >= length)
-        {
-                text_set_warned_backslash = true;
-                address_to at += 1;
-                return '\\';
-        }
-
-        p8 next = spec[address_to at + 1];
-
-        address_to at += 2;
-
-        p8 escaped = byte_simple_escape(next);
-
-        if (escaped)
-                return escaped;
-
-        if (next >= '0' && next <= '7')
-        {
-                positive value = (positive)(next - '0');
-                positive digits = 1;
-
-                while (digits < 3 && address_to at < length &&
-                       spec[address_to at] >= '0' && spec[address_to at] <= '7')
+        for (positive i = 0; i < sizeof(simple); i += 2)
+                if (simple[i] == c)
                 {
-                        positive wider = value * 8 + (positive)(spec[address_to at] - '0');
-
-                        if (wider > 255)
+                        into[address_to made] = '\\';
+                        address_to made += 1;
+                        if (c != '\\')
                         {
-                                text_set_warned_octal = true;
-                                break;
+                                into[address_to made] = simple[i + 1];
+                                address_to made += 1;
                         }
-
-                        value = wider;
-                        address_to at += 1;
-                        digits++;
+                        return;
                 }
 
-                return (p8)value;
+        if (c >= ' ' && c <= '~')
+        {
+                into[address_to made] = c;
+                address_to made += 1;
+                return;
         }
 
-        return next;
+        into[address_to made] = '\\';
+        into[address_to made + 1] = (p8)('0' + (c >> 6));
+        into[address_to made + 2] = (p8)('0' + ((c >> 3) & 7));
+        into[address_to made + 3] = (p8)('0' + (c & 7));
+        address_to made += 4;
 }
 
-/*
-        The expansion of one set, with its facts. other_length is the length
-        of the set this one is paired against, which is what an indefinite
-        repeat -- [x*] -- is padded up to; measured, tr ab '[x*]y' maps b to
-        y, so the repeat is as long as it must be and no longer.
-*/
-static fn text_set_build(string_address spec, p8 address_to into, p8 address_to classes,
-                         positive address_to have, text_set_facts address_to facts,
-                         positive other_length)
+static bool tr_complain(string_address format, p8 address_to from,
+                        positive length, bool quoted)
 {
-        positive at = 0;
-        positive length = string_length(spec);
+        p8 shown[256];
+        positive made = 0;
 
-        address_to have = 0;
-        address_to facts = (text_set_facts){0};
+        for (positive i = 0; i < length && made + 5 < sizeof(shown); i++)
+                tr_printable(shown, address_of made, from[i]);
 
-        while (at < length && !facts->complaint)
+        shown[made] = '\0';
+        text_flush();
+
+        if (quoted)
         {
-                if (spec[at] == '[' && spec[at + 1] == ':')
+                //      quote() in the C locale: single quotes, and an
+                //      apostrophe inside is closed, escaped and reopened.
+                p8 wrapped[sizeof(shown) * 4 + 3];
+                positive w = 0;
+
+                wrapped[w++] = '\'';
+                for (positive i = 0; i < made; i++)
                 {
-                        positive close = at + 2;
-
-                        while (close + 1 < length &&
-                               !(spec[close] == ':' && spec[close + 1] == ']'))
-                                close++;
-
-                        if (close + 1 < length)
+                        if (shown[i] == '\'')
                         {
-                                positive used;
-                                b32 class = byte_class_parse(spec + at, length - at,
-                                                             address_of used);
+                                memory_copy_apart(wrapped + w, "'\\''", 4);
+                                w += 4;
+                        }
+                        else
+                                wrapped[w++] = shown[i];
+                }
+                wrapped[w++] = '\'';
+                wrapped[w] = '\0';
+                string_format(writer_stderr, format, wrapped);
+        }
+        else
+                string_format(writer_stderr, format, shown);
 
-                                if (close == at + 2)
+        text_status = 1;
+        return false;
+}
+
+static bool tr_is(positive at, p8 c, positive length)
+{
+        return at < length && tr_text[at] == c && !tr_escaped[at];
+}
+
+// Pass one: GNU's unquote. Answers the length of the unescaped text.
+static bool tr_unquote(string_address spec, positive address_to length)
+{
+        positive size = string_length(spec);
+        positive j = 0;
+
+        if (!array_store_reserve(tr_text, tr_text_room, 0, 2 * (size + 1), 256))
+                return string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+
+        // Both arrays are one reservation, so the flags follow the text.
+        tr_escaped = tr_text + size + 1;
+
+        for (positive i = 0; spec[i]; i++)
+        {
+                p8 c = (p8)spec[i];
+
+                tr_escaped[j] = false;
+
+                if (c != '\\')
+                {
+                        tr_text[j++] = c;
+                        continue;
+                }
+
+                tr_escaped[j] = true;
+                p8 next = (p8)spec[i + 1];
+
+                if (next >= '0' && next <= '7')
+                {
+                        c = (p8)(next - '0');
+                        if (spec[i + 2] >= '0' && spec[i + 2] <= '7')
+                        {
+                                c = (p8)(8 * c + (spec[i + 2] - '0'));
+                                i++;
+                                if (spec[i + 2] >= '0' && spec[i + 2] <= '7')
                                 {
-                                        text_set_note(facts, "missing character class name",
-                                                      spec + at, close + 2 - at);
-                                        return;
-                                }
+                                        positive wider = 8 * (positive)c + (positive)(spec[i + 2] - '0');
 
-                                if (class < 0)
-                                {
-                                        text_set_note(facts, "invalid character class",
-                                                      spec + at + 2, close - at - 2);
-                                        return;
-                                }
-
-                                bool upper = string_compare_max(spec + at + 2, "upper", 5) == 0;
-                                bool lower = string_compare_max(spec + at + 2, "lower", 5) == 0;
-                                p8 kind = upper ? 1 : lower ? 2 : 0;
-
-                                facts->has_class = true;
-                                if (kind)
-                                        facts->has_upper_lower = true;
-                                else
-                                        facts->has_other_class = true;
-
-                                for (b32 c = 0; c < 256; c++)
-                                        if (byte_class_holds(class, (p8)c))
+                                        if (wider < 256)
                                         {
-                                                if (address_to have < TEXT_SET_MAX)
-                                                        classes[address_to have] = kind;
-                                                text_set_put(into, have, (p8)c);
+                                                c = (p8)wider;
+                                                i++;
+                                        }
+                                        else
+                                        {
+                                                p8 all[4] = {(p8)spec[i], (p8)spec[i + 1], (p8)spec[i + 2], 0};
+                                                p8 pair[3] = {(p8)spec[i], (p8)spec[i + 1], 0};
+
+                                                text_flush();
+                                                string_format(writer_stderr,
+                                                    "tr: warning: the ambiguous octal escape \\%s is being\n"
+                                                    "\tinterpreted as the 2-byte sequence \\0%s, %s\n",
+                                                    all, pair, all + 2);
+                                        }
+                                }
+                        }
+                }
+                else if (!next)
+                {
+                        text_flush();
+                        writer_stderr("tr: warning: an unescaped backslash at end of string is not portable\n", 0);
+                        tr_escaped[j] = false;
+                        i--;
+                        c = '\\';
+                }
+                else
+                {
+                        p8 escaped = byte_simple_escape(next);
+
+                        c = escaped ? escaped : next;
+                }
+
+                i++;
+                tr_text[j++] = c;
+        }
+
+        address_to length = j;
+        return true;
+}
+
+// GNU's find_bracketed_repeat: 0 found, -1 not a repeat, -2 refused.
+static b32 tr_repeat(positive start, positive length, p8 address_to repeated,
+                     positive address_to count, positive address_to close)
+{
+        if (!tr_is(start + 1, '*', length))
+                return -1;
+
+        for (positive i = start + 2; i < length && !tr_escaped[i]; i++)
+        {
+                if (tr_text[i] != ']')
+                        continue;
+
+                positive digits = i - start - 2;
+
+                address_to repeated = tr_text[start];
+                address_to count = 0;
+
+                if (digits)
+                {
+                        p8 address_to at = tr_text + start + 2;
+                        positive base = at[0] == '0' ? 8 : 10;
+                        positive value = 0;
+                        bool good = true;
+
+                        for (positive d = 0; d < digits; d++)
+                        {
+                                p8 byte = at[d];
+
+                                if (byte < '0' || byte > (base == 8 ? '7' : '9') ||
+                                    value > (TR_COUNT_MAX - (positive)(byte - '0')) / base)
+                                {
+                                        good = false;
+                                        break;
+                                }
+
+                                value = value * base + (positive)(byte - '0');
+                        }
+
+                        if (!good)
+                        {
+                                tr_complain("tr: invalid repeat count %s in [c*n] construct\n",
+                                            at, digits, true);
+                                return -2;
+                        }
+
+                        address_to count = value;
+                }
+
+                address_to close = i;
+                return 0;
+        }
+
+        return -1;
+}
+
+// GNU's star_digits_closebracket: does \*[0-9]*] start here, unescaped?
+static bool tr_star_digits_close(positive at, positive length)
+{
+        if (!tr_is(at, '*', length))
+                return false;
+
+        for (positive i = at + 1; i < length; i++)
+                if (!byte_is_digit(tr_text[i]) || tr_escaped[i])
+                        return tr_is(i, ']', length);
+
+        return false;
+}
+
+// Pass two: GNU's build_spec_list.
+static bool tr_parse(string_address spec, tr_list address_to list)
+{
+        positive length;
+
+        list->used = 0;
+
+        if (!tr_unquote(spec, address_of length))
+                return false;
+
+        p8 address_to p = tr_text;
+        positive i = 0;
+
+        while (i + 2 < length)
+        {
+                if (tr_is(i, '[', length))
+                {
+                        if (tr_is(i + 1, ':', length) || tr_is(i + 1, '=', length))
+                        {
+                                p8 delimiter = p[i + 1];
+                                positive close = 0;
+                                bool found = false;
+
+                                for (positive k = i + 2; k + 1 < length; k++)
+                                        if (p[k] == delimiter && p[k + 1] == ']' &&
+                                            !tr_escaped[k] && !tr_escaped[k + 1])
+                                        {
+                                                close = k;
+                                                found = true;
+                                                break;
                                         }
 
-                                facts->ends_with_class = true;
-                                at += used;
+                                if (found)
+                                {
+                                        positive size = close - (i + 2);
+                                        p8 address_to name = p + i + 2;
+
+                                        if (!size)
+                                        {
+                                                text_flush();
+                                                writer_stderr(delimiter == ':'
+                                                                  ? "tr: missing character class name '[::]'\n"
+                                                                  : "tr: missing equivalence class character '[==]'\n",
+                                                              0);
+                                                text_status = 1;
+                                                return false;
+                                        }
+
+                                        bool taken = false;
+
+                                        if (delimiter == ':')
+                                        {
+                                                b32 class = size <= 6 ? byte_class_index((string_address)name, size) : -1;
+
+                                                if (class >= 0)
+                                                {
+                                                        p8 kind = size == 5 && !memory_compare(name, "upper", 5) ? TR_UPPER
+                                                                  : size == 5 && !memory_compare(name, "lower", 5) ? TR_LOWER
+                                                                                                                   : TR_NONE;
+
+                                                        if (!tr_add(list, (tr_item){.kind = TR_CLASS, .class = class,
+                                                                                    .case_class = kind}))
+                                                                return false;
+                                                        taken = true;
+                                                }
+                                                else if (!tr_star_digits_close(i + 2, length))
+                                                        return tr_complain("tr: invalid character class %s\n",
+                                                                           name, size, true);
+                                        }
+                                        else if (size == 1)
+                                        {
+                                                if (!tr_add(list, (tr_item){.kind = TR_EQUIV, .first = name[0]}))
+                                                        return false;
+                                                taken = true;
+                                        }
+                                        else if (!tr_star_digits_close(i + 2, length))
+                                                return tr_complain("tr: %s: equivalence class operand must be a single character\n",
+                                                                   name, size, false);
+
+                                        if (taken)
+                                        {
+                                                i = close + 2;
+                                                continue;
+                                        }
+                                }
+                        }
+
+                        p8 repeated;
+                        positive count;
+                        positive close;
+                        b32 found = tr_repeat(i + 1, length, address_of repeated,
+                                              address_of count, address_of close);
+
+                        if (found == -2)
+                                return false;
+
+                        if (!found)
+                        {
+                                if (!tr_add(list, (tr_item){.kind = TR_REPEAT, .first = repeated,
+                                                            .count = count}))
+                                        return false;
+                                i = close + 1;
                                 continue;
                         }
                 }
 
-                if (spec[at] == '[' && spec[at + 1] == '=' && at + 3 < length &&
-                    spec[at + 3] == '=' && spec[at + 4] == ']')
+                if (tr_is(i + 1, '-', length))
                 {
-                        if (address_to have < TEXT_SET_MAX)
-                                classes[address_to have] = 0;
-                        text_set_put(into, have, spec[at + 2]);
-                        facts->has_equiv = true;
-                        facts->ends_with_class = false;
-                        at += 5;
-                        continue;
-                }
-
-                // [x*n] repeats: a count, or none at all for as many as the
-                // other set needs. The count is octal behind a leading 0, a
-                // 0 alone is the indefinite form, and anything that is not
-                // digits of the right base is refused with GNU's words.
-                if (spec[at] == '[' && at + 2 < length && spec[at + 2] == '*')
-                {
-                        positive scan = at + 3;
-                        positive count = 0;
-                        bool digits = false;
-                        bool bad = false;
-                        bool octal = spec[scan] == '0';
-
-                        while (scan < length && spec[scan] != ']')
+                        if (p[i + 2] < p[i])
                         {
-                                p8 digit = spec[scan];
+                                p8 shown[16];
+                                positive made = 0;
 
-                                if (!byte_is_digit(digit) || (octal && digit > '7'))
-                                        bad = true;
-                                else if (!bad)
+                                for (positive e = 0; e < 3; e += 2)
                                 {
-                                        positive base = octal ? 8 : 10;
-                                        positive value = (positive)(digit - '0');
-
-                                        if (count > (positive_max - value) / base)
-                                                bad = true;
+                                        if (p[i + e] >= ' ' && p[i + e] <= '~')
+                                                shown[made++] = p[i + e];
                                         else
-                                                count = count * base + value;
+                                        {
+                                                shown[made++] = '\\';
+                                                shown[made++] = (p8)('0' + (p[i + e] >> 6));
+                                                shown[made++] = (p8)('0' + ((p[i + e] >> 3) & 7));
+                                                shown[made++] = (p8)('0' + (p[i + e] & 7));
+                                        }
+                                        if (!e)
+                                                shown[made++] = '-';
                                 }
-
-                                digits = true;
-                                scan++;
+                                shown[made] = '\0';
+                                text_flush();
+                                string_format(writer_stderr,
+                                              "tr: range-endpoints of '%s' are in reverse collating sequence order\n",
+                                              shown);
+                                text_status = 1;
+                                return false;
                         }
 
-                        if (scan < length)
-                        {
-                                if (bad)
-                                {
-                                        text_set_note(facts, "invalid repeat count in [c*n] construct",
-                                                      spec + at + 3, scan - at - 3);
-                                        return;
-                                }
-
-                                if (!digits || !count)
-                                {
-                                        facts->repeats++;
-                                        facts->repeat_at = address_to have;
-                                        facts->repeat_char = spec[at + 1];
-                                }
-                                else
-                                {
-                                        /*
-                                                A repeat longer than the pairing
-                                                can read is the same set. Only
-                                                other_length bytes of a second
-                                                set are ever looked at, and a
-                                                first set is read against a
-                                                second no longer than the room
-                                                here, so every position past
-                                                that maps the way the last one
-                                                does. GNU builds the whole of
-                                                [x*4294967296] and reads no more
-                                                than this either.
-                                        */
-                                        if (other_length > address_to have &&
-                                            count > other_length - address_to have)
-                                                count = other_length - address_to have;
-
-                                        if (count > TEXT_SET_MAX - address_to have)
-                                                count = TEXT_SET_MAX - address_to have;
-
-                                        memory_fill(into + address_to have, spec[at + 1], count);
-                                        memory_fill(classes + address_to have, 0, count);
-                                        address_to have += count;
-                                }
-
-                                facts->ends_with_class = false;
-                                at = scan + 1;
-                                continue;
-                        }
-                }
-
-                positive was = at;
-                p8 first = text_escape(spec, address_of at, length);
-
-                if (at < length && spec[at] == '-' && at + 1 < length)
-                {
-                        positive after = at + 1;
-                        p8 last = text_escape(spec, address_of after, length);
-
-                        if (first > last)
-                        {
-                                text_set_note(facts, "range-endpoints are in reverse collating sequence order",
-                                              spec + was, after - was);
-                                return;
-                        }
-
-                        for (b32 c = first; c <= (b32)last; c++)
-                        {
-                                if (address_to have < TEXT_SET_MAX)
-                                        classes[address_to have] = 0;
-                                text_set_put(into, have, (p8)c);
-                        }
-
-                        facts->ends_with_class = false;
-                        at = after;
+                        if (!tr_add(list, (tr_item){.kind = TR_RANGE, .first = p[i], .last = p[i + 2]}))
+                                return false;
+                        i += 3;
                         continue;
                 }
 
-                if (address_to have < TEXT_SET_MAX)
-                        classes[address_to have] = 0;
-                text_set_put(into, have, first);
-                facts->ends_with_class = false;
+                if (!tr_add(list, (tr_item){.kind = TR_NORMAL, .first = p[i]}))
+                        return false;
+                i++;
         }
 
-        if (facts->repeats == 1 && other_length > address_to have)
-        {
-                positive need = other_length - address_to have;
-                positive tail = address_to have - facts->repeat_at;
+        for (; i < length; i++)
+                if (!tr_add(list, (tr_item){.kind = TR_NORMAL, .first = p[i]}))
+                        return false;
 
-                if (need > TEXT_SET_MAX - address_to have)
+        return true;
+}
+
+static fn tr_begin(tr_list address_to list)
+{
+        list->at = 0;
+        list->state = TR_NEW;
+}
+
+static fn tr_skip(tr_list address_to list)
+{
+        list->at++;
+        list->state = TR_NEW;
+}
+
+// GNU's get_next: the next byte of the expansion, or -1 at its end.
+static b32 tr_next(tr_list address_to list, p8 address_to case_class)
+{
+        if (case_class)
+                address_to case_class = TR_NONE;
+
+        while (list->at < list->used)
+        {
+                tr_item address_to item = list->items + list->at;
+                b32 answer;
+
+                switch (item->kind)
                 {
-                        text_set_broken = true;
-                        need = TEXT_SET_MAX - address_to have;
+                case TR_NORMAL:
+                case TR_EQUIV:
+                        tr_skip(list);
+                        return item->first;
+
+                case TR_RANGE:
+                        list->state = list->state == TR_NEW ? item->first : list->state + 1;
+                        answer = (b32)list->state;
+                        if (list->state == item->last)
+                                tr_skip(list);
+                        return answer;
+
+                case TR_CLASS:
+                {
+                        if (case_class)
+                                address_to case_class = item->case_class;
+
+                        b32 c = list->state == TR_NEW ? 0 : (b32)list->state;
+
+                        if (list->state == TR_NEW)
+                                while (c < 256 && !byte_class_holds(item->class, (p8)c))
+                                        c++;
+
+                        answer = c;
+
+                        for (c++; c < 256 && !byte_class_holds(item->class, (p8)c); c++)
+                                ;
+
+                        if (c < 256)
+                                list->state = (positive)c;
+                        else
+                                tr_skip(list);
+                        return answer;
                 }
 
-                // The tail moves up over itself, and the two arrays keep
-                // their bytes in step.
-                memory_copy(into + facts->repeat_at + need,
-                            into + facts->repeat_at, tail);
-                memory_copy(classes + facts->repeat_at + need,
-                            classes + facts->repeat_at, tail);
-                memory_fill(into + facts->repeat_at, facts->repeat_char, need);
-                memory_fill(classes + facts->repeat_at, 0, need);
-                address_to have += need;
+                case TR_REPEAT:
+                        if (!item->count)
+                        {
+                                tr_skip(list);
+                                continue;
+                        }
+
+                        list->state = list->state == TR_NEW ? 1 : list->state + 1;
+                        if (list->state == item->count)
+                                tr_skip(list);
+                        return item->first;
+                }
+        }
+
+        return -1;
+}
+
+static positive tr_class_size(b32 class)
+{
+        positive size = 0;
+
+        for (b32 c = 0; c < 256; c++)
+                size += byte_class_holds(class, (p8)c) != 0;
+
+        return size;
+}
+
+// GNU's get_spec_stats.
+static bool tr_stats(tr_list address_to list)
+{
+        positive length = 0;
+
+        list->indefinite = 0;
+        list->has_equiv = false;
+        list->has_restricted_class = false;
+        list->has_class = false;
+
+        for (positive i = 0; i < list->used; i++)
+        {
+                tr_item address_to item = list->items + i;
+                positive size = 0;
+
+                switch (item->kind)
+                {
+                case TR_NORMAL:
+                case TR_EQUIV:
+                        size = 1;
+                        list->has_equiv |= item->kind == TR_EQUIV;
+                        break;
+                case TR_RANGE:
+                        size = (positive)(item->last - item->first) + 1;
+                        break;
+                case TR_CLASS:
+                        list->has_class = true;
+                        size = tr_class_size(item->class);
+                        if (item->case_class == TR_NONE)
+                                list->has_restricted_class = true;
+                        break;
+                case TR_REPEAT:
+                        if (item->count)
+                                size = item->count;
+                        else
+                        {
+                                list->indefinite_at = i;
+                                list->indefinite++;
+                        }
+                        break;
+                }
+
+                if (size > TR_COUNT_MAX - length)
+                {
+                        text_flush();
+                        writer_stderr("tr: too many characters in set\n", 0);
+                        text_status = 1;
+                        return false;
+                }
+
+                length += size;
+        }
+
+        list->length = length;
+        return true;
+}
+
+static bool tr_fatal(string_address message)
+{
+        text_flush();
+        string_format(writer_stderr, "tr: %s\n", message);
+        text_status = 1;
+        return false;
+}
+
+// GNU's validate_case_classes.
+static bool tr_case_classes(bool complement)
+{
+        if (complement || !tr_two.has_class)
+                return true;
+
+        positive upper = tr_class_size(byte_class_index("upper", 5));
+        positive lower = tr_class_size(byte_class_index("lower", 5));
+        b32 c1 = 0;
+        b32 c2 = 0;
+        bool new_one = true;
+        bool new_two = true;
+
+        tr_begin(address_of tr_one);
+        tr_begin(address_of tr_two);
+
+        while (c1 != -1 && c2 != -1)
+        {
+                p8 class_one, class_two;
+
+                c1 = tr_next(address_of tr_one, address_of class_one);
+                c2 = tr_next(address_of tr_two, address_of class_two);
+
+                if (new_two && class_two != TR_NONE &&
+                    !(new_one && class_one != TR_NONE))
+                        return tr_fatal("misaligned [:upper:] and/or [:lower:] construct");
+
+                if (class_two != TR_NONE)
+                {
+                        tr_skip(address_of tr_one);
+                        tr_skip(address_of tr_two);
+                        tr_one.length -= (class_one == TR_UPPER ? upper : lower) - 1;
+                        tr_two.length -= (class_two == TR_UPPER ? upper : lower) - 1;
+                }
+
+                new_one = tr_one.state == TR_NEW;
+                new_two = tr_two.state == TR_NEW;
+        }
+
+        return true;
+}
+
+static bool tr_homogeneous(tr_list address_to list)
+{
+        tr_begin(list);
+
+        b32 first = tr_next(list, null);
+
+        if (first < 0)
+                return false;
+
+        for (b32 c; (c = tr_next(list, null)) >= 0;)
+                if (c != first)
+                        return false;
+
+        return true;
+}
+
+// Which bytes a set holds. Read off the constructs rather than walked, so a
+// repeat of a billion costs what a single byte does.
+static fn tr_members(tr_list address_to list, bool complement, p8 address_to in)
+{
+        memory_fill(in, 0, 256);
+
+        for (positive i = 0; i < list->used; i++)
+        {
+                tr_item address_to item = list->items + i;
+
+                if (item->kind == TR_RANGE)
+                        memory_fill(in + item->first, 1,
+                                    (positive)(item->last - item->first) + 1);
+                else if (item->kind == TR_CLASS)
+                {
+                        for (b32 c = 0; c < 256; c++)
+                                if (byte_class_holds(item->class, (p8)c))
+                                        in[c] = 1;
+                }
+                else if (item->kind != TR_REPEAT || item->count)
+                        in[item->first] = 1;
+        }
+
+        if (complement)
+                for (b32 c = 0; c < 256; c++)
+                        in[c] = (p8)!in[c];
+}
+
+// GNU's validate, string2_extend included.
+static bool tr_validate(bool second, bool translating, bool complement,
+                        bool truncate)
+{
+        if (!tr_stats(address_of tr_one))
+                return false;
+
+        if (complement)
+        {
+                p8 in[256];
+
+                tr_members(address_of tr_one, true, in);
+                tr_one.length = 0;
+                for (b32 c = 0; c < 256; c++)
+                        tr_one.length += in[c];
+        }
+
+        if (tr_one.indefinite)
+                return tr_fatal("the [c*] repeat construct may not appear in string1");
+
+        if (!second)
+                return true;
+
+        if (!tr_stats(address_of tr_two))
+                return false;
+
+        if (tr_one.length >= tr_two.length && tr_two.indefinite == 1)
+        {
+                tr_two.items[tr_two.indefinite_at].count = tr_one.length - tr_two.length;
+                tr_two.length = tr_one.length;
+        }
+
+        if (tr_two.indefinite > 1)
+                return tr_fatal("only one [c*] repeat construct may appear in string2");
+
+        if (!translating)
+        {
+                if (tr_two.indefinite)
+                        return tr_fatal("the [c*] construct may appear in string2 only when translating");
+                return true;
+        }
+
+        if (tr_two.has_equiv)
+                return tr_fatal("[=c=] expressions may not appear in string2 when translating");
+
+        if (tr_two.has_restricted_class)
+                return tr_fatal("when translating, the only character classes that may appear in\n"
+                                "string2 are 'upper' and 'lower'");
+
+        if (!tr_case_classes(complement))
+                return false;
+
+        if (tr_one.length > tr_two.length && !truncate)
+        {
+                if (!tr_two.length)
+                        return tr_fatal("when not truncating set1, string2 must be non-empty");
+
+                tr_item address_to last = tr_two.items + tr_two.used - 1;
+                p8 repeated = last->kind == TR_RANGE ? last->last : last->first;
+
+                if (last->kind == TR_CLASS)
+                        return tr_fatal("when translating with string1 longer than string2,\n"
+                                        "the latter string must not end with a character class");
+
+                if (!tr_add(address_of tr_two, (tr_item){.kind = TR_REPEAT, .first = repeated,
+                                                          .count = tr_one.length - tr_two.length}))
+                        return false;
+                tr_two.length = tr_one.length;
+        }
+
+        if (complement && tr_one.has_class &&
+            !(tr_two.length == tr_one.length && tr_homogeneous(address_of tr_two)))
+                return tr_fatal("when translating with complemented character classes,\n"
+                                "string2 must map all characters in the domain to one");
+
+        return true;
+}
+
+// The translation table GNU's main builds, for either shape of set1.
+static fn tr_translation(bool complement, p8 address_to mapped)
+{
+        for (b32 c = 0; c < 256; c++)
+                mapped[c] = (p8)c;
+
+        tr_begin(address_of tr_two);
+
+        if (complement)
+        {
+                p8 in[256];
+
+                tr_members(address_of tr_one, false, in);
+
+                for (b32 c = 0; c < 256; c++)
+                {
+                        if (in[c])
+                                continue;
+
+                        b32 to = tr_next(address_of tr_two, null);
+
+                        if (to < 0)
+                                break;
+
+                        mapped[c] = (p8)to;
+                }
+
+                return;
+        }
+
+        tr_begin(address_of tr_one);
+
+        for (;;)
+        {
+                p8 class_one, class_two;
+                b32 c1 = tr_next(address_of tr_one, address_of class_one);
+                b32 c2 = tr_next(address_of tr_two, address_of class_two);
+
+                if (class_one == TR_LOWER && class_two == TR_UPPER)
+                {
+                        for (b32 c = 'a'; c <= 'z'; c++)
+                                mapped[c] = (p8)(c - 'a' + 'A');
+                }
+                else if (class_one == TR_UPPER && class_two == TR_LOWER)
+                {
+                        for (b32 c = 'A'; c <= 'Z'; c++)
+                                mapped[c] = (p8)(c - 'A' + 'a');
+                }
+                else
+                {
+                        if (c1 < 0 || c2 < 0)
+                                break;
+                        mapped[c1] = (p8)c2;
+                }
+
+                if (class_two != TR_NONE)
+                {
+                        tr_skip(address_of tr_one);
+                        tr_skip(address_of tr_two);
+                }
         }
 }
 
@@ -16811,184 +17302,30 @@ static b32 text_tr()
         */
         (void)extra;
 
-        text_set_facts facts_one;
-        text_set_facts facts_two = {0};
         bool translating = second && !remove;
-
-        text_set_broken = false;
-        text_set_warned_backslash = false;
-        text_set_warned_octal = false;
-        text_set_build(first, text_set_one, text_set_one_class,
-                       address_of text_set_one_length, address_of facts_one, 0);
-
-        if (facts_one.complaint)
-                return text_done(string_diagnostic(&text_diagnostic, 1, facts_one.about, facts_one.complaint));
-
         p8 in_first[256];
         p8 in_second[256];
         p8 mapped[256];
-        positive domain = 0;
 
-        memory_fill(in_first, 0, sizeof(in_first));
+        //      Both sets are read before either is checked, as GNU reads
+        //      them: a bad string2 is reported even where string1 would have
+        //      been refused by the checks that follow.
+        if (!tr_parse(first, address_of tr_one) ||
+            (second && !tr_parse(second, address_of tr_two)) ||
+            !tr_validate(second != null, translating, complement, truncate))
+                return text_done(1);
+
+        tr_members(address_of tr_one, complement, in_first);
         memory_fill(in_second, 0, sizeof(in_second));
 
-        for (positive i = 0; i < text_set_one_length && i < TEXT_SET_MAX; i++)
-                in_first[text_set_one[i]] = 1;
-
-        if (complement)
-                for (b32 c = 0; c < 256; c++)
-                        in_first[c] = (p8)!in_first[c];
-
-        for (b32 c = 0; c < 256; c++)
-                domain += in_first[c];
-
-        // The length the second set is paired against: the first set as
-        // written, or the size of its complement.
-        positive length_one = complement ? domain : text_set_one_length;
-
         if (second)
-        {
-                text_set_build(second, text_set_two, text_set_two_class,
-                               address_of text_set_two_length, address_of facts_two,
-                               length_one);
-
-                if (facts_two.complaint)
-                        return text_done(string_diagnostic(&text_diagnostic, 1, facts_two.about, facts_two.complaint));
-        }
-
-        if (text_set_broken)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "set too large"));
-
-        if (text_set_warned_backslash)
-                string_diagnostic(&text_diagnostic, 0, null, "warning: an unescaped backslash at end of string is not portable");
-
-        if (text_set_warned_octal)
-                string_diagnostic(&text_diagnostic, 0, null, "warning: an ambiguous octal escape is being interpreted as a 2-byte sequence");
-
-        /*
-                What GNU refuses before it reads a byte, in its words. A
-                repeat that fills to the other set has no other set to fill
-                to in string1; only one of them can be open-ended in string2,
-                and only while translating; equivalence classes and the
-                classes that are not upper and lower have no order to map by;
-                and a second set that is shorter has to end in something that
-                can be repeated to pad it.
-        */
-        if (facts_one.repeats)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "the [c*] repeat construct may not appear in string1"));
-
-        if (facts_two.repeats > 1)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "only one [c*] repeat construct may appear in string2"));
-
-        if (second && !translating && facts_two.repeats)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "the [c*] construct may appear in string2 only when translating"));
+                tr_members(address_of tr_two, false, in_second);
 
         if (translating)
-        {
-                if (facts_two.has_equiv)
-                        return text_done(string_diagnostic(&text_diagnostic, 1, null, "[=c=] expressions may not appear in string2 when translating"));
-
-                if (facts_two.has_other_class)
-                        return text_done(string_diagnostic(&text_diagnostic, 1, null, "when translating, the only character classes that may appear in string2 are 'upper' and 'lower'"));
-
-                if (length_one > text_set_two_length && !truncate)
-                {
-                        if (!text_set_two_length)
-                                return text_done(string_diagnostic(&text_diagnostic, 1, null, "when not truncating set1, string2 must be non-empty"));
-
-                        if (facts_two.ends_with_class)
-                                return text_done(string_diagnostic(&text_diagnostic, 1, null, "when translating with string1 longer than string2, the latter string must not end with a character class"));
-                }
-
-                // A complemented class maps every byte it names to one byte:
-                // the second set, padded as far as it reaches, must be one
-                // byte over and over and reach exactly as far.
-                if (complement && facts_one.has_class)
-                {
-                        positive reach = truncate ? text_set_two_length
-                                         : text_set_two_length > length_one ? text_set_two_length
-                                                                            : length_one;
-                        bool one_byte = text_set_two_length != 0;
-
-                        for (positive i = 1; i < text_set_two_length && i < TEXT_SET_MAX; i++)
-                                if (text_set_two[i] != text_set_two[0])
-                                        one_byte = false;
-
-                        if (!one_byte || reach != length_one)
-                                return text_done(string_diagnostic(&text_diagnostic, 1, null, "when translating with complemented character classes, string2 must map all characters in the domain to one"));
-                }
-
-                // [:upper:] and [:lower:] in the second set must stand where
-                // a class stands in the first, so case conversion lines up.
-                if (facts_two.has_upper_lower && !complement)
-                {
-                        positive span = truncate && text_set_two_length < text_set_one_length
-                                            ? text_set_two_length
-                                            : text_set_one_length;
-
-                        for (positive i = 0; i < span && i < TEXT_SET_MAX; i++)
-                        {
-                                bool one = text_set_one_class[i] != 0;
-                                bool two = i < text_set_two_length && text_set_two_class[i] != 0;
-
-                                if (one != two)
-                                        return text_done(string_diagnostic(&text_diagnostic, 1, null, "misaligned [:upper:] and/or [:lower:] construct"));
-                        }
-                }
-        }
-
-        for (positive i = 0; i < text_set_two_length && i < TEXT_SET_MAX; i++)
-                in_second[text_set_two[i]] = 1;
-
-        for (b32 c = 0; c < 256; c++)
-                mapped[c] = (p8)c;
-
-        // A second set shorter than the first is padded with its last
-        // character, which is what makes tr a-z x work.
-        if (second && !remove && text_set_two_length)
-        {
-                if (complement)
-                {
-                        // The complement is every byte not in the first set,
-                        // in byte order, and it maps to the second set by
-                        // position the way a written-out set does: measured,
-                        // tr -c a-z A-Z turns a newline into K. -t stops the
-                        // mapping where the second set ends.
-                        positive room = text_set_two_length < TEXT_SET_MAX
-                                            ? text_set_two_length
-                                            : TEXT_SET_MAX;
-                        positive index = 0;
-
-                        for (b32 c = 0; c < 256; c++)
-                        {
-                                if (!in_first[c])
-                                        continue;
-
-                                if (truncate && index >= room)
-                                        break;
-
-                                mapped[c] = text_set_two[index < room ? index
-                                                                      : room - 1];
-                                index++;
-                        }
-                }
-                else
-                {
-                        positive have = text_set_one_length < TEXT_SET_MAX ? text_set_one_length
-                                                                          : TEXT_SET_MAX;
-                        positive room = text_set_two_length < TEXT_SET_MAX ? text_set_two_length
-                                                                          : TEXT_SET_MAX;
-
-                        // -t stops padding: what the second set does not
-                        // reach is left alone rather than mapped to its last.
-                        if (truncate && have > room)
-                                have = room;
-
-                        for (positive i = 0; i < have; i++)
-                                mapped[text_set_one[i]] =
-                                    text_set_two[i < room ? i : room - 1];
-                }
-        }
+                tr_translation(complement, mapped);
+        else
+                for (b32 c = 0; c < 256; c++)
+                        mapped[c] = (p8)c;
 
         // Without a second set, squeezing looks at the first one. With one,
         // it is the second whether or not the first is being deleted: -ds
