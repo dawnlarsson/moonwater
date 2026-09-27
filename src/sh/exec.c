@@ -11797,7 +11797,7 @@ static bool conditional_primary(bool invert)
                         return test_unary('e', operand);
 
                 if (word_is(raw, "-v"))
-                        return env_get(operand) != null;
+                        return test_variable_set(operand);
 
                 /*
                         -R names a variable, not a path. After expansion an

@@ -13798,6 +13798,37 @@ def shell_lang_declaration_append(rng):
         "env | grep -c '^v='"))
 
 
+#       bash's test takes -v, -a, -o and -R as unary operators, as [[ ]]
+#       does, and -a and -o between two words are the binary and/or. test
+#       had none of the four: `[ -v x ]` and `test -a /tmp` were "too many
+#       arguments", and [[ -v a[1] ]] was false for an element that is set.
+def shell_lang_test_bash_unary(rng):
+    operator = rng.choice(("-v", "-a", "-o", "-R"))
+    operand = {"-v": ("x", "nope", "'a[1]'", "'a[7]'", "'m[k]'", "'m[z]'", "a", "''", "-a"),
+               "-a": ("/", "/nope", "f", "''", "-a", "-o"),
+               "-o": ("errexit", "noglob", "nosuch", "''", "-a"),
+               "-R": ("r", "x", "nope")}[operator]
+    word = operator + " " + rng.choice(operand)
+    shape = rng.choice(("plain", "negated", "and", "or", "brackets", "three", "double"))
+    if shape == "negated":
+        expression = "[ ! " + word + " ]"
+    elif shape == "and":
+        expression = "[ " + word + " -a -d / ]"
+    elif shape == "or":
+        expression = "[ -z x -o " + word + " ]"
+    elif shape == "brackets":
+        expression = "[ \\( " + word + " \\) ]"
+    elif shape == "three":
+        expression = "[ " + rng.choice(("!", "x", "''")) + " " + rng.choice(("-a", "-o")) + " " + rng.choice(("/", "''", "y")) + " ]"
+    elif shape == "double":
+        expression = "[[ " + word + " ]]"
+    else:
+        expression = rng.choice(("[ " + word + " ]", "test " + word))
+    return ("test-bash-unary-" + shape, shell_BASH, shell_program(
+        "x=1; a=(p q); declare -A m=([k]=v); declare -n r=x; : > f; set -o noglob",
+        expression + " 2>/dev/null; echo \"s=$?\""))
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16429,6 +16460,7 @@ SHELL_FAMILIES = (
     shell_lang_array_literal_lines,
     shell_lang_positional_each,
     shell_lang_declaration_append,
+    shell_lang_test_bash_unary,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),

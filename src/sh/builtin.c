@@ -10602,6 +10602,67 @@ bool test_unary(p8 op, string_address value)
 #define test_modified(facts) ((facts)->modified.seconds)
 #define test_modified_fraction(facts) ((facts)->modified.nanoseconds)
 
+/*
+        The four unary operators bash's test has beyond POSIX: -v NAME is set
+        (an element too, a[1]), -a FILE is the old spelling of -e, -o OPTION
+        is on, and -R NAME is a nameref. [[ ]] had them and test did not, so
+        `[ -v x ]` and `test -a /tmp` were "too many arguments", status 2.
+        dash has none of them.
+*/
+static bool test_bash_unary(string_address word)
+{
+        return shell_bash_compat && word && string_is(word, '-') &&
+               (string_is(word + 1, 'v') || string_is(word + 1, 'a') ||
+                string_is(word + 1, 'o') || string_is(word + 1, 'R')) &&
+               !string_get(word + 2);
+}
+
+bool test_variable_set(string_address name)
+{
+        positive length = string_length(name);
+        positive value_length;
+
+        string_address open = string_first_of(name, '[');
+
+        if (open && open > name && length > 3 && name[length - 1] == ']')
+        {
+                positive base = (positive)(open - name);
+                positive key_length;
+                string_address key;
+
+                if (!shell_valid_name(name, base))
+                        return false;
+                key = shell_expand_subscript(name, base, open + 1,
+                                             length - base - 2,
+                                             address_of key_length);
+                return key && shell_array_get(name, base, key, key_length,
+                                              address_of value_length) != null;
+        }
+
+        return env_get(name) != null;
+}
+
+static bool test_bash_unary_value(p8 letter, string_address operand)
+{
+        if (letter == 'a')
+                return test_unary('e', operand);
+
+        if (letter == 'v')
+                return test_variable_set(operand);
+
+        if (letter == 'R')
+                return string_get(operand) &&
+                       (shell_variable_attributes(operand,
+                                                  string_length(operand)) &
+                        SHELL_ARRAY_NAMEREF) != 0;
+
+        positive option = string_table_find(operand, shell_option_names,
+                                            sizeof(shell_option_names[0]),
+                                            SHELL_OPTION_NAMES);
+
+        return option < SHELL_OPTION_NAMES && shell_option_on(option);
+}
+
 PURE bool test_is_unary(string_address word)
 {
         p8 letter;
@@ -11140,6 +11201,15 @@ bool test_primary()
                 return value;
         }
 
+        if (test_at + 1 < test_stop && test_bash_unary(word))
+        {
+                bool value = test_bash_unary_value(string_get(word + 1),
+                                                   shell_argv[test_at + 1]);
+
+                test_at += 2;
+                return value;
+        }
+
         test_at++;
 
         return word && string_not(word, end);
@@ -11210,6 +11280,11 @@ HOT bool test_short(positive from, positive to, bool address_to handled)
                         return test_unary(string_get(shell_argv[from] + 1),
                                           shell_argv[from + 1]);
 
+                if (test_bash_unary(shell_argv[from]))
+                        return test_bash_unary_value(
+                            string_get(shell_argv[from] + 1),
+                            shell_argv[from + 1]);
+
                 address_to handled = false;
                 return false;
         }
@@ -11220,6 +11295,21 @@ HOT bool test_short(positive from, positive to, bool address_to handled)
 
                 if (kind)
                         return test_compare(kind, shell_argv[from], shell_argv[from + 2]);
+
+                /* -a and -o are binary primaries too, and three words with
+                   one in the middle are that test: `[ ! -a / ]` is "!" and
+                   "/", both not empty. */
+                if (shell_bash_compat &&
+                    (word_is(shell_argv[from + 1], "-a") ||
+                     word_is(shell_argv[from + 1], "-o")))
+                {
+                        bool left = string_get(shell_argv[from]) != end;
+                        bool right = string_get(shell_argv[from + 2]) != end;
+
+                        return word_is(shell_argv[from + 1], "-a")
+                                   ? left && right
+                                   : left || right;
+                }
         }
 
         if (count == 3 || count == 4)
