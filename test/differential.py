@@ -9875,7 +9875,33 @@ MISC_UTILITIES = (
                    ("--foreground", "--preserve-status", "-s", "KILL", ".1", "sleep", "2"),
                    ("--foreground", "-k0", ".1", "sh", "-c", "trap '' TERM; sleep 5"),
                    ("--foreground", "-s", "KILL", "0", "./exe", "b"),
-                   ("--foreground", "-s", "KILL", "1", "./exe", "a"))),
+                   ("--foreground", "-s", "KILL", "1", "./exe", "a"),
+                   # A span too short to count still times out; one too long
+                   # to count is forever, not a mistake.
+                   ("1e-10000", "sleep", "2"), ("1e400", "true"), ("99999999999999999999", "true"),
+                   ("-k", "1e400", ".1", "true"), ("1e-10000s", "true"))),
+    #       timeout between the command and signals from outside: an ALRM
+    #       is the timeout come early and answers 124, the others are sent
+    #       on, and none of them may end timeout and leave the command
+    #       behind (which answered 142 with the sleep still running). The words are
+    #       the signal sent a moment after the start, then timeout's own; a
+    #       signal of "none" is a shell that ignores SIGCHLD, and "pipe" a
+    #       reader gone before a -v line.
+    Utility("timeout_signals",
+            operands=(("ALRM", "30", "sleep", "21.37"), ("USR1", "30", "sleep", "21.37"), ("USR2", "30", "sleep", "21.37"),
+                      ("PIPE", "30", "sleep", "21.37"), ("HUP", "30", "sleep", "21.37"),
+                      ("ALRM", "-s", "INT", "30", "sleep", "21.37"),
+                      ("ALRM", "-k", ".2", "30", "sh", "-c", "trap '' TERM; sleep 21.37"),
+                      ("none", "5", "true"), ("none", "5", "sh", "-c", "exit 3"), ("pipe", "-v", ".1", "sleep", "7")),
+            stdin=("empty",), fixture="misc", stderr="exact", modes=("bash",), timeout=10.0,
+            script=lambda argv, stdin_name: ul_live("timeout", (
+                "env --ignore-signal=CHLD bash -c 'exec -a timeout \"$0\" \"$@\"' \"$tool\" " + ul_words(argv[1:]) +
+                "\nstatus=$?\n" if argv[0] == "none" else
+                "run " + ul_words(argv[1:]) + " 2>&1 | :\nstatus=${PIPESTATUS[0]}\n" if argv[0] == "pipe" else
+                "(exec -a timeout \"$tool\" " + ul_words(argv[1:]) + ") &\np=$!\nsleep .3\nkill -" + argv[0] +
+                " $p\n{ wait $p; } 2> /dev/null\nstatus=$?\n")
+                + "exit $status\n"),
+            valid=lambda argv: len(argv) > 2 and argv[0].isupper() or argv[:1] in (["none"], ["pipe"])),
 
     Utility("nohup",
             operands=(("./exe", "a"), ("./exe",), ("missing",), (), ("--", "./exe"), ("dir",), ("unreadable",),

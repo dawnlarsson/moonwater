@@ -32709,9 +32709,15 @@ static b32 file_touch()
 // Durations: sleep, timeout, replay and util-linux waits share checked
 // decimal/scientific seconds. Keep 19 significant digits plus the next digit:
 // only the twentieth can still contribute to a native-word nanosecond count.
+/* Whether the last duration refused was a number too large to hold, which
+   timeout and sleep take as forever rather than as a mistake. */
+static bool file_duration_overflowed;
+
 static bool file_duration_read(string_address text, bool units,
                                 positive address_to nanoseconds)
 {
+        file_duration_overflowed = false;
+
         string_address at = text;
         positive made = 0;
         positive fraction = 0;
@@ -32817,18 +32823,26 @@ static bool file_duration_read(string_address text, bool units,
         {
                 positive digit = dropped ? next : 0;
                 if (made > (positive_max - digit) / 10)
+                {
+                        file_duration_overflowed = true;
                         return false;
+                }
                 made = made * 10 + digit;
                 dropped = 0;
                 scale--;
         }
-        while (scale < 0 && made)
+        //      A span too short to count in nanoseconds is still a span, and
+        //      GNU's timeout 1e-10000 times out rather than never does.
+        while (scale < 0 && made > 1)
         {
                 made /= 10;
                 scale++;
         }
         if (made > positive_max / multiplier)
+        {
+                file_duration_overflowed = true;
                 return false;
+        }
         address_to nanoseconds = made * multiplier;
         return true;
 }
@@ -32838,7 +32852,11 @@ static bool sleep_read(string_address text, p64 address_to seconds,
 {
         positive total;
         if (!file_duration_read(text, true, address_of total))
-                return false;
+        {
+                if (!file_duration_overflowed)
+                        return false;
+                total = positive_max;
+        }
         address_to seconds = total / 1000000000;
         address_to nanoseconds = total % 1000000000;
         return true;
