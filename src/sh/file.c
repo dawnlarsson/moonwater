@@ -15252,10 +15252,18 @@ static fn du_tree_enter(address_any context, address_any node_address,
                                 ;
                         else if ((facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
                         {
+                                /*
+                                        A directory that is one of its own
+                                        ancestors -- a bind mount of a over
+                                        a/b, or a link -L follows back up --
+                                        is passed over in silence, as fts
+                                        reports it and GNU's du skips a
+                                        cycle a mount point is part of.
+                                */
                                 bool cycle = false;
 
                                 for (du_tree_node address_to up = node;
-                                     du_follow && up && !cycle; up = up->parent)
+                                     up && !cycle; up = up->parent)
                                         cycle = up->device == device &&
                                                 up->inode == facts.inode;
 
@@ -15966,7 +15974,7 @@ static bool du_exclude_seen(p8 letter, string_address value)
 
 static const argument_option du_options[] = {
     {"all", 'a'},
-    {"apparent-size", 'A', ARGUMENT_LONG_ONLY},
+    {"apparent-size", 'A'},
     {"block-size", 'B', ARGUMENT_REQUIRED, 1},
     {"bytes", 'b', 0, 1},
     {"count-links", 'l'},

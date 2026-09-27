@@ -7870,6 +7870,10 @@ FILES_SCENES = {
     "full_out": ("", " >/dev/full", ""),
     "posix": ("export POSIXLY_CORRECT=1\n", "", ""),
     "none": ("", "", ""),
+    # a bound over a/b, in a namespace of the scene's own: a directory that
+    # is its own ancestor.
+    "bind": ("env mkdir -p a/b/c && echo x > a/f && env mount --bind a a/b || exit 9\n", "", ""),
+    "bind2": ("env mkdir -p a/b/c && echo x > a/f && env mount --bind a a/b/c || exit 9\n", "", ""),
 }
 FILES_SCENE_CASES = (
     ("gone", "readlink", "-e", "."), ("gone", "readlink", "-f", "."), ("gone", "readlink", "-m", "."),
@@ -7896,13 +7900,17 @@ FILES_SCENE_CASES = (
     ("full", "cksum", "--debug", "a.txt"), ("full", "cksum", "-a", "crc32b", "--debug", "a.txt"),
     ("posix", "nohup"), ("posix", "nohup", "--bogus"),
     ("none", "kill"), ("none", "kill", "-s"),
+    # A bind mount's cycle is passed over in silence, as fts and GNU's du
+    # pass it; the tree once counted the mounted directory a second time.
+    ("bind", "du", "a"), ("bind", "du", "-a", "a"), ("bind2", "du", "a/b"), ("bind2", "du", "-s", "a"),
+    ("bind", "du", "-A", "a/f"), ("none", "du", "-A", "-s", "dir"),
 )
 
 
 def files_scene_script(argv, stdin_name):
     setup, redirect, after = FILES_SCENES[argv[0]]
     body = (setup + "run " + ul_words(argv[2:]) + redirect + "\nstatus=$?\n" + after + "exit $status\n")
-    return ul_live(argv[1], body)
+    return ul_live(argv[1], body, wrap="unshare -Urm" if argv[0].startswith("bind") else None)
 
 
 FILES_UTILITIES = FILES_UTILITIES + (
@@ -17559,6 +17567,10 @@ _TEXT_WRITE_TARGETS = {
     #       gone without the trap: SIGPIPE as the tool was started with it.
     "broken": ("env mkfifo p\nenv head -c 1 p > /dev/null &\n", "> p", "wait\n"),
     "none": ("", "", ""),
+    # a bound over a/b, in a namespace of the scene's own: a directory that
+    # is its own ancestor.
+    "bind": ("env mkdir -p a/b/c && echo x > a/f && env mount --bind a a/b || exit 9\n", "", ""),
+    "bind2": ("env mkdir -p a/b/c && echo x > a/f && env mount --bind a a/b/c || exit 9\n", "", ""),
 }
 _TEXT_WRITE_CASES = (
     ("cat", "file", "tmpfs"), ("cat", "pipe", "tmpfs"), ("cat", "zero", "tmpfs"),
