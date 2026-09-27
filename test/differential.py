@@ -33136,6 +33136,32 @@ def harness_tls_chains(argv):
         ("first intermediate sixty-five extensions", 2, good_leaf,
          {"first_extra": "subjectKeyIdentifier=none\nauthorityKeyIdentifier=none\n" +
           "".join("1.2.202.%d=DER:05:00\n" % n for n in range(63))}),
+        # Semantic refuses / accepts on the depth-2 "first" cert, parallel to second.
+        ("first intermediate is not a CA", 2, good_leaf, {"first_ca": "CA:FALSE"}),
+        ("first intermediate has no basic constraints", 2, good_leaf,
+         {"first_extensions": "keyUsage=critical,keyCertSign,cRLSign\n"}),
+        ("first intermediate may not sign certificates", 2, good_leaf,
+         {"first_key_usage": "digitalSignature"}),
+        ("first intermediate constraints are noncritical", 2, good_leaf,
+         {"first_extensions": "basicConstraints=CA:TRUE,pathlen:1\n"
+                              "keyUsage=critical,keyCertSign,cRLSign\n"}),
+        ("first intermediate has no key usage", 2, good_leaf,
+         {"first_extensions": "basicConstraints=critical,CA:TRUE,pathlen:1\n"}),
+        ("first intermediate is restricted to client auth", 2, good_leaf,
+         {"first_extensions": "basicConstraints=critical,CA:TRUE,pathlen:1\n"
+                              "keyUsage=critical,keyCertSign,cRLSign\n"
+                              "extendedKeyUsage=clientAuth\n"}),
+        ("first intermediate unknown critical extension", 2, good_leaf,
+         {"first_extra": "1.2.3.4=critical,DER:05:00\n"}),
+        ("first intermediate unknown noncritical extension", 2, good_leaf,
+         {"first_extra": "1.2.3.4=DER:05:00\n"}),
+        # Default first is BC+KU plus auto SKI/AKI (four).  Pin SKI/AKI off
+        # so BC+KU plus sixty-two unknowns are the inclusive sixty-four ceiling.
+        ("first intermediate sixty-four extensions", 2, good_leaf,
+         {"first_extra": "subjectKeyIdentifier=none\nauthorityKeyIdentifier=none\n" +
+          "".join("1.2.203.%d=DER:05:00\n" % n for n in range(62))}),
+        ("first intermediate carries name constraints", 2, good_leaf,
+         {"first_extra": "nameConstraints=critical,permitted;IP:127.0.0.0/255.0.0.0\n"}),
         ("intermediate carries name constraints", 2, good_leaf,
          {"second_extra": "nameConstraints=critical,permitted;IP:127.0.0.0/255.0.0.0\n"}),
         ("path length exceeded", 2, good_leaf, {"first_pathlen": 0}),
@@ -33189,6 +33215,7 @@ def harness_tls_chains(argv):
         "no subject alternative name": "a name is taken from subjectAltName only, never the CN",
         "leaf is a CA": "a certificate that says CA:TRUE is not an end entity (tls_leaf_authorized)",
         "intermediate carries name constraints": "name constraints fail closed until implemented",
+        "first intermediate carries name constraints": "name constraints fail closed until implemented",
         "duplicate subjectAltName leaf extension": "RFC 5280 one-instance rule; OpenSSL may still accept",
         "leaf duplicate unknown extension": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
         "leaf nonadjacent duplicate unknown": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
@@ -33204,6 +33231,10 @@ def harness_tls_chains(argv):
         "intermediate constraints are noncritical", "intermediate has no key usage",
         "unknown noncritical intermediate extension", "unknown noncritical leaf extension",
         "leaf sixty-four extensions",
+        "first intermediate constraints are noncritical",
+        "first intermediate has no key usage",
+        "first intermediate unknown noncritical extension",
+        "first intermediate sixty-four extensions",
     }
 
     checks = Checks()
@@ -33364,9 +33395,12 @@ def harness_tls_chains(argv):
                 chain = []
                 issuer = top
                 if depth >= 1:
-                    first_extensions = (
-                        "basicConstraints=critical,CA:TRUE,pathlen:%d\n"
-                        "keyUsage=critical,keyCertSign,cRLSign\n" % change.get("first_pathlen", 1))
+                    first_extensions = change.get(
+                        "first_extensions",
+                        "basicConstraints=critical,%s\nkeyUsage=critical,%s\n" %
+                        (change.get("first_ca", "CA:TRUE,pathlen:%d" %
+                                    change.get("first_pathlen", 1)),
+                         change.get("first_key_usage", "keyCertSign,cRLSign")))
                     first_extensions += change.get("first_extra", "")
                     issue("first", p384, "/CN=tls chains first", top,
                           first_extensions,
@@ -33976,14 +34010,16 @@ int main(void)
 
 
 def harness_tls_der_fuzz(argv):
-    """Coverage-guided libFuzzer over tls_parse_extensions and tls_parse_cert.
+    """Coverage-guided libFuzzer over DER certs and Certificate HS framing.
 
-    Lifts the DER readers from src/net/net.c the way http_response_framing
-    lifts response framing: a hosted shim, the OIDs and ASN.1/cert parsers,
-    and LLVMFuzzerTestOneInput. Seed corpus lives under
-    test/fuzz_corpus/tls_der/ (fixtures from checks.c). Bounded fixed-seed
-    run so a lane cannot hang; return 2 (NOT RUN) when clang/libFuzzer is
-    unavailable.
+    Lifts the DER readers and tls_certificate_body_open from src/net/net.c the
+    way http_response_framing lifts response framing: a hosted shim, the OIDs
+    and ASN.1/cert parsers, certificate-list open/walk, and
+    LLVMFuzzerTestOneInput. Seed corpus lives under test/fuzz_corpus/tls_der/
+    (extension fixtures from checks.c plus Certificate handshake bodies).
+    Bounded fixed-seed run so a lane cannot hang; return 2 (NOT RUN) when
+    clang/libFuzzer is unavailable. Expected TLS_FAIL is ignored; only
+    ASan/UBSan aborts fail the lane.
 
         python3 test/differential.py --harness tls_der_fuzz
     """
@@ -34018,6 +34054,11 @@ def harness_tls_der_fuzz(argv):
         net,
         "static COLD bipolar tls_asn1_length(p8 address_to bytes, positive size,",
         "/* An anchor's key laid out the way tls_parse_cert lays out a served one. */")
+    framing = sec(
+        net,
+        "// A TLS handshake length: three bytes, most significant first.\n"
+        "static PURE positive tls_load_24",
+        "static COLD bool tls_verify_chain")
 
     shim = r"""
 #include <stdio.h>
@@ -34088,6 +34129,10 @@ static positive memory_span_without_byte(const void *block, p8 byte,
                 i++;
         return i;
 }
+static p16 network_load_16(const p8 *bytes)
+{
+        return (p16)(((p16)bytes[0] << 8) | (p16)bytes[1]);
+}
 static p32 network_load_32(const p8 *bytes)
 {
         return ((p32)bytes[0] << 24) | ((p32)bytes[1] << 16) |
@@ -34103,6 +34148,47 @@ static bipolar string_to_host(string_address host)
 """
 
     driver = r"""
+/* Walk a Certificate handshake body the way tls_verify_chain frames the
+   list, but only call tls_parse_cert on each slice. After the walk, apply
+   the same empty-list / leftover refuse as production (`!count ||
+   at != list_end`). No abort on TLS_FAIL. */
+static void fuzz_certificate_list(p8 *body, positive body_length)
+{
+        tls_cert cert;
+        positive at;
+        positive list_end;
+        positive count = 0;
+
+        if (!tls_certificate_body_open(body, body_length,
+                                       address_of at, address_of list_end))
+                return;
+
+        while (at + 3 <= list_end && count < 8)
+        {
+                positive cert_length = tls_load_24(body + at);
+                positive ext_length;
+
+                at += 3;
+                if (at + cert_length + 2 > list_end)
+                        return;
+                memory_fill(address_of cert, 0, sizeof cert);
+                (void)tls_parse_cert(body + at, cert_length, address_of cert,
+                                     null);
+                at += cert_length;
+                ext_length = network_load_16(body + at);
+                at += 2;
+                if (at + ext_length > list_end)
+                        return;
+                at += ext_length;
+                count++;
+        }
+
+        /* Same post-loop refuse as tls_verify_chain: empty list, or bytes
+           past the last framed entry (including a 9th entry past certs[8]). */
+        if (!count || at != list_end)
+                return;
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         tls_cert cert;
@@ -34124,12 +34210,19 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         memory_fill(address_of cert, 0, sizeof cert);
         (void)tls_parse_cert(buf, length, address_of cert, null);
 
+        /* Also interpret the input as a TLS 1.3 Certificate HS body. */
+        fuzz_certificate_list(buf, length);
+
+        /* Magic prefix 0xC1: remainder is Certificate-list framing only. */
+        if (length > 1 && buf[0] == 0xc1)
+                fuzz_certificate_list(buf + 1, length - 1);
+
         free(buf);
         return 0;
 }
 """
 
-    source = shim + oids + "\n" + parsers + driver
+    source = shim + oids + "\n" + parsers + framing + driver
     environment = dict(os.environ,
                        ASAN_OPTIONS="detect_leaks=0:halt_on_error=1",
                        UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=0")

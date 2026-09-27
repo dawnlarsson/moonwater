@@ -61,8 +61,11 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
 - [x] Add persistent coverage-guided fuzzing for DER
       (`python3 test/differential.py --harness tls_der_fuzz`; ASan/UBSan via
       clang libFuzzer when available, else NOT RUN).
-- [ ] Add persistent coverage-guided fuzzing for handshake fragmentation
-      and certificate-list framing.
+- [x] Add persistent coverage-guided fuzzing for certificate-list framing
+      (`tls_der_fuzz` seeds plus `tls_certificate_body_open` / list walk with
+      `tls_parse_cert` on slices, then the same empty-list / leftover refuse as
+      `tls_verify_chain`; expected `TLS_FAIL` ignored).
+- [ ] Add persistent coverage-guided fuzzing for handshake fragmentation.
 
 ## Shell and operating-system boundary
 
@@ -82,11 +85,13 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
 
 ## Faults, resources, and portability
 
-- [x] Selected entropy policies are tested by seccomp failure injection.
+- [x] Selected entropy policies are tested by seccomp failure injection when
+  seccomp is available; else NOT RUN (e.g. under qemu-user).
 - [x] Partial I/O, EINTR, ENOSPC, deadlines, stream fragmentation, and guard
   boundaries have procedural coverage in existing lanes.
 - [x] Network namespace and netem tests exist for privileged network paths.
-- [x] Require x86-64, ARM64, and RISC-V security lanes in CI.
+- [x] Gate for x86-64, ARM64, and RISC-V security lanes exists in the parked
+  `security` workflow job (workflow_dispatch only; not auto on push).
 - [ ] Add descriptor-, mapping-, and allocation-exhaustion sweeps to every
   externally reachable service loop.
 - [ ] Publish fuzz corpus coverage and sanitizer versions with each release.

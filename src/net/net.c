@@ -4972,6 +4972,32 @@ static COLD bool tls_oid_is(const p8 address_to bytes, positive length,
         return length == oid_length && !memory_compare(bytes, oid, oid_length);
 }
 
+/* X.690 DER OBJECT IDENTIFIER content: each subidentifier is base-128 with
+   bit 8 as continuation.  The final octet must clear that bit, and no octet
+   may be 0x80 -- that value is always a non-terminal pad (forbidden as a
+   leading subidentifier octet, and non-minimal anywhere else).  Long-form
+   OID length is already refused by tls_asn1_length. */
+static COLD bool tls_oid_content_der(const p8 address_to bytes, positive length)
+{
+        if (!length || (bytes[length - 1] & 0x80))
+                return false;
+        for (positive i = 0; i < length; i++)
+                if (bytes[i] == 0x80)
+                        return false;
+        return true;
+}
+
+static COLD bipolar tls_asn1_enter_oid(p8 address_to bytes, positive size,
+                                  positive address_to at, positive address_to stop)
+{
+        if (tls_asn1_enter(bytes, size, 0x06, at, stop))
+                return TLS_FAIL;
+        if (!tls_oid_content_der(bytes + address_to at,
+                                 address_to stop - address_to at))
+                return TLS_FAIL;
+        return TLS_OK;
+}
+
 /* DER INTEGERs used for keys and ECDSA signatures are strictly positive and
    minimally encoded.  Return the magnitude without the one permitted sign
    octet. */
@@ -5011,8 +5037,8 @@ static COLD bool tls_signature_algorithm(p8 address_to der, positive size,
         if (tls_asn1_enter(der, size, 0x30, at, address_of alg_stop))
                 return false;
         oid_at = address_to at;
-        if (tls_asn1_enter(der, alg_stop, 0x06, address_of oid_at,
-                           address_of oid_stop))
+        if (tls_asn1_enter_oid(der, alg_stop, address_of oid_at,
+                               address_of oid_stop))
                 return false;
 
         ecdsa = tls_oid_is(der + oid_at, oid_stop - oid_at,
@@ -5365,8 +5391,8 @@ static COLD bipolar tls_parse_extended_key_usage(p8 address_to value, positive l
         {
                 positive oid_stop = 0;
 
-                if (tls_asn1_enter(value, stop, 0x06, address_of at,
-                                   address_of oid_stop))
+                if (tls_asn1_enter_oid(value, stop, address_of at,
+                                       address_of oid_stop))
                         return TLS_FAIL;
                 if (tls_oid_is(value + at, oid_stop - at, tls_oid_server_auth, 8))
                         cert->server_auth = true;
@@ -5430,8 +5456,8 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                                    address_of extension_stop))
                         return TLS_FAIL;
                 oid_at = at;
-                if (tls_asn1_enter(der, extension_stop, 0x06, address_of oid_at,
-                                   address_of oid_stop))
+                if (tls_asn1_enter_oid(der, extension_stop, address_of oid_at,
+                                       address_of oid_stop))
                         return TLS_FAIL;
                 /* RFC 5280 permits one instance of an extension in a
                    certificate. Track unknown OIDs too: accepting two merely
@@ -5631,7 +5657,8 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
         if (tls_asn1_enter(der, spki_stop, 0x30, address_of at, address_of alg_stop))
                 return TLS_FAIL;
         param_at = at;
-        if (tls_asn1_enter(der, alg_stop, 0x06, address_of param_at, address_of oid_stop))
+        if (tls_asn1_enter_oid(der, alg_stop, address_of param_at,
+                               address_of oid_stop))
                 return TLS_FAIL;
 
         /* Whichever algorithm the OID turns out to name, the key itself is
@@ -5652,8 +5679,8 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
                 positive curve_stop = 0;
                 positive coord;
 
-                if (tls_asn1_enter(der, alg_stop, 0x06, address_of oid_stop,
-                                   address_of curve_stop) ||
+                if (tls_asn1_enter_oid(der, alg_stop, address_of oid_stop,
+                                       address_of curve_stop) ||
                     curve_stop != alg_stop)
                         return TLS_FAIL;
                 if (tls_oid_is(der + oid_stop, curve_stop - oid_stop, tls_oid_p256, 8))
@@ -6750,6 +6777,90 @@ static COLD bool tls_post_handshake_valid(p8 address_to messages,
         return valid;
 }
 
+/* Encrypted server flight: handshake bytes are a stream across records, so
+   each plaintext fragment is appended to hs[] and every complete message is
+   peeled from the front.  Unlike tls_handshake_one_append, an empty fragment
+   is a no-op (no !length guard) and several messages may share one record.
+   Leftover bytes after the flight reaches COMPLETE are refused.
+
+   tls may be null: then only framing and tls_server_flight_step run, which is
+   how the unit checks exercise the same walk without keys or a peer. */
+static COLD bipolar tls_encrypted_flight_append(
+    tls_conn address_to tls, p8 address_to hs, positive room,
+    positive address_to hs_used, p8 address_to flight,
+    p8 address_to fragment, positive length,
+    positive address_to messages)
+{
+        positive msg_at = 0;
+
+        if (*hs_used + length > room)
+                return TLS_FAIL;
+        memory_copy(hs + *hs_used, fragment, length);
+        *hs_used += length;
+
+        while (msg_at + 4 <= *hs_used)
+        {
+                p8 hs_type = hs[msg_at];
+                positive hs_len = tls_load_24(hs + msg_at + 1);
+
+                if (msg_at + 4 + hs_len > *hs_used)
+                        break;
+
+                if (!tls_server_flight_step(flight, hs_type))
+                        return TLS_FAIL;
+
+                if (tls)
+                {
+                        if (hs_type == TLS_HS_ENCRYPTED_EXTS)
+                        {
+                                if (!tls_encrypted_extensions_valid(
+                                        hs + msg_at + 4, hs_len))
+                                        return TLS_FAIL;
+                                tls_transcript_add(tls, hs + msg_at,
+                                                   4 + hs_len);
+                        }
+                        else if (hs_type == TLS_HS_CERTIFICATE)
+                        {
+                                tls_transcript_add(tls, hs + msg_at,
+                                                   4 + hs_len);
+                                if (!tls_verify_chain(hs + msg_at + 4, hs_len,
+                                                      tls->host, tls))
+                                        return TLS_FAIL;
+                        }
+                        else if (hs_type == TLS_HS_CERT_VERIFY)
+                        {
+                                if (tls_check_cert_verify(tls, hs + msg_at,
+                                                          4 + hs_len))
+                                        return TLS_FAIL;
+                                tls_transcript_add(tls, hs + msg_at,
+                                                   4 + hs_len);
+                        }
+                        else if (hs_type == TLS_HS_FINISHED)
+                        {
+                                if (tls_check_finished(tls, hs + msg_at + 4,
+                                                       hs_len))
+                                        return TLS_FAIL;
+                                tls_transcript_add(tls, hs + msg_at,
+                                                   4 + hs_len);
+                        }
+                }
+
+                if (messages)
+                        (*messages)++;
+                msg_at += 4 + hs_len;
+        }
+
+        if (msg_at)
+        {
+                memory_copy(hs, hs + msg_at, *hs_used - msg_at);
+                *hs_used -= msg_at;
+        }
+
+        if (*flight == TLS_SERVER_FLIGHT_COMPLETE && *hs_used)
+                return TLS_FAIL;
+        return TLS_OK;
+}
+
 static COLD bipolar tls_handshake(
     tls_conn address_to tls, const network_deadline address_to deadline)
 {
@@ -6847,8 +6958,6 @@ static COLD bipolar tls_handshake(
 
         while (flight != TLS_SERVER_FLIGHT_COMPLETE)
         {
-                positive msg_at = 0;
-
                 if (tls_read_record(tls, address_of type, record, sizeof(record),
                                     address_of length, deadline))
                         goto done;
@@ -6860,59 +6969,10 @@ static COLD bipolar tls_handshake(
                 }
                 if (type != TLS_CT_HANDSHAKE)
                         goto done;
-                if (hs_used + length > sizeof(hs))
-                        goto done;
-                memory_copy(hs + hs_used, record, length);
-                hs_used += length;
-
-                while (msg_at + 4 <= hs_used)
-                {
-                        p8 hs_type = hs[msg_at];
-                        positive hs_len = tls_load_24(hs + msg_at + 1);
-                        if (msg_at + 4 + hs_len > hs_used)
-                                break;
-
-                        if (!tls_server_flight_step(address_of flight,
-                                                    hs_type))
-                                goto done;
-
-                        if (hs_type == TLS_HS_ENCRYPTED_EXTS)
-                        {
-                                if (!tls_encrypted_extensions_valid(
-                                        hs + msg_at + 4, hs_len))
-                                        goto done;
-                                tls_transcript_add(tls, hs + msg_at, 4 + hs_len);
-                        }
-                        else if (hs_type == TLS_HS_CERTIFICATE)
-                        {
-                                tls_transcript_add(tls, hs + msg_at, 4 + hs_len);
-                                if (!tls_verify_chain(hs + msg_at + 4, hs_len, tls->host,
-                                                      tls))
-                                        goto done;
-                        }
-                        else if (hs_type == TLS_HS_CERT_VERIFY)
-                        {
-                                if (tls_check_cert_verify(tls, hs + msg_at, 4 + hs_len))
-                                        goto done;
-                                tls_transcript_add(tls, hs + msg_at, 4 + hs_len);
-                        }
-                        else if (hs_type == TLS_HS_FINISHED)
-                        {
-                                if (tls_check_finished(tls, hs + msg_at + 4, hs_len))
-                                        goto done;
-                                tls_transcript_add(tls, hs + msg_at, 4 + hs_len);
-                        }
-
-                        msg_at += 4 + hs_len;
-                }
-
-                if (msg_at)
-                {
-                        memory_copy(hs, hs + msg_at, hs_used - msg_at);
-                        hs_used -= msg_at;
-                }
-
-                if (flight == TLS_SERVER_FLIGHT_COMPLETE && hs_used)
+                if (tls_encrypted_flight_append(tls, hs, sizeof(hs),
+                                                address_of hs_used,
+                                                address_of flight, record,
+                                                length, null))
                         goto done;
         }
 

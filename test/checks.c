@@ -48629,7 +48629,62 @@ b32 main(void)
 
 #ifdef CHECK_net
 #include "../src/lib.util.c"
+
+/*
+        http_write_spans resume after a positive short writev cannot be forced
+        with a pipe peer alone: a blocking writev finishes in one syscall once
+        the peer drains, and a nonblocking short is followed by EAGAIN before
+        another task can make room (SIGALRM injection faults under qemu-user).
+        Arm this once around production http_write_spans so the first writev
+        really transfers a mid-iovec prefix and returns that count; the next
+        writev is the ordinary kernel path.
+*/
+static positive http_writev_short_limit;
+static bool http_writev_short_hit;
+
+typedef struct
+{
+        address_any base;
+        positive length;
+} http_test_span;
+
+static bipolar http_net_call3(positive number, positive one, positive two,
+                              positive three)
+{
+        if (number == syscall(writev) && http_writev_short_limit)
+        {
+                positive want = http_writev_short_limit;
+                http_test_span address_to spans = (http_test_span address_to)two;
+                positive count = three;
+                http_test_span trimmed[8];
+                positive used = 0;
+                positive left = want;
+
+                http_writev_short_limit = 0;
+                while (used < count && used < 8 && left)
+                {
+                        trimmed[used].base = spans[used].base;
+                        if (spans[used].length > left)
+                        {
+                                trimmed[used].length = left;
+                                left = 0;
+                        }
+                        else
+                        {
+                                trimmed[used].length = spans[used].length;
+                                left -= spans[used].length;
+                        }
+                        used++;
+                }
+                http_writev_short_hit = true;
+                return (system_call_3)(number, one, (positive)trimmed, used);
+        }
+        return (system_call_3)(number, one, two, three);
+}
+
+#define system_call_3(...) http_net_call3(__VA_ARGS__)
 #include "../src/net/net.c"
+#undef system_call_3
 /*
         The netlink wire, and the messages built on it.
 
@@ -50261,6 +50316,12 @@ static fn fetching(void)
                                 "0\r\n", "");
                 framing_harness("chunk-size-overflow", false, UNCHUNK,
                                 "10000000000000000\r\n", "");
+                framing_harness("chunk-non-hex", false, UNCHUNK, "ZZ\r\n",
+                                "");
+                framing_harness("chunk-truncated-data", false, UNCHUNK,
+                                "9\r\nabc\r\n", "");
+                framing_harness("malformed-trailer-field", false, UNCHUNK,
+                                "0\r\nnot-a-field\r\n\r\n", "");
                 framing_harness("oversize-header", false, OVERSIZE, "", "");
 
                 framing_harness("simple-length", true, FULL,
@@ -50270,11 +50331,21 @@ static fn fetching(void)
                 framing_harness("empty-length", true, FRAME,
                                 "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
                                 "");
+                framing_harness("bare-lf-headers", true, FRAME,
+                                "HTTP/1.1 200 OK\nContent-Length: 0\n\n", "");
                 framing_harness("chunked-full", true, FULL,
                                 "HTTP/1.1 200 OK\r\n"
                                 "Transfer-Encoding: chunked\r\n\r\n"
                                 "5\r\nhello\r\n0\r\n\r\n",
                                 "hello");
+                framing_harness("chunked-extension", true, UNCHUNK,
+                                "A;extension=value\r\nabcdefghij\r\n"
+                                "0;finished=yes\r\n\r\n",
+                                "abcdefghij");
+                framing_harness("redirect-location", true, FRAME,
+                                "HTTP/1.1 302 Found\r\nLocation: /next\r\n"
+                                "Content-Length: 0\r\n\r\n",
+                                "");
 #undef framing_harness
         }
 
@@ -51202,12 +51273,11 @@ static fn http_body_write_failure(void)
         a count larger than the remaining total, and fail-close when the next
         write would block.
 
-        A blocking writev to a pipe finishes inside one syscall once a peer
-        drains it, so the success-path resume after a short count is not
-        forced here without a signal trampoline (x86_64 qemu-user faults on
-        that injection). The nonblocking case still lands a mid-iovec short
-        and proves the prefix and the EAGAIN refuse; a draining peer proves
-        the multi-span body bytes.
+        The nonblocking case lands a mid-iovec short and proves the prefix and
+        the EAGAIN refuse. A draining peer proves a multi-span body in one
+        syscall. Success-path resume after 0 < n < total uses the once-armed
+        writev short (see http_writev_short_limit) so the second writev is the
+        ordinary completion path without SIGALRM.
 */
 static fn http_write_spans_partial(void)
 {
@@ -51217,7 +51287,8 @@ static fn http_write_spans_partial(void)
                 F_GETPIPE_SZ = 1032,
                 SPAN_BYTES = 3000,
                 SPAN_COUNT = 3,
-                SPAN_TOTAL = SPAN_BYTES * SPAN_COUNT
+                SPAN_TOTAL = SPAN_BYTES * SPAN_COUNT,
+                SHORT_BYTES = SPAN_BYTES + SPAN_BYTES / 2
         };
         static p8 spans_bytes[SPAN_COUNT][SPAN_BYTES];
         static p8 readback[SPAN_TOTAL];
@@ -51292,6 +51363,63 @@ static fn http_write_spans_partial(void)
                       intact && filled == (positive)capacity);
                 system_call_1(syscall(close), ends[0]);
                 system_call_1(syscall(close), ends[1]);
+        }
+
+        opened = system_call_2(syscall(pipe2), (positive)ends, 0);
+        check("a blocking pipe for a short-write resume opens", opened == 0);
+        if (!opened)
+        {
+                for (at = 0; at < SPAN_COUNT; at++)
+                {
+                        spans[at].base = spans_bytes[at];
+                        spans[at].length = SPAN_BYTES;
+                }
+                child = system_call_2(syscall(clone), SIGCHLD, 0);
+                check("the short-write resume reader starts", child >= 0);
+                if (!child)
+                {
+                        positive got = 0;
+                        bool match = true;
+
+                        system_call_1(syscall(close), ends[1]);
+                        while (got < SPAN_TOTAL)
+                        {
+                                bipolar read = system_call_3(
+                                    syscall(read), ends[0],
+                                    (positive)(readback + got),
+                                    SPAN_TOTAL - got);
+
+                                if (read <= 0)
+                                        break;
+                                got += (positive)read;
+                        }
+                        for (at = 0; at < got; at++)
+                                match &= readback[at] ==
+                                         (p8)(at / SPAN_BYTES + 1);
+                        system_call_1(syscall(close), ends[0]);
+                        system_call_1(syscall(exit_group),
+                                     got == SPAN_TOTAL && match ? 0 : 1);
+                }
+                system_call_1(syscall(close), ends[0]);
+                if (child >= 0)
+                {
+                        http_write_failure = 0;
+                        http_writev_short_hit = false;
+                        http_writev_short_limit = SHORT_BYTES;
+                        check("a mid-iovec short writev resumes and finishes the body",
+                              http_write_spans(ends[1], spans, SPAN_COUNT,
+                                               SPAN_TOTAL) &&
+                                  http_writev_short_hit &&
+                                  !http_writev_short_limit);
+                        http_writev_short_limit = 0;
+                        system_call_1(syscall(close), ends[1]);
+                        check("the short-write resume reader saw every span in order",
+                              system_wait4_retry((b32)child, address_of raw, 0,
+                                                 null) == child &&
+                                  wait_status_code(raw) == 0);
+                }
+                else
+                        system_call_1(syscall(close), ends[1]);
         }
 
         opened = system_call_2(syscall(pipe2), (positive)ends, 0);
@@ -52108,10 +52236,8 @@ static fn tls_certificate_identity_rules(void)
             0x04, 0x05,
             0x30, 0x03, 0x01, 0x01, 0xff};
         /* Non-minimal base-128 for the final arc of 2.5.29.19
-           (06 04 55 1d 80 13).  Still a valid OID TLV for tls_asn1_enter;
-           tls_oid_is is exact memcmp against {0x55,0x1d,0x13}, so the
-           extension is unknown and must not set CA/pathLen from the same
-           value bytes the control above accepts. */
+           (06 04 55 1d 80 13).  tls_asn1_enter_oid refuses the 0x80 pad
+           before tls_oid_is; CA/pathLen must stay unset. */
         static p8 bc_oid_overlong_final_arc[] = {
             0xa3, 0x14,
             0x30, 0x12,
@@ -52119,8 +52245,8 @@ static fn tls_certificate_identity_rules(void)
             0x06, 0x04, 0x55, 0x1d, 0x80, 0x13,
             0x04, 0x08,
             0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x00};
-        /* Same overlong OID marked critical: unknown-critical path, still
-           no basicConstraints flags. */
+        /* Same overlong OID marked critical: still refused at the OID
+           content layer, not accepted as unknown-critical. */
         static p8 bc_oid_overlong_critical[] = {
             0xa3, 0x14,
             0x30, 0x12,
@@ -52130,9 +52256,8 @@ static fn tls_certificate_identity_rules(void)
             0x04, 0x05,
             0x30, 0x03, 0x01, 0x01, 0xff};
         /* Canonical BC (CA:FALSE) then overlong wire for the same logical
-           OID (CA:TRUE payload).  Seen-OID tracking compares raw bytes, so
-           the second instance is not a duplicate; it is unknown and ignored.
-           Residual against peers that normalize OID encodings first. */
+           OID (CA:TRUE payload).  Fail closed on the non-DER OID rather
+           than treating it as a distinct unknown extension. */
         static p8 bc_oid_canonical_then_overlong[] = {
             0xa3, 0x1c,
             0x30, 0x1a,
@@ -52141,8 +52266,7 @@ static fn tls_certificate_identity_rules(void)
             0x30, 0x0d, 0x06, 0x04, 0x55, 0x1d, 0x80, 0x13, 0x04, 0x05,
             0x30, 0x03, 0x01, 0x01, 0xff};
         /* Two different overlong encodings of 2.5.29.19
-           (final-arc vs middle-arc padding).  Both miss tls_oid_is and each
-           other; duplicate detection does not fire.  Residual. */
+           (final-arc vs middle-arc padding).  Each is refused as non-DER. */
         static p8 bc_oid_two_overlong_aliases[] = {
             0xa3, 0x1a,
             0x30, 0x18,
@@ -52150,7 +52274,8 @@ static fn tls_certificate_identity_rules(void)
             0x30, 0x00,
             0x30, 0x0a, 0x06, 0x04, 0x55, 0x80, 0x1d, 0x13, 0x04, 0x02,
             0x30, 0x00};
-        /* Identical overlong wires are still exact-byte duplicates. */
+        /* Identical overlong wires are refused as non-DER on the first OID
+           (before duplicate tracking). */
         static p8 bc_oid_overlong_duplicate[] = {
             0xa3, 0x1a,
             0x30, 0x18,
@@ -52264,35 +52389,33 @@ static fn tls_certificate_identity_rules(void)
                   !cert.basic_constraints && !cert.ca &&
                   !cert.path_length_present);
         memory_fill(address_of cert, 0, sizeof cert);
-        check("overlong basicConstraints OID content misses tls_oid_is and sets no CA",
+        check("overlong basicConstraints OID content is refused as non-DER",
               tls_parse_extensions(bc_oid_overlong_final_arc,
                                    sizeof bc_oid_overlong_final_arc, 0, 2,
-                                   address_of cert, null) == TLS_OK &&
+                                   address_of cert, null) == TLS_FAIL &&
                   !cert.basic_constraints && !cert.ca &&
                   !cert.path_length_present && !cert.unsupported_critical);
         memory_fill(address_of cert, 0, sizeof cert);
-        check("critical overlong basicConstraints OID is unknown-critical not CA",
+        check("critical overlong basicConstraints OID is refused as non-DER",
               tls_parse_extensions(bc_oid_overlong_critical,
                                    sizeof bc_oid_overlong_critical, 0, 2,
-                                   address_of cert, null) == TLS_OK &&
+                                   address_of cert, null) == TLS_FAIL &&
                   !cert.basic_constraints && !cert.ca &&
-                  !cert.path_length_present && cert.unsupported_critical);
+                  !cert.path_length_present && !cert.unsupported_critical);
         memory_fill(address_of cert, 0, sizeof cert);
-        check("canonical then overlong basicConstraints OID is residual duplicate miss",
+        check("canonical then overlong basicConstraints OID is refused as non-DER",
               tls_parse_extensions(bc_oid_canonical_then_overlong,
                                    sizeof bc_oid_canonical_then_overlong, 0, 2,
-                                   address_of cert, null) == TLS_OK &&
-                  cert.basic_constraints && !cert.ca &&
-                  !cert.path_length_present && !cert.unsupported_critical);
+                                   address_of cert, null) == TLS_FAIL);
         memory_fill(address_of cert, 0, sizeof cert);
-        check("two overlong encodings of basicConstraints OID are residual alias miss",
+        check("two overlong encodings of basicConstraints OID are refused as non-DER",
               tls_parse_extensions(bc_oid_two_overlong_aliases,
                                    sizeof bc_oid_two_overlong_aliases, 0, 2,
-                                   address_of cert, null) == TLS_OK &&
+                                   address_of cert, null) == TLS_FAIL &&
                   !cert.basic_constraints && !cert.ca &&
                   !cert.path_length_present && !cert.unsupported_critical);
         memory_fill(address_of cert, 0, sizeof cert);
-        check("identical overlong basicConstraints OID wires are refused as duplicates",
+        check("identical overlong basicConstraints OID wires are refused as non-DER",
               tls_parse_extensions(bc_oid_overlong_duplicate,
                                    sizeof bc_oid_overlong_duplicate, 0, 2,
                                    address_of cert, null) == TLS_FAIL);
@@ -53266,12 +53389,10 @@ static fn tls_server_flight_validation(void)
         }
 }
 
-/* After ServerHello the encrypted flight does not use tls_handshake_one_append:
-   each record's plaintext is copied into hs[TLS_HS_MAX] and complete handshake
-   messages are peeled from the front.  Full tls_handshake loopback needs a
-   peer and crypto; these unit proofs feed successive plaintext fragments into
-   a local copy of that length / leftover walk and call the same flight-step
-   predicate production uses. */
+/* After ServerHello the encrypted flight uses tls_encrypted_flight_append
+   (same static tls_handshake calls).  Full loopback needs a peer and keys;
+   these unit proofs feed plaintext fragments with tls=null so only framing
+   and flight-step run — one implementation, no mirrored walk. */
 typedef struct
 {
         p8 hs[TLS_HS_MAX];
@@ -53283,35 +53404,10 @@ typedef struct
 static bipolar tls_flight_hs_append(tls_flight_hs_walk address_to walk,
                                     p8 address_to fragment, positive length)
 {
-        positive msg_at = 0;
-
-        if (walk->used + length > sizeof(walk->hs))
-                return TLS_FAIL;
-        memory_copy(walk->hs + walk->used, fragment, length);
-        walk->used += length;
-
-        while (msg_at + 4 <= walk->used)
-        {
-                p8 hs_type = walk->hs[msg_at];
-                positive hs_len = tls_load_24(walk->hs + msg_at + 1);
-
-                if (msg_at + 4 + hs_len > walk->used)
-                        break;
-                if (!tls_server_flight_step(address_of walk->flight, hs_type))
-                        return TLS_FAIL;
-                walk->messages++;
-                msg_at += 4 + hs_len;
-        }
-
-        if (msg_at)
-        {
-                memory_copy(walk->hs, walk->hs + msg_at, walk->used - msg_at);
-                walk->used -= msg_at;
-        }
-
-        if (walk->flight == TLS_SERVER_FLIGHT_COMPLETE && walk->used)
-                return TLS_FAIL;
-        return TLS_OK;
+        return tls_encrypted_flight_append(
+            null, walk->hs, sizeof(walk->hs), address_of walk->used,
+            address_of walk->flight, fragment, length,
+            address_of walk->messages);
 }
 
 static fn tls_flight_hs_put_header(p8 address_to at, p8 type, positive body)
@@ -55465,6 +55561,11 @@ static fn redirect_urls(void)
               http_transport_allowed(address_of secure, true) && secure);
         check("a redirect chain cannot downgrade after HTTPS",
               !http_transport_allowed(address_of secure, false) && secure);
+        /* HTTPS→HTTP Location refusal is unit-only here: fetching_for_real
+           has no TLS server loopback, so the downgrade guard is exercised
+           through http_transport_allowed / http_absolutize rather than an
+           end-to-end HTTPS hop. Absolute multi-host HTTP_HOPS coverage
+           lives in fetching_for_real. */
         check("an absolute HTTP Location remains visible to the downgrade guard",
               http_absolutize(true, "example.com", 443, "/old",
                               "http://example.com/new", into, sizeof into) ==
@@ -56080,6 +56181,160 @@ static fn fetching_for_real(void)
 
                 system_wait4_retry((b32)hops_child, null, 0, null);
                 socket_close((b32)hops_listening);
+        }
+
+        /* Absolute Location hop ceiling across two loopback hosts
+           (127.0.0.1 ↔ 127.0.0.2).  Relative Location above only proves the
+           count; this proves absolutize + lookup still refuse a tenth hop.
+           HTTPS→HTTP downgrade stays unit-only in redirect_urls: this
+           freestanding harness has no TLS server loopback. */
+        {
+                socket_address_internet where_a;
+                socket_address_internet where_b;
+                p32 size_a = sizeof where_a;
+                p32 size_b = sizeof where_b;
+                bipolar listen_a;
+                bipolar listen_b;
+                bipolar hops_child;
+                p16 port_a;
+                p16 port_b;
+                b32 one = 1;
+
+                listen_a = socket_new(AF_INET, SOCK_STREAM, 0);
+                listen_b = socket_new(AF_INET, SOCK_STREAM, 0);
+                check("an absolute-hop listener on 127.0.0.1 opens",
+                      listen_a >= 0);
+                check("an absolute-hop listener on 127.0.0.2 opens",
+                      listen_b >= 0);
+                if (listen_a < 0 || listen_b < 0)
+                {
+                        if (listen_a >= 0)
+                                socket_close((b32)listen_a);
+                        if (listen_b >= 0)
+                                socket_close((b32)listen_b);
+                        return;
+                }
+
+                socket_option_set((b32)listen_a, SOL_SOCKET, SO_REUSEADDR,
+                                  address_of one, sizeof one);
+                socket_option_set((b32)listen_b, SOL_SOCKET, SO_REUSEADDR,
+                                  address_of one, sizeof one);
+                memory_fill(address_of where_a, 0, sizeof where_a);
+                memory_fill(address_of where_b, 0, sizeof where_b);
+                where_a.family = AF_INET;
+                where_b.family = AF_INET;
+                where_a.host = network_order_32(HOST_LOOPBACK);
+                where_b.host = network_order_32(HOST_LOOPBACK + 1);
+                check("an absolute-hop listener binds 127.0.0.1",
+                      socket_bind((b32)listen_a, address_of where_a,
+                                  sizeof where_a) == 0);
+                check("an absolute-hop listener binds 127.0.0.2",
+                      socket_bind((b32)listen_b, address_of where_b,
+                                  sizeof where_b) == 0);
+                check("an absolute-hop listener listens on 127.0.0.1",
+                      socket_listen((b32)listen_a, 4) == 0);
+                check("an absolute-hop listener listens on 127.0.0.2",
+                      socket_listen((b32)listen_b, 4) == 0);
+                memory_fill(address_of where_a, 0, sizeof where_a);
+                memory_fill(address_of where_b, 0, sizeof where_b);
+                socket_name((b32)listen_a, address_of where_a,
+                            address_of size_a);
+                socket_name((b32)listen_b, address_of where_b,
+                            address_of size_b);
+                port_a = network_order_16(where_a.port);
+                port_b = network_order_16(where_b.port);
+
+                hops_child = system_call_2(syscall(clone), SIGCHLD, 0);
+                if (hops_child == 0)
+                {
+                        p8 said[256];
+                        p8 answer_ok[] = "HTTP/1.1 200 OK\r\n"
+                                         "Content-Length: 0\r\n"
+                                         "\r\n";
+                        /* Nine absolute redirects then a final body, then
+                           ten absolute redirects that never land. */
+                        positive answers = HTTP_HOPS - 1 + 1 + HTTP_HOPS;
+
+                        for (positive at = 0; at < answers; at++)
+                        {
+                                bool on_a = (at & 1) == 0;
+                                bipolar listening = on_a ? listen_a : listen_b;
+                                p16 next_port = on_a ? port_b : port_a;
+                                string_address next_host =
+                                    on_a ? (string_address) "127.0.0.2"
+                                         : (string_address) "127.0.0.1";
+                                bipolar taken = socket_accept(
+                                    (b32)listening, 0, 0, 0);
+                                p8 answer[96];
+                                positive length = 0;
+
+                                if (at == HTTP_HOPS - 1)
+                                {
+                                        memory_copy(answer, answer_ok,
+                                                    sizeof answer_ok - 1);
+                                        length = sizeof answer_ok - 1;
+                                }
+                                else
+                                {
+                                        static const p8 head[] =
+                                            "HTTP/1.1 302 Found\r\n"
+                                            "Location: http://";
+                                        static const p8 mid[] = ":";
+                                        static const p8 tail[] =
+                                            "/\r\nContent-Length: 0\r\n"
+                                            "\r\n";
+
+                                        memory_copy(answer, head,
+                                                    sizeof head - 1);
+                                        length = sizeof head - 1;
+                                        memory_copy(answer + length, next_host,
+                                                    string_length(next_host));
+                                        length += string_length(next_host);
+                                        memory_copy(answer + length, mid,
+                                                    sizeof mid - 1);
+                                        length += sizeof mid - 1;
+                                        length += positive_into(
+                                            answer + length, next_port);
+                                        memory_copy(answer + length, tail,
+                                                    sizeof tail - 1);
+                                        length += sizeof tail - 1;
+                                }
+                                if (taken >= 0)
+                                {
+                                        socket_receive((b32)taken, said,
+                                                       sizeof said, 0, 0, 0);
+                                        system_write_all((positive)taken,
+                                                         answer, length);
+                                        socket_shutdown((b32)taken, SHUT_BOTH);
+                                        socket_close((b32)taken);
+                                }
+                        }
+                        system_call_1(syscall(exit_group), 0);
+                }
+
+                {
+                        b32 code = 0;
+                        bipolar status;
+                        p8 url[64];
+                        positive url_used = sizeof("http://127.0.0.1:") - 1;
+
+                        memory_copy(url, "http://127.0.0.1:", url_used);
+                        url_used += positive_into(url + url_used, port_a);
+                        url[url_used++] = '/';
+                        url[url_used] = end;
+
+                        status = http_fetch_to(url, -1, false, address_of code);
+                        check("nine absolute multi-host redirects then a final response succeed",
+                              status == HTTP_OK && code == 200);
+
+                        status = http_fetch_to(url, -1, false, address_of code);
+                        check("ten absolute multi-host redirects are refused before a landing",
+                              status == HTTP_REDIRECTS);
+                }
+
+                system_wait4_retry((b32)hops_child, null, 0, null);
+                socket_close((b32)listen_a);
+                socket_close((b32)listen_b);
         }
 
         /* A Location whose length alone fills the next-URL buffer is refused
