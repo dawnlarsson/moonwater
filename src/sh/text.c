@@ -15964,6 +15964,10 @@ static positive cut_lines(p8 address_to base, positive left, p8 delimiter,
         }
 }
 
+// The one record cut makes of its input when the field delimiter ends
+// records too.
+static byte_store cut_record;
+
 static b32 text_cut()
 {
         file_taking taking = {
@@ -16068,13 +16072,24 @@ static b32 text_cut()
                 return text_done(string_diagnostic(&text_diagnostic, 1, null, "an input delimiter makes sense only when operating on fields"));
 
         // -w splits on runs of blanks and joins with a tab, which is the one
-        // place cut's two delimiters are not the same character; -F joins
-        // with a space.
-        if (whitespace && !separator)
+        // place cut's two delimiters are not the same character. -F joins
+        // with a space whatever splits the fields, a -d included, as GNU's
+        // does: `cut -F 2,3 -d ,` writes "b c".
+        if ((whitespace || by_blanks) && !separator)
         {
-                separator = by_blanks && !(flags & FILE_FLAG('w')) ? " " : "\t";
+                separator = by_blanks ? " " : "\t";
                 separator_length = 1;
         }
+
+        /*
+                A field delimiter that is also the record terminator -- -d
+                with a newline, or -z with -d '' -- makes the whole input one
+                record whose fields are its lines, as GNU reads it: a
+                terminator that is the input's last byte ends the record, and
+                every other one parts two fields. `printf 'a\nb\n' | cut
+                -d $'\n' -f1- --output-delimiter=:` is a:b.
+        */
+        bool whole_record = by_field && !whitespace && delimiter == text_delimiter;
 
         b32 inputs = text_input_count();
         bool spans = by_character &&
@@ -16096,10 +16111,47 @@ static b32 text_cut()
                 if (!text_open(text_file_name(i)))
                         continue;
 
+                bool record_taken = false;
+                bool record_ended = false;
+
                 for (;;)
                 {
                         p8 address_to line = null;
                         positive line_length = 0;
+
+                        if (whole_record)
+                        {
+                                if (record_taken)
+                                        break;
+
+                                record_taken = true;
+                                cut_record.used = 0;
+
+                                while (text_fill())
+                                {
+                                        positive left = text_input.filled - text_input.position;
+
+                                        if (!byte_store_reserve(address_of cut_record,
+                                                                cut_record.used + left, 1 << 16))
+                                        {
+                                                text_close();
+                                                return text_done(string_diagnostic(&text_diagnostic, 1, null,
+                                                                                   "memory exhausted"));
+                                        }
+
+                                        memory_copy(cut_record.bytes + cut_record.used,
+                                                    text_input.buffer + text_input.position, left);
+                                        cut_record.used += left;
+                                        text_input.position = text_input.filled;
+                                }
+
+                                if (!cut_record.used)
+                                        break;
+
+                                line = cut_record.bytes;
+                                record_ended = line[cut_record.used - 1] == delimiter;
+                                line_length = cut_record.used - record_ended;
+                        }
 
                         if (whole_lines && text_fill())
                         {
@@ -16114,7 +16166,8 @@ static b32 text_cut()
                                         continue;
                         }
 
-                        if (!text_line_view(address_of line,
+                        if (!whole_record &&
+                            !text_line_view(address_of line,
                                             address_of line_length,
                                             null, 0, null))
                                 break;
@@ -16277,6 +16330,21 @@ static b32 text_cut()
                                     ? string_span_max(line, line_length,
                                                       text_set_inside) < line_length
                                     : memory_first_of(line, delimiter, line_length) != null;
+
+                                //      The terminator that ended a whole-input
+                                //      record parts no fields, yet GNU reads the
+                                //      record as delimited all the same: under
+                                //      -s it is written when its one field is
+                                //      selected and dropped, terminator and all,
+                                //      when it is not.
+                                if (record_ended && !split)
+                                {
+                                        if (only_delimited &&
+                                            text_list_has(1) == complement)
+                                                continue;
+
+                                        split = true;
+                                }
 
                                 // A line with no delimiter is one whole field,
                                 // and is printed unchanged unless -s says not

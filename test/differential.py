@@ -17813,7 +17813,18 @@ TEXT_UTILITIES = (
                    (), ("-d", ":"), ("--complement",),
                    #   Pieces of a list are split at blanks as well as commas.
                    ("-d", ":", "-f", "1 3", "fields"), ("-d", ":", "-f", "1\t3", "fields"), ("-c", "1 3"),
-                   ("-d", ":", "-f", "1  3"), ("-d", ":", "-f", "1,"), ("-d", ":", "-f", " 1"), ("-d", ":", "-f", "1,-"))),
+                   ("-d", ":", "-f", "1  3"), ("-d", ":", "-f", "1,"), ("-d", ":", "-f", " 1"), ("-d", ":", "-f", "1,-"),
+                   #   -F joins with a space whatever splits the fields.
+                   ("-F", "2,3", "-d", ",", "fields"), ("-F", "1,3", "-d", ":"), ("-F", "2-", "-w"), ("-F", "1,2", "-O", "|"),
+                   #   A field delimiter that also ends records makes the input
+                   #   one record whose fields are its records.
+                   *({"argv": argv, "stdin": stdin, "fixture": "text"} for stdin in ("text", "nonl", "empty", "blank_runs")
+                     for argv in (("-d", "\n", "-f1-", "--output-delimiter=:"), ("-d", "\n", "-f2"), ("-d", "\n", "-f3,1"),
+                                  ("-s", "-d", "\n", "-f1"), ("-s", "-d", "\n", "-f9"), ("--complement", "-d", "\n", "-f1"),
+                                  ("-s", "--complement", "-d", "\n", "-f2"))),
+                   *({"argv": argv, "stdin": "nul_lines", "fixture": "text"}
+                     for argv in (("-z", "-d", "", "-f1"), ("-z", "-d", "", "-f2"), ("-z", "-d", "", "-f1-", "-O", ":"),
+                                  ("-z", "-s", "-d", "", "-f1"))))),
     Utility("expand",
             options=(Option("-i"), Option("--initial"), Option("-t", _TEXT_TAB_LISTS, None, repeat=True),
                      Option("--tabs", ("3,5", "4"), True), Option("-4"), Option("-3,5"), Option("-8"),
