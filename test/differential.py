@@ -6732,13 +6732,17 @@ FIXTURES["files_self"] = {
 }
 
 
-def files_self_cases(tool, flags, pairs=None):
+files_SELF_PAIRS = (("f", "f"), ("f", "d/"), ("f", "d/f"), ("./f", "f"), ("sl", "f"), ("f", "sl"),
+                    ("f", "h"), ("h", "f"), ("sl", "sl2"), ("sl", "sl"), ("d/f", "f"), ("sl", "d/sl"))
+
+
+def files_self_cases(tool, flags, pairs=files_SELF_PAIRS):
     """Each pair of names for one file, under a seeded draw of the tool's
-    options: none, each alone once, and pairs and triples of them."""
+    options: none, each alone once, and pairs and triples of them. A pair
+    of two files, one a link, rides along where the tool treats a link
+    over a file by what it has to copy."""
     rng = random.Random(int.from_bytes(hashlib.sha256(
         ("self:" + tool).encode()).digest()[:8], "little"))
-    pairs = pairs or (("f", "f"), ("f", "d/"), ("f", "d/f"), ("./f", "f"), ("sl", "f"), ("f", "sl"),
-                      ("f", "h"), ("h", "f"), ("sl", "sl2"), ("sl", "sl"), ("d/f", "f"), ("sl", "d/sl"))
     cases = []
     for pair in pairs:
         chosen = [()] + [(flag,) for flag in rng.sample(flags, min(4, len(flags)))] + \
@@ -7274,7 +7278,13 @@ FILES_UTILITIES = (
             + files_backup_cases("cp", ()) + files_backup_cases("cp", ("-a",))
             + files_self_cases("cp", ("-a", "-d", "-f", "-l", "-s", "-b", "--remove-destination", "-L", "-P",
                                       "-H", "-r", "-i", "-n", "-u", "--attributes-only", "-v",
-                                      "--backup=numbered", "-df")),
+                                      "--backup=numbered", "-df"),
+                               files_SELF_PAIRS + (("sl", "g"), ("sl", "sub/f"), ("d", "g")))
+            + tuple({"fixture": "files_self", "argv": words + pair}
+                    for words in (("-a", "--attributes-only"), ("-d", "--attributes-only"),
+                                  ("-df", "--attributes-only"), ("-a", "--attributes-only", "--remove-destination"),
+                                  ("-rd", "--attributes-only", "-b"))
+                    for pair in (("sl", "g"), ("d", "g"), ("sl", "sub/f"))),
             normalize=files_sorted_lines),
     Utility("install", options=(Option("-b"), Option("-c"), Option("-C"), Option("-d"), Option("-D"), Option("-p"), Option("-s"),
                                 Option("-T"), Option("-v"), Option("-Z"), Option("--backup"),

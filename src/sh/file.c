@@ -27919,6 +27919,26 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                  destination_entry_exists,
                                  address_of destination_entry);
 
+        /* GNU copy.c removes an existing destination before making a link
+           or a special file in its place only when there is data to copy or
+           it was told to: --attributes-only has none, so the creation meets
+           the name already there -- a link replaced only under -f, a fifo
+           or device not even then -- and cp -a --attributes-only sym1 file2
+           is refused rather than turning file2 into a link. */
+        if (!moving && cp_attributes_only && !cp_replace &&
+            destination_entry_exists &&
+            (destination_entry.mode & MODE_FORMAT) != MODE_DIRECTORY &&
+            (kind == MODE_LINK ? !cp_force
+                               : cp_recursive && kind != MODE_DIRECTORY &&
+                                     kind != MODE_FILE))
+                return string_report(
+                    log_error, false, "cp: cannot create %s %w: %s\n",
+                    kind == MODE_LINK ? (string_address) "symbolic link"
+                    : kind == MODE_PIPE ? (string_address) "fifo"
+                                        : (string_address) "special file",
+                    writer_shell_quoted_name, destination_shown,
+                    file_reason(-ERROR_EXISTS));
+
         if (kind == MODE_LINK || ((moving || cp_recursive) &&
                                   kind != MODE_DIRECTORY && kind != MODE_FILE))
         {
