@@ -377,11 +377,17 @@ _Static_assert(sizeof(struct snapshot_request) == 32,
         The state below comes back whatever the request answers. Reading it
         needs nothing; on and off need CAP_SYS_ADMIN. LAYOUT reads the
         compositor keymap without a capability; setting it needs CAP_SYS_ADMIN.
+        KERNEL_LOG opens the kernel log window, or leaves the one that is
+        open, and TERMINAL starts a terminal as Control-Shift-T does; both
+        start a root shell's worth of view or input, so both need
+        CAP_SYS_ADMIN, and both answer -ENODEV while Canvas is off.
 */
 #define SPARK_CANVAS_STATUS 0u
 #define SPARK_CANVAS_ON 1u
 #define SPARK_CANVAS_OFF 2u
 #define SPARK_CANVAS_LAYOUT 3u
+#define SPARK_CANVAS_KERNEL_LOG 4u
+#define SPARK_CANVAS_TERMINAL 5u
 #define SPARK_CANVAS_OUTPUTS 4u
 
 struct canvas_output_state {

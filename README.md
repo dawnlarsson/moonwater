@@ -34,6 +34,7 @@ moonwater bind exit add "command"      run a command before the disks go read-on
 moonwater bind exit remove ID|"command"
 
 moonwater canvas [on|off]              the desktop, and on which screens [on]
+moonwater canvas log|terminal          open the kernel log window, or a terminal
 moonwater keyboard [LAYOUT]            us uk de se no dk fi fr es it [us]
 
 moonwater wifi                         the radio, saved networks and networks in range, or why there are none

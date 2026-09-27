@@ -3402,7 +3402,26 @@ static fn host_tty1_shell(void)
         }
 }
 
-/* moonwater canvas [on|off] */
+/*
+        moonwater canvas log and moonwater canvas terminal: the windows a
+        desktop starts with. Canvas opens neither by itself; the machine
+        script asks for them on the canvas on event.
+*/
+static b32 host_canvas_open(positive request, string_address what)
+{
+        struct canvas_control control;
+        bipolar failed = host_canvas_request(request, address_of control);
+
+        if (failed == -EPERM)
+                return host_refuse("opening %s needs root (CAP_SYS_ADMIN)\n", what);
+        if (failed == -ENODEV)
+                return host_refuse("Canvas is off, so there is nowhere to open %s\n", what);
+        if (failed < 0)
+                return host_fail(what, failed);
+        return 0;
+}
+
+/* moonwater canvas [on|off|log|terminal] */
 static b32 host_canvas(string_address address_to arguments, positive count)
 {
         struct canvas_control control;
@@ -3443,6 +3462,12 @@ static b32 host_canvas(string_address address_to arguments, positive count)
 
                 return 0;
         }
+
+        if (string_equals(arguments[2], "log"))
+                return host_canvas_open(SPARK_CANVAS_KERNEL_LOG, "the kernel log");
+
+        if (string_equals(arguments[2], "terminal"))
+                return host_canvas_open(SPARK_CANVAS_TERMINAL, "a terminal");
 
         if (string_equals(arguments[2], "on"))
         {
@@ -10439,6 +10464,8 @@ static fn host_usage_write(writer out)
                       "  " TERM_DIM "what runs when the machine stops" TERM_RESET "\n"
                       TERM_BOLD "  canvas [on|off]" TERM_RESET
                       "             " TERM_DIM "the desktop" TERM_RESET "\n"
+                      TERM_BOLD "  canvas log|terminal" TERM_RESET
+                      "         " TERM_DIM "open the kernel log or a terminal" TERM_RESET "\n"
                       TERM_BOLD "  wifi [on|off]" TERM_RESET
                       "               " TERM_DIM "the wireless radio" TERM_RESET "\n"
                       TERM_BOLD "  wifi add SSID [PASSWORD|-]" TERM_RESET

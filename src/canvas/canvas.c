@@ -389,6 +389,10 @@ static struct desktop
         _Bool started;
         _Bool terminal;
 
+        // Asked for before the desktop had a size; canvas_start opens them.
+        _Bool log_wanted;
+        _Bool terminal_wanted;
+
         // Turned off from userspace: no window may be created until it is on.
         _Bool off;
 
@@ -8266,6 +8270,9 @@ static int canvas_start(struct canvas *canvas)
         // then on found a desktop that believed it already had a terminal.
         if (!desktop.terminal)
                 canvas_terminal_first();
+        else if (desktop.terminal_wanted)
+                canvas_first_spawn();
+        desktop.terminal_wanted = false;
 
         return 0;
 }
@@ -9708,6 +9715,67 @@ static void canvas_state(struct canvas_control *answer)
         rt_mutex_unlock(&desktop.lock);
 }
 
+/*
+        The kernel log window and a terminal, when userspace asks.
+
+        Canvas on can be answered before the card's first picture: the claim
+        queues the start on moonwater/plug. A request that arrives in that
+        gap is kept, and canvas_start opens it once the desktop has a size.
+        The log is one window, so asking with it open leaves it; each
+        terminal request is a new terminal, started on the canvas thread as
+        Control-Shift-T starts one.
+*/
+static long canvas_log_open(void)
+{
+        mutex_lock(&canvas_control_lock);
+
+        if (!canvas_is_on())
+        {
+                mutex_unlock(&canvas_control_lock);
+                return -ENODEV;
+        }
+
+        rt_mutex_lock(&desktop.lock);
+        desktop.log_wanted = true;
+        if (desktop.started)
+        {
+                console_start();
+                desktop_recompose();
+        }
+        rt_mutex_unlock(&desktop.lock);
+
+        mutex_unlock(&canvas_control_lock);
+        return 0;
+}
+
+static long canvas_terminal_open(void)
+{
+        _Bool started;
+
+        mutex_lock(&canvas_control_lock);
+
+        if (!canvas_is_on())
+        {
+                mutex_unlock(&canvas_control_lock);
+                return -ENODEV;
+        }
+
+        rt_mutex_lock(&desktop.lock);
+        started = desktop.started;
+        if (!started)
+                desktop.terminal_wanted = true;
+        rt_mutex_unlock(&desktop.lock);
+
+        mutex_unlock(&canvas_control_lock);
+
+        if (started)
+        {
+                atomic_set(&desktop.spawn, 1);
+                canvas_thread_wake();
+        }
+        return 0;
+}
+
 /* ---- pointer: the pointer ---- */
 
 /*
@@ -11029,7 +11097,7 @@ static long report_canvas(struct canvas_control __user *out)
         request = control.request;
         memcpy(layout, control.master_command, sizeof(layout));
         layout[sizeof(layout) - 1] = 0;
-        if (request > SPARK_CANVAS_LAYOUT)
+        if (request > SPARK_CANVAS_TERMINAL)
                 return -EINVAL;
         if (request == SPARK_CANVAS_LAYOUT)
         {
@@ -11057,6 +11125,10 @@ static long report_canvas(struct canvas_control __user *out)
                 answer = canvas_turn_on(&control);
         else if (request == SPARK_CANVAS_OFF)
                 answer = canvas_turn_off();
+        else if (request == SPARK_CANVAS_KERNEL_LOG)
+                answer = canvas_log_open();
+        else if (request == SPARK_CANVAS_TERMINAL)
+                answer = canvas_terminal_open();
 
         canvas_state(&control);
 

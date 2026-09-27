@@ -19811,6 +19811,9 @@ static long canvas_turn_on(struct canvas_control *answer) {
 }
 static long canvas_turn_off(void) { canvas_offs++; return canvas_off_answer; }
 static void canvas_state(struct canvas_control *answer) { canvas_states++;answer->running=1;answer->cards=1; }
+static unsigned canvas_logs,canvas_terminals;
+static long canvas_log_open(void) { canvas_logs++; return 0; }
+static long canvas_terminal_open(void) { canvas_terminals++; return 0; }
 '''
     source += canvas[canvas.index("static long report_canvas"):]
     # Here rather than beside the geometry it reshapes: resize_move reads the
@@ -20977,11 +20980,20 @@ static void check_canvas_control(void) {
     memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_OFF;
     check(report_canvas(&control)==-EPERM && !canvas_offs,
           "CAP_SYS_BOOT is not enough to turn Canvas off");
+    /* The log window and a terminal show the machine's log and start a root
+       shell, so they are refused like off, before anything is asked. */
+    memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_KERNEL_LOG;
+    check(report_canvas(&control)==-EPERM && !canvas_logs,
+          "opening the kernel log window without CAP_SYS_ADMIN is refused");
+    memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_TERMINAL;
+    check(report_canvas(&control)==-EPERM && !canvas_terminals,
+          "starting a terminal without CAP_SYS_ADMIN is refused");
     power_admin=1;
-    /* One past the last request there is: 3 became SPARK_CANVAS_LAYOUT, so
-       the sentinel follows the enum rather than naming a number. */
-    memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_LAYOUT+1;
-    check(report_canvas(&control)==-EINVAL && !canvas_ons && !canvas_offs,
+    /* One past the last request there is: the sentinel follows the enum
+       rather than naming a number, as 3 became LAYOUT and 5 TERMINAL. */
+    memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_TERMINAL+1;
+    check(report_canvas(&control)==-EINVAL && !canvas_ons && !canvas_offs &&
+          !canvas_logs && !canvas_terminals,
           "an unknown Canvas request is refused");
     canvas_on_answer=-EBUSY;
     memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_ON;
@@ -20992,6 +21004,14 @@ static void check_canvas_control(void) {
     memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_OFF;
     check(!report_canvas(&control) && canvas_offs==1 && control.request==SPARK_CANVAS_OFF,
           "off with CAP_SYS_ADMIN turns Canvas off and answers what that answered");
+    memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_KERNEL_LOG;
+    check(!report_canvas(&control) && canvas_logs==1 && !canvas_terminals &&
+          control.request==SPARK_CANVAS_KERNEL_LOG && control.running==1,
+          "the kernel log request reaches the log and answers the state");
+    memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_TERMINAL;
+    check(!report_canvas(&control) && canvas_terminals==1 && canvas_logs==1 &&
+          control.request==SPARK_CANVAS_TERMINAL,
+          "the terminal request reaches the terminal and nothing else");
     power_capable=1;power_admin=1;canvas_on_answer=0;
 }
 
