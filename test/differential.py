@@ -6463,9 +6463,31 @@ files_DATE_READS = (
     "2001-09-09 last sun", "2001-09-09 this sun", "2001-09-09 sunday ago", "2001-09-09 2 sundays",
     "1 September 2001 12:00 +0200", "@9223372036854775807", "@-9223372036854775808", "@99999999999999999999",
     "1000-01-01", "9999-12-31 23:59:59", "0001-01-01", "2038-01-19 03:14:08", "1901-12-13 20:45:52",
+    # A number after a zone's name, ordinals before weekdays and units, the
+    # month's name with dashes, dotted days with no year, comments, zones
+    # by name and military letter, and days counted on the calendar across
+    # a change of summer time.
+    "1970-01-01 00:00:01 UTC +2 hours", "2024-03-01 next monday", "next friday", "last monday",
+    "this thursday", "2024-03-01 12:34:56 this minute", "2024-03-06 this week", "2024-03-06 this year",
+    "2001-09-09 third day", "2001-09-09 this fortnight", "May-23-2003", "May-23-03", "24.01.",
+    "1.2. 3:4:5.6", "2020-01-01 12:00 J", "2020-01-01 12:00 A", "2020-01-01 12:00 N", "2020-01-01 12:00 Y",
+    "2020-01-01 12:00 M", "2020-01-01 (comment) 12:00", "(a (nested) comment) 2024-01-01",
+    "2020-01-01 12:00 EDT", "2020-01-01 12:00 EET", "2020-01-01 12:00 EEST", "2020-01-01 12:00 ist",
+    "2020-01-01 12:00 NDT", "2024-03-01 EST+1", "2024-03-01 12:00 CET -1 hours", "2020-01-01 + 6 months",
+    "2024-03-30 12:00 +24 hours", "2024-01-01 12:00 3 days hence", "2024-01-01 ago", "2024-01-01 hence",
+    "2024-01-01 yesterday ago", "2024-01-01 next day ago", "monday 12:00", "next mon 9:00",
+    'TZ="Europe/Stockholm" 2024-03-30 12:00 tomorrow', 'TZ="Europe/Stockholm" 2024-03-30 12:00 1 day',
+    'TZ="Europe/Stockholm" 2024-10-26 12:00 1 week', 'TZ="Europe/Stockholm" 2024-03-30 12:00 24 hours',
+    'TZ="Europe/Stockholm" 2024-10-27 02:30 1 hour ago', 'TZ="Europe/Stockholm" 2024-03-31 02:30',
+    'TZ="America/New_York" 2024-03-10 02:30', 'TZ="America/New_York" 2024-11-02 12:00 +1 day',
 )
 
 files_DATE_FORMATS = (
+    # gnulib's padding, which date follows and libc's strftime does not: -
+    # is no padding at all, + pads with zeros and signs a year that needs it,
+    # an offset is one number with its colons in it, and %N sheds zeros.
+    ("+%05s|%-5s|%_5s|%+5s|%5s",), ("+%+Y|%+6Y|%+4C|%3C|%-5Y|%_10Y|%+G",), ("+%8:z|%-8:z|%_8:z|%10:z|%+5z|%_5z|%-10z",),
+    ("+%-5d|%_5d|%+5d|%^5a|%-9a|%+9a|%09a",), ("+%N|%3N|%-3N|%-N|%12N|%_12N|%-12N|%_3N",),
     ("+%Y-%m-%d",), ("+%F %T",), ("+%a %A %b %B",), ("+%j %u %w %y %C %e",), ("+%I %p %l %P %r",), ("+%s",),
     ("+%Z %z %:z %::z %:::z",), ("+a%%b%nc%td",), ("+%-d/%-m/%-H",), ("+%_d|%_m|%_H",), ("+%0e|%0k|%0l",),
     ("+%U %W %V %G %g",), ("+%q %N",), ("+%c|%x|%X|%D|%R",), ("+",), ("+%Q%%",), ("+%^a %^b %#p %#Z %^Z",),
@@ -7821,7 +7843,10 @@ FILES_UTILITIES = (
                    ("-s", "2001-09-09", "-d", "@0"), ("--set=@0", "+%s"), ("-d", "@1000000000", "-s", "nonsense"),
                    ("-d", "@1000000000", "+%N"), ("-d", "@1000000000.123456789", "+%N|%3N|%s"), ("-d", "@1000000000", "--debug"),
                    ("-d", "2001-09-09 +1 day", "--debug", "+%F"), ("--resolution",), ("-d", "@1000000000", "--resolution"),
-                   ("-x",), ("-d",), ("-r",), ("-f",), ("-I", "-R", "-d", "@0"), ("-R", "-I", "-d", "@0"), ("-u", "-d", "2001-09-09 12:00 +0200", "+%H %Z"))),
+                   ("-x",), ("-d",), ("-r",), ("-f",), ("-I", "-R", "-d", "@0"), ("-R", "-I", "-d", "@0"), ("-u", "-d", "2001-09-09 12:00 +0200", "+%H %Z"),
+                   # Options after the format operand, which getopt reaches.
+                   ("+%F", "-d", "@0"), ("+%s", "-u", "-d", "@5"), ("+%F", "-d", "@0", "+%T"),
+                   ("-d", "@0", "+%F", "-u"), ("+%F", "--", "-d"))),
 )
 
 #       Scenes a fixture cannot hold, made by the shell before the program
@@ -40921,20 +40946,10 @@ PINNED = r"""
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"30fee5333b8071993e31e45021907a2a52e50ac527d411dcc634b6cd2789840c"},"case":{"argv":["c.txt","/9/","{2}"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"text","utility":"csplit"},"domain":"files","id":"f791e9a1b19af817","kind":"bug","list":"ledger","reason_id":"r90","utility":"csplit"},
 {"domain":"files","kind":"bug","list":"ledger","option":"--suffix-format","reason_id":"r91","utility":"csplit"},
 {"domain":"files","kind":"bug","list":"ledger","option":"-b","reason_id":"r91","utility":"csplit"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-d","2001-09-09 last sun","+%Y-%m-%d %H:%M:%S"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"1cb3d7d097cd5c69","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"61457265ab37a25075bf614801646994e66b86df434409ef501654c98947a816"},"case":{"argv":["-d","2001-09-09 sunday ago","+%Y-%m-%d %H:%M:%S"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"26f1817776fdbdf7","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-d","2001-09-09 this minute","+%Y-%m-%d %H:%M:%S"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"4628d68b0ec5b495","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-d","2001-09-09 third month","+%Y-%m-%d %H:%M:%S"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"698e45fbe1fd393c","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"e3cbf3c89f64ef48467fe506582155b7939e258518febb4c30eb872c568d61d0"},"case":{"argv":["-d","0001-01-01","+%Y-%m-%d %H:%M:%S"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"7d78ecdf96aeebc8","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"ac27f0a19c6dcc210687994bc217e7644bffa9158eb94d98885e00baa5d0aa1e"},"case":{"argv":["-d","2001-09-09 23:59:60","+%Y-%m-%d %H:%M:%S"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"a5d74ff50f7990a6","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-d","@-9223372036854775808","+%Y-%m-%d %H:%M:%S"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"c6db97f2549f59a7","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-d","2001-09-09 EST","+%Y-%m-%d %H:%M:%S"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"dc8e4f8a145d06a4","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-d","@9223372036854775807","+%Y-%m-%d"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"dffd332edf6579f9","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-d","@9223372036854775807","+%Y-%m-%d %H:%M:%S"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"f22ed4b56d57915a","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-d","2001-09-09 this sun","+%Y-%m-%d %H:%M:%S"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"f82953715973e34b","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-d","2001-09-09 01:46:40 CEST","+%Y-%m-%d %H:%M:%S"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"fb2730ced833dd11","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-d","2001-09-09 next sun","+%Y-%m-%d %H:%M:%S"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"fb9dfd55f4427b0c","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-d","2001-09-09 first day","+%Y-%m-%d %H:%M:%S"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"fee9e5fb4212ae55","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
 {"domain":"files","kind":"bug","list":"ledger","option":"--debug","reason_id":"r93","utility":"date"},
 {"domain":"files","kind":"bug","list":"ledger","option":"--block-size","reason_id":"r95","utility":"df"},
 {"domain":"files","kind":"bug","list":"ledger","option":"--output","reason_id":"r95","utility":"df"},

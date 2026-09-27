@@ -2399,36 +2399,43 @@ fn file_stamp_short(writer write, b64 seconds, b64 now)
         followed by a bare day, and so does this; a tool that read it as a
         day alone would be an hour out with nothing to say so.
 */
+/*
+        Days, weeks and fortnights are counted on the calendar and not in
+        seconds, as GNU counts them: a day across the change to summer time
+        is the same hour the next day, not twenty-four hours on.
+*/
 typedef struct
 {
         string_address name;
         b64 seconds;
+        b64 days;
         b64 months;
 } file_unit;
 
 static const file_unit file_units[] = {
-    {(string_address) "sec", 1, 0},
-    {(string_address) "secs", 1, 0},
-    {(string_address) "second", 1, 0},
-    {(string_address) "seconds", 1, 0},
-    {(string_address) "min", 60, 0},
-    {(string_address) "mins", 60, 0},
-    {(string_address) "minute", 60, 0},
-    {(string_address) "minutes", 60, 0},
-    {(string_address) "hour", 3600, 0},
-    {(string_address) "hours", 3600, 0},
-    {(string_address) "day", 86400, 0},
-    {(string_address) "days", 86400, 0},
-    {(string_address) "week", 604800, 0},
-    {(string_address) "weeks", 604800, 0},
-    {(string_address) "fortnight", 1209600, 0},
-    {(string_address) "fortnights", 1209600, 0},
-    {(string_address) "month", 0, 1},
-    {(string_address) "months", 0, 1},
-    {(string_address) "year", 0, 12},
-    {(string_address) "years", 0, 12},
-    {null, 0, 0},
+    {(string_address) "sec", 1, 0, 0},
+    {(string_address) "secs", 1, 0, 0},
+    {(string_address) "second", 1, 0, 0},
+    {(string_address) "seconds", 1, 0, 0},
+    {(string_address) "min", 60, 0, 0},
+    {(string_address) "mins", 60, 0, 0},
+    {(string_address) "minute", 60, 0, 0},
+    {(string_address) "minutes", 60, 0, 0},
+    {(string_address) "hour", 3600, 0, 0},
+    {(string_address) "hours", 3600, 0, 0},
+    {(string_address) "day", 0, 1, 0},
+    {(string_address) "days", 0, 1, 0},
+    {(string_address) "week", 0, 7, 0},
+    {(string_address) "weeks", 0, 7, 0},
+    {(string_address) "fortnight", 0, 14, 0},
+    {(string_address) "fortnights", 0, 14, 0},
+    {(string_address) "month", 0, 0, 1},
+    {(string_address) "months", 0, 0, 1},
+    {(string_address) "year", 0, 0, 12},
+    {(string_address) "years", 0, 0, 12},
+    {null, 0, 0, 0},
 };
+
 
 // A day written down has to be a day the month has; a day arrived at by
 // adding months to another one does not, and rolls into the month after.
@@ -2468,6 +2475,69 @@ static const file_unit address_to file_unit_of(string_address text, positive len
                         return address_of file_units[i];
 
         return null;
+}
+
+/* GNU's ordinal words: last, this and next, and first to twelfth but not
+   second, which is a unit. -2 when the word is none of them. */
+static b64 file_ordinal_of(string_address text, positive length)
+{
+        static const string_address ordinals[] = {
+            "last", "this", "next", "first", "", "third", "fourth", "fifth", "sixth",
+            "seventh", "eighth", "ninth", "tenth", "eleventh", "twelfth"};
+
+        for (positive i = 0; i < array_count(ordinals); i++)
+                if (string_get(ordinals[i]) && file_same_word(text, length, ordinals[i]))
+                        return i < 3 ? (b64)i - 1 : (b64)i - 2;
+        return -2;
+}
+
+/*
+        The zones GNU's parse-datetime knows by name, east of Greenwich in
+        seconds, the daylight ones an hour further on; and the military
+        letters, A to M east and N to Y west, J being the local time and T
+        the ISO separator rather than zones.
+*/
+static bool file_zone_named(string_address text, positive length,
+                            b64 address_to offset, bool address_to wall)
+{
+        static const struct { string_address name; b32 minutes; bool daylight; } zones[] = {
+            {"wet", 0, false}, {"west", 0, true}, {"bst", 0, true}, {"art", -180, false},
+            {"brt", -180, false}, {"brst", -180, true}, {"nst", -210, false}, {"ndt", -210, true},
+            {"ast", -240, false}, {"adt", -240, true}, {"clt", -240, false}, {"clst", -240, true},
+            {"est", -300, false}, {"edt", -300, true}, {"cst", -360, false}, {"cdt", -360, true},
+            {"mst", -420, false}, {"mdt", -420, true}, {"pst", -480, false}, {"pdt", -480, true},
+            {"akst", -540, false}, {"akdt", -540, true}, {"hst", -600, false}, {"hast", -600, false},
+            {"hadt", -600, true}, {"sst", -720, false}, {"wat", 60, false}, {"cet", 60, false},
+            {"cest", 60, true}, {"met", 60, false}, {"mez", 60, false}, {"mest", 60, true},
+            {"mesz", 60, true}, {"eet", 120, false}, {"eest", 120, true}, {"cat", 120, false},
+            {"sast", 120, false}, {"eat", 180, false}, {"msk", 180, false}, {"msd", 180, true},
+            {"ist", 330, false}, {"sgt", 480, false}, {"kst", 540, false}, {"jst", 540, false},
+            {"gst", 600, false}, {"nzst", 720, false}, {"nzdt", 720, true}};
+
+        address_to wall = false;
+        for (positive i = 0; i < array_count(zones); i++)
+                if (file_same_word(text, length, zones[i].name))
+                {
+                        address_to offset = (b64)zones[i].minutes * 60 + (zones[i].daylight ? 3600 : 0);
+                        return true;
+                }
+
+        if (length != 1)
+                return false;
+
+        p8 letter = byte_to_lower(string_get(text));
+
+        if (letter == 'j')
+        {
+                address_to wall = true;
+                return true;
+        }
+        if (letter < 'a' || letter > 'y' || letter == 't')
+                return false;
+        address_to offset = letter <= 'i' ? (b64)(letter - 'a' + 1) * 3600
+                          : letter <= 'm' ? (b64)(letter - 'k' + 10) * 3600
+                                          : -(b64)(letter - 'n' + 1) * 3600;
+        return true;
 }
 
 static positive file_read_number(string_address text, positive at, b64 address_to out,
@@ -2587,6 +2657,7 @@ static bool file_moment_read_local(string_address text, b64 now, positive fracti
         bool timed = false;
         bool anything = false;
         b64 shift = 0;
+        b64 days_shift = 0;
         b64 months = 0;
 
         // A date said by its month's name may leave the year for later, and
@@ -2597,22 +2668,46 @@ static bool file_moment_read_local(string_address text, b64 now, positive fracti
         bool universal = false; // UTC, GMT or Z said by name
         bool zoned = false;
         bipolar weekday = -1;
+        b64 weekday_ordinal = 0;
         b64 zone = 0;
+        bool zone_named = false;
 
         // ago turns round the displacement it follows and not the ones before
         // it: "3 hours 2 days ago" is three hours on and two days back, which
         // is what the system's date makes of it.
         b64 recent = 0;
+        bool relative_last = false;
+        b64 recent_days = 0;
         b64 recent_months = 0;
 
         while (string_get(text + at))
         {
                 at += string_span(text + at, string_set_blanks);
 
+                // A parenthesis opens a comment, nested ones included,
+                // which the lexer passes over wherever a word could start.
+                if (string_is(text + at, '('))
+                {
+                        positive depth = 0;
+
+                        do
+                        {
+                                depth += string_is(text + at, '(');
+                                depth -= string_is(text + at, ')');
+                                at++;
+                        } while (string_get(text + at) && depth);
+                        continue;
+                }
+
                 if (!string_get(text + at))
                         break;
 
                 anything = true;
+
+                // ago and hence belong to the displacement just before them.
+                bool follows = relative_last;
+
+                relative_last = false;
 
                 b64 sign = 1;
                 bool marked = false;
@@ -2772,16 +2867,20 @@ static bool file_moment_read_local(string_address text, b64 now, positive fracti
                                             address_of which,
                                             address_of wide);
 
-                                        if (!wide || value < 1 ||
-                                            value > 31 || rest < 1 ||
-                                            rest > 12)
+                                        if (value < 1 || value > 31 ||
+                                            rest < 1 || rest > 12)
                                                 return false;
 
-                                        year = wide <= 2
-                                                   ? (which <= 68
-                                                          ? 2000 + which
-                                                          : 1900 + which)
-                                                   : which;
+                                        // 24.01. is the day and the month
+                                        // of this year.
+                                        if (!wide)
+                                                end_at = after + 1;
+                                        else
+                                                year = wide <= 2
+                                                           ? (which <= 68
+                                                                  ? 2000 + which
+                                                                  : 1900 + which)
+                                                           : which;
 
                                         if (value > file_month_days(
                                                         year, rest))
@@ -2859,7 +2958,8 @@ static bool file_moment_read_local(string_address text, b64 now, positive fracti
                         // system's date reads the + in "12:00 +1 day" that
                         // way too, as a zone of one hour and then a bare
                         // day, so the unit is left for the next word.
-                        if (marked && timed && !zoned)
+                        if (marked && (timed || zone_named) && (!zoned || zone_named) &&
+                            !((universal || zone_named) && unit))
                         {
                                 b64 hours = value;
                                 b64 minutes = 0;
@@ -2883,11 +2983,15 @@ static bool file_moment_read_local(string_address text, b64 now, positive fracti
                                                 return false;
                                 }
 
-                                if (hours > 23 || minutes > 59)
+                                // GNU takes a whole day either way, and no more.
+                                if (hours > 24 || minutes > 59 || (hours == 24 && minutes))
                                         return false;
 
-                                zone = sign * (hours * 3600 + minutes * 60);
+                                // After a zone's name, a number corrects it:
+                                // EST+1 is an hour east of EST.
+                                zone += sign * (hours * 3600 + minutes * 60);
                                 zoned = true;
+                                zone_named = false;
 
                                 continue;
                         }
@@ -2998,10 +3102,13 @@ static bool file_moment_read_local(string_address text, b64 now, positive fracti
 
                         at += length;
                         recent = sign * value * unit->seconds;
+                        recent_days = sign * value * unit->days;
                         recent_months = sign * value * unit->months;
                         shift += recent;
+                        days_shift += recent_days;
                         months += recent_months;
                         anything = true;
+                        relative_last = true;
 
                         continue;
                 }
@@ -3019,10 +3126,21 @@ static bool file_moment_read_local(string_address text, b64 now, positive fracti
 
                 if (file_same_word(word, length, (string_address) "ago"))
                 {
+                        if (!follows)
+                                return false;
                         shift -= 2 * recent;
+                        days_shift -= 2 * recent_days;
                         months -= 2 * recent_months;
                         recent = -recent;
+                        recent_days = -recent_days;
                         recent_months = -recent_months;
+                        continue;
+                }
+
+                if (file_same_word(word, length, (string_address) "hence"))
+                {
+                        if (!follows)
+                                return false;
                         continue;
                 }
 
@@ -3059,6 +3177,27 @@ static bool file_moment_read_local(string_address text, b64 now, positive fracti
                         continue;
                 }
 
+                // A zone by its name, or a military letter.
+                {
+                        b64 offset = 0;
+                        bool wall = false;
+
+                        if (file_name_among(word, length, file_month_names, 12) < 0 &&
+                            file_name_among(word, length, file_weekday_names, 7) < 0 &&
+                            file_zone_named(word, length, address_of offset, address_of wall))
+                        {
+                                if (zoned || universal)
+                                        return false;
+                                if (!wall)
+                                {
+                                        zone = offset;
+                                        zoned = true;
+                                        zone_named = true;
+                                }
+                                continue;
+                        }
+                }
+
                 bipolar named = file_name_among(word, length, file_month_names, 12);
 
                 if (named >= 0)
@@ -3073,7 +3212,13 @@ static bool file_moment_read_local(string_address text, b64 now, positive fracti
                                 return false;
 
                         at += string_span(text + at, string_set_blanks);
-                        at = file_read_number(text, at, address_of value, address_of digits);
+
+                        // May-23-2003: the day and the year each behind a
+                        // dash, which GNU reads as two signed numbers.
+                        bool dashed = string_is(text + at, '-') &&
+                                      byte_is_digit(string_get(text + at + 1));
+
+                        at = file_read_number(text, at + dashed, address_of value, address_of digits);
 
                         if (!digits || value < 1 || value > 31)
                                 return false;
@@ -3083,6 +3228,17 @@ static bool file_moment_read_local(string_address text, b64 now, positive fracti
                         dated = true;
                         named_date = true;
                         year_wanted = true;
+
+                        if (dashed && string_is(text + at, '-') &&
+                            byte_is_digit(string_get(text + at + 1)))
+                        {
+                                b64 which;
+                                positive wide;
+
+                                at = file_read_number(text, at + 1, address_of which, address_of wide);
+                                year = wide == 2 ? (which < 69 ? 2000 + which : 1900 + which) : which;
+                                year_wanted = false;
+                        }
 
                         if (!timed)
                         {
@@ -3103,6 +3259,7 @@ static bool file_moment_read_local(string_address text, b64 now, positive fracti
                 if (named >= 0)
                 {
                         weekday = named;
+                        weekday_ordinal = 0;
 
                         if (string_is(text + at, ','))
                                 at++;
@@ -3113,16 +3270,23 @@ static bool file_moment_read_local(string_address text, b64 now, positive fracti
                 if (file_same_word(word, length, (string_address) "yesterday") ||
                     file_same_word(word, length, (string_address) "tomorrow"))
                 {
-                        recent = byte_to_lower(string_get(word)) == 'y' ? -86400 : 86400;
+                        recent = 0;
+                        recent_days = byte_to_lower(string_get(word)) == 'y' ? -1 : 1;
                         recent_months = 0;
-                        shift += recent;
+                        days_shift += recent_days;
 
                         continue;
                 }
 
-                bool ahead = file_same_word(word, length, (string_address) "next");
+                /*
+                        An ordinal -- last, this, next, first, third to
+                        twelfth -- counts the unit after it (next week, this
+                        hour is none at all) or picks a weekday (next monday
+                        is the one after today's, last friday the one before).
+                */
+                b64 ordinal = file_ordinal_of(word, length);
 
-                if (ahead || file_same_word(word, length, (string_address) "last"))
+                if (ordinal != -2)
                 {
                         at += string_span(text + at, string_set_blanks);
 
@@ -3132,15 +3296,27 @@ static bool file_moment_read_local(string_address text, b64 now, positive fracti
                                             string_set_alpha);
 
                         const file_unit address_to unit = file_unit_of(text + at, wide);
+                        bipolar day = file_name_among(text + at, wide, file_weekday_names, 7);
 
-                        if (!unit)
+                        if (!unit && day < 0)
                                 return false;
 
                         at += wide;
-                        recent = (ahead ? 1 : -1) * unit->seconds;
-                        recent_months = (ahead ? 1 : -1) * unit->months;
+                        if (day >= 0)
+                        {
+                                weekday = day;
+                                weekday_ordinal = ordinal;
+                                if (string_is(text + at, ','))
+                                        at++;
+                                continue;
+                        }
+                        recent = ordinal * unit->seconds;
+                        recent_days = ordinal * unit->days;
+                        recent_months = ordinal * unit->months;
                         shift += recent;
+                        days_shift += recent_days;
                         months += recent_months;
+                        relative_last = true;
 
                         continue;
                 }
@@ -3151,9 +3327,12 @@ static bool file_moment_read_local(string_address text, b64 now, positive fracti
                         return false;
 
                 recent = unit->seconds;
+                recent_days = unit->days;
                 recent_months = unit->months;
                 shift += recent;
+                days_shift += recent_days;
                 months += recent_months;
+                relative_last = true;
         }
 
         // A named date is checked once its year is known, because the day
@@ -3183,7 +3362,8 @@ static bool file_moment_read_local(string_address text, b64 now, positive fracti
         {
                 b64 today = ((days % 7) + 7 + 4) % 7;
 
-                days += (weekday - today + 7) % 7;
+                days += (weekday - today + 7) % 7 +
+                        7 * (weekday_ordinal - (weekday_ordinal > 0 && today != weekday));
 
                 if (!timed)
                 {
@@ -3203,6 +3383,7 @@ static bool file_moment_read_local(string_address text, b64 now, positive fracti
         if (!zoned && !universal && !clock_local_exists(civil))
                 return false;
 
+        civil += days_shift * 86400;
         address_to out = (zoned || universal ? civil - zone
                                              : clock_local_to_utc(civil)) +
                          shift;
@@ -40635,6 +40816,18 @@ static bool date_option_seen(p8 letter, string_address value)
         return true;
 }
 
+/* The operands, wherever they stand: getopt permutes, so date +%F -d X is
+   a format and an option, where the first word not an option ended them. */
+static positive date_operand_list[2];
+static positive date_operand_count;
+
+static fn date_operand(b32 index)
+{
+        if (date_operand_count < array_count(date_operand_list))
+                date_operand_list[date_operand_count] = (positive)index;
+        date_operand_count++;
+}
+
 static bool date_emit(string_address format, b64 when, positive nanoseconds)
 {
         if (!date_shape(log, when, nanoseconds, format))
@@ -40728,12 +40921,17 @@ static b32 file_date()
             .program = (string_address) "date",
             .options = date_options,
             .seen = date_option_seen,
+            .operand = date_operand,
+            .posix_order = true,
         };
 
+        date_operand_count = 0;
         if (!file_take(address_of taking))
                 return 1;
+        // Operands after -- are operands too, and come after the rest.
+        for (positive at = taking.first; at < count; at++)
+                date_operand((b32)at);
 
-        positive index = taking.first;
         string_address format = date_chosen_format;
         string_address given = file_option_value(address_of taking, 'd');
         string_address of_file = file_option_value(address_of taking, 'r');
@@ -40765,9 +40963,9 @@ static b32 file_date()
                     "date: the options to print and set the time may not be used together\n"
                     "Try 'date --help' for more information.\n");
 
-        if (index < count)
+        if (date_operand_count)
         {
-                string_address argument = program_argument((b32)index++);
+                string_address argument = program_argument((b32)date_operand_list[0]);
 
                 if (!string_is(argument, '+'))
                 {
@@ -40786,10 +40984,11 @@ static b32 file_date()
                 }
 
                 /* GNU names a spare operand before it names two formats. */
-                if (index < count)
+                if (date_operand_count > 1)
                         return string_report(log_error, 1,
                                              "date: extra operand '%w'\n",
-                                             writer_terminal_quoted_name, program_argument((b32)index));
+                                             writer_terminal_quoted_name,
+                                             program_argument((b32)date_operand_list[1]));
 
                 if (format)
                         return string_report(

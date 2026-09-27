@@ -17479,9 +17479,61 @@ static fn clock_format_run(clock_format_state address_to state, p8 byte,
 static fn clock_format_widen(clock_format_state address_to state,
                              positive length)
 {
+        /* date's formatter is gnulib's, where - means no padding at all and
+           + pads with zeros, as 0 does. */
+        if (state->extensions && state->pad == '-')
+                return;
         if (state->width > 0 && (positive)state->width > length)
-                clock_format_run(state, state->pad == '0' ? '0' : ' ',
+                clock_format_run(state,
+                                 state->pad == '0' || state->pad == '+' ? '0' : ' ',
                                  (positive)state->width - length);
+}
+
+/*
+        A number as gnulib's strftime writes it for date: the digits as they
+        are, a sign when the number is negative or when a + asked for one on
+        a year that needs it, and the width -- the directive's own digit count
+        when none was named -- filled with zeros after the sign, spaces before
+        it under _, and not at all under -. So %05s of -5 is -0005 where glibc
+        writes 000-5, %-5s is -5 where glibc writes three spaces before it,
+        and %+6Y is +01969. colons puts a colon into the digits every two
+        places, which is how the offset of %:z and %::z is one field.
+*/
+static fn clock_format_gnu(clock_format_state address_to state, bipolar value,
+                           positive least, bool yearish, positive colons,
+                           bool plus)
+{
+        p8 body[48];
+        positive at = sizeof(body);
+        bool negative = value < 0;
+        positive magnitude = negative ? (positive)(-(value + 1)) + 1 : (positive)value;
+        positive mask = colons;
+        bipolar width = state->width < 0 ? (bipolar)least : state->width;
+
+        do
+        {
+                if (mask & 1)
+                        body[--at] = ':';
+                mask >>= 1;
+                body[--at] = (p8)('0' + magnitude % 10);
+                magnitude /= 10;
+        } while (magnitude || mask);
+
+        positive length = sizeof(body) - at;
+        bool always = plus ||
+                      (yearish && state->pad == '+' &&
+                       ((least == 2 ? 99 : 9999) < (positive)value || (bipolar)least < width));
+        p8 sign = negative ? '-' : always ? '+' : 0;
+        bipolar shortage = width - (sign ? 1 : 0) - (bipolar)length;
+        positive padding = state->pad == '-' || shortage <= 0 ? 0 : (positive)shortage;
+
+        if (state->pad == '_')
+                clock_format_run(state, ' ', padding);
+        if (sign)
+                clock_format_run(state, sign, 1);
+        if (state->pad != '_')
+                clock_format_run(state, '0', padding);
+        clock_format_raw(state, body + at, length);
 }
 
 /*
@@ -17598,6 +17650,12 @@ static positive clock_number_text(p8 address_to body, bipolar value,
 static fn clock_format_number(clock_format_state address_to state,
                               bipolar value, positive least)
 {
+        if (state->extensions)
+        {
+                clock_format_gnu(state, value, least, false, 0, false);
+                return;
+        }
+
         p8 body[40];
         bool negative = value < 0;
         positive at;
@@ -17884,7 +17942,8 @@ static fn clock_format_core(clock_format_state address_to state,
                 {
                         p8 flag = (p8)(address_to cursor);
 
-                        if (flag == '-' || flag == '_' || flag == '0')
+                        if (flag == '-' || flag == '_' || flag == '0' ||
+                            (flag == '+' && state->extensions))
                                 state->pad = flag;
                         else if (flag == '^')
                                 state->to_upper = true;
@@ -18012,12 +18071,17 @@ static fn clock_format_core(clock_format_state address_to state,
                 }
 
                 case 'C':
-                        clock_format_number(
-                                state,
-                                clock_floor_divide((bipolar)broken->tm_year +
-                                                           1900,
-                                                   100),
-                                1);
+                        if (state->extensions)
+                                clock_format_gnu(state,
+                                                 clock_floor_divide((bipolar)broken->tm_year + 1900, 100),
+                                                 2, true, 0, false);
+                        else
+                                clock_format_number(
+                                        state,
+                                        clock_floor_divide((bipolar)broken->tm_year +
+                                                                   1900,
+                                                           100),
+                                        1);
                         break;
 
                 case 'd':
@@ -18036,8 +18100,11 @@ static fn clock_format_core(clock_format_state address_to state,
                         clock_iso_week(broken, address_of year, address_of week);
                         if (which == 'g')
                                 year -= clock_floor_divide(year, 100) * 100;
-                        clock_format_number(state, which == 'V' ? week : year,
-                                            which == 'G' ? 1 : 2);
+                        if (state->extensions && which == 'G')
+                                clock_format_gnu(state, year, 4, true, 0, false);
+                        else
+                                clock_format_number(state, which == 'V' ? week : year,
+                                                    which == 'G' ? 1 : 2);
                         break;
                 }
 
@@ -18079,20 +18146,36 @@ static fn clock_format_core(clock_format_state address_to state,
                         clock_format_number(state, broken->tm_min, 2);
                         break;
 
+                /*
+                        The fraction as gnulib writes it: as many of its
+                        digits as the width names, nine by default and zeros
+                        past the ninth, left-aligned; under - or _ a named
+                        width sheds its trailing zeros (down to one digit),
+                        and _ puts spaces where they were.
+                */
                 case 'N':
                         if (state->extensions)
                         {
-                                positive digits = 9;
-                                positive ns = state->nanoseconds;
+                                p8 fraction[64];
+                                positive ns = state->nanoseconds > 999999999
+                                                  ? 999999999 : state->nanoseconds;
+                                positive wanted = state->width > 0
+                                                      ? (positive)state->width : 9;
+                                positive shown;
 
-                                if (ns > 999999999)
-                                        ns = 999999999;
+                                if (wanted > sizeof(fraction))
+                                        wanted = sizeof(fraction);
+                                positive_into_padded(fraction, ns, 9, '0');
+                                for (positive at = 9; at < wanted; at++)
+                                        fraction[at] = '0';
+                                shown = wanted;
                                 if (state->width > 0 &&
-                                    (positive)state->width < 9)
-                                        digits = (positive)state->width;
-                                for (positive drop = 9 - digits; drop; drop--)
-                                        ns /= 10;
-                                clock_format_number(state, (bipolar)ns, digits);
+                                    (state->pad == '-' || state->pad == '_'))
+                                        while (shown > 1 && fraction[shown - 1] == '0')
+                                                shown--;
+                                clock_format_raw(state, fraction, shown);
+                                if (state->pad == '_')
+                                        clock_format_run(state, ' ', wanted - shown);
                         }
                         else
                                 clock_format_append(state, (address_any)opened,
@@ -18150,7 +18233,13 @@ static fn clock_format_core(clock_format_state address_to state,
                                         (bipolar)broken->tm_gmtoff,
                                 address_of at);
 
-                        clock_format_append(state, body + at, length);
+                        if (state->extensions)
+                                clock_format_gnu(state,
+                                                 (bipolar)timegm(address_of copy) -
+                                                         (bipolar)broken->tm_gmtoff,
+                                                 1, false, 0, false);
+                        else
+                                clock_format_append(state, body + at, length);
                         break;
                 }
 
@@ -18201,8 +18290,12 @@ static fn clock_format_core(clock_format_state address_to state,
                 }
 
                 case 'Y':
-                        clock_format_number(
-                                state, (bipolar)broken->tm_year + 1900, 1);
+                        if (state->extensions)
+                                clock_format_gnu(state, (bipolar)broken->tm_year + 1900,
+                                                 4, true, 0, false);
+                        else
+                                clock_format_number(
+                                        state, (bipolar)broken->tm_year + 1900, 1);
                         break;
 
                 /*
@@ -18221,6 +18314,25 @@ static fn clock_format_core(clock_format_state address_to state,
                         bipolar hours = magnitude / 3600;
                         bipolar minutes = magnitude / 60 % 60;
                         bipolar seconds = magnitude % 60;
+
+                        /* gnulib's %z family: the offset is one signed
+                           number with its colons inside it, and %:::z
+                           as short as the fields that are not nought. */
+                        if (state->extensions)
+                        {
+                                bool full = colons == 2 || (colons == 3 && seconds);
+                                bool half = colons == 1 || (colons == 3 && minutes);
+                                bipolar number = full ? hours * 10000 + minutes * 100 + seconds
+                                               : half || !colons ? hours * 100 + minutes
+                                                                 : hours;
+
+                                /* The sign is the offset's, even for a
+                                   nought: +0000, never a bare 0000. */
+                                clock_format_gnu(state, offset < 0 ? -number : number,
+                                                 full ? 9 : half ? 6 : colons ? 3 : 5, false,
+                                                 full ? 024 : half ? 04 : 0, offset >= 0);
+                                break;
+                        }
 
                         clock_format_byte(state, offset < 0 ? '-' : '+');
                         if (!colons)
