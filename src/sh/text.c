@@ -27733,6 +27733,12 @@ static fn sort_emit(sort_writer address_to out)
 */
 #define SORT_O_TMPFILE (020000000 | O_DIRECTORY)
 
+// EMFILE, and whether the open that met it was allowed to meet it quietly:
+// a merge short of descriptors merges fewer inputs at once instead.
+#define SORT_NO_DESCRIPTOR 24
+static bool sort_descriptors_short;
+static bool sort_descriptors_ran_out;
+
 static string_address address_to sort_directories;
 static positive sort_directories_room;
 static positive sort_directories_count;
@@ -27818,6 +27824,13 @@ static bipolar sort_temporary()
         {
                 sort_temporary_place = directory;
                 return handle;
+        }
+
+        // A merge short of descriptors closes an input and asks again.
+        if (handle == -SORT_NO_DESCRIPTOR && sort_descriptors_short)
+        {
+                sort_descriptors_ran_out = true;
+                return -1;
         }
 
         text_flush();
@@ -28027,6 +28040,15 @@ static bool sort_source_open(sort_source address_to source, sort_entry address_t
                         bipolar handle = system_open_at(AT_FDCWD, entry->name,
                                                         FILE_READ | O_CLOEXEC);
 
+                        // A merge that can live with fewer inputs at once
+                        // hears of running out of descriptors and says
+                        // nothing yet; see sort_sources_open_some.
+                        if (handle == -SORT_NO_DESCRIPTOR && sort_descriptors_short)
+                        {
+                                sort_descriptors_ran_out = true;
+                                return false;
+                        }
+
                         if (handle < 0)
                         {
                                 text_file_failed(entry->name, handle, false);
@@ -28084,6 +28106,86 @@ static bool sort_sources_open(positive first, positive count)
         }
 
         return true;
+}
+
+/*
+        GNU's open_input_files: as many of [first, first + count) as the
+        descriptors allow, in order, opened and not yet read. A named input
+        that meets EMFILE stops the run there without a word, and the caller
+        is told how many are open; any other refusal is said and ends sort as
+        it always did. A temporary or standard input costs no descriptor to
+        open, since its handle is the entry's.
+*/
+static bool sort_sources_open_some(positive first, positive count,
+                                   positive address_to opened)
+{
+        sort_sources_close();
+
+        if (!array_store_reserve(sort_sources, sort_sources_room, 0, count, 64) ||
+            !array_store_reserve(sort_tree, sort_tree_room, 0, count + 1, 64))
+                return sort_exhausted();
+
+        sort_descriptors_short = true;
+        sort_descriptors_ran_out = false;
+
+        for (positive at = 0; at < count; at++)
+        {
+                if (!sort_source_open(sort_sources + at, sort_entries + first + at))
+                {
+                        sort_descriptors_short = false;
+
+                        if (!sort_descriptors_ran_out)
+                                return false;
+                        break;
+                }
+
+                sort_sources_open_count++;
+        }
+
+        sort_descriptors_short = false;
+        address_to opened = sort_sources_open_count;
+        return true;
+}
+
+/*
+        Each open source at its first line. Apart from the opening, so that
+        a source closed again to make room -- standard input among them --
+        has not had a byte read from it.
+*/
+static bool sort_sources_prime()
+{
+        for (positive at = 0; at < sort_sources_open_count; at++)
+        {
+                sort_source_next(sort_sources + at);
+
+                if (sort_failed)
+                        return false;
+        }
+
+        return true;
+}
+
+// The last open source closed again, which gives its descriptor back when
+// it had one of its own.
+static fn sort_sources_drop_last()
+{
+        sort_source address_to source = sort_sources + --sort_sources_open_count;
+        positive none = 0;
+
+        if (source->opened)
+                system_close((positive)source->handle);
+
+        array_store_release(source->buffer, source->room, none);
+}
+
+// sort_die's shape: what failed, the name through quotef, and the reason.
+static b32 sort_open_failed(string_address name, bipolar reason)
+{
+        text_flush();
+        string_format(writer_stderr, "%s: open failed: %w: %s\n", text_name,
+                      writer_shell_name, name ? name : (string_address) "-",
+                      file_reason(reason));
+        return 2;
 }
 
 static inline INLINE bool sort_source_before(sort_source address_to sources,
@@ -28881,12 +28983,21 @@ static fn sort_entries_close(positive first, positive count)
                         continue;
 
                 // One temporary can stand for several entries: an input named
-                // twice that is also the output.
+                // twice that is also the output. Another entry still to be
+                // merged may be one of them, and keeps it open.
+                bool kept = false;
+
+                for (positive other = 0; other < sort_entries_count; other++)
+                        if ((other < first || other >= first + count) &&
+                            sort_entries[other].handle == handle)
+                                kept = true;
+
                 for (positive other = at; other < first + count; other++)
                         if (sort_entries[other].handle == handle)
                                 sort_entries[other].handle = SORT_ENTRY_NAMED;
 
-                system_close((positive)handle);
+                if (!kept)
+                        system_close((positive)handle);
         }
 }
 
@@ -29815,12 +29926,22 @@ static bool sort_protect_output(string_address output, positive count)
 
 static bipolar sort_output_handle;
 
+static bool sort_output_take(string_address output, bipolar handle,
+                             sort_writer address_to out);
+
 static bool sort_output_open(string_address output, sort_writer address_to out)
+{
+        return sort_output_take(output, output ? text_open_handle(output, TEXT_WRITE, 0666) : 1,
+                                out);
+}
+
+// The output, already opened when -o named one: the handle is what that
+// open answered.
+static bool sort_output_take(string_address output, bipolar handle,
+                             sort_writer address_to out)
 {
         if (output)
         {
-                bipolar handle = text_open_handle(output, TEXT_WRITE, 0666);
-
                 if (handle < 0)
                 {
                         string_diagnostic(&text_diagnostic, 2, output, "cannot open for writing");
@@ -29931,6 +30052,89 @@ static b32 sort_inputs(string_address output)
         --batch-size inputs at once, into temporaries, and on inputs out of
         order that schedule shows in the answer, so it is kept to the letter.
 */
+/*
+        The entries [at, at + taken) are merged: the new temporary stands at
+        at, and what followed them moves down behind it.
+*/
+static fn sort_entries_fold(positive at, positive taken, bipolar merged)
+{
+        sort_entries_close(at, taken);
+        sort_entries[at] = (sort_entry){.handle = merged};
+        memory_copy(sort_entries + at + 1, sort_entries + at + taken,
+                    (sort_entries_count - at - taken) * sizeof(sort_entry));
+        sort_entries_count -= taken - 1;
+}
+
+/*
+        GNU's mergefiles: as many of the count entries from first as the
+        descriptors allow, at least two, merged into a new temporary, and
+        how many that was. Fewer than two, or no descriptor for the
+        temporary itself, is -2 with nothing said, for the caller to make
+        room and ask again.
+*/
+static bipolar sort_merge_temporary_some(positive first, positive count,
+                                         positive address_to merged)
+{
+        sort_descriptors_short = true;
+        sort_descriptors_ran_out = false;
+
+        bipolar handle = sort_temporary();
+
+        sort_descriptors_short = false;
+
+        // No descriptor even for the temporary: merged says so with the
+        // count no merge can have.
+        address_to merged = positive_max;
+        if (handle < 0)
+                return sort_descriptors_ran_out ? -2 : -1;
+
+        sort_writer out;
+        positive opened = 0;
+        bool fine = sort_writer_ready(address_of out, (positive)handle) &&
+                    sort_sources_open_some(first, count, address_of opened);
+        bool starved = fine && opened < 2 && opened < count;
+
+        fine = fine && !starved && sort_sources_prime() &&
+               sort_merge(opened, address_of out);
+        sort_sources_close();
+        sort_writer_flush(address_of out);
+
+        if (fine && out.failed)
+        {
+                sort_writer_failed(address_of out);
+                fine = false;
+        }
+
+        address_to merged = opened;
+
+        if (!fine)
+        {
+                system_close((positive)handle);
+                return starved ? -2 : -1;
+        }
+
+        return handle;
+}
+
+/*
+        -m does not sort. It takes whichever input has the smallest line at
+        its front, over and over, which is the same answer as sorting when
+        every input was in order and a different one when they were not --
+        and GNU's answer is the different one. GNU also merges no more than
+        --batch-size inputs at once, into temporaries, and on inputs out of
+        order that schedule shows in the answer, so it is kept to the letter.
+
+        Descriptors can run out first, under a low ulimit -n, and GNU lowers
+        the batch to what they allow: a batch merge takes the inputs that
+        opened, if two did, and the last merge into the output merges the
+        inputs that opened into a temporary, closing the last of them to make
+        room for it, and goes round again. The temporaries here are nameless
+        and each holds its descriptor, where GNU closes a temporary and opens
+        it again by name, so when the ones a pass has made leave too few for
+        the next batch they are merged into one first -- only where GNU would
+        still have had a descriptor and gone on. Entries stay packed: the
+        temporaries a pass has made, then the inputs it has still to read.
+*/
 static b32 sort_merge_inputs(string_address output)
 {
         positive count = (positive)text_input_count();
@@ -29945,53 +30149,146 @@ static b32 sort_merge_inputs(string_address output)
 
         sort_entries_count = count;
 
-        while (count > sort_batch)
+        while (sort_entries_count > sort_batch)
         {
-                positive in = 0;
-                positive written = 0;
+                positive made = 0;
+                bool short_done = false;
 
-                for (; sort_batch <= count - in; written++)
+                for (;;)
                 {
-                        bipolar merged = sort_merge_temporary(in, sort_batch);
+                        positive left = sort_entries_count - made;
+                        positive want;
 
-                        if (merged < 0)
+                        if (sort_batch <= left)
+                                want = sort_batch;
+                        else
+                        {
+                                positive cheap = sort_batch - made % sort_batch;
+
+                                if (short_done || cheap >= left)
+                                        break;
+                                want = left - cheap + 1;
+                                short_done = true;
+                        }
+
+                        positive merged;
+                        bipolar handle = sort_merge_temporary_some(made, want, address_of merged);
+
+                        if (handle == -2 && made)
+                        {
+                                // Out of descriptors with temporaries held:
+                                // they become one, and the batch is asked
+                                // again. With one held, it joins the batch.
+                                if (made > 1)
+                                {
+                                        handle = sort_merge_temporary(0, made);
+                                        if (handle < 0)
+                                                return 2;
+                                        sort_entries_fold(0, made, handle);
+                                        made = 1;
+                                        short_done = false;
+                                        continue;
+                                }
+
+                                handle = sort_merge_temporary_some(0, want, address_of merged);
+                                made = 0;
+                        }
+
+                        // Nothing held to give back: GNU's own words for
+                        // the temporary it could not make, or the input.
+                        if (handle == -2 && merged == positive_max)
+                        {
+                                bipolar spare = sort_temporary();
+
+                                if (spare >= 0)
+                                        system_close((positive)spare);
+                                return 2;
+                        }
+                        if (handle == -2)
+                                return sort_open_failed(sort_entries[made + merged].name,
+                                                        -SORT_NO_DESCRIPTOR);
+                        if (handle < 0)
                                 return 2;
 
-                        sort_entries_close(in, sort_batch);
-                        sort_entries[written] = (sort_entry){.handle = merged};
-                        in += sort_batch;
+                        sort_entries_fold(made, merged, handle);
+                        made++;
+
+                        if (short_done)
+                                break;
                 }
-
-                positive remainder = count - in;
-                positive cheap = sort_batch - written % sort_batch;
-
-                if (cheap < remainder)
-                {
-                        positive shorter = remainder - cheap + 1;
-                        bipolar merged = sort_merge_temporary(in, shorter);
-
-                        if (merged < 0)
-                                return 2;
-
-                        sort_entries_close(in, shorter);
-                        sort_entries[written++] = (sort_entry){.handle = merged};
-                        in += shorter;
-                }
-
-                memory_copy(sort_entries + written, sort_entries + in,
-                            (count - in) * sizeof(sort_entry));
-                count -= in - written;
-                sort_entries_count = count;
         }
 
-        if (!sort_protect_output(output, count) || !sort_sources_open(0, count) ||
-            !sort_output_open(output, address_of out))
+        if (!sort_protect_output(output, sort_entries_count))
                 return 2;
 
-        bool fine = sort_merge(count, address_of out);
+        for (;;)
+        {
+                positive opened;
 
-        sort_output_close(address_of out);
-        return fine ? 0 : 2;
+                count = sort_entries_count;
+
+                if (!sort_sources_open_some(0, count, address_of opened))
+                        return 2;
+
+                if (opened == count)
+                {
+                        bipolar handle = output ? text_open_handle(output, TEXT_WRITE, 0666) : 1;
+
+                        if (handle != -SORT_NO_DESCRIPTOR)
+                        {
+                                if (!sort_output_take(output, handle, address_of out) ||
+                                    !sort_sources_prime())
+                                        return 2;
+
+                                bool fine = sort_merge(count, address_of out);
+
+                                sort_output_close(address_of out);
+                                return fine ? 0 : 2;
+                        }
+
+                        if (opened <= 2)
+                                return sort_open_failed(output, handle);
+                }
+                else if (opened <= 2)
+                        return sort_open_failed(sort_entries[opened].name, -SORT_NO_DESCRIPTOR);
+
+                // Close the last input opened, for a descriptor to write
+                // the temporary with; again while there is none.
+                bipolar handle;
+
+                do
+                {
+                        sort_sources_drop_last();
+                        opened--;
+                        sort_descriptors_short = opened > 2;
+                        sort_descriptors_ran_out = false;
+                        handle = sort_temporary();
+                        sort_descriptors_short = false;
+                } while (handle < 0 && sort_descriptors_ran_out);
+
+                if (handle < 0)
+                        return 2;
+
+                bool fine = sort_writer_ready(address_of out, (positive)handle) &&
+                            sort_sources_prime() && sort_merge(opened, address_of out);
+
+                sort_sources_close();
+                sort_writer_flush(address_of out);
+
+                if (fine && out.failed)
+                {
+                        sort_writer_failed(address_of out);
+                        fine = false;
+                }
+
+                if (!fine)
+                {
+                        system_close((positive)handle);
+                        return 2;
+                }
+
+                sort_entries_fold(0, opened, handle);
+        }
 }
 
 // -c reads the lines and says whether they were already in order, one line

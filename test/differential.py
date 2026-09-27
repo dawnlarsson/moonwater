@@ -17744,6 +17744,15 @@ _TEXT_WRITE_SOURCES = {
     "zerobound": "env head -c 1M /dev/zero | env tr '\\0' '\\n' | run {words} {target}",
     "numbers": "env seq 1 400000 > big\nrun {words} big {target}",
     "numbersin": "env seq 1 400000 > big\nrun {words} < big {target}",
+    #       Thirty inputs, each in order, merged under a descriptor limit
+    #       too low to hold them all: GNU merges what opens. The unordered
+    #       set shows the batch schedule in the answer.
+    "fd7": ("for i in $(env seq 30); do env seq $i 30 $((i + 300)) > f$i; done\n"
+            "(ulimit -n 7; run {words} f* {target})"),
+    "fd10": ("for i in $(env seq 30); do env seq $i 30 $((i + 300)) > f$i; done\n"
+             "(ulimit -n 10; run {words} f* {target})"),
+    "fd7r": ("for i in $(env seq 30); do env seq 400 -$i 1 > f$i; done\n"
+             "(ulimit -n 7; run {words} f* {target})"),
     #       A descriptor limit of twenty, for what sort's --batch-size may be.
     "lim20": "(ulimit -n 20; run {words} < small {target})",
     #       An input that says nothing until the tool is done, or five
@@ -17775,6 +17784,7 @@ _TEXT_WRITE_TARGETS = {
     #       brokenign ignores it first.
     "broken": ("env mkfifo p\nexec 3<>p 4>p 3<&-\n", ">&4", ""),
     "brokenign": ("trap '' PIPE\nenv mkfifo p\nexec 3<>p 4>p 3<&-\n", ">&4", ""),
+    "sum": ("", "> out", 'echo "out $(env md5sum < out)"\n'),
     "none": ("", "", ""),
     # a bound over a/b, in a namespace of the scene's own: a directory that
     # is its own ancestor.
@@ -17850,6 +17860,8 @@ _TEXT_WRITE_CASES = (
     ("sort", "lim20", "none", "--batch-size=1000"), ("sort", "lim20", "none", "--batch-size=1"),
     ("sort", "lim20", "none", "--batch-size=0"), ("sort", "lim20", "none", "--batch-size=5k"),
     ("sort", "lim20", "none", "--batch-size=99999999999999999999"),
+    ("sort", "fd7", "sum", "-m"), ("sort", "fd10", "sum", "-m"), ("sort", "fd7", "none", "-m", "-o", "o"),
+    ("sort", "fd7r", "sum", "-m", "--batch-size=3"), ("sort", "fd7r", "sum", "-m"), ("sort", "fd7", "sum", "-m", "-n", "--batch-size=5"),
 )
 
 
