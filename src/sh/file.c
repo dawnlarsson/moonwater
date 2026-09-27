@@ -529,6 +529,30 @@ static bool file_mode_clauses(string_address specification, positive current,
 
                         step++;
 
+                        /* gnulib's [-+=][0-7]+: an operator with no class
+                           before it may take an octal number, which then
+                           names every bit, the directory's set-ID bits
+                           among them, and must end its clause -- =777 and
+                           =2755 as chmod takes them. */
+                        if (!named && string_get(step) >= '0' &&
+                            string_get(step) <= '7')
+                        {
+                                positive value;
+                                if (!string_digits_checked(address_of step, 8,
+                                                           address_of value) ||
+                                    value > 07777 ||
+                                    (string_get(step) && !string_is(step, ',')))
+                                        return false;
+                                changed |= action == '=' ? 07777 : value;
+                                if (action == '+')
+                                        mode |= value;
+                                else if (action == '-')
+                                        mode &= ~value;
+                                else
+                                        mode = value;
+                                break;
+                        }
+
                         while (string_get(step) && !string_is(step, ',') &&
                                !string_is(step, '+') && !string_is(step, '-') &&
                                !string_is(step, '='))
@@ -580,8 +604,14 @@ static bool file_mode_clauses(string_address specification, positive current,
                                 mode = (mode & omit) | bits;
                 }
 
+                //      A comma joins two clauses; one with nothing after
+                //      it is no clause, as gnulib's mode_compile has it.
                 if (string_is(step, ','))
+                {
                         step++;
+                        if (!string_get(step))
+                                return false;
+                }
                 else if (string_get(step))
                         return false;
         }
@@ -4511,26 +4541,48 @@ static bool file_change_root_refused(string_address path, string_address program
 
 // The operand list those three read, which is the same list every time: each
 // name is visited, and under -R so is everything under it.
+/* The operands an option scan collects where they stand, for the tools
+   that read the line as getopt permutes it. */
+static b32 address_to file_operand_list;
+static positive file_operand_count;
+static positive file_operand_room;
+static bool file_operand_failed;
+
+static fn file_operand(b32 index)
+{
+        if (file_operand_failed)
+                return;
+
+        if (!shell_array_room(file_operand_list, file_operand_room, file_operand_count + 1))
+        {
+                file_operand_failed = true;
+                return;
+        }
+
+        file_operand_list[file_operand_count++] = index;
+}
+
+static fn file_operands_begin()
+{
+        file_operand_count = 0;
+        file_operand_failed = false;
+}
+
+static string_address file_operand_at(positive index)
+{
+        return program_argument(file_operand_list[index]);
+}
+
 static fn file_change_paths(positive first, positive count, bool recursive,
                             string_address program, b32 address_to status,
                             file_visit visit)
 {
-        bool ended = false;
-
+        //      first and count index the operands the option scan
+        //      collected, in getopt's order: options anywhere on the line,
+        //      the first -- the end of them, and every word after it a name.
         while (first < count)
         {
-                string_address path = program_argument((b32)first++);
-
-                //      A -- among the operands is the end of the options and
-                //      not a name: the reference's getopt reads the whole
-                //      line, so chmod 0600 -- -dash changes -dash. Only the
-                //      first one is the marker; a second is a file called --.
-                if (!ended && string_is(path, '-') && string_is(path + 1, '-') &&
-                    !string_get(path + 2))
-                {
-                        ended = true;
-                        continue;
-                }
+                string_address path = file_operand_at(first++);
 
                 if (recursive && file_change_root_refused(path, program, status))
                         continue;
@@ -17721,7 +17773,9 @@ static const argument_option chmod_options[] = {
     {"silent", 'f'},
     {"verbose", 'v', 0, ARGUMENT_SELECT(chmod_selection, loudness)},
     {"HLP", 0, 0, ARGUMENT_SELECT(chmod_selection, traverse)},
-    {"rwxXstugoa", 0, ARGUMENT_OPTIONAL},
+    //      GNU's getopt string holds the octal digits too, so -022 and -0
+    //      are modes (a minus and an octal number) as -w is.
+    {"rwxXstugoa01234567", 0, ARGUMENT_OPTIONAL},
     {null},
 };
 
@@ -17739,16 +17793,24 @@ static b32 file_chmod()
         //      through. This walk goes through none of them, which is what
         //      -H (the default) and -P both ask for; -L is taken and does
         //      not change the walk, and the ledger records that.
+        //      The operands are collected wherever they stand, as getopt
+        //      permutes them: chmod u+w -R dir is a recursive change.
+        file_operands_begin();
         file_taking taking = {
             .program = (string_address) "chmod",
             .options = chmod_options,
             .selection = (p8 address_to)address_of chmod_selected,
+            .operand = file_operand,
+            .posix_order = true,
         };
 
         if (!file_take(address_of taking))
                 return 1;
+        if (file_operand_failed)
+                return string_report(log_error, 1, "chmod: memory exhausted\n");
 
-        positive first = taking.first;
+        positive first = 0;
+        count = file_operand_count;
 
         chmod_quiet = (taking.flags & FILE_FLAG('f')) != 0;
 
@@ -17785,7 +17847,7 @@ static b32 file_chmod()
         static p8 chmod_taken[4];
         string_address minus_mode = null;
 
-        for (string_address letter = (string_address) "rwxXstugoa"; string_get(letter); letter++)
+        for (string_address letter = (string_address) "rwxXstugoa01234567"; string_get(letter); letter++)
         {
                 if (!(taking.flags & FILE_FLAG(string_get(letter))))
                         continue;
@@ -17823,9 +17885,9 @@ static b32 file_chmod()
                 return file_need_operand((string_address) "chmod");
         else if (!like && first + 1 >= count)
                 return file_need_operand_after((string_address) "chmod",
-                                               program_argument((b32)first));
+                                               file_operand_at(first));
         else if (!like)
-                chmod_specification = program_argument((b32)first++);
+                chmod_specification = file_operand_at(first++);
 
         /* GNU looks up --reference after it knows there is a file operand. */
         if (like)
@@ -18467,57 +18529,143 @@ static const argument_option chown_options[] = {
         cannot complete, and a half that names nobody is refused with the
         whole spec quoted, which is how the reference quotes it.
 */
+/*
+        gnulib's parse_with_separator: the user before the separator, looked
+        up by name first and as a number after; the group after it. A
+        separator with no group after it names the user's login group, which
+        a number has none of; "user:" is refused only for want of that.
+        Answers the complaint, or null.
+*/
+static string_address chown_spec_parsed;
+
+static string_address chown_spec_try(string_address who, positive split,
+                                     bool separated, bipolar address_to user,
+                                     bipolar address_to group)
+{
+        p8 name[FILE_NAME_MAX];
+        string_address after = separated && string_get(who + split + 1)
+                                   ? who + split + 1 : null;
+
+        if (split >= FILE_NAME_MAX)
+                return (string_address) "invalid user";
+        memory_copy_apart(name, who, split);
+        name[split] = end;
+
+        if (split)
+        {
+                bipolar id = name[0] == '+'
+                                 ? -1
+                                 : file_account_id(file_account_text(FILE_ACCOUNT_USER),
+                                                   name, 2);
+                if (id >= 0 && separated && !after)
+                {
+                        bipolar login = file_account_id(
+                            file_account_text(FILE_ACCOUNT_USER), name, 3);
+                        if (login < 0)
+                                return (string_address) "invalid spec";
+                        address_to group = login;
+                }
+                else if (id < 0)
+                {
+                        if (separated && !after)
+                                return (string_address) "invalid spec";
+                        positive number;
+                        string_address digits = name[0] == '+' ? name + 1 : name;
+                        if (!string_digits_exact(digits, null) ||
+                            !string_digits_checked_exact(digits, 10, address_of number) ||
+                            number >= p32_max)
+                                return (string_address) "invalid user";
+                        id = (bipolar)number;
+                }
+                address_to user = id;
+        }
+
+        if (after)
+        {
+                address_to group = file_identity_of(after, true);
+                if (address_to group < 0)
+                        return (string_address) "invalid group";
+        }
+        return null;
+}
+
+/*
+        GNU's parse_user_spec: a colon separates the user from the group; with
+        none, the whole spec is a user name first, and only when it is not
+        one is a dot taken as the separator -- the obsolete user.group, which
+        is warned about.
+*/
 static bool chown_spec_read(string_address who, bipolar address_to user,
                             bipolar address_to group)
 {
-        p8 name[FILE_NAME_MAX];
-        positive length = 0;
+        string_address colon = string_first_of(who, ':');
+        positive length = string_length(who);
+        bipolar user_now = -1;
+        bipolar group_now = -1;
+        bool dotted = false;
+        string_address why = chown_spec_try(
+            who, colon ? (positive)(colon - who) : length, colon != null,
+            address_of user_now, address_of group_now);
 
-        while (string_get(who + length) && !string_is(who + length, ':') &&
-               !string_is(who + length, '.') && length + 1 < FILE_NAME_MAX)
+        if (why && !colon)
         {
-                name[length] = string_get(who + length);
-                length++;
+                string_address dot = string_first_of(who, '.');
+                bipolar user_dot = -1;
+                bipolar group_dot = -1;
+
+                if (dot && !chown_spec_try(who, (positive)(dot - who), true,
+                                           address_of user_dot,
+                                           address_of group_dot))
+                {
+                        string_format(log_error,
+                                      "%s: warning: '.' should be ':': '%w'\n",
+                                      chown_program, writer_terminal_quoted_name, who);
+                        why = null;
+                        dotted = true;
+                        user_now = user_dot;
+                        group_now = group_dot;
+                }
         }
 
-        name[length] = end;
+        if (why)
+                return string_report(log_error, false, "%s: %s: '%w'\n",
+                                     chown_program, why,
+                                     writer_terminal_quoted_name, who);
 
-        if (string_get(who + length) && !string_is(who + length, ':') &&
-            !string_is(who + length, '.'))
-                return string_report(log_error, false, "%s: invalid spec: '%w'\n",
-                                     chown_program, writer_terminal_quoted_name, who);
+        if (user_now >= 0)
+                address_to user = user_now;
+        if (group_now >= 0)
+                address_to group = group_now;
 
-        string_address rest = null;
-
-        if (string_is(who + length, ':') || string_is(who + length, '.'))
-                rest = who + length + 1;
-
-        //      "user:" names a group by that user's own login group, which
-        //      needs a database this image has not got. A colon with nothing
-        //      on either side of it names nobody in particular, which is
-        //      what --from= means and is not a refusal.
-        if (length && rest && !string_get(rest))
-                return string_report(log_error, false, "%s: invalid spec: '%w'\n",
-                                     chown_program, writer_terminal_quoted_name, who);
-
-        if (length > 0)
+        /* What -v says it changed to is the user and the group as GNU parsed
+           them, colon between: dawn. and dawn: say dawn:dawn, the login
+           group by its name. */
+        string_address split = colon ? colon : dotted ? string_first_of(who, '.') : null;
+        chown_spec_parsed = null;
+        if (split && (dotted || !string_get(split + 1)))
         {
-                address_to user = file_identity_of(name, false);
+                static p8 shown[2 * FILE_NAME_MAX + 2];
+                positive head = (positive)(split - who);
+                p8 group_name[FILE_NAME_MAX];
+                string_address tail = split + 1;
 
-                if (address_to user < 0)
-                        return string_report(log_error, false, "%s: invalid user: '%w'\n",
-                                             chown_program, writer_terminal_quoted_name, who);
+                if (!string_get(tail) && group_now >= 0)
+                {
+                        file_account_label((positive)group_now, true, true,
+                                           group_name);
+                        tail = group_name;
+                }
+                if (head < FILE_NAME_MAX)
+                {
+                        memory_copy_apart(shown, who, head);
+                        shown[head] = ':';
+                        memory_copy_apart_end(shown + head + 1, tail,
+                                              string_length(tail) < FILE_NAME_MAX
+                                                  ? string_length(tail)
+                                                  : FILE_NAME_MAX - 1);
+                        chown_spec_parsed = shown;
+                }
         }
-
-        if (rest && string_get(rest))
-        {
-                address_to group = file_identity_of(rest, true);
-
-                if (address_to group < 0)
-                        return string_report(log_error, false, "%s: invalid group: '%w'\n",
-                                             chown_program, writer_terminal_quoted_name, who);
-        }
-
         return true;
 }
 
@@ -18547,14 +18695,20 @@ static b32 file_chown_common(string_address program, bool groups_only)
         chown_groups_only = groups_only;
         chown_spec = (string_address) "";
 
+        file_operands_begin();
         file_taking taking = {
             .program = program,
             .options = chown_options,
             .selection = (p8 address_to)address_of chown_selected,
+            .operand = file_operand,
+            .posix_order = true,
         };
 
         if (!file_take(address_of taking))
                 return 1;
+        if (file_operand_failed)
+                return string_report(log_error, 1, "%s: memory exhausted\n", program);
+        count = file_operand_count;
 
         //      --from's spec is read first: the reference is a getopt loop
         //      and reads the word where the option is, before it asks
@@ -18575,7 +18729,7 @@ static b32 file_chown_common(string_address program, bool groups_only)
                                      "%s: -R --dereference requires either -H or -L\n",
                                      program);
 
-        positive first = taking.first;
+        positive first = 0;
 
         chown_flags = taking.flags;
         chown_quiet = (taking.flags & FILE_FLAG('f')) != 0;
@@ -18593,7 +18747,7 @@ static b32 file_chown_common(string_address program, bool groups_only)
                         return string_report(log_error, 1, "%s: missing operand\n", program);
 
                 return string_report(log_error, 1, "%s: missing operand after '%w'\n",
-                                     program, writer_terminal_quoted_name, program_argument((b32)(count - 1)));
+                                     program, writer_terminal_quoted_name, file_operand_at(count - 1));
         }
 
         if (like)
@@ -18629,7 +18783,7 @@ static b32 file_chown_common(string_address program, bool groups_only)
                 return chown_status;
         }
 
-        string_address who = program_argument((b32)first++);
+        string_address who = file_operand_at(first++);
 
         chown_spec = who;
 
@@ -18651,6 +18805,8 @@ static b32 file_chown_common(string_address program, bool groups_only)
 
         if (!chown_spec_read(who, address_of chown_user, address_of chown_group))
                 return 1;
+        if (chown_spec_parsed)
+                chown_spec = chown_spec_parsed;
 
         chown_paths(first, count);
 
@@ -19371,36 +19527,6 @@ static b32 file_ln()
 // link / unlink ------------------------------------------------------
 /* The single-purpose POSIX interfaces are deliberately narrower than ln and
    rm: no collision policy, directory traversal or symlink dereference. */
-
-static b32 address_to file_operand_list;
-static positive file_operand_count;
-static positive file_operand_room;
-static bool file_operand_failed;
-
-static fn file_operand(b32 index)
-{
-        if (file_operand_failed)
-                return;
-
-        if (!shell_array_room(file_operand_list, file_operand_room, file_operand_count + 1))
-        {
-                file_operand_failed = true;
-                return;
-        }
-
-        file_operand_list[file_operand_count++] = index;
-}
-
-static fn file_operands_begin()
-{
-        file_operand_count = 0;
-        file_operand_failed = false;
-}
-
-static string_address file_operand_at(positive index)
-{
-        return program_argument(file_operand_list[index]);
-}
 
 static bool file_simple_operands(string_address program, positive wanted)
 {
@@ -26872,6 +26998,32 @@ static const argument_option rmdir_options[] = {
     {null},
 };
 
+/* GNU's ignorable_failure: a directory with something in it, which the
+   kernel says outright (ENOTEMPTY, EEXIST) or may be hiding behind a
+   refusal that would have come first -- the parent read-only, the file
+   system too, the directory busy -- in which case it is looked into. */
+static bool rmdir_ignorable(bipolar gone, string_address path)
+{
+        if (gone == -ERROR_NOT_EMPTY || gone == -ERROR_EXISTS)
+                return true;
+        if (gone != -ERROR_ACCESS && gone != -ERROR_NOT_PERMITTED &&
+            gone != -ERROR_READ_ONLY && gone != -ERROR_BUSY)
+                return false;
+
+        bipolar handle = system_open_at(AT_FDCWD, path,
+                                        FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        if (handle < 0)
+                return false;
+
+        file_walk walk = {.handle = handle, .error = 0, .have = 0, .at = 0};
+        struct linux_dirent64 address_to entry;
+        bool something = false;
+        while (!something && (entry = file_walk_next(address_of walk)))
+                something = !file_is_dot(entry->d_name);
+        file_walk_close(address_of walk);
+        return something;
+}
+
 static b32 file_rmdir()
 {
         positive count = (positive)program_argument_count();
@@ -26910,7 +27062,7 @@ static b32 file_rmdir()
 
                         if (gone < 0)
                         {
-                                if ((flags & FILE_FLAG('I')) && gone == -ERROR_NOT_EMPTY)
+                                if ((flags & FILE_FLAG('I')) && rmdir_ignorable(gone, path))
                                         break;
 
                                 // A name that ends in a slash and is a link

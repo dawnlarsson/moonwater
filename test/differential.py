@@ -7003,6 +7003,77 @@ INPUTS["files_colors_aliases"] = (b"OWT 1;2\nowt 3\nOWR 4\nNORM 0\nLNK 01;36\nSY
                                   b"BLOCK 01;33\nCHAR 01;32\nLEFT \\033[\nRIGHT m\nEND 0\nSUID 37;41\n"
                                   b"sgid 30;43\nClrToEol \\033[K\n.x 1\n")
 
+
+def files_mode_word_cases():
+    """chmod's mode words the grammar never spelled, and the line read as
+    getopt permutes it: an operator with no class taking an octal number
+    (=777, +644, -022, =2755 on a set-group-ID directory) and where that
+    form must end, options after the mode or after the files, and -- as a
+    mode and as a name after the first one ends the options."""
+    cases = []
+    for mode in ("=777", "=2755", "+644", "-022", "=0", "=07777", "=17777", "=755,u+s", "u=755", "=7a", "=8",
+                 "+", "=,", "a=755", "=755,", "-0", "+4000"):
+        for target in ("a.txt", "dir", "exe"):
+            cases.append((mode, target))
+    for words in (("u+w", "-R", "dir"), ("a-w", "dir", "-R"), ("0700", "-v", "a.txt"), ("--", "--", "--", "a.txt"),
+                  ("--", "--", "a.txt"), ("u+x", "--", "-dash"), ("u+x", "--", "--", "a.txt"), ("-v", "--", "0600", "a.txt"),
+                  ("0600", "a.txt", "-c"), ("-w", "a.txt", "-v"), ("a.txt", "-R", "u+w"), ("--reference=b.txt", "a.txt", "-v")):
+        cases.append(words)
+    return tuple(cases)
+
+
+def files_owner_word_cases(group_only=False):
+    """chown's and chgrp's specs as gnulib's parse_user_spec reads them: a
+    colon with nothing after it names the user's login group, a dot is the
+    obsolete separator when the whole word is not a user, and the spec may
+    stand after the files, getopt permuting."""
+    import grp
+    import pwd
+    user = pwd.getpwuid(os.getuid()).pw_name
+    group = grp.getgrgid(os.getgid()).gr_name
+    if group_only:
+        return tuple(shape for spec in (group, group + ".", "." + group, ":" + group, files_GID)
+                     for shape in ((spec, "a.txt"), ("-v", spec, "a.txt"), (spec, "a.txt", "-v"),
+                                   ("--", spec, "a.txt"), ("-v", "--", spec, "--", "a.txt"), (spec, "-R", "dir")))
+    cases = []
+    for spec in (user + ":", user + ".", user + "." + group, user + ":" + group, files_UID + ":", files_UID + ".",
+                 files_UID + "." + files_GID, "nosuchuser.", "nosuchuser." + group, user + ".nosuchgroup",
+                 user, "root.", "0.", user + "..", user + ":.", "+" + files_UID, "+" + files_UID + ":"):
+        for flags in ((), ("-v",), ("-c",)):
+            cases.append(flags + (spec, "a.txt"))
+    for words in ((user + ":", "-R", "dir"), ("a.txt", user + ":", "-v"), ("-v", "--", user, "a.txt"),
+                  ("--from=" + user + ":", files_UID, "a.txt"), ("--from=" + user + ".", files_UID, "a.txt")):
+        cases.append(words)
+    return tuple(cases)
+
+
+#       A directory whose parent cannot be written: removing it is refused
+#       whatever it holds, and --ignore-fail-on-non-empty is to look inside
+#       and forgive the refusal when the directory is not empty.
+FIXTURES["files_rmdir"] = {
+    "x/y/z": files_file(b"z\n", 1000000000),
+    "x/y": files_dir(1010000000),
+    "x/e": files_dir(1020000000),
+    "x": files_dir(1030000000, 0o555),
+    "p/q/r": files_dir(1040000000),
+    "p/q/s": files_file(b"s\n", 1050000000),
+    "p/q": files_dir(1060000000),
+    "p": files_dir(1070000000),
+    "ro/n/m": files_dir(1080000000),
+    "ro/n": files_dir(1090000000, 0o555),
+    "ro": files_dir(1100000000),
+}
+
+
+def files_rmdir_cases():
+    cases = []
+    for flags in ((), ("--ignore-fail-on-non-empty",), ("-p",), ("-p", "--ignore-fail-on-non-empty"), ("-v",),
+                  ("-pv", "--ignore-fail-on-non-empty")):
+        for operands in (("x/y",), ("x/e",), ("x",), ("p/q",), ("p/q/r",), ("ro/n/m",), ("ro/n",), ("x/y", "p/q/r")):
+            cases.append({"fixture": "files_rmdir", "argv": flags + operands})
+    return tuple(cases)
+
+
 FILES_UTILITIES = (
     # yes is the one program here the engine cannot bound: it writes until
     # something stops it, so both sides die on the harness's file-size limit
@@ -7322,7 +7393,7 @@ FILES_UTILITIES = (
             operands=files_UID_OPERANDS, stdin=("empty",), fixture="files", stderr="exact",
             #       As chmod's: a directory the walk cannot read is named and
             #       answered for, silently under -f.
-            extra=((("-R", files_UID, "shut"), ("-fR", files_UID, "shut")))),
+            extra=((("-R", files_UID, "shut"), ("-fR", files_UID, "shut"))) + files_owner_word_cases()),
     Utility("chgrp", options=(Option("-c"), Option("-f"), Option("-v"), Option("-h"), Option("-R"), Option("-H"),
                               Option("-L"), Option("-P"), Option("--changes"), Option("--silent"), Option("--quiet"),
                               Option("--verbose"), Option("--no-dereference"), Option("--dereference"),
@@ -7332,7 +7403,7 @@ FILES_UTILITIES = (
             operands=files_GID_OPERANDS, stdin=("empty",), fixture="files", stderr="exact",
             #       As chmod's: a directory the walk cannot read is named and
             #       answered for, silently under -f.
-            extra=((("-R", files_GID, "shut"), ("-fR", files_GID, "shut")))),
+            extra=((("-R", files_GID, "shut"), ("-fR", files_GID, "shut"))) + files_owner_word_cases(True)),
     Utility("chmod", options=(Option("-c"), Option("-f"), Option("-v"), Option("-R"), Option("--changes"),
                               Option("--silent"), Option("--quiet"), Option("--verbose"), Option("--recursive"),
                               Option("--preserve-root"), Option("--no-preserve-root"),
@@ -7344,7 +7415,7 @@ FILES_UTILITIES = (
             #       and answers 1, -f takes the word away and leaves the
             #       answer, and the pool walk said nothing and answered 0.
             extra=(("-R", "a-w", "shut"), ("-fR", "a-w", "shut"),
-                   ("-R", "a-w", "dir/../shut"))),
+                   ("-R", "a-w", "dir/../shut")) + files_mode_word_cases()),
     Utility("ln", options=(Option("-s"), Option("-f"), Option("-i"), Option("-n"), Option("-r"), Option("-v"),
                            Option("-T"), Option("-L"), Option("-P"), Option("-b"), Option("-d"), Option("-F"),
                            Option("--directory"), Option("--symbolic"),
@@ -7401,7 +7472,7 @@ FILES_UTILITIES = (
             operands=(("hollow",), ("dir",), ("a.txt",), ("missing",), ("nest/a/b",), ("dirlink",), ("hollow", "dir"), ("shut",),
                       (), ("hollow/",), ("dir/sub",), ("nest/a/b/",), ("nest",), ("dangling",), ("nest/a/b", "hollow"),
                       ("deep/one/two/three",), ("./hollow",), ("hollow/.",), ("dirlink/",), ("hollow", "missing")),
-            stdin=("empty",), fixture="files", stderr="exact"),
+            stdin=("empty",), fixture="files", stderr="exact", extra=files_rmdir_cases()),
     Utility("mkfifo", options=(Option("-Z"), Option("--context"),
                                Option("-m", ("0620", "u=rw,g=r,o=", "1777", "6777", "a+t", "u+s", "x", "=rwx", "u=rwx,g+r", "0"), None),
                                Option("--mode", ("0600",), True)),
@@ -41504,8 +41575,6 @@ PINNED = r"""
 {"domain":"files","kind":"bug","list":"ledger","option":"-c","reason_id":"r85","utility":"cal"},
 {"domain":"files","kind":"bug","list":"ledger","option":"-v","reason_id":"r85","utility":"cal"},
 {"domain":"files","kind":"bug","list":"ledger","option":"-w","reason_id":"r85","utility":"cal"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["1000","dangling"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","utility":"chgrp"},"domain":"files","id":"be401d18e481053c","kind":"bug","list":"ledger","reason_id":"r86","utility":"chgrp"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["1000","dangling"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","utility":"chown"},"domain":"files","id":"f98a31213b71d4df","kind":"bug","list":"ledger","reason_id":"r86","utility":"chown"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a","--keep-directory-symlink","-H","--one-file-system","-u","--force","dir","dirlink"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_yes","tier":"pinned","utility":"cp"},"domain":"files","id":"04629a86fef74958","kind":"deliberate","list":"ledger","reason":"deliberate: a recursive copy whose destination resolves inside its source is rejected before creating or changing an object; the reference leaves a partial tree before reporting the same error","reference":{"effects":"1bf2af85eab696eac345fddd70ea9746f9e1e684d8ca5b05deb992e528560e9c","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"cp"},
 {"candidate":{"effects":"52b6b8d65afb43c36002a35e783b62ace02c4e6d582b898beec40ee9d700229c","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--remove-destination","-P","f","d/f"],"domain":"files","family":null,"fixture":"files_self","input_kind":"command","mode":null,"stdin":"files_yes","tier":"pinned","utility":"cp"},"domain":"files","id":"0fd9ff039ce05fd0","kind":"deliberate","list":"ledger","reason":"cp pins its source before it removes or backs up the destination, so a destination that is the source under another spelling (d/f through d -> ., the source link itself) is copied from the pinned inode; the reference reopens the source by name after removing it and fails with the name gone, losing a link it was asked to copy","reference":{"effects":"10666ea854f690373d865e9bdc3bdbe3bbbd9ea44ecfbdf0fca2ca7541f8ea7c","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"cp"},
 {"candidate":{"effects":"3c4fe9ea9b6736596fc6ec58392feb4ec7aeb9637118141192fad3114761bb16","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--remove-destination","--backup=numbered","sl","sl"],"domain":"files","family":null,"fixture":"files_self","input_kind":"command","mode":null,"stdin":"files_yes","tier":"pinned","utility":"cp"},"domain":"files","id":"1c61e7ef9b96ca14","kind":"deliberate","list":"ledger","reason":"cp pins its source before it removes or backs up the destination, so a destination that is the source under another spelling (d/f through d -> ., the source link itself) is copied from the pinned inode; the reference reopens the source by name after removing it and fails with the name gone, losing a link it was asked to copy","reference":{"effects":"f44c708a8a5259935c3b29ad292e0c7043a158821509b875716bb9d8d1abfade","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"cp"},
