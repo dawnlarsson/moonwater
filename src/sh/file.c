@@ -15903,6 +15903,69 @@ static positive df_sample_room;
 static positive address_to df_order;
 static positive df_order_room;
 
+/*
+        Which mounts df looks at, gnulib's way: -l leaves out a remote one
+        -- a source naming a host, host:path, or a type from its list of
+        network filesystems -- and a pseudo filesystem the kernel keeps for
+        itself is left out of the whole table unless -a asks for it, but
+        shown when a file on it is named. -t keeps only the types it names,
+        -x drops the types it names.
+*/
+static bool df_local;
+static string_address df_selected[16];
+static positive df_selected_count;
+static string_address df_excluded[16];
+static positive df_excluded_count;
+
+static bool df_type_listed(string_address type, string_address address_to list,
+                           positive count)
+{
+        for (positive at = 0; at < count; at++)
+                if (string_equals(type, list[at]))
+                        return true;
+        return false;
+}
+
+static bool df_remote(storage_mount address_to mount)
+{
+        static const string_address remote[] = {
+            "acfs", "afs", "autofs", "auristorfs", "cachefs", "ceph", "cifs", "coda", "fhgfs",
+            "gfs", "gfs2", "gpfs", "ibrix", "lustre", "ncpfs", "netfs", "nfs", "nfs3", "nfs4",
+            "ocfs2", "panfs", "smb", "smb2", "smb3", "smbfs", "snfs", "stnfs", "userlandfs",
+            "vxfs", "websearchfs"};
+
+        return string_first_of(mount->source, ':') ||
+               string_equals(mount->source, "-hosts") ||
+               df_type_listed(mount->type, (string_address address_to)remote,
+                              array_count(remote));
+}
+
+static bool df_wanted(storage_mount address_to mount)
+{
+        if (df_local && df_remote(mount))
+                return false;
+        if (df_selected_count &&
+            !df_type_listed(mount->type, df_selected, df_selected_count))
+                return false;
+        return !df_type_listed(mount->type, df_excluded, df_excluded_count);
+}
+
+static bool df_seen(p8 letter, string_address value)
+{
+        if (letter != 't' && letter != 'x')
+                return true;
+
+        string_address address_to list = letter == 't' ? df_selected : df_excluded;
+        positive address_to count = letter == 't' ? address_of df_selected_count
+                                                  : address_of df_excluded_count;
+
+        if (address_to count == array_count(df_selected))
+                return string_report(log_error, false, "df: too many file system types\n");
+        list[address_to count] = value;
+        address_to count += 1;
+        return true;
+}
+
 static fn df_measure(storage_mount address_to mount, df_sample address_to sample)
 {
         sample->queried = true;
@@ -16046,6 +16109,12 @@ static const argument_option df_options[] = {
     {"print-type", 'T'},
     {"km", 0, 0, 1},
     {"v", 0},
+    {"local", 'l'},
+    {"type", 't', ARGUMENT_REQUIRED},
+    {"exclude-type", 'x', ARGUMENT_REQUIRED},
+    // Whether df syncs before it asks is nothing a reader can see.
+    {"sync", 'Y', ARGUMENT_LONG_ONLY},
+    {"no-sync", 'N', ARGUMENT_LONG_ONLY},
     {null},
 };
 
@@ -16061,11 +16130,25 @@ static b32 file_df()
             //      reference does with it too.
             .options = df_options,
             .selection = address_of df_unit_option,
+            .seen = df_seen,
         };
 
         df_unit_option = 0;
+        df_selected_count = df_excluded_count = 0;
 
         if (!file_take(address_of taking))
+                return 1;
+
+        df_local = (taking.flags & FILE_FLAG('l')) != 0;
+
+        for (positive at = 0; at < df_selected_count; at++)
+                if (df_type_listed(df_selected[at], df_excluded, df_excluded_count))
+                {
+                        string_format(log_error, "df: file system type '%w' both selected and excluded\n",
+                                      writer_terminal_name, df_selected[at]);
+                        df_failed = true;
+                }
+        if (df_failed)
                 return 1;
 
         positive first = taking.first;
@@ -16134,6 +16217,9 @@ static b32 file_df()
         {
                 storage_mount address_to mount = mounts.entry + at;
                 df_sample address_to sample = df_samples + at;
+
+                if (!df_wanted(mount))
+                        continue;
                 df_measure(mount, sample);
                 if (sample->reason)
                 {
@@ -16184,6 +16270,8 @@ static b32 file_df()
                                         df_sample address_to named =
                                             df_samples + at - 1;
 
+                                        if (!df_wanted(mounts.entry + at - 1))
+                                                break;
                                         if (!named->queried)
                                                 df_measure(mounts.entry + at - 1,
                                                             named);
@@ -16197,8 +16285,10 @@ static b32 file_df()
                                         }
                                         else
                                         {
-                                                named->shown = named->eligible;
-                                                if (named->eligible)
+                                                /* Named, a filesystem with
+                                                   no blocks is still shown. */
+                                                named->shown = named->measured || df_all;
+                                                if (named->shown)
                                                         df_order[ordered++] = at - 1;
                                         }
 
@@ -16241,13 +16331,15 @@ static b32 file_df()
                 }
         }
 
-        /* Named operands that all failed leave nothing to head, and the
-           reference prints no lone heading over an empty table. */
-        if (filtering && !showing)
+        /* Nothing to head is no table at all, and when nothing went wrong
+           on the way that is itself the complaint. */
+        if (!showing)
         {
                 storage_mount_table_release(address_of mounts);
                 log_flush();
-                return df_failed ? 1 : 0;
+                if (!df_failed)
+                        log_error("df: no file systems processed\n", 0);
+                return 1;
         }
 
         string_to_field_bulk(log, (string_address) "Filesystem", df_device_width,
