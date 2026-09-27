@@ -12250,6 +12250,11 @@ static bipolar exec_spawn_node(b32 index, bool background)
                 if (background && parse_nodes[index].kind == NODE_SUBSHELL)
                         parse_nodes[index].kind = NODE_GROUP;
 
+                /* This child is the background command, so its and-or list
+                   runs here rather than being put in the background again. */
+                if (background && parse_nodes[index].kind == NODE_ANDOR)
+                        parse_nodes[index].flags = 0;
+
                 /* A child made for one simple command -- `cmd &`, or a
                    subshell `( cmd )` whose whole body it is -- becomes that
                    command, rather than making a second process to run it and
@@ -13834,8 +13839,12 @@ static b32 exec_node_kind(b32 index)
         if (node->kind == NODE_LIST)
                 return exec_list(index);
 
+        /* The only command of a body -- `if c; then cmd & fi`, a loop's or
+           a group's -- is an and-or node with no list around it, so the
+           ampersand that the list would have read is read here. */
         if (node->kind == NODE_ANDOR)
-                return exec_and_or(index);
+                return node->flags ? (shell_status = exec_background(index))
+                                   : exec_and_or(index);
 
         if (node->kind == NODE_PIPELINE)
                 return exec_pipeline(index);

@@ -13620,6 +13620,49 @@ def shell_lang_background_wait(rng):
     return "background-" + shape, shell_BASH if bash_only else shell_ALL, shell_program(script + " 2>/dev/null", "echo \"end=$?\"")
 
 
+#       An ampersand inside a compound command: the only, the last or the
+#       first command of an if, else, loop, case arm, group or function
+#       body. A body of one command has no list around it, so the
+#       ampersand is the and-or's own, and reading it only where a list is
+#       left `if c; then { ...; } & fi` running in the foreground of the
+#       shell itself -- where an exit inside ended the script. The
+#       background command waits for a file the shell makes only after
+#       the compound, so one run in the foreground never finishes rather than
+#       racing a sleep.
+shell_BACKGROUND_WAITER = "until [ -e go ]; do sleep 0.01; done; echo bg; exit 3"
+shell_BACKGROUND_ITEMS = {
+    "group": "{ @W@; }",
+    "subshell": "(@W@)",
+    "simple": "sh -c '@W@'",
+    "pipeline": ": | { @W@; }",
+    "and-or": "true && { @W@; }",
+    "nested-if": "if :; then @W@; fi",
+}
+shell_BACKGROUND_BODIES = {
+    "if": "if :; then @B@ fi",
+    "else": "if false; then :; else @B@ fi",
+    "elif": "if false; then :; elif :; then @B@ fi",
+    "while": "n=0; while [ $n -lt 1 ]; do n=1; @B@ done",
+    "until": "n=0; until [ $n -ge 1 ]; do n=1; @B@ done",
+    "for": "for i in 1; do @B@ done",
+    "case": "case x in x) @B@ ;; esac",
+    "group": "{ @B@ }",
+    "function": "f() { @B@ }; f",
+    "brace-loop": "for i in 1; do { @B@ } done",
+}
+
+
+def shell_lang_background_body(rng):
+    item = rng.choice(sorted(shell_BACKGROUND_ITEMS))
+    body = rng.choice(sorted(shell_BACKGROUND_BODIES))
+    place = rng.choice(("only", "last", "first"))
+    command = shell_BACKGROUND_ITEMS[item].replace("@W@", shell_BACKGROUND_WAITER) + " &"
+    inner = {"only": command, "last": ": ; " + command, "first": command + " :;"}[place]
+    script = shell_BACKGROUND_BODIES[body].replace("@B@", inner if inner.endswith(";") else inner + "\n")
+    return ("background-body-%s-%s" % (body, place), shell_ALL,
+            shell_program("rm -f go", script, "echo fg; : > go", "wait; echo \"wait=$?\""))
+
+
 def shell_lang_errexit_contexts(rng):
     failing = rng.choice(("false", "(exit 3)", "f", "sh -c 'exit 7'", "cat missing", "nosuchcommand", "! true", "x=$(false)",
                           "local x=$(false)", "declare x=$(false)", "eval false", ". ./fails", "false | true", "true | false",
@@ -15517,6 +15560,7 @@ SHELL_FAMILIES = (
     shell_lang_traps,
     shell_lang_subshells,
     shell_lang_background_wait,
+    shell_lang_background_body,
     shell_lang_errexit_contexts,
     shell_lang_nounset_forms,
     shell_lang_noclobber,
