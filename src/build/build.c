@@ -2128,16 +2128,18 @@ static bool build_asm_pass(string_address text, string_address target,
                 */
                 if (marker)
                 {
-                        string_address text_line = build_join("\tasm_line(",
+                        //      Not text_line: that name is text.c's line
+                        //      store, which a macro reads through.
+                        string_address marker_line = build_join("\tasm_line(",
                                                               build_number(line_number),
                                                               ", \"", source,
                                                               "\")\n", null);
-                        positive length = string_length(text_line);
+                        positive length = string_length(marker_line);
 
                         if (address_to used + length >= room)
                                 return false;
 
-                        memory_copy(into + address_to used, text_line, length);
+                        memory_copy(into + address_to used, marker_line, length);
                         address_to used += length;
                         marker = false;
                 }
