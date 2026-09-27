@@ -17845,6 +17845,7 @@ _TEXT_WRITE_SOURCES = {
     "zerobound": "env head -c 1M /dev/zero | env tr '\\0' '\\n' | run {words} {target}",
     "numbers": "env seq 1 400000 > big\nrun {words} big {target}",
     "numbersin": "env seq 1 400000 > big\nrun {words} < big {target}",
+    "args": "run {words} {target}",
     #       Thirty inputs, each in order, merged under a descriptor limit
     #       too low to hold them all: GNU merges what opens. The unordered
     #       set shows the batch schedule in the answer.
@@ -17870,6 +17871,9 @@ _TEXT_WRITE_TARGETS = {
     "filled": ("env head -c 1M /dev/zero > m/pad 2> /dev/null\n", "> m/f",
                'echo "wrote $(env wc -c < m/f)"\n'),
     "full": ("", "> /dev/full", ""),
+    #       Standard error refused rather than standard output: GNU's tools
+    #       end with status 1 when a diagnostic could not be written.
+    "errfull": ("", "> /dev/null 2> /dev/full", ""),
     "closed": ("", ">&-", ""),
     "reading": ("", "1< /dev/null", ""),
     "limit": ("env prlimit --pid $$ --fsize=20000:20000\ntrap '' XFSZ\n", "> out",
@@ -17973,12 +17977,14 @@ _TEXT_WRITE_CASES = (
     ("pr", "small", "full"), ("pr", "yes", "full"), ("pr", "smallin", "closed"), ("pr", "small", "filled"),
     ("fmt", "small", "full"), ("fmt", "smallin", "closed"), ("fmt", "small", "filled"),
     ("ptx", "small", "full"), ("ptx", "smallin", "closed"),
+    ("od", "small", "errfull", "-w1"), ("tail", "args", "errfull", "-n0", "--retry", "small"),
+    ("numfmt", "args", "errfull", "--debug", "1000"), ("cut", "small", "errfull", "-c1", "missing"),
 )
 
 
 _TEXT_WRITE_TOOLS = ("cat", "head", "tail", "tr", "cut", "sed", "sort", "base64", "base32", "basenc",
                      "grep", "paste", "nl", "expand", "unexpand", "fold", "od", "uniq", "comm",
-                     "join", "tac", "wc", "rev", "tee", "pr", "fmt", "ptx")
+                     "join", "tac", "wc", "rev", "tee", "pr", "fmt", "ptx", "numfmt")
 
 
 def _text_write_valid(argv):

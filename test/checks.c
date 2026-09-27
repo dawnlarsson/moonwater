@@ -16695,6 +16695,29 @@ fn check_diagnostic()
         if (read == 8)
                 same_bytes("stderr writers", "embedded NUL", bytes, "alphax\0z", 8);
         system_call_1(syscall(close), pipes[0]);
+
+        /* A span the kernel refuses is remembered for the tool's status; a
+           taken one and the raw once-writer leave the mark alone. */
+        same("stderr writers", "no failure after taken spans", writer_stderr_failed, 0);
+        bipolar full = system_call_4(syscall(openat), AT_FDCWD, (positive)"/dev/full",
+                                     O_WRONLY, 0);
+        saved = system_call_1(syscall(dup), 2);
+        if (full >= 0 && saved >= 0 &&
+            system_call_3(syscall(dup3), full, 2, 0) == 2)
+        {
+                writer_stderr_once("x", 1);
+                same("stderr writers", "once leaves the mark", writer_stderr_failed, 0);
+                writer_stderr("refused", 0);
+                same("stderr writers", "refused span marks", writer_stderr_failed, 1);
+                writer_stderr_failed = 0;
+        }
+        if (saved >= 0)
+        {
+                system_call_3(syscall(dup3), saved, 2, 0);
+                system_call_1(syscall(close), saved);
+        }
+        if (full >= 0)
+                system_call_1(syscall(close), full);
 }
 
 /* Reenter the formatter while its outer variadic cursor is live. */

@@ -463,6 +463,14 @@ static b32 text_done(b32 code)
                 return 1;
         }
 
+        //      A diagnostic the kernel would not take ends a GNU tool with
+        //      its failure status, silently, when it closes standard error at
+        //      exit: `od -w1 2>/dev/full` is 1 however well the dump went.
+        if (!code && writer_stderr_failed)
+                return string_equals(text_name, "grep") || string_equals(text_name, "sort") ? 2
+                       : string_equals(text_name, "sed") ? 4
+                                                          : 1;
+
         return code;
 }
 

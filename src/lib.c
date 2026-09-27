@@ -53416,7 +53416,17 @@ __asm__(
 
 // A writer-compatible stderr span. Zero length means a terminated string;
 // positive lengths remain exact, including embedded NUL. No output is flushed.
+// A span the kernel would not take whole sets writer_stderr_failed, which is
+// never cleared: GNU's tools end with status 1 when a diagnostic could not be
+// written, whatever else went right, and a tool asks this at its end.
 fn writer_stderr(address_any data, positive length);
+extern p8 writer_stderr_failed;
+
+__asm__(
+    ASM_BSS_OBJECT_BEGIN(writer_stderr_failed, 1)
+    ".zero 1\n"
+    ASM_OBJECT_END(writer_stderr_failed)
+);
 // Same writer convention, but exactly one raw write, including an empty span.
 fn writer_stderr_once(address_any data, positive length);
 #if X64
@@ -53431,9 +53441,13 @@ __asm__(
     "test %rsi, %rsi\n   jnz .Lstderr_x64_length\n"
     "call string_length\n   mov %rax, %rsi\n"
     ".Lstderr_x64_length:\n   mov %rsi, %rdx\n   mov 0(%rsp), %rsi\n"
-    "mov 8(%rsp), %r10d\n   add $24, %rsp\n   mov $2, %edi\n"
-    "test %r10d, %r10d\n   jz system_write_all\n"
+    "mov 8(%rsp), %r10d\n   mov $2, %edi\n"
+    "test %r10d, %r10d\n   jz .Lstderr_x64_all\n   add $24, %rsp\n"
     "mov $" MOONWATER_NUMBER(syscall(write)) ", %eax\n   syscall\n" ASM_RET
+    ".Lstderr_x64_all:\n   mov %rdx, 16(%rsp)\n   call system_write_all\n"
+    "cmp 16(%rsp), %rax\n   jae .Lstderr_x64_done\n"
+    "movb $1, writer_stderr_failed(%rip)\n"
+    ".Lstderr_x64_done:\n   add $24, %rsp\n" ASM_RET
     ASM_END(writer_stderr)
 );
 #elif ARM64
@@ -53448,8 +53462,14 @@ __asm__(
     "cbnz x1, .Lstderr_arm64_length\n"
     "bl string_length\n   mov x1, x0\n"
     ".Lstderr_arm64_length:\n   mov x2, x1\n   ldr w9, [sp, 16]\n"
-    "ldp x1, x30, [sp], 32\n   mov x0, 2\n   cbz w9, system_write_all\n"
+    "ldr x1, [sp]\n   mov x0, 2\n   cbz w9, .Lstderr_arm64_all\n"
+    "ldr x30, [sp, 8]\n   add sp, sp, 32\n"
     "mov x8, " MOONWATER_NUMBER(syscall(write)) "\n   svc 0\n" ASM_RET
+    ".Lstderr_arm64_all:\n   str x2, [sp, 24]\n   bl system_write_all\n"
+    "ldr x2, [sp, 24]\n   cmp x0, x2\n   b.hs .Lstderr_arm64_done\n"
+    "adrp x9, writer_stderr_failed\n   add x9, x9, :lo12:writer_stderr_failed\n"
+    "mov w10, 1\n   strb w10, [x9]\n"
+    ".Lstderr_arm64_done:\n   ldr x30, [sp, 8]\n   add sp, sp, 32\n" ASM_RET
     ASM_END(writer_stderr)
 );
 #elif RISCV64
@@ -53462,9 +53482,13 @@ __asm__(
     "li t0, 0\n"
     ".Lstderr_rv_enter:\n   addi sp, sp, -32\n   sd a0, 0(sp)\n   sd ra, 24(sp)\n   sw t0, 8(sp)\n"
     "bnez a1, .Lstderr_rv_length\n   call string_length\n   mv a1, a0\n"
-    ".Lstderr_rv_length:\n   mv a2, a1\n   ld a1, 0(sp)\n   ld ra, 24(sp)\n   lw t0, 8(sp)\n"
-    "addi sp, sp, 32\n   li a0, 2\n   beqz t0, system_write_all\n"
+    ".Lstderr_rv_length:\n   mv a2, a1\n   ld a1, 0(sp)\n   lw t0, 8(sp)\n"
+    "li a0, 2\n   beqz t0, .Lstderr_rv_all\n   ld ra, 24(sp)\n   addi sp, sp, 32\n"
     "li a7, " MOONWATER_NUMBER(syscall(write)) "\n   ecall\n" ASM_RET
+    ".Lstderr_rv_all:\n   sd a2, 16(sp)\n   call system_write_all\n"
+    "ld a2, 16(sp)\n   bgeu a0, a2, .Lstderr_rv_done\n"
+    "lla t1, writer_stderr_failed\n   li t2, 1\n   sb t2, 0(t1)\n"
+    ".Lstderr_rv_done:\n   ld ra, 24(sp)\n   addi sp, sp, 32\n" ASM_RET
     ASM_END(writer_stderr)
 );
 #endif
