@@ -17267,6 +17267,57 @@ def _text_stream_script(argv, stdin_name):
     return ul_live(argv[0], body, wrap="unshare -Urm")
 
 
+#       tail -f, -F and --follow, which never end on their own: every cell
+#       names a writer with --pid, and the writer waits (bounded) for each
+#       step to show in tail's output or diagnostics before it takes the
+#       next, so what tail says does not hang on when it was scheduled.
+#       -n +1 prints the whole file whenever tail got to it. The writer is
+#       started from a subshell that exits at once, so init reaps it: GNU
+#       counts a zombie as alive, and a shell that only reaps a background
+#       job when it next waits would leave tail waiting for ever. Each cell runs
+#       with inotify and again with ---disable-inotify, GNU's hidden switch
+#       for the polling loop; both must say the same.
+_TEXT_FOLLOW_PROLOGUE = (
+    "waitfor() { i=0; while ! env grep -q \"$1\" \"$2\" 2>/dev/null; do i=$((i+1)); "
+    "[ $i -gt 150 ] && return 1; env sleep .02; done; }\n"
+    "fast='-s.1 --max-unchanged-stats=1'\n")
+_TEXT_FOLLOW_SCRIPTS = {
+    "append": ("printf 'a\\nb\\n' > f\n"
+               "( { waitfor b out; printf 'c\\n' >> f; waitfor c out; printf 'd\\n' >> f; waitfor d out; } & echo $! > wp; )\nw=$(env cat wp)\n"
+               "run -f $fast --pid=$w -n +1 $mode f > out 2> err\n"),
+    "truncated": ("printf 'a\\nb\\n' > f\n"
+                  "( { waitfor b out; printf 'x\\n' > f; waitfor x out; } & echo $! > wp; )\nw=$(env cat wp)\n"
+                  "run -f $fast --pid=$w -n +1 $mode f > out 2> err\n"),
+    "descriptor": ("printf 'a\\nb\\n' > f\n"
+                   "( { waitfor b out; env mv f g; printf 'c\\n' >> g; waitfor c out; } & echo $! > wp; )\nw=$(env cat wp)\n"
+                   "run -f $fast --pid=$w -n +1 $mode f > out 2> err\n"),
+    "name": ("printf 'a\\nb\\n' > f\n"
+             "( { waitfor b out; env mv f g; waitfor inaccessible err; printf 'n\\n' > f; waitfor n out;"
+             " printf 'o\\n' >> f; waitfor o out; } & echo $! > wp; )\nw=$(env cat wp)\n"
+             "run -F $fast --pid=$w -n +1 $mode f > out 2> err\n"),
+    "appears": ("( { waitfor 'cannot open' err; printf 'm\\n' > late; waitfor m out; } & echo $! > wp; )\nw=$(env cat wp)\n"
+                "run -F $fast --pid=$w -n +1 $mode late > out 2> err\n"),
+    "headers": ("printf 'a\\n' > f; printf 'b\\n' > g\n"
+                "( { waitfor b out; printf 'c\\n' >> f; waitfor c out; printf 'e\\n' >> g; waitfor e out; } & echo $! > wp; )\nw=$(env cat wp)\n"
+                "run -f $fast --pid=$w -n +1 $mode f g > out 2> err\n"),
+    "stdin-pipe": ("printf 'a\\nb\\nc\\n' | run -f $fast -n 1 $mode > out 2> err\n"),
+    "dead": ("run -F $fast --pid=2147483647 $mode a.txt missing > out 2> err\n"),
+}
+_TEXT_FOLLOW_CASES = tuple((name, mode) for name in _TEXT_FOLLOW_SCRIPTS
+                           for mode in ("inotify", "polling"))
+
+
+def _text_follow_script(argv, stdin_name):
+    mode = "mode=" + ("---disable-inotify" if argv[1] == "polling" else "''") + "\n"
+    body = (_TEXT_FOLLOW_PROLOGUE + mode + _TEXT_FOLLOW_SCRIPTS[argv[0]] + "status=$?\n" +
+            "env cat out; echo ---; env cat err\nenv rm -f f g out err late wp\nexit $status\n")
+    return ul_live("tail", body)
+
+
+def _text_follow_valid(argv):
+    return len(argv) == 2 and argv[0] in _TEXT_FOLLOW_SCRIPTS
+
+
 # ----------------------------------------------------------------------------
 #       The programs.
 # ----------------------------------------------------------------------------
@@ -17274,6 +17325,8 @@ def _text_stream_script(argv, stdin_name):
 TEXT_UTILITIES = (
     Utility("write_errors", operands=_TEXT_WRITE_CASES, stdin=("empty",), fixture="text",
             stderr="exact", modes=BASH, script=_text_write_script, valid=_text_write_valid),
+    Utility("tail_follow", operands=_TEXT_FOLLOW_CASES, stdin=("empty",), fixture="text",
+            stderr="exact", modes=BASH, script=_text_follow_script, valid=_text_follow_valid),
     Utility("streams", operands=_TEXT_STREAM_CASES, stdin=("empty",), fixture="text",
             modes=BASH, script=_text_stream_script, valid=_text_stream_valid),
     Utility("base64", options=_TEXT_ENCODING_OPTIONS, operands=_TEXT_ENCODING_OPERANDS,
@@ -17564,6 +17617,15 @@ TEXT_UTILITIES = (
                    #       A device that seeks is read from N before its
                    #       end: /dev/zero has none and was read for ever.
                    ("-c", "100", "/dev/zero"), ("-c", "5", "/dev/null"), ("-c", "+3", "/dev/null"),
+                   #       Following that ends on its own: a writer long
+                   #       dead, a name that is not there, a word refused.
+                   ("-f", "--pid=2147483647", "a.txt"), ("-f", "missing"), ("--follow=name", "missing"),
+                   ("-f", "dir"), ("-F",), ("--follow=bogus", "a.txt"), ("--follow=",),
+                   ("-s", "x", "a.txt"), ("-s", "-1", "a.txt"), ("--pid=x", "a.txt"), ("--pid=-1", "a.txt"),
+                   ("--pid=99999999999", "a.txt"), ("--max-unchanged-stats=x", "a.txt"),
+                   ("--max-unchanged-stats=-1", "a.txt"), ("-F", "--pid=2147483647", "a.txt", "missing"),
+                   ("-f", "--pid=2147483647", "a.txt", "missing"), ("-f", "--retry", "--pid=2147483647", "a.txt"),
+                   ("--retry", "a.txt"), ("--pid=1", "a.txt"),
                    *({"fixture": "text", "stdin": "many_lines", "argv": argv}
                      for argv in (("+2",), ("+2c",), ("-2c",), ("-2l",), ("-l",), ("-b",), ("+18",),
                                   ("-c",), ("-",))))),

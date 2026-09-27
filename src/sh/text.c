@@ -534,6 +534,10 @@ static bool text_quiet_open;
 /* sed reads a script file, and R a line at a time, without a word about a
    file that will not open or read -- as GNU passes over both. */
 static bool text_quiet_read;
+/* tail -f opens its files without blocking when it has more than one or a
+   --pid to watch, and GNU takes a read that would block as the end of what
+   there is for now rather than as a failure. */
+static bool text_again_ends;
 /* One sentinel slot is used while a sed script file is turned into text. */
 static p8 text_line[TEXT_LINE_MAX + 1];
 static positive text_line_length;
@@ -762,7 +766,7 @@ static bool text_reader_fill_amount(text_reader address_to reader,
         {
                 reader->finished = true;
 
-                if (got < 0)
+                if (got < 0 && !(got == -ERROR_AGAIN && text_again_ends))
                 {
                         if (!text_quiet_read)
                                 text_file_failed(reader->name, got, true);
@@ -1060,6 +1064,7 @@ static fn text_begin(string_address name)
         /* A shell may run several built-in tools in one process. */
         text_out_used = 0;
         text_quiet_read = false;
+        text_again_ends = false;
         text_out_handle = 1;
         text_out_failed = false;
         text_out_error = 0;
@@ -1370,10 +1375,8 @@ static b32 text_input_count()
 */
 static bool text_banner_written;
 
-static fn text_banner(b32 which)
+static fn text_banner_named(string_address name)
 {
-        string_address name = text_file_name(which);
-
         if (text_banner_written)
                 text_put_character('\n');
 
@@ -1384,6 +1387,11 @@ static fn text_banner(b32 which)
                             ? name
                             : (string_address)"standard input");
         text_put_string(" <==\n");
+}
+
+static fn text_banner(b32 which)
+{
+        text_banner_named(text_file_name(which));
 }
 
 /*
@@ -6167,7 +6175,7 @@ static positive text_read_into(p8 address_to into, positive want)
 
         text_input.finished = true;
 
-        if (read < 0)
+        if (read < 0 && !(read == -ERROR_AGAIN && text_again_ends))
         {
                 text_file_failed(text_input.name, read, true);
                 text_input.failed = true;
@@ -6543,6 +6551,163 @@ static bool text_count_refused(string_address said, p8 letter)
         return false;
 }
 
+/*
+        What tail -f was told, read as getopt meets each word. Every one is
+        set again at the start of each run, since a shell may run tail more
+        than once in one process.
+*/
+static p8 tail_follow_mode;             // 0, 'd'escriptor or 'n'ame
+static bool tail_retry;
+static bool tail_pids_given;
+static b32 address_to tail_pids;
+static positive tail_pids_room;
+static positive tail_pids_count;
+static positive tail_sleep_ns;
+static positive tail_max_unchanged;
+static bool tail_no_inotify;
+static bool tail_debug;
+
+// gnulib's words for a value it refused, with the reason it gives a number
+// written below the floor of a signed or bounded reading.
+static positive head_tail_old_count(string_address digits, positive length,
+                                    positive by);
+
+static bool tail_value_refused(string_address what, string_address said,
+                               bool too_large)
+{
+        text_flush();
+        string_format(writer_stderr, "%s: %s: '%w'%s\n", text_name, what,
+                      writer_terminal_quoted_name, said,
+                      too_large ? ": Value too large for defined data type" : "");
+        return false;
+}
+
+/*
+        --follow's word, the way argmatch takes it: the whole of descriptor
+        or name, or any beginning of just one of them. An empty word begins
+        both, which argmatch calls ambiguous rather than invalid.
+*/
+static bool tail_follow_word(string_address said)
+{
+        static const string_address words[] = {
+            (string_address) "descriptor", (string_address) "name"};
+        positive chosen = 0;
+
+        if (said[0] && text_word_of(said, words, 2, address_of chosen))
+        {
+                tail_follow_mode = chosen ? 'n' : 'd';
+                return true;
+        }
+
+        text_flush();
+        string_format(writer_stderr,
+                      "%s: %s argument '%w' for '--follow'\n"
+                      "Valid arguments are:\n  - 'descriptor'\n  - 'name'\n"
+                      "Try '%s --help' for more information.\n",
+                      text_name, said[0] ? "invalid" : "ambiguous",
+                      writer_terminal_quoted_name, said, text_name);
+        return false;
+}
+
+/*
+        -s: cl_strtod's reading, a decimal or hexadecimal number with an
+        exponent, or inf, and nothing after it; a negative or a NaN is
+        refused. The sleep is bounded rather than refused past what a
+        timespec holds.
+*/
+static bool tail_seconds(string_address said)
+{
+        string_address at = said + string_span(said, string_set_space);
+        positive length;
+
+        at += at[0] == '+';
+        length = string_length(at);
+
+        if ((length == 3 || length == 8) &&
+            !compare_ascii_case_known(at, "infinity", length))
+        {
+                tail_sleep_ns = positive_max;
+                return true;
+        }
+
+        return file_duration_read(said, false, address_of tail_sleep_ns) ||
+               tail_value_refused("invalid number of seconds", said, false);
+}
+
+// --pid and --max-unchanged-stats: decimal digits after blanks and a plus.
+// A pid past pid_t is too large; the stats count saturates.
+static bool tail_whole(string_address said, positive address_to value,
+                       positive ceiling, string_address what)
+{
+        string_address at = said + string_span(said, string_set_space);
+        bool negative = at[0] == '-';
+
+        at += at[0] == '+' || negative;
+
+        positive digits = string_span(at, string_set_digits);
+
+        if (!digits || at[digits])
+                return tail_value_refused(what, said, false);
+
+        if (negative)
+                return tail_value_refused(what, said, !ceiling);
+
+        address_to value = head_tail_old_count(at, digits, 1);
+
+        if (ceiling && address_to value > ceiling)
+                return tail_value_refused(what, said, true);
+
+        return true;
+}
+
+static bool tail_option_seen(p8 letter, string_address value)
+{
+        positive number;
+
+        switch (letter)
+        {
+        case 'f':
+                tail_follow_mode = 'd';
+                return true;
+        case 'F':
+                tail_follow_mode = 'n';
+                tail_retry = true;
+                return true;
+        case 'L':
+                if (!value)
+                {
+                        tail_follow_mode = 'd';
+                        return true;
+                }
+                return tail_follow_word(value);
+        case 'R':
+                tail_retry = true;
+                return true;
+        case 'I':
+                tail_no_inotify = true;
+                return true;
+        case 'D':
+                tail_debug = true;
+                return true;
+        case 's':
+                return tail_seconds(value);
+        case 'M':
+                return tail_whole(value, address_of tail_max_unchanged, 0,
+                                  "invalid maximum number of unchanged stats between opens");
+        case 'P':
+                if (!tail_whole(value, address_of number, 0x7fffffff, "invalid PID"))
+                        return false;
+                tail_pids_given = true;
+                if (!array_store_reserve(tail_pids, tail_pids_room, tail_pids_count,
+                                         tail_pids_count + 1, 16))
+                        return string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                tail_pids[tail_pids_count++] = (b32)number;
+                return true;
+        }
+
+        return true;
+}
+
 static bool head_tail_seen(p8 letter, string_address value)
 {
         if (letter == 'c' || letter == 'n')
@@ -6561,6 +6726,8 @@ static bool head_tail_seen(p8 letter, string_address value)
         }
         else if (letter == 'q' || letter == 'v')
                 text_banner_last = letter;
+        else if (text_count_tail)
+                return tail_option_seen(letter, value);
 
         return true;
 }
@@ -6738,35 +6905,78 @@ static b32 tail_obsolete(head_tail_old address_to old)
 /*
         The long spellings tail answers to.
 
-        --pid, --sleep-interval and --max-unchanged-stats all say something
-        about how to wait while following a file, and GNU itself warns and
-        ignores them when it is not following. Nothing here follows, so they
-        are taken and dropped.
-
-        Not here, and deliberately: --zero-terminated, which is the line
-        reader's business, and -F, which promises to reopen a file by name.
+        -f and --follow follow the descriptor unless --follow names the
+        name, -F is --follow=name --retry, and the last of the three decides
+        which, as getopt's last word does in GNU. --pid may be given many
+        times and every process named is waited on. ---disable-inotify is
+        GNU's hidden switch, taken so its own tests run the polling loop.
+        Each value is read as it is met, so the first one GNU would refuse
+        is the one refused here.
 */
-// --pid and --max-unchanged-stats are waited on rather than read, and --retry
-// and --debug say nothing about the bytes. P and R are letters tail has not
-// got, so the words reach a bit of the flag word and -P stays a mistake.
-
 static const argument_option tail_options[] = {
     {"bytes", 'c', ARGUMENT_REQUIRED},
     {"lines", 'n', ARGUMENT_REQUIRED},
     {"quiet", 'q'},
     {"silent", 'q'},
     {"verbose", 'v'},
-    {"follow", 'F', ARGUMENT_OPTIONAL | ARGUMENT_LONG_ONLY},
+    {"follow", 'L', ARGUMENT_OPTIONAL | ARGUMENT_LONG_ONLY},
     {"retry", 'R', ARGUMENT_LONG_ONLY},
     {"pid", 'P', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"sleep-interval", 's', ARGUMENT_REQUIRED},
     {"max-unchanged-stats", 'M', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"debug", 'D', ARGUMENT_LONG_ONLY},
     {"zero-terminated", 'z'},
+    {"-disable-inotify", 'I', ARGUMENT_LONG_ONLY},
     {"-presume-input-pipe", 'U', ARGUMENT_LONG_ONLY},
-    {"f", 0},
+    {"fF", 0},
     {null},
 };
+
+static b32 tail_follow(positive count, bool by_bytes, bool marked, bool headers);
+
+/*
+        One input's tail, from wherever text_input stands: a regular file
+        from its end, a seekable device from N before its end, anything else
+        read through. Shared by the plain loop and by -f's first pass. False
+        only when memory ran out, which has been said.
+*/
+static inline INLINE bool tail_input(positive count, bool by_bytes, bool marked)
+{
+        utility_arena.used = 0;
+
+        positive size = 0;
+        bool seekable = !marked && !head_tail_pipe_presumed &&
+                        text_regular_size(text_input.handle, address_of size);
+
+        if (seekable)
+        {
+                positive floor = text_stream_floor();
+
+                text_stream_from(
+                    by_bytes ? (count < size - floor ? size - count
+                                                     : floor)
+                             : text_tail_start(text_input.handle, size,
+                                               count, floor));
+                return true;
+        }
+
+        if (!marked && by_bytes && !head_tail_pipe_presumed &&
+            text_tail_device(count))
+                return true;
+
+        // +N starts at the Nth record and streams from there; N wants
+        // the end, which a pipe only has once it has been read through.
+        if (marked)
+        {
+                text_stream_skip(count ? count - 1 : 0, by_bytes);
+                text_put_rest();
+                return true;
+        }
+
+        return by_bytes && count >= TEXT_WINDOW_FIRST
+                   ? text_tail_ring(count)
+                   : text_window(count, by_bytes, false);
+}
 
 /* Shared option/operand lifetime; the constant tool choice leaves each
    scanner specialized, including head's early stop and tail's reverse scan. */
@@ -6774,9 +6984,6 @@ static inline INLINE b32 text_head_tail(bool tail)
 {
         file_taking taking = {
             .program = tail ? (string_address)"tail" : (string_address)"head",
-            // -f waits for more to be written, which is a wait this does not
-            // do: the file is read to its end and that is where GNU would
-            // still be sitting. -s is how long it would have waited.
             .options = tail ? tail_options : head_options,
             .operand = text_file_add,
             .seen = head_tail_seen,
@@ -6788,6 +6995,14 @@ static inline INLINE b32 text_head_tail(bool tail)
         text_banner_last = 0;
         text_count_tail = tail;
         text_banner_written = false;
+        tail_follow_mode = 0;
+        tail_retry = false;
+        tail_pids_given = false;
+        tail_pids_count = 0;
+        tail_sleep_ns = 1000000000;
+        tail_max_unchanged = 5;
+        tail_no_inotify = false;
+        tail_debug = false;
 
         head_tail_old old = {.count = 10};
         b32 obsolete = tail ? tail_obsolete(address_of old)
@@ -6813,6 +7028,7 @@ static inline INLINE b32 text_head_tail(bool tail)
 
         text_count_marked = old.from_start;
         text_banner_last = old.banner;
+        tail_follow_mode = old.follow ? 'd' : 0;
 
         if (!text_took_from(address_of taking, 1 + (positive)obsolete))
                 return text_done(1);
@@ -6824,11 +7040,19 @@ static inline INLINE b32 text_head_tail(bool tail)
                     tail ? "option used in invalid context" : "invalid trailing option",
                     misplaced[1], !tail));
 
-        if (tail && (taking.flags & FILE_FLAG('R')))
+        if (tail && tail_retry && !tail_follow_mode)
+        {
+                tail_retry = false;
                 string_diagnostic(&text_diagnostic, 0, null, "warning: --retry ignored; --retry is useful only when following");
+        }
+        else if (tail && tail_retry && tail_follow_mode == 'd')
+                string_diagnostic(&text_diagnostic, 0, null, "warning: --retry only effective for the initial open");
 
-        if (tail && (taking.flags & FILE_FLAG('P')))
+        if (tail && tail_pids_given && !tail_follow_mode)
+        {
+                tail_pids_given = false;
                 string_diagnostic(&text_diagnostic, 0, null, "warning: PID ignored; --pid=PID is useful only when following");
+        }
 
         positive count = text_count_last ? text_count_value : old.count;
         bool by_bytes = text_count_last ? text_count_last == 'c' : old.by_bytes;
@@ -6848,12 +7072,14 @@ static inline INLINE b32 text_head_tail(bool tail)
                 left where it stood. Measured with -n 0, -c 0 and -0, with and
                 without -q, -v and the following-only words warned about above.
         */
-        if (tail && !marked && !count && !old.follow &&
-            !(taking.flags & (FILE_FLAG('f') | FILE_FLAG('F'))))
+        if (tail && !marked && !count && !tail_follow_mode)
                 return text_done(0);
 
         b32 inputs = text_input_count();
         bool headers = (text_files_count > 1 || loud) && !quiet;
+
+        if (tail && tail_follow_mode)
+                return tail_follow(count, by_bytes, marked, headers);
 
         for (b32 i = 0; i < inputs && !text_out_failed; i++)
         {
@@ -6875,42 +7101,7 @@ static inline INLINE b32 text_head_tail(bool tail)
                         continue;
                 }
 
-                utility_arena.used = 0;
-
-                positive size = 0;
-                bool seekable = !marked && !head_tail_pipe_presumed &&
-                                text_regular_size(text_input.handle, address_of size);
-
-                if (seekable)
-                {
-                        positive floor = text_stream_floor();
-
-                        text_stream_from(
-                            by_bytes ? (count < size - floor ? size - count
-                                                             : floor)
-                                     : text_tail_start(text_input.handle, size,
-                                                       count, floor));
-                        text_close();
-                        continue;
-                }
-
-                if (!marked && by_bytes && !head_tail_pipe_presumed &&
-                    text_tail_device(count))
-                {
-                        text_close();
-                        continue;
-                }
-
-                // +N starts at the Nth record and streams from there; N wants
-                // the end, which a pipe only has once it has been read through.
-                if (marked)
-                {
-                        text_stream_skip(count ? count - 1 : 0, by_bytes);
-                        text_put_rest();
-                }
-                else if (by_bytes && count >= TEXT_WINDOW_FIRST
-                             ? !text_tail_ring(count)
-                             : !text_window(count, by_bytes, false))
+                if (!tail_input(count, by_bytes, marked))
                         return text_done(1);
 
                 text_close();
@@ -6921,6 +7112,1255 @@ static inline INLINE b32 text_head_tail(bool tail)
 
 static b32 text_head() { return text_head_tail(false); }
 static b32 text_tail() { return text_head_tail(true); }
+
+/*
+        Following: tail -f, -F and --follow, after GNU's tail_file,
+        tail_forever and tail_forever_inotify, whose messages are matched
+        word for word because scripts and GNU's own tests wait on them.
+
+        Every named file becomes one tail_file that keeps its descriptor
+        open after its first tail, where it was last read, and what fstat
+        said of it then. The polling loop fstats each one every -s seconds
+        and copies what has grown; following by name it also opens the name
+        again after --max-unchanged-stats quiet rounds to see whether the
+        name now means another file. inotify replaces the rounds with events
+        when every file is a local regular file or FIFO and no name is a
+        symbolic link, as GNU chooses; anything else, or inotify refusing,
+        falls back to polling with the words GNU uses.
+
+        None of it is reached unless tail was asked to follow, so the plain
+        tail above keeps its loop and its measured floors.
+*/
+#define TAIL_ODD 1              // GNU's errnum of -1: not an errno at all
+#define TAIL_REVERT (-1)        // tail_notified: go back to polling
+#define TAIL_BUFSIZ 8192
+
+#define TAIL_IN_MODIFY 0x002
+#define TAIL_IN_ATTRIB 0x004
+#define TAIL_IN_MOVED_TO 0x080
+#define TAIL_IN_CREATE 0x100
+#define TAIL_IN_DELETE 0x200
+#define TAIL_IN_DELETE_SELF 0x400
+#define TAIL_IN_MOVE_SELF 0x800
+
+typedef struct
+{
+        string_address name;    // as given; - is standard input
+        string_address shown;   // GNU's prettyname
+        bipolar handle;         // -1 while nothing is open
+        bipolar error;          // 0, a negated errno, or TAIL_ODD
+        positive read_at;       // where a regular file was last read to
+        b64 seconds;
+        p32 nanoseconds;
+        p16 mode;
+        p64 inode;
+        p32 major, minor;
+        b8 blocking;            // 1, 0, or -1 when not yet known
+        bool ignore;
+        bool tailable;
+        bool remote;
+        bool listed;            // in the watch table
+        positive unchanged;
+        bipolar watch;
+        bipolar parent;
+        positive base;          // where the name's last component starts
+} tail_file;
+
+static tail_file address_to tail_files;
+static positive tail_files_room;
+static positive tail_files_count;
+static bool tail_monitor;
+
+static bool tail_tailable_mode(p16 mode)
+{
+        p16 format = mode & MODE_FORMAT;
+
+        return format == MODE_FILE || format == MODE_PIPE ||
+               format == MODE_SOCKET || format == MODE_CHARACTER;
+}
+
+static bool tail_regular(p16 mode)
+{
+        return (mode & MODE_FORMAT) == MODE_FILE;
+}
+
+static bool tail_is_stdin(tail_file address_to f)
+{
+        return string_equals(f->name, "-");
+}
+
+// "tail: 'name' what[: reason]", the name through quoteaf.
+static fn tail_say(tail_file address_to f, string_address what, bipolar reason)
+{
+        text_flush();
+        string_format(writer_stderr, "%s: %w %s%s%s\n", text_name,
+                      writer_shell_quoted_name, f->shown, what,
+                      reason < 0 ? ": " : "",
+                      reason < 0 ? file_reason(reason) : (string_address) "");
+}
+
+// "tail: name: what", the name through quotef.
+static fn tail_say_plain(tail_file address_to f, string_address what)
+{
+        text_flush();
+        string_format(writer_stderr, "%s: %w: %s\n", text_name,
+                      writer_shell_name, f->shown, what);
+}
+
+static bipolar tail_look(bipolar handle, file_facts address_to facts)
+{
+        return file_look_code(handle, (string_address) "", AT_EMPTY_PATH, facts);
+}
+
+static bool tail_same_file(tail_file address_to f, file_facts address_to facts)
+{
+        return f->inode == facts->inode && f->major == facts->device_major &&
+               f->minor == facts->device_minor;
+}
+
+static bool tail_same_time(tail_file address_to f, file_facts address_to facts)
+{
+        return f->seconds == facts->modified.seconds &&
+               f->nanoseconds == facts->modified.nanoseconds;
+}
+
+static fn tail_close(bipolar handle)
+{
+        if (handle > 0)
+                system_close((positive)handle);
+}
+
+/*
+        Whether a descriptor is on a file system whose changes inotify may
+        never hear of. GNU's fs-is-local.h answers from a table of every
+        magic it knows and calls the unknown remote; this keeps the rows it
+        names remote -- NFS, SMB, FUSE, Ceph, Lustre, overlay and the rest
+        -- and takes everything else as local, which is every file system
+        this machine builds.
+*/
+static bool tail_remote(bipolar handle)
+{
+        static const p32 remote[] = {
+            0x61636673, 0x5346414F, 0x61756673, 0x00C36400, 0xFF534D42,
+            0x73757245, 0x19830326, 0x65735546, 0x65735543, 0x01161970,
+            0x47504653, 0x474D454D, 0x013111A8, 0x6B414653, 0x0BD00BD0,
+            0x564C, 0x6969, 0x6E667364, 0x7461636F, 0x794C7630,
+            0xAAD7AAEA, 0x50495045, 0x7C7C6673, 0x517B, 0xFE534D42,
+            0xBEEFDEAD, 0x786F4256, 0xBACBACBC, 0xA501FCF5,
+        };
+        p64 facts[32];
+
+        if (system_call_2(syscall(fstatfs), (positive)handle,
+                          (positive)facts) < 0)
+                return true;
+
+        for (positive i = 0; i < sizeof(remote) / sizeof(remote[0]); i++)
+                if ((p32)facts[0] == remote[i])
+                        return true;
+
+        return false;
+}
+
+/*
+        open_safer: GNU never lets a file it opens land on 0, 1 or 2, so
+        tail -f /dev/null >&- still finds standard output closed and says
+        so rather than following /dev/null in its place.
+*/
+static bipolar tail_open(tail_file address_to f, bool blocking)
+{
+        bipolar handle = system_open_at(AT_FDCWD, f->name,
+                                        FILE_READ | O_CLOEXEC | (blocking ? 0 : O_NONBLOCK));
+
+        if (handle >= 0 && handle <= 2)
+        {
+                bipolar safe = system_call_3(syscall(fcntl), (positive)handle, 1030, 3);
+
+                system_close((positive)handle);
+                handle = safe;
+        }
+
+        return handle;
+}
+
+static fn tail_record(tail_file address_to f, bipolar handle, bipolar read_at,
+                      file_facts address_to facts, b8 blocking)
+{
+        f->handle = handle;
+        f->seconds = facts->modified.seconds;
+        f->nanoseconds = facts->modified.nanoseconds;
+        f->inode = facts->inode;
+        f->major = facts->device_major;
+        f->minor = facts->device_minor;
+        f->mode = facts->mode;
+        if (tail_regular(facts->mode))
+                f->read_at = read_at >= 0 ? (positive)read_at
+                                          : (positive)system_seek(handle, 0, FILE_SEEK_CUR);
+        f->blocking = blocking;
+        f->unchanged = 0;
+        f->ignore = false;
+}
+
+/*
+        dump_remainder: copy from the descriptor to the output, the header
+        first when something came and one was wanted. A read that would
+        block is the end for now; any other failure ends tail, as it ends
+        GNU's. Answers the bytes read, or -1 after a fatal read.
+*/
+#define TAIL_TO_END ((bipolar)-1)
+#define TAIL_A_BUFFER ((bipolar)-2)
+
+static bipolar tail_dump(tail_file address_to f, bool header, bipolar amount)
+{
+        bipolar total = 0;
+        bipolar left = amount;
+
+        do
+        {
+                positive want = amount < 0 || TAIL_BUFSIZ < left ? TAIL_BUFSIZ
+                                                                 : (positive)left;
+                bipolar got = system_read_retry((positive)f->handle,
+                                                text_input.buffer, want);
+
+                if (got < 0)
+                {
+                        if (got != -ERROR_AGAIN)
+                        {
+                                text_file_failed(f->name, got, true);
+                                return -1;
+                        }
+                        break;
+                }
+
+                if (!got)
+                        break;
+
+                total += got;
+
+                if (header)
+                {
+                        text_banner_named(f->name);
+                        header = false;
+                }
+
+                text_put(text_input.buffer, (positive)got);
+
+                if (text_out_failed)
+                        return -1;
+
+                if (amount == TAIL_A_BUFFER)
+                        break;
+
+                left -= got;
+        } while (left != 0);
+
+        return total;
+}
+
+// The pids still alive, zombies included; the dead are dropped.
+static bool tail_writers_alive()
+{
+        for (positive i = 0; i < tail_pids_count;)
+        {
+                if (system_call_2(syscall(kill), (positive)tail_pids[i], 0) ==
+                    -ERROR_NO_PROCESS)
+                {
+                        tail_pids_count--;
+                        memory_copy(tail_pids + i, tail_pids + i + 1,
+                                    (tail_pids_count - i) * sizeof(tail_pids[0]));
+                }
+                else
+                        i++;
+        }
+
+        return tail_pids_count > 0;
+}
+
+// Standard output gone, as a writer finds it: SIGPIPE, or 1 when ignored.
+static b32 tail_die_pipe()
+{
+        text_out_used = 0;
+        system_call_2(syscall(kill), (positive)system_call(syscall(getpid)), 13);
+        return 1;
+}
+
+static bool tail_output_broken()
+{
+        system_poll_descriptor out = {1, 0, 0};
+        timespec none = {0, 0};
+
+        return tail_monitor &&
+               system_poll_wait(address_of out, 1, address_of none, null) > 0 &&
+               out.returned;
+}
+
+/*
+        recheck: open the name again and say what became of it -- gone,
+        replaced, unreadable, no longer a file tail can follow, or back.
+*/
+static fn tail_recheck(tail_file address_to f, bool blocking)
+{
+        file_facts facts;
+        bool ok = false;
+        bool is_stdin = tail_is_stdin(f);
+        bipolar before = f->error;
+        bipolar handle = is_stdin ? 0 : tail_open(f, blocking);
+        bipolar looked = handle >= 0 ? tail_look(handle, address_of facts) : handle;
+        file_facts link;
+
+        if (!tail_no_inotify && file_look_link(f->name, address_of link) &&
+            (link.mode & MODE_FORMAT) == MODE_LINK)
+        {
+                f->error = TAIL_ODD;
+                f->ignore = true;
+                tail_say(f, "has been replaced with an untailable symbolic link", 0);
+        }
+        else if (looked < 0)
+        {
+                f->error = looked;
+
+                if (handle < 0)
+                {
+                        if (f->tailable)
+                                tail_say(f, "has become inaccessible", looked);
+                }
+                else if (before != f->error)
+                        tail_say_plain(f, file_reason(looked));
+        }
+        else if (!tail_tailable_mode(facts.mode))
+        {
+                f->error = TAIL_ODD;
+                f->ignore = !(tail_retry && tail_follow_mode == 'n');
+
+                if (f->tailable || !(before == TAIL_ODD || before == -ERROR_IS_DIRECTORY))
+                        tail_say(f, f->ignore ? "has been replaced with an untailable file; giving up on this name"
+                                              : "has been replaced with an untailable file", 0);
+        }
+        else if ((f->remote = tail_remote(handle)) && !tail_no_inotify)
+        {
+                f->error = TAIL_ODD;
+                tail_say(f, "has been replaced with an untailable remote file", 0);
+                f->ignore = true;
+        }
+        else
+        {
+                ok = true;
+                f->error = 0;
+        }
+
+        f->tailable = ok;
+
+        bool fresh = false;
+
+        if (!ok)
+        {
+                tail_close(handle);
+                tail_close(f->handle);
+                f->handle = -1;
+        }
+        else if (before && before != -ERROR_NO_ENTRY)
+        {
+                fresh = true;
+                tail_say(f, "has become accessible", 0);
+        }
+        else if (f->handle < 0)
+        {
+                fresh = true;
+                tail_say(f, "has appeared;  following new file", 0);
+        }
+        else if (!tail_same_file(f, address_of facts))
+        {
+                fresh = true;
+                tail_say(f, "has been replaced;  following new file", 0);
+                tail_close(f->handle);
+        }
+        else
+                tail_close(handle);
+
+        if (fresh)
+                tail_record(f, handle, -1, address_of facts,
+                            is_stdin ? -1 : (b8)blocking);
+}
+
+static bool tail_any_live()
+{
+        if (tail_retry && tail_follow_mode == 'n')
+                return true;
+
+        for (positive i = 0; i < tail_files_count; i++)
+                if (tail_files[i].handle >= 0 ||
+                    (!tail_files[i].ignore && tail_retry))
+                        return true;
+
+        return false;
+}
+
+static fn tail_nap(positive nanoseconds)
+{
+        timespec span = {nanoseconds / 1000000000, nanoseconds % 1000000000};
+
+        system_call_2(syscall(nanosleep), (positive)address_of span, 0);
+}
+
+/*
+        tail_forever: every round fstats each file, copies what grew, says
+        when a regular file shrank, and writes the header of whichever file
+        is now speaking. A round in which nothing came flushes, checks the
+        writers --pid named, and sleeps; once they are gone one more round
+        runs without sleeping to take what they left, and the next quiet
+        round ends tail with the status its first pass earned.
+*/
+static b32 tail_polled(bool headers, bool okay)
+{
+        positive count = tail_files_count;
+        positive last = count - 1;
+        bool debugged = false;
+
+        for (;;)
+        {
+                bool blocking = !tail_pids_given && tail_follow_mode == 'd' &&
+                                count == 1 && tail_files[0].handle >= 0 &&
+                                !tail_regular(tail_files[0].mode);
+
+                if (tail_debug && !debugged)
+                {
+                        debugged = true;
+                        string_diagnostic(&text_diagnostic, 0, null,
+                                          blocking ? "using blocking mode" : "using polling mode");
+                }
+
+                bool any_input = false;
+
+                for (positive i = 0; i < count; i++)
+                {
+                        tail_file address_to f = tail_files + i;
+                        file_facts facts;
+
+                        if (f->ignore)
+                                continue;
+
+                        bipolar handle = f->handle;
+
+                        if (handle < 0)
+                        {
+                                tail_recheck(f, blocking);
+                                continue;
+                        }
+
+                        p16 mode = f->mode;
+
+                        if (f->blocking != (b8)blocking)
+                        {
+                                bipolar flags = system_call_3(syscall(fcntl), (positive)handle, 3, 0);
+                                bipolar wanted = flags | (blocking ? 0 : O_NONBLOCK);
+                                bipolar set = flags < 0 ? flags
+                                            : wanted != flags
+                                                ? system_call_3(syscall(fcntl), (positive)handle, 4,
+                                                                (positive)wanted)
+                                                : 0;
+
+                                if (set < 0)
+                                {
+                                        // An append-only file refuses the
+                                        // change, and is read as it is.
+                                        if (!(tail_regular(mode) && set == -ERROR_NOT_PERMITTED))
+                                        {
+                                                text_flush();
+                                                string_format(writer_stderr, "%s: %w: cannot change nonblocking mode: %s\n",
+                                                              text_name, writer_shell_name, f->shown,
+                                                              file_reason(set));
+                                                return 1;
+                                        }
+                                }
+                                else
+                                        f->blocking = (b8)blocking;
+                        }
+
+                        bool read_unchanged = false;
+
+                        if (!f->blocking)
+                        {
+                                bipolar looked = tail_look(handle, address_of facts);
+
+                                if (looked < 0)
+                                {
+                                        f->handle = -1;
+                                        f->error = looked;
+                                        tail_say_plain(f, file_reason(looked));
+                                        tail_close(handle);
+                                        continue;
+                                }
+
+                                if (f->mode == facts.mode &&
+                                    (!tail_regular(facts.mode) || f->read_at == facts.size) &&
+                                    tail_same_time(f, address_of facts))
+                                {
+                                        if (tail_max_unchanged <= f->unchanged++ &&
+                                            tail_follow_mode == 'n')
+                                        {
+                                                tail_recheck(f, f->blocking);
+                                                f->unchanged = 0;
+                                        }
+
+                                        if (handle != f->handle || tail_regular(facts.mode) || count > 1)
+                                                continue;
+
+                                        read_unchanged = true;
+                                }
+
+                                f->seconds = facts.modified.seconds;
+                                f->nanoseconds = facts.modified.nanoseconds;
+                                f->mode = facts.mode;
+
+                                if (!read_unchanged)
+                                        f->unchanged = 0;
+
+                                if (tail_regular(mode) && facts.size < f->read_at)
+                                {
+                                        tail_say_plain(f, "file truncated");
+                                        f->read_at = (positive)system_seek(handle, 0, FILE_SEEK_SET);
+                                }
+
+                                if (i != last)
+                                {
+                                        if (headers)
+                                                text_banner_named(f->name);
+                                        last = i;
+                                }
+                        }
+
+                        bipolar amount = f->blocking ? TAIL_A_BUFFER
+                                       : tail_regular(mode) && f->remote
+                                           ? (bipolar)(facts.size - f->read_at)
+                                           : TAIL_TO_END;
+                        bipolar got = tail_dump(f, false, amount);
+
+                        if (got < 0)
+                                return 1;
+
+                        if (got > 0)
+                        {
+                                if (tail_regular(mode))
+                                        f->read_at += (positive)got;
+                                if (read_unchanged)
+                                        f->unchanged = 0;
+                                any_input = true;
+                        }
+                }
+
+                if (!tail_any_live())
+                {
+                        string_diagnostic(&text_diagnostic, 0, null, "no files remaining");
+                        return 1;
+                }
+
+                if (!any_input || blocking)
+                        text_flush();
+
+                if (text_out_failed)
+                        return 1;
+
+                if (tail_output_broken())
+                        return tail_die_pipe();
+
+                if (!any_input)
+                {
+                        if (tail_pids_given)
+                        {
+                                if (!tail_pids_count)
+                                        break;
+                                if (!tail_writers_alive())
+                                        continue;
+                        }
+
+                        tail_nap(tail_sleep_ns);
+                }
+        }
+
+        return okay ? 0 : 1;
+}
+
+/*
+        GNU keeps its watches in a hash from watch descriptor to file,
+        where the first file to claim a descriptor keeps it; a handful of
+        files is a short walk, so the table is a flag on each.
+*/
+static tail_file address_to tail_listed(bipolar watch)
+{
+        for (positive i = 0; i < tail_files_count; i++)
+                if (tail_files[i].listed && tail_files[i].watch == watch)
+                        return tail_files + i;
+
+        return null;
+}
+
+static fn tail_list(tail_file address_to f)
+{
+        if (!tail_listed(f->watch))
+                f->listed = true;
+}
+
+static tail_file address_to tail_unlist(bipolar watch)
+{
+        tail_file address_to f = tail_listed(watch);
+
+        if (f)
+                f->listed = false;
+
+        return f;
+}
+
+static bipolar tail_watch(bipolar notify, string_address path, p32 mask)
+{
+        return system_call_3(syscall(inotify_add_watch), (positive)notify,
+                             (positive)path, mask);
+}
+
+static fn tail_unwatch(bipolar notify, bipolar watch)
+{
+        system_call_2(syscall(inotify_rm_watch), (positive)notify, (positive)watch);
+}
+
+// check_fspec: copy what one watched file has gained, its header first
+// when another file spoke last.
+static bool tail_check(tail_file address_to f, tail_file address_to address_to previous,
+                       bool headers)
+{
+        file_facts facts;
+
+        if (f->handle < 0)
+                return true;
+
+        bipolar looked = tail_look(f->handle, address_of facts);
+
+        if (looked < 0)
+        {
+                f->error = looked;
+                tail_close(f->handle);
+                f->handle = -1;
+                return true;
+        }
+
+        if (tail_regular(f->mode) && facts.size < f->read_at)
+        {
+                tail_say_plain(f, "file truncated");
+                f->read_at = (positive)system_seek(f->handle, 0, FILE_SEEK_SET);
+        }
+        else if (tail_regular(f->mode) && facts.size == f->read_at &&
+                 tail_same_time(f, address_of facts))
+                return true;
+
+        bipolar got = tail_dump(f, headers && f != address_to previous, TAIL_TO_END);
+
+        if (got < 0)
+                return false;
+
+        if (got > 0)
+        {
+                if (tail_regular(f->mode))
+                        f->read_at += (positive)got;
+                address_to previous = f;
+                text_flush();
+        }
+
+        return !text_out_failed;
+}
+
+// gnulib's last_component and dir_len, for the directory watched by name.
+static positive tail_base(string_address name)
+{
+        positive at = 0;
+        positive base = 0;
+        bool slash = false;
+
+        while (name[at] == '/')
+                at++;
+        base = at;
+
+        for (; name[at]; at++)
+                if (name[at] == '/')
+                        slash = true;
+                else if (slash)
+                {
+                        base = at;
+                        slash = false;
+                }
+
+        return base;
+}
+
+static positive tail_directory_length(string_address name, positive base)
+{
+        positive floor = name[0] == '/';
+        positive length = base;
+
+        while (floor < length && name[length - 1] == '/')
+                length--;
+
+        return length;
+}
+
+/*
+        tail_forever_inotify. Answers the status tail ends with, or
+        TAIL_REVERT when GNU would go back to polling: no watch to be had,
+        a file replaced before its watch was in place, or the directory
+        holding a name removed.
+*/
+static b32 tail_notified(bipolar notify, bool headers)
+{
+        static p8 events[16384] __attribute__((aligned(8)));
+        positive count = tail_files_count;
+        bool by_name = tail_follow_mode == 'n';
+        bool watchable = false;
+        bool unwatchable = false;
+        bool no_directory = false;
+        bool exhausted = false;
+        p32 mask = TAIL_IN_MODIFY |
+                   (by_name ? TAIL_IN_ATTRIB | TAIL_IN_DELETE_SELF | TAIL_IN_MOVE_SELF : 0);
+
+        for (positive i = 0; i < count; i++)
+        {
+                tail_file address_to f = tail_files + i;
+
+                if (f->ignore)
+                        continue;
+
+                f->watch = -1;
+
+                if (by_name)
+                {
+                        static p8 directory[4096];
+                        positive base = tail_base(f->name);
+                        positive length = tail_directory_length(f->name, base);
+
+                        f->base = base;
+                        f->parent = -ERROR_NAME_TOO_LONG;
+
+                        if (length < sizeof(directory))
+                        {
+                                memory_copy_apart(directory, f->name, length);
+                                directory[length] = 0;
+                                f->parent = tail_watch(notify,
+                                                       length ? (string_address)directory
+                                                              : (string_address) ".",
+                                                       TAIL_IN_CREATE | TAIL_IN_DELETE |
+                                                           TAIL_IN_MOVED_TO | TAIL_IN_ATTRIB |
+                                                           TAIL_IN_DELETE_SELF);
+                        }
+
+                        if (f->parent < 0)
+                        {
+                                if (f->parent != -ERROR_NO_SPACE)
+                                {
+                                        text_flush();
+                                        string_format(writer_stderr, "%s: cannot watch parent directory of %w: %s\n",
+                                                      text_name, writer_shell_quoted_name, f->name,
+                                                      file_reason(f->parent));
+                                }
+                                else
+                                        string_diagnostic(&text_diagnostic, 0, null, "inotify resources exhausted");
+                                no_directory = true;
+                                break;
+                        }
+                }
+
+                f->watch = tail_watch(notify, f->name, mask);
+
+                if (f->watch < 0)
+                {
+                        bipolar reason = f->watch;
+
+                        if (f->handle >= 0)
+                                unwatchable = true;
+
+                        if (reason == -ERROR_NO_SPACE || reason == -ERROR_NO_MEMORY)
+                        {
+                                exhausted = true;
+                                string_diagnostic(&text_diagnostic, 0, null, "inotify resources exhausted");
+                                break;
+                        }
+
+                        if (reason != f->error)
+                        {
+                                text_flush();
+                                string_format(writer_stderr, "%s: cannot watch %w: %s\n", text_name,
+                                              writer_shell_quoted_name, f->name, file_reason(reason));
+                        }
+                        continue;
+                }
+
+                tail_list(f);
+                watchable = true;
+        }
+
+        if (exhausted || no_directory || (!by_name && unwatchable))
+                return TAIL_REVERT;
+
+        if (!by_name && !watchable)
+                return 1;
+
+        tail_file address_to previous = tail_files + count - 1;
+
+        // What arrived between the first pass and the watches.
+        for (positive i = 0; i < count; i++)
+        {
+                tail_file address_to f = tail_files + i;
+
+                if (f->ignore)
+                        continue;
+
+                if (by_name)
+                        tail_recheck(f, false);
+                else if (f->handle >= 0)
+                {
+                        file_facts facts;
+
+                        if (file_look_at(f->name, address_of facts) &&
+                            !tail_same_file(f, address_of facts))
+                        {
+                                tail_say(f, "was replaced", 0);
+                                return TAIL_REVERT;
+                        }
+                }
+
+                if (!tail_check(f, address_of previous, headers))
+                        return 1;
+        }
+
+        if (tail_debug)
+                string_diagnostic(&text_diagnostic, 0, null, "using notification mode");
+
+        positive length = 0;
+        positive at = 0;
+
+        for (;;)
+        {
+                if (by_name && !tail_retry)
+                {
+                        positive listed = 0;
+
+                        for (positive i = 0; i < count; i++)
+                                listed += tail_files[i].listed;
+
+                        if (!listed)
+                        {
+                                string_diagnostic(&text_diagnostic, 0, null, "no files remaining");
+                                return 1;
+                        }
+                }
+
+                if (length <= at)
+                {
+                        system_poll_descriptor wait[2];
+                        bipolar ready;
+
+                        do
+                        {
+                                timespec limit = {0, 0};
+                                bool forever = true;
+
+                                if (tail_pids_given)
+                                {
+                                        if (!tail_pids_count)
+                                                return 0;
+
+                                        if (tail_writers_alive() && tail_sleep_ns)
+                                        {
+                                                // ceil to the millisecond, as poll's delay is.
+                                                positive ms = (tail_sleep_ns + 999999) / 1000000;
+
+                                                limit.tv_sec = ms / 1000;
+                                                limit.tv_nsec = ms % 1000 * 1000000;
+                                        }
+                                        forever = false;
+                                }
+
+                                wait[0] = (system_poll_descriptor){(b32)notify, SYSTEM_POLL_READ, 0};
+                                wait[1] = (system_poll_descriptor){1, 0, 0};
+                                ready = system_poll_wait(wait, tail_monitor ? 2 : 1,
+                                                         forever ? null : address_of limit, null);
+                        } while (ready == 0 || ready == -4);
+
+                        if (ready < 0)
+                        {
+                                string_diagnostic(&text_diagnostic, 0,
+                                                  (string_address) "error waiting for inotify and output events",
+                                                  file_reason(ready));
+                                return 1;
+                        }
+
+                        if (tail_monitor && wait[1].returned)
+                                return tail_die_pipe();
+
+                        bipolar got = system_read_retry((positive)notify, events, sizeof(events));
+
+                        if (got <= 0)
+                        {
+                                if (got < 0)
+                                        string_diagnostic(&text_diagnostic, 0,
+                                                          (string_address) "error reading inotify event",
+                                                          file_reason(got));
+                                else
+                                        string_diagnostic(&text_diagnostic, 0, null, "error reading inotify event");
+                                return 1;
+                        }
+
+                        length = (positive)got;
+                        at = 0;
+                }
+
+                b32 watch;
+                p32 happened, size;
+
+                memory_copy_apart(address_of watch, events + at, 4);
+                memory_copy_apart(address_of happened, events + at + 4, 4);
+                memory_copy_apart(address_of size, events + at + 12, 4);
+
+                string_address named = (string_address)(events + at + 16);
+
+                at += 16 + size;
+
+                if ((happened & TAIL_IN_DELETE_SELF) && !size)
+                        for (positive i = 0; i < count; i++)
+                                if (watch == tail_files[i].parent)
+                                {
+                                        string_diagnostic(&text_diagnostic, 0, null,
+                                                          "directory containing watched file was removed");
+                                        return TAIL_REVERT;
+                                }
+
+                tail_file address_to f = null;
+
+                if (size)
+                {
+                        positive j = 0;
+
+                        for (; j < count; j++)
+                                if (tail_files[j].parent == watch &&
+                                    string_equals(named, tail_files[j].name + tail_files[j].base))
+                                        break;
+
+                        if (j == count)
+                                continue;
+
+                        f = tail_files + j;
+
+                        bipolar fresh = -1;
+                        bool deleting = (happened & TAIL_IN_DELETE) != 0;
+
+                        if (!deleting)
+                        {
+                                fresh = tail_watch(notify, f->name, mask);
+
+                                if (fresh < 0)
+                                {
+                                        if (fresh == -ERROR_NO_SPACE || fresh == -ERROR_NO_MEMORY)
+                                        {
+                                                string_diagnostic(&text_diagnostic, 0, null,
+                                                                  "inotify resources exhausted");
+                                                return TAIL_REVERT;
+                                        }
+
+                                        text_flush();
+                                        string_format(writer_stderr, "%s: cannot watch %w: %s\n", text_name,
+                                                      writer_shell_quoted_name, f->name, file_reason(fresh));
+                                }
+                        }
+
+                        if (!deleting && (f->watch < 0 || fresh != f->watch))
+                        {
+                                if (f->watch >= 0)
+                                {
+                                        tail_unwatch(notify, f->watch);
+                                        tail_unlist(f->watch);
+                                }
+
+                                f->watch = fresh;
+
+                                if (fresh < 0)
+                                        continue;
+
+                                // A renamed file keeps its watch, so the
+                                // name it left may hold this descriptor.
+                                tail_file address_to other = tail_unlist(f->watch);
+
+                                if (other && other != f)
+                                {
+                                        if (by_name)
+                                                tail_recheck(other, false);
+                                        other->watch = -1;
+                                        tail_close(other->handle);
+                                        other->handle = -1;
+                                }
+
+                                tail_list(f);
+                        }
+
+                        if (by_name)
+                                tail_recheck(f, false);
+                }
+                else
+                        f = tail_listed(watch);
+
+                if (!f)
+                        continue;
+
+                if (happened & (TAIL_IN_ATTRIB | TAIL_IN_DELETE | TAIL_IN_DELETE_SELF |
+                                TAIL_IN_MOVE_SELF))
+                {
+                        if ((happened & TAIL_IN_DELETE_SELF) ||
+                            (!tail_retry && (happened & TAIL_IN_MOVE_SELF)))
+                        {
+                                tail_unwatch(notify, f->watch);
+                                tail_unlist(f->watch);
+                        }
+
+                        tail_recheck(f, false);
+                        continue;
+                }
+
+                if (!tail_check(f, address_of previous, headers))
+                        return 1;
+        }
+}
+
+/*
+        tail_file for each operand, then GNU's main from there: standard
+        input on a pipe is not followed, inotify is tried where it can hear
+        every change, and the rounds of tail_polled take over otherwise.
+*/
+static COLD b32 tail_follow_run(positive count, bool by_bytes, bool marked,
+                                bool headers)
+{
+        positive files = text_input_count();
+        bool hyphen = false;
+        bool okay = true;
+
+        tail_files_count = 0;
+
+        if (!array_store_reserve(tail_files, tail_files_room, 0, files, 16))
+                return string_diagnostic(&text_diagnostic, 0, null, "memory exhausted"), 1;
+
+        for (positive i = 0; i < files; i++)
+        {
+                tail_file address_to f = tail_files + i;
+                string_address name = text_file_name((b32)i);
+
+                memory_fill(f, 0, sizeof(*f));
+                f->name = name ? name : (string_address) "-";
+                f->shown = string_equals(f->name, "-") ? (string_address) "standard input"
+                                                       : f->name;
+                f->handle = -1;
+                f->watch = -1;
+                f->parent = -1;
+                hyphen |= string_equals(f->name, "-");
+        }
+
+        tail_files_count = files;
+
+        if (hyphen && tail_follow_mode == 'n')
+        {
+                text_flush();
+                string_format(writer_stderr, "%s: cannot follow '-' by name\n", text_name);
+                return 1;
+        }
+
+        if (hyphen)
+        {
+                file_facts facts;
+                bool blocking = !tail_pids_given && tail_follow_mode == 'd' && files == 1 &&
+                                tail_look(0, address_of facts) == 0 &&
+                                !tail_regular(facts.mode);
+
+                if (!blocking && stream_is_terminal(0))
+                        string_diagnostic(&text_diagnostic, 0, null,
+                                          "warning: following standard input indefinitely is ineffective");
+        }
+
+        bool nonblocking = tail_pids_given || files > 1;
+
+        text_again_ends = true;
+
+        for (positive i = 0; i < files && !text_out_failed; i++)
+        {
+                tail_file address_to f = tail_files + i;
+                bool is_stdin = tail_is_stdin(f);
+                bipolar handle = is_stdin ? 0 : tail_open(f, !nonblocking);
+                file_facts facts;
+
+                f->tailable = false;
+
+                if (handle < 0)
+                {
+                        f->error = handle;
+                        f->ignore = !tail_retry;
+                        text_file_failed(f->name, handle, false);
+                        okay = false;
+                        continue;
+                }
+
+                f->handle = handle;
+
+                if (headers)
+                        text_banner_named(f->name);
+
+                bipolar looked = tail_look(handle, address_of facts);
+                bool ok = looked == 0;
+
+                if (!ok)
+                {
+                        f->error = looked;
+                        text_flush();
+                        string_format(writer_stderr, "%s: cannot fstat %w: %s\n", text_name,
+                                      writer_shell_quoted_name, f->shown, file_reason(looked));
+                }
+                else
+                {
+                        text_reader_reset(address_of text_input, f->name);
+                        text_input.handle = (positive)handle;
+
+                        if (!tail_input(count, by_bytes, marked))
+                                return 1;
+
+                        ok = !text_input.failed;
+                        f->error = ok ? 0 : -ERROR_INPUT_OUTPUT;
+
+                        if (tail_tailable_mode(facts.mode))
+                                f->tailable = true;
+                        else
+                        {
+                                ok = false;
+                                f->error = TAIL_ODD;
+                                tail_say_plain(f, tail_retry ? "cannot follow end of this type of file"
+                                                             : "cannot follow end of this type of file; giving up on this name");
+                        }
+                }
+
+                if (!ok)
+                {
+                        okay = false;
+                        f->ignore = !tail_retry;
+                        tail_close(handle);
+                        f->handle = -1;
+                        continue;
+                }
+
+                // Where the reader stands: what it read less what it holds.
+                bipolar read_at = -1;
+
+                if (tail_regular(facts.mode))
+                        read_at = (bipolar)text_stream_floor();
+
+                tail_record(f, handle, read_at, address_of facts, is_stdin ? -1 : 1);
+                f->remote = tail_remote(handle);
+        }
+
+        if (text_out_failed)
+                return 1;
+
+        // A pipe on standard input is read once and not followed: POSIX
+        // asks it of the operand-less tail, and GNU of every -.
+        bool viable = false;
+
+        for (positive i = 0; i < files; i++)
+        {
+                tail_file address_to f = tail_files + i;
+
+                if (tail_is_stdin(f) && !f->ignore && f->handle >= 0 &&
+                    (f->mode & MODE_FORMAT) == MODE_PIPE)
+                {
+                        f->handle = -1;
+                        f->error = TAIL_ODD;
+                        f->ignore = true;
+                }
+                else
+                        viable = true;
+        }
+
+        if (!viable)
+                return okay ? 0 : 1;
+
+        file_facts out;
+        bipolar looked = tail_look(1, address_of out);
+
+        if (looked < 0)
+        {
+                string_diagnostic(&text_diagnostic, 0, (string_address) "standard output",
+                                  file_reason(looked));
+                return 1;
+        }
+
+        tail_monitor = (out.mode & MODE_FORMAT) == MODE_PIPE;
+
+        if (!tail_no_inotify)
+        {
+                bool any_local = false;
+
+                for (positive i = 0; i < files; i++)
+                {
+                        tail_file address_to f = tail_files + i;
+                        file_facts link;
+
+                        if ((!f->ignore && tail_is_stdin(f)) ||
+                            (f->handle >= 0 && f->remote) ||
+                            (file_look_link(f->name, address_of link) &&
+                             (link.mode & MODE_FORMAT) == MODE_LINK) ||
+                            (f->handle >= 0 && !tail_regular(f->mode) &&
+                             (f->mode & MODE_FORMAT) != MODE_PIPE))
+                                tail_no_inotify = true;
+
+                        any_local |= f->handle >= 0 && !f->remote;
+                }
+
+                if (!any_local || (!okay && tail_follow_mode == 'd'))
+                        tail_no_inotify = true;
+        }
+
+        if (!tail_no_inotify)
+        {
+                bipolar notify = system_call_1(syscall(inotify_init1), O_CLOEXEC);
+                bipolar reason = notify;
+
+                if (notify >= 0)
+                {
+                        text_flush();
+
+                        b32 status = tail_notified(notify, headers);
+
+                        system_close((positive)notify);
+
+                        if (status != TAIL_REVERT)
+                                return status;
+
+                        reason = 0;
+                }
+
+                if (text_out_failed)
+                        return 1;
+
+                if (reason < 0)
+                        string_diagnostic(&text_diagnostic, 0,
+                                          (string_address) "inotify cannot be used, reverting to polling",
+                                          file_reason(reason));
+                else
+                        string_diagnostic(&text_diagnostic, 0, null,
+                                          "inotify cannot be used, reverting to polling");
+        }
+
+        tail_no_inotify = true;
+        return tail_polled(headers, okay);
+}
+
+static COLD b32 tail_follow(positive count, bool by_bytes, bool marked, bool headers)
+{
+        b32 status = tail_follow_run(count, by_bytes, marked, headers);
+
+        for (positive i = 0; i < tail_files_count; i++)
+                tail_close(tail_files[i].handle);
+
+        tail_files_count = 0;
+        text_input.opened = false;
+        return text_done(status);
+}
 
 /*
         The long spellings tee answers to.
