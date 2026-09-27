@@ -13496,119 +13496,9 @@ static p64 statfs_identity(file_mount_facts address_to facts)
         return ((p64)(p32)facts->identity[0] << 32) | (p32)facts->identity[1];
 }
 
-/*
-        A stat format, walked once: everything up to the next % goes out as it
-        stands and the letter after it is handed to the tool's own specifier.
-        stat and stat -f differ only in what a letter means and in what they
-        read it from, so both of those come in and neither walker is written
-        twice.
-*/
-static fn stat_percent_walk(string_address format, string_address path,
-                            address_any facts,
-                            fn(address_to one)(p8 letter, string_address path,
-                                               address_any facts))
-{
-        string_address step = format;
-
-        while (string_get(step))
-        {
-                string_address mark = string_first_of_or_end(step, '%');
-
-                if (mark != step)
-                        log(step, (positive)(mark - step));
-
-                if (!string_get(mark))
-                        break;
-
-                if (string_get(mark + 1))
-                {
-                        one(string_get(mark + 1), path, facts);
-                        step = mark + 2;
-                        continue;
-                }
-
-                log("%", 1);
-                break;
-        }
-
-        log("\n", 1);
-}
-
-static fn statfs_one_specifier(p8 letter, string_address path, address_any given)
-{
-        file_mount_facts address_to facts = given;
-
-        switch (letter)
-        {
-        case 'n':
-                return log(path, 0);
-        case 'i':
-                return positive_to_base_field(log, statfs_identity(facts), 16, 16,
-                                              -1, (positive)1 << 28);
-        case 'l':
-                return positive_to_string(log, facts->name_length);
-        case 's':
-                return positive_to_string(log, facts->block_size);
-        case 'S':
-                return positive_to_string(log, facts->fragment_size);
-        case 'b':
-                return positive_to_string(log, facts->blocks);
-        case 'f':
-                return positive_to_string(log, facts->blocks_free);
-        case 'a':
-                return positive_to_string(log, facts->blocks_available);
-        case 'c':
-                return positive_to_string(log, facts->files);
-        case 'd':
-                return positive_to_string(log, facts->files_free);
-        case 'T':
-                return log(statfs_type_name(facts->type), 0);
-        case 't':
-                return positive_to_base_field(log, (p64)facts->type, 16, 1, -1, 0);
-        case '%':
-                return log("%", 1);
-        }
-
-        log("?", 1);
-}
-
-static fn statfs_readable(string_address path, file_mount_facts address_to facts)
-{
-        p8 text[64];
-
-        log("  File: \"", 0);
-        log(path, 0);
-        log("\"\n    ID: ", 0);
-        positive_to_base_field(log, statfs_identity(facts), 16, 16, -1,
-                               (positive)1 << 28);
-        log(" Namelen: ", 0);
-        positive_into_string(text, facts->name_length);
-        string_to_field_bulk(log, text, 8, ' ', true);
-        log("Type: ", 0);
-        log(statfs_type_name(facts->type), 0);
-
-        log("\nBlock size: ", 0);
-        positive_into_string(text, facts->block_size);
-        string_to_field_bulk(log, text, 11, ' ', true);
-        log("Fundamental block size: ", 0);
-        positive_to_string(log, facts->fragment_size);
-
-        log("\nBlocks: Total: ", 0);
-        positive_into_string(text, facts->blocks);
-        string_to_field_bulk(log, text, 11, ' ', true);
-        log("Free: ", 0);
-        positive_into_string(text, facts->blocks_free);
-        string_to_field_bulk(log, text, 11, ' ', true);
-        log("Available: ", 0);
-        positive_to_string(log, facts->blocks_available);
-
-        log("\nInodes: Total: ", 0);
-        positive_into_string(text, facts->files);
-        string_to_field_bulk(log, text, 11, ' ', true);
-        log("Free: ", 0);
-        positive_to_string(log, facts->files_free);
-        log("\n", 1);
-}
+#define STAT_FLAGS "'-+ #0I"
+#define STAT_FORCE_SYNC 0x2000
+#define STAT_DONT_SYNC 0x4000
 
 /* A regular file with nothing in it has its own spelling in coreutils, and
    both the default layout and %F use it. */
@@ -13621,245 +13511,831 @@ static RETURNS_NONNULL string_address file_kind_told(
         return file_kind_name(facts->mode);
 }
 
-static fn stat_one_specifier(p8 letter, string_address path, address_any given)
+/*
+        A directive as coreutils' print_it reads it: the flags, width and
+        precision between the % and its letter, each kind of value taking the
+        flags printf gives it -- a string only -, a signed number ' - + space
+        and 0, an unsigned one ' - and 0, octal and hex - # and 0 -- and
+        dropping the rest rather than refusing them. The thousands flag
+        groups nothing in the C locale.
+*/
+typedef struct
 {
-        file_facts address_to facts = given;
-        p8 text[FILE_PATH_MAX];
+        bool left, plus, space, alternate, zero, precise;
+        positive width, precision;
+} stat_spec;
+
+static positive stat_digits(string_address at, positive address_to value)
+{
+        positive length = 0;
+
+        address_to value = 0;
+        while (byte_is_digit(string_get(at + length)))
+        {
+                if (address_to value < 100000000u)
+                        address_to value = address_to value * 10 +
+                                           (positive)(string_get(at + length) - '0');
+                length++;
+        }
+        return length;
+}
+
+static fn stat_spec_read(string_address prefix, positive length,
+                         stat_spec address_to spec)
+{
+        positive at = 0;
+
+        address_to spec = (stat_spec){0};
+        for (; at < length && string_first_of(STAT_FLAGS, string_get(prefix + at)); at++)
+        {
+                p8 flag = string_get(prefix + at);
+
+                spec->left |= flag == '-';
+                spec->plus |= flag == '+';
+                spec->space |= flag == ' ';
+                spec->alternate |= flag == '#';
+                spec->zero |= flag == '0';
+        }
+        at += stat_digits(prefix + at, address_of spec->width);
+        if (at < length && string_get(prefix + at) == '.')
+        {
+                spec->precise = true;
+                stat_digits(prefix + at + 1, address_of spec->precision);
+        }
+}
+
+static fn stat_pad(positive count, p8 byte)
+{
+        writer_fill(log, count, byte);
+}
+
+static positive stat_out_text(stat_spec address_to spec, string_address text,
+                              positive length)
+{
+        if (spec->precise && length > spec->precision)
+                length = spec->precision;
+
+        positive pad = spec->width > length ? spec->width - length : 0;
+
+        if (!spec->left)
+                stat_pad(pad, ' ');
+        log(text, length);
+        if (spec->left)
+                stat_pad(pad, ' ');
+        return length + pad;
+}
+
+/* kind is d, u, o or x, and a minus zero is the "-0" of a negative second
+   that rounds to nothing. Answers the bytes written. */
+static positive stat_out_number(stat_spec address_to given, p8 kind,
+                                positive magnitude, bool negative,
+                                bool minus_zero)
+{
+        stat_spec spec = address_to given;
+        p8 digits[96];
+        p8 sign[3];
+        positive base = kind == 'o' ? 8 : kind == 'x' ? 16 : 10;
+        positive count = 0;
+        positive signs = 0;
+
+        if (kind != 'd')
+                spec.plus = spec.space = false;
+        if (kind == 'd' || kind == 'u')
+                spec.alternate = false;
+        if (minus_zero)
+                spec.precise = false;
+
+        if (!(spec.precise && !spec.precision && !magnitude) || minus_zero)
+                do
+                {
+                        digits[sizeof(digits) - 1 - count++] =
+                            (p8)"0123456789abcdef"[magnitude % base];
+                        magnitude /= base;
+                } while (magnitude);
+
+        while (spec.precise && count < spec.precision && count < sizeof(digits) - 8)
+                digits[sizeof(digits) - 1 - count++] = '0';
+
+        if (kind == 'o' && spec.alternate &&
+            (!count || digits[sizeof(digits) - count] != '0'))
+                digits[sizeof(digits) - 1 - count++] = '0';
+
+        if (negative)
+                sign[signs++] = '-';
+        else if (spec.plus)
+                sign[signs++] = '+';
+        else if (spec.space)
+                sign[signs++] = ' ';
+        if (kind == 'x' && spec.alternate && count &&
+            !(count == 1 && digits[sizeof(digits) - 1] == '0'))
+        {
+                sign[signs++] = '0';
+                sign[signs++] = 'x';
+        }
+
+        positive length = signs + count;
+        positive pad = spec.width > length ? spec.width - length : 0;
+
+        if (!spec.left && !(spec.zero && !spec.precise))
+                stat_pad(pad, ' ');
+        log(sign, signs);
+        if (!spec.left && spec.zero && !spec.precise)
+                stat_pad(pad, '0');
+        log(digits + sizeof(digits) - count, count);
+        if (spec.left)
+                stat_pad(pad, ' ');
+        return length + pad;
+}
+
+static fn stat_out_unsigned(string_address prefix, positive length, p8 kind,
+                            positive value)
+{
+        stat_spec spec;
+
+        stat_spec_read(prefix, length, address_of spec);
+        stat_out_number(address_of spec, kind, value, false, false);
+}
+
+/*
+        Seconds since the epoch the way out_epoch_sec prints them, which is
+        printf's %f made of two integers: the precision says how many digits
+        of the nanoseconds follow the point (nine when the point stands
+        alone, and zeros past nine), and a width counts the whole number, so
+        the part before the point is given what is left of it.
+*/
+static fn stat_out_epoch(string_address prefix, positive length, b64 seconds,
+                         positive nanoseconds)
+{
+        p8 whole[64];
+        positive whole_length = length < sizeof(whole) - 16 ? length : sizeof(whole) - 16;
+        string_address dot = memory_first_of(prefix, '.', length);
+        positive precision = 0;
+        positive width = 0;
+
+        memory_copy_apart(whole, prefix, whole_length);
+
+        if (dot)
+        {
+                positive before = (positive)(dot - prefix);
+
+                whole_length = before;
+                if (byte_is_digit(string_get(dot + 1)))
+                        stat_digits(dot + 1, address_of precision);
+                else
+                        precision = 9;
+
+                if (precision && before && byte_is_digit(string_get(prefix + before - 1)))
+                {
+                        positive run = before;
+
+                        while (run && byte_is_digit(string_get(prefix + run - 1)))
+                                run--;
+                        stat_digits(prefix + run, address_of width);
+                        if (width > 1)
+                        {
+                                run += string_get(prefix + run) == '0';
+                                whole_length = run;
+                                if (width - 1 > 1 && width - 1 > precision + 1)
+                                {
+                                        positive kept = 0;
+                                        bool left = false;
+
+                                        for (positive at = 0; at < run; at++)
+                                        {
+                                                if (string_get(prefix + at) == '-')
+                                                        left = true;
+                                                else
+                                                        whole[kept++] = string_get(prefix + at);
+                                        }
+                                        if (!left)
+                                                kept += positive_into_string(
+                                                    whole + kept, width - 1 - precision);
+                                        whole_length = kept;
+                                }
+                        }
+                }
+        }
+
+        positive divisor = 1;
+
+        for (positive at = precision; at < 9; at++)
+                divisor *= 10;
+
+        positive fraction = nanoseconds / divisor;
+        bool minus_zero = false;
+
+        if (seconds < 0 && nanoseconds)
+        {
+                fraction = 1000000000u / divisor - fraction - (nanoseconds % divisor != 0);
+                seconds += fraction != 0;
+                minus_zero = seconds == 0;
+        }
+
+        stat_spec spec;
+
+        stat_spec_read(whole, whole_length, address_of spec);
+        spec.alternate = false;
+
+        positive written = stat_out_number(address_of spec, 'd',
+                                           seconds < 0 ? (positive)-seconds : (positive)seconds,
+                                           seconds < 0 || minus_zero, minus_zero);
+
+        if (!precision)
+                return;
+
+        /* The zeros past the ninth digit, in a field that is what the
+           width has left over -- printf's %-*.*d, where a field worked out
+           below zero is still that many columns, to the left. */
+        positive shown = precision < 9 ? precision : 9;
+        bipolar trailing = written < width && 1 < width - written
+                               ? (bipolar)width - (bipolar)written - 1 - (bipolar)shown : 0;
+        positive field = trailing < 0 ? (positive)-trailing : (positive)trailing;
+
+        log(".", 1);
+        positive_to_padded(log, fraction, shown, '0', 0);
+        stat_pad(precision - shown, '0');
+        if (field > precision - shown)
+                stat_pad(field - (precision - shown), ' ');
+}
+
+/* Text gathered for a directive that takes a width: a stamp, a quoted name. */
+static p8 stat_piece[FILE_PATH_MAX * 4 + 64];
+static positive stat_piece_used;
+
+static fn stat_piece_add(address_any data, positive length)
+{
+        if (!length)
+                length = string_length((string_address)data);
+        if (length > sizeof(stat_piece) - stat_piece_used)
+                length = sizeof(stat_piece) - stat_piece_used;
+        memory_copy_apart(stat_piece + stat_piece_used, data, length);
+        stat_piece_used += length;
+}
+
+static fn stat_out_gathered(string_address prefix, positive length)
+{
+        stat_spec spec;
+
+        stat_spec_read(prefix, length, address_of spec);
+        stat_out_text(address_of spec, stat_piece, stat_piece_used);
+        stat_piece_used = 0;
+}
+
+static fn stat_out_string(string_address prefix, positive length,
+                          string_address text)
+{
+        stat_piece_used = 0;
+        stat_piece_add(text, 0);
+        stat_out_gathered(prefix, length);
+}
+
+static fn stat_out_stamp(string_address prefix, positive length, b64 seconds,
+                         positive nanoseconds)
+{
+        stat_piece_used = 0;
+        file_stamp(stat_piece_add, seconds, nanoseconds);
+        stat_out_gathered(prefix, length);
+}
+
+/* %N quotes as QUOTING_STYLE says, shell-escape-always when it says nothing;
+   the default layout's name is written as it stands. */
+static fn stat_out_quoted(string_address prefix, positive length,
+                          string_address name)
+{
+        stat_piece_used = 0;
+        ls_quote(stat_piece_add, name);
+        stat_out_gathered(prefix, length);
+}
+
+/*
+        The mount a file is on, found as coreutils' find_mount_point finds
+        it: from the file's directory -- the file itself when it is one --
+        up through its parents until the next one up is on another device or
+        is the same directory, which only the root is.
+*/
+static bool stat_out_mount(string_address prefix, positive length,
+                           string_address path, file_facts address_to facts)
+{
+        p8 place[FILE_PATH_MAX];
+        p8 above[FILE_PATH_MAX];
+        file_facts here;
+        file_facts up;
+
+        if (!file_resolve_as(path, place, stat_follow || (facts->mode & MODE_FORMAT) != MODE_LINK,
+                             FILE_RESOLVE_DIRECTORIES))
+        {
+                string_format(log_error, "stat: failed to canonicalize %w: %s\n",
+                              writer_shell_quoted_name, path, file_reason(-ERROR_NO_ENTRY));
+                stat_out_string(prefix, length, (string_address) "?");
+                return true;
+        }
+
+        if ((facts->mode & MODE_FORMAT) != MODE_DIRECTORY)
+        {
+                path_head_copy(above, FILE_PATH_MAX, place);
+                string_copy_max_end(place, above, FILE_PATH_MAX - 1);
+        }
+
+        if (file_look_code(AT_FDCWD, place, 0, address_of here) < 0)
+        {
+                stat_out_string(prefix, length, (string_address) "?");
+                return true;
+        }
+
+        while (!string_equals(place, "/"))
+        {
+                path_head_copy(above, FILE_PATH_MAX, place);
+                if (file_look_code(AT_FDCWD, above, 0, address_of up) < 0 ||
+                    up.device_major != here.device_major ||
+                    up.device_minor != here.device_minor ||
+                    up.inode == here.inode)
+                        break;
+                string_copy_max_end(place, above, FILE_PATH_MAX - 1);
+                here = up;
+        }
+
+        stat_out_string(prefix, length, place);
+        return false;
+}
+
+static bool stat_out_context(string_address prefix, positive length,
+                             string_address path)
+{
+        p8 context[256];
+        bipolar got = system_call_4(stat_follow ? syscall(getxattr) : syscall(lgetxattr),
+                                    (positive)path, (positive) "security.selinux",
+                                    (positive)context, sizeof(context) - 1);
+
+        /* No label at all is what libselinux calls unsupported. */
+        if (got < 0)
+        {
+                string_format(log_error, "stat: failed to get security context of %w: %s\n",
+                              writer_shell_quoted_name, path,
+                              got == -61 ? (string_address) "Operation not supported"
+                                         : file_reason(got));
+                stat_out_string(prefix, length, (string_address) "?");
+                return true;
+        }
+
+        context[got] = end;
+        stat_out_string(prefix, length, context);
+        return false;
+}
+
+static bool statfs_directive(string_address prefix, positive length, p8 letter,
+                             p8 modifier, string_address path, address_any given)
+{
+        file_mount_facts address_to facts = given;
+        stat_spec spec;
+
+        (void)modifier;
+        stat_spec_read(prefix, length, address_of spec);
 
         switch (letter)
         {
         case 'n':
-                log(path, 0);
-                return;
-
-        case 'N':
-                log("'", 1);
-                log(path, 0);
-                log("'", 1);
-
-                if ((facts->mode & MODE_FORMAT) == MODE_LINK &&
-                    file_link_text(path, text, FILE_PATH_MAX) >= 0)
-                {
-                        log(" -> '", 0);
-                        log(text, 0);
-                        log("'", 1);
-                }
-
-                return;
-
-        case 's':
-                return positive_to_string(log, facts->size);
-
-        case 'b':
-                return positive_to_string(log, facts->blocks);
-
-        case 'B':
-                return positive_to_string(log, 512);
-
-        case 'a':
-                return positive_to_base_field(log, facts->mode & 07777, 8, 1,
-                                              -1, (positive)1 << 28);
-
-        case 'A':
-                file_mode_letters(text, facts->mode);
-                return log(text, 10);
-
-        case 'f':
-                return positive_to_base_field(log, facts->mode, 16, 1,
-                                              -1, (positive)1 << 28);
-
-        case 'F':
-                return log(file_kind_told(facts), 0);
-
-        case 'h':
-                return positive_to_string(log, facts->hard_links);
-
+                stat_out_string(prefix, length, path);
+                break;
         case 'i':
-                return positive_to_string(log, facts->inode);
-
-        case 'u':
-                return positive_to_string(log, facts->owner);
-
-        case 'g':
-                return positive_to_string(log, facts->group);
-
-        case 'U':
-                file_account_label(facts->owner, false, true, text);
-                return log(text, 0);
-
-        case 'G':
-                file_account_label(facts->group, true, true, text);
-                return log(text, 0);
-
-        case 'o':
-                return positive_to_string(log, facts->blocksize);
-
-        case 'd':
-                return positive_to_string(log, file_device(facts->device_major,
-                                                           facts->device_minor));
-
+                stat_out_unsigned(prefix, length, 'x', statfs_identity(facts));
+                break;
+        case 'l':
+                stat_out_unsigned(prefix, length, 'u', facts->name_length);
+                break;
         case 't':
-                return positive_to_base_field(log, facts->rdev_major, 16, 1,
-                                              -1, (positive)1 << 28);
-
+                stat_out_unsigned(prefix, length, 'x', (p64)facts->type);
+                break;
         case 'T':
-                return positive_to_base_field(log, facts->rdev_minor, 16, 1,
-                                              -1, (positive)1 << 28);
-
-        case 'X':
-                return bipolar_to_string(log, facts->accessed.seconds);
-
-        case 'Y':
-                return bipolar_to_string(log, facts->modified.seconds);
-
-        case 'Z':
-                return bipolar_to_string(log, facts->changed.seconds);
-
-        case 'W':
-                return bipolar_to_string(log, (facts->mask & STATX_BIRTH)
-                                            ? facts->created.seconds
-                                            : (b64)0);
-
-        case 'x':
-                return file_stamp(log, facts->accessed.seconds, facts->accessed.nanoseconds);
-
-        case 'y':
-                return file_stamp(log, facts->modified.seconds, facts->modified.nanoseconds);
-
-        case 'z':
-                return file_stamp(log, facts->changed.seconds, facts->changed.nanoseconds);
-
-        case 'w':
-                if (!(facts->mask & STATX_BIRTH))
-                        return log("-", 1);
-
-                return file_stamp(log, facts->created.seconds, facts->created.nanoseconds);
-
-        case '%':
-                return log("%", 1);
+                stat_out_string(prefix, length, statfs_type_name(facts->type));
+                break;
+        case 'b':
+                stat_out_number(address_of spec, 'd', facts->blocks, false, false);
+                break;
+        case 'f':
+                stat_out_number(address_of spec, 'd', facts->blocks_free, false, false);
+                break;
+        case 'a':
+                stat_out_number(address_of spec, 'd', facts->blocks_available, false, false);
+                break;
+        case 's':
+                stat_out_unsigned(prefix, length, 'u', facts->block_size);
+                break;
+        case 'S':
+                stat_out_unsigned(prefix, length, 'u',
+                                  facts->fragment_size ? facts->fragment_size
+                                                       : facts->block_size);
+                break;
+        case 'c':
+                stat_out_unsigned(prefix, length, 'u', facts->files);
+                break;
+        case 'd':
+                stat_out_number(address_of spec, 'd', facts->files_free, false, false);
+                break;
+        default:
+                log("?", 1);
         }
 
-        log("?", 1);
+        return false;
+}
+
+static bool stat_directive(string_address prefix, positive length, p8 letter,
+                           p8 modifier, string_address path, address_any given)
+{
+        file_facts address_to facts = given;
+        p8 text[FILE_PATH_MAX];
+        positive device = file_device(facts->device_major, facts->device_minor);
+        positive special = file_device(facts->rdev_major, facts->rdev_minor);
+
+        switch (letter)
+        {
+        case 'n':
+                stat_out_string(prefix, length, path);
+                break;
+        case 'N':
+                stat_out_quoted(prefix, length, path);
+                if ((facts->mode & MODE_FORMAT) == MODE_LINK)
+                {
+                        bipolar read = file_link_text(path, text, FILE_PATH_MAX);
+
+                        if (read < 0)
+                        {
+                                string_format(log_error, "stat: cannot read symbolic link %w: %s\n",
+                                              writer_shell_quoted_name, path, file_reason(read));
+                                return true;
+                        }
+                        log(" -> ", 4);
+                        stat_out_quoted(prefix, length, text);
+                }
+                break;
+        case 'd':
+                stat_out_unsigned(prefix, length, 'u',
+                                  modifier == 'H' ? facts->device_major
+                                  : modifier == 'L' ? facts->device_minor : device);
+                break;
+        case 'D':
+                stat_out_unsigned(prefix, length, 'x', device);
+                break;
+        case 'i':
+                stat_out_unsigned(prefix, length, 'u', facts->inode);
+                break;
+        case 'a':
+                stat_out_unsigned(prefix, length, 'o', facts->mode & 07777);
+                break;
+        case 'A':
+                file_mode_letters(text, facts->mode);
+                text[10] = end;
+                stat_out_string(prefix, length, text);
+                break;
+        case 'f':
+                stat_out_unsigned(prefix, length, 'x', facts->mode);
+                break;
+        case 'F':
+                stat_out_string(prefix, length, file_kind_told(facts));
+                break;
+        case 'h':
+                stat_out_unsigned(prefix, length, 'u', facts->hard_links);
+                break;
+        case 'u':
+                stat_out_unsigned(prefix, length, 'u', facts->owner);
+                break;
+        case 'g':
+                stat_out_unsigned(prefix, length, 'u', facts->group);
+                break;
+        case 'U':
+        case 'G':
+                stat_out_string(prefix, length,
+                                file_account_label(letter == 'U' ? facts->owner : facts->group,
+                                                   letter == 'G', true, text)
+                                    ? (string_address)text : (string_address) "UNKNOWN");
+                break;
+        case 'm':
+                return stat_out_mount(prefix, length, path, facts);
+        case 's':
+                stat_out_unsigned(prefix, length, 'u', facts->size);
+                break;
+        case 'r':
+                stat_out_unsigned(prefix, length, 'u',
+                                  modifier == 'H' ? facts->rdev_major
+                                  : modifier == 'L' ? facts->rdev_minor : special);
+                break;
+        case 'R':
+                stat_out_unsigned(prefix, length, 'x', special);
+                break;
+        case 't':
+                stat_out_unsigned(prefix, length, 'x', facts->rdev_major);
+                break;
+        case 'T':
+                stat_out_unsigned(prefix, length, 'x', facts->rdev_minor);
+                break;
+        case 'B':
+                stat_out_unsigned(prefix, length, 'u', 512);
+                break;
+        case 'b':
+                stat_out_unsigned(prefix, length, 'u', facts->blocks);
+                break;
+        case 'o':
+                stat_out_unsigned(prefix, length, 'u', facts->blocksize);
+                break;
+        case 'w':
+                if (facts->mask & STATX_BIRTH)
+                        stat_out_stamp(prefix, length, facts->created.seconds,
+                                       facts->created.nanoseconds);
+                else
+                        stat_out_string(prefix, length, (string_address) "-");
+                break;
+        case 'W':
+                if (facts->mask & STATX_BIRTH)
+                        stat_out_epoch(prefix, length, facts->created.seconds,
+                                       facts->created.nanoseconds);
+                else
+                        stat_out_epoch(prefix, length, 0, 0);
+                break;
+        case 'x':
+                stat_out_stamp(prefix, length, facts->accessed.seconds,
+                               facts->accessed.nanoseconds);
+                break;
+        case 'X':
+                stat_out_epoch(prefix, length, facts->accessed.seconds,
+                               facts->accessed.nanoseconds);
+                break;
+        case 'y':
+                stat_out_stamp(prefix, length, facts->modified.seconds,
+                               facts->modified.nanoseconds);
+                break;
+        case 'Y':
+                stat_out_epoch(prefix, length, facts->modified.seconds,
+                               facts->modified.nanoseconds);
+                break;
+        case 'z':
+                stat_out_stamp(prefix, length, facts->changed.seconds,
+                               facts->changed.nanoseconds);
+                break;
+        case 'Z':
+                stat_out_epoch(prefix, length, facts->changed.seconds,
+                               facts->changed.nanoseconds);
+                break;
+        case 'C':
+                return stat_out_context(prefix, length, path);
+        default:
+                log("?", 1);
+        }
+
+        return false;
+}
+
+/* One backslash escape of --printf, from just past the backslash. Answers
+   where the escape ends. */
+static string_address stat_escape(string_address at)
+{
+        p8 byte = string_get(at);
+
+        if (byte >= '0' && byte <= '7')
+        {
+                positive value = 0;
+                positive digits = 0;
+
+                while (digits < 3 && string_get(at) >= '0' && string_get(at) <= '7')
+                        value = value * 8 + (positive)(string_get(at++) - '0'), digits++;
+                p8 out = (p8)value;
+                log(address_of out, 1);
+                return at;
+        }
+
+        if (byte == 'x' && byte_is_hexadecimal(string_get(at + 1)))
+        {
+                positive value = digit_known(string_get(at + 1), 16);
+
+                at += 2;
+                if (byte_is_hexadecimal(string_get(at)))
+                        value = value * 16 + digit_known(string_get(at++), 16);
+                p8 out = (p8)value;
+                log(address_of out, 1);
+                return at;
+        }
+
+        if (!byte)
+        {
+                log_error("stat: warning: backslash at end of format\n", 0);
+                log("\\", 1);
+                return at;
+        }
+
+        p8 out = byte == 'a' ? 7 : byte == 'b' ? 8 : byte == 'e' ? 27
+               : byte == 'f' ? 12 : byte == 'n' ? 10 : byte == 'r' ? 13
+               : byte == 't' ? 9 : byte == 'v' ? 11 : byte;
+
+        if (out == byte && byte != '"' && byte != '\\')
+        {
+                p8 spelled[2] = {byte, end};
+
+                string_format(log_error, "stat: warning: unrecognized escape '\\%s'\n",
+                              (string_address)spelled);
+        }
+        log(address_of out, 1);
+        return at + 1;
 }
 
 /*
-        -c is a format, not a printf: the system's own stat reads backslash
-        escapes only under --printf, and a format that said \t would print
-        those two characters. So does this one.
+        A format, walked once: %% is a percent sign and so is a lone % at
+        the end, a directive with flags before %% is refused as invalid,
+        %Hd %Ld %Hr %Lr are the halves of a device number, and the letter
+        of any other directive goes to the tool's own writer with what came
+        between. Backslashes are escapes only under --printf. Answers 1 for
+        a directive that could not be answered, 2 for a refused format.
 */
-static fn stat_readable(string_address path, file_facts address_to facts)
+static b32 stat_walk(string_address format, string_address path, address_any facts,
+                     bool file_system, bool escapes)
 {
-        p8 text[FILE_PATH_MAX];
+        b32 failed = 0;
 
-        log("  File: ", 0);
-        log(path, 0);
-
-        if ((facts->mode & MODE_FORMAT) == MODE_LINK &&
-            file_link_text(path, text, FILE_PATH_MAX) >= 0)
+        for (string_address at = format; string_get(at);)
         {
-                log(" -> ", 0);
-                log(text, 0);
+                if (string_get(at) == '\\' && escapes)
+                {
+                        at = stat_escape(at + 1);
+                        continue;
+                }
+
+                if (string_get(at) != '%')
+                {
+                        string_address mark = string_first_of_or_end(at, '%');
+                        string_address slash = escapes ? string_first_of(at, '\\') : null;
+
+                        if (slash && slash < mark)
+                                mark = slash;
+                        log(at, (positive)(mark - at));
+                        at = mark;
+                        continue;
+                }
+
+                string_address prefix = at + 1;
+                string_address code = prefix + string_span_of_set(prefix, STAT_FLAGS);
+
+                while (byte_is_digit(string_get(code)))
+                        code++;
+                if (string_get(code) == '.')
+                        for (code++; byte_is_digit(string_get(code));)
+                                code++;
+
+                positive length = (positive)(code - prefix);
+                p8 letter = string_get(code);
+                p8 modifier = 0;
+
+                if (!letter || letter == '%')
+                {
+                        if (length)
+                        {
+                                p8 spelled[FILE_PATH_MAX];
+                                positive kept = min(length + 1 + (letter != 0),
+                                                    sizeof(spelled) - 1);
+
+                                memory_copy_apart(spelled, at, kept);
+                                spelled[kept] = end;
+                                log_flush();
+                                string_format(log_error, "stat: '%w': invalid directive\n",
+                                              writer_terminal_name, spelled);
+                                return 2;
+                        }
+                        log("%", 1);
+                        at = letter ? code + 1 : code;
+                        continue;
+                }
+
+                if (!file_system && (letter == 'H' || letter == 'L') &&
+                    (string_get(code + 1) == 'd' || string_get(code + 1) == 'r'))
+                {
+                        modifier = letter;
+                        letter = string_get(++code);
+                }
+
+                if (file_system ? statfs_directive(prefix, length, letter, modifier, path, facts)
+                                : stat_directive(prefix, length, letter, modifier, path, facts))
+                        failed = 1;
+                at = code + 1;
         }
 
-        log("\n  Size: ", 0);
-        positive_into_string(text, facts->size);
-        string_to_field_bulk(log, text, 10, ' ', true);
-        log("\tBlocks: ", 0);
-        positive_into_string(text, facts->blocks);
-        string_to_field_bulk(log, text, 10, ' ', true);
-        log(" IO Block: ", 0);
-        positive_into_string(text, facts->blocksize);
-        string_to_field_bulk(log, text, 6, ' ', true);
-        log(" ", 1);
-        log(file_kind_told(facts), 0);
-
-        log("\nDevice: ", 0);
-        positive_to_string(log, facts->device_major);
-        log(",", 1);
-        positive_to_string(log, facts->device_minor);
-        log("\tInode: ", 0);
-        positive_into_string(text, facts->inode);
-        string_to_field_bulk(log, text, 10, ' ', true);
-        log("  Links: ", 0);
-        positive_to_string(log, facts->hard_links);
-
-        positive kind = facts->mode & MODE_FORMAT;
-
-        if (kind == MODE_CHARACTER || kind == MODE_BLOCK)
-        {
-                log("     Device type: ", 0);
-                positive_to_string(log, facts->rdev_major);
-                log(",", 1);
-                positive_to_string(log, facts->rdev_minor);
-        }
-
-        log("\nAccess: (", 0);
-        positive_to_base_field(log, facts->mode & 07777, 8, 4, -1,
-                               (positive)1 << 28);
-        log("/", 1);
-        file_mode_letters(text, facts->mode);
-        log(text, 10);
-        log(")  Uid: (", 0);
-        positive_to_padded(log, facts->owner, 5, ' ', 0);
-        log("/", 1);
-
-        file_account_label(facts->owner, false, true, text);
-        string_to_field_bulk(log, text, 8, ' ', false);
-
-        log(")   Gid: (", 0);
-        positive_to_padded(log, facts->group, 5, ' ', 0);
-        log("/", 1);
-
-        file_account_label(facts->group, true, true, text);
-        string_to_field_bulk(log, text, 8, ' ', false);
-
-        log(")\nAccess: ", 0);
-        file_stamp(log, facts->accessed.seconds, facts->accessed.nanoseconds);
-        log("\nModify: ", 0);
-        file_stamp(log, facts->modified.seconds, facts->modified.nanoseconds);
-        log("\nChange: ", 0);
-        file_stamp(log, facts->changed.seconds, facts->changed.nanoseconds);
-        log("\n Birth: ", 0);
-
-        if (facts->mask & STATX_BIRTH)
-                file_stamp(log, facts->created.seconds, facts->created.nanoseconds);
-        else
-                log("-", 1);
-
-        log("\n", 1);
+        return failed;
 }
 
+/* The layouts coreutils writes when no format is given. */
+static const p8 stat_layout_file_system[] =
+    "  File: \"%n\"\n"
+    "    ID: %-8i Namelen: %-7l Type: %T\n"
+    "Block size: %-10s Fundamental block size: %S\n"
+    "Blocks: Total: %-10b Free: %-10f Available: %a\n"
+    "Inodes: Total: %-10c Free: %d\n";
+static const p8 stat_layout_head[] =
+    "  File: %N\n"
+    "  Size: %-10s\tBlocks: %-10b IO Block: %-6o %F\n";
+static const p8 stat_layout_device[] =
+    "Device: %Hd,%Ld\tInode: %-10i  Links: %-5h Device type: %Hr,%Lr\n";
+static const p8 stat_layout_plain[] =
+    "Device: %Hd,%Ld\tInode: %-10i  Links: %h\n";
+static const p8 stat_layout_tail[] =
+    "Access: (%04a/%10.10A)  Uid: (%5u/%8U)   Gid: (%5g/%8G)\n"
+    "Access: %x\n"
+    "Modify: %y\n"
+    "Change: %z\n"
+    " Birth: %w\n";
+
+typedef struct { p8 format, cached; } stat_selection;
+_Static_assert(sizeof(stat_selection) <= 16, "selection mask covers every field");
 static const argument_option stat_options[] = {
     {"dereference", 'L'},
     {"file-system", 'f'},
-    {"format", 'c', ARGUMENT_REQUIRED},
+    {"format", 'c', ARGUMENT_REQUIRED, ARGUMENT_SELECT(stat_selection, format)},
+    {"printf", 'P', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY, ARGUMENT_SELECT(stat_selection, format)},
+    {"terse", 't'},
+    {"cached", 'K', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {null},
 };
+
+static const file_word stat_cached_words[] = {
+    {"default", 'd'}, {"never", 'n'}, {"always", 'a'}};
+
+static stat_selection stat_selected;
 
 static b32 file_stat()
 {
         positive count = (positive)program_argument_count();
         stat_status = 0;
+        stat_selected = (stat_selection){};
         file_taking taking = {
             .program = (string_address) "stat",
             .options = stat_options,
+            .selection = (p8 address_to)address_of stat_selected,
         };
 
         if (!file_take(address_of taking))
                 return 1;
 
         positive index = taking.first;
-        string_address format = file_option_value(address_of taking, 'c');
+        string_address format = stat_selected.format
+                                    ? file_option_value(address_of taking, stat_selected.format)
+                                    : null;
+        bool escapes = stat_selected.format == 'P';
+        bool terse = (taking.flags & FILE_FLAG('t')) != 0;
+        string_address cached = file_option_value(address_of taking, 'K');
+        positive sync = 0;
 
         stat_follow = (taking.flags & FILE_FLAG('L')) != 0;
         stat_file_system = (taking.flags & FILE_FLAG('f')) != 0;
 
+        if (cached)
+        {
+                b32 chosen = file_word_among((string_address) "stat", (string_address) "--cached",
+                                             cached, stat_cached_words,
+                                             array_count(stat_cached_words));
+
+                if (chosen < 0)
+                        return 1;
+                sync = chosen == 'n' ? STAT_FORCE_SYNC
+                     : chosen == 'a' ? STAT_DONT_SYNC : 0;
+        }
+
         if (index >= count)
-                return string_report(log_error, 1, "%s: missing operand\n", (string_address) "stat");
+                return file_need_operand((string_address) "stat");
+
+        /*
+                A format of the user's that names a file with %N quotes it as
+                QUOTING_STYLE says, shell-escape-always when it says nothing;
+                the layouts below write the name as it stands.
+        */
+        ls_quoting = 'L';
+        ls_hide_controls = false;
+        if (format)
+        {
+                for (string_address at = format; (at = string_first_of(at, '%'));
+                     at += (string_get(at + 1) == '%') + 1)
+                {
+                        if (string_get(at + 1) != 'N')
+                                continue;
+
+                        string_address style = file_environment((string_address) "QUOTING_STYLE");
+
+                        ls_quoting = 'E';
+                        if (style)
+                        {
+                                positive word = 0;
+
+                                while (word < array_count(ls_quoting_words) &&
+                                       !string_equals(style, ls_quoting_words[word].word))
+                                        word++;
+                                if (word < array_count(ls_quoting_words))
+                                        ls_quoting = ls_quoting_words[word].answer;
+                                else
+                                        string_format(log_error,
+                                                      "stat: ignoring invalid value of environment variable QUOTING_STYLE: %w\n",
+                                                      writer_terminal_quoted_name, style);
+                        }
+                        break;
+                }
+        }
 
         while (index < count)
         {
                 string_address path = program_argument((b32)index++);
+                b32 walked;
 
                 if (stat_file_system)
                 {
@@ -13886,37 +14362,61 @@ static b32 file_stat()
                                 continue;
                         }
 
-                        if (format)
-                                stat_percent_walk(format, path, address_of facts,
-                                                  statfs_one_specifier);
-                        else
-                                statfs_readable(path, address_of facts);
-
-                        continue;
+                        walked = stat_walk(format ? format
+                                           : terse ? (string_address) "%n %i %l %t %s %S %b %f %a %c %d\n"
+                                                   : (string_address)stat_layout_file_system,
+                                           path, address_of facts, true, escapes);
                 }
-
-                file_facts facts;
-                // A lone dash is standard input, whatever it is open on.
-                bool standard = string_is(path, '-') && !string_get(path + 1);
-                bipolar looked = standard
-                    ? file_look_code(0, (string_address) "", AT_EMPTY_PATH, address_of facts)
-                    : file_look_code(AT_FDCWD, path,
-                                     stat_follow ? 0 : AT_SYMLINK_NOFOLLOW,
-                                     address_of facts);
-
-                if (looked < 0)
-                {
-                        string_format(log_error, "stat: cannot statx %w: %s\n",
-                                      writer_shell_quoted_name, path, file_reason(looked));
-                        stat_status = 1;
-                        continue;
-                }
-
-                if (format)
-                        stat_percent_walk(format, path, address_of facts,
-                                          stat_one_specifier);
                 else
-                        stat_readable(path, address_of facts);
+                {
+                        file_facts facts;
+                        // A lone dash is standard input, whatever it is open on.
+                        bool standard = string_is(path, '-') && !string_get(path + 1);
+                        bipolar looked = standard
+                            ? file_look_code(0, (string_address) "", AT_EMPTY_PATH | sync,
+                                             address_of facts)
+                            : file_look_code(AT_FDCWD, path,
+                                             (stat_follow ? 0 : AT_SYMLINK_NOFOLLOW) | sync,
+                                             address_of facts);
+
+                        if (looked < 0)
+                        {
+                                if (standard)
+                                        string_format(log_error, "stat: cannot stat standard input: %s\n",
+                                                      file_reason(looked));
+                                else
+                                        string_format(log_error, "stat: cannot statx %w: %s\n",
+                                                      writer_shell_quoted_name, path, file_reason(looked));
+                                stat_status = 1;
+                                continue;
+                        }
+
+                        positive kind = facts.mode & MODE_FORMAT;
+
+                        if (format || terse)
+                                walked = stat_walk(format ? format
+                                                   : (string_address) "%n %s %b %f %u %g %D %i %h %t %T %X %Y %Z %W %o\n",
+                                                   path, address_of facts, false, escapes);
+                        else
+                                walked = stat_walk((string_address)stat_layout_head, path,
+                                                   address_of facts, false, false) |
+                                         stat_walk(kind == MODE_CHARACTER || kind == MODE_BLOCK
+                                                       ? (string_address)stat_layout_device
+                                                       : (string_address)stat_layout_plain,
+                                                   path, address_of facts, false, false) |
+                                         stat_walk((string_address)stat_layout_tail, path,
+                                                   address_of facts, false, false);
+                }
+
+                if (walked == 2)
+                {
+                        log_flush();
+                        return 1;
+                }
+                if (walked)
+                        stat_status = 1;
+                if (format && !escapes)
+                        log("\n", 1);
         }
 
         log_flush();

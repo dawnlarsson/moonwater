@@ -6485,6 +6485,10 @@ files_STAT_FORMATS = (
     "%w", "%f", "%d", "%D", "%t %T", "%o", "%N", "%m", "%C", "%r %R", "%n|%s|%a|%F|%h", "%n:%s", "100%%",
     "%n\\t%s", "%n\\n", "%-10n|%10s|%05a", "%.3s", "%Q", "%", "\\x41\\101\\a\\b\\e\\f\\r\\v\\\\", "%n %",
     "%n|%i|%l|%s|%S|%b|%c|%T|%t", "free=%a|%f|%d", "%b %c", "%%s %s", "%10.3s|%-12.4n|", "%#o %#a",
+    # Widths, precisions and flags as printf reads them, the seconds as
+    # printf's %f made of two integers, and the halves of a device number.
+    "%Hd,%Ld %Hr,%Lr", "%.9Y|%-18.10Y|%12.Y|%.0Y", "%010.3X|%-3.10Y|%18.3Y|%-18.3Y", "%+5d|%#x|%#a|% i",
+    "%5%", "%-", "%.4W|%W|%-5h|%-8F|", "%'5s|%I5s|%0-6o|", "%.2U|%12G|%-12N|",
 )
 
 files_MKTEMP_TEMPLATES = (
@@ -6860,7 +6864,8 @@ FILES_UTILITIES = (
                              Option("--file-system"), Option("--terse"),
                              Option("--cached", ("never", "always", "default", "bogus"), True),
                              Option("-c", files_STAT_FORMATS, False), Option("--format", ("%n %s", "%i"), True),
-                             Option("--printf", ("%n|%s\\n", "%n", "\\n", "%a %A\\n"), True)),
+                             Option("--printf", ("%n|%s\\n", "%n", "\\n", "%a %A\\n", "\\q|%5.2n\\x4a\\1012\\",
+                                                 "%-6s|%N\\0"), True)),
             operands=(("a.txt",), ("dir",), ("link",), ("dangling",), ("missing",), ("empty",), ("exe",), ("two words",),
                       ("unreadable",), ("shut/inside",), ("a.txt", "dir", "link"), ("twin",), ("loop",), ("/dev/null",),
                       ("hollow",), ("-",), (), ("dirlink",), ("badwalk",), ("recent.txt",), ("a.txt", "missing", "b.txt"),
@@ -37102,8 +37107,6 @@ REASONS = {
  "r128": "-e elides empty pieces, and a byte count ending in a bare B is taken rather than refused.",
  "r129": "-e elides empty pieces, -u writes without buffering and --filter runs a program for each piece; each changes what a piece is or where it goes.",
  "r13": "sub() on a value that cannot be assigned to: POSIX leaves it undefined, ours refuses it (exit 2), gawk computes and discards the result",
- "r130": "-t is a second layout, %C is a security context this kernel does not carry, %D is the device in hexadecimal, and --cached takes a word.",
- "r131": "-t is a second layout and --printf a second escape policy over -c; --cached names a coherency this statx call does not ask for.",
  "r133": "a division by zero is refused as a bad number rather than named.",
  "r134": "the operating system name is not in struct utsname and is not ours to claim on another system behalf. This one answers Moonwater, and -a stops at the machine for the same reason.",
  "r135": "deliberate: the operating system name is not in struct utsname and is not ours to claim on another system's behalf. This one answers Moonwater, and -a stops at the machine for the same reason.",
@@ -40617,18 +40620,6 @@ PINNED = r"""
 {"domain":"files","kind":"bug","list":"ledger","option":"--filter","reason_id":"r129","utility":"split"},
 {"domain":"files","kind":"bug","list":"ledger","option":"--unbuffered","reason_id":"r129","utility":"split"},
 {"domain":"files","kind":"bug","list":"ledger","option":"-u","reason_id":"r129","utility":"split"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"d70d5b36de5adecb7514ff65716ded7f3f509fc7df48ca1a611a24f9eb99fed9"},"case":{"argv":["-c","%#o %#a","a.txt"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","utility":"stat"},"domain":"files","id":"20c72c30fd3dcdae","kind":"bug","list":"ledger","reason_id":"r130","utility":"stat"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"a86821dbeadec75d56c739631117eb9940f928e9616b4b7ac605048fb035a66a"},"case":{"argv":["-c","%.3s","a.txt"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","utility":"stat"},"domain":"files","id":"57591ffb9cb087c7","kind":"bug","list":"ledger","reason_id":"r130","utility":"stat"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"ce773b87709a04bbcb0ead74fea94b1f20fa4a4d185fc06a24a9bc703dd99613"},"case":{"argv":["-c","%C","a.txt"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","utility":"stat"},"domain":"files","id":"a265fbc23dd229bb","kind":"bug","list":"ledger","reason_id":"r130","utility":"stat"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"ce773b87709a04bbcb0ead74fea94b1f20fa4a4d185fc06a24a9bc703dd99613"},"case":{"argv":["-c","%D","a.txt"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","utility":"stat"},"domain":"files","id":"b24ab0f0d6e8c92e","kind":"bug","list":"ledger","reason_id":"r130","utility":"stat"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"ce773b87709a04bbcb0ead74fea94b1f20fa4a4d185fc06a24a9bc703dd99613"},"case":{"argv":["-c","%m","a.txt"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","utility":"stat"},"domain":"files","id":"b91e0b6deb68d4d2","kind":"bug","list":"ledger","reason_id":"r130","utility":"stat"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"c151fd8bd44915419cef75330617c8929015b90be0cf9f4091926838fb3408f3"},"case":{"argv":["-c","%10.3s|%-12.4n|","a.txt"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","utility":"stat"},"domain":"files","id":"bac851d9de7ef0be","kind":"bug","list":"ledger","reason_id":"r130","utility":"stat"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"62ed1b5c5592295d1f4ed136bf36cca85b6fca88805c6f88d057d78810dfedd4"},"case":{"argv":["-c","%-10n|%10s|%05a","a.txt"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","utility":"stat"},"domain":"files","id":"cea506183dbb6846","kind":"bug","list":"ledger","reason_id":"r130","utility":"stat"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"c5436858a8f0443a5d00ff695892318a8fa0035b21f96bd5df9ed3a3118d46c3"},"case":{"argv":["-c","%r %R","a.txt"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","utility":"stat"},"domain":"files","id":"e99296c0a427dac8","kind":"bug","list":"ledger","reason_id":"r130","utility":"stat"},
-{"domain":"files","kind":"bug","list":"ledger","option":"--cached","reason_id":"r131","utility":"stat"},
-{"domain":"files","kind":"bug","list":"ledger","option":"--printf","reason_id":"r131","utility":"stat"},
-{"domain":"files","kind":"bug","list":"ledger","option":"--terse","reason_id":"r131","utility":"stat"},
-{"domain":"files","kind":"bug","list":"ledger","option":"-t","reason_id":"r131","utility":"stat"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"b8f8a73df80f8d3a89a0d19ac0e0911fe14446353de97f2981e0a06c9db95b6e"},"case":{"argv":["-s","-v","-i","-p","-o","--nodename"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","tier":"random","utility":"uname"},"domain":"files","id":"018c076f69ea87ac","kind":"bug","list":"ledger","reason_id":"r321","reference":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"674bfbeecc9466066f0ee6ba70cc445424a3a67a4db007106abad4b1987778ad"},"utility":"uname"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"75eb204934be5cdfe89963168fe614625adb440ec9d6ed71a44f5ad7783d127e"},"case":{"argv":["--operating-system","--processor","--nodename","-s","-v","-a"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","tier":"random","utility":"uname"},"domain":"files","id":"02174911a3f4f181","kind":"bug","list":"ledger","reason_id":"r321","reference":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"7c826e528e1bf5dc55c9addeb970517f7ff90ca07407971a447848fc5843bfde"},"utility":"uname"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"75eb204934be5cdfe89963168fe614625adb440ec9d6ed71a44f5ad7783d127e"},"case":{"argv":["--kernel-name","-a","-s","--machine","-o","-n"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","tier":"random","utility":"uname"},"domain":"files","id":"03ed28fe59bee294","kind":"bug","list":"ledger","reason_id":"r321","reference":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"7c826e528e1bf5dc55c9addeb970517f7ff90ca07407971a447848fc5843bfde"},"utility":"uname"},
