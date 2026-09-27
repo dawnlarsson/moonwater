@@ -1558,6 +1558,9 @@ bipolar file_link_text(string_address path, p8 address_to into, positive limit)
 #define FILE_RESOLVE_MISSING_TAIL 4
 #define FILE_RESOLVE_UNRESOLVED 8
 
+/* Whether the last refusal was a working directory with no name. */
+static bool file_resolve_homeless;
+
 static bool file_resolve_as(string_address path, p8 address_to into,
                             bool follow, p8 policy)
 {
@@ -1567,6 +1570,8 @@ static bool file_resolve_as(string_address path, p8 address_to into,
         positive length = 0;
         positive hops = 0;
         bool missing_walk = false;
+
+        file_resolve_homeless = false;
 
         if (string_is(path, end) || string_length(path) >= FILE_PATH_MAX)
                 return false;
@@ -1578,16 +1583,28 @@ static bool file_resolve_as(string_address path, p8 address_to into,
         }
         else
         {
-                string_address here = working_directory_get();
+                /*
+                        A relative name hangs from the working directory,
+                        and one that has been removed has no name to hang
+                        it from: getcwd refuses it, and the name is refused
+                        with it, as coreutils' canonicalize refuses it.
+                        working_directory_get drops that refusal and hands
+                        back an empty buffer, which read as the root -- so
+                        readlink -e . in a removed directory answered /, and
+                        a script went on to act on the root. A name outside
+                        this process's root comes back unreachable rather
+                        than absolute and is refused the same way.
+                */
+                bipolar got = system_call_2(syscall(getcwd), (positive)into,
+                                            FILE_PATH_MAX);
 
-                length = string_length_max(here, FILE_PATH_MAX - 1);
-                memory_copy_apart(into, here, length);
-
-                if (length == 0)
+                if (got <= 0 || into[0] != '/')
                 {
-                        into[0] = '/';
-                        length = 1;
+                        file_resolve_homeless = true;
+                        return false;
                 }
+
+                length = string_length_max(into, FILE_PATH_MAX - 1);
         }
 
         into[length] = end;
@@ -19102,7 +19119,9 @@ static bool realpath_named(string_address path, p8 policy, bool logical,
         {
                 if (!file_resolve_as(path, scratch, false, policy))
                 {
-                        *why = (string_address) "Invalid argument";
+                        *why = file_resolve_homeless
+                                   ? (string_address) "No such file or directory"
+                                   : (string_address) "Invalid argument";
                         return false;
                 }
 

@@ -7426,6 +7426,31 @@ FILES_UTILITIES = (
                    ("-x",), ("-d",), ("-r",), ("-f",), ("-I", "-R", "-d", "@0"), ("-R", "-I", "-d", "@0"), ("-u", "-d", "2001-09-09 12:00 +0200", "+%H %Z"))),
 )
 
+#       A working directory that has been removed under the program. A
+#       relative name then has nothing to hang from: coreutils' canonicalize
+#       refuses it where getcwd does, and readlink -e . once answered / here,
+#       which a script would then have acted on. The words are the program
+#       and its own; the directory is made and removed by the shell first.
+FILES_GONE_CWD_CASES = (
+    ("readlink", "-e", "."), ("readlink", "-f", "."), ("readlink", "-m", "."), ("readlink", "-f", "x"),
+    ("readlink", "-m", "x/y"), ("readlink", "-ev", "."), ("readlink", "-f", ".."), ("readlink", "-e", "/"),
+    ("realpath", "."), ("realpath", "-m", "x"), ("realpath", "-s", "."), ("realpath", "-e", ".."),
+    ("realpath", "-L", "."), ("realpath", "-q", "."), ("realpath", "/", "."), ("realpath", "--relative-to=/", "/tmp"),
+)
+
+
+def files_gone_cwd_script(argv, stdin_name):
+    body = ("env mkdir -p gone/here\ncd gone/here || exit 9\nenv rmdir ../here || exit 9\n"
+            "run " + ul_words(argv[1:]) + "\nstatus=$?\ncd / || exit 9\nexit $status\n")
+    return ul_live(argv[0], body)
+
+
+FILES_UTILITIES = FILES_UTILITIES + (
+    Utility("gone_cwd", operands=FILES_GONE_CWD_CASES, stdin=("empty",), fixture="files", stderr="exact",
+            modes=("bash",), script=files_gone_cwd_script,
+            valid=lambda argv: bool(argv) and argv[0] in ("readlink", "realpath")),
+)
+
 # Every utility drops GNU's --help hint from its diagnostics, whether or not it
 # has a normaliser of its own.
 FILES_UTILITIES = tuple(utility if utility.normalize else dataclasses.replace(utility, normalize=files_plain)
