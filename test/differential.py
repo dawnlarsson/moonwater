@@ -15625,17 +15625,32 @@ SHELL_UTILITIES = (
     shell_POLICY_BASH,
 )
 
+#       The same family, each script also handed to the shell on its
+#       standard input and as a file operand. -c is one string the shell
+#       holds whole; a script on stdin is read a piece at a time as `curl |
+#       sh` feeds it, and a file through its own reader. Every case was -c,
+#       so a crash only the stdin reader had went unseen. The families
+#       chosen are the ones whose scripts do not read standard input
+#       themselves, and whose answers are the same whichever way they come.
+def shell_delivered(generator, ways=("command", "stdin", "file")):
+    def delivered(rng):
+        family, modes, script, *_ = generator(rng)
+        return family, modes, script, ways
+    delivered.__name__ = generator.__name__
+    return delivered
+
+
 SHELL_FAMILIES = (
-    shell_lex_quotes,
-    shell_lex_substitution,
-    shell_lex_heredoc,
-    shell_lex_comment_boundary,
+    shell_delivered(shell_lex_quotes),
+    shell_delivered(shell_lex_substitution),
+    shell_delivered(shell_lex_heredoc),
+    shell_delivered(shell_lex_comment_boundary),
     shell_lex_operators,
     shell_lex_redirection,
     shell_lex_syntax_mutation,
     shell_lex_stray_terminator,
     shell_lex_function_metadata,
-    shell_lex_nested_syntax,
+    shell_delivered(shell_lex_nested_syntax),
     shell_exec_special_prefix,
     shell_exec_command_exception,
     shell_exec_disabled_special,
@@ -15707,25 +15722,25 @@ SHELL_FAMILIES = (
     shell_lang_brace_expansion,
     shell_lang_tilde,
     shell_lang_command_substitution,
-    shell_lang_case_in_substitution,
+    shell_delivered(shell_lang_case_in_substitution),
     shell_lang_process_substitution,
     shell_lang_coproc,
-    shell_lang_heredoc,
+    shell_delivered(shell_lang_heredoc),
     shell_lang_here_string,
     shell_lang_redirections,
     shell_lang_redirection_persistence,
     shell_lang_pipelines,
     shell_lang_lists,
-    shell_lang_compound_commands,
+    shell_delivered(shell_lang_compound_commands),
     shell_lang_double_bracket,
     shell_lang_double_bracket_first,
     shell_lang_functions,
     shell_lang_traps,
     shell_lang_subshells,
     shell_lang_background_wait,
-    shell_lang_background_body,
+    shell_delivered(shell_lang_background_body),
     shell_lang_errexit_contexts,
-    shell_lang_errexit_redirect,
+    shell_delivered(shell_lang_errexit_redirect),
     shell_lang_nounset_forms,
     shell_lang_noclobber,
     shell_lang_allexport_noglob,
@@ -15753,7 +15768,7 @@ SHELL_FAMILIES = (
     shell_lang_errexit_functions,
     shell_lang_heredoc_expansion,
     shell_lang_arithmetic_edges,
-    shell_lang_arithmetic_subscripts,
+    shell_delivered(shell_lang_arithmetic_subscripts),
     shell_lang_read_field_edges,
     shell_lang_nested_parameter,
     shell_lang_dynamic_names,
