@@ -51197,6 +51197,156 @@ static fn http_body_write_failure(void)
         system_close(full);
 }
 
+/*
+        http_write_spans must survive a positive short writev mid-iovec, refuse
+        a count larger than the remaining total, and fail-close when the next
+        write would block.
+
+        A blocking writev to a pipe finishes inside one syscall once a peer
+        drains it, so the success-path resume after a short count is not
+        forced here without a signal trampoline (x86_64 qemu-user faults on
+        that injection). The nonblocking case still lands a mid-iovec short
+        and proves the prefix and the EAGAIN refuse; a draining peer proves
+        the multi-span body bytes.
+*/
+static fn http_write_spans_partial(void)
+{
+        enum
+        {
+                F_SETPIPE_SZ = 1031,
+                F_GETPIPE_SZ = 1032,
+                SPAN_BYTES = 3000,
+                SPAN_COUNT = 3,
+                SPAN_TOTAL = SPAN_BYTES * SPAN_COUNT
+        };
+        static p8 spans_bytes[SPAN_COUNT][SPAN_BYTES];
+        static p8 readback[SPAN_TOTAL];
+        http_span spans[SPAN_COUNT];
+        b32 ends[2];
+        bipolar opened;
+        bipolar capacity;
+        bipolar sink;
+        positive filled;
+        positive raw;
+        bipolar child;
+        bool intact;
+        positive at;
+
+        for (at = 0; at < SPAN_COUNT; at++)
+                memory_fill(spans_bytes[at], (p8)(at + 1), SPAN_BYTES);
+
+        {
+                static p8 oversize[] = "abcdefgh";
+                http_span one = {.base = oversize, .length = sizeof oversize - 1};
+
+                sink = system_open_at(AT_FDCWD, (string_address)"/dev/null",
+                                      FILE_WRITE | O_CLOEXEC);
+                check("a sink for an oversized writev count opens", sink >= 0);
+                if (sink >= 0)
+                {
+                        http_write_failure = 99;
+                        check("writev that reports more than the remaining total is refused",
+                              !http_write_spans(sink, address_of one, 1, 3));
+                        check("an oversized writev count clears the write errno",
+                              http_write_failure == 0);
+                        system_close(sink);
+                }
+        }
+
+        opened = system_call_2(syscall(pipe2), (positive)ends, O_NONBLOCK);
+        check("a nonblocking pipe for a mid-iovec short write opens",
+              opened == 0);
+        if (!opened)
+        {
+                system_call_3(syscall(fcntl), ends[1], F_SETPIPE_SZ, 4096);
+                capacity = system_call_2(syscall(fcntl), ends[1], F_GETPIPE_SZ);
+                check("the short-write pipe is smaller than the gathered spans",
+                      capacity > SPAN_BYTES &&
+                          (positive)capacity < SPAN_TOTAL);
+                for (at = 0; at < SPAN_COUNT; at++)
+                {
+                        spans[at].base = spans_bytes[at];
+                        spans[at].length = SPAN_BYTES;
+                }
+                http_write_failure = 0;
+                check("a mid-iovec short writev without a draining peer fail-closes",
+                      !http_write_spans(ends[1], spans, SPAN_COUNT, SPAN_TOTAL) &&
+                          http_write_failure == -EAGAIN);
+                filled = 0;
+                intact = true;
+                while (filled < (positive)capacity)
+                {
+                        bipolar got = system_call_3(
+                            syscall(read), ends[0],
+                            (positive)(readback + filled),
+                            (positive)capacity - filled);
+
+                        if (got <= 0)
+                                break;
+                        filled += (positive)got;
+                }
+                for (at = 0; at < filled; at++)
+                        intact &= readback[at] ==
+                                  (p8)(at / SPAN_BYTES + 1);
+                check("the refused short writev still delivered a mid-iovec prefix",
+                      intact && filled == (positive)capacity);
+                system_call_1(syscall(close), ends[0]);
+                system_call_1(syscall(close), ends[1]);
+        }
+
+        opened = system_call_2(syscall(pipe2), (positive)ends, 0);
+        check("a blocking pipe for a multi-span writev opens", opened == 0);
+        if (opened)
+                return;
+        system_call_3(syscall(fcntl), ends[1], F_SETPIPE_SZ, 4096);
+        capacity = system_call_2(syscall(fcntl), ends[1], F_GETPIPE_SZ);
+        check("the multi-span pipe is smaller than the gathered spans",
+              capacity > 0 && (positive)capacity < SPAN_TOTAL);
+        for (at = 0; at < SPAN_COUNT; at++)
+        {
+                spans[at].base = spans_bytes[at];
+                spans[at].length = SPAN_BYTES;
+        }
+        child = system_call_2(syscall(clone), SIGCHLD, 0);
+        check("the multi-span writev reader starts", child >= 0);
+        if (!child)
+        {
+                positive got = 0;
+                bool match = true;
+
+                system_call_1(syscall(close), ends[1]);
+                while (got < SPAN_TOTAL)
+                {
+                        bipolar read = system_call_3(
+                            syscall(read), ends[0],
+                            (positive)(readback + got), SPAN_TOTAL - got);
+
+                        if (read <= 0)
+                                break;
+                        got += (positive)read;
+                }
+                for (at = 0; at < got; at++)
+                        match &= readback[at] == (p8)(at / SPAN_BYTES + 1);
+                system_call_1(syscall(close), ends[0]);
+                system_call_1(syscall(exit_group),
+                             got == SPAN_TOTAL && match ? 0 : 1);
+        }
+        system_call_1(syscall(close), ends[0]);
+        if (child < 0)
+        {
+                system_call_1(syscall(close), ends[1]);
+                return;
+        }
+        http_write_failure = 0;
+        check("a multi-span writev through a draining pipe finishes the body",
+              http_write_spans(ends[1], spans, SPAN_COUNT, SPAN_TOTAL));
+        system_call_1(syscall(close), ends[1]);
+        check("the multi-span writev reader saw every span in order",
+              system_wait4_retry((b32)child, address_of raw, 0, null) ==
+                      child &&
+                  wait_status_code(raw) == 0);
+}
+
 static fn network_stream_sigpipe(void)
 {
         b32 pair[2];
@@ -51582,6 +51732,126 @@ static fn tls_closure_boundaries(void)
                 }
                 if (file >= 0)
                         socket_close((b32)file);
+        }
+
+        //      One more record than a single writev gather holds: the first
+        //      flush takes HTTP_WRITE_SPANS whole records, the next takes the
+        //      remainder, and the file still holds them in order.
+        {
+                b32 pair[2];
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_STREAM, 0,
+                                                (positive)pair);
+                bipolar file = (bipolar)system_call_2(syscall(memfd_create),
+                                                      (positive)"tls-spans", 0);
+                #define HTTP_SPAN_FLUSH_RECORDS (HTTP_WRITE_SPANS + 1)
+                #define HTTP_SPAN_FLUSH_LENGTH 17
+
+                check("TLS write-span flush socket pair and file open",
+                      opened == 0 && file >= 0);
+                if (!opened && file >= 0)
+                {
+                        bipolar child = system_call_2(syscall(clone), SIGCHLD, 0);
+
+                        if (!child)
+                        {
+                                tls_conn sender = {0};
+                                p8 record[HTTP_SPAN_FLUSH_LENGTH];
+                                p8 alert[] = {1, 0};
+                                bool sent = true;
+
+                                socket_close(pair[0]);
+                                sender.handle = pair[1];
+                                for (positive at = 0;
+                                     at < HTTP_SPAN_FLUSH_RECORDS && sent;
+                                     at++)
+                                {
+                                        for (positive byte = 0;
+                                             byte < HTTP_SPAN_FLUSH_LENGTH;
+                                             byte++)
+                                                record[byte] =
+                                                    (p8)(at * 31 + byte);
+                                        sent = tls_send_enc(address_of sender,
+                                                            TLS_CT_APP, record,
+                                                            HTTP_SPAN_FLUSH_LENGTH) ==
+                                               TLS_OK;
+                                }
+                                sent = sent &&
+                                       tls_send_enc(address_of sender,
+                                                    TLS_CT_ALERT, alert,
+                                                    sizeof alert) == TLS_OK;
+                                system_call_1(syscall(exit_group), sent ? 0 : 1);
+                        }
+                        check("TLS write-span flush writer starts", child > 0);
+                        socket_close(pair[1]);
+                        if (child > 0)
+                        {
+                                static p8 whole[HTTP_SPAN_FLUSH_RECORDS *
+                                                HTTP_SPAN_FLUSH_LENGTH];
+                                http_link link = {
+                                    .handle = pair[0],
+                                    .tls = true,
+                                    .session = {
+                                        .handle = pair[0],
+                                        .encrypted = true,
+                                        .application = true,
+                                    },
+                                };
+                                http_body body = {.link = address_of link};
+                                positive total = HTTP_SPAN_FLUSH_RECORDS *
+                                                 HTTP_SPAN_FLUSH_LENGTH;
+                                positive filled = 0;
+                                positive place = 0;
+                                positive got = 99;
+                                positive raw = 0;
+                                p8 byte = 0;
+                                bipolar count;
+                                bool intact = true;
+
+                                check("an exact HTTP body past one writev gather is written",
+                                      http_copy(address_of body, file, total,
+                                                true) == HTTP_OK);
+                                check("close_notify still ends the stream after the gathered body",
+                                      tls_read(address_of link.session,
+                                               address_of byte, 1,
+                                               address_of got) == TLS_OK &&
+                                          got == 0);
+                                system_call_3(syscall(lseek), (positive)file, 0,
+                                              0);
+                                while ((count = system_read_retry(
+                                            (positive)file, whole + filled,
+                                            sizeof whole - filled)) > 0)
+                                        filled += (positive)count;
+                                for (positive at = 0;
+                                     at < HTTP_SPAN_FLUSH_RECORDS; at++)
+                                        for (positive offset = 0;
+                                             offset < HTTP_SPAN_FLUSH_LENGTH;
+                                             offset++, place++)
+                                                intact &= place < filled &&
+                                                          whole[place] ==
+                                                              (p8)(at * 31 +
+                                                                   offset);
+                                check("the gathered body holds every record across two writev flushes",
+                                      intact && filled == total);
+                                http_link_close(address_of link);
+                                check("TLS write-span flush writer finishes",
+                                      system_wait4_retry((b32)child,
+                                                         address_of raw, 0,
+                                                         null) == child &&
+                                          wait_status_code(raw) == 0);
+                        }
+                        else
+                                socket_close(pair[0]);
+                }
+                else if (!opened)
+                {
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                }
+                if (file >= 0)
+                        socket_close((b32)file);
+                #undef HTTP_SPAN_FLUSH_LENGTH
+                #undef HTTP_SPAN_FLUSH_RECORDS
         }
         #undef TLS_BATCH_LENGTH
         #undef TLS_BATCH_RECORDS
@@ -52092,9 +52362,10 @@ static fn tls_certificate_identity_rules(void)
         Empty, truncated-at-every-boundary, oversize length, indefinite BER
         lengths (including nested), duplicate OID encodings, and off-by-one
         length claims that would pass a confused `at + length` bound.  Run by
-        `sh test/run net` through CHECK_net.  The same fixture bytes are a
-        seed corpus for a future coverage-guided build; this lane is the
-        deterministic proving set that must stay green under ASan/UBSan.
+        `sh test/run net` through CHECK_net.  The same fixture bytes seed
+        test/fuzz_corpus/tls_der/ for `python3 test/differential.py --harness
+        tls_der_fuzz`; this lane is the deterministic proving set that must
+        stay green under ASan/UBSan.
 */
 static fn tls_certificate_extension_adversarial(void)
 {
@@ -56668,6 +56939,7 @@ b32 main(void)
         network_stream_send_timeout();
         http_header_deadlines();
         http_body_write_failure();
+        http_write_spans_partial();
         network_stream_sigpipe();
         tls_closure_boundaries();
         tls_sensitive_state_erasure();

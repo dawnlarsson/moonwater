@@ -33975,6 +33975,205 @@ int main(void)
     return checks.verdict("http response framing", "http-response-framing")
 
 
+def harness_tls_der_fuzz(argv):
+    """Coverage-guided libFuzzer over tls_parse_extensions and tls_parse_cert.
+
+    Lifts the DER readers from src/net/net.c the way http_response_framing
+    lifts response framing: a hosted shim, the OIDs and ASN.1/cert parsers,
+    and LLVMFuzzerTestOneInput. Seed corpus lives under
+    test/fuzz_corpus/tls_der/ (fixtures from checks.c). Bounded fixed-seed
+    run so a lane cannot hang; return 2 (NOT RUN) when clang/libFuzzer is
+    unavailable.
+
+        python3 test/differential.py --harness tls_der_fuzz
+    """
+    del argv
+    import shutil
+    import tempfile
+
+    clang = shutil.which("clang")
+    if not clang:
+        print("tls der fuzz: NOT RUN -- no clang")
+        return 2
+
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    corpus = HARNESS_ROOT / "test/fuzz_corpus/tls_der"
+    if not corpus.is_dir():
+        print("tls der fuzz: NOT RUN -- missing seed corpus at " + str(corpus))
+        return 2
+    seeds = sorted(p for p in corpus.iterdir() if p.is_file())
+    if not seeds:
+        print("tls der fuzz: NOT RUN -- seed corpus is empty")
+        return 2
+
+    def sec(text, first, following):
+        i = text.index(first)
+        return text[i:text.index(following, i)]
+
+    oids = sec(net, "static const p8 tls_oid_ec[7] = {",
+               "typedef struct\n{\n        bipolar handle;")
+    # Drop the blank line that trailed the last OID before tls_conn.
+    oids = oids[:oids.rfind("};\n") + 3]
+    parsers = sec(
+        net,
+        "static COLD bipolar tls_asn1_length(p8 address_to bytes, positive size,",
+        "/* An anchor's key laid out the way tls_parse_cert lays out a served one. */")
+
+    shim = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include <ctype.h>
+typedef uint8_t p8;
+typedef uint8_t b8;
+typedef uint16_t p16;
+typedef uint32_t p32;
+typedef uint64_t p64;
+typedef int32_t b32;
+typedef long bipolar;
+typedef unsigned long positive;
+typedef void *address_any;
+typedef char *string_address;
+typedef const char *const_string;
+#define COLD
+#define CONST
+#define PURE
+#define fn void
+#define address_to *
+#define address_of &
+#define null NULL
+#define end ((p8)0)
+#define positive_max (~(positive)0)
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define memory_compare memcmp
+#define memory_copy memcpy
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define TLS_OK 0
+#define TLS_FAIL (-1)
+/* glibc ctype macros return bit flags (often > 255); truncate-to-p8
+   would turn a hit into 0. Keep the same helpers as http_response_framing. */
+static inline p8 byte_is_alnum(p8 b) { return isalnum(b) != 0; }
+static inline p8 byte_is_digit(p8 b) { return isdigit(b) != 0; }
+static inline p8 byte_is_control(p8 b) { return b < 0x20 || b == 0x7f; }
+static inline p8 byte_is_blank(p8 b) { return b == ' ' || b == '\t'; }
+static positive string_length(const_string s) { return (positive)strlen(s); }
+static string_address string_first_of(string_address s, int c)
+{
+        return (string_address)strchr(s, c);
+}
+static b32 memory_compare_ascii_case(const void *one, const void *two,
+                                     positive size)
+{
+        const p8 *a = one, *b = two;
+        for (positive i = 0; i < size; i++) {
+                p8 x = a[i], y = b[i];
+                if (x >= 'A' && x <= 'Z')
+                        x = (p8)(x - 'A' + 'a');
+                if (y >= 'A' && y <= 'Z')
+                        y = (p8)(y - 'A' + 'a');
+                if (x != y)
+                        return (b32)(x - y);
+        }
+        return 0;
+}
+static positive memory_span_without_byte(const void *block, p8 byte,
+                                         positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[i] != byte)
+                i++;
+        return i;
+}
+static p32 network_load_32(const p8 *bytes)
+{
+        return ((p32)bytes[0] << 24) | ((p32)bytes[1] << 16) |
+               ((p32)bytes[2] << 8) | (p32)bytes[3];
+}
+/* Host matching is only reached when the fuzzer passes a non-null host;
+   the entry below always passes null. */
+static bipolar string_to_host(string_address host)
+{
+        (void)host;
+        return -1;
+}
+"""
+
+    driver = r"""
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        tls_cert cert;
+        p8 *buf;
+        positive length;
+
+        if (size > 65536)
+                size = 65536;
+        length = (positive)size;
+        buf = (p8 *)malloc(length ? length : 1);
+        if (!buf)
+                return 0;
+        if (length)
+                memcpy(buf, data, length);
+
+        memory_fill(address_of cert, 0, sizeof cert);
+        (void)tls_parse_extensions(buf, length, 0, 2, address_of cert, null);
+
+        memory_fill(address_of cert, 0, sizeof cert);
+        (void)tls_parse_cert(buf, length, address_of cert, null);
+
+        free(buf);
+        return 0;
+}
+"""
+
+    source = shim + oids + "\n" + parsers + driver
+    environment = dict(os.environ,
+                       ASAN_OPTIONS="detect_leaks=0:halt_on_error=1",
+                       UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=0")
+
+    with tempfile.TemporaryDirectory(prefix="tls-der-fuzz-") as temporary:
+        work = Path(temporary)
+        unit = work / "tls_der_fuzz.c"
+        binary = work / "tls_der_fuzz"
+        unit.write_text(source)
+        built = subprocess.run(
+            [clang, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
+             "-fno-sanitize-recover=all",
+             "-fsanitize=fuzzer,address,undefined",
+             str(unit), "-o", str(binary)],
+            capture_output=True, text=True)
+        if built.returncode:
+            print("tls der fuzz: NOT RUN -- clang lacks libFuzzer "
+                  "(need -fsanitize=fuzzer):\n" + built.stderr[-2000:])
+            return 2
+
+        run_corpus = work / "corpus"
+        run_corpus.mkdir()
+        for seed in seeds:
+            (run_corpus / seed.name).write_bytes(seed.read_bytes())
+
+        ran = subprocess.run(
+            [str(binary), str(run_corpus),
+             "-seed=1", "-runs=20000", "-max_total_time=5",
+             "-max_len=4096",
+             "-artifact_prefix=" + str(work) + "/",
+             "-print_final_stats=0"],
+            capture_output=True, text=True, env=environment, timeout=60)
+        ok = ran.returncode == 0 and "ERROR" not in ran.stderr and \
+            "Sanitizer" not in ran.stderr and "runtime error" not in ran.stderr
+        if not ok:
+            print("  FAIL tls der libFuzzer:\n" +
+                  (ran.stderr or ran.stdout)[-3000:])
+            write_tally("tls-der-fuzz", 0, 1)
+            return 1
+        print("  tls der fuzz: %d seeds, libFuzzer ASan/UBSan run clean" %
+              len(seeds))
+        write_tally("tls-der-fuzz", 1, 1)
+        return 0
+
 
 def harness_machine_scan(argv):
     """The kernel's machine-script scanner against bash, over generated scripts.
@@ -37862,6 +38061,7 @@ HARNESS_CHECKS = {
     "machine_reap": harness_machine_reap,
     "tls_chains": harness_tls_chains,
     "http_response_framing": harness_http_response_framing,
+    "tls_der_fuzz": harness_tls_der_fuzz,
     "machine_scan": harness_machine_scan,
     "waterlink_noise": harness_waterlink_noise,
     "waterlink_mdns": harness_waterlink_mdns,

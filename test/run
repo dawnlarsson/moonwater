@@ -3586,6 +3586,9 @@ lane_socket() { freestanding_checks_lane socket socket; }
 #       http_response_framing holds the response parser to a written
 #       accept/refuse matrix (and names deliberate disagreements with
 #       Python's http.client).
+#       tls_der_fuzz is a bounded libFuzzer ASan/UBSan run over
+#       tls_parse_extensions / tls_parse_cert (seed corpus under
+#       test/fuzz_corpus/tls_der/); NOT RUN (2) when clang/libFuzzer is absent.
 lane_net()
 {
         freestanding_checks_lane net net
@@ -3597,6 +3600,12 @@ lane_net()
         *) net_outcome=1 ;;
         esac
         python3 test/differential.py --harness http_response_framing
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
+        python3 test/differential.py --harness tls_der_fuzz
         case $? in
         0) ;;
         2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;

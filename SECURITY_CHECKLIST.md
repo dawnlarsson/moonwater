@@ -58,8 +58,11 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
 - [x] Generated chain verdicts are compared with OpenSSL; certificate issuance
   selects the modern `x509` date interface or the established `ca` fallback so
   supported host CLI versions cannot silently disable the oracle.
-- [ ] Add persistent coverage-guided fuzzing for DER, handshake fragmentation,
-  and certificate-list framing.
+- [x] Add persistent coverage-guided fuzzing for DER
+      (`python3 test/differential.py --harness tls_der_fuzz`; ASan/UBSan via
+      clang libFuzzer when available, else NOT RUN).
+- [ ] Add persistent coverage-guided fuzzing for handshake fragmentation
+      and certificate-list framing.
 
 ## Shell and operating-system boundary
 
