@@ -35,6 +35,28 @@ Passing rows are evidence for a particular build and environment, not a
 permanent certification. Unsupported architecture, namespace, sanitizer, or
 oracle lanes must be reported as not run rather than silently counted as pass.
 
+## Per-parser resource budgets (net)
+
+Length and item-count ceilings already enforced in `src/net/net.c`, with
+exact-limit and/or one-over proving checks under `CHECK_net`. There is no
+separate CPU-work counter for these parsers; DNS decompression bounds jumps
+structurally (ceiling lowers), and DHCP junk discard is an absolute deadline.
+The full mapping (parser → budget kind → constant → check name) is the comment
+ledger at the top of the `CHECK_net` section in `test/checks.c`.
+
+| Parser | Budget | Constant | Hit coverage |
+| --- | --- | --- | --- |
+| DNS | message length | `DNS_MAX_MESSAGE` | exact + one-over unit; TCP/UDP transport one-over |
+| DNS | label / name | 63 / 255 | exact + one-over |
+| DNS | CNAME hops | `answers + 1` | chain accept + cycle exhaust |
+| TLS | record payload | `TLS_RECORD_MAX` | exact + one-over (+ empty) |
+| TLS | enc plaintext | `TLS_RECORD_MAX - 17` | one-over (+ wraparound) |
+| TLS | handshake hold | `TLS_HS_MAX` | exact + one-over |
+| TLS | cert extensions / chain | 64 / `certs[8]` | exact + one-over |
+| HTTP | URL / headers / body | `HTTP_URL_MAX` / `HTTP_HEAD_MAX` / `HTTP_FETCH_MAX` | exact + one-over |
+| HTTP | redirects / writev spans | `HTTP_HOPS` / `HTTP_WRITE_SPANS` | hop ceiling; spans+1 flush |
+| DHCP | receive room | caller buffer (300 in test) | exact + one-over |
+
 ## Oracle quality
 
 A differential oracle is not enough by itself: two implementations can agree

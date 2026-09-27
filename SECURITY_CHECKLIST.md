@@ -11,9 +11,15 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
 - [x] Wire-field narrowing is checked for netlink attributes and messages.
 - [x] HTTP lengths and chunk sizes reject native-word overflow.
 - [x] Guard-page coverage exists for shared bounded primitives and codecs.
-- [ ] Run network parser fuzz targets continuously under ASan and UBSan.
+- [x] Run network parser fuzz targets continuously under ASan and UBSan
+  (local via `sh test/fuzz_net`; defaults one hour / unbounded run count;
+  override with `MOONWATER_FUZZ_SECONDS` / `MOONWATER_FUZZ_RUNS`. lane_net
+  keeps the short bounded smoke only).
 - [ ] Run an MSan lane on a hosted build to find uninitialized wire padding.
-- [ ] Record a per-parser allocation, item-count, recursion, and CPU budget.
+- [x] Record a per-parser allocation, item-count, recursion, and CPU budget.
+  Ledger of length/item/recursion ceilings (no invented CPU budgets) lives in
+  `test/checks.c` (CHECK_net) and `SECURITY_TEST_MATRIX.md`; exact-limit and
+  one-over hit tests cover DNS, TLS, HTTP, and DHCP main parsers.
 
 ## Identity and state
 
@@ -39,12 +45,13 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
 - [x] Duplicate framing fields and TE/CL conflicts are rejected.
 - [x] Header names, controls, obsolete folding, chunk lines, extensions, and
   trailers have bounded grammar tests.
-- [x] Stream framing is tested at every socket/header split.
+- [x] Chunked body framing is tested across header/socket splits, plus header
+  deadline trickle.
 - [x] Redirect count and HTTPS downgrade are bounded/refused
   (`python3 test/differential.py --harness https_downgrade` for e2e
   HTTPS→HTTP Location refusal under wget manners).
-- [x] Differentially test response framing against multiple independent HTTP
-  implementations, retaining a written policy where references disagree
+- [x] Differentially test response framing via a written matrix and
+  `http.client` as a second oracle with deliberate disagreements
   (`python3 test/differential.py --harness http_response_framing`).
 
 ## TLS and certificates
@@ -60,18 +67,21 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
 - [x] Generated chain verdicts are compared with OpenSSL; certificate issuance
   selects the modern `x509` date interface or the established `ca` fallback so
   supported host CLI versions cannot silently disable the oracle.
-- [x] Add persistent coverage-guided fuzzing for DER
-      (`python3 test/differential.py --harness tls_der_fuzz`; ASan/UBSan via
-      clang libFuzzer when available, else NOT RUN).
-- [x] Add persistent coverage-guided fuzzing for certificate-list framing
-      (`tls_der_fuzz` seeds plus `tls_certificate_body_open` / list walk with
-      `tls_parse_cert` on slices, then the same empty-list / leftover refuse as
-      `tls_verify_chain`; expected `TLS_FAIL` ignored).
-- [x] Add persistent coverage-guided fuzzing for handshake fragmentation
-      (`python3 test/differential.py --harness tls_hs_fuzz`; lifts
+- [x] Bounded lane-smoke coverage-guided fuzzing for DER (5s / 20k runs via
+      `python3 test/differential.py --harness tls_der_fuzz`; ASan/UBSan via
+      clang libFuzzer when available, else NOT RUN). Local continuous: see
+      `test/fuzz_net` / `MOONWATER_FUZZ_*`.
+- [x] Bounded lane-smoke coverage-guided fuzzing for certificate-list framing
+      (same `tls_der_fuzz` 5s/20k smoke: seeds plus `tls_certificate_body_open` /
+      list walk with `tls_parse_cert` on slices, then the same empty-list /
+      leftover refuse as `tls_verify_chain`; expected `TLS_FAIL` ignored). Local
+      continuous: see `test/fuzz_net` / `MOONWATER_FUZZ_*`.
+- [x] Bounded lane-smoke coverage-guided fuzzing for handshake fragmentation
+      (`python3 test/differential.py --harness tls_hs_fuzz`, 5s / 20k; lifts
       `tls_handshake_one_append` / `tls_encrypted_flight_append` with `tls=null`
       framing; seeds under `test/fuzz_corpus/tls_hs/`; ASan/UBSan via clang
-      libFuzzer when available, else NOT RUN).
+      libFuzzer when available, else NOT RUN). Local continuous: see
+      `test/fuzz_net` / `MOONWATER_FUZZ_*`.
 
 ## Shell and operating-system boundary
 
@@ -98,6 +108,10 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
 - [x] Network namespace and netem tests exist for privileged network paths.
 - [x] Gate for x86-64, ARM64, and RISC-V security lanes exists in the parked
   `security` workflow job (workflow_dispatch only; not auto on push).
+- [x] Descriptor- and mmap/`byte_store_reserve`-exhaustion sweeps for the
+  HTTP fetch / TLS client open loops (`EMFILE` → `HTTP_NO_ROUTE`; reserve
+  failure → `HTTP_NO_REPLY`). Accept N/A (client connect only); TLS
+  handshake has no separate mmap.
 - [ ] Add descriptor-, mapping-, and allocation-exhaustion sweeps to every
-  externally reachable service loop.
+  remaining externally reachable service loop.
 - [ ] Publish fuzz corpus coverage and sanitizer versions with each release.

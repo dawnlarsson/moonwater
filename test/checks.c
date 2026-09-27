@@ -48685,6 +48685,72 @@ static bipolar http_net_call3(positive number, positive one, positive two,
 #define system_call_3(...) http_net_call3(__VA_ARGS__)
 #include "../src/net/net.c"
 #undef system_call_3
+
+/*
+        Per-parser resource-budget ledger (length / item-count / recursion).
+        No invented CPU budgets: only ceilings already enforced in net.c.
+        Each row names the exact-limit and/or one-over proving check.
+
+        DNS
+          message length     DNS_MAX_MESSAGE (4096)
+            exact+one-over:  "a DNS reply of exactly DNS_MAX_MESSAGE is accepted"
+                             / "a DNS reply one past DNS_MAX_MESSAGE is refused"
+            transport one-over also: "an oversized TCP DNS frame is refused",
+                             "an oversized complete UDP DNS reply remains malformed"
+          label length       63
+            exact+one-over:  "a DNS label of sixty-three is accepted"
+                             / "a DNS label of sixty-four is refused"
+          name wire length   255
+            exact+one-over:  "a DNS name of two hundred fifty-five octets is accepted"
+                             / "a DNS name of two hundred fifty-six octets is refused"
+          decompress jumps   structural (ceiling lowers; no step counter)
+            hit:             "a pointer loop is refused", forward/cycle sweeps
+          CNAME hop passes   answers + 1
+            exact path:      "DNS follows a case-insensitive CNAME chain by owner"
+            hop exhaust:     "a DNS CNAME cycle exhausts the answer-section hop budget"
+
+        TLS
+          record payload     TLS_RECORD_MAX (16640)
+            exact+one-over:  "a TLS record of exactly TLS_RECORD_MAX is accepted"
+                             / "a TLS record one past TLS_RECORD_MAX is refused"
+          enc plaintext      TLS_RECORD_MAX - 17
+            one-over:        "TLS encrypted plaintext one over TLS_RECORD_MAX-17 is refused"
+                             (wraparound also: "TLS record sizing rejects arithmetic wraparound")
+          handshake hold     TLS_HS_MAX (16384)
+            exact+one-over:  "encrypted-flight hs may fill exactly to TLS_HS_MAX"
+                             / one-octet-past companion; post-handshake ticket ceiling pair
+          cert extensions    TLS_CERT_EXTENSIONS_MAX (64)
+            exact+one-over:  "certificate extension ceiling is inclusive of sixty-four"
+                             / "certificate extension work stops at its explicit ceiling"
+          cert list depth    certs[8]
+            exact+one-over:  "a Certificate list of eight certificates fills certs[8]"
+                             / "a ninth Certificate list entry past certs[8] is refused"
+          AEAD sequence      TLS_AES_GCM_RECORD_LIMIT
+            at-limit refuse: "TLS write/read keys stop at their AES-GCM usage limit"
+
+        HTTP
+          URL length         HTTP_URL_MAX (2048)
+            exact+one-over:  start/Location URL ceiling checks in redirect_urls
+          header block       HTTP_HEAD_MAX (16384)
+            exact+one-over:  "a response header ending on the shared cap is accepted"
+                             / "a response header ending beyond the shared cap is refused"
+          body / store       HTTP_FETCH_MAX (16MiB)
+            exact framing:   "Content-Length of exactly HTTP_FETCH_MAX is framed"
+            one-over e2e:    "Content-Length past HTTP_FETCH_MAX is refused in memory"
+          redirect hops      HTTP_HOPS (10)
+            exact+one-over:  fetching_for_real HTTP_HOPS nine-then-refuse coverage
+          writev gather      HTTP_WRITE_SPANS (64)
+            hit:             TLS write-span flush with HTTP_WRITE_SPANS + 1 records;
+                             http_write_spans_partial short-write resume
+
+        DHCP
+          receive room       caller buffer (test uses 300)
+            exact+one-over:  "DHCP refuses datagrams larger than its receive buffer"
+          option map         gathered[256] by option code (structural index, not a walk budget)
+          junk discard       absolute deadline (not a packet-count CPU budget)
+            hit:             "DHCP discards replay, junk and wrong peers before the valid reply"
+*/
+
 /*
         The netlink wire, and the messages built on it.
 
@@ -49491,6 +49557,99 @@ static fn resolving_edges(void)
                       dns_answer_address(reply, at, (positive)question, 2,
                                          0, address_of found) == DNS_OK &&
                           found == 0xc0000201);
+        }
+
+        /* DNS_MAX_MESSAGE is an inclusive reply ceiling: exactly that many
+           octets may still answer, and one past is malformed even when the
+           truncated view would have matched identity. */
+        {
+                p8 request[DNS_HEADER + 64];
+                p8 reply[DNS_MAX_MESSAGE];
+                p32 found = 0;
+                p16 id = 0x9a3c;
+                bipolar question;
+                positive question_length;
+                positive at;
+
+                memory_fill(reply, 0, sizeof reply);
+                network_store_16(reply, id);
+                network_store_16(reply + 2, DNS_FLAG_RESPONSE);
+                network_store_16(reply + 4, 1);
+                network_store_16(reply + 6, 1);
+                question = dns_write_name(reply + DNS_HEADER,
+                                          sizeof reply - DNS_HEADER,
+                                          (string_address) "ceiling.example");
+                check("DNS_MAX_MESSAGE fixture question writes", question > 0);
+                if (question < 0)
+                        return;
+                at = DNS_HEADER + (positive)question;
+                network_store_16(reply + at, DNS_TYPE_A);
+                network_store_16(reply + at + 2, DNS_CLASS_IN);
+                at += 4;
+                question_length = at - DNS_HEADER;
+                memory_copy(request, reply, at);
+
+                reply[at++] = 0xc0;
+                reply[at++] = DNS_HEADER;
+                network_store_16(reply + at, DNS_TYPE_A);
+                network_store_16(reply + at + 2, DNS_CLASS_IN);
+                network_store_32(reply + at + 4, 0);
+                network_store_16(reply + at + 8, 4);
+                network_store_32(reply + at + 10, 0xc0000209);
+                at += 14;
+
+                check("a DNS reply of exactly DNS_MAX_MESSAGE is accepted",
+                      dns_reply_result(reply, DNS_MAX_MESSAGE, id, request,
+                                       question_length, address_of found) ==
+                              DNS_OK &&
+                          found == 0xc0000209);
+                found = 0;
+                check("a DNS reply one past DNS_MAX_MESSAGE is refused",
+                      dns_reply_result(reply, DNS_MAX_MESSAGE + 1, id, request,
+                                       question_length, address_of found) ==
+                          DNS_MALFORMED);
+        }
+
+        /* Answer-section hop budget is answers+1 passes. A two-record CNAME
+           cycle burns every pass without a separate decompress step counter
+           (dns_copy_name bounds jumps by lowering its ceiling instead). */
+        {
+                p8 reply[512] = {0};
+                bipolar question = dns_write_name(
+                    reply, sizeof reply, (string_address) "cycle.example");
+                positive at = (positive)question;
+                bipolar owner;
+                p32 found = 0;
+
+                check("DNS CNAME-cycle fixture question writes", question > 0);
+                if (question < 0)
+                        return;
+
+                reply[at++] = 0xc0;
+                reply[at++] = 0;
+                network_store_16(reply + at, DNS_TYPE_CNAME);
+                network_store_16(reply + at + 2, DNS_CLASS_IN);
+                network_store_32(reply + at + 4, 0);
+                owner = dns_write_name(reply + at + 10, sizeof reply - at - 10,
+                                       (string_address) "other.example");
+                network_store_16(reply + at + 8, (p16)owner);
+                at += 10 + (positive)owner;
+
+                owner = dns_write_name(reply + at, sizeof reply - at,
+                                       (string_address) "other.example");
+                at += (positive)owner;
+                network_store_16(reply + at, DNS_TYPE_CNAME);
+                network_store_16(reply + at + 2, DNS_CLASS_IN);
+                network_store_32(reply + at + 4, 0);
+                network_store_16(reply + at + 8, 2);
+                reply[at + 10] = 0xc0;
+                reply[at + 11] = 0;
+                at += 12;
+
+                check("a DNS CNAME cycle exhausts the answer-section hop budget",
+                      dns_answer_address(reply, at, (positive)question, 2, 0,
+                                         address_of found) == DNS_MALFORMED &&
+                          !found);
         }
 }
 
@@ -50993,6 +51152,31 @@ static fn http_bounded_store(void)
                 system_wait4_retry((b32)child, null, 0, null);
                 socket_close((b32)listening);
         }
+
+        /* HTTP_FETCH_MAX is inclusive on the Content-Length gate (`>`): the
+           decimal must parse at the ceiling, and one past is refused above. */
+        {
+                p8 head[96];
+                p8 length_text[24];
+                http_response response;
+                positive header = 0;
+                positive used = 0;
+                positive digits = positive_into(length_text, HTTP_FETCH_MAX);
+
+                length_text[digits] = end;
+                memory_copy(head, "HTTP/1.1 200 OK\r\nContent-Length: ",
+                            sizeof("HTTP/1.1 200 OK\r\nContent-Length: ") - 1);
+                used = sizeof("HTTP/1.1 200 OK\r\nContent-Length: ") - 1;
+                memory_copy(head + used, length_text, digits);
+                used += digits;
+                memory_copy(head + used, "\r\n\r\n", 4);
+                used += 4;
+                check("Content-Length of exactly HTTP_FETCH_MAX is framed",
+                      http_response_framing(head, used, address_of header,
+                                            address_of response) == HTTP_OK &&
+                          response.body_kind == HTTP_BODY_LENGTH &&
+                          response.body_length == HTTP_FETCH_MAX);
+        }
 }
 
 static fn network_stream_timeouts(void)
@@ -51266,6 +51450,118 @@ static fn http_body_write_failure(void)
                       HTTP_WRITE &&
                   http_write_failure == -ENOSPC);
         system_close(full);
+}
+
+/*
+        Descriptor- and mapping-/allocation-exhaustion for the externally
+        reachable HTTP fetch and TLS client open loops.
+
+        Accept is out of scope: http_stream_open only connects. TLS handshake
+        opens no further descriptors once the socket exists, so EMFILE is
+        proved at the shared socket_new gate for both http_get and
+        http_fetch_to (HTTPS). Body storage grows through byte_store_reserve
+        → memory_reserve → mmap; RLIMIT_AS refusal is therefore both the
+        allocation and the mapping sweep for that path. TLS handshake /
+        record loops keep fixed buffers and do not mmap — no separate
+        mapping case there.
+*/
+static fn http_tls_resource_exhaustion(void)
+{
+        positive nofile[2] = {0, 0};
+        positive as_limit[2] = {0, 0};
+        bipolar asked;
+
+        asked = system_call_4(syscall(prlimit64), 0, 7, 0,
+                              (positive)address_of nofile);
+        if (asked)
+                log_direct(str("net: HTTP/TLS descriptor exhaustion NOT RUN -- prlimit unavailable\n"));
+        else
+        {
+                positive capped[2];
+                http_buffer body = {0};
+                b32 code = 0;
+                bipolar status;
+                bipolar probe;
+
+                /* Soft 0 keeps existing descriptors; the next open gets EMFILE. */
+                capped[0] = 0;
+                capped[1] = nofile[1];
+                asked = system_call_4(syscall(prlimit64), 0, 7,
+                                      (positive)address_of capped, 0);
+                check("HTTP/TLS descriptor table can be capped at EMFILE",
+                      asked == 0);
+                if (!asked)
+                {
+                        probe = system_open_at(AT_FDCWD,
+                                               (string_address)"/dev/null",
+                                               FILE_READ | O_CLOEXEC);
+                        check("a capped table refuses a new open with EMFILE",
+                              probe == -EMFILE);
+                        if (probe >= 0)
+                                system_close(probe);
+
+                        status = http_get((string_address)"http://127.0.0.1:1/",
+                                          address_of body, address_of code);
+                        check("HTTP fetch fails closed when connect cannot open a socket",
+                              status == HTTP_NO_ROUTE);
+                        http_forget(address_of body);
+
+                        status = http_fetch_to(
+                            (string_address)"https://127.0.0.1:1/", -1, false,
+                            address_of code);
+                        check("HTTPS fetch fails closed when TLS open cannot get a socket",
+                              status == HTTP_NO_ROUTE);
+
+                        asked = system_call_4(syscall(prlimit64), 0, 7,
+                                              (positive)address_of nofile, 0);
+                        check("HTTP/TLS descriptor limit is restored",
+                              asked == 0);
+                }
+        }
+
+        asked = system_call_4(syscall(prlimit64), 0, 9, 0,
+                              (positive)address_of as_limit);
+        if (asked)
+                log_direct(str("net: HTTP body store reserve exhaustion NOT RUN -- prlimit unavailable\n"));
+        else
+        {
+                static p8 bytes[] = "body bytes that need a reserved mapping";
+                http_buffer store = {0};
+                http_body body = {
+                    .stash = bytes,
+                    .stash_used = sizeof bytes - 1,
+                    .store = address_of store,
+                    .store_limit = HTTP_FETCH_MAX,
+                };
+                positive constrained[2];
+                bipolar status = HTTP_OK;
+
+                constrained[0] = 0;
+                constrained[1] = as_limit[1];
+                asked = system_call_4(syscall(prlimit64), 0, 9,
+                                      (positive)address_of constrained, 0);
+                check("HTTP body store address space can be constrained",
+                      asked == 0);
+                if (!asked)
+                {
+                        status = http_copy(address_of body, -1,
+                                           sizeof bytes - 1, true);
+                        asked = system_call_4(syscall(prlimit64), 0, 9,
+                                              (positive)address_of as_limit, 0);
+                        check("HTTP body store address-space limit is restored",
+                              asked == 0);
+                }
+
+                /* User-mode emulators can still satisfy guest mmaps inside a
+                   host VMA reserved before the limit was lowered. */
+                if (status == HTTP_OK && store.used)
+                        log_direct(str("net: HTTP body store reserve exhaustion NOT RUN -- address-space limit ignored (likely emulation)\n"));
+                else
+                        check("HTTP body store fails closed when byte_store_reserve cannot grow",
+                              status == HTTP_NO_REPLY && !store.used &&
+                                  !store.bytes);
+                http_forget(address_of store);
+        }
 }
 
 /*
@@ -51985,6 +52281,55 @@ static fn tls_closure_boundaries(void)
         #undef TLS_BATCH_RECORDS
 }
 
+/* TLS_RECORD_MAX is the inclusive ciphertext payload ceiling on the wire.
+   An unencrypted handshake record is enough to hit the length gate before
+   any AEAD work: exact fill is accepted, one past and empty are refused. */
+static fn tls_record_payload_ceiling(void)
+{
+        tls_conn tls = {0};
+        p8 type = 0;
+        p8 address_to inner = null;
+        positive length = 0;
+
+        tls.receive[0] = TLS_CT_HANDSHAKE;
+        tls.receive[1] = 0x03;
+        tls.receive[2] = 0x03;
+        network_store_16(tls.receive + 3, TLS_RECORD_MAX);
+        memory_fill(tls.receive + 5, 0xa5, TLS_RECORD_MAX);
+        tls.receive_end = 5 + TLS_RECORD_MAX;
+        check("a TLS record of exactly TLS_RECORD_MAX is accepted",
+              tls_next_record(address_of tls, address_of type,
+                              address_of inner, address_of length, null) ==
+                      TLS_OK &&
+                  type == TLS_CT_HANDSHAKE && length == TLS_RECORD_MAX &&
+                  inner == tls.receive + 5);
+
+        memory_fill(address_of tls, 0, sizeof tls);
+        tls.receive[0] = TLS_CT_HANDSHAKE;
+        tls.receive[1] = 0x03;
+        tls.receive[2] = 0x03;
+        network_store_16(tls.receive + 3, TLS_RECORD_MAX + 1);
+        tls.receive_end = 5;
+        type = 0;
+        inner = null;
+        length = 0;
+        check("a TLS record one past TLS_RECORD_MAX is refused",
+              tls_next_record(address_of tls, address_of type,
+                              address_of inner, address_of length, null) ==
+                  TLS_FAIL);
+
+        memory_fill(address_of tls, 0, sizeof tls);
+        tls.receive[0] = TLS_CT_HANDSHAKE;
+        tls.receive[1] = 0x03;
+        tls.receive[2] = 0x03;
+        network_store_16(tls.receive + 3, 0);
+        tls.receive_end = 5;
+        check("an empty TLS record payload length is refused",
+              tls_next_record(address_of tls, address_of type,
+                              address_of inner, address_of length, null) ==
+                  TLS_FAIL);
+}
+
 static fn tls_sensitive_state_erasure(void)
 {
         {
@@ -51994,6 +52339,11 @@ static fn tls_sensitive_state_erasure(void)
                 check("TLS record sizing rejects arithmetic wraparound",
                       tls_send_enc(address_of connection, TLS_CT_APP,
                                    address_of byte, (positive)-1) == TLS_FAIL);
+
+                check("TLS encrypted plaintext one over TLS_RECORD_MAX-17 is refused",
+                      tls_send_enc(address_of connection, TLS_CT_APP,
+                                   address_of byte,
+                                   TLS_RECORD_MAX - 16) == TLS_FAIL);
 
                 connection.seq_write = TLS_AES_GCM_RECORD_LIMIT;
                 check("TLS write keys stop at their AES-GCM usage limit",
@@ -57195,9 +57545,11 @@ b32 main(void)
         network_stream_send_timeout();
         http_header_deadlines();
         http_body_write_failure();
+        http_tls_resource_exhaustion();
         http_write_spans_partial();
         network_stream_sigpipe();
         tls_closure_boundaries();
+        tls_record_payload_ceiling();
         tls_sensitive_state_erasure();
         tls_certificate_dates();
         tls_certificate_identity_rules();

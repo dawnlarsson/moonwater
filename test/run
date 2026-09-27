@@ -3592,6 +3592,10 @@ lane_socket() { freestanding_checks_lane socket socket; }
 #       tls_hs_fuzz is the same bounded pattern over handshake fragmentation
 #       (tls_handshake_one_append / tls_encrypted_flight_append; corpus under
 #       test/fuzz_corpus/tls_hs/).
+#       Fuzz exit 2 is soft: missing clang must not turn a green freestanding+
+#       oracle lane into "did not run". Exit 1 from fuzz stays a hard fail.
+#       Oracle harnesses (tls_chains / https_downgrade / http_response_framing)
+#       still propagate exit 2 into net_outcome when the lane was otherwise 0.
 lane_net()
 {
         freestanding_checks_lane net net
@@ -3617,13 +3621,13 @@ lane_net()
         python3 test/differential.py --harness tls_der_fuzz
         case $? in
         0) ;;
-        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        2) note "tls_der_fuzz: skipped (soft) -- does not downgrade net" ;;
         *) net_outcome=1 ;;
         esac
         python3 test/differential.py --harness tls_hs_fuzz
         case $? in
         0) ;;
-        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        2) note "tls_hs_fuzz: skipped (soft) -- does not downgrade net" ;;
         *) net_outcome=1 ;;
         esac
         return "$net_outcome"

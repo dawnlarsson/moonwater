@@ -1,0 +1,23 @@
+#!/bin/sh
+#
+#       Continuous / longer local fuzz for the TLS net parsers.
+#
+#           sh test/fuzz_net
+#
+#       lane_net keeps the bounded smoke (20000 runs / 5s). This entry point
+#       is explicit: longer defaults, override with MOONWATER_FUZZ_RUNS /
+#       MOONWATER_FUZZ_SECONDS. Runs tls_der_fuzz then tls_hs_fuzz.
+#
+set -eu
+
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd -- "$root"
+
+# -1 runs = unbounded by count; time is the primary stop.
+: "${MOONWATER_FUZZ_RUNS:=-1}"
+: "${MOONWATER_FUZZ_SECONDS:=3600}"
+export MOONWATER_FUZZ_RUNS MOONWATER_FUZZ_SECONDS
+
+echo "fuzz_net: der then hs (runs=$MOONWATER_FUZZ_RUNS seconds=$MOONWATER_FUZZ_SECONDS)"
+python3 test/differential.py --harness tls_der_fuzz
+python3 test/differential.py --harness tls_hs_fuzz

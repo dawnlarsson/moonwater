@@ -34230,6 +34230,21 @@ int main(void)
     return checks.verdict("http response framing", "http-response-framing")
 
 
+def tls_fuzz_budget(default_runs=20000, default_seconds=5):
+    """Lane smoke defaults; longer local runs via MOONWATER_FUZZ_* env vars.
+
+    MOONWATER_FUZZ_RUNS / MOONWATER_FUZZ_SECONDS override the libFuzzer
+    -runs / -max_total_time knobs. Lane_net leaves them unset (20000 / 5).
+    test/fuzz_net sets longer values for continuous local fuzzing.
+    """
+    runs = int(os.environ.get("MOONWATER_FUZZ_RUNS", str(default_runs)))
+    seconds = int(os.environ.get("MOONWATER_FUZZ_SECONDS", str(default_seconds)))
+    # Give the process a little headroom past max_total_time for compile-less
+    # shutdown and artifact write; never shorter than the historical 60s smoke.
+    timeout = max(60, seconds + 30) if seconds >= 0 else None
+    return runs, seconds, timeout
+
+
 def harness_tls_der_fuzz(argv):
     """Coverage-guided libFuzzer over DER certs and Certificate HS framing.
 
@@ -34240,7 +34255,8 @@ def harness_tls_der_fuzz(argv):
     (extension fixtures from checks.c plus Certificate handshake bodies).
     Bounded fixed-seed run so a lane cannot hang; return 2 (NOT RUN) when
     clang/libFuzzer is unavailable. Expected TLS_FAIL is ignored; only
-    ASan/UBSan aborts fail the lane.
+    ASan/UBSan aborts fail the lane. Override MOONWATER_FUZZ_RUNS /
+    MOONWATER_FUZZ_SECONDS for longer local runs (see test/fuzz_net).
 
         python3 test/differential.py --harness tls_der_fuzz
     """
@@ -34248,6 +34264,7 @@ def harness_tls_der_fuzz(argv):
     import shutil
     import tempfile
 
+    runs, seconds, timeout = tls_fuzz_budget()
     clang = shutil.which("clang")
     if not clang:
         print("tls der fuzz: NOT RUN -- no clang")
@@ -34471,11 +34488,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
         ran = subprocess.run(
             [str(binary), str(run_corpus),
-             "-seed=1", "-runs=20000", "-max_total_time=5",
+             "-seed=1", "-runs=%d" % runs, "-max_total_time=%d" % seconds,
              "-max_len=4096",
              "-artifact_prefix=" + str(work) + "/",
              "-print_final_stats=0"],
-            capture_output=True, text=True, env=environment, timeout=60)
+            capture_output=True, text=True, env=environment, timeout=timeout)
         ok = ran.returncode == 0 and "ERROR" not in ran.stderr and \
             "Sanitizer" not in ran.stderr and "runtime error" not in ran.stderr
         if not ok:
@@ -34483,8 +34500,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                   (ran.stderr or ran.stdout)[-3000:])
             write_tally("tls-der-fuzz", 0, 1)
             return 1
-        print("  tls der fuzz: %d seeds, libFuzzer ASan/UBSan run clean" %
-              len(seeds))
+        print("  tls der fuzz: %d seeds, libFuzzer ASan/UBSan "
+              "(-runs=%d -max_total_time=%d) clean" %
+              (len(seeds), runs, seconds))
         write_tally("tls-der-fuzz", 1, 1)
         return 0
 
@@ -34498,7 +34516,8 @@ def harness_tls_hs_fuzz(argv):
     test/fuzz_corpus/tls_hs/ mirrors ServerHello fragment and encrypted-flight
     cases from checks.c. Bounded fixed-seed run; return 2 (NOT RUN) when
     clang/libFuzzer is unavailable. Expected TLS_FAIL is ignored; only
-    ASan/UBSan aborts fail the lane.
+    ASan/UBSan aborts fail the lane. Override MOONWATER_FUZZ_RUNS /
+    MOONWATER_FUZZ_SECONDS for longer local runs (see test/fuzz_net).
 
         python3 test/differential.py --harness tls_hs_fuzz
     """
@@ -34506,6 +34525,7 @@ def harness_tls_hs_fuzz(argv):
     import shutil
     import tempfile
 
+    runs, seconds, timeout = tls_fuzz_budget()
     clang = shutil.which("clang")
     if not clang:
         print("tls hs fuzz: NOT RUN -- no clang")
@@ -34868,11 +34888,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
         ran = subprocess.run(
             [str(binary), str(run_corpus),
-             "-seed=1", "-runs=20000", "-max_total_time=5",
+             "-seed=1", "-runs=%d" % runs, "-max_total_time=%d" % seconds,
              "-max_len=20480",
              "-artifact_prefix=" + str(work) + "/",
              "-print_final_stats=0"],
-            capture_output=True, text=True, env=environment, timeout=60)
+            capture_output=True, text=True, env=environment, timeout=timeout)
         ok = ran.returncode == 0 and "ERROR" not in ran.stderr and \
             "Sanitizer" not in ran.stderr and "runtime error" not in ran.stderr
         if not ok:
@@ -34880,8 +34900,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                   (ran.stderr or ran.stdout)[-3000:])
             write_tally("tls-hs-fuzz", 0, 1)
             return 1
-        print("  tls hs fuzz: %d seeds, libFuzzer ASan/UBSan run clean" %
-              len(seeds))
+        print("  tls hs fuzz: %d seeds, libFuzzer ASan/UBSan "
+              "(-runs=%d -max_total_time=%d) clean" %
+              (len(seeds), runs, seconds))
         write_tally("tls-hs-fuzz", 1, 1)
         return 0
 
