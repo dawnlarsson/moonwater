@@ -11502,9 +11502,28 @@ static bool conditional_tokenize(string_address text)
 
                 start = at;
 
-                while (string_get(at) && !lex_is_space(string_get(at)))
+                /* A regex operand is one word through parentheses, blanks
+                   inside them included: [[ $v =~ (one two) ]] has the
+                   pattern "(one two)", as bash reads it. */
+                positive depth = 0;
+
+                while (string_get(at) &&
+                       (depth || !lex_is_space(string_get(at))))
                 {
                         p8 value = string_get(at);
+
+                        if (regex_operand && value == '(')
+                        {
+                                depth++;
+                                at++;
+                                continue;
+                        }
+                        if (regex_operand && value == ')' && depth)
+                        {
+                                depth--;
+                                at++;
+                                continue;
+                        }
 
                         /*
                                 An extended pattern group is one piece of the
@@ -11523,8 +11542,9 @@ static bool conditional_tokenize(string_address text)
                                 }
                         }
 
-                        if ((value == '&' && string_is(at + 1, '&')) ||
-                            (value == '|' && string_is(at + 1, '|')) ||
+                        if ((!depth &&
+                             ((value == '&' && string_is(at + 1, '&')) ||
+                              (value == '|' && string_is(at + 1, '|')))) ||
                             (!regex_operand &&
                              (value == '(' || value == ')')))
                                 break;
@@ -11678,6 +11698,14 @@ static bool conditional_regex_match(string_address text, string_address pattern,
                 matched = regex_find(REGEX_FIRST | REGEX_CAPTURES, text, string_length(text), 0);
                 if (matched)
                         conditional_regex_captures(text);
+                else
+                {
+                        /* A failed match empties BASH_REMATCH, as bash's
+                           does; the last success's groups stayed. */
+                        string_address none[1] = {null};
+
+                        shell_array_words("BASH_REMATCH", 12, none, 0);
+                }
         }
         regex_pool.used = mark;
         regex_current = saved;

@@ -13877,6 +13877,20 @@ def shell_lang_cfor_forms(rng):
     return ("cfor-forms-" + shape, shell_BASH, shell_program("i=0", line, 'echo "end=$? i=$i"'))
 
 
+#       The right side of =~ is one word through its parentheses, blanks
+#       inside them included, and a failed match empties BASH_REMATCH.
+#       (one two) was a syntax error, and the last match's groups stayed.
+def shell_lang_regex_operand(rng):
+    subject = rng.choice(("'one two'", "'a  b'", "'x one y'", "ab", "'<>'", "zz", "'a b c'"))
+    pattern = rng.choice(("(one two)", "(a  b)", "x\\ (one|two)\\ y", "(a)(b)", "( a )", "(< >)", "^(a|z)+$",
+                          "(a b) c", "((a) (b))", "'(a b)'", '"one two"', "(o[n]e) (t)"))
+    before = rng.choice(("", "[[ ab =~ (a)(b) ]]; ", "[[ q =~ q ]]; "))
+    return ("regex-operand", shell_BASH, shell_program(
+        before + "[[ " + subject + " =~ " + pattern + " ]] 2>/dev/null; echo \"s=$?\"",
+        "echo \"${#BASH_REMATCH[@]}\"; printf '<%s>' \"${BASH_REMATCH[@]}\"; echo",
+        "[[ " + subject + " =~ " + pattern + " && -n x ]] && echo both || echo not"))
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16511,6 +16525,7 @@ SHELL_FAMILIES = (
     shell_lang_test_bash_unary,
     shell_lang_indirect_elements,
     shell_lang_cfor_forms,
+    shell_lang_regex_operand,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),
