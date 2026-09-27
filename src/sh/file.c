@@ -693,6 +693,32 @@ static string_address file_last_component(string_address path)
         return last ? last + 1 : path;
 }
 
+/* gnulib's same_nameat on names as the command line spelled them: the same
+   last component, and the directories they are spelled in looked at without
+   following -- so d/f through a link d to here is not f -- except a target
+   directory the names were put into, which the tool opened and so
+   followed. */
+static bool file_into_mode;
+
+static bool file_same_spelled(string_address source, string_address destination)
+{
+        p8 head[FILE_PATH_MAX];
+        file_facts left;
+        file_facts right;
+
+        if (!string_equals(file_last_component(source),
+                           file_last_component(destination)))
+                return false;
+        path_head_copy(head, FILE_PATH_MAX, source);
+        if (!file_look(AT_FDCWD, head, AT_SYMLINK_NOFOLLOW, address_of left))
+                return false;
+        path_head_copy(head, FILE_PATH_MAX, destination);
+        return file_look(AT_FDCWD, head,
+                         file_into_mode ? 0 : AT_SYMLINK_NOFOLLOW,
+                         address_of right) &&
+               file_same_identity(address_of left, address_of right);
+}
+
 static bipolar file_parent_open(string_address path, p8 address_to leaf)
 {
         return system_open_parent_pinned(AT_FDCWD, path, leaf,
@@ -6222,6 +6248,7 @@ static bool file_source_destination(string_address program, positive first,
                                     fn(address_to pair)(string_address source,
                                                         string_address destination))
 {
+        file_into_mode = false;
         if (into && alone)
                 return string_report(
                     log_error, false,
@@ -6302,6 +6329,7 @@ static bool file_source_destination(string_address program, positive first,
 
         bool complete = true;
 
+        file_into_mode = true;
         while (first < after)
         {
                 string_address source = program_argument((b32)first++);
@@ -27537,35 +27565,151 @@ added:
 
 /* GNU copy.c same_file_ok after the UPDATE_NONE skip. True proceeds
    (and *done is -l already linked). False is the same-file refuse. */
+/*
+        GNU copy.c same_file_ok, whole, for cp: asked of every destination
+        that exists, not only of one that is the source's own inode, since a
+        source link copied as itself onto what it points at -- cp -a sl f --
+        is two inodes that are one file once the link is followed, and
+        removing f to write the link there left f -> f. The source is as cp
+        looked at it; the destination as GNU's use_lstat looks at it, which
+        cp_same_file_look below decides. done says the copy is already
+        there and nothing is to be written.
+*/
+static bool cp_copy_contents;
+static bool cp_keep_directory_link;
+
+static bool cp_same_file_look(positive kind)
+{
+        bool as_regular = !cp_recursive || cp_copy_contents;
+
+        return (kind != MODE_FILE &&
+                (!as_regular ||
+                 (kind == MODE_DIRECTORY && !cp_keep_directory_link) ||
+                 kind == MODE_LINK)) ||
+               cp_symbolic || cp_hard || file_backup_kind || cp_replace;
+}
+
 static bool cp_same_file_ok(bipolar source_directory, string_address source,
                             bipolar destination_directory,
                             string_address destination,
+                            string_address source_shown,
+                            string_address destination_shown, bool named,
                             file_facts address_to source_facts,
-                            bool destination_is_link, bool address_to done)
+                            file_facts address_to destination_facts,
+                            bool address_to done)
 {
+        file_facts source_entry;
+        file_facts destination_entry;
+        file_facts address_to source_link = source_facts;
+        file_facts address_to destination_link = destination_facts;
+        bool same = file_same_identity(source_facts, destination_facts);
+        bool same_link;
+
+#define CP_IS_LINK(facts) (((facts)->mode & MODE_FORMAT) == MODE_LINK)
+        //      A name on the command line is compared as spelled; one found
+        //      in a walk is where the walk opened it.
+#define CP_SAME_NAME                                                        \
+        (named ? file_same_spelled(source_shown, destination_shown)         \
+               : file_same_dirent(source_directory, source,                 \
+                                  destination_directory, destination))
         *done = false;
-        if (cp_hard)
+        if (same && cp_hard)
         {
                 *done = true;
                 return true;
         }
 
-        bool same_name = file_same_dirent(source_directory, source,
-                                          destination_directory, destination);
-
-        if (file_backup_kind && !same_name)
-                return true;
-        /* GNU same_file_ok: a symbolic copy onto an existing dest link
-           proceeds, then linkat fails with EEXIST. */
-        if (cp_symbolic && destination_is_link)
-                return true;
-        if (cp_replace)
+        if (!cp_dereference)
         {
-                if (destination_is_link)
+                same_link = same;
+                if (CP_IS_LINK(source_facts) && CP_IS_LINK(destination_facts))
+                {
+                        bool same_name = CP_SAME_NAME;
+                        if (!same_name)
+                        {
+                                if (file_backup_kind)
+                                        return true;
+                                if (same_link)
+                                {
+                                        *done = true;
+                                        return true;
+                                }
+                        }
+                        return !same_name;
+                }
+        }
+        else
+        {
+                if (!same)
                         return true;
-                if (source_facts->hard_links > 1 && !same_name)
+                if (!file_look(destination_directory, destination,
+                               AT_SYMLINK_NOFOLLOW, address_of destination_entry) ||
+                    !file_look(source_directory, source, AT_SYMLINK_NOFOLLOW,
+                               address_of source_entry))
+                        return true;
+                source_link = address_of source_entry;
+                destination_link = address_of destination_entry;
+                same_link = file_same_identity(source_link, destination_link);
+                if (CP_IS_LINK(source_link) && CP_IS_LINK(destination_link) &&
+                    cp_replace)
                         return true;
         }
+
+        if (file_backup_kind)
+        {
+                if (!same_link)
+                        return !(cp_dereference && CP_IS_LINK(source_link) &&
+                                 !CP_IS_LINK(destination_link));
+                return !CP_SAME_NAME;
+        }
+
+        if (cp_replace)
+        {
+                if (CP_IS_LINK(destination_link))
+                        return true;
+                if (same_link && destination_link->hard_links > 1 &&
+                    !CP_SAME_NAME)
+                        return true;
+        }
+
+        if (!CP_IS_LINK(source_link) && !CP_IS_LINK(destination_link))
+        {
+                if (!file_same_identity(source_link, destination_link))
+                        return true;
+                if (cp_hard)
+                {
+                        *done = true;
+                        return true;
+                }
+        }
+
+        if (cp_symbolic && CP_IS_LINK(destination_link))
+                return true;
+
+        if (!cp_dereference)
+        {
+                file_facts source_through = *source_link;
+                file_facts destination_through = *destination_link;
+
+                if (CP_IS_LINK(source_link) &&
+                    !file_look(source_directory, source, 0,
+                               address_of source_through))
+                        return true;
+                if (CP_IS_LINK(destination_link) &&
+                    !file_look(destination_directory, destination, 0,
+                               address_of destination_through))
+                        return true;
+                if (!file_same_identity(address_of source_through,
+                                        address_of destination_through))
+                        return true;
+                if (cp_hard)
+                {
+                        *done = !CP_IS_LINK(destination_link);
+                        return true;
+                }
+        }
+#undef CP_IS_LINK
+#undef CP_SAME_NAME
         return false;
 }
 
@@ -27690,15 +27834,19 @@ static bool file_copy_one(bipolar source_directory, string_address source,
            copy; the same-file sentence is not the answer. -l is already
            linked, -b of a distinct dirent and --remove-destination of a
            dest symlink or extra hard link all proceed. */
-        if (!moving && destination_exists && cp_update_policy != 'n' &&
+        file_facts same_there;
+        if (!moving && !fresh && cp_update_policy != 'n' &&
             cp_update_policy != 'F' &&
-            file_same_identity(address_of facts, address_of there))
+            file_look(destination_directory, destination,
+                      cp_same_file_look(kind) ? AT_SYMLINK_NOFOLLOW : 0,
+                      address_of same_there))
         {
                 bool done = false;
 
                 if (cp_same_file_ok(source_directory, source,
                                     destination_directory, destination,
-                                    address_of facts, destination_is_link,
+                                    source_shown, destination_shown, named,
+                                    address_of facts, address_of same_there,
                                     address_of done))
                 {
                         if (done)
@@ -28454,18 +28602,20 @@ static fn cp_pair(string_address source, string_address destination)
         bool entry_exists = file_look(
             destination_directory, destination_leaf, AT_SYMLINK_NOFOLLOW,
             address_of destination_entry);
-        if (destination_exists && cp_update_policy != 'n' &&
-            cp_update_policy != 'F' &&
-            file_same_identity(address_of source_facts,
-                               address_of destination_facts))
+        file_facts same_there;
+        bool already = false;
+        if (cp_update_policy != 'n' && cp_update_policy != 'F' &&
+            file_look(destination_directory, destination_leaf,
+                      cp_same_file_look(kind) ? AT_SYMLINK_NOFOLLOW : 0,
+                      address_of same_there))
         {
-                bool destination_is_link = entry_exists &&
-                    (destination_entry.mode & MODE_FORMAT) == MODE_LINK;
                 bool done = false;
 
                 if (!cp_same_file_ok(source_directory, source_leaf,
                                      destination_directory, destination_leaf,
-                                     address_of source_facts, destination_is_link,
+                                     source, destination, true,
+                                     address_of source_facts,
+                                     address_of same_there,
                                      address_of done))
                 {
                         string_format(log_error, "cp: %w and %w are the same file\n",
@@ -28477,13 +28627,10 @@ static fn cp_pair(string_address source, string_address destination)
                         cp_status = 1;
                         return;
                 }
-                if (done)
-                {
-                        system_close(source_directory);
-                        system_close(destination_directory);
-                        system_close(source_pinned);
-                        return;
-                }
+                //      Already there -- a hard link onto its own inode --
+                //      but GNU still weighs -u and asks -i first, and a no
+                //      is a no.
+                already = done;
         }
 
         /* Collision options authorize the original destination.  Backing it
@@ -28512,6 +28659,8 @@ static fn cp_pair(string_address source, string_address destination)
                                     cp_update_policy == 'F',
                                     cp_loud, address_of source_facts,
                                     collision_facts, address_of cp_status))
+                already = true;
+        if (already)
         {
                 system_close(source_directory);
                 system_close(destination_directory);
@@ -28843,6 +28992,8 @@ static b32 file_cp()
 
         cp_attributes_only = (taking.flags & FILE_FLAG('A')) != 0;
         cp_replace = (taking.flags & FILE_FLAG('D')) != 0;
+        cp_copy_contents = (taking.flags & FILE_FLAG('C')) != 0;
+        cp_keep_directory_link = (taking.flags & FILE_FLAG('K')) != 0;
 
         positive flags = taking.flags;
         positive first = taking.first;
