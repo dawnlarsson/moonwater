@@ -13572,6 +13572,10 @@ static b32 exec_time(b32 index)
         return status;
 }
 
+/* The compound whose own redirection failed last. bash hands that failure
+   through a `!` untouched: `! { :; } < missing` is 1, not 0. */
+static b32 exec_redirect_failed_node;
+
 static b32 exec_pipeline(b32 index)
 {
         parse_node address_to node = parse_nodes + index;
@@ -13586,7 +13590,10 @@ static b32 exec_pipeline(b32 index)
         }
 
         if (node->flags)
+        {
                 exec_tested = true;
+                exec_redirect_failed_node = 0;
+        }
 
         status = count > 1
                      ? exec_pipe(node->left, count, false, shell_pipefail(),
@@ -13600,7 +13607,10 @@ static b32 exec_pipeline(b32 index)
 
         if (node->flags)
         {
-                shell_status = status ? 0 : 1;
+                shell_status = shell_bash_compat && count == 1 &&
+                                       exec_redirect_failed_node == node->left
+                                   ? status
+                                   : status ? 0 : 1;
 
                 return shell_status;
         }
@@ -13870,6 +13880,10 @@ static b32 exec_node_kind(b32 index)
                 exec_expansion_done(expanded, substitutions);
 
                 shell_status = (exec_line_aborted() ? shell_status : exec_redirect_status ? exec_redirect_status : 1);
+                exec_redirect_failed_node = index;
+                /* A compound whose redirection failed is a command that
+                   failed, and set -e and the ERR trap see it as one. */
+                exec_errexit(shell_status);
                 return shell_status;
         }
 

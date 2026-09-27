@@ -13729,6 +13729,44 @@ def shell_lang_errexit_contexts(rng):
         "f() { return 3; }; printf 'false\\n' > fails", options, "echo start", body + " 2>/dev/null", "echo \"after=$?\"")
 
 
+#       A redirection that fails on a compound command fails the command:
+#       set -e leaves and the ERR trap runs, unless the command is tested.
+#       Only simple commands were ever given the chance, so a while loop
+#       reading a missing file went on to the next line.
+shell_ERREXIT_COMPOUNDS = {
+    "group": "{ echo in; }",
+    "subshell": "( echo in )",
+    "while-read": "while read l; do echo \"$l\"; done",
+    "for": "for i in 1; do echo in; done",
+    "if": "if true; then echo in; fi",
+    "case": "case x in x) echo in;; esac",
+    "until": "until true; do :; done",
+    "function": "f",
+    "double-bracket": "[[ -n x ]]",
+    "arithmetic": "(( 1 ))",
+}
+
+
+def shell_lang_errexit_redirect(rng):
+    compound = rng.choice(sorted(shell_ERREXIT_COMPOUNDS))
+    redirect = rng.choice(("< missing", "> nodir/out", "3< missing", "2> nodir/err", "< missing > out"))
+    context = rng.choice(("plain", "plain", "if-cond", "or-left", "and-left", "function-body", "loop-body", "negated"))
+    options = rng.choice(("set -e", "set -e", "set +e", "trap-err"))
+    command = shell_ERREXIT_COMPOUNDS[compound] + " " + redirect
+    body = {"plain": command,
+            "if-cond": "if " + command + "; then echo T; else echo F; fi",
+            "or-left": command + " || echo caught",
+            "and-left": command + " && echo and",
+            "function-body": "g() { " + command + "; echo in-g; }; g",
+            "loop-body": "for i in 1 2; do " + command + "; echo body-$i; done",
+            "negated": "! " + command}[context]
+    bash_only = options == "trap-err" or compound in ("double-bracket", "arithmetic")
+    if options == "trap-err":
+        options = "set -E; trap 'echo \"err=$?\"' ERR"
+    return "errexit-redirect-" + compound, shell_BASH if bash_only else shell_ALL, shell_program(
+        "f() { echo in-f; }", options, "echo start", body + " 2>/dev/null", "echo \"after=$?\"")
+
+
 def shell_lang_nounset_forms(rng):
     form = rng.choice(("$x", "${x}", "${x-}", "${x:-d}", "${x+set}", "${#x}", "${x#a}", "${x%a}", "${x/a/b}", "${x:0:1}",
                        "${x^^}", "${x@Q}", "$1", "${10}", "$@", "$*", "\"$@\"", "\"$*\"", "${@}", "$#", "$!", "${!x}", "${a[0]}",
@@ -15562,6 +15600,7 @@ SHELL_FAMILIES = (
     shell_lang_background_wait,
     shell_lang_background_body,
     shell_lang_errexit_contexts,
+    shell_lang_errexit_redirect,
     shell_lang_nounset_forms,
     shell_lang_noclobber,
     shell_lang_allexport_noglob,
