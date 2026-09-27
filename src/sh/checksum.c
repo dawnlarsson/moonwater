@@ -89,6 +89,9 @@ static bool checksum_sha2_family;
    -1 before the first, 0 the standard "digest  name", 1 the reversed BSD
    "digest name". */
 static b32 checksum_bsd_reversed;
+/* cksum --check reads a digest written in base64 as well as in hex, as
+   coreutils' cksum does and its md5sum and the rest do not. */
+static bool checksum_base64_read;
 /* Whose name a verification complains in, and the label it calls a line it
    could not read. cksum --check borrows this walk under its own name. */
 static string_address checksum_program;
@@ -110,6 +113,73 @@ static fn checksum_modes_reset()
         checksum_length = 0;
         checksum_sha2_family = false;
         checksum_bsd_reversed = -1;
+        checksum_base64_read = false;
+}
+
+static positive checksum_base64_length(positive bytes)
+{
+        return (bytes + 2) / 3 * 4;
+}
+
+/* A base64 digest of exactly bytes bytes, padding and all, into expected. */
+static bool checksum_base64_decode(string_address text, positive length,
+                                   positive bytes, p8 address_to expected)
+{
+        static const p8 alphabet[] =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        positive padding = (3 - bytes % 3) % 3;
+        positive made = 0;
+        positive bits = 0;
+        positive held = 0;
+
+        if (length != checksum_base64_length(bytes))
+                return false;
+
+        for (positive at = 0; at < length; at++)
+        {
+                if (at >= length - padding)
+                {
+                        if (text[at] != '=')
+                                return false;
+                        continue;
+                }
+
+                string_address place = string_first_of((string_address)alphabet, text[at]);
+
+                if (!place || !text[at])
+                        return false;
+                held = held << 6 | (positive)(place - (string_address)alphabet);
+                bits += 6;
+                if (bits >= 8)
+                {
+                        bits -= 8;
+                        if (made < bytes)
+                                expected[made++] = (p8)(held >> bits);
+                        held &= ((positive)1 << bits) - 1;
+                }
+        }
+
+        return made == bytes && !held;
+}
+
+/* The digest of a record, hex or (for cksum) base64, at its width. */
+static bool checksum_digest_read(string_address text, positive length,
+                                 positive bytes, p8 address_to expected)
+{
+        if (length != bytes * 2)
+                return checksum_base64_read &&
+                       checksum_base64_decode(text, length, bytes, expected);
+
+        for (positive i = 0; i < bytes; i++)
+        {
+                positive high = digit_known(text[i * 2], 16);
+                positive low = digit_known(text[i * 2 + 1], 16);
+
+                if (high >= 16 || low >= 16)
+                        return false;
+                expected[i] = (p8)((high << 4) | low);
+        }
+        return true;
 }
 
 /* coreutils' complaint about an option out of place, with its usage hint. */
@@ -720,7 +790,11 @@ static bool checksum_line_parse(const checksum_algorithm address_to algorithm,
         if (text_line_length && text_line[text_line_length - 1] == '\r')
                 text_line_length--;
 
-        bool escaped = text_line_length && text_line[0] == '\\';
+        // Blanks before the record, then the backslash of an escaped name.
+        while (at < text_line_length && (text_line[at] == ' ' || text_line[at] == '\t'))
+                at++;
+
+        bool escaped = at < text_line_length && text_line[at] == '\\';
 
         if (escaped)
                 at++;
@@ -728,17 +802,25 @@ static bool checksum_line_parse(const checksum_algorithm address_to algorithm,
         const checksum_algorithm address_to one = null;
         positive width = 0;
         positive digest_at;
+        positive digest_length;
         p8 address_to name;
         bool reversed = false;
         positive named = checksum_tag_parse(at, address_of one, address_of width);
 
         if (named)
         {
-                // The BSD tagged record: LABEL (name) = digest.
+                /*
+                        The tagged record, BSD's LABEL (name) = digest or
+                        OpenSSL's LABEL(name)= digest: the name runs to the
+                        last parenthesis, and blanks may stand either side of
+                        the equals sign.
+                */
                 bool accepted = !algorithm || one == algorithm ||
                                 (checksum_sha2_family &&
                                  one >= checksum_algorithms + CHECKSUM_SHA2_FIRST &&
                                  one <= checksum_algorithms + CHECKSUM_SHA2_LAST);
+                if (!algorithm)
+                        checksum_check_label = one->label;
                 if (!accepted)
                         return false;
                 // A tag without a width is the algorithm's full one,
@@ -748,15 +830,29 @@ static bool checksum_line_parse(const checksum_algorithm address_to algorithm,
                     named == at + string_length(one->label) + 2)
                         width = one->bytes;
 
-                positive digits = width * 2;
+                positive close = text_line_length;
 
-                if (text_line_length < named + 4 + digits ||
-                    memory_compare(text_line + text_line_length - digits - 4, ") = ", 4))
+                while (close > named && text_line[close - 1] != ')')
+                        close--;
+                if (close == named)
                         return false;
 
+                positive after = close;
+
+                while (after < text_line_length &&
+                       (text_line[after] == ' ' || text_line[after] == '\t'))
+                        after++;
+                if (after >= text_line_length || text_line[after] != '=')
+                        return false;
+                after++;
+                while (after < text_line_length &&
+                       (text_line[after] == ' ' || text_line[after] == '\t'))
+                        after++;
+
                 name = text_line + named;
-                digest_at = text_line_length - digits;
-                text_line[digest_at - 4] = end;
+                digest_at = after;
+                digest_length = text_line_length - after;
+                text_line[close - 1] = end;
         }
         else
         {
@@ -766,40 +862,56 @@ static bool checksum_line_parse(const checksum_algorithm address_to algorithm,
                 one = algorithm;
                 width = checksum_bytes(algorithm);
 
+                positive token = 0;
+                positive hexes = 0;
+
+                while (at + token < text_line_length && text_line[at + token] != ' ' &&
+                       text_line[at + token] != '\t')
+                        token++;
+                while (hexes < token && digit_known(text_line[at + hexes], 16) < 16)
+                        hexes++;
+
                 if (algorithm->variable_length || checksum_sha2_family)
                 {
-                        positive digits = 0;
+                        positive paddings = 0;
 
-                        while (at + digits < text_line_length &&
-                               digit_known(text_line[at + digits], 16) < 16)
-                                digits++;
+                        while (paddings < token && text_line[at + token - 1 - paddings] == '=')
+                                paddings++;
+                        width = 0;
+                        if (hexes == token)
+                                width = token / 2;
+                        else if (checksum_base64_read)
+                                for (positive bytes = 1; bytes <= 64 && !width; bytes++)
+                                        if (checksum_base64_length(bytes) == token &&
+                                            (3 - bytes % 3) % 3 == paddings)
+                                                width = bytes;
 
                         if (algorithm->variable_length)
                         {
-                                if (digits < 2 || digits % 2 || digits > 128)
+                                if (hexes == token &&
+                                    (token < 2 || token % 2 || token > 128))
                                         return false;
-                                width = digits / 2;
                         }
                         else
                         {
                                 one = null;
                                 for (positive which = CHECKSUM_SHA2_FIRST;
                                      which <= CHECKSUM_SHA2_LAST; which++)
-                                        if (digits == 2 * (positive)checksum_algorithms[which].bytes)
+                                        if (width == (positive)checksum_algorithms[which].bytes)
                                                 one = checksum_algorithms + which;
                                 if (!one)
                                         return false;
-                                width = one->bytes;
                         }
+                        if (!width)
+                                return false;
                 }
 
-                positive digits = width * 2;
-
-                if (text_line_length < at + digits + 2)
+                if (text_line_length < at + token + 2)
                         return false;
 
                 digest_at = at;
-                at += digits;
+                digest_length = token;
+                at += token;
 
                 /*
                         One blank, then a mode marker if one is there.
@@ -833,16 +945,8 @@ static bool checksum_line_parse(const checksum_algorithm address_to algorithm,
                 name = text_line + at;
         }
 
-        for (positive i = 0; i < width; i++)
-        {
-                positive high = digit_known(text_line[digest_at + i * 2], 16);
-                positive low = digit_known(text_line[digest_at + i * 2 + 1], 16);
-
-                if (high >= 16 || low >= 16)
-                        return false;
-
-                expected[i] = (p8)((high << 4) | low);
-        }
+        if (!checksum_digest_read(text_line + digest_at, digest_length, width, expected))
+                return false;
 
         /*
                 coreutils will not let one run mix the two untagged shapes:
@@ -915,6 +1019,9 @@ static bool checksum_line_parse(const checksum_algorithm address_to algorithm,
 typedef struct
 {
         const checksum_algorithm address_to algorithm;
+        /* What a malformed record is called: cksum without -a calls it by
+           the last tag it read, as coreutils' does. */
+        string_address label;
         positive line;
         positive name;
         p8 width;
@@ -1007,6 +1114,7 @@ static fn checksum_check_collect(checksum_check_run address_to run)
                         record.name = run->names_used;
                         run->names_used += length;
                 }
+                record.label = checksum_check_label;
 
                 p8 address_to records = (p8 address_to)run->records;
 
@@ -1069,7 +1177,7 @@ static fn checksum_check_one(checksum_check_run address_to run,
                         text_flush();
                         string_format(log_error, "%s: %w: %p: improperly formatted %s checksum line\n",
                                       checksum_program, checksum_name_put,
-                                      run->manifest, record->line, checksum_check_label);
+                                      run->manifest, record->line, record->label);
                 }
                 return;
         }
@@ -1585,6 +1693,8 @@ static const argument_option cksum_options[] = {
     {"strict", 'S'},
     {"warn", 'w', 0, ARGUMENT_SELECT(checksum_selection, verify)},
     {"debug", 'D'},
+    {"binary", 'b', 0, ARGUMENT_SELECT(checksum_selection, mode)},
+    {"text", 't', 0, ARGUMENT_SELECT(checksum_selection, mode)},
     {null},
 };
 
@@ -1701,6 +1811,10 @@ static b32 cksum_main()
         b32 refused = checksum_refuse_modes("cksum", checking, tagged, taking.flags);
         if (refused)
                 return refused;
+        // cksum tags unless told not to, and a tagged line has no room for
+        // the text marker.
+        if (checksum_selected.mode == 't' && checksum_selected.style != 'U')
+                return checksum_usage_error("cksum", "--text mode is only supported with --untagged");
 
         if (raw && text_files_count > 1)
                 return text_done(string_diagnostic(address_of text_diagnostic, 1, null, "the --raw option is not supported with multiple files"));
@@ -1730,6 +1844,7 @@ static b32 cksum_main()
                         return text_done(string_diagnostic(address_of text_diagnostic, 1, algorithm, "algorithm is not supported by the available checksum engine"));
 
                 checksum_sha2_family = sha2 && !bits;
+                checksum_base64_read = true;
                 checksum_manifest_files = true;
                 checksum_program = (string_address) "cksum";
                 checksum_check_label = sha2 ? (string_address) "SHA2"

@@ -32,6 +32,7 @@ the random tier happened upon is run every time after.
 """
 
 import argparse
+import base64
 import collections
 import dataclasses
 import hashlib
@@ -9059,6 +9060,24 @@ for misc_name, (misc_algorithm, misc_tag) in misc_SUMS.items():
     misc_FIXTURE["sums." + misc_name + ".bad"] = misc_bad
     misc_FIXTURE["sums." + misc_name + ".tagged"] = misc_tagged
     INPUTS["misc_sums_" + misc_name] = misc_good
+#   The other spellings of a check record: OpenSSL's LABEL(name)= digest,
+#   blanks before a record and around its equals sign, a backslash before a
+#   tag, and the base64 digests cksum reads (tagged and untagged) and the
+#   named sums refuse. Given on standard input, so the fixture is unchanged.
+def misc_sum_forms(algorithm, tag):
+    data = misc_basic_bytes("a.txt")
+    raw = hashlib.new(algorithm, data).digest()
+    hexed, based = raw.hex().encode(), base64.b64encode(raw)
+    return b"".join((
+        tag + b"(a.txt)= " + hexed + b"\n", b" " + tag + b" (a.txt) = " + hexed + b"\n",
+        b"\t" + hexed + b"  a.txt\n", b"\\" + tag + b" (a.txt) = " + hexed + b"\n",
+        tag + b" (a.txt)=" + hexed + b"\n", tag + b" (a.txt)  =  " + hexed + b"\n",
+        tag + b" (a.txt) = " + based + b"\n", based + b"  a.txt\n",
+        tag + b"(b.txt)= " + hexed + b"\n", tag + b" (a.(txt)) = " + hexed + b"\n"))
+
+
+for misc_name, (misc_algorithm, misc_tag) in misc_SUMS.items():
+    INPUTS["misc_sums_forms_" + misc_name] = misc_sum_forms(misc_algorithm, misc_tag)
 misc_FIXTURE["sums.crc"] = b"".join(
     b"%d %d %s\n" % (0, len(misc_basic_bytes(name)), name.encode()) for name in ("a.txt", "empty"))
 FIXTURES["misc"] = misc_FIXTURE
@@ -9496,7 +9515,7 @@ def misc_checksum(name, variable_length=False):
                   ("sums." + name, "sums.malformed"), ("sums.malformed", "sums." + name),
                   ("sums." + name, "empty"), ("sums." + name, "missing"), ("-", "-"),
                   ("sums." + name + ".tagged",), ("sums.md5sum",), ("sums.sha256sum.bad",)),
-        stdin=("text", "empty", "misc_sums_" + name, "misc_sums_malformed", "edge_65535",
+        stdin=("text", "empty", "misc_sums_" + name, "misc_sums_malformed", "misc_sums_forms_" + name, "edge_65535",
                "edge_65536", "edge_65537", "long", "nul", "high", "nonl"),
         fixture="misc", stderr="exact")
 
@@ -9869,7 +9888,14 @@ MISC_UTILITIES = (
             # The sums that are not digests, the width-named families, the
             # algorithms this engine does not carry, and check mode reading
             # each tagged and untagged spelling.
-            extra=(("-a", "crc32b", "a.txt"), ("-acrc32b", "a.txt"), ("-a", "sm3", "a.txt"),
+            extra=tuple({"argv": argv, "stdin": "misc_sums_forms_" + name, "fixture": "misc"}
+                        for name in ("md5sum", "sha256sum", "b2sum", "sha512sum")
+                        for argv in (("-c", "-"), ("-c", "-w", "-"), ("-a", name[:-3].replace("b2", "blake2b"), "-c", "-"))) +
+                  (("-a", "md5", "-b", "--untagged", "a.txt"), ("-a", "md5", "-t", "--untagged", "a.txt"),
+                   ("-a", "md5", "-t", "a.txt"), ("-t", "a.txt"), ("-b", "a.txt"), ("--binary", "a.txt"),
+                   ("--text", "--untagged", "-a", "sha1", "a.txt"), ("-a", "md5", "-b", "-c", "sums.md5sum"),
+                   ("-a", "md5", "--untagged", "-t", "-b", "a.txt")) +
+                  (("-a", "crc32b", "a.txt"), ("-acrc32b", "a.txt"), ("-a", "sm3", "a.txt"),
                    ("-a", "sha3", "a.txt"), ("-a", "sha2", "a.txt"), ("-a", "bsd", "a.txt"),
                    ("-a", "sysv", "a.txt"), ("-c", "sums.crc"), ("--check", "sums.sha256sum"),
                    ("-a", "sha256", "-c", "sums.sha256sum.tagged"), ("-a", "sha2", "-l", "384", "a.txt", "empty"),
@@ -19463,6 +19489,7 @@ UTIL_LINUX_CHECKS = (ul_check_denominator, ul_check_rfkill, ul_check_lscpu_summa
 
 
 import argparse
+import base64
 import ast
 import contextlib
 import copy
@@ -41484,10 +41511,6 @@ PINNED = r"""
 {"domain":"files","kind":"bug","list":"ledger","option":"--show-limits","reason_id":"r138","utility":"xargs"},
 {"domain":"misc","kind":"deliberate","list":"ledger","option":"--groups","reason_id":"r141","utility":"chroot"},
 {"domain":"misc","kind":"deliberate","list":"ledger","option":"--userspec","reason_id":"r141","utility":"chroot"},
-{"candidate":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a","blake2b","--tag","--untagged","--check","-l","256","--ignore-missing","--quiet","--status"],"domain":"misc","family":null,"fixture":"misc","input_kind":"command","mode":null,"stdin":"text","tier":"triples","utility":"cksum"},"domain":"misc","id":"3137101635aac28f","kind":"bug","list":"ledger","reason":"-a names the algorithm a manifest is read as here, where the reference reads each line as the algorithm the manifest itself was written with: a sha256 manifest checked under --algorithm=blake2b is a formatting complaint to this one and a row of FAILED to that one. Beside it, --length is taken and then ignored: this always computes the whole 512-bit BLAKE2b and tags it BLAKE2b, where the reference parameterises the hash by the length asked for -- a different digest, not a truncation of the long one -- tags it BLAKE2b-<bits>, and refuses a length that is not a multiple of eight or is over 512.","reference":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"cksum"},
-{"candidate":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a","blake2b","--algorithm=blake2b","--check","-l","8","--ignore-missing","-"],"domain":"misc","family":null,"fixture":"misc","input_kind":"command","mode":null,"stdin":"many_lines","tier":"triples","utility":"cksum"},"domain":"misc","id":"53f7830795b3e16e","kind":"bug","list":"ledger","reason":"-a names the algorithm a manifest is read as here, where the reference reads each line as the algorithm the manifest itself was written with: a sha256 manifest checked under --algorithm=blake2b is a formatting complaint to this one and a row of FAILED to that one. Beside it, --length is taken and then ignored: this always computes the whole 512-bit BLAKE2b and tags it BLAKE2b, where the reference parameterises the hash by the length asked for -- a different digest, not a truncation of the long one -- tags it BLAKE2b-<bits>, and refuses a length that is not a multiple of eight or is over 512.","reference":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"cksum"},
-{"candidate":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-asha256","--algorithm=blake2b","--base64","--untagged","-c","--check","-l8","--status","--strict","-w","-"],"domain":"misc","family":null,"fixture":"misc","input_kind":"command","mode":null,"stdin":"many_lines","tier":"triples","utility":"cksum"},"domain":"misc","id":"5a16fac215d29d7e","kind":"bug","list":"ledger","reason":"-a names the algorithm a manifest is read as here, where the reference reads each line as the algorithm the manifest itself was written with: a sha256 manifest checked under --algorithm=blake2b is a formatting complaint to this one and a row of FAILED to that one. Beside it, --length is taken and then ignored: this always computes the whole 512-bit BLAKE2b and tags it BLAKE2b, where the reference parameterises the hash by the length asked for -- a different digest, not a truncation of the long one -- tags it BLAKE2b-<bits>, and refuses a length that is not a multiple of eight or is over 512.","reference":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":1,"stdout":"9a3355651f9ad5ef13a9d0d19702bd7ad397f4266bfb2ff135d582dc2545fd65"},"utility":"cksum"},
-{"candidate":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a","sha1","--algorithm=blake2b","--raw","--tag","--untagged","-c","-l256","--status","-w","-"],"domain":"misc","family":null,"fixture":"misc","input_kind":"command","mode":null,"stdin":"many_lines","tier":"triples","utility":"cksum"},"domain":"misc","id":"abaaa47d01ace910","kind":"bug","list":"ledger","reason":"-a names the algorithm a manifest is read as here, where the reference reads each line as the algorithm the manifest itself was written with: a sha256 manifest checked under --algorithm=blake2b is a formatting complaint to this one and a row of FAILED to that one. Beside it, --length is taken and then ignored: this always computes the whole 512-bit BLAKE2b and tags it BLAKE2b, where the reference parameterises the hash by the length asked for -- a different digest, not a truncation of the long one -- tags it BLAKE2b-<bits>, and refuses a length that is not a multiple of eight or is over 512.","reference":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":1,"stdout":"9a3355651f9ad5ef13a9d0d19702bd7ad397f4266bfb2ff135d582dc2545fd65"},"utility":"cksum"},
 {"candidate":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a","sm3","a.txt"],"domain":"misc","family":null,"fixture":"misc","input_kind":"command","mode":null,"stdin":"text","tier":"extra","utility":"cksum"},"domain":"misc","id":"f1ad5d9c4312268f","kind":"deliberate","list":"ledger","reason_id":"r142","reference":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":0,"stdout":"5f6af0a369fe4245958c1fa46d35d533d655f94205bfa7262c910010ddbada23"},"utility":"cksum"},
 {"domain":"misc","kind":"deliberate","list":"ledger","option":"conv=ascii","reason_id":"r143","utility":"dd"},
 {"domain":"misc","kind":"deliberate","list":"ledger","option":"conv=block","reason_id":"r144","utility":"dd"},
