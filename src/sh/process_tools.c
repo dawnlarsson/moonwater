@@ -660,11 +660,13 @@ static b32 process_nohup()
     {null},
         }};
         positive count = (positive)program_argument_count();
+        /* POSIX has nohup fail with 127 where coreutils otherwise uses 125. */
+        b32 failure = file_environment((string_address) "POSIXLY_CORRECT") ? 127 : 125;
 
         if (!file_take(address_of taking))
-                return 125;
+                return failure;
         if (taking.first >= count)
-                return string_report(log_error, 125, "nohup: missing operand\n"
+                return string_report(log_error, failure, "nohup: missing operand\n"
                                                      "Try 'nohup --help' for more information.\n");
 
         bool input_terminal = stream_is_terminal(0);
@@ -680,7 +682,7 @@ static b32 process_nohup()
                     (string_address) "/dev/null", FILE_READ | O_CLOEXEC);
 
                 if (null_input < 0)
-                        return string_report(log_error, 125, "nohup: failed to open '/dev/null': %s\n",
+                        return string_report(log_error, failure, "nohup: failed to open '/dev/null': %s\n",
                                       file_reason(null_input));
         }
 
@@ -692,7 +694,7 @@ static b32 process_nohup()
                 {
                         if (null_input >= 0)
                                 system_close(null_input);
-                        return string_report(log_error, 125, "nohup: failed to open 'nohup.out': %s\n",
+                        return string_report(log_error, failure, "nohup: failed to open 'nohup.out': %s\n",
                                       file_reason(output));
                 }
         }
@@ -719,7 +721,7 @@ static b32 process_nohup()
                         system_close(null_input);
                         if (output >= 0)
                                 system_close(output);
-                        return 125;
+                        return failure;
                 }
                 if (null_input != 0)
                         system_close(null_input);
@@ -731,7 +733,7 @@ static b32 process_nohup()
                                               (string_address) "standard output"))
                 {
                         system_close(output);
-                        return 125;
+                        return failure;
                 }
                 if (output != 1)
                         system_close(output);
@@ -739,12 +741,12 @@ static b32 process_nohup()
 
         if (error_terminal &&
             !process_nohup_duplicate(1, 2, (string_address) "standard error"))
-                return 125;
+                return failure;
 
         /* Ignored dispositions survive exec; that is precisely nohup's one
            signal operation. */
         if (!system_signal_install(SIGHUP, SIGNAL_IGNORE, 0, 0, null))
-                return string_report(log_error, 125, "nohup: cannot ignore hangup signal\n");
+                return string_report(log_error, failure, "nohup: cannot ignore hangup signal\n");
 
         return process_tool_exec((string_address) "nohup",
             program_argument_list() + taking.first);

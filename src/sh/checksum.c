@@ -1528,6 +1528,18 @@ static fn cksum_crc_put(p32 crc, p64 bytes, string_address name, bool named)
         sum -s's byte total folded to 16 bits, over 1024- and 512-byte
         blocks; text.c's sum computes both the same way.
 */
+/* --debug's line goes to standard error through a writer that notes a
+   short write: a note nobody could read is a failure, as GNU counts it. */
+static bool cksum_debug_lost;
+
+static fn cksum_debug_say(address_any data, positive length)
+{
+        if (!length)
+                length = string_length((string_address)data);
+        if (system_write_all(2, data, length) != length)
+                cksum_debug_lost = true;
+}
+
 static bool cksum_other_path(p8 kind, string_address path, bool debug,
                              p32 address_to result, p64 address_to size)
 {
@@ -1541,7 +1553,7 @@ static bool cksum_other_path(p8 kind, string_address path, bool debug,
         if (debug && kind == 'c')
         {
                 text_flush();
-                string_format(writer_stderr, "cksum: using %s hardware support\n",
+                string_format(cksum_debug_say, "cksum: using %s hardware support\n",
 #if !defined(KERNEL_MODE) && (X64 || ARM64 || RISCV64)
                               cpu_has_pclmul ? (string_address) "pclmul" :
 #endif
@@ -1736,6 +1748,7 @@ static b32 cksum_main()
 
         text_begin("cksum");
         checksum_modes_reset();
+        cksum_debug_lost = false;
 
         if (!file_take(address_of taking) ||
             (text_files_failed && string_diagnostic(
@@ -1856,7 +1869,11 @@ static b32 cksum_main()
         if (algorithm && !string_equals(algorithm, "crc"))
         {
                 if (string_equals(algorithm, "crc32b"))
-                        return cksum_others('c', debug);
+                {
+                        b32 answered = cksum_others('c', debug);
+
+                        return answered | cksum_debug_lost;
+                }
                 if (string_equals(algorithm, "bsd"))
                         return cksum_others('b', debug);
                 if (string_equals(algorithm, "sysv"))
@@ -1879,9 +1896,11 @@ static b32 cksum_main()
                         machinery = (string_address) "pclmul";
 #endif
                 text_flush();
-                string_format(writer_stderr, "cksum: using %s hardware support\n",
+                string_format(cksum_debug_say, "cksum: using %s hardware support\n",
                               machinery);
         }
 
-        return cksum_others('p', debug);
+        b32 answered = cksum_others('p', debug);
+
+        return answered | cksum_debug_lost;
 }

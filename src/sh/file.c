@@ -15928,7 +15928,11 @@ static b32 file_du()
                 return string_report(log_error, 1,
                                      "du: cannot both summarize and show all entries\n");
 
-        if (du_summary && (flags & FILE_FLAG('d')))
+        // -s with a depth of nought says the same thing twice, which is a
+        // warning; with any other depth it says two things, which is not.
+        if (du_summary && (flags & FILE_FLAG('d')) && !du_maximum)
+                log_error("du: warning: summarizing is the same as using --max-depth=0\n", 0);
+        else if (du_summary && (flags & FILE_FLAG('d')))
         {
                 string_format(log_error,
                               "du: warning: summarizing conflicts with --max-depth=%b\n",
@@ -35227,6 +35231,31 @@ static fn id_written(positive user, positive group, p32 address_to members,
         log("\n", 1);
 }
 
+/*
+        The last of a program's output, written so that a refusal is said:
+        coreutils' close_stdout names it -- "date: write error: No space left
+        on device" -- where the shared writer only notes that one happened,
+        and the tool answered 1 without a word. What is still buffered goes
+        out in one checked write; an earlier flush that failed has left no
+        reason behind, and is the full device it almost always is.
+*/
+static bool file_output_told(string_address program)
+{
+        system_write_result wrote = {0, 0};
+
+        if (log_writer_buffer_length)
+                wrote = system_write_all_checked(1, log_writer_buffer,
+                                                 log_writer_buffer_length);
+        log_writer_buffer_length = 0;
+
+        if (!wrote.error && !log_failed())
+                return true;
+
+        string_format(log_error, "%s: write error: %s\n", program,
+                      file_reason(wrote.error ? wrote.error : -28));
+        return false;
+}
+
 static b32 file_id()
 {
         file_taking taking = {
@@ -35280,8 +35309,14 @@ static b32 file_id()
                         positive number;
 
                         // A number is the account that has it, by name from
-                        // here on, so every field below is the same lookup.
-                        if (string_digits_exact(who, address_of number) &&
+                        // here on, so every field below is the same lookup;
+                        // a + before it says it is a number and never a name.
+                        if (string_is(who, '+') &&
+                            string_digits_exact(who + 1, address_of number) &&
+                            number <= p32_max &&
+                            file_user_name(number, named, FILE_NAME_MAX))
+                                who = (string_address)named;
+                        else if (string_digits_exact(who, address_of number) &&
                             number <= p32_max &&
                             file_user_name(number, named, FILE_NAME_MAX))
                                 who = (string_address)named;
@@ -35321,9 +35356,7 @@ static b32 file_id()
                                 log("", 1);
                 }
 
-                log_flush();
-
-                return status;
+                return file_output_told((string_address) "id") ? status : 1;
         }
 
         positive user = (positive)system_call(syscall(getuid));
@@ -35344,9 +35377,7 @@ static b32 file_id()
 
         id_written(user, group, file_id_scratch, have, flags, names, zero);
 
-        log_flush();
-
-        return 0;
+        return file_output_told((string_address) "id") ? 0 : 1;
 }
 
 // groups ----------------------------------------------------------
@@ -35434,8 +35465,7 @@ static b32 file_groups()
                                 status = 1;
                 }
 
-        log_flush();
-        return status;
+        return file_output_told((string_address) "groups") ? status : 1;
 }
 
 // whoami ---------------------------------------------------------
@@ -37360,7 +37390,7 @@ static b32 file_kill()
                     !string_compare(argument, "--signal"))
                 {
                         if (index + 1 >= count)
-                                return string_report(log_error, 2,
+                                return string_report(log_error, kill_shell_spelling ? 2 : 1,
                                                      "kill: not enough arguments\n");
                         if (print_only)
                                 return string_report(log_error, 1,
@@ -37465,7 +37495,9 @@ static b32 file_kill()
 
         if (index >= count)
         {
-                return string_report(log_error, 2, "kill: not enough arguments\n");
+                // util-linux answers 1; the shells' builtin answers 2.
+                return string_report(log_error, kill_shell_spelling ? 2 : 1,
+                                     "kill: not enough arguments\n");
         }
 
         while (index < count)
@@ -38827,8 +38859,7 @@ static b32 file_date()
         if (batch)
         {
                 status = date_batch(batch, format, file_now()) ? 0 : 1;
-                log_flush();
-                return status;
+                return file_output_told((string_address) "date") ? status : 1;
         }
 
         if (of_file)
@@ -38892,9 +38923,7 @@ static b32 file_date()
         if (!date_emit(format, when, nanoseconds))
                 return 1;
 
-        log_flush();
-
-        return status;
+        return file_output_told((string_address) "date") ? status : 1;
 }
 
 // xargs -----------------------------------------------------------

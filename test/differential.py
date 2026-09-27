@@ -6940,7 +6940,7 @@ FILES_UTILITIES = (
                            Option("-Z"), Option("-a"), Option("--user"), Option("--group"), Option("--groups"),
                            Option("--name"), Option("--real"), Option("--zero"), Option("--context")),
             operands=((), ("root",), ("nosuchuser",), ("0",), (files_UID,), ("root", "root"), ("root", "nosuchuser"),
-                      ("",)),
+                      ("",), ("+0",), ("+" + files_UID,), ("+99999",), ("+root",)),
             stdin=("empty",), fixture="files", stderr="exact"),
     Utility("groups", operands=((), ("root",), ("root", "root"), ("nosuchuser",), ("root", "-x"), (files_UID,), ("",)),
             stdin=("empty",), fixture="files", stderr="exact"),
@@ -7048,7 +7048,8 @@ FILES_UTILITIES = (
                     ("-Lx", "."), ("-a", "--time", "."), ("-sh", "."), ("-sb", "."), ("-c", "dir", "dup"), ("-s", "-a", "dir"),
                     ("-d", "1", "-s", "dir"), ("-b", "-m", "a.txt"), ("-m", "-b", "a.txt"), ("-k", "-m", "a.txt"),
                    ("--inodes", "-a", "."), ("--apparent-size", "-a", "dir"), ("-l", "dup"), ("--files0-from=-",),
-                   ("--exclude=[^d]*", "-a", "."), ("--exclude=[!d]*", "-a", "."), ("--exclude=[d^]*", "-ab", "."))
+                   ("--exclude=[^d]*", "-a", "."), ("--exclude=[!d]*", "-a", "."), ("--exclude=[d^]*", "-ab", "."),
+                   ("--max-depth=0", "--summarize", "dir"), ("-s", "-d", "0", "dir"), ("-s", "-d", "1", "dir"))
                   #   Patterns read from a file, a line each: every file in
                   #   the fixture that holds lines, holds none, holds no
                   #   newline at its end, or cannot be read, over each root
@@ -7662,6 +7663,7 @@ FILES_SCENES = {
     "full": ("", " 2>/dev/full", ""),
     "full_out": ("", " >/dev/full", ""),
     "posix": ("export POSIXLY_CORRECT=1\n", "", ""),
+    "none": ("", "", ""),
 }
 FILES_SCENE_CASES = (
     ("gone", "readlink", "-e", "."), ("gone", "readlink", "-f", "."), ("gone", "readlink", "-m", "."),
@@ -7681,6 +7683,13 @@ FILES_SCENE_CASES = (
     ("closed", "mktemp", "-p", "dir"), ("full_out", "mktemp", "-u", "-p", "dir"),
     ("full_out", "mktemp", "-q", "-p", "dir", "x.XXXX"),
     ("posix", "mktemp", "-u", "aXXXX", "--suffix=b"), ("posix", "mktemp", "-u", "aXXXX", "-d"),
+    # Output nobody could be given is said, and a note on a full standard
+    # error is a failure; POSIX has nohup fail with 127.
+    ("full_out", "date", "-d", "@0"), ("closed", "date", "-u", "-d", "@0"), ("full_out", "groups"),
+    ("full_out", "id"), ("closed", "id", "-u"), ("full_out", "id", "-G", "-n"),
+    ("full", "cksum", "--debug", "a.txt"), ("full", "cksum", "-a", "crc32b", "--debug", "a.txt"),
+    ("posix", "nohup"), ("posix", "nohup", "--bogus"),
+    ("none", "kill"), ("none", "kill", "-s"),
 )
 
 
@@ -41019,7 +41028,6 @@ PINNED = r"""
 {"domain":"files","kind":"bug","list":"ledger","option":"--strip-program","reason_id":"r107","utility":"install"},
 {"domain":"files","kind":"bug","list":"ledger","option":"-Z","reason_id":"r107","utility":"install"},
 {"domain":"files","kind":"bug","list":"ledger","option":"-s","reason_id":"r107","utility":"install"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":[],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","utility":"kill"},"domain":"files","id":"af8d1cc7d9440dcc","kind":"bug","list":"ledger","reason_id":"r108","utility":"kill"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--backup=bogus","a.txt","pointer"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_yes","utility":"ln"},"domain":"files","id":"3ca284fc0f68c893","kind":"bug","list":"ledger","reason_id":"r110","utility":"ln"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["dangling"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_no","utility":"ln"},"domain":"files","id":"892d531fae0719e9","kind":"bug","list":"ledger","reason_id":"r110","utility":"ln"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["a.txt"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_no","utility":"ln"},"domain":"files","id":"8aa5b6650d91759d","kind":"bug","list":"ledger","reason_id":"r110","utility":"ln"},
