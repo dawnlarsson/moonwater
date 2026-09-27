@@ -4326,10 +4326,11 @@ builtins_add(Utility(
     "alias",
     operands=((), ("mw_a",), ("mw_a", "mw_b"), ("mw_c=echo three",),
               ("mw_a=echo changed",), ("missing12345",), ("mw_d='a b'",),
-              ("-p",)),
+              ("mw_q=it's",), ("-p",)),
     stdin=("empty",), stderr="loose", modes=ALL,
     script=builtins_wrap("alias", prologue=ALIAS_PROLOGUE,
-                         report='alias mw_a 2>/dev/null; alias mw_c 2>/dev/null\n'),
+                         report='alias mw_a 2>/dev/null; alias mw_c 2>/dev/null; '
+                                'alias mw_q 2>/dev/null\n'),
     max_flags=0))
 builtins_add(Utility(
     "unalias",

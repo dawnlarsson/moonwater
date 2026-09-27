@@ -14782,13 +14782,33 @@ bool alias_record(string_address name, positive name_length, string_address valu
         return true;
 }
 
-// Both bash and dash leave the name and '=' outside the shell-quoted value;
-// the line is valid input when a script saves `alias` output and reads it
-// back.  Keep bash's optional "alias " prefix in the caller.
+// dash quotes the whole of name=value as one word, 'll=ls -l', and bash only
+// the value, ll='ls -l'; either is a line its own shell reads back, which is
+// what a script saving its aliases relies on. The whole word is quoted as
+// shell_quoted quotes any other, so a quote in the value is closed and put in
+// double quotes as dash puts it. Bash's optional "alias " prefix is the
+// caller's.
 fn alias_written(writer write, positive index)
 {
-        string_format(write, "%s=", alias_table[index].name);
-        shell_quoted(write, alias_table[index].value);
+        string_address name = alias_table[index].name;
+        string_address value = alias_table[index].value;
+        positive name_length = string_length(name);
+        positive room = name_length + string_length(value) + 2;
+        p8 address_to word = shell_bash_compat ? null : shell_map(room);
+
+        if (word)
+        {
+                memory_copy(word, name, name_length);
+                word[name_length] = '=';
+                string_copy(word + name_length + 1, value);
+                shell_quoted(write, word);
+                memory_free(word, room);
+        }
+        else
+        {
+                string_format(write, "%s=", name);
+                shell_quoted(write, value);
+        }
         write("\n", 1);
 }
 
