@@ -13919,6 +13919,28 @@ def shell_lang_loop_control_arguments(rng):
         "{ " + body + "; } 2>/dev/null", 'echo "end=$?"'))
 
 
+#       return inside a trap action returns from the function the signal
+#       interrupted, with the operand's status, or without one the status of
+#       the command the trap came after. The action's return was taken back,
+#       so the function ran on and one spinning in a loop never left.
+def shell_lang_trap_return(rng):
+    action = rng.choice(("return 5", "return", "echo t; return 3", "false; return", "return 0"))
+    shape = rng.choice(("direct", "loop", "nested", "before-false", "spin"))
+    if shape == "direct":
+        body = "f() { kill -USR1 $$; echo not-reached; }; f"
+    elif shape == "loop":
+        body = "f() { for i in 1 2; do kill -USR1 $$; echo \"in$i\"; done; echo not-reached; }; f"
+    elif shape == "nested":
+        body = "g() { kill -USR1 $$; echo g-on; }; f() { g; echo \"g=$?\"; }; f"
+    elif shape == "before-false":
+        body = "f() { false; kill -USR1 $$; echo not-reached; }; f"
+    else:
+        body = "f() { while :; do :; done; }; { sleep 0.2; kill -USR1 $$; } & f"
+    modes = shell_BASH if shape == "spin" else shell_ALL
+    return ("trap-return-" + shape, modes, shell_program(
+        "trap " + shell_quote(action) + " USR1", body, 'echo "f=$?"', "wait"))
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16555,6 +16577,7 @@ SHELL_FAMILIES = (
     shell_lang_cfor_forms,
     shell_lang_regex_operand,
     shell_lang_loop_control_arguments,
+    shell_lang_trap_return,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),

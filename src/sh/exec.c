@@ -8237,6 +8237,11 @@ static b32 exec_call(positive slot)
 
         status = exec_node(body);
 
+        // A return anywhere below -- a trap action's among them -- left its
+        // answer in shell_status whatever the node it unwound through said.
+        if (exec_signal == EXEC_SIGNAL_RETURN)
+                status = shell_status;
+
         // The function is still standing while its RETURN trap runs, which is
         // what lets the action read FUNCNAME and the status it is returning.
         if (trap_return_here && shell_extra_on(SHELL_EXTRA_FUNCTRACE))
@@ -9553,10 +9558,12 @@ static bool exec_control_number(string_address word, bool allow_zero,
         return true;
 }
 
+static b32 exec_trap_status;
+
 static COLD fn exec_return_bash()
 {
         positive first = 1;
-        bipolar value = shell_status;
+        bipolar value = trap_inside ? exec_trap_status : shell_status;
         bool valid = true;
 
         if (first < shell_argc && word_is(shell_argv[first], "--"))
@@ -9729,6 +9736,8 @@ bool exec_control_builtin(string_address name, bool run)
                 exec_return_bash();
                 return true;
         }
+        if (shell_argc <= 1 && trap_inside)
+                shell_status = exec_trap_status;
         if (shell_argc > 1 &&
             !exec_control_number(shell_argv[1], true, address_of shell_status))
         {
@@ -9921,6 +9930,8 @@ static b32 exec_dispatch(b32 command_word)
         status the interrupted command answered with, and a return or a break
         inside one belongs to the action and not to the loop it landed in.
 */
+/* exec_trap_status: the status a return with no operand gives inside a trap
+   action, the one the interrupted command left, not the action's own last. */
 fn exec_traps()
 {
         b32 kept_status = shell_status;
@@ -9944,6 +9955,7 @@ fn exec_traps()
 
                 exec_signal = EXEC_SIGNAL_NONE;
                 exec_tested = false;
+                exec_trap_status = kept_status;
                 // An action is source, however many lines of it there are,
                 // and what it leaves unfinished is its own syntax error --
                 // the same two calls eval makes. One line at a time used to
@@ -9957,6 +9969,18 @@ fn exec_traps()
                 {
                         action_fatal = true;
                         break;
+                }
+
+                /* A return in the action returns from the function the
+                   trap interrupted, in bash and dash both: trap 'return 5'
+                   USR1 inside f leaves f with 5. It was taken back, so f
+                   ran on, and a function spinning in a loop never left. */
+                if (exec_signal == EXEC_SIGNAL_RETURN &&
+                    (exec_function_depth || shell_source_depth))
+                {
+                        trap_entered(false);
+                        exec_tested = kept_tested;
+                        return;
                 }
         }
 
@@ -13913,7 +13937,13 @@ static b32 exec_node(b32 index)
            discover that no handler has written it. Checking abort state is
            likewise unnecessary until there is a trap to run. */
         if (trap_caught && !trap_inside && !exec_line_aborted())
+        {
                 exec_traps();
+
+                // A return the action made is the function's answer.
+                if (exec_signal == EXEC_SIGNAL_RETURN)
+                        status = shell_status;
+        }
 
         exec_parent_supervision_relax();
 
@@ -14103,6 +14133,10 @@ static b32 exec_node_kind(b32 index)
         else
                 exec_expansion_done(expanded, substitutions);
 
+        // A return unwinding through this compound carries its own status,
+        // which the loop's last body status must not replace.
+        if (exec_signal == EXEC_SIGNAL_RETURN)
+                status = shell_status;
         shell_status = status;
 
         if (conditional_syntax)
