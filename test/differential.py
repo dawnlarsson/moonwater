@@ -9422,9 +9422,9 @@ def misc_dd_valid(argv):
             return False
         if word.startswith("oflag=") and not named_output:
             return False
-        if word.startswith(("count=", "skip=", "iseek=")) and word.endswith("B") and not named_input:
+        if word.startswith(("count=", "skip=", "iseek=")) and "B" in word and not named_input:
             return False
-        if word.startswith(("seek=", "oseek=")) and word.endswith("B") and not named_output:
+        if word.startswith(("seek=", "oseek=")) and "B" in word and not named_output:
             return False
     return True
 
@@ -9617,7 +9617,37 @@ MISC_UTILITIES = (
                    ("if=zeros", "of=a.txt", "bs=512", "conv=sparse,notrunc", "status=noxfer"),
                    ("if=zeros", "of=out", "bs=1K", "conv=sparse", "status=noxfer"),
                    ("if=blob", "of=b.txt", "ibs=512", "obs=64", "conv=sparse,notrunc", "status=noxfer"),
-                   ("if=zeros", "bs=1K", "conv=sparse", "status=none"))),
+                   ("if=zeros", "bs=1K", "conv=sparse", "status=none"),
+                   # A B anywhere in a product counts bytes, a nought factor
+                   # makes the product nought whatever else is in it, and
+                   # direct and nocache do not go together.
+                   ("if=blob", "of=out", "oseek=1Bx2x4", "bs=5", "status=noxfer"),
+                   ("if=blob", "of=out", "seek=2Bx4B", "bs=5", "count=1", "status=noxfer"),
+                   ("if=blob", "iseek=1Bx8", "bs=5", "count=2", "status=noxfer"),
+                   ("if=ten", "count=00x99999999999999999999", "status=noxfer"),
+                   ("if=ten", "count=99999999999999999999x0", "status=noxfer"),
+                   ("if=ten", "count=99999999999999999999x2", "status=noxfer"),
+                   ("if=a.txt", "iflag=nocache,direct"), ("if=a.txt", "iflag=nocache", "count=0"),
+                   ("if=a.txt", "of=out", "oflag=nocache", "conv=notrunc", "count=0"),
+                   ("if=a.txt", "iflag=directory"), ("if=dir", "iflag=directory", "count=0"))),
+    #       dd on the descriptors it was handed rather than files it opened:
+    #       iflag and oflag set on them as coreutils' set_fd_flags sets them
+    #       (append, and directory checked), nocache count=0 on a pipe
+    #       refused, and statistics that cannot be written a failure.
+    Utility("dd_streams",
+            operands=(("pipe", "iflag=nocache", "count=0"), ("file", "iflag=directory"), ("file", "iflag=nonblock", "status=none"),
+                      ("append", "bs=1", "conv=sparse", "oflag=append", "status=none"),
+                      ("append", "bs=1", "oflag=append", "conv=notrunc", "status=none"), ("errclosed",), ("errfull",),
+                      ("errfull", "status=none"), ("errfull", "status=noxfer"), ("pipe", "oflag=nocache", "count=0")),
+            stdin=("empty",), fixture="misc", stderr="exact", modes=("bash",), normalize=misc_dd_normalize,
+            script=lambda argv, stdin_name: ul_live("dd", {
+                "pipe": "echo | run {w}\nstatus=$?\n",
+                "file": "run {w} < a.txt\nstatus=$?\n",
+                "append": "printf xx > out\nprintf 'a\\0\\0b' | run {w} >> out\nstatus=$?\nenv od -c out\n",
+                "errclosed": "run if=a.txt of=/dev/null {w} 2>&-\nstatus=$?\n",
+                "errfull": "run if=a.txt of=/dev/null {w} 2>/dev/full\nstatus=$?\n",
+            }[argv[0]].format(w=ul_words(argv[1:])) + "exit $status\n"),
+            valid=lambda argv: argv[:1] in (["pipe"], ["file"], ["append"], ["errclosed"], ["errfull"])),
 
     Utility("od",
             options=(Option("-A", ("d", "o", "x", "n", "bad", "dd"), None),

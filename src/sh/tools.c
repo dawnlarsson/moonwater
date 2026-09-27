@@ -7343,41 +7343,70 @@ static bool dd_bare(p8 address_to text, positive length)
         return length >= 2 && text[length - 2] == ' ';
 }
 
-static fn dd_summary()
+/*
+        The statistics go to standard error through a writer that notes a
+        short write, since a dd whose report could not be written has not
+        done what it was asked (2>&- or 2>/dev/full answers 1, as GNU's
+        close_stdout makes it), and counts what it wrote, which a progress
+        line needs to rub out a longer one before it.
+*/
+static bool dd_report_failed;
+static positive dd_report_count;
+static positive dd_progress_length;
+static positive dd_progress_next;
+
+static fn dd_report(address_any data, positive length)
 {
-        if (dd_status_level == DD_STATUS_NONE)
-                return;
+        if (!length)
+                length = string_length((string_address)data);
+        dd_report_count += length;
+        if (system_write_all(2, data, length) != length)
+                dd_report_failed = true;
+}
 
-        text_flush();
+static positive dd_now()
+{
+        p64 wall[2] = {0, 0};
 
-        string_format(writer_stderr, "%p+%p records in\n%p+%p records out\n",
-                      dd_in_full, dd_in_partial, dd_out_full, dd_out_partial);
+        system_call_2(syscall(clock_gettime), 1, (positive)wall);
+        return (positive)wall[0] * 1000000000u + (positive)wall[1];
+}
 
-        if (dd_status_level == DD_STATUS_NOXFER)
-                return;
-
+/* coreutils' print_xfer_stats: the bytes, the time and the rate, on a line
+   of its own at the end or rewritten in place once a second under
+   status=progress, where the seconds are whole. */
+static fn dd_transfer(bool progress)
+{
         p8 si[32];
         p8 iec[32];
         positive si_length = positive_into_human_nearest_string(si, dd_written,
                                                                  false);
         positive iec_length = positive_into_human_nearest_string(iec, dd_written,
                                                                   true);
+        positive elapsed = dd_now() - dd_started;
 
-        positive_to_string(writer_stderr, dd_written);
-        writer_stderr(dd_written == 1 ? " byte" : " bytes", 0);
+        if (!elapsed)
+                elapsed = 1;
+
+        if (progress)
+                dd_report("\r", 1);
+        dd_report_count = 0;
+
+        positive_to_string(dd_report, dd_written);
+        dd_report(dd_written == 1 ? " byte" : " bytes", 0);
 
         if (!dd_bare(si, si_length))
         {
-                writer_stderr(" (", 0);
-                writer_stderr(si, 0);
+                dd_report(" (", 0);
+                dd_report(si, 0);
 
                 if (!dd_bare(iec, iec_length))
                 {
-                        writer_stderr(", ", 0);
-                        writer_stderr(iec, 0);
+                        dd_report(", ", 0);
+                        dd_report(iec, 0);
                 }
 
-                writer_stderr(")", 0);
+                dd_report(")", 0);
         }
 
         /*
@@ -7385,29 +7414,21 @@ static fn dd_summary()
                 the other one did, so they are printed in the shape coreutils
                 prints them in and nothing here compares them.
         */
-        p64 wall[2] = {0, 0};
+        dd_report(" copied, ", 0);
 
-        system_call_2(syscall(clock_gettime), 1, (positive)wall);
+        if (progress)
+                positive_to_string(dd_report, (elapsed + 500000000u) / 1000000000u);
+        else
+        {
+                p8 fraction[9];
 
-        positive elapsed = (positive)wall[0] * 1000000000u + (positive)wall[1] - dd_started;
+                positive_to_string(dd_report, elapsed / 1000000000u);
+                dd_report(".", 0);
+                dd_report(fraction, positive_into_padded(fraction, elapsed % 1000000000u,
+                                                         9, '0'));
+        }
 
-        if (!elapsed)
-                elapsed = 1;
-
-        writer_stderr(" copied, ", 0);
-
-        positive whole = elapsed / 1000000000u;
-        positive rest = elapsed % 1000000000u;
-
-        positive_to_string(writer_stderr, whole);
-        writer_stderr(".", 0);
-
-        p8 fraction[9];
-        positive fraction_length = positive_into_padded(fraction, rest, 9, '0');
-
-        system_write_all(2, fraction, fraction_length);
-
-        writer_stderr(" s, ", 0);
+        dd_report(" s, ", 0);
 
         /*
                 Bytes per second from microseconds, not from whole seconds:
@@ -7427,8 +7448,43 @@ static fn dd_summary()
                            : dd_written / microseconds * 1000000u;
 
         positive_into_human_nearest_string(rate, per, false);
-        writer_stderr(rate, 0);
-        writer_stderr("/s\n", 0);
+        dd_report(rate, 0);
+        dd_report("/s", 0);
+
+        if (!progress)
+        {
+                dd_report("\n", 1);
+                return;
+        }
+
+        positive length = dd_report_count;
+
+        if (length < dd_progress_length)
+                for (positive gap = dd_progress_length - length; gap; gap--)
+                        dd_report(" ", 1);
+        dd_progress_length = length;
+}
+
+static fn dd_summary()
+{
+        if (dd_status_level == DD_STATUS_NONE)
+                return;
+
+        text_flush();
+
+        if (dd_progress_length)
+        {
+                dd_report("\n", 1);
+                dd_progress_length = 0;
+        }
+
+        string_format(dd_report, "%p+%p records in\n%p+%p records out\n",
+                      dd_in_full, dd_in_partial, dd_out_full, dd_out_partial);
+
+        if (dd_status_level == DD_STATUS_NOXFER)
+                return;
+
+        dd_transfer(false);
 }
 
 /*
@@ -7442,12 +7498,21 @@ static bool dd_size(string_address text, positive address_to out)
 {
         positive total = 1;
         string_address at = text;
+        bool over = false;
+        bool zero = false;
 
         dd_overflow = false;
 
         if (!string_get(at))
                 return false;
 
+        /*
+                A product, as coreutils' parse_integer multiplies it: a
+                factor or a product too large to hold is an overflow unless
+                another factor is nought, which makes the whole of it
+                nought -- count=00x99999999999999999999 is no records, not a
+                value too large.
+        */
         while (1)
         {
                 positive value;
@@ -7456,8 +7521,12 @@ static bool dd_size(string_address text, positive address_to out)
                 {
                         // Digits that would not fit are the type's limit;
                         // anything else is a misspelling.
-                        dd_overflow = byte_is_digit(string_get(at));
-                        return false;
+                        if (!byte_is_digit(string_get(at)))
+                                return false;
+                        while (byte_is_digit(string_get(at)))
+                                at++;
+                        over = true;
+                        value = 1;
                 }
 
                 positive power = size_suffix_power(string_get(at), false);
@@ -7494,27 +7563,25 @@ static bool dd_size(string_address text, positive address_to out)
                                 multiple, base, (p8)power,
                                 (p64)positive_max, address_of scaled))
                         {
-                                dd_overflow = true;
-                                return false;
+                                over = true;
+                                scaled = 1;
                         }
                         multiple = (positive)scaled;
                 }
 
+                zero |= !value;
+
                 if (value && multiple > positive_max / value)
+                        over = true;
+                else
                 {
-                        dd_overflow = true;
-                        return false;
+                        positive piece = value * multiple;
+
+                        if (piece && total > positive_max / piece)
+                                over = true;
+                        else
+                                total *= piece;
                 }
-
-                positive piece = value * multiple;
-
-                if (piece && total > positive_max / piece)
-                {
-                        dd_overflow = true;
-                        return false;
-                }
-
-                total *= piece;
 
                 if (string_get(at) != 'x')
                         break;
@@ -7525,14 +7592,22 @@ static bool dd_size(string_address text, positive address_to out)
         if (string_get(at))
                 return false;
 
+        if (zero)
+                total = 0;
+        else if (over)
+        {
+                dd_overflow = true;
+                return false;
+        }
+
         address_to out = total;
 
         return true;
 }
 
-// A final B on count, skip or seek changes the unit from blocks to bytes.
-// It is still part of the ordinary size grammar (3KB is 3000), so parsing is
-// shared and only this last-byte fact is carried separately.
+// A B on count, skip or seek changes the unit from blocks to bytes. It is
+// still part of the ordinary size grammar (3KB is 3000), so parsing is
+// shared and only whether one is there is carried separately.
 /* The open(2) bits an iflag or oflag word asks for. */
 static positive dd_open_flags(positive flags)
 {
@@ -7567,7 +7642,9 @@ static bool dd_quantity(string_address text, positive address_to out,
         dd_refused = false;
         positive length = string_length(text);
 
-        address_to bytes = length && text[length - 1] == 'B';
+        // coreutils counts bytes when a B is anywhere in the product:
+        // oseek=1Bx2x4 is eight bytes, not eight blocks.
+        address_to bytes = length && string_first_of(text, 'B');
         if (!dd_size(text, out))
                 return false;
 
@@ -7839,6 +7916,70 @@ static bool dd_truncate_failed(positive handle, string_address output,
                              file_reason(refused));
 }
 
+/*
+        iflag and oflag on a side dd did not open, which is coreutils'
+        set_fd_flags: what fcntl can change is changed on the descriptor
+        (append, direct, nonblock, noatime, the syncs), the creation-only
+        words are dropped, and directory is a promise checked against what
+        the descriptor is -- dd iflag=directory < file refuses, where it
+        was taken and ignored.
+*/
+static bool dd_flags_set(positive handle, positive wanted, string_address name)
+{
+        wanted &= ~(positive)(DD_O_NOCTTY | DD_O_NOFOLLOW);
+        if (!wanted)
+                return true;
+
+        bipolar old = system_call_3(syscall(fcntl), handle, FILE_F_GETFL, 0);
+        bipolar failed = old < 0 ? old : 0;
+
+        if (!failed && ((positive)old | wanted) != (positive)old)
+        {
+                if (wanted & DD_O_DIRECTORY)
+                {
+                        file_facts facts;
+                        bipolar told = system_stat_at(handle, "", AT_EMPTY_PATH,
+                                                      STATX_BASIC, address_of facts);
+
+                        failed = told < 0 ? told
+                               : (facts.mode & MODE_FORMAT) != MODE_DIRECTORY ? -20 : 0;
+                        wanted &= ~(positive)DD_O_DIRECTORY;
+                }
+                if (!failed && ((positive)old | wanted) != (positive)old)
+                {
+                        bipolar set = system_call_3(syscall(fcntl), handle, FILE_F_SETFL,
+                                                    (positive)old | wanted);
+                        failed = set < 0 ? set : 0;
+                }
+        }
+
+        if (!failed)
+                return true;
+
+        text_flush();
+        return string_report(writer_stderr, false, "dd: setting flags for '%w': %s\n",
+                             writer_terminal_name, name, file_reason(failed));
+}
+
+/* The count=0 drop, from where the side stands to its end, a page at a
+   time: a side that cannot say where it stands cannot be dropped. */
+static bool dd_cache_drop(positive handle, string_address name)
+{
+        bipolar at = system_seek(handle, 0, 1);
+        bipolar dropped = at < 0 ? at
+                        : system_call_4(syscall(fadvise64), handle,
+                                        (positive)at - (positive)at % DD_PAGE, 0, 4);
+
+        if (dropped >= 0)
+                return false;
+
+        text_flush();
+        writer_stderr("dd: failed to discard cache for: ", 0);
+        dd_named(name);
+        string_format(writer_stderr, ": %s\n", file_reason(dropped));
+        return true;
+}
+
 // swab is one conversion over the byte stream, not one conversion per read.
 // An odd byte therefore waits for the first byte of the next input record.
 static positive dd_swab(p8 address_to into, p8 address_to from, positive length,
@@ -7921,13 +8062,12 @@ static b32 tools_dd(void)
         dd_status_level = DD_STATUS_ALL;
         dd_info_asked = 0;
         utility_arena.used = 0;
+        dd_report_failed = false;
+        dd_progress_length = 0;
+        dd_started = dd_now();
+        dd_progress_next = dd_started + 1000000000u;
 
-        {
-                p64 wall[2] = {0, 0};
-
-                system_call_2(syscall(clock_gettime), 1, (positive)wall);
-                dd_started = (positive)wall[0] * 1000000000u + (positive)wall[1];
-        }
+        bool progress = false;
 
         for (b32 i = 1; i < text_argument_count; i++)
         {
@@ -7989,12 +8129,16 @@ static b32 tools_dd(void)
                         output = value;
                 else if (dd_operand(argument, "status", address_of value))
                 {
+                        progress = false;
                         if (string_equals(value, "none"))
                                 dd_status_level = DD_STATUS_NONE;
                         else if (string_equals(value, "noxfer"))
                                 dd_status_level = DD_STATUS_NOXFER;
                         else if (string_equals(value, "progress"))
+                        {
                                 dd_status_level = DD_STATUS_ALL;
+                                progress = true;
+                        }
                         else
                                 return dd_complain((string_address)"invalid status level", value);
                 }
@@ -8068,6 +8212,10 @@ static b32 tools_dd(void)
         if ((conv & DD_LCASE) && (conv & DD_UCASE))
                 return string_diagnostic(&text_diagnostic, 1, null, "cannot combine lcase and ucase");
 
+        // nocache asks the page cache to let go and direct never used it.
+        if (((iflags | oflags) & DD_NOCACHE) && ((iflags | oflags) & DD_DIRECT))
+                return string_diagnostic(&text_diagnostic, 1, null, "cannot combine direct and nocache");
+
         if (!ibs || ibs > positive_max - 31)
         {
                 text_flush();
@@ -8116,6 +8264,8 @@ static b32 tools_dd(void)
 
                 in_handle = (positive)opened;
         }
+        else if (!dd_flags_set(0, dd_open_flags(iflags), (string_address) "standard input"))
+                return 1;
 
         if (output)
         {
@@ -8149,6 +8299,10 @@ static b32 tools_dd(void)
 
                 out_handle = (positive)opened;
         }
+        else if (!dd_flags_set(1, dd_open_flags(oflags) |
+                                      ((oflags & DD_APPEND) ? DD_O_APPEND : 0),
+                               (string_address) "standard output"))
+                return 1;
 
         /*
                 One buffer or two, which is coreutils' rule and not a size
@@ -8277,6 +8431,17 @@ static b32 tools_dd(void)
                 {
                         dd_info_asked = 0;
                         dd_summary();
+                }
+
+                if (progress)
+                {
+                        positive now = dd_now();
+
+                        if (now >= dd_progress_next)
+                        {
+                                dd_transfer(true);
+                                dd_progress_next += 1000000000u;
+                        }
                 }
 
                 if (!count_bytes && count != TEXT_UNSET &&
@@ -8553,6 +8718,28 @@ static b32 tools_dd(void)
                 }
         }
 
+        /*
+                count=0 with nocache is how a cache is dropped for a whole
+                file, and coreutils refuses what cannot be dropped -- a pipe
+                has no offset to drop from -- rather than claim it was.
+        */
+        if (count_set && !count)
+        {
+                if ((iflags & DD_NOCACHE) &&
+                    dd_cache_drop(in_handle, input ? input : (string_address) "standard input"))
+                        result = 1;
+                if ((oflags & DD_NOCACHE) &&
+                    dd_cache_drop(out_handle, output ? output : (string_address) "standard output"))
+                        result = 1;
+        }
+        else
+        {
+                if (iflags & DD_NOCACHE)
+                        system_call_4(syscall(fadvise64), in_handle, 0, 0, 4);
+                if (oflags & DD_NOCACHE)
+                        system_call_4(syscall(fadvise64), out_handle, 0, 0, 4);
+        }
+
         if (out_handle != 1 && system_close(out_handle) < 0)
         {
                 string_diagnostic(&text_diagnostic, 0, output, "close failed");
@@ -8565,7 +8752,7 @@ static b32 tools_dd(void)
         text_flush();
         dd_summary();
 
-        return result;
+        return result | dd_report_failed;
 }
 
 // Binary dumps -------------------------------------------------------------
