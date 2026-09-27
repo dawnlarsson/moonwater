@@ -30289,9 +30289,30 @@ static fn cp_pair(string_address source, string_address destination)
         /* GNU copy.c's src_info: a non-directory named twice among the
            sources is copied once, with a warning, when no backup would
            keep the first copy. */
-        if (kind != MODE_DIRECTORY && !file_backup_kind)
+        /* Named as gnulib's triple_compare names it: the same file under the
+           same last component in the same directory, so ./a and a are one
+           source, and a hard link of it elsewhere is another. */
+        p8 given_key[FILE_NAME_MAX + 48];
+        file_facts above;
+        positive leaf_length = string_length(source_leaf);
+        bool keyed = leaf_length < FILE_NAME_MAX &&
+                     file_look(source_directory, (string_address)"",
+                               AT_EMPTY_PATH, address_of above);
+        if (keyed)
         {
-                if (file_set_seen(file_given_buckets, source,
+                positive at = leaf_length;
+                memory_copy_apart(given_key, source_leaf, leaf_length);
+                given_key[at++] = '/';
+                at += positive_into_string(given_key + at, above.inode);
+                given_key[at++] = ':';
+                at += positive_into_string(given_key + at,
+                                           (positive)above.device_major << 20 |
+                                               above.device_minor);
+                given_key[at] = end;
+        }
+        if (keyed && kind != MODE_DIRECTORY && !file_backup_kind)
+        {
+                if (file_set_seen(file_given_buckets, given_key,
                                   address_of source_facts))
                 {
                         string_format(log_error,
@@ -30301,7 +30322,7 @@ static fn cp_pair(string_address source, string_address destination)
                         system_close(destination_directory);
                         return;
                 }
-                file_set_record(address_of file_given_buckets, source,
+                file_set_record(address_of file_given_buckets, given_key,
                                 address_of source_facts);
         }
         /* And a directory named twice into one target is copied once, with
@@ -31674,6 +31695,22 @@ static fn mv_one(string_address source, string_address destination)
                               source, file_reason(looked));
                 mv_status = 1;
                 goto finished;
+        }
+
+        /* A directory named twice into one target is tried once, as GNU's
+           remember_copied has it: the second is only warned about. */
+        if ((from.mode & MODE_FORMAT) == MODE_DIRECTORY)
+        {
+                if (file_set_seen(file_given_buckets, destination_leaf,
+                                  address_of from))
+                {
+                        string_format(log_error,
+                                      "mv: warning: source directory %w specified more than once\n",
+                                      writer_shell_quoted_name, source);
+                        goto finished;
+                }
+                file_set_record(address_of file_given_buckets, destination_leaf,
+                                address_of from);
         }
 
         /* The rename the reference makes is given the slash, and the

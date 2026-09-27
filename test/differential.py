@@ -6851,7 +6851,8 @@ def files_made_cases(tool, flags):
     rng = random.Random(int.from_bytes(hashlib.sha256(
         ("made:" + tool).encode()).digest()[:8], "little"))
     operands = (("a/f", "b/f", "c"), ("a/f", "a/f", "c"), ("a/f", "b/f", "a/g", "c"), ("a/1", "b/1", "c"),
-                ("b/1", "a/1", "c"), ("a/d", "b/d", "c"), ("-t", "c", "a/f", "b/f"), ("a/f", "c/f", "c"))
+                ("b/1", "a/1", "c"), ("a/d", "b/d", "c"), ("-t", "c", "a/f", "b/f"), ("a/f", "c/f", "c"),
+                ("./a/f", "a/f", "c"), ("a/d", "./a/d", "c"), ("a/d", "a//d", "a/d", "c"))
     cases = []
     for words in operands:
         for chosen in [()] + [(flag,) for flag in flags] + [tuple(rng.sample(flags, 2)) for _ in range(3)]:
