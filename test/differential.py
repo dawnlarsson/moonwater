@@ -17320,6 +17320,9 @@ TEXT_UTILITIES = (
                    ("+2", "-", "a.txt"), ("-c", "--"), ("-2b", "big"), ("+2", "-n", "3", "fifteen"),
                    ("-c", "1m", "big"), ("-c", "1KD", "big"), ("-n", "--5", "a.txt"),
                    ("---presume-input-pipe", "-c", "7", "big"), ("---presume-input-pipe", "-n", "2", "a.txt"),
+                   #       A device that seeks is read from N before its
+                   #       end: /dev/zero has none and was read for ever.
+                   ("-c", "100", "/dev/zero"), ("-c", "5", "/dev/null"), ("-c", "+3", "/dev/null"),
                    *({"fixture": "text", "stdin": "many_lines", "argv": argv}
                      for argv in (("+2",), ("+2c",), ("-2c",), ("-2l",), ("-l",), ("-b",), ("+18",),
                                   ("-c",), ("-",))))),

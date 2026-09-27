@@ -6214,6 +6214,55 @@ static bool text_tail_ring(positive count)
         return true;
 }
 
+/*
+        tail -c N of a device that can be seeked: GNU's tail_bytes asks the
+        descriptor to go to N before its end and then reads at most N. That
+        is the last N bytes of a disk, and N bytes of /dev/zero or
+        /dev/urandom, which have no end and used to be read for ever here
+        through the window. A device that cannot seek says so and is left
+        to the window, a terminal or a tape among them; a device that seeks
+        to no end at all is read from where it stood. Regular files never
+        come here, and a directory reads the same refusal either way.
+*/
+static bool text_tail_device(positive count)
+{
+        file_facts facts;
+
+        if (!text_handle_facts(text_input.handle, address_of facts))
+                return false;
+
+        p16 format = facts.mode & MODE_FORMAT;
+
+        if (format != MODE_CHARACTER && format != MODE_BLOCK)
+                return false;
+
+        bipolar at = system_seek(text_input.handle, 0, FILE_SEEK_CUR);
+
+        if (at < 0)
+                return false;
+
+        bipolar from = system_seek(text_input.handle,
+                                   count > (positive)0x7fffffffffffffff
+                                       ? (bipolar)0x8000000000000001
+                                       : -(bipolar)count,
+                                   FILE_SEEK_END);
+        bipolar stop = from >= 0 ? from + (bipolar)min(count, (positive)0x7fffffffffffffff)
+                                : system_seek(text_input.handle, 0, FILE_SEEK_END);
+
+        if (from < 0)
+                from = stop;
+
+        bipolar start = at < stop && (bipolar)count < stop - at
+                            ? stop - (bipolar)count
+                            : at;
+
+        if (start != from)
+                system_seek(text_input.handle, start, FILE_SEEK_SET);
+
+        text_stream_count(count);
+        return true;
+}
+
 static bool text_window(positive count, bool by_bytes, bool front)
 {
         byte_store window = {0};
@@ -6818,6 +6867,13 @@ static inline INLINE b32 text_head_tail(bool tail)
                                                              : floor)
                                      : text_tail_start(text_input.handle, size,
                                                        count, floor));
+                        text_close();
+                        continue;
+                }
+
+                if (!marked && by_bytes && !head_tail_pipe_presumed &&
+                    text_tail_device(count))
+                {
                         text_close();
                         continue;
                 }
