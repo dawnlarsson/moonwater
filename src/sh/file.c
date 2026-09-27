@@ -16317,6 +16317,9 @@ static bool df_posix;
 // is the one that holds, so df -h -m counts megabytes and df -m -h does not.
 static p8 df_unit_option;
 static p64 df_unit;
+// -H and --si, and the letter -B's spelling puts after every amount.
+static bool df_si;
+static p8 df_suffix[8];
 
 static positive df_device_width;
 static positive df_type_width;
@@ -16390,8 +16393,27 @@ static bool df_wanted(storage_mount address_to mount)
         return !df_type_listed(mount->type, df_excluded, df_excluded_count);
 }
 
+static file_taking address_to df_taking;
+
 static bool df_seen(p8 letter, string_address value)
 {
+        // -B is read where it is written, whatever -h says after it, and
+        // refused in the spelling it was given.
+        if (letter == 'B')
+        {
+                positive unit;
+                bool human, si;
+                p8 suffix[8];
+
+                if (ls_block_size_read(value, address_of unit, address_of human,
+                                       address_of si, suffix))
+                        return true;
+                return string_report(log_error, false, "df: invalid %s argument '%s'\n",
+                                     df_taking && df_taking->long_written
+                                         ? (string_address) "--block-size"
+                                         : (string_address) "-B",
+                                     value);
+        }
         if (letter != 't' && letter != 'x')
                 return true;
 
@@ -16428,16 +16450,101 @@ static fn df_measure(storage_mount address_to mount, df_sample address_to sample
 // The kernel counts in whatever unit the filesystem uses; df has always
 // reported in 1024 byte ones, or 1048576 under -m, and rounds a part of one up
 // to a whole. An inode is not a byte and is reported as the number it is.
+static p8 address_to df_into;
+static positive df_into_used;
+
+static fn df_collect(address_any data, positive length)
+{
+        if (!length)
+                length = string_length((string_address)data);
+        if (df_into_used + length < 63)
+        {
+                memory_copy_apart(df_into + df_into_used, data, length);
+                df_into_used += length;
+        }
+}
+
 static positive df_amount(p8 address_to into, p64 blocks, p64 size)
 {
-        p64 bytes = blocks * size;
+        if (df_inodes && !df_human)
+                return positive_into_string(into, blocks);
 
-        if (!df_human)
-                return df_inodes ? positive_into_string(into, blocks)
-                                 : positive_into_string(
-                                       into, bytes / df_unit + (bytes % df_unit != 0));
+        // One writer for ls, du and df: -B's unit and its letter, or -h and
+        // -H scaled by 1024 and by 1000.
+        df_into = into;
+        df_into_used = 0;
+        ls_scaled(df_collect, df_inodes ? blocks : blocks * size, df_inodes ? 1 : df_unit,
+                  df_human, df_si, df_inodes ? (string_address) "" : (string_address)df_suffix);
+        into[df_into_used] = end;
+        return df_into_used;
+}
 
-        return positive_into_human_1024_string(into, bytes);
+/*
+        The heading over the sizes under -B, which is GNU's: the block size
+        in the base it is exact in (1K, 1kB, 1M, 1MB), a B after a count in
+        powers of a thousand or a count too small for a letter, iB after a
+        binary one spelled that way, and a figure too awkward for either
+        rounded up to one decimal (-B1536 is 1.6kB).
+*/
+static fn df_block_heading(p8 address_to into, p64 size, bool binary, bool marked)
+{
+        p64 q1000 = size, q1024 = size;
+        bool by1000, by1024;
+        positive at = 0;
+
+        do
+        {
+                by1000 = q1000 % 1000 == 0;
+                q1000 /= 1000;
+                by1024 = q1024 % 1024 == 0;
+                q1024 /= 1024;
+        } while (by1000 && by1024);
+        if (by1000 < by1024)
+                binary = true;
+        if (by1024 < by1000)
+                binary = false;
+        if (!binary)
+                marked = true;
+
+        p64 base = binary ? 1024 : 1000;
+        p64 whole = size;
+        p64 divisor = 1;
+        positive power = 0;
+
+        while (whole >= base && power < 8)
+        {
+                divisor *= base;
+                whole = size / divisor;
+                power++;
+        }
+
+        p64 rest = size - whole * divisor;
+
+        if (power && whole < 10 && rest)
+        {
+                p64 tenths = (rest * 10 + divisor - 1) / divisor;
+
+                if (tenths == 10)
+                        whole++, tenths = 0;
+                at = positive_into_string(into, whole);
+                if (tenths)
+                {
+                        into[at++] = '.';
+                        into[at++] = (p8)('0' + tenths);
+                }
+        }
+        else
+                at = positive_into_string(into, whole + (power && rest != 0));
+
+        if (power)
+                into[at++] = (p8)(binary ? "KMGTPEZYRQ" : "kMGTPEZYRQ")[power - 1];
+        if (marked)
+        {
+                if (binary && power)
+                        into[at++] = 'i';
+                into[at++] = 'B';
+        }
+        memory_copy_apart(into + at, "-blocks", 8);
 }
 
 static fn df_column(p8 address_to text, positive width)
@@ -16550,6 +16657,9 @@ static const argument_option df_options[] = {
     {"km", 0, 0, 1},
     {"v", 0},
     {"local", 'l'},
+    {"block-size", 'B', ARGUMENT_REQUIRED, 1},
+    {"si", 'H', 0, 1},
+    {"total", 'O', ARGUMENT_LONG_ONLY},
     {"type", 't', ARGUMENT_REQUIRED},
     {"exclude-type", 'x', ARGUMENT_REQUIRED},
     // Whether df syncs before it asks is nothing a reader can see.
@@ -16575,13 +16685,15 @@ static b32 file_df()
 
         df_unit_option = 0;
         df_selected_count = df_excluded_count = 0;
+        df_taking = address_of taking;
 
         if (!file_take(address_of taking))
                 return 1;
 
         df_local = (taking.flags & FILE_FLAG('l')) != 0;
 
-        for (positive at = 0; at < df_selected_count; at++)
+        // Newest first, as coreutils keeps its list of -t types.
+        for (positive at = df_selected_count; at--;)
                 if (df_type_listed(df_selected[at], df_excluded, df_excluded_count))
                 {
                         string_format(log_error, "df: file system type '%w' both selected and excluded\n",
@@ -16593,8 +16705,49 @@ static b32 file_df()
 
         positive first = taking.first;
 
-        df_human = df_unit_option == 'h';
+        df_human = df_unit_option == 'h' || df_unit_option == 'H';
+        df_si = df_unit_option == 'H';
         df_unit = df_unit_option == 'm' ? (p64)1048576 : (p64)1024;
+        df_suffix[0] = end;
+
+        p8 block_heading[48];
+        p8 posix_heading[48];
+        bool total = (taking.flags & FILE_FLAG('O')) != 0;
+
+        if (df_unit_option == 'B')
+        {
+                string_address given = file_option_value(address_of taking, 'B');
+                positive unit;
+                bool human, si;
+
+                if (!ls_block_size_read(given, address_of unit, address_of human,
+                                        address_of si, df_suffix))
+                        return string_report(log_error, 1,
+                                             "df: invalid -B argument '%s'\n",
+                                             given);
+                df_human = human;
+                df_si = si;
+                df_unit = unit;
+
+                // A letter makes the base 1024, unless a bare B after it
+                // makes it 1000; iB and B both ask for the B.
+                bool letter = false;
+                bool marked = false;
+                bool decimal = false;
+
+                for (string_address at = given; string_get(at); at++)
+                        if (string_is(at, 'B'))
+                        {
+                                marked = true;
+                                decimal = !(at > given && at[-1] == 'i');
+                        }
+                        else if (byte_is_alpha(string_get(at)) && !string_is(at, 'i'))
+                                letter = true;
+                memory_copy_apart(posix_heading + positive_into_string(posix_heading, unit),
+                                  "-blocks", 8);
+                if (!human)
+                        df_block_heading(block_heading, unit, letter && !decimal, marked);
+        }
         df_inodes = (taking.flags & FILE_FLAG('i')) != 0;
         df_types = (taking.flags & FILE_FLAG('T')) != 0;
         df_all = (taking.flags & FILE_FLAG('a')) != 0;
@@ -16609,8 +16762,10 @@ static b32 file_df()
         df_amount_column columns[] = {
             {df_inodes ? (string_address) "Inodes"
              : df_human ? (string_address) "Size"
+             : df_posix && df_unit_option == 'B' ? (string_address)posix_heading
              : df_posix ? df_unit_option == 'm' ? (string_address) "1048576-blocks"
                                                 : (string_address) "1024-blocks"
+             : df_unit_option == 'B' ? (string_address)block_heading
              : df_unit_option == 'm' ? (string_address) "1M-blocks"
                                      : (string_address) "1K-blocks", 5},
             {df_inodes ? (string_address) "IUsed" : (string_address) "Used", 5},
@@ -16771,6 +16926,44 @@ static b32 file_df()
                 }
         }
 
+        /*
+                --total: every row shown added up, in bytes, as one more row
+                named total with - for its type and its mount.
+        */
+        file_mount_facts sum;
+
+        memory_fill(address_of sum, 0, sizeof(sum));
+        sum.fragment_size = sum.block_size = 1;
+        for (positive row = 0; total && row < (filtering ? ordered : mounts.count); row++)
+        {
+                // Row by row, so a filesystem named twice counts twice.
+                df_sample address_to sample = df_samples + (filtering ? df_order[row] : row);
+                p64 size = sample->facts.fragment_size ? (p64)sample->facts.fragment_size
+                                                       : (p64)sample->facts.block_size;
+
+                if (!sample->shown || !sample->measured)
+                        continue;
+                sum.blocks += sample->facts.blocks * size;
+                sum.blocks_free += sample->facts.blocks_free * size;
+                sum.blocks_available += sample->facts.blocks_available * size;
+                sum.files += sample->facts.files;
+                sum.files_free += sample->facts.files_free;
+        }
+        if (total && showing)
+        {
+                p64 values[3], size;
+                p8 text[64];
+
+                df_reading(address_of sum, values, values + 1, values + 2, address_of size);
+                for (positive column = 0; column < array_count(columns); column++)
+                {
+                        positive length = df_amount(text, values[column], size);
+
+                        if (length > columns[column].width)
+                                columns[column].width = length;
+                }
+        }
+
         /* Nothing to head is no table at all, and when nothing went wrong
            on the way that is itself the complaint. */
         if (!showing)
@@ -16808,6 +17001,9 @@ static b32 file_df()
                                address_of df_samples[at].facts,
                                df_samples[at].measured, columns);
         }
+        if (total)
+                df_row((string_address) "total", (string_address) "-", (string_address) "-",
+                       address_of sum, true, columns);
 
         storage_mount_table_release(address_of mounts);
         log_flush();
