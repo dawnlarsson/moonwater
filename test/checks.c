@@ -49665,6 +49665,130 @@ static fn resolving_truncated(void)
                   elapsed < NETWORK_NANOSECONDS + NETWORK_NANOSECONDS / 2);
 }
 
+/* Modes match harness_http_response_framing CASES in differential.py. */
+enum
+{
+        HTTP_FRAMING_HARNESS_FRAME = 0,
+        HTTP_FRAMING_HARNESS_FULL,
+        HTTP_FRAMING_HARNESS_UNCHUNK,
+        HTTP_FRAMING_HARNESS_OVERSIZE,
+};
+
+/* Freestanding twin of the hosted extract: same wires, production
+   http_response_framing / http_unchunk already linked into CHECK_net. */
+static bool http_response_framing_harness_case(
+        bool must_accept, positive mode, p8 address_to wire,
+        positive wire_length, p8 address_to expected_body,
+        positive expected_body_length)
+{
+        bool accepted = false;
+        p8 address_to body = null;
+        positive body_length = 0;
+        p8 scratch[256];
+        p8 address_to work = wire;
+        positive work_length = wire_length;
+
+        if (mode == HTTP_FRAMING_HARNESS_OVERSIZE)
+        {
+                p8 oversized[HTTP_HEAD_MAX + 4];
+                http_response response;
+                positive header = 0;
+
+                memory_fill(oversized, 'x', sizeof oversized);
+                memory_copy(oversized, "HTTP/1.1 200 OK\r\n",
+                            sizeof("HTTP/1.1 200 OK\r\n") - 1);
+                memory_copy(oversized + HTTP_HEAD_MAX, "\r\n\r\n", 4);
+                accepted = http_response_framing(oversized, sizeof oversized,
+                                                 address_of header,
+                                                 address_of response) ==
+                           HTTP_OK;
+        }
+        else
+        {
+                if (mode != HTTP_FRAMING_HARNESS_FRAME)
+                {
+                        if (wire_length > sizeof scratch)
+                                return false;
+                        memory_copy(scratch, wire, wire_length);
+                        work = scratch;
+                }
+
+                if (mode == HTTP_FRAMING_HARNESS_UNCHUNK)
+                {
+                        bipolar got = http_unchunk(work, work_length);
+
+                        if (got >= 0)
+                        {
+                                accepted = true;
+                                body = work;
+                                body_length = (positive)got;
+                        }
+                }
+                else
+                {
+                        http_response response;
+                        positive header = 0;
+
+                        if (http_response_framing(work, work_length,
+                                                  address_of header,
+                                                  address_of response) ==
+                            HTTP_OK)
+                        {
+                                if (mode == HTTP_FRAMING_HARNESS_FRAME)
+                                {
+                                        accepted = true;
+                                        if (response.body_kind ==
+                                                HTTP_BODY_LENGTH &&
+                                            work_length >=
+                                                header + response.body_length)
+                                        {
+                                                body = work + header;
+                                                body_length =
+                                                    response.body_length;
+                                        }
+                                }
+                                else if (response.body_kind ==
+                                         HTTP_BODY_CHUNKED)
+                                {
+                                        bipolar got = http_unchunk(
+                                            work + header,
+                                            work_length - header);
+
+                                        if (got >= 0)
+                                        {
+                                                accepted = true;
+                                                body = work + header;
+                                                body_length = (positive)got;
+                                        }
+                                }
+                                else if (response.body_kind ==
+                                         HTTP_BODY_LENGTH)
+                                {
+                                        if (work_length >=
+                                            header + response.body_length)
+                                        {
+                                                accepted = true;
+                                                body = work + header;
+                                                body_length =
+                                                    response.body_length;
+                                        }
+                                }
+                                else
+                                        accepted = true;
+                        }
+                }
+        }
+
+        if (accepted != must_accept)
+                return false;
+        if (!must_accept)
+                return true;
+        return body_length == expected_body_length &&
+               (expected_body_length == 0 ||
+                (body != null &&
+                 !memory_compare(body, expected_body, expected_body_length)));
+}
+
 //      The URL, the headers and the chunk framing -- all of it pure.
 static fn fetching(void)
 {
@@ -50085,6 +50209,73 @@ static fn fetching(void)
                           (p8 address_to)switching, sizeof switching - 1,
                           address_of header, address_of response) ==
                           HTTP_MALFORMED);
+        }
+
+        /* Exact MUST_REFUSE / MUST_ACCEPT wires from
+           harness_http_response_framing CASES — freestanding twin of the
+           Python-hosted extract, no shim. */
+        {
+                enum
+                {
+                        FRAME = HTTP_FRAMING_HARNESS_FRAME,
+                        FULL = HTTP_FRAMING_HARNESS_FULL,
+                        UNCHUNK = HTTP_FRAMING_HARNESS_UNCHUNK,
+                        OVERSIZE = HTTP_FRAMING_HARNESS_OVERSIZE,
+                };
+#define framing_harness(name, accept, mode, wire, body)                      \
+                check("http_response_framing harness " name,                 \
+                      http_response_framing_harness_case(                    \
+                          accept, mode, (p8 address_to)(wire),               \
+                          sizeof(wire) - 1, (p8 address_to)(body),           \
+                          sizeof(body) - 1))
+
+                framing_harness("te-cl-conflict", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+                                "Content-Length: 5\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+                                "");
+                framing_harness("duplicate-content-length", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n"
+                                "Content-Length: 2\r\n\r\nx",
+                                "");
+                framing_harness("bare-cr-in-location", false, FRAME,
+                                "HTTP/1.1 302 Found\r\n"
+                                "Location: /safe\rhidden\r\n\r\n",
+                                "");
+                framing_harness("obs-fold-location", false, FRAME,
+                                "HTTP/1.1 302 Found\r\n"
+                                "Location: https://good.example/\r\n"
+                                " https://evil.example/\r\n\r\n",
+                                "");
+                framing_harness("space-before-colon", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length : 0\r\n\r\n",
+                                "");
+                framing_harness("te-not-chunked", false, FRAME,
+                                "HTTP/1.1 200 OK\r\n"
+                                "Transfer-Encoding: gzip\r\n\r\nxxxx",
+                                "");
+                framing_harness("duplicate-location", false, FRAME,
+                                "HTTP/1.1 302 Found\r\nLocation: /a\r\n"
+                                "location: /b\r\n\r\n",
+                                "");
+                framing_harness("truncated-chunk-trailer", false, UNCHUNK,
+                                "0\r\n", "");
+                framing_harness("chunk-size-overflow", false, UNCHUNK,
+                                "10000000000000000\r\n", "");
+                framing_harness("oversize-header", false, OVERSIZE, "", "");
+
+                framing_harness("simple-length", true, FULL,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"
+                                "hello",
+                                "hello");
+                framing_harness("empty-length", true, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+                                "");
+                framing_harness("chunked-full", true, FULL,
+                                "HTTP/1.1 200 OK\r\n"
+                                "Transfer-Encoding: chunked\r\n\r\n"
+                                "5\r\nhello\r\n0\r\n\r\n",
+                                "hello");
+#undef framing_harness
         }
 
         {
@@ -52041,6 +52232,212 @@ static fn tls_certificate_extension_adversarial(void)
 }
 
 /*
+        Adversarial full-certificate DER harness for tls_parse_cert.
+
+        Starts from the same minimal v1 ECDSA P-256 Certificate that
+        tls_certificate_list_depth uses (195 bytes).  Empty and truncated
+        streams, oversize / indefinite outer lengths, trailing bytes past
+        the outer SEQUENCE, SPKI unused-bits, a non-minimal serial, a v1
+        TBS that still carries extensions, and a TBS/outer signature OID
+        mismatch must each refuse; the untouched fixture remains the
+        positive control.
+*/
+static fn tls_parse_cert_adversarial(void)
+{
+        /* Minimal v1 ECDSA P-256 Certificate DER tls_parse_cert accepts:
+           CN=a Names, UTCTime YYMMDDHHMMSSZ, real P-256 SPKI, and a tiny
+           non-empty signature BIT STRING. */
+        static p8 minimal[] = {
+            0x30, 0x81, 0xc0, 0x30, 0x81, 0xa6, 0x02, 0x01, 0x01, 0x30, 0x0a,
+            0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02, 0x30,
+            0x0c, 0x31, 0x0a, 0x30, 0x08, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c,
+            0x01, 0x61, 0x30, 0x1e, 0x17, 0x0d, 0x30, 0x31, 0x30, 0x31, 0x30,
+            0x31, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x5a, 0x17, 0x0d, 0x34,
+            0x39, 0x31, 0x32, 0x33, 0x31, 0x32, 0x33, 0x35, 0x39, 0x35, 0x39,
+            0x5a, 0x30, 0x0c, 0x31, 0x0a, 0x30, 0x08, 0x06, 0x03, 0x55, 0x04,
+            0x03, 0x0c, 0x01, 0x61, 0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a,
+            0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48,
+            0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04, 0xf5, 0x6e,
+            0xa0, 0x7c, 0x0c, 0x20, 0xd3, 0x14, 0xd8, 0x9a, 0x24, 0x94, 0x01,
+            0x21, 0x55, 0x86, 0x76, 0x96, 0xf9, 0xa0, 0xe5, 0xa5, 0x76, 0x28,
+            0x15, 0xb1, 0xd1, 0x97, 0xbd, 0x64, 0x2a, 0xa4, 0x1e, 0xd0, 0xed,
+            0x17, 0xea, 0xa6, 0xc2, 0x9b, 0x36, 0x26, 0x0c, 0x36, 0x5c, 0xd1,
+            0x72, 0x57, 0x7b, 0xd1, 0x80, 0xbf, 0x5e, 0xf8, 0x12, 0xf7, 0x90,
+            0xe6, 0x51, 0x42, 0xd3, 0xa8, 0xcd, 0x17, 0x30, 0x0a, 0x06, 0x08,
+            0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02, 0x03, 0x09, 0x00,
+            0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01};
+        tls_cert cert = {0};
+        positive refused = 0;
+        p8 empty = 0;
+
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("an empty certificate DER stream is refused",
+              tls_parse_cert(address_of empty, 0, address_of cert, null) ==
+                  TLS_FAIL);
+
+        for (positive prefix = 1; prefix < sizeof minimal; prefix++)
+        {
+                memory_fill(address_of cert, 0, sizeof cert);
+                if (tls_parse_cert(minimal, prefix, address_of cert, null) ==
+                    TLS_FAIL)
+                        refused++;
+        }
+        check("every proper prefix of a valid certificate is refused",
+              refused == sizeof minimal - 1);
+
+        {
+                /* Outer SEQUENCE claims one more content byte than the
+                   buffer holds after its long-form length. */
+                p8 oversize[sizeof minimal];
+
+                memory_copy(oversize, minimal, sizeof minimal);
+                oversize[2] = 0xc1;
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("an oversize outer certificate SEQUENCE length is refused",
+                      tls_parse_cert(oversize, sizeof oversize, address_of cert,
+                                     null) == TLS_FAIL);
+        }
+
+        {
+                /* BER indefinite length (0x80) is not DER; tls_asn1_length
+                   rejects a zero count before any content is walked. */
+                static p8 indefinite[] = {
+                    0x30, 0x80, 0x30, 0x81, 0xa6, 0x02, 0x01, 0x01, 0x30, 0x0a,
+                    0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02,
+                    0x30, 0x0c, 0x31, 0x0a, 0x30, 0x08, 0x06, 0x03, 0x55, 0x04,
+                    0x03, 0x0c, 0x01, 0x61, 0x30, 0x1e, 0x17, 0x0d, 0x30, 0x31,
+                    0x30, 0x31, 0x30, 0x31, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30,
+                    0x5a, 0x17, 0x0d, 0x34, 0x39, 0x31, 0x32, 0x33, 0x31, 0x32,
+                    0x33, 0x35, 0x39, 0x35, 0x39, 0x5a, 0x30, 0x0c, 0x31, 0x0a,
+                    0x30, 0x08, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x01, 0x61,
+                    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce,
+                    0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d,
+                    0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04, 0xf5, 0x6e, 0xa0,
+                    0x7c, 0x0c, 0x20, 0xd3, 0x14, 0xd8, 0x9a, 0x24, 0x94, 0x01,
+                    0x21, 0x55, 0x86, 0x76, 0x96, 0xf9, 0xa0, 0xe5, 0xa5, 0x76,
+                    0x28, 0x15, 0xb1, 0xd1, 0x97, 0xbd, 0x64, 0x2a, 0xa4, 0x1e,
+                    0xd0, 0xed, 0x17, 0xea, 0xa6, 0xc2, 0x9b, 0x36, 0x26, 0x0c,
+                    0x36, 0x5c, 0xd1, 0x72, 0x57, 0x7b, 0xd1, 0x80, 0xbf, 0x5e,
+                    0xf8, 0x12, 0xf7, 0x90, 0xe6, 0x51, 0x42, 0xd3, 0xa8, 0xcd,
+                    0x17, 0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d,
+                    0x04, 0x03, 0x02, 0x03, 0x09, 0x00, 0x30, 0x06, 0x02, 0x01,
+                    0x01, 0x02, 0x01, 0x01, 0x00, 0x00};
+
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("an indefinite outer certificate SEQUENCE length is refused",
+                      tls_parse_cert(indefinite, sizeof indefinite,
+                                     address_of cert, null) == TLS_FAIL);
+        }
+
+        {
+                p8 trailing[sizeof minimal + 1];
+
+                memory_copy(trailing, minimal, sizeof minimal);
+                trailing[sizeof minimal] = 0xff;
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("trailing bytes after the outer certificate SEQUENCE are refused",
+                      tls_parse_cert(trailing, sizeof trailing, address_of cert,
+                                     null) == TLS_FAIL);
+        }
+
+        {
+                p8 unused[sizeof minimal];
+
+                memory_copy(unused, minimal, sizeof minimal);
+                /* SPKI BIT STRING: tag 0x03, length 0x42, unused-bits octet. */
+                unused[106] = 0x01;
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("a SPKI BIT STRING with non-zero unused bits is refused",
+                      tls_parse_cert(unused, sizeof unused, address_of cert,
+                                     null) == TLS_FAIL);
+        }
+
+        {
+                /* Serial INTEGER 02 02 00 01: leading 0x00 without the high
+                   bit set on the next octet -- tls_positive_integer refuses. */
+                static p8 serial_padded[] = {
+                    0x30, 0x81, 0xc1, 0x30, 0x81, 0xa7, 0x02, 0x02, 0x00, 0x01,
+                    0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04,
+                    0x03, 0x02, 0x30, 0x0c, 0x31, 0x0a, 0x30, 0x08, 0x06, 0x03,
+                    0x55, 0x04, 0x03, 0x0c, 0x01, 0x61, 0x30, 0x1e, 0x17, 0x0d,
+                    0x30, 0x31, 0x30, 0x31, 0x30, 0x31, 0x30, 0x30, 0x30, 0x30,
+                    0x30, 0x30, 0x5a, 0x17, 0x0d, 0x34, 0x39, 0x31, 0x32, 0x33,
+                    0x31, 0x32, 0x33, 0x35, 0x39, 0x35, 0x39, 0x5a, 0x30, 0x0c,
+                    0x31, 0x0a, 0x30, 0x08, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c,
+                    0x01, 0x61, 0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86,
+                    0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48,
+                    0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04, 0xf5,
+                    0x6e, 0xa0, 0x7c, 0x0c, 0x20, 0xd3, 0x14, 0xd8, 0x9a, 0x24,
+                    0x94, 0x01, 0x21, 0x55, 0x86, 0x76, 0x96, 0xf9, 0xa0, 0xe5,
+                    0xa5, 0x76, 0x28, 0x15, 0xb1, 0xd1, 0x97, 0xbd, 0x64, 0x2a,
+                    0xa4, 0x1e, 0xd0, 0xed, 0x17, 0xea, 0xa6, 0xc2, 0x9b, 0x36,
+                    0x26, 0x0c, 0x36, 0x5c, 0xd1, 0x72, 0x57, 0x7b, 0xd1, 0x80,
+                    0xbf, 0x5e, 0xf8, 0x12, 0xf7, 0x90, 0xe6, 0x51, 0x42, 0xd3,
+                    0xa8, 0xcd, 0x17, 0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48,
+                    0xce, 0x3d, 0x04, 0x03, 0x02, 0x03, 0x09, 0x00, 0x30, 0x06,
+                    0x02, 0x01, 0x01, 0x02, 0x01, 0x01};
+
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("a non-minimal certificate serial INTEGER is refused",
+                      tls_parse_cert(serial_padded, sizeof serial_padded,
+                                     address_of cert, null) == TLS_FAIL);
+        }
+
+        {
+                /* Implicit v1 (no version field) plus a well-formed [3]
+                   extensions block after SPKI.  Extensions exist only in
+                   v3; tls_parse_extensions refuses when version != 2. */
+                static p8 v1_with_extensions[] = {
+                    0x30, 0x81, 0xcb, 0x30, 0x81, 0xb1, 0x02, 0x01, 0x01, 0x30,
+                    0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03,
+                    0x02, 0x30, 0x0c, 0x31, 0x0a, 0x30, 0x08, 0x06, 0x03, 0x55,
+                    0x04, 0x03, 0x0c, 0x01, 0x61, 0x30, 0x1e, 0x17, 0x0d, 0x30,
+                    0x31, 0x30, 0x31, 0x30, 0x31, 0x30, 0x30, 0x30, 0x30, 0x30,
+                    0x30, 0x5a, 0x17, 0x0d, 0x34, 0x39, 0x31, 0x32, 0x33, 0x31,
+                    0x32, 0x33, 0x35, 0x39, 0x35, 0x39, 0x5a, 0x30, 0x0c, 0x31,
+                    0x0a, 0x30, 0x08, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x01,
+                    0x61, 0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48,
+                    0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce,
+                    0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04, 0xf5, 0x6e,
+                    0xa0, 0x7c, 0x0c, 0x20, 0xd3, 0x14, 0xd8, 0x9a, 0x24, 0x94,
+                    0x01, 0x21, 0x55, 0x86, 0x76, 0x96, 0xf9, 0xa0, 0xe5, 0xa5,
+                    0x76, 0x28, 0x15, 0xb1, 0xd1, 0x97, 0xbd, 0x64, 0x2a, 0xa4,
+                    0x1e, 0xd0, 0xed, 0x17, 0xea, 0xa6, 0xc2, 0x9b, 0x36, 0x26,
+                    0x0c, 0x36, 0x5c, 0xd1, 0x72, 0x57, 0x7b, 0xd1, 0x80, 0xbf,
+                    0x5e, 0xf8, 0x12, 0xf7, 0x90, 0xe6, 0x51, 0x42, 0xd3, 0xa8,
+                    0xcd, 0x17, 0xa3, 0x09, 0x30, 0x07, 0x30, 0x05, 0x06, 0x01,
+                    0x2a, 0x04, 0x00, 0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48,
+                    0xce, 0x3d, 0x04, 0x03, 0x02, 0x03, 0x09, 0x00, 0x30, 0x06,
+                    0x02, 0x01, 0x01, 0x02, 0x01, 0x01};
+
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("a v1 certificate that carries extensions is refused",
+                      tls_parse_cert(v1_with_extensions,
+                                     sizeof v1_with_extensions, address_of cert,
+                                     null) == TLS_FAIL);
+        }
+
+        {
+                p8 mismatch[sizeof minimal];
+
+                memory_copy(mismatch, minimal, sizeof minimal);
+                /* Outer signature OID last byte: ecdsa-with-SHA256 (02) ->
+                   ecdsa-with-SHA384 (03), leaving the TBS OID unchanged. */
+                mismatch[183] = 0x03;
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("a TBS/outer signature algorithm OID mismatch is refused",
+                      tls_parse_cert(mismatch, sizeof mismatch, address_of cert,
+                                     null) == TLS_FAIL);
+        }
+
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("the complete minimal ECDSA certificate still parses",
+              tls_parse_cert(minimal, sizeof minimal, address_of cert, null) ==
+                      TLS_OK &&
+                  cert.curve == 1);
+}
+
+/*
         Certificate handshake list depth for tls_verify_chain's certs[8].
 
         A minimal v1 ECDSA P-256 DER certificate (CN=a, UTCTime validity,
@@ -52595,6 +52992,210 @@ static fn tls_server_flight_validation(void)
                 check("TLS encrypted extension payload cannot overrun",
                       !tls_encrypted_extensions_valid(overrun,
                                                       sizeof overrun));
+        }
+}
+
+/* After ServerHello the encrypted flight does not use tls_handshake_one_append:
+   each record's plaintext is copied into hs[TLS_HS_MAX] and complete handshake
+   messages are peeled from the front.  Full tls_handshake loopback needs a
+   peer and crypto; these unit proofs feed successive plaintext fragments into
+   a local copy of that length / leftover walk and call the same flight-step
+   predicate production uses. */
+typedef struct
+{
+        p8 hs[TLS_HS_MAX];
+        positive used;
+        p8 flight;
+        positive messages;
+} tls_flight_hs_walk;
+
+static bipolar tls_flight_hs_append(tls_flight_hs_walk address_to walk,
+                                    p8 address_to fragment, positive length)
+{
+        positive msg_at = 0;
+
+        if (walk->used + length > sizeof(walk->hs))
+                return TLS_FAIL;
+        memory_copy(walk->hs + walk->used, fragment, length);
+        walk->used += length;
+
+        while (msg_at + 4 <= walk->used)
+        {
+                p8 hs_type = walk->hs[msg_at];
+                positive hs_len = tls_load_24(walk->hs + msg_at + 1);
+
+                if (msg_at + 4 + hs_len > walk->used)
+                        break;
+                if (!tls_server_flight_step(address_of walk->flight, hs_type))
+                        return TLS_FAIL;
+                walk->messages++;
+                msg_at += 4 + hs_len;
+        }
+
+        if (msg_at)
+        {
+                memory_copy(walk->hs, walk->hs + msg_at, walk->used - msg_at);
+                walk->used -= msg_at;
+        }
+
+        if (walk->flight == TLS_SERVER_FLIGHT_COMPLETE && walk->used)
+                return TLS_FAIL;
+        return TLS_OK;
+}
+
+static fn tls_flight_hs_put_header(p8 address_to at, p8 type, positive body)
+{
+        at[0] = type;
+        at[1] = (p8)(body >> 16);
+        at[2] = (p8)(body >> 8);
+        at[3] = (p8)body;
+}
+
+static fn tls_encrypted_flight_hs_reassembly(void)
+{
+        /* 1. Certificate (type 11) split across appends: incomplete then complete. */
+        {
+                p8 cert[4 + 24];
+                tls_flight_hs_walk walk = {.flight = TLS_SERVER_FLIGHT_CERTIFICATE};
+
+                tls_flight_hs_put_header(cert, TLS_HS_CERTIFICATE, 24);
+                memory_fill(cert + 4, 0xab, 24);
+
+                check("a fragmented Certificate header is retained",
+                      tls_flight_hs_append(address_of walk, cert, 3) == TLS_OK &&
+                          walk.used == 3 && !walk.messages);
+                check("a fragmented Certificate body waits for its declared end",
+                      tls_flight_hs_append(address_of walk, cert + 3, 10) ==
+                          TLS_OK &&
+                          walk.used == 13 && !walk.messages);
+                check("a fragmented Certificate is consumed when complete",
+                      tls_flight_hs_append(address_of walk, cert + 13,
+                                          sizeof cert - 13) == TLS_OK &&
+                          !walk.used && walk.messages == 1 &&
+                          walk.flight == TLS_SERVER_FLIGHT_CERT_VERIFY);
+        }
+
+        /* 2. Exact TLS_HS_MAX fill is accepted; one octet past refuses. */
+        {
+                p8 chunk[TLS_HS_MAX];
+                p8 one = 0;
+                tls_flight_hs_walk walk = {.flight = TLS_SERVER_FLIGHT_CERTIFICATE};
+
+                /* Declare a body larger than the buffer so the message stays
+                   incomplete while the flight hs[] fills to its ceiling. */
+                tls_flight_hs_put_header(chunk, TLS_HS_CERTIFICATE, TLS_HS_MAX);
+                memory_fill(chunk + 4, 0xcd, sizeof chunk - 4);
+
+                check("encrypted-flight hs may fill exactly to TLS_HS_MAX",
+                      tls_flight_hs_append(address_of walk, chunk,
+                                          sizeof chunk) == TLS_OK &&
+                          walk.used == TLS_HS_MAX && !walk.messages &&
+                          sizeof(walk.hs) == (positive)TLS_HS_MAX);
+                check("one byte past the encrypted-flight hs buffer is refused",
+                      tls_flight_hs_append(address_of walk, address_of one, 1) ==
+                          TLS_FAIL &&
+                          walk.used == TLS_HS_MAX);
+        }
+
+        /* 3. Empty mid-message fragment: flight path has no !length guard
+           (unlike tls_handshake_one_append / post-handshake), so length 0 is
+           a no-op that leaves the held prefix alone. */
+        {
+                p8 cert[4 + 8];
+                tls_flight_hs_walk walk = {.flight = TLS_SERVER_FLIGHT_CERTIFICATE};
+
+                tls_flight_hs_put_header(cert, TLS_HS_CERTIFICATE, 8);
+                memory_fill(cert + 4, 0x11, 8);
+
+                check("an empty encrypted-flight fragment is ignored mid-message",
+                      tls_flight_hs_append(address_of walk, cert, 6) == TLS_OK &&
+                          walk.used == 6 &&
+                          tls_flight_hs_append(address_of walk, cert, 0) ==
+                              TLS_OK &&
+                          walk.used == 6 && !walk.messages);
+                check("Certificate reassembly resumes after an empty fragment",
+                      tls_flight_hs_append(address_of walk, cert + 6,
+                                          sizeof cert - 6) == TLS_OK &&
+                          !walk.used && walk.messages == 1);
+        }
+
+        /* 4. Two HS messages in one record: tiny EE consumed, Certificate start held. */
+        {
+                p8 record[6 + 4 + 2];
+                tls_flight_hs_walk walk = {.flight = TLS_SERVER_FLIGHT_EE};
+
+                /* EncryptedExtensions with empty extension vector (body 2). */
+                tls_flight_hs_put_header(record, TLS_HS_ENCRYPTED_EXTS, 2);
+                record[4] = 0;
+                record[5] = 0;
+                /* Start of Certificate: header + two body bytes of eight. */
+                tls_flight_hs_put_header(record + 6, TLS_HS_CERTIFICATE, 8);
+                record[10] = 0xaa;
+                record[11] = 0xbb;
+
+                check("EncryptedExtensions in a shared record is consumed",
+                      tls_flight_hs_append(address_of walk, record,
+                                          sizeof record) == TLS_OK &&
+                          walk.messages == 1 &&
+                          walk.flight == TLS_SERVER_FLIGHT_CERTIFICATE &&
+                          walk.used == 6 &&
+                          walk.hs[0] == TLS_HS_CERTIFICATE &&
+                          walk.hs[3] == 8 && walk.hs[4] == 0xaa &&
+                          walk.hs[5] == 0xbb);
+
+                {
+                        p8 rest[6];
+
+                        memory_fill(rest, 0xcc, sizeof rest);
+                        check("the Certificate remainder after a shared record completes",
+                              tls_flight_hs_append(address_of walk, rest,
+                                                  sizeof rest) == TLS_OK &&
+                                  !walk.used && walk.messages == 2 &&
+                                  walk.flight == TLS_SERVER_FLIGHT_CERT_VERIFY);
+                }
+        }
+
+        /* 5. Trailing junk after Finished when the flight is COMPLETE fails. */
+        {
+                p8 flight_bytes[6 + 4 + 4 + 4 + 32 + 1];
+                positive at = 0;
+                tls_flight_hs_walk walk = {.flight = TLS_SERVER_FLIGHT_EE};
+
+                tls_flight_hs_put_header(flight_bytes + at, TLS_HS_ENCRYPTED_EXTS,
+                                        2);
+                at += 4;
+                flight_bytes[at++] = 0;
+                flight_bytes[at++] = 0;
+
+                tls_flight_hs_put_header(flight_bytes + at, TLS_HS_CERTIFICATE, 0);
+                at += 4;
+
+                tls_flight_hs_put_header(flight_bytes + at, TLS_HS_CERT_VERIFY, 0);
+                at += 4;
+
+                tls_flight_hs_put_header(flight_bytes + at, TLS_HS_FINISHED, 32);
+                at += 4;
+                memory_fill(flight_bytes + at, 0x55, 32);
+                at += 32;
+                flight_bytes[at++] = 0xff; /* junk past Finished */
+
+                check("trailing junk after a COMPLETE encrypted flight is refused",
+                      tls_flight_hs_append(address_of walk, flight_bytes, at) ==
+                          TLS_FAIL &&
+                          walk.flight == TLS_SERVER_FLIGHT_COMPLETE &&
+                          walk.messages == 4);
+
+                /* Same flight without the junk clears cleanly. */
+                walk.used = 0;
+                walk.flight = TLS_SERVER_FLIGHT_EE;
+                walk.messages = 0;
+                memory_fill(walk.hs, 0, sizeof walk.hs);
+                check("a COMPLETE encrypted flight with no leftover clears",
+                      tls_flight_hs_append(address_of walk, flight_bytes,
+                                          at - 1) == TLS_OK &&
+                          !walk.used &&
+                          walk.flight == TLS_SERVER_FLIGHT_COMPLETE &&
+                          walk.messages == 4);
         }
 }
 
@@ -56073,11 +56674,13 @@ b32 main(void)
         tls_certificate_dates();
         tls_certificate_identity_rules();
         tls_certificate_extension_adversarial();
+        tls_parse_cert_adversarial();
         tls_certificate_list_depth();
         tls_client_hello_bounds();
         tls_client_hello_groups();
         tls_server_hello_validation();
         tls_server_flight_validation();
+        tls_encrypted_flight_hs_reassembly();
         tls_post_handshake_framing();
         tls_certificate_framing();
         crypto_floor();
