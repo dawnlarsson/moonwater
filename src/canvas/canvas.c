@@ -387,7 +387,6 @@ static struct desktop
         unsigned int idle_frames;
         _Bool awake;
         _Bool started;
-        _Bool terminal;
 
         // Asked for before the desktop had a size; canvas_start opens them.
         _Bool log_wanted;
@@ -8114,67 +8113,25 @@ static int canvas_build(struct canvas *canvas, _Bool biggest)
 }
 
 /*
-        The first terminal waits for the initcalls.
+        A terminal, started on the canvas thread.
 
-        A built-in canvas has a screen at device_initcall, but nothing in
-        userspace is meant to run before every initcall has -- floodlight, for
-        one, registers its device at late_initcall on exactly that promise. A
-        terminal started into that gap exited without opening a window, on
-        every boot, and left the log alone on the screen; the same /term run
-        once init had started opened one. So the first is held until the
-        initcalls are done, and a canvas that comes up after that -- a late
-        card, or the module loaded by init -- starts it at once.
+        Canvas opens no window by itself: the kernel log and the terminals a
+        desktop starts with are the machine script's, asked for on the canvas
+        on event through moonwater canvas log and moonwater canvas terminal.
+        That also settles what the first terminal used to wait for: a
+        terminal started before the initcalls finished exited without a
+        window, and a request cannot arrive from userspace before then.
 
-        The two sides meet in one word, not under desktop.lock. The
-        initcall that says they are done runs on the thread that goes on to
-        exec init, and the lock is held for whole frames -- the first picture,
-        a blocking flush -- so taking it there put up to a display period, and
-        on real hardware a modeset, in front of Run /init on about a third of
-        boots. Each side sets its own bit and looks at the other's in the same
-        atomic step, so exactly one of them sees both and asks for the spawn,
-        which happens on the canvas thread as it always did.
+        Outside desktop.lock: canvas_start holds that lock for the first
+        picture, and the terminal's first WINDOW ioctl takes it too, so
+        spawning under it would wait out the child's open. The thread starts
+        Control-Shift-T the same way.
 */
-#define CANVAS_FIRST_DONE 1u
-#define CANVAS_FIRST_WANTED 2u
-
-#ifdef MODULE
-static atomic_t canvas_first = ATOMIC_INIT(CANVAS_FIRST_DONE);
-#else
-static atomic_t canvas_first = ATOMIC_INIT(0);
-#endif
-
-static void canvas_first_spawn(void)
+static void canvas_terminal_spawn(void)
 {
-        /*
-                Outside desktop.lock, on the canvas thread.
-
-                canvas_start holds that lock for the first picture. The
-                terminal's first WINDOW ioctl takes it too, so spawning
-                from here would wait out the child's open. The thread
-                already starts Control-Shift-T that way.
-        */
         atomic_set(&desktop.spawn, 1);
         canvas_thread_wake();
 }
-
-static void canvas_terminal_first(void)
-{
-        if (atomic_fetch_or(CANVAS_FIRST_WANTED, &canvas_first) &
-            CANVAS_FIRST_DONE)
-                canvas_first_spawn();
-}
-
-#ifndef MODULE
-static int __init canvas_initcalls_finished(void)
-{
-        if (atomic_fetch_or(CANVAS_FIRST_DONE, &canvas_first) &
-            CANVAS_FIRST_WANTED)
-                canvas_first_spawn();
-
-        return 0;
-}
-late_initcall_sync(canvas_initcalls_finished);
-#endif
 
 /*
         The biggest mode every screen offers, and what to do when it will not
@@ -8244,9 +8201,10 @@ static int canvas_start(struct canvas *canvas)
                 atomic_set(&desktop.pending_y, desktop.cursor_y);
         }
 
-        // Before the redraw, so the first frame already carries it, and before
-        // the terminal below, which is userspace and may never arrive.
-        console_start();
+        // Asked for before the desktop had a size. Before the redraw, so the
+        // first frame already carries it.
+        if (desktop.log_wanted)
+                console_start();
 
         // The redraw, less the commit this card has just had: the picture
         // goes to the flusher and the answer above is what is reported.
@@ -8263,15 +8221,8 @@ static int canvas_start(struct canvas *canvas)
                 pr_info("[moonwater canvas] " "desktop %dx%d, %u output(s)\n", desktop.width, desktop.height, count);
         }
 
-        // Something to use it with. A desktop with nothing on it is not a
-        // desktop, and this is the first program a screen is worth having.
-        // The bit is set only once spawn_terminal has actually started:
-        // setting it first meant a failed spawn never retried, and off
-        // then on found a desktop that believed it already had a terminal.
-        if (!desktop.terminal)
-                canvas_terminal_first();
-        else if (desktop.terminal_wanted)
-                canvas_first_spawn();
+        if (desktop.terminal_wanted)
+                canvas_terminal_spawn();
         desktop.terminal_wanted = false;
 
         return 0;
@@ -9434,8 +9385,8 @@ static void __maybe_unused canvas_start_probing(void)
         is set up on each card, which drm_client_lib.active= kept from ever
         having one. The kernel log window stays: its cells are the cache of
         the boot, and printk keeps writing them while the cards are away.
-        On claims the cards again the way the boot does, and canvas_start
-        opens a terminal as it does at boot if the first one is gone.
+        On claims the cards again the way the boot does and fires canvas on,
+        and the machine script opens whatever windows it wants again.
 
         Lock order: canvas_control_lock, then a card's clientlist_mutex, then
         canvas_list_lock, then desktop.lock, then a card's master_mutex.
@@ -9582,7 +9533,6 @@ static long canvas_turn_off(void)
         // that way, on comes back painted with every key dropped.
         if (desktop.focused && !desktop.focused->shared)
                 pane_focus(NULL);
-        desktop.terminal = false;
         desktop.suspended = false;
         rt_mutex_unlock(&desktop.lock);
 
@@ -9769,10 +9719,7 @@ static long canvas_terminal_open(void)
         mutex_unlock(&canvas_control_lock);
 
         if (started)
-        {
-                atomic_set(&desktop.spawn, 1);
-                canvas_thread_wake();
-        }
+                canvas_terminal_spawn();
         return 0;
 }
 
@@ -10781,11 +10728,7 @@ static _Bool canvas_suspend_check(void)
                         desktop_set_awake(false);
         }
         else if (desktop.suspended)
-        {
                 desktop_resume();
-                if (!desktop.terminal)
-                        atomic_set(&desktop.spawn, 1);
-        }
 
         rt_mutex_unlock(&desktop.lock);
 
@@ -10855,12 +10798,6 @@ static int canvas_loop(void *unused)
                         int ret = spawn_terminal();
 
                         pr_info("[moonwater canvas] " "terminal: %d\n", ret);
-                        if (!ret)
-                        {
-                                rt_mutex_lock(&desktop.lock);
-                                desktop.terminal = true;
-                                rt_mutex_unlock(&desktop.lock);
-                        }
                 }
 
                 if (canvas_suspend_check())

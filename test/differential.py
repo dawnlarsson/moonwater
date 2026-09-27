@@ -20806,13 +20806,13 @@ static void check_input_suspension(void) {
     check(!canvas_suspend_check() && mock_resumes==1,
           "a desktop that was not suspended is not resumed again");
     memset(&desktop,0,sizeof(desktop));
-    desktop.terminal=1;desktop.spawn=1;mock_taken=1;
+    desktop.spawn=1;mock_taken=1;
     check(canvas_suspend_check() && desktop.spawn,
           "Control-Shift-T is still queued while another program has the card");
     memset(&desktop,0,sizeof(desktop));
     desktop.suspended=1;mock_taken=0;mock_resumes=0;
-    check(!canvas_suspend_check() && desktop.spawn && mock_resumes==1,
-          "resume starts a terminal that never ran");
+    check(!canvas_suspend_check() && !desktop.spawn && mock_resumes==1,
+          "resume starts no terminal: what a desktop starts with is the machine script's");
     memset(&desktop,0,sizeof(desktop));mock_taken=0;mock_resumes=0;
 }
 /* GET writes the script into a buffer the kernel is told the size of, and

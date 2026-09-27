@@ -371,8 +371,9 @@ _Static_assert(sizeof(struct snapshot_request) == 32,
         the compositor's input handler and thread stop, its DRM clients are
         released, every console gets its keyboard back, and the kernel's
         framebuffer console takes each screen. On takes the cards again and
-        opens the kernel log and a terminal; it refuses while another program
-        is master of a card, and names that program.
+        fires canvas on, and opens no window by itself: the machine script
+        asks for the kernel log and a terminal on that event. It refuses
+        while another program is master of a card, and names that program.
 
         The state below comes back whatever the request answers. Reading it
         needs nothing; on and off need CAP_SYS_ADMIN. LAYOUT reads the

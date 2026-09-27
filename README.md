@@ -153,9 +153,12 @@ CPU through DRM, so it works on any display the kernel can drive.
 `moonwater canvas off` closes every window and leaves a shell on the text
 console, from which another display server such as Weston can take the screen.
 
-The terminal opens at boot and on Control-Shift-T, and answers as
-`xterm-256color`, so nano, vim, less, htop, btop and other ncurses programs
-draw as they do in xterm or tmux:
+Canvas opens no window by itself. The machine script's `moonwater_canvas`
+function opens the kernel log and a terminal when Canvas starts, at boot and
+after `moonwater canvas on`; change it to start a desktop with something
+else, or nothing. Control-Shift-T opens another terminal. The terminal
+answers as `xterm-256color`, so nano, vim, less, htop, btop and other ncurses
+programs draw as they do in xterm or tmux:
 
 - 256 colours; true colour is drawn in the nearest of them.
 - UTF-8: wide characters take two columns and combining marks none. Glyphs the

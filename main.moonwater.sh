@@ -77,6 +77,19 @@ function moonwater_ctrl_alt_delete {
   reboot
 }
 
+# Canvas started or stopped; $1 is on or off. Canvas opens no window by
+# itself: these are the windows a desktop starts with, at boot and after
+# `moonwater canvas on`. Defining this function owns the canvas rows, so
+# `moonwater bind canvas on|off` is refused while it is here.
+function moonwater_canvas {
+  case $1 in
+  on)
+    moonwater canvas log
+    moonwater canvas terminal
+    ;;
+  esac
+}
+
 # Every event, including those with a function above. $1 is the name;
 # canvas, tablet, headphone and dock pass $2 on or off.
 function moonwater_event {
