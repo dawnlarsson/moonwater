@@ -15,7 +15,7 @@ python3 test/fuzz_corpus/generate_seeds.py
 | Directory | Harness | Parsers |
 | --- | --- | --- |
 | `tls_der/` | `tls_der_fuzz` | `tls_parse_extensions`, `tls_parse_cert`, Certificate-list framing, EKU/SAN/BC/KU value lanes, names_chain + leaf/issuer policy |
-| `tls_der/` | `tls_verify_fuzz` (hand / `fuzz_net`) | Same corpus; `tls_verify_chain` early-reject walker (parse/policy/names; signatures mocked refuse) |
+| `tls_der/` | `tls_verify_fuzz` (hand / `fuzz_net`) | Same corpus; `tls_verify_chain` walker (parse/policy/names + production `tls_verify_one`; WR2→GTS prove) |
 | `tls_hs/` | `tls_hs_fuzz` | `tls_handshake_one_append`, `tls_encrypted_flight_append` (`tls=null`) |
 
 Magic prefixes on `tls_der` seeds (first byte): `C1` list body, `C2` EKU

@@ -211,7 +211,7 @@ report = {
             "max_total_time_seconds": i("MOONWATER_FUZZ_SECONDS"),
             "duration_seconds": i("REPORT_VERIFY_DURATION"),
             "exit": i("REPORT_VERIFY_EXIT"),
-            "note": "early-reject path; signatures mocked; not lane_net smoke",
+            "note": "parse/policy + production tls_verify_one; WR2/GTS prove; not lane_net smoke",
         },
     ],
     "coverage_note": (

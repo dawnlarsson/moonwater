@@ -35324,12 +35324,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
 
 def harness_tls_verify_fuzz(argv):
-    """libFuzzer over tls_verify_chain early-reject (parse/policy; mocked sigs).
+    """libFuzzer over tls_verify_chain with production tls_verify_one.
 
-    Lifts the same DER parsers and path-policy helpers as tls_der_fuzz, plus a
-    hosted walker that mirrors tls_verify_chain through Certificate-list open,
-    parse_cert, SAN host gate, leaf/issuer authorization, and names_chain —
-    then refuses every signature (no crypto). Seed corpus is tls_der/ (same
+    Lifts the same DER parsers and path-policy helpers as tls_der_fuzz, plus
+    hosted ECDSA/RSA verify (C montgomery from SHARED_montgomery_reference,
+    pure SHA-256/384) so each Certificate-list link calls production
+    ``tls_verify_one``. LLVMFuzzerInitialize proves WR2→GTS accept and a
+    flipped-signature refuse before fuzzing. Seed corpus is tls_der/ (same
     hex source). Not in lane_net smoke; hand-run / fuzz_net only. Bounded
     fixed-seed; return 2 when clang/libFuzzer is unavailable.
 
@@ -35338,6 +35339,14 @@ def harness_tls_verify_fuzz(argv):
     del argv
     import shutil
     import tempfile
+
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location(
+        "tls_verify_hosted",
+        HARNESS_ROOT / "test" / "tls_verify_hosted.py")
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    build_tls_verify_fuzz_source = _mod.build_tls_verify_fuzz_source
 
     runs, seconds, timeout = tls_fuzz_budget()
     clang = shutil.which("clang")
@@ -35355,6 +35364,7 @@ def harness_tls_verify_fuzz(argv):
         return 2
 
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    checks = (HARNESS_ROOT / "test/checks.c").read_text()
     corpus = HARNESS_ROOT / "test/fuzz_corpus/tls_der"
     if not corpus.is_dir():
         print("tls verify fuzz: NOT RUN -- missing seed corpus at " + str(corpus))
@@ -35364,14 +35374,15 @@ def harness_tls_verify_fuzz(argv):
         print("tls verify fuzz: NOT RUN -- seed corpus is empty")
         return 2
 
-    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
+    oids, parsers, policy, framing, _shim = tls_der_fuzz_lift_parts(net)
 
     driver = r"""
 enum { FUZZ_TLS_NOW = 20200101000000ull };
 
-/* Mirror tls_verify_chain through parse + path policy; signatures always
-   refuse (mocked). check_cert selects the SAN host gate. */
-static bool fuzz_verify_early(p8 *body, positive body_length,
+/* Mirror tls_verify_chain through parse + path policy + production
+   tls_verify_one on each served link. Hosted lift has no anchor table, so a
+   sole leaf (or final link that would need tls_anchor_verifies) refuses. */
+static bool fuzz_verify_chain(p8 *body, positive body_length,
                               string_address host, bool check_cert)
 {
         tls_cert certs[8];
@@ -35425,14 +35436,24 @@ static bool fuzz_verify_early(p8 *body, positive body_length,
         for (i = 0; i + 1 < count; i++)
         {
                 if (!tls_certificate_names_chain(address_of certs[i],
-                                                 address_of certs[i + 1]))
+                                                 address_of certs[i + 1]) ||
+                    !tls_verify_one(address_of certs[i],
+                                    address_of certs[i + 1]))
                         return false;
-                /* Mocked signature refuse: production would call tls_verify_one
-                   here; early-reject path stops without crypto. */
-                return false;
         }
-        /* Single-cert chain: would need anchor verify; mocked refuse. */
-        return false;
+        return count > 1;
+}
+
+int LLVMFuzzerInitialize(int *argc, char ***argv)
+{
+        (void)argc;
+        (void)argv;
+        if (!fuzz_prove_wr2_gts())
+        {
+                fprintf(stderr, "tls_verify_fuzz: WR2/GTS tls_verify_one prove failed\\n");
+                exit(1);
+        }
+        return 0;
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
@@ -35449,17 +35470,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         if (length)
                 memcpy(buf, data, length);
 
-        (void)fuzz_verify_early(buf, length, null, false);
-        (void)fuzz_verify_early(buf, length, (string_address)"example.com",
+        (void)fuzz_verify_chain(buf, length, null, false);
+        (void)fuzz_verify_chain(buf, length, (string_address)"example.com",
                                 true);
-        (void)fuzz_verify_early(buf, length, (string_address)"192.0.2.1",
+        (void)fuzz_verify_chain(buf, length, (string_address)"192.0.2.1",
                                 true);
 
         /* 0xC1: remainder is Certificate HS body only. */
         if (length > 1 && buf[0] == 0xc1)
         {
-                (void)fuzz_verify_early(buf + 1, length - 1, null, false);
-                (void)fuzz_verify_early(buf + 1, length - 1,
+                (void)fuzz_verify_chain(buf + 1, length - 1, null, false);
+                (void)fuzz_verify_chain(buf + 1, length - 1,
                                         (string_address)"example.com", true);
         }
 
@@ -35468,7 +35489,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 }
 """
 
-    source = shim + oids + "\n" + parsers + policy + framing + driver
+    try:
+        source = build_tls_verify_fuzz_source(
+            net, oids, parsers, policy, framing, driver, checks)
+    except Exception as exc:
+        print("tls verify fuzz: NOT RUN -- hosted lift failed: " + str(exc))
+        return 2
 
     with tempfile.TemporaryDirectory(prefix="tls-verify-fuzz-") as temporary:
         work = Path(temporary)
@@ -35510,6 +35536,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
               (len(seeds), san_label, runs, seconds))
         write_tally("tls-verify-fuzz", 1, 1)
         return 0
+
 
 
 def harness_msan_net(argv):

@@ -97,9 +97,11 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
       framing; seeds under `test/fuzz_corpus/tls_hs/`; ASan/UBSan via clang
       libFuzzer when available, else NOT RUN). Local continuous: see
       `test/fuzz_net` / `MOONWATER_FUZZ_*`.
-- [x] Optional verify early-reject fuzz (`tls_verify_fuzz`; not lane_net smoke):
-      same `tls_der` corpus; mirrors `tls_verify_chain` through parse/policy/names
-      with signatures mocked refuse. Wired into `sh test/fuzz_net`; hand-run via
+- [x] Optional verify fuzz (`tls_verify_fuzz`; not lane_net smoke): same
+      `tls_der` corpus; mirrors `tls_verify_chain` through parse/policy/names and
+      calls production `tls_verify_one` (hosted C montgomery + pure SHA; WR2→GTS
+      accept + flipped-sig refuse prove before fuzz). Wired into
+      `sh test/fuzz_net`; hand-run via
       `python3 test/differential.py --harness tls_verify_fuzz`.
 
 ## Shell and operating-system boundary

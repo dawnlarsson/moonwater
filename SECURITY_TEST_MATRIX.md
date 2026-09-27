@@ -31,7 +31,7 @@ Seed bytes are hex in `test/fuzz_corpus/generate_seeds.py` (do not commit
 | Corpus | Path (generated) | Harness | What it exercises |
 | --- | --- | --- | --- |
 | DER / Certificate list | `test/fuzz_corpus/tls_der/` | `tls_der_fuzz` | `tls_parse_extensions` / `tls_parse_cert` / certificate-list framing; EKU/SAN/BC/KU value lanes; names_chain + leaf/issuer policy; magic prefixes C1–C9 |
-| DER verify early-reject | `test/fuzz_corpus/tls_der/` (same) | `tls_verify_fuzz` | `tls_verify_chain` parse/policy/names walker; signatures mocked refuse; **not** lane_net smoke (hand / `fuzz_net`) |
+| DER verify + sig | `test/fuzz_corpus/tls_der/` (same) | `tls_verify_fuzz` | `tls_verify_chain` parse/policy/names walker plus production `tls_verify_one` (hosted C montgomery + SHA); WR2→GTS prove in `LLVMFuzzerInitialize`; **not** lane_net smoke (hand / `fuzz_net`) |
 | Handshake fragmentation | `test/fuzz_corpus/tls_hs/` | `tls_hs_fuzz` | `tls_handshake_one_append` / `tls_encrypted_flight_append` |
 
 Seed counts are whatever the generator writes; `sh test/fuzz_net --report`
