@@ -4614,103 +4614,168 @@ static bool numfmt_unit(string_address text, positive address_to unit)
         return true;
 }
 
-/* numfmt's format deliberately has a narrower grammar than printf: one %f,
-   optional zero/group/left flags, width and an optional decimal precision.
-   No precision means the ordinary human-format precision, not printf's six. */
-/* Which of the reference's three sentences a format string earns. */
+/*
+        numfmt's format, read as GNU's parse_format_string reads it, which is
+        narrower than printf and odd in two places kept on purpose. Before
+        the directive a %% is one byte of the prefix's count but two of the
+        text, and the prefix written is that many bytes of the format as it
+        stands -- so %%%f writes a %, and a%%b%f writes a%% and drops the b.
+        After it the suffix is written as it stands, %% and all. The flags
+        are blanks, a ' for grouping and a 0, in any order; the width is what
+        strtoimax reads there, a sign and blanks included, negative for left
+        alignment and zero-filled only when positive and the 0 was given; the
+        precision after a dot is strtol's, where no digits at all are zero and
+        a blank, a + or a minus is refused.
+*/
+/* Which of the reference's sentences a format string earns. */
 #define NUMFMT_FORMAT_OK 0
 #define NUMFMT_FORMAT_NONE 1
 #define NUMFMT_FORMAT_MANY 2
 #define NUMFMT_FORMAT_BAD 3
+#define NUMFMT_FORMAT_ENDS 4
+#define NUMFMT_FORMAT_PRECISION 5
 
 static p8 numfmt_format_kind;
 
 static bool numfmt_format_read(string_address text,
                                numfmt_format address_to format)
 {
-        bool found = false;
+        positive at = 0;
+        positive prefix = 0;
 
-        numfmt_format_kind = NUMFMT_FORMAT_BAD;
         memory_fill(format, 0, sizeof(*format));
         format->text = text;
 
-        for (positive at = 0; text[at]; at++)
+        while (!(text[at] == '%' && text[at + 1] != '%'))
         {
-                if (text[at] != '%')
-                        continue;
-
-                if (text[at + 1] == '%')
-                        /* GNU numfmt copies %% literally and can discard the
-                           byte after it while finding the directive.  That
-                           is not printf semantics, so refuse this uncommon
-                           spelling instead of reproducing the corruption. */
-                        return false;
-
-                if (found)
+                if (!text[at])
                 {
-                        numfmt_format_kind = NUMFMT_FORMAT_MANY;
+                        numfmt_format_kind = NUMFMT_FORMAT_NONE;
                         return false;
                 }
 
-                found = true;
-                format->directive = at++;
+                prefix++;
+                at += (text[at] == '%') + 1;
+        }
 
-                while (text[at] == '0' || text[at] == '\'' ||
-                       text[at] == '-')
+        format->directive = prefix;
+        at++;
+
+        bool zero = false;
+
+        for (;;)
+        {
+                positive blanks = 0;
+
+                while (text[at + blanks] == ' ')
+                        blanks++;
+                at += blanks;
+
+                if (text[at] == '\'')
                 {
-                        if (text[at] == '0')
-                                format->zero = true;
-                        else if (text[at] == '\'')
-                                format->grouping = true;
-                        else
-                                format->left = true;
+                        format->grouping = true;
                         at++;
+                }
+                else if (text[at] == '0')
+                {
+                        zero = true;
+                        at++;
+                }
+                else if (!blanks)
+                        break;
+        }
+
+        //      strtoimax: white space, a sign, digits; none leaves the
+        //      reading where it began.
+        positive number = at;
+
+        while (byte_is_space(text[number]))
+                number++;
+
+        bool negative = text[number] == '-';
+
+        if (text[number] == '-' || text[number] == '+')
+                number++;
+
+        if (byte_is_digit(text[number]))
+        {
+                positive width = 0;
+
+                while (byte_is_digit(text[number]))
+                {
+                        positive digit = (positive)(text[number++] - '0');
+
+                        if (width > (TEXT_LINE_MAX - digit) / 10)
+                        {
+                                numfmt_format_kind = NUMFMT_FORMAT_BAD;
+                                return false;
+                        }
+
+                        width = width * 10 + digit;
+                }
+
+                at = number;
+                format->width = width;
+                format->left = negative && width;
+                format->zero = zero && !negative && width;
+        }
+
+        if (!text[at])
+        {
+                numfmt_format_kind = NUMFMT_FORMAT_ENDS;
+                return false;
+        }
+
+        if (text[at] == '.')
+        {
+                at++;
+                format->has_precision = true;
+
+                p8 first = (p8)text[at];
+
+                if (first == ' ' || first == '\t' || first == '+' || first == '-')
+                {
+                        numfmt_format_kind = NUMFMT_FORMAT_PRECISION;
+                        return false;
                 }
 
                 while (byte_is_digit(text[at]))
                 {
                         positive digit = (positive)(text[at++] - '0');
 
-                        if (format->width > (TEXT_LINE_MAX - digit) / 10)
-                                return false;
-
-                        format->width = format->width * 10 + digit;
-                }
-
-                if (text[at] == '.')
-                {
-                        format->has_precision = true;
-                        at++;
-
-                        if (!byte_is_digit(text[at]))
-                                return false;
-
-                        while (byte_is_digit(text[at]))
+                        if (format->precision > 18)
                         {
-                                positive digit = (positive)(text[at++] - '0');
-
-                                if (format->precision > 18)
-                                        return false;
-
-                                format->precision = format->precision * 10 + digit;
+                                numfmt_format_kind = NUMFMT_FORMAT_PRECISION;
+                                return false;
                         }
 
-                        if (format->precision > 18)
-                                return false;
+                        format->precision = format->precision * 10 + digit;
                 }
 
-                if (text[at] != 'f')
+                if (format->precision > 18)
+                {
+                        numfmt_format_kind = NUMFMT_FORMAT_PRECISION;
                         return false;
-
-                format->after = at + 1;
+                }
         }
 
-        if (!found)
-                numfmt_format_kind = NUMFMT_FORMAT_NONE;
-        else
-                numfmt_format_kind = NUMFMT_FORMAT_OK;
+        if (text[at] != 'f')
+        {
+                numfmt_format_kind = NUMFMT_FORMAT_BAD;
+                return false;
+        }
 
-        return found;
+        format->after = ++at;
+
+        for (; text[at]; at += (text[at] == '%') + 1)
+                if (text[at] == '%' && text[at + 1] != '%')
+                {
+                        numfmt_format_kind = NUMFMT_FORMAT_MANY;
+                        return false;
+                }
+
+        numfmt_format_kind = NUMFMT_FORMAT_OK;
+        return true;
 }
 
 /* Normalize only enough to let seq's checked parser own the value.  Leading
@@ -4978,8 +5043,7 @@ static fn numfmt_body_out(p8 address_to number, positive number_length,
 
         if (numfmt.have_format)
         {
-                seq_format_literal(text_put, numfmt.format.text,
-                                   numfmt.format.directive);
+                text_put(numfmt.format.text, numfmt.format.directive);
 
                 if (numfmt.format.zero && !numfmt.format.left)
                 {
@@ -5049,8 +5113,7 @@ static fn numfmt_body_out(p8 address_to number, positive number_length,
 
         if (numfmt.have_format)
         {
-                string_address after = numfmt.format.text + numfmt.format.after;
-                seq_format_literal(text_put, after, string_length(after));
+                text_put_string(numfmt.format.text + numfmt.format.after);
         }
 }
 
@@ -5830,6 +5893,12 @@ static b32 tools_numfmt()
                         else if (numfmt_format_kind == NUMFMT_FORMAT_MANY)
                                 string_format(writer_stderr,
                                     "numfmt: format '%w' has too many %% directives\n", writer_terminal_quoted_name, value);
+                        else if (numfmt_format_kind == NUMFMT_FORMAT_ENDS)
+                                string_format(writer_stderr,
+                                    "numfmt: format '%w' ends in %%\n", writer_terminal_quoted_name, value);
+                        else if (numfmt_format_kind == NUMFMT_FORMAT_PRECISION)
+                                string_format(writer_stderr,
+                                    "numfmt: invalid precision in format '%w'\n", writer_terminal_quoted_name, value);
                         else
                                 string_format(writer_stderr,
                                     "numfmt: invalid format '%w', directive must be %%[0]['][-][N][.][N]f\n",
@@ -5947,13 +6016,24 @@ static b32 tools_numfmt()
                                         if (text_line[at] == '\n')
                                                 text_line[at] = ' ';
 
-                        if (records++ < numfmt.header)
-                                text_put(text_line, text_line_length);
+                        //      GNU reads each line into a C string, so a NUL
+                        //      inside one ends it there: a data line is
+                        //      converted up to the NUL and still terminated,
+                        //      and a header line, which it writes with fputs
+                        //      terminator and all, loses its terminator too.
+                        p8 address_to nul = memory_first_of(text_line, 0,
+                                                            text_line_length);
+                        positive length = nul ? (positive)(nul - text_line)
+                                              : text_line_length;
+                        bool header = records++ < numfmt.header;
+
+                        if (header)
+                                text_put(text_line, length);
                         else
-                                numfmt_record(text_line, text_line_length);
+                                numfmt_record(text_line, length);
 
                         // A last record the input left unterminated stays so.
-                        if (!numfmt.stop && text_line_ended)
+                        if (!numfmt.stop && text_line_ended && !(header && nul))
                                 text_put_character(text_delimiter);
                 }
 
