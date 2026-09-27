@@ -8765,6 +8765,15 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                                      string_is(at, '\n')))
                         at++;
 
+                /* A list written over several lines may carry comments,
+                   which run to the end of their line. */
+                if (at < stop && string_is(at, '#') && lex_comments_on())
+                {
+                        while (at < stop && !string_is(at, '\n'))
+                                at++;
+                        continue;
+                }
+
                 if (at >= stop)
                         break;
 

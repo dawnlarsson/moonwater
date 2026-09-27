@@ -13710,6 +13710,40 @@ def shell_lang_trap_numeric_reset(rng):
         "trap " + first + " " + rest + " 2>/dev/null; echo \"s=$?\"", "trap"))
 
 
+#       A compound array assignment over several lines, with comments, and
+#       one that reads the array it replaces. The list is one word only once
+#       its parenthesis closes, so a=( at the end of a line has to ask for
+#       the next; and bash expands every element before it empties the
+#       array, so ar=("${ar[@]}" c) keeps what was there.
+def shell_lang_array_literal_lines(rng):
+    declare = rng.choice(("", "declare -a ", "local ", "declare -A "))
+    keyed = "-A" in declare
+    elements = []
+    for n in range(rng.randint(1, 4)):
+        value = rng.choice(("x%d" % n, "'a b'", '"$v"', "$v", '"${old[@]}"', "${old[0]}", "$(echo s%d)" % n))
+        if keyed:
+            value = "[k%d]=%s" % (n, value if "[@]" not in value else "${old[k0]}")
+        elements.append(value)
+    joiner = rng.choice((" ", "\n", "\n  ", " # note\n", "\n\n"))
+    body = rng.choice(("", "\n")) + joiner.join(elements) + rng.choice(("", "\n", " # end\n"))
+    op = rng.choice(("=", "=", "+="))
+    old = "declare -A old=([k0]=p [k1]=q)" if keyed else "old=(p q)"
+    #   local old=(... "${old[@]}") reads the caller's old in bash and the
+    #   new empty local here; that one is left open.
+    target = "arr" if declare == "local " else rng.choice(("arr", "old"))
+    line = declare + target + op + "(" + body + ")"
+    report = "declare -p " + target + " | sed 's/^declare -[a-zA-Z-]* //'"
+    if declare == "local ":
+        line = "f() {\n" + line + "\n" + report + "\n}\nf"
+        report = ":"
+    if keyed:
+        report = 'for k in k0 k1 k2 k3; do printf "<%s>" "${' + target + '[$k]-unset}"; done; echo'
+        if declare == "local ":
+            report = ":"
+    return ("array-literal-lines", shell_BASH,
+            shell_program("v='m n'", old, line, report, 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16338,6 +16372,7 @@ SHELL_FAMILIES = (
     shell_lang_command_lookup,
     shell_lang_lineno_traps,
     shell_lang_trap_numeric_reset,
+    shell_lang_array_literal_lines,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),

@@ -177,8 +177,8 @@ static b8 lex_in_double[STRING_SET_BYTES];
         Bytes that cannot open a line continuation. parse_feed used to walk
         every line twice -- lex_unfinished, then lex_line -- and the second
         walk is the only one that produces tokens. The unfinished walk is
-        needed only when a quote, a backslash, a substitution, `[[`, or a
-        process substitution might still be open; this set lets one
+        needed only when a quote, a backslash, a substitution, `[[`, a
+        process substitution or an a=( list might still be open; this set lets one
         string_span prove the common line has none of those.
 */
 static b8 lex_closed[STRING_SET_BYTES];
@@ -248,7 +248,7 @@ fn lex_prepare()
 
         memory_fill(lex_closed + 1, 1, STRING_SET_BYTES - 1);
         {
-                static const string_address opens = "\"'\\$`[<>";
+                static const string_address opens = "\"'\\$`[<>(";
 
                 for (positive i = 0; opens[i]; i++)
                         lex_closed[opens[i]] = 0;
@@ -1108,6 +1108,8 @@ static bool lex_line_closed(string_address line)
         }
 }
 
+static PURE bool lex_assignment_head(string_address text, positive length);
+
 b32 lex_unfinished(string_address line)
 {
         string_address step = line;
@@ -1116,6 +1118,8 @@ b32 lex_unfinished(string_address line)
         bool fresh = true;
         bool comments = lex_comments_on();
         bool newline = lex_scan_newline;
+
+        string_address word = null;
 
         lex_prepare();
         lex_unmatched = 0;
@@ -1209,11 +1213,30 @@ b32 lex_unfinished(string_address line)
                                 }
                         }
 
+                        /* a=( with its elements on the lines below: the
+                           word is not finished until the parenthesis
+                           closes, as lex_word will read it. */
+                        if (c == '(' && shell_bash_compat && word &&
+                            !fresh && step > word && step[-1] == '=' &&
+                            lex_assignment_head(word,
+                                                (positive)(step - word - 1)))
+                        {
+                                string_address stop = lex_nesting(step);
+
+                                if (stop == step)
+                                        return lex_open_match(LEX_OPEN, ')');
+
+                                step = stop;
+                                continue;
+                        }
+
                         fresh = true;
                         step++;
                         continue;
                 }
 
+                if (fresh)
+                        word = step;
                 fresh = false;
 
                 // A # past the first byte of a run is a byte of the word, so
