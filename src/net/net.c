@@ -7126,48 +7126,59 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
 {
         string_address at = url;
         positive length;
-
-        address_to tls = false;
-        address_to port = HTTP_PORT;
+        p16 selected_port = HTTP_PORT;
+        bool selected_tls = false;
 
         for (string_address scan = url; *scan; scan++)
-                if (byte_is_control(*scan) || *scan == ' ')
+                if (byte_is_control(*scan) || *scan == ' ' || *scan == '\\')
                         return HTTP_BAD_URL;
 
         if (!string_compare_max(url, (string_address) "https://", 8))
         {
-                address_to tls = true;
-                address_to port = HTTP_HTTPS_PORT;
+                selected_tls = true;
+                selected_port = HTTP_HTTPS_PORT;
                 at = url + 8;
         }
         else if (!string_compare_max(url, (string_address) "http://", 7))
                 at = url + 7;
 
-        /* The authority's userinfo is not part of the host, and RFC 3986 ends
-           it at the LAST '@' so a '@' written inside it cannot move the
-           boundary. A client that keeps it looks "evil.com@good.com" up as a
-           name and sends it as the Host, which is the shape the deprecation
-           was about. */
-        length = string_span_without_set(at, "/?#");
+        /* A spelling with an explicit scheme is not a schemeless HTTP URL.
+           Treating "gopher://host" as host "gopher" is a parser
+           differential: a policy and this client can appear to approve the
+           same string while naming different destinations. */
+        else
         {
-                positive mark = 0;
+                string_address scheme = string_first_of(url, ':');
 
-                for (positive byte = 0; byte < length; byte++)
-                        if (at[byte] == '@')
-                                mark = byte + 1;
-                at += mark;
+                if (scheme && scheme[1] == '/' && scheme[2] == '/')
+                        return HTTP_BAD_URL;
         }
+
+        /* This client implements no userinfo.  Silently discarding it makes
+           logs and allow-list checks easy to read as the text before '@'
+           while the connection goes to the text after it, the classic URL
+           authority confusion used in SSRF chains. */
+        length = string_span_without_set(at, "/?#");
+        if (memory_first_of(at, '@', length))
+                return HTTP_BAD_URL;
 
         length = string_span_without_set(at, "/:?#");
         if (length + 1 >= room)
                 return HTTP_BAD_URL;
 
-        memory_copy(host, at, length);
-        at += length;
-        host[length] = end;
+        /* HTTP Host and DNS have narrower syntax than an arbitrary URI
+           reg-name.  Validate before touching the caller's output so a
+           rejected URL cannot leave a plausible partial destination there. */
+        for (positive byte = 0; byte < length; byte++)
+                if (!byte_is_alnum(at[byte]) && at[byte] != '-' &&
+                    at[byte] != '.')
+                        return HTTP_BAD_URL;
 
         if (!length)
                 return HTTP_BAD_URL;
+
+        string_address host_at = at;
+        at += length;
 
         if (string_is(at, ':'))
         {
@@ -7182,13 +7193,21 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
                 if (!bound ||
                     !string_digits_checked(address_of digits, 10,
                                            address_of value) ||
-                    (positive)(digits - at) != bound || value > 65535)
+                    (positive)(digits - at) != bound || !value || value > 65535)
                         return HTTP_BAD_URL;
 
-                address_to port = (p16)value;
+                selected_port = (p16)value;
                 at = digits;
         }
 
+        /* Publish every out-parameter together.  Failed parsing is a
+           transaction, not a half-written host paired with a default port;
+           callers which log or retry after an error cannot accidentally use
+           pieces of a rejected authority. */
+        memory_copy(host, host_at, length);
+        host[length] = end;
+        address_to port = selected_port;
+        address_to tls = selected_tls;
         address_to path = string_get(at) && !string_is(at, '#')
                               ? at : (string_address) "/";
 
@@ -7260,6 +7279,65 @@ static PURE bipolar http_header_end(p8 address_to bytes, positive size)
         return -1;
 }
 
+/* Validate the complete response head before assigning meaning to any field.
+   In particular, do not let a NUL, a bare carriage return, or obsolete line
+   folding give this client a different field boundary from a proxy in front
+   of it.  Response splitting is still relevant to a client: a poisoned
+   keep-alive cache or an intercepting proxy can otherwise make the bytes
+   authenticated by TLS describe a different response from the one consumed
+   here. */
+static bool http_token_byte(p8 byte)
+{
+        return byte_is_alnum(byte) ||
+               memory_first_of("!#$%&'*+-.^_`|~", byte, 15);
+}
+
+static bool http_header_block_valid(p8 address_to bytes, positive size)
+{
+        positive at = 0;
+        bool status = true;
+
+        while (at < size)
+        {
+                positive line = at;
+                positive stop = at + memory_span_without_byte(
+                    bytes + at, '\n', size - at);
+                positive colon = line;
+
+                if (stop == size || stop == line || bytes[stop - 1] != '\r')
+                        return false;
+                stop--;
+                at = stop + 2;
+
+                if (stop == line)
+                        return at == size;
+
+                if (status)
+                {
+                        status = false;
+                        for (positive byte = line; byte < stop; byte++)
+                                if ((bytes[byte] < 0x20 && bytes[byte] != '\t') ||
+                                    bytes[byte] == 0x7f)
+                                        return false;
+                        continue;
+                }
+
+                /* A field begins with a token.  This also rejects obs-fold,
+                   whitespace before the colon, and an empty field name. */
+                while (colon < stop && http_token_byte(bytes[colon]))
+                        colon++;
+                if (colon == line || colon == stop || bytes[colon] != ':')
+                        return false;
+
+                for (positive byte = colon + 1; byte < stop; byte++)
+                        if ((bytes[byte] < 0x20 && bytes[byte] != '\t') ||
+                            bytes[byte] == 0x7f)
+                                return false;
+        }
+
+        return false;
+}
+
 //      One header's value, by name, without regard to its case.
 static string_address http_header(p8 address_to bytes, positive size,
                                   string_address name, positive address_to length,
@@ -7312,12 +7390,6 @@ static string_address http_header(p8 address_to bytes, positive size,
                 address_to length = found_length;
 
         return found;
-}
-
-static bool http_token_byte(p8 byte)
-{
-        return byte_is_alnum(byte) ||
-               memory_first_of("!#$%&'*+-.^_`|~", byte, 15);
 }
 
 static bool http_chunk_extensions_valid(string_address at,
@@ -7525,21 +7597,8 @@ static bipolar http_response_framing_from(p8 address_to bytes, positive size,
                 if (header < 0)
                         return scan == HTTP_HEAD_MAX ? HTTP_MALFORMED
                                                      : HTTP_NO_REPLY;
-
-#if MOONWATER_STRICT >= STRICT_SAFE
-                /* obs-fold. RFC 7230 retired header line folding, and the
-                   two readings of a folded field -- skip the continuation
-                   line, or join it -- give different values. Which one
-                   anything ahead of this client took is not knowable from
-                   here, so refuse the ambiguity rather than pick a reading.
-                   A resumed walk never returns to a block it has passed, so
-                   every complete block is read once. */
-                for (positive line = 0; line + 1 < (positive)header; line++)
-                        if (bytes[at + line] == '\n' &&
-                            (bytes[at + line + 1] == ' ' ||
-                             bytes[at + line + 1] == '\t'))
-                                return HTTP_MALFORMED;
-#endif
+                if (!http_header_block_valid(bytes + at, (positive)header))
+                        return HTTP_MALFORMED;
 
                 transfer = http_header(
                     bytes + at, (positive)header,

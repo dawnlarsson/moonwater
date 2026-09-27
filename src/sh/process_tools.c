@@ -595,11 +595,42 @@ static bool process_nohup_duplicate(bipolar from, b32 to,
         return true;
 }
 
+/* Pin and authenticate one possible output name. */
+static bipolar process_nohup_output_open(string_address path)
+{
+        /* nohup is commonly launched from a terminal as root.  Opening the
+           public name with O_APPEND alone followed a planted symlink, and a
+           FIFO could hold the privileged process in open forever.  Pin the
+           object without following, without blocking, and accept only one
+           ordinary inode: a second hard link is the remaining way an
+           existing sensitive file can be presented under this name. */
+#define NOHUP_OUTPUT_FLAGS (FILE_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        bipolar answer = system_open_at_mode(
+            AT_FDCWD, path, NOHUP_OUTPUT_FLAGS, 0600);
+
+        if (answer >= 0)
+        {
+                file_facts facts;
+
+                if (!file_look(answer, (string_address)"", AT_EMPTY_PATH,
+                               address_of facts) ||
+                    (facts.mode & MODE_FORMAT) != MODE_FILE ||
+                    facts.hard_links != 1 ||
+                    facts.owner != (p32)system_call_1(syscall(geteuid), 0))
+                {
+                        system_close((positive)answer);
+                        answer = -ERROR_ACCESS;
+                }
+        }
+
+        return answer;
+#undef NOHUP_OUTPUT_FLAGS
+}
+
 static bipolar process_nohup_output(p8 address_to path)
 {
-        bipolar answer = system_open_at_mode(
-            AT_FDCWD, (string_address) "nohup.out", FILE_APPEND | O_CLOEXEC,
-            0600);
+        bipolar answer = process_nohup_output_open(
+            (string_address)"nohup.out");
 
         if (answer >= 0)
         {
@@ -614,8 +645,7 @@ static bipolar process_nohup_output(p8 address_to path)
                 return answer;
 
         path_join(path, FILE_PATH_MAX, home, (string_address) "nohup.out");
-        return system_open_at_mode(AT_FDCWD, path, FILE_APPEND | O_CLOEXEC,
-                                   0600);
+        return process_nohup_output_open(path);
 }
 
 static b32 process_nohup()

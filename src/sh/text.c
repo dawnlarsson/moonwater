@@ -24353,6 +24353,19 @@ static positive sort_tasks_count;
 static positive address_to sort_counts;
 static positive sort_counts_room;
 
+/* Counts cross several differently sized sort tables.  Keep products out of
+   call arguments: wrapping there turns an impossible allocation into a small
+   successful one followed by indexed writes past it, the canonical C
+   count-times-size bug. */
+static bool sort_count_product(positive left, positive right,
+                               positive address_to product)
+{
+        if (left && right > positive_max / left)
+                return false;
+        address_to product = left * right;
+        return true;
+}
+
 static inline INLINE positive sort_bucket(sort_item address_to item,
                                           sort_split_work address_to work)
 {
@@ -24402,7 +24415,8 @@ static bool sort_task_push(positive from, positive to, b32 stage, positive depth
             (stage == sort_key_count && (sort_unique || sort_stable)))
                 return true;
 
-        if (!array_store_reserve(sort_tasks, sort_tasks_room, sort_tasks_count,
+        if (sort_tasks_count == positive_max ||
+            !array_store_reserve(sort_tasks, sort_tasks_room, sort_tasks_count,
                                  sort_tasks_count + 1, 512))
                 return string_diagnostic(&text_diagnostic, 0, null, "out of memory");
 
@@ -24420,6 +24434,8 @@ static bool sort_task_split(sort_task task, bool address_to split)
         positive count = task.to - task.from;
         positive blocks = sort_blocks(count);
         positive column = task.depth & 7;
+        positive count_cells;
+        positive work_bytes;
 
         address_to split = false;
 
@@ -24444,11 +24460,14 @@ static bool sort_task_split(sort_task task, bool address_to split)
             .ended = sort_stage_reverse[stage] ? 256 : 0,
         };
 
-        if (!array_store_reserve(sort_counts, sort_counts_room, 0, blocks * 257, 257 * 64))
+        if (!sort_count_product(blocks, 257, address_of count_cells) ||
+            !sort_count_product(count, sizeof(sort_item), address_of work_bytes) ||
+            !array_store_reserve(sort_counts, sort_counts_room, 0,
+                                 count_cells, 257 * 64))
                 return string_diagnostic(&text_diagnostic, 0, null, "out of memory");
 
         parallel_for(sort_split_count_job, address_of work, blocks,
-                     count * sizeof(sort_item));
+                     work_bytes);
 
         positive start[258];
         positive occupied = 0;
@@ -25041,7 +25060,6 @@ static bipolar sort_temporary_named(string_address directory)
 {
         p8 path[TEXT_PATH_MAX + 32];
         positive length = string_length(directory);
-        static positive serial;
 
         if (length > TEXT_PATH_MAX)
                 return -36;
@@ -25050,18 +25068,17 @@ static bipolar sort_temporary_named(string_address directory)
 
         for (b32 attempt = 0; attempt < 64; attempt++)
         {
-                /* Random, as mktemp's are: from the pid and a counter, every
-                   one of the 64 names was one another user of a shared
-                   TMPDIR could make first, and sort then had nowhere to
-                   spill. The counter stands in only where the kernel has no
-                   entropy to give. */
-                positive stamp = (positive)system_call_1(syscall(getpid), 0) *
-                                     0x9e3779b1u +
-                                 serial++;
-                positive drawn = 0;
+                /* A shared TMPDIR is adversarial.  The former entropy
+                   fallback was pid*constant+counter, so another user could
+                   reserve all 64 candidates and reliably deny an external
+                   sort at early boot.  Block for the kernel CSPRNG instead;
+                   if it cannot answer, do not publish a predictable name. */
+                positive stamp;
+                bipolar random = system_random_fill(
+                    address_of stamp, sizeof(stamp), 0);
 
-                if (!system_random_fill(address_of drawn, sizeof(drawn), 1))
-                        stamp ^= drawn;
+                if (random < 0)
+                        return random;
                 p8 address_to at = path + length;
 
                 memory_copy_apart(at, "/sort", 5);
@@ -26033,7 +26050,8 @@ static b32 sort_pool_merge_ready()
         for (positive at = SORT_SPLIT_EVERY; at < sort_samples_count;
              at += SORT_SPLIT_EVERY)
         {
-                if (!array_store_reserve(sort_splitters, sort_splitters_room,
+                if (sort_splitters_count == positive_max ||
+                    !array_store_reserve(sort_splitters, sort_splitters_room,
                                          sort_splitters_count, sort_splitters_count + 1,
                                          256))
                         return 0;
@@ -26041,9 +26059,18 @@ static b32 sort_pool_merge_ready()
                 sort_splitters[sort_splitters_count++] = sorted[at];
         }
 
+        if (sort_splitters_count == positive_max)
+                return 0;
         positive pieces = sort_splitters_count + 1;
+        positive bound_rows;
+        positive bound_cells;
+        positive error_bytes;
 
-        if (!array_store_reserve(sort_bounds, sort_bounds_room, 0, (pieces + 1) * count,
+        if (pieces == positive_max ||
+            !sort_count_product(pieces + 1, count, address_of bound_cells) ||
+            !sort_count_product(pieces, count, address_of bound_rows) ||
+            !sort_count_product(pieces, sizeof(bipolar), address_of error_bytes) ||
+            !array_store_reserve(sort_bounds, sort_bounds_room, 0, bound_cells,
                                  1024) ||
             !array_store_reserve(sort_piece_errors, sort_piece_errors_room, 0, pieces, 256) ||
             !sort_merge_slots_ready())
@@ -26052,12 +26079,12 @@ static b32 sort_pool_merge_ready()
         for (positive source = 0; source < count; source++)
         {
                 sort_bounds[source] = 0;
-                sort_bounds[pieces * count + source] =
+                sort_bounds[bound_rows + source] =
                     sort_entries[source].handle == SORT_ENTRY_MEMORY ? sort_lines_count
                                                                      : sort_sizes[source];
         }
 
-        memory_fill(sort_piece_errors, 0, pieces * sizeof(bipolar));
+        memory_fill(sort_piece_errors, 0, error_bytes);
 
         if (!parallel_for(sort_bound_job, null, sort_splitters_count, total))
         {

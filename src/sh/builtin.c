@@ -14782,18 +14782,14 @@ bool alias_record(string_address name, positive name_length, string_address valu
         return true;
 }
 
-// dash quotes the whole of name=value, not just the value, and a script that
-// reads its own aliases back is reading that.
+// Both bash and dash leave the name and '=' outside the shell-quoted value;
+// the line is valid input when a script saves `alias` output and reads it
+// back.  Keep bash's optional "alias " prefix in the caller.
 fn alias_written(writer write, positive index)
 {
-        if (shell_bash_compat)
-        {
-                string_format(write, "%s=", alias_table[index].name);
-                shell_quoted(write, alias_table[index].value);
-                write("\n", 1);
-                return;
-        }
-        string_format(write, "'%s=%s'\n", alias_table[index].name, alias_table[index].value);
+        string_format(write, "%s=", alias_table[index].name);
+        shell_quoted(write, alias_table[index].value);
+        write("\n", 1);
 }
 
 COLD fn shell_alias(writer write, string_address input)

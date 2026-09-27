@@ -49703,6 +49703,42 @@ static fn fetching(void)
         check("an empty port is refused",
               http_split_into((string_address) "http://h:/", name, sizeof name,
                          address_of port, address_of path, address_of tls) == HTTP_BAD_URL);
+        check("port zero is not a connectable HTTP authority",
+              http_split_into((string_address) "http://h:0/", name, sizeof name,
+                         address_of port, address_of path, address_of tls) == HTTP_BAD_URL);
+        check("unsupported explicit schemes are not reinterpreted as hosts",
+              http_split_into((string_address) "gopher://127.0.0.1/", name,
+                         sizeof name, address_of port, address_of path,
+                         address_of tls) == HTTP_BAD_URL);
+        check("userinfo cannot disguise the connected HTTP host",
+              http_split_into((string_address) "http://allowed@127.0.0.1/", name,
+                         sizeof name, address_of port, address_of path,
+                         address_of tls) == HTTP_BAD_URL);
+        check("backslashes cannot create another authority boundary",
+              http_split_into((string_address) "http://allowed\\@127.0.0.1/", name,
+                         sizeof name, address_of port, address_of path,
+                         address_of tls) == HTTP_BAD_URL);
+        check("raw non-ASCII and URI punctuation are not DNS host bytes",
+              http_split_into((string_address) "http://bad_name/", name,
+                         sizeof name, address_of port, address_of path,
+                         address_of tls) == HTTP_BAD_URL);
+        {
+                p8 rejected_name[8];
+                string_address rejected_path = (string_address)"sentinel";
+
+                memory_fill(rejected_name, 0xa5, sizeof rejected_name);
+                port = 0xa5a5;
+                tls = true;
+                check("a rejected URL publishes no partial authority",
+                      http_split_into((string_address)"https://ok:0/path",
+                                      rejected_name, sizeof rejected_name,
+                                      address_of port, address_of rejected_path,
+                                      address_of tls) == HTTP_BAD_URL &&
+                          port == 0xa5a5 && tls &&
+                          string_equals(rejected_path,
+                                        (string_address)"sentinel") &&
+                          rejected_name[0] == 0xa5);
+        }
         check("the largest port is accepted",
               http_split_into((string_address) "http://h:65535/", name, sizeof name,
                          address_of port, address_of path, address_of tls) == HTTP_OK && port == 65535);
@@ -49725,7 +49761,8 @@ static fn fetching(void)
                                 string_copy(input + length, tails[ending]);
                                 memory_fill(name, 0x5a, sizeof name);
                                 bipolar result = http_split_into(input, name, capacity, &port, &path, &tls);
-                                bool fits = length + 1 < capacity, intact = true;
+                                bool fits = (length & 1) && length + 1 < capacity;
+                                bool intact = true;
                                 for (positive at = 0; at < sizeof name; at++)
                                         intact &= name[at] == (fits && at <= length
                                                 ? at == length ? 0 : byte : 0x5a);
@@ -49788,6 +49825,62 @@ static fn fetching(void)
                                             address_of header,
                                             address_of response) ==
                           HTTP_MALFORMED);
+        }
+
+        {
+                static const p8 folded[] =
+                    "HTTP/1.1 302 Found\r\nLocation: https://good.example/\r\n"
+                    " https://evil.example/\r\n\r\n";
+                static const p8 bare_lf[] =
+                    "HTTP/1.1 200 OK\nContent-Length: 0\n\n";
+                static const p8 bare_cr[] =
+                    "HTTP/1.1 302 Found\r\nLocation: /safe\rhidden\r\n\r\n";
+                static const p8 bad_name[] =
+                    "HTTP/1.1 200 OK\r\nContent-Length : 0\r\n\r\n";
+                http_response response;
+                positive header = 0;
+
+                check("HTTP response fields cannot be continued ambiguously",
+                      http_response_framing((p8 address_to)folded,
+                                            sizeof folded - 1, address_of header,
+                                            address_of response) == HTTP_MALFORMED);
+                check("HTTP response framing requires CRLF",
+                      http_response_framing((p8 address_to)bare_lf,
+                                            sizeof bare_lf - 1, address_of header,
+                                            address_of response) == HTTP_MALFORMED);
+                check("HTTP response values reject embedded controls",
+                      http_response_framing((p8 address_to)bare_cr,
+                                            sizeof bare_cr - 1, address_of header,
+                                            address_of response) == HTTP_MALFORMED);
+                check("HTTP response field names are exact tokens",
+                      http_response_framing((p8 address_to)bad_name,
+                                            sizeof bad_name - 1, address_of header,
+                                            address_of response) == HTTP_MALFORMED);
+        }
+
+        /* Exercise every byte class, not only one example from each.  This
+           pins the complete grammar shared by response field names, values
+           and the status line: token bytes alone name fields; values and the
+           reason phrase admit HT and visible/obs-text bytes, never controls
+           or DEL. */
+        for (positive byte = 0; byte <= 255; byte++)
+        {
+                p8 name[] = "HTTP/1.1 200 OK\r\nXxY: value\r\n\r\n";
+                p8 value[] = "HTTP/1.1 200 OK\r\nX: x\r\n\r\n";
+                p8 status[] = "HTTP/1.1 200 x\r\nX: value\r\n\r\n";
+                bool text = (byte >= 0x20 || byte == '\t') && byte != 0x7f;
+
+                name[19] = (p8)byte;
+                value[20] = (p8)byte;
+                status[13] = (p8)byte;
+                if (byte != ':')
+                        check("every HTTP field-name byte has its token classification",
+                              http_header_block_valid(name, sizeof name - 1) ==
+                                  http_token_byte((p8)byte));
+                check("every HTTP field-value byte has its text classification",
+                      http_header_block_valid(value, sizeof value - 1) == text);
+                check("every HTTP reason byte has its text classification",
+                      http_header_block_valid(status, sizeof status - 1) == text);
         }
 
         for (b32 status = 299; status <= 309; status++)
@@ -53646,6 +53739,17 @@ static fn fetching_for_real(void)
                                      "Location: /ignored\r\n"
                                      "Content-Length: 0\r\n"
                                      "\r\n";
+                p8 answer_folded[] = "HTTP/1.1 302 Found\r\n"
+                                     "Location: /safe\r\n"
+                                     " /attacker-selected\r\n\r\n";
+                p8 answer_bare_lf[] = "HTTP/1.1 200 OK\n"
+                                      "Content-Length: 5\n\n"
+                                      "hello";
+                p8 answer_control[] = "HTTP/1.1 302 Found\r\n"
+                                      "Location: /safe\rhidden\r\n\r\n";
+                p8 answer_bad_name[] = "HTTP/1.1 200 OK\r\n"
+                                       "Content-Length : 5\r\n\r\n"
+                                       "hello";
                 string_address answers[] = {
                     (string_address)answer_good,
                     (string_address)answer_split,
@@ -53662,7 +53766,11 @@ static fn fetching_for_real(void)
                     (string_address)answer_no_content,
                     (string_address)answer_not_modified,
                     (string_address)answer_use_proxy,
-                    (string_address)answer_unused};
+                    (string_address)answer_unused,
+                    (string_address)answer_folded,
+                    (string_address)answer_bare_lf,
+                    (string_address)answer_control,
+                    (string_address)answer_bad_name};
                 positive sizes[] = {
                     sizeof(answer_good) - 1,
                     sizeof(answer_split) - 1,
@@ -53679,7 +53787,11 @@ static fn fetching_for_real(void)
                     sizeof(answer_no_content) - 1,
                     sizeof(answer_not_modified) - 1,
                     sizeof(answer_use_proxy) - 1,
-                    sizeof(answer_unused) - 1};
+                    sizeof(answer_unused) - 1,
+                    sizeof(answer_folded) - 1,
+                    sizeof(answer_bare_lf) - 1,
+                    sizeof(answer_control) - 1,
+                    sizeof(answer_bad_name) - 1};
 
                 for (positive at = 0;
                      at < array_count(answers) + array_count(status_mutations) +
@@ -53856,6 +53968,21 @@ static fn fetching_for_real(void)
                                                address_of code);
                         check("a 306 Location is not followed",
                               status == HTTP_STATUS && code == 306);
+                }
+
+                /* These are real loopback exchanges, through the same
+                   socket/head/body path as fetch.  Before header-block
+                   validation they reached HTTP_STATUS or HTTP_OK: these
+                   assertions therefore reproduce the parser differential,
+                   rather than merely testing its new predicate. */
+                for (positive attack = 0; attack < 4; attack++)
+                {
+                        status = http_get(url, address_of body,
+                                          address_of code);
+                        check("an ambiguous response is refused end to end",
+                              status == HTTP_MALFORMED);
+                        check("a refused ambiguous response publishes no body",
+                              !body.used);
                 }
 
                 check("the preservation sentinel is restored",
@@ -65183,10 +65310,46 @@ static fn enable_name(string_address name, bool off)
         shell_argv[2] = name;
         shell_enable(capture, null);
 }
+
+typedef struct { p16 code; p8 yes, no; p32 value; } audit_filter_instruction;
+typedef struct { p16 length; audit_filter_instruction address_to instructions; }
+    audit_filter_program;
+
+static bipolar audit_refuse_randomness(void)
+{
+        audit_filter_instruction instructions[] = {
+            {0x20, 0, 0, 0},
+            {0x15, 0, 1, syscall(getrandom)},
+            {0x06, 0, 0, 0x0005000b},
+            {0x06, 0, 0, 0x7fff0000},
+        };
+        audit_filter_program program = {
+            array_count(instructions), instructions};
+
+        if (system_call_5(syscall(prctl), 38, 1, 0, 0, 0) < 0)
+                return -1;
+        return system_call_3(syscall(seccomp), 1, 0,
+                             (positive)address_of program);
+}
 b32 main(void)
 {
         string_address arguments[8] = {0};
         shell_argv = arguments;
+
+        /* Dash and bash both serialize an alias as name='value', so the
+           listing can be sourced again.  Quoting the complete name=value
+           word is valid shell but not parity with either reference. */
+        shell_bash_compat = false;
+        check("dash alias regression records", alias_record(
+                  (string_address)"mw_a", 4,
+                  (string_address)"echo one"));
+        captured_used = 0;
+        captured[0] = end;
+        alias_written(capture, 0);
+        check("dash alias listing quotes only its value",
+              string_equals(captured,
+                            (string_address)"mw_a='echo one'\n"));
+        shell_bash_compat = true;
 
         /* Spark's fast path must reject oversized vectors before reserving or
            copying their flat representation.  Otherwise fallback remains
@@ -65273,6 +65436,120 @@ b32 main(void)
         for (positive i = 0; i < array_count(sizes); i++)
                 check("util-linux human size spelling",
                       string_equals(ul_lscpu_cache_size(sizes[i].bytes, false, true), sizes[i].text));
+
+        {
+                positive product = 0xa5a5;
+
+                check("sort table products reject integer wrap before allocation",
+                      !sort_count_product(positive_max, 2,
+                                          address_of product) &&
+                          product == 0xa5a5);
+                check("sort table products retain the largest representable product",
+                      sort_count_product(positive_max / 2, 2,
+                                         address_of product) &&
+                          product == (positive_max / 2) * 2);
+        }
+
+        /* nohup used to follow this public output name with the privileges
+           of its caller.  Exercise the descriptor policy directly: neither
+           a symlink nor another hard-link name for an existing inode may be
+           opened, while a single regular output remains appendable. */
+        {
+                p8 root[96] = "/tmp/moonwater-nohup.";
+                p8 victim[128];
+                p8 output[128];
+                positive used = string_length(root);
+
+                used += positive_into(root + used,
+                    (positive)system_call_1(syscall(getpid), 0));
+                root[used] = end;
+                path_join(victim, sizeof victim, root,
+                          (string_address)"victim");
+                path_join(output, sizeof output, root,
+                          (string_address)"nohup.out");
+                (void)system_remove_at(AT_FDCWD, output, 0);
+                (void)system_remove_at(AT_FDCWD, victim, 0);
+                (void)system_remove_at(AT_FDCWD, root, AT_REMOVEDIR);
+                check("nohup security directory is private",
+                      system_make_directory_exact_at(AT_FDCWD, root, 0700) == 0);
+                bipolar made = system_open_at_mode(
+                    AT_FDCWD, victim,
+                    FILE_WRITE | FILE_CREATE | FILE_EXCLUSIVE | O_CLOEXEC,
+                    0600);
+                check("nohup security victim is created", made >= 0);
+                if (made >= 0)
+                        system_close((positive)made);
+
+                check("nohup output symlink is planted",
+                      system_symbolic_link_at(victim, AT_FDCWD, output) == 0);
+                bipolar opened = process_nohup_output_open(output);
+                check("nohup refuses a planted output symlink", opened < 0);
+                if (opened >= 0)
+                        system_close((positive)opened);
+                (void)system_remove_at(AT_FDCWD, output, 0);
+
+                check("nohup output hard link is planted",
+                      system_link_at(AT_FDCWD, victim, AT_FDCWD, output, 0) == 0);
+                opened = process_nohup_output_open(output);
+                check("nohup refuses a multiply-linked output inode", opened < 0);
+                if (opened >= 0)
+                        system_close((positive)opened);
+                (void)system_remove_at(AT_FDCWD, output, 0);
+
+                opened = process_nohup_output_open(output);
+                check("nohup accepts one regular output inode", opened >= 0);
+                if (opened >= 0)
+                        system_close((positive)opened);
+
+                /* A single-link regular file is still hostile when another
+                   account planted it in a directory the privileged caller
+                   entered.  Ownership is checked through the descriptor,
+                   after open, so a pathname swap cannot change this proof. */
+                opened = system_open_at(
+                    AT_FDCWD, output, FILE_READ_WRITE | O_CLOEXEC);
+                bool foreign = opened >= 0 &&
+                    system_call_3(syscall(fchown), (positive)opened,
+                                  65534, 65534) == 0;
+                if (opened >= 0)
+                        system_close((positive)opened);
+                if (foreign)
+                {
+                        opened = process_nohup_output_open(output);
+                        check("nohup refuses output owned by another account",
+                              opened < 0);
+                        if (opened >= 0)
+                                system_close((positive)opened);
+                }
+                (void)system_remove_at(AT_FDCWD, output, 0);
+                (void)system_remove_at(AT_FDCWD, victim, 0);
+                (void)system_remove_at(AT_FDCWD, root, AT_REMOVEDIR);
+        }
+
+        /* A denied getrandom must fail before sort creates a guessable spill
+           name.  The old pid/counter fallback made this child succeed. */
+        {
+                bipolar child = system_call_2(syscall(clone), SIGCHLD, 0);
+                positive raw = 0;
+
+                check("sort entropy-policy child starts", child >= 0);
+                if (!child)
+                {
+                        if (audit_refuse_randomness() < 0)
+                                system_call_1(syscall(exit_group), 77);
+                        bipolar temporary = sort_temporary_named(
+                            (string_address)"/tmp");
+                        if (temporary >= 0)
+                                system_close((positive)temporary);
+                        system_call_1(syscall(exit_group),
+                                      temporary < 0 ? 0 : 1);
+                }
+                if (child > 0)
+                        check("sort refuses predictable temporary names when entropy fails",
+                              system_wait4_retry((b32)child, address_of raw,
+                                                 0, null) == child &&
+                                  (wait_status_code(raw) == 0 ||
+                                   wait_status_code(raw) == 77));
+        }
         return test_report(null);
 }
 #endif /* CHECK_audit_builtin_regressions */
