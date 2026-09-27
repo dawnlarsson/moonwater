@@ -9477,11 +9477,17 @@ _MISC_WRITE_CASES = (
     ("hexdump", "file", "limit", "-v"), ("hexdump", "file", "gone"), ("hexdump", "small", "full"),
     ("hexdump", "small", "full", "-C"), ("hexdump", "small", "closed"), ("hexdump", "small", "reading"),
     ("hexdump", "small", "filled"),
+    # yes stops only at a refused write, and says why, SIGPIPE ignored or not;
+    # its options are none at all, so each of these is refused before a line.
+    ("yes", "words", "full"), ("yes", "words", "closed"), ("yes", "words", "gone"),
+    ("yes", "words", "broken"), ("yes", "words", "reading", "a", "b"), ("yes", "words", "full", "-x"),
+    ("yes", "words", "full", "--foo"), ("yes", "words", "full", "-/"), ("yes", "words", "full", "--", "-x"),
+    ("yes", "words", "full", "-"),
 )
 
 
 def _misc_write_valid(argv):
-    return (len(argv) >= 3 and argv[0] in ("factor", "numfmt", "hexdump") and
+    return (len(argv) >= 3 and argv[0] in ("factor", "numfmt", "hexdump", "yes") and
             argv[1] in _MISC_WRITE_SOURCES and argv[2] in _TEXT_WRITE_TARGETS)
 
 

@@ -33684,9 +33684,10 @@ static b32 file_yes()
 {
         // No flags at all, which still has to be said: yes -x is a mistake
         // and printing -x for ever is not what was meant by it.
+        static const argument_option none[] = {{null}};
         file_taking taking = {
             .program = (string_address) "yes",
-            .options = null,
+            .options = none,
         };
 
         if (!file_take(address_of taking))
@@ -33760,10 +33761,17 @@ static b32 file_yes()
 
         while (1)
         {
-                if (system_write_all(standard_output_descriptor, output, filled) != filled)
+                system_write_result wrote = system_write_all_checked(
+                    standard_output_descriptor, output, filled);
+
+                //      Said, as GNU says it, even when a pipe that closed
+                //      with SIGPIPE ignored is why: a silent 1 there is
+                //      what upstream's probes read as no SIGPIPE at all.
+                if (wrote.error || wrote.bytes != filled)
                 {
                         memory_free(line, length);
-                        return 1;
+                        return string_report(log_error, 1, "yes: standard output: %s\n",
+                                             file_reason(wrote.error ? wrote.error : -28));
                 }
         }
 
