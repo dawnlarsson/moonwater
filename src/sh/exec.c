@@ -6760,6 +6760,32 @@ typedef struct
 } exec_function;
 
 KEEP __attribute__((externally_visible)) exec_function address_to exec_functions;
+static string_address exec_frames_code_source();
+
+/* The file each slot's definition was read from, which BASH_SOURCE names for
+   the function's frame. Beside the table rather than in it: the slot walk
+   reads the table at a fixed stride. */
+static string_address address_to exec_function_sources;
+static positive exec_function_sources_room;
+
+static fn exec_function_source_set(positive slot, string_address source)
+{
+        positive had = exec_function_sources_room;
+
+        if (!shell_array_room(exec_function_sources, exec_function_sources_room,
+                              slot + 1))
+                return;
+        for (positive at = had; at < exec_function_sources_room; at++)
+                exec_function_sources[at] = null;
+        exec_function_sources[slot] = source;
+}
+
+static string_address exec_function_source(positive slot)
+{
+        return slot < exec_function_sources_room && exec_function_sources[slot]
+                   ? exec_function_sources[slot]
+                   : shell_script_name;
+}
 
 /*
         The next live function at or beyond one slot.
@@ -7757,6 +7783,7 @@ static b32 exec_define(b32 index)
 
         exec_functions[slot].body = body;
         exec_functions[slot].environment_valid = false;
+        exec_function_source_set(slot, exec_frames_code_source());
         exec_function_recent = slot;
         if (exec_functions[slot].exported)
         {
@@ -7947,6 +7974,9 @@ typedef struct
 {
         string_address name;
         positive line;
+        // The file this frame's code was read from: a function's definition
+        // file, or the file a `.` is reading.
+        string_address source;
 } exec_frame;
 
 static exec_frame address_to exec_frames;
@@ -7954,6 +7984,77 @@ static positive exec_frame_room;
 static positive exec_frame_count;
 static bool exec_frames_published;
 static bool exec_frames_standing;
+
+/* A script named on the command line has a bottom frame of its own, main,
+   read from that file; -c, standard input and a terminal have none. */
+static PURE bool exec_frames_main()
+{
+        return !string_get(shell_option_flags) && !shell_is_interactive;
+}
+
+// The file the code now running was read from.
+static string_address exec_frames_code_source()
+{
+        return exec_frame_count ? exec_frames[exec_frame_count - 1].source
+                                : shell_script_name;
+}
+
+/*
+        Names a frame points at outlive the reading that gave them: a
+        function defined in a sourced file names that file for as long as it
+        is defined. Each distinct name is kept once.
+*/
+static string_address address_to exec_source_names;
+static positive exec_source_names_room;
+static positive exec_source_name_count;
+
+static string_address exec_source_intern(string_address name)
+{
+        positive length;
+        p8 address_to made = null;
+        positive made_room = 0;
+
+        for (positive at = 0; at < exec_source_name_count; at++)
+                if (!string_compare(exec_source_names[at], name))
+                        return exec_source_names[at];
+
+        length = string_length(name);
+        if (length == positive_max ||
+            !shell_array_room(made, made_room, length + 1) ||
+            !shell_array_room(exec_source_names, exec_source_names_room,
+                              exec_source_name_count + 1))
+                return shell_script_name;
+
+        memory_copy_end(made, name, length);
+        exec_source_names[exec_source_name_count++] = made;
+        return made;
+}
+
+static COLD fn exec_frames_forget();
+
+// `.` and source: a frame named source for the file being read.
+fn exec_frames_source_enter(string_address path)
+{
+        if (!shell_array_room(exec_frames, exec_frame_room,
+                              exec_frame_count + 1))
+                return;
+        exec_frames[exec_frame_count].line = (positive)exec_line;
+        exec_frames[exec_frame_count].name = (string_address) "source";
+        exec_frames[exec_frame_count++].source = exec_source_intern(path);
+        exec_frames_published = false;
+        if (exec_frames_standing)
+                exec_frames_forget();
+}
+
+fn exec_frames_source_leave()
+{
+        if (!exec_frame_count)
+                return;
+        exec_frame_count--;
+        exec_frames_published = false;
+        if (exec_frames_standing)
+                exec_frames_forget();
+}
 
 static COLD fn exec_frames_forget()
 {
@@ -7963,15 +8064,27 @@ static COLD fn exec_frames_forget()
         exec_frames_standing = false;
 }
 
+/*
+        Innermost first, which is the opposite of the order the frames were
+        pushed in and the order every script that reads them expects, with
+        main at the bottom for a script file. FUNCNAME stands only while a
+        function runs; BASH_SOURCE and BASH_LINENO stand wherever there is a
+        frame, so ${BASH_SOURCE[0]} at the top of a script is its path and
+        in a sourced file that file's. BASH_SOURCE was $0 for every frame
+        and nothing at all outside a function, which is what
+        cd "$(dirname "${BASH_SOURCE[0]}")" reads.
+*/
 static COLD fn exec_frames_publish()
 {
         shell_mark held = shell_store_mark(address_of exec_store);
         string_address address_to walked;
         bipolar address_to lines;
+        bool main = exec_frames_main();
+        positive count = exec_frame_count + main;
 
         exec_frames_published = true;
 
-        if (!exec_frame_count)
+        if (!count)
         {
                 exec_frames_forget();
                 return;
@@ -7980,10 +8093,9 @@ static COLD fn exec_frames_publish()
         exec_frames_standing = true;
 
         walked = (string_address address_to)shell_store_take(
-            address_of exec_store,
-            exec_frame_count * sizeof(walked[0]));
+            address_of exec_store, count * sizeof(walked[0]));
         lines = (bipolar address_to)shell_store_take(
-            address_of exec_store, exec_frame_count * sizeof(lines[0]));
+            address_of exec_store, count * sizeof(lines[0]));
 
         if (!walked || !lines)
         {
@@ -7991,21 +8103,29 @@ static COLD fn exec_frames_publish()
                 return;
         }
 
-        // Innermost first, which is the opposite of the order they were
-        // pushed in and the order every script that reads them expects.
         for (positive at = 0; at < exec_frame_count; at++)
         {
                 walked[at] = exec_frames[exec_frame_count - at - 1].name;
                 lines[at] = (bipolar)exec_frames[exec_frame_count - at - 1].line;
         }
+        if (main)
+        {
+                walked[exec_frame_count] = (string_address) "main";
+                lines[exec_frame_count] = 0;
+        }
 
-        shell_array_words("FUNCNAME", 8, walked, exec_frame_count);
-        shell_array_numbers("BASH_LINENO", 11, lines, exec_frame_count);
+        if (exec_function_depth)
+                shell_array_words("FUNCNAME", 8, walked, count);
+        else
+                env_unset("FUNCNAME");
+        shell_array_numbers("BASH_LINENO", 11, lines, count);
 
         for (positive at = 0; at < exec_frame_count; at++)
-                walked[at] = shell_script_name;
+                walked[at] = exec_frames[exec_frame_count - at - 1].source;
+        if (main)
+                walked[exec_frame_count] = shell_script_name;
 
-        shell_array_words("BASH_SOURCE", 11, walked, exec_frame_count);
+        shell_array_words("BASH_SOURCE", 11, walked, count);
         shell_store_rewind(address_of exec_store, held);
 }
 
@@ -8095,6 +8215,8 @@ fn shell_caller(writer write, string_address input)
 {
         positive want = 0;
         bool numbered = shell_argc > 1;
+        bool main = exec_frames_main();
+        positive count = exec_frame_count + main;
         p8 shown[32];
         positive written;
 
@@ -8117,9 +8239,10 @@ fn shell_caller(writer write, string_address input)
 
         //      Numbered caller is BASH_LINENO[n], FUNCNAME[n+1] and
         //      BASH_SOURCE[n+1]. A function called from the top of -c has
-        //      no n+1 slot, so `caller 0` inside it prints nothing.
+        //      no n+1 slot, so `caller 0` inside it prints nothing; one run
+        //      from a script file has main there.
         if (want >= exec_frame_count ||
-            (numbered && want + 1 >= exec_frame_count))
+            (numbered && want + 1 >= count))
         {
                 shell_answer(1);
                 return;
@@ -8132,16 +8255,21 @@ fn shell_caller(writer write, string_address input)
 
         if (numbered)
         {
-                write(exec_frames[exec_frame_count - want - 2].name, 0);
+                write(want + 1 < exec_frame_count
+                          ? exec_frames[exec_frame_count - want - 2].name
+                          : (string_address) "main",
+                      0);
                 write(" ", 1);
         }
 
-        /* Bash calls an unnamed input source NULL. Keep the real path for a
-           named script, while stdin and -c must not expose argv[0] as though
-           it were the file containing the function. */
+        /* Bash calls an unnamed input source NULL. A named script gives the
+           file the calling frame was read from, while stdin and -c must not
+           expose argv[0] as though it were the file containing the function. */
         write(string_get(shell_option_flags)
                   ? (string_address) "NULL"
-                  : shell_script_name,
+                  : want + 1 < exec_frame_count
+                        ? exec_frames[exec_frame_count - want - 2].source
+                        : shell_script_name,
               0);
         write("\n", 1);
 
@@ -8158,7 +8286,7 @@ fn shell_caller(writer write, string_address input)
 */
 COLD bool shell_frames_wanted(const_string name, positive length)
 {
-        if (exec_frames_published || !exec_frame_count)
+        if (exec_frames_published || (!exec_frame_count && !exec_frames_main()))
                 return false;
 
         if (!memory_is_word((address_any)name, length, "FUNCNAME") &&
@@ -8230,6 +8358,8 @@ static b32 exec_call(positive slot)
                 // Where the call was written, which is the line of the
                 // command making it and not the line the reader is on.
                 exec_frames[exec_frame_count].line = (positive)exec_line;
+                exec_frames[exec_frame_count].source =
+                    exec_function_source(slot);
                 exec_frames[exec_frame_count++].name =
                     exec_functions[slot].name;
                 exec_frames_published = false;

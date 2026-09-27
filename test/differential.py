@@ -13999,6 +13999,26 @@ def shell_lang_empty_at_joins(rng):
         "n() { echo \"$#:$*\"; }; x=x; e=", "set -- " + params, "n " + word, 'echo "end=$?"'))
 
 
+#       The call stack as FUNCNAME, BASH_SOURCE, BASH_LINENO and caller see
+#       it through sourced files and a script file. BASH_SOURCE named $0 for
+#       every frame and nothing outside a function, a sourced file had no
+#       frame, and a script had no main at the bottom.
+def shell_lang_source_frames(rng):
+    probe = rng.choice(('${BASH_SOURCE[0]-none}', '${BASH_SOURCE[*]}', '${#BASH_SOURCE[@]}', '${FUNCNAME[*]-unset}',
+                        '${BASH_LINENO[*]}', '${#FUNCNAME[@]}', '$(caller 0 2>&1 | sed "s|.*/||")'))
+    where = rng.choice(("top", "sourced-top", "function", "sourced-function", "nested", "after-source"))
+    files = ("printf '%s\\n' 'echo \"inc:" + probe.replace('"', '\\"') + "\"' 'g() { echo \"g:" +
+             probe.replace('"', '\\"') + "\"; }' > inc.sh")
+    lines = {"top": 'echo "top:' + probe + '"',
+             "sourced-top": ". ./inc.sh",
+             "function": 'f() { echo "f:' + probe + '"; }; f',
+             "sourced-function": ". ./inc.sh >/dev/null; g",
+             "nested": '. ./inc.sh >/dev/null; f() { g; echo "f:' + probe + '"; }; f',
+             "after-source": '. ./inc.sh >/dev/null; echo "after:' + probe + '"'}
+    return ("source-frames-" + where, shell_BASH,
+            shell_program(files, lines[where], 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16638,6 +16658,7 @@ SHELL_FAMILIES = (
     shell_lang_trap_return,
     shell_lang_funcname_stack,
     shell_lang_empty_at_joins,
+    shell_lang_source_frames,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),
