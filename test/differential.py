@@ -13850,6 +13850,33 @@ def shell_lang_indirect_elements(rng):
         "a=(ab 'c d' ef); declare -A m=([k]=vb); i=2", line + " 2>/dev/null", 'echo "end=$?"'))
 
 
+#       The arithmetic for with clauses left empty or blank, and for and
+#       select with a brace group for their body. A blank condition was read
+#       as 0, so for (( ; ; )) never ran its body; { ...; } in place of
+#       do ... done was a syntax error.
+def shell_lang_cfor_forms(rng):
+    init = rng.choice(("", " ", "i=0", " i = 0 "))
+    cond = rng.choice(("", " ", "i<3", " i < 3 "))
+    step = rng.choice(("", " ", "i++", " i += 1 "))
+    spacing = rng.choice(("", " "))
+    head = "for ((" + spacing + init + ";" + cond + ";" + step + spacing + "))"
+    body = 'echo "i=$i"; [ "${i:-0}" -ge 5 ] && break; : $((i+=0))'
+    if not step.strip():
+        body += "; i=$((i+1))"
+    shape = rng.choice(("do", "brace", "brace-newline", "list-brace", "select-brace"))
+    if shape == "do":
+        line = head + "; do " + body + "; done"
+    elif shape == "brace":
+        line = head + " { " + body + "; }"
+    elif shape == "brace-newline":
+        line = head + "\n{\n" + body + "\n}"
+    elif shape == "list-brace":
+        line = "for i in 1 2 3; { echo \"v=$i\"; }"
+    else:
+        line = "select s in a b; { echo \"s=$s\"; break; } <<< 2"
+    return ("cfor-forms-" + shape, shell_BASH, shell_program("i=0", line, 'echo "end=$? i=$i"'))
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16483,6 +16510,7 @@ SHELL_FAMILIES = (
     shell_lang_declaration_append,
     shell_lang_test_bash_unary,
     shell_lang_indirect_elements,
+    shell_lang_cfor_forms,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),

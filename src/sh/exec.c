@@ -11380,9 +11380,12 @@ static b32 exec_cfor(b32 index)
         }
 
         address_to second = end;
-        initialize = expressions;
-        condition = first + 1;
-        update = second + 1;
+        /* A clause of nothing but blanks is an empty clause: for (( ; ; ))
+           loops for ever, where the blank condition was read as 0 and the
+           body never ran. */
+        initialize = arith_skip_space(expressions);
+        condition = arith_skip_space(first + 1);
+        update = arith_skip_space(second + 1);
 
         if (string_get(initialize) &&
             !exec_arithmetic_value(initialize, address_of value, "(("))
