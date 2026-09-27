@@ -32,8 +32,8 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
 
 - [x] Request components are validated at the wire serializer.
 - [x] Host has one allowlisted byte grammar; target rejects controls, space,
-  DEL, backslash, non-ASCII, and percent-encoded NUL/CR/LF; header values
-  reject controls and DEL.
+  DEL, backslash, non-ASCII, and percent-encoded NUL/CR/LF including nested
+  `%25` peelings; header values reject controls and DEL.
 - [x] Userinfo, unsupported schemes, ambiguous authority bytes, and fragments
   are rejected or removed before transmission.
 - [x] Duplicate framing fields and TE/CL conflicts are rejected.

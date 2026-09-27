@@ -8269,16 +8269,48 @@ static bool http_request_component_valid(string_address text, p8 kind)
                         return false;
                 if (kind == HTTP_REQUEST_TARGET && byte == '%')
                 {
-                        positive high = digit_known(string_get(text + 1), 16);
-                        positive low = digit_known(string_get(text + 2), 16);
+                        /* One decode is not enough: %250d is a CR after two
+                           URI decodes, and %25250a needs three. Peel %25
+                           whether written as %25 or as a bare 25 hex pair
+                           left after a previous peel. */
+                        string_address at = text;
+                        bool percent_form = true;
 
-                        if (high < 16 && low < 16)
+                        for (;;)
                         {
-                                p8 decoded = (p8)((high << 4) | low);
+                                positive high;
+                                positive low;
+                                p8 decoded;
 
+                                if (percent_form || string_get(at) == '%')
+                                {
+                                        if (string_get(at) != '%')
+                                                break;
+                                        high = digit_known(string_get(at + 1),
+                                                           16);
+                                        low = digit_known(string_get(at + 2),
+                                                          16);
+                                        if (high >= 16 || low >= 16)
+                                                break;
+                                        decoded = (p8)((high << 4) | low);
+                                        at += 3;
+                                }
+                                else
+                                {
+                                        high = digit_known(string_get(at), 16);
+                                        low = digit_known(string_get(at + 1),
+                                                          16);
+                                        if (high >= 16 || low >= 16)
+                                                break;
+                                        decoded = (p8)((high << 4) | low);
+                                        at += 2;
+                                }
                                 if (decoded == 0 || decoded == '\r' ||
                                     decoded == '\n')
                                         return false;
+                                if (decoded != '%')
+                                        break;
+                                percent_form = false;
                         }
                 }
                 if (kind == HTTP_REQUEST_HOST &&

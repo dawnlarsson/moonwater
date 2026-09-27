@@ -50178,6 +50178,25 @@ static fn fetching(void)
                       http_get_request(request, sizeof request,
                                        "example.com", 80, "/ok%0ax", false,
                                        '1', "agent", &used) == HTTP_BAD_URL);
+                check("request targets refuse double-encoded CR LF and NUL",
+                      http_get_request(request, sizeof request,
+                                       "example.com", 80, "/%250d", false,
+                                       '1', "agent", &used) == HTTP_BAD_URL &&
+                          http_get_request(request, sizeof request,
+                                           "example.com", 80, "/%25250a",
+                                           false, '1', "agent", &used) ==
+                              HTTP_BAD_URL &&
+                          http_get_request(request, sizeof request,
+                                           "example.com", 80, "/%2500", false,
+                                           '1', "agent", &used) ==
+                              HTTP_BAD_URL);
+                check("a lone encoded percent remains a valid target byte",
+                      http_get_request(request, sizeof request,
+                                       "example.com", 80, "/%25", false, '1',
+                                       "agent", &used) == HTTP_OK &&
+                          http_get_request(request, sizeof request,
+                                           "example.com", 80, "/%2541", false,
+                                           '1', "agent", &used) == HTTP_OK);
                 check("an empty request target becomes the origin-form root",
                       http_get_request(request, sizeof request,
                                        "example.com", 80, "", false, '1',
