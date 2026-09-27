@@ -14618,6 +14618,14 @@ COLD fn shell_trap(writer write, string_address input)
 
                 action = null;
         }
+        /* POSIX: a first operand that is an unsigned decimal integer makes
+           every operand a condition to reset. `trap 0 2` put the command 0
+           on INT and kept the exit trap. Both references still take a
+           number that names no condition, 99, for the action. */
+        else if (string_digits_checked_exact(shell_argv[index], 10, null) &&
+                 trap_number(shell_argv[index]) >= 0 &&
+                 trap_number(shell_argv[index]) <= TRAP_CONDITION_MAX)
+                action = null;
         else
                 action = shell_argv[index++];
 

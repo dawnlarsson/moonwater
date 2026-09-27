@@ -13699,6 +13699,17 @@ def shell_lang_lineno_traps(rng):
             shell_program(*lines), ("command", "stdin", "file"))
 
 
+#       trap with a number first: when it names a condition, every operand
+#       is a condition to reset, as POSIX has it; one that names none, 99, is
+#       an action like any other word. `trap 0 2` set INT to run 0.
+def shell_lang_trap_numeric_reset(rng):
+    first = rng.choice(("0", "2", "10", "15", "00", "99", "1", "EXIT", "-", "''"))
+    rest = " ".join(rng.sample(("0", "2", "EXIT", "INT", "USR1", "10", "TERM"), rng.randint(1, 3)))
+    return ("trap-numeric-reset", shell_ALL, shell_program(
+        "trap 'echo exit-trap' EXIT; trap 'echo int' INT; trap 'echo usr1' USR1; trap 'echo term' TERM",
+        "trap " + first + " " + rest + " 2>/dev/null; echo \"s=$?\"", "trap"))
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16326,6 +16337,7 @@ SHELL_FAMILIES = (
     shell_lang_nul_bytes,
     shell_lang_command_lookup,
     shell_lang_lineno_traps,
+    shell_lang_trap_numeric_reset,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),
