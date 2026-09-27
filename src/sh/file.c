@@ -5674,8 +5674,12 @@ static bipolar file_staged_name_finish(file_staged_name address_to stage,
         }
 
         /* An output that names its input looks at the name again before
-           publishing: it must still be the file it replaces, or still be
-           absent, and it is never the input itself. */
+           publishing: it must still be the entry it replaces -- the same
+           inode, of the same kind, so a link that is being replaced rather
+           than followed still counts as itself -- or still be absent, and
+           it is never the input itself. Holding it to a regular file made
+           split, the one caller whose output may be a link, fail every
+           such name with EAGAIN when its input was a file. */
         if (result >= 0 && stage->input)
         {
                 file_facts current;
@@ -5686,7 +5690,8 @@ static bipolar file_staged_name_finish(file_staged_name address_to stage,
                 if (stage->replaced_known)
                         result = found < 0 ? found
                                  : (current.mask & STATX_BASIC) != STATX_BASIC ||
-                                           (current.mode & MODE_FORMAT) != MODE_FILE ||
+                                           (current.mode & MODE_FORMAT) !=
+                                               (stage->replaced.mode & MODE_FORMAT) ||
                                            !file_same_identity(address_of stage->replaced,
                                                                address_of current)
                                      ? -ERROR_AGAIN
