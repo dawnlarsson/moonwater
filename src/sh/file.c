@@ -719,6 +719,105 @@ static bool file_same_spelled(string_address source, string_address destination)
                file_same_identity(address_of left, address_of right);
 }
 
+/*
+        GNU's dest_info: what this run has already put in a target directory
+        under the names given on the command line, by name and identity, so
+        that a later operand landing on the same name -- mv a/f b/f c, cp -r
+        a/1 b/1 c -- is refused rather than writing over what it just made.
+        Kept only where the problem can arise, two or more sources into one
+        directory; file_made_last is the last of them, which mv need not
+        record.
+*/
+typedef struct file_made_entry
+{
+        struct file_made_entry address_to next;
+        p64 inode;
+        p32 device_major;
+        p32 device_minor;
+        p8 name[];
+} file_made_entry;
+
+#define FILE_MADE_BUCKETS 1024
+static file_made_entry address_to address_to file_made_buckets;
+// cp's src_info beside it: the sources already copied, by spelling and
+// identity, so one named twice is warned about and copied once.
+static file_made_entry address_to address_to file_given_buckets;
+static bool file_made_on;
+static bool file_made_last;
+
+static positive file_made_bucket(string_address name, file_facts address_to facts)
+{
+        p64 key = facts->inode * 0x9e3779b97f4a7c15ull ^ facts->device_minor;
+        for (; *name; name++)
+                key = (key ^ (p8)*name) * 0x100000001b3ull;
+        return (positive)(key % FILE_MADE_BUCKETS);
+}
+
+static bool file_set_seen(file_made_entry address_to address_to buckets,
+                          string_address name, file_facts address_to facts)
+{
+        if (!file_made_on || !buckets)
+                return false;
+        for (file_made_entry address_to entry =
+                 buckets[file_made_bucket(name, facts)];
+             entry; entry = entry->next)
+                if (entry->inode == facts->inode &&
+                    entry->device_major == facts->device_major &&
+                    entry->device_minor == facts->device_minor &&
+                    string_equals((string_address)entry->name, name))
+                        return true;
+        return false;
+}
+
+static fn file_set_record(file_made_entry address_to address_to address_to table,
+                          string_address name, file_facts address_to facts)
+{
+        if (!file_made_on || file_set_seen(*table, name, facts))
+                return;
+        if (!*table)
+        {
+                *table = utility_arena_take(
+                    FILE_MADE_BUCKETS * sizeof(file_made_entry address_to));
+                if (!*table)
+                        return;
+                memory_fill(*table, 0,
+                            FILE_MADE_BUCKETS * sizeof(file_made_entry address_to));
+        }
+        file_made_entry address_to address_to file_made_buckets = *table;
+        positive length = string_length(name);
+        file_made_entry address_to entry =
+            utility_arena_take(sizeof(file_made_entry) + length + 1);
+        if (!entry)
+                return;
+        positive bucket = file_made_bucket(name, facts);
+        entry->inode = facts->inode;
+        entry->device_major = facts->device_major;
+        entry->device_minor = facts->device_minor;
+        memory_copy_apart_end(entry->name, name, length);
+        entry->next = file_made_buckets[bucket];
+        file_made_buckets[bucket] = entry;
+}
+
+static bool file_made_seen(string_address name, file_facts address_to facts)
+{
+        return file_set_seen(file_made_buckets, name, facts);
+}
+
+static fn file_made_record(string_address name, file_facts address_to facts)
+{
+        file_set_record(address_of file_made_buckets, name, facts);
+}
+
+// After the destination was made: record it as it now stands.
+static fn file_made_now(bipolar directory, string_address name)
+{
+        file_facts facts;
+
+        if (file_made_on && file_look(directory, name, AT_SYMLINK_NOFOLLOW,
+                                      address_of facts))
+                file_made_record(name, address_of facts);
+}
+
 static bipolar file_parent_open(string_address path, p8 address_to leaf)
 {
         return system_open_parent_pinned(AT_FDCWD, path, leaf,
@@ -6257,6 +6356,7 @@ static bool file_source_destination(string_address program, positive first,
                                                         string_address destination))
 {
         file_into_mode = false;
+        file_made_on = false;
         if (into && alone)
                 return string_report(
                     log_error, false,
@@ -6338,10 +6438,13 @@ static bool file_source_destination(string_address program, positive first,
         bool complete = true;
 
         file_into_mode = true;
+        file_made_on = after - first >= 2;
         while (first < after)
         {
                 string_address source = program_argument((b32)first++);
                 static p8 destination[FILE_PATH_MAX];
+
+                file_made_last = first == after;
 
                 if (!file_destination_in(program, last, source, destination))
                 {
@@ -18131,6 +18234,25 @@ static bool ln_make(string_address target, string_address name)
                 text followed from here, and the same only when it has one
                 name or the two are the same entry.
         */
+        /* A hard link this run just made from an earlier operand is not
+           replaced by a later one (GNU's dest_set, kept under -f for hard
+           links into a directory without numbered backups). */
+        if (destination_exists &&
+            (ln_selected.collision == 'f' || ln_selected.collision == 'i' ||
+             file_backup_kind) &&
+            (destination.mode & MODE_FORMAT) != MODE_DIRECTORY &&
+            file_made_seen(name, address_of destination))
+        {
+                string_format(log_error,
+                              "ln: will not overwrite just-created %w with %w\n",
+                              writer_shell_quoted_name, name,
+                              writer_shell_quoted_name, target);
+                system_close(destination_directory);
+                if (source_handle >= 0)
+                        system_close(source_handle);
+                return false;
+        }
+
         if (destination_exists &&
             (file_backup_kind ? !ln_symbolic : ln_selected.collision == 'f'))
         {
@@ -18271,6 +18393,8 @@ static bool ln_make(string_address target, string_address name)
                 ln_failed(target, name, done);
                 return file_backup_did ? ln_unbackup(name) : false;
         }
+        if (!ln_symbolic)
+                file_made_record(name, address_of source);
 
         if (ln_loud)
         {
@@ -18317,6 +18441,7 @@ static b32 file_ln()
         ln_selected = (ln_selection){};
         ln_target_directory = null;
         ln_into = false;
+        file_made_on = false;
         file_backup_control_named = null;
 
         file_taking taking = {
@@ -18460,6 +18585,8 @@ static b32 file_ln()
         b32 status = 0;
 
         ln_into = true;
+        file_made_on = after - first >= 2 && ln_selected.collision == 'f' &&
+                       !ln_symbolic && file_backup_kind != 'n';
         while (first < after)
         {
                 string_address target = program_argument((b32)first++);
@@ -28758,6 +28885,24 @@ static fn cp_pair(string_address source, string_address destination)
                 cp_status = 1;
                 return;
         }
+        /* GNU copy.c's src_info: a non-directory named twice among the
+           sources is copied once, with a warning, when no backup would
+           keep the first copy. */
+        if (kind != MODE_DIRECTORY && !file_backup_kind)
+        {
+                if (file_set_seen(file_given_buckets, source,
+                                  address_of source_facts))
+                {
+                        string_format(log_error,
+                                      "cp: warning: source file %w specified more than once\n",
+                                      writer_shell_quoted_name, source);
+                        system_close(source_directory);
+                        system_close(destination_directory);
+                        return;
+                }
+                file_set_record(address_of file_given_buckets, source,
+                                address_of source_facts);
+        }
         if (file_name_has_trailing_slash(given) &&
             !cp_slash_allowed(source, given, kind, destination_directory,
                               destination_leaf))
@@ -28809,10 +28954,12 @@ static fn cp_pair(string_address source, string_address destination)
             address_of destination_entry);
         file_facts same_there;
         bool already = false;
+        bool same_there_exists = file_look(
+            destination_directory, destination_leaf,
+            cp_same_file_look(kind) ? AT_SYMLINK_NOFOLLOW : 0,
+            address_of same_there);
         if (cp_update_policy != 'n' && cp_update_policy != 'F' &&
-            file_look(destination_directory, destination_leaf,
-                      cp_same_file_look(kind) ? AT_SYMLINK_NOFOLLOW : 0,
-                      address_of same_there))
+            same_there_exists)
         {
                 bool done = false;
 
@@ -28873,6 +29020,40 @@ static fn cp_pair(string_address source, string_address destination)
                 return;
         }
 
+        /* GNU copy.c: a name this run already made from an earlier
+           operand is not written over from a later one -- cp a/f b/f c
+           would leave only b/f -- unless numbered backups keep both; and a
+           link it made is not copied through. */
+        if (same_there_exists &&
+            (same_there.mode & MODE_FORMAT) != MODE_DIRECTORY &&
+            file_backup_kind != 'n' &&
+            file_made_seen(destination_leaf, address_of same_there))
+        {
+                string_format(log_error,
+                              "cp: will not overwrite just-created %w with %w\n",
+                              writer_shell_quoted_name, destination,
+                              writer_shell_quoted_name, source);
+                system_close(source_directory);
+                system_close(destination_directory);
+                system_close(source_pinned);
+                cp_status = 1;
+                return;
+        }
+        if (!file_backup_kind && entry_exists &&
+            (destination_entry.mode & MODE_FORMAT) == MODE_LINK &&
+            file_made_seen(destination_leaf, address_of destination_entry))
+        {
+                string_format(log_error,
+                              "cp: will not copy %w through just-created symlink %w\n",
+                              writer_shell_quoted_name, source,
+                              writer_shell_quoted_name, destination);
+                system_close(source_directory);
+                system_close(destination_directory);
+                system_close(source_pinned);
+                cp_status = 1;
+                return;
+        }
+
         file_backup_source = source;
         file_backup_source_facts = address_of source_facts;
         if (!refuse_dangling &&
@@ -28908,6 +29089,7 @@ static fn cp_pair(string_address source, string_address destination)
                            address_of source_facts, source_pinned,
                            destination_slashed ? FILE_COPY_SLASHED : 0))
                 cp_status = 1;
+        file_made_now(destination_directory, destination_leaf);
         system_close(source_pinned);
         system_close(source_directory);
         system_close(destination_directory);
@@ -30142,6 +30324,21 @@ static fn mv_one(string_address source, string_address destination)
                 goto finished;
         }
 
+        /* GNU copy.c: mv a/f b/f c must not move b/f over the c/f it has
+           just made from a/f, unless numbered backups keep both. */
+        if (destination_exists && !mv_exchange &&
+            (to.mode & MODE_FORMAT) != MODE_DIRECTORY &&
+            file_backup_kind != 'n' &&
+            file_made_seen(destination_leaf, address_of to))
+        {
+                string_format(log_error,
+                              "mv: will not overwrite just-created %w with %w\n",
+                              writer_shell_quoted_name, destination,
+                              writer_shell_quoted_name, source);
+                mv_status = 1;
+                goto finished;
+        }
+
         /* Cross-device fallback must honor the same destination inode/absence
            decision as the first rename attempt. */
         mv_destination_decided = true;
@@ -30244,6 +30441,8 @@ static fn mv_one(string_address source, string_address destination)
 
         if (done == 0)
         {
+                if (!file_made_last)
+                        file_made_now(destination_directory, destination_leaf);
                 if (mv_loud)
                         file_backup_told(
                             source, destination,
@@ -30316,6 +30515,9 @@ static fn mv_one(string_address source, string_address destination)
 
                 if (copied)
                 {
+                        if (!file_made_last)
+                                file_made_now(destination_directory,
+                                              destination_leaf);
                         if (mv_loud)
                                 file_backup_told(source, destination,
                                                  (string_address) "renamed '",

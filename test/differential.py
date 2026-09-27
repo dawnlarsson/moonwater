@@ -6776,6 +6776,38 @@ def files_skip_cases(tool):
     return tuple(cases)
 
 
+#       Two sources with one last name put into one directory: the second
+#       lands on what the first just made there. mv a/f b/f c once moved
+#       b/f over the c/f it had made from a/f, and cp the same; a link made
+#       by the first was copied through by the second.
+FIXTURES["files_made"] = {
+    "a/f": files_file(b"A\n", 1000000000),
+    "b/f": files_file(b"B\n", 1010000000),
+    "a/g": files_file(b"G\n", 1020000000),
+    "a/1": files_link("f", 1030000000),
+    "b/1": files_file(b"one\n", 1040000000),
+    "a/d/x": files_file(b"x\n", 1050000000),
+    "b/d/y": files_file(b"y\n", 1060000000),
+    "a/d": files_dir(1070000000),
+    "b/d": files_dir(1080000000),
+    "a": files_dir(1090000000),
+    "b": files_dir(1100000000),
+    "c": files_dir(1110000000),
+}
+
+
+def files_made_cases(tool, flags):
+    rng = random.Random(int.from_bytes(hashlib.sha256(
+        ("made:" + tool).encode()).digest()[:8], "little"))
+    operands = (("a/f", "b/f", "c"), ("a/f", "a/f", "c"), ("a/f", "b/f", "a/g", "c"), ("a/1", "b/1", "c"),
+                ("b/1", "a/1", "c"), ("a/d", "b/d", "c"), ("-t", "c", "a/f", "b/f"), ("a/f", "c/f", "c"))
+    cases = []
+    for words in operands:
+        for chosen in [()] + [(flag,) for flag in flags] + [tuple(rng.sample(flags, 2)) for _ in range(3)]:
+            cases.append({"fixture": "files_made", "argv": chosen + words})
+    return tuple(cases)
+
+
 FILES_UTILITIES = (
     # yes is the one program here the engine cannot bound: it writes until
     # something stops it, so both sides die on the harness's file-size limit
@@ -7109,6 +7141,7 @@ FILES_UTILITIES = (
                 "ln", ("-s", "-f", "-n", "-v", "-T", "-b", "-r", "-L", "-P", "--backup=numbered"),
                 ("a.txt", "dir", "link", "dangling"))
             + files_backup_cases("ln", ("-s",)) + files_backup_cases("ln", ("-f",))
+            + files_made_cases("ln", ("-f", "-s", "-sf", "-b", "--backup=numbered", "-fb", "-v", "-fv", "-L"))
             + files_self_cases("ln", ("-s", "-f", "-i", "-b", "-n", "-v", "-T", "-L", "-P", "-r",
                                       "--backup=numbered"))),
     Utility("link", operands=(("a.txt", "hard"), ("link", "hard"), ("a.txt", "-W"), ("--", "-dash", "hard"), ("missing", "hard"),
@@ -7327,7 +7360,9 @@ FILES_UTILITIES = (
                                   ("-df", "--attributes-only"), ("-a", "--attributes-only", "--remove-destination"),
                                   ("-rd", "--attributes-only", "-b"))
                     for pair in (("sl", "g"), ("d", "g"), ("sl", "sub/f")))
-            + files_skip_cases("cp"),
+            + files_skip_cases("cp")
+            + files_made_cases("cp", ("-f", "-b", "--backup=numbered", "-d", "-R", "-l", "-s", "-v", "-a",
+                                      "-dR", "--remove-destination", "-n")),
             normalize=files_sorted_lines),
     Utility("install", options=(Option("-b"), Option("-c"), Option("-C"), Option("-d"), Option("-D"), Option("-p"), Option("-s"),
                                 Option("-T"), Option("-v"), Option("-Z"), Option("--backup"),
@@ -7389,7 +7424,8 @@ FILES_UTILITIES = (
                 "mv", ("-f", "-n", "-u", "-v", "-b", "-T", "--update=none-fail", "--no-copy", "--debug"),
                 ("a.txt", "dir", "link", "dirlink", "dangling"))
                 if "dangling/" not in case)
-            + files_backup_cases("mv", ()) + files_skip_cases("mv")),
+            + files_backup_cases("mv", ()) + files_skip_cases("mv")
+            + files_made_cases("mv", ("-f", "-b", "--backup=numbered", "-v", "-n", "-u"))),
     Utility("rm", options=(Option("-f"), Option("-i"), Option("-I"), Option("-r"), Option("-R"), Option("-d"), Option("-v"),
                            Option("--force"), Option("--interactive"), Option("--interactive", ("always", "once", "never", "bogus"), True),
                            Option("--one-file-system"), Option("--no-preserve-root"), Option("--preserve-root"),
