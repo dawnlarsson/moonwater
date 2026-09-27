@@ -13983,6 +13983,22 @@ def shell_lang_funcname_stack(rng):
         "outer", 'echo "top:[' + probe + ']"'))
 
 
+#       An empty "$@" beside other pieces of one word. bash drops the word
+#       when every other piece is a quoted expansion that came out empty --
+#       "$xxx$@", "$@""$@", ${x+"$@"}, "${@:+y}" -- and keeps it for a literal
+#       "" or a byte; dash keeps it every time but for "$@" alone. This gave
+#       dash's answer under bash.
+def shell_lang_empty_at_joins(rng):
+    pieces = ('"$@"', '"$xxx"', '"${xxx}"', '""', "a", '"$e"', '"${@:+y}"', '"${@+y}"', '"$*"', "'$'", '"${@-}"')
+    word = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 3)))
+    wrap = rng.choice(("", "", "${x+", "${xxx-"))
+    if wrap:
+        word = wrap + word + "}"
+    params = rng.choice(("", "", "a", "'' b"))
+    return ("empty-at-joins", shell_ALL, shell_program(
+        "n() { echo \"$#:$*\"; }; x=x; e=", "set -- " + params, "n " + word, 'echo "end=$?"'))
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16621,6 +16637,7 @@ SHELL_FAMILIES = (
     shell_lang_loop_control_arguments,
     shell_lang_trap_return,
     shell_lang_funcname_stack,
+    shell_lang_empty_at_joins,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),

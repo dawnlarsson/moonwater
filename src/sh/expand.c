@@ -1970,6 +1970,14 @@ static bool expand_push_parameter_as(expand_reference reference, bool quoted,
         {
                 positive at;
 
+                /* bash drops a word whose only pieces are an empty "$@" and
+                   quoted expansions that came out empty: "$xxx$@" and
+                   "$@""$@" are no word with no parameters, as "$@" is. A
+                   literal "" or any byte keeps the word, and dash keeps it
+                   either way. */
+                if (quoted && !shell_parameter_count && shell_bash_compat)
+                        expand_name_at_empty = true;
+
                 for (at = 0; at < shell_parameter_count; at++)
                 {
                         if (at)
@@ -8494,6 +8502,11 @@ static string_address expand_braced_body(string_address step,
                 {
                         if (!missing)
                                 expand_word_into(word, quoted);
+                        /* "${@:+y}" with no parameters is no word in bash,
+                           the way "$@" is. */
+                        else if (quoted && shell_bash_compat &&
+                                 string_is(name, '@') && !string_get(name + 1))
+                                expand_name_at_empty = true;
 
                         return close + 1;
                 }
@@ -8698,8 +8711,10 @@ RETURNS_NONNULL string_address shell_expand_document_part(string_address step,
 static string_address expand_double(string_address step)
 {
         positive begun = expand_length;
+        bool at_before = expand_name_at_empty;
 
         expand_quoted_seen = true;
+        expand_name_at_empty = false;
 
         if (string_is(step + 1, '"'))
                 expand_explicit_empty = true;
@@ -8764,6 +8779,14 @@ static string_address expand_double(string_address step)
                 expand_push(seen, MARK_QUOTED);
                 step++;
         }
+
+        /* A quoted run that came out empty with no empty "$@" in it is an
+           empty argument the way "" is: bash keeps "$*""$@" as one word and
+           drops "$*$@". */
+        if (expand_length == begun && !expand_name_at_empty &&
+            shell_bash_compat)
+                expand_explicit_empty = true;
+        expand_name_at_empty = expand_name_at_empty || at_before;
 
         if (expand_length == begun)
                 expand_push_empty();
