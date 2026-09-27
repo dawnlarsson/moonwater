@@ -49654,7 +49654,41 @@ static fn fetching(void)
         check("HTTP keeps percent-encoded path bytes unchanged",
               http_split_into("http://h/%20%0d%0a%7f", name, sizeof name, &port, &path, &tls) == HTTP_OK &&
               string_equals(path, "/%20%0d%0a%7f"));
+        /* The URL parser deliberately does not decode.  The request
+           serializer is the sink that refuses percent-encoded CR/LF/NUL so a
+           peer decoder cannot turn a stored path into a second header. */
+        {
+                p8 request[HTTP_HEAD_MAX];
+                positive used = 0;
 
+                check("HTTP serializer refuses a path the URL parser preserved",
+                      http_split_into("http://h/%0d%0a", name, sizeof name,
+                                      &port, &path, &tls) == HTTP_OK &&
+                          http_get_request(request, sizeof request, name, port,
+                                           path, false, '1', "agent",
+                                           &used) == HTTP_BAD_URL);
+                check("an empty User-Agent is still a present field value",
+                      http_get_request(request, sizeof request, "example.com",
+                                       80, "/safe", false, '1', "",
+                                       &used) == HTTP_OK);
+        }        /* The URL parser deliberately does not decode.  The request
+           serializer is the sink that refuses percent-encoded CR/LF/NUL so a
+           peer decoder cannot turn a stored path into a second header. */
+        {
+                p8 request[HTTP_HEAD_MAX];
+                positive used = 0;
+
+                check("HTTP serializer refuses a path the URL parser preserved",
+                      http_split_into("http://h/%0d%0a", name, sizeof name,
+                                      &port, &path, &tls) == HTTP_OK &&
+                          http_get_request(request, sizeof request, name, port,
+                                           path, false, '1', "agent",
+                                           &used) == HTTP_BAD_URL);
+                check("an empty User-Agent is still a present field value",
+                      http_get_request(request, sizeof request, "example.com",
+                                       80, "/safe", false, '1', "",
+                                       &used) == HTTP_OK);
+        }
         check("a port is taken",
               http_split_into((string_address) "http://127.0.0.1:8080/x", name, sizeof name,
                          address_of port, address_of path, address_of tls) == HTTP_OK);

@@ -33119,6 +33119,16 @@ def harness_tls_chains(argv):
          {"second_extra": "1.2.3.4=critical,DER:05:00\n"}),
         ("unknown noncritical intermediate extension", 2, good_leaf,
          {"second_extra": "1.2.3.4=DER:05:00\n"}),
+        # OpenSSL collapses identical extfile keys, so mint two distinct
+        # unknowns and rewrite the second OID on the wire before resigning.
+        ("intermediate duplicate unknown extension", 2, good_leaf,
+         {"second_extra": "1.2.3.4=DER:05:00\n1.2.3.5=DER:05:00\n",
+          "der_dup_unknown_second": True}),
+        # Default second is BC+KU plus auto SKI/AKI (four).  Pin SKI/AKI off
+        # so BC+KU plus sixty-three unknowns are exactly the wire ceiling.
+        ("intermediate sixty-five extensions", 2, good_leaf,
+         {"second_extra": "subjectKeyIdentifier=none\nauthorityKeyIdentifier=none\n" +
+          "".join("1.2.201.%d=DER:05:00\n" % n for n in range(63))}),
         ("intermediate carries name constraints", 2, good_leaf,
          {"second_extra": "nameConstraints=critical,permitted;IP:127.0.0.0/255.0.0.0\n"}),
         ("path length exceeded", 2, good_leaf, {"first_pathlen": 0}),
@@ -33167,6 +33177,8 @@ def harness_tls_chains(argv):
         "leaf duplicate unknown extension": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
         "leaf nonadjacent duplicate unknown": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
         "leaf sixty-five extensions": "explicit per-certificate extension work ceiling",
+        "intermediate duplicate unknown extension": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
+        "intermediate sixty-five extensions": "explicit per-certificate extension work ceiling",
     }
     MUST_ACCEPT = {
         "good", "under the root", "one intermediate", "root served too",
@@ -33239,7 +33251,7 @@ def harness_tls_chains(argv):
                 at += 1
             return value, at
 
-        def rewrite_leaf_oids(issuer_name, rewrites):
+        def rewrite_cert_oids(name, issuer_name, rewrites):
             # OpenSSL's extfile cannot emit two Extensions with the same OID.
             # Issue distinct OIDs, then rewrite and re-sign so the wire has
             # the duplicate Moonwater must refuse and OpenSSL still accepts.
@@ -33247,7 +33259,7 @@ def harness_tls_chains(argv):
             from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
             der = bytearray(subprocess.check_output(
-                ["openssl", "x509", "-in", "leaf.pem", "-outform", "DER"], cwd=work))
+                ["openssl", "x509", "-in", name + ".pem", "-outform", "DER"], cwd=work))
             for old, new in rewrites:
                 if len(old) != len(new):
                     raise RuntimeError("OID rewrite lengths must match")
@@ -33280,16 +33292,16 @@ def harness_tls_chains(argv):
             bit = bytes([0x03]) + asn1_length(len(signature) + 1) + bytes([0]) + signature
             body = tbs + alg + bit
             cert = bytes([0x30]) + asn1_length(len(body)) + body
-            (work / "leaf.der").write_bytes(cert)
-            openssl("x509", "-inform", "DER", "-in", "leaf.der", "-out", "leaf.pem")
+            (work / (name + ".der")).write_bytes(cert)
+            openssl("x509", "-inform", "DER", "-in", name + ".der", "-out", name + ".pem")
 
-        def mutate_leaf_der(issuer_name, change):
-            rewrites = list(change.get("der_rewrite_oids") or ())
-            if change.get("der_dup_unknown"):
+        def mutate_cert_der(name, issuer_name, change, rewrite_key, dup_key):
+            rewrites = list(change.get(rewrite_key) or ())
+            if change.get(dup_key):
                 # 1.2.3.5 content bytes -> 1.2.3.4 (tag/length stay 06 03).
                 rewrites.append((bytes([0x2a, 0x03, 0x05]), bytes([0x2a, 0x03, 0x04])))
             if rewrites:
-                rewrite_leaf_oids(issuer_name, rewrites)
+                rewrite_cert_oids(name, issuer_name, rewrites)
 
         p384 = keys[1][1]
         for root in ("root", "stranger"):
@@ -33350,12 +33362,16 @@ def harness_tls_chains(argv):
                     issue("second", p384, "/CN=tls chains second", "first",
                           second_extensions,
                           change.get("second_dates", (-1, 90)))
+                    if change.get("der_rewrite_oids_second") or change.get("der_dup_unknown_second"):
+                        mutate_cert_der("second", "first", change,
+                                        "der_rewrite_oids_second", "der_dup_unknown_second")
                     chain.insert(0, "second")
                     issuer = "second"
                 issue("leaf", key, "/CN=127.0.0.1", issuer, leaf_ext,
                       change.get("leaf_dates", (-1, 90)))
                 if change.get("der_rewrite_oids") or change.get("der_dup_unknown"):
-                    mutate_leaf_der(issuer, change)
+                    mutate_cert_der("leaf", issuer, change,
+                                    "der_rewrite_oids", "der_dup_unknown")
                 served = [c for c in chain if not (change.get("skip_second") and c == "second")]
                 if change.get("serve_root"):
                     served.append(top)
