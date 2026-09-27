@@ -55561,11 +55561,11 @@ static fn redirect_urls(void)
               http_transport_allowed(address_of secure, true) && secure);
         check("a redirect chain cannot downgrade after HTTPS",
               !http_transport_allowed(address_of secure, false) && secure);
-        /* HTTPS→HTTP Location refusal is unit-only here: fetching_for_real
-           has no TLS server loopback, so the downgrade guard is exercised
-           through http_transport_allowed / http_absolutize rather than an
-           end-to-end HTTPS hop. Absolute multi-host HTTP_HOPS coverage
-           lives in fetching_for_real. */
+        /* End-to-end HTTPS→HTTP Location refusal (wget manners, TLS loopback)
+           lives in `python3 test/differential.py --harness https_downgrade`
+           (lane_net). This freestanding check still pins the unit guard and
+           that absolutize leaves an absolute http:// Location visible to it.
+           Absolute multi-host HTTP_HOPS coverage lives in fetching_for_real. */
         check("an absolute HTTP Location remains visible to the downgrade guard",
               http_absolutize(true, "example.com", 443, "/old",
                               "http://example.com/new", into, sizeof into) ==
@@ -56186,8 +56186,9 @@ static fn fetching_for_real(void)
         /* Absolute Location hop ceiling across two loopback hosts
            (127.0.0.1 ↔ 127.0.0.2).  Relative Location above only proves the
            count; this proves absolutize + lookup still refuse a tenth hop.
-           HTTPS→HTTP downgrade stays unit-only in redirect_urls: this
-           freestanding harness has no TLS server loopback. */
+           HTTPS→HTTP downgrade e2e is `python3 test/differential.py
+           --harness https_downgrade` (lane_net); this freestanding harness
+           has no TLS server loopback. */
         {
                 socket_address_internet where_a;
                 socket_address_internet where_b;

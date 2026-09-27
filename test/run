@@ -3589,11 +3589,20 @@ lane_socket() { freestanding_checks_lane socket socket; }
 #       tls_der_fuzz is a bounded libFuzzer ASan/UBSan run over
 #       tls_parse_extensions / tls_parse_cert (seed corpus under
 #       test/fuzz_corpus/tls_der/); NOT RUN (2) when clang/libFuzzer is absent.
+#       tls_hs_fuzz is the same bounded pattern over handshake fragmentation
+#       (tls_handshake_one_append / tls_encrypted_flight_append; corpus under
+#       test/fuzz_corpus/tls_hs/).
 lane_net()
 {
         freestanding_checks_lane net net
         net_outcome=$?
         python3 test/differential.py --harness tls_chains
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
+        python3 test/differential.py --harness https_downgrade
         case $? in
         0) ;;
         2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
@@ -3606,6 +3615,12 @@ lane_net()
         *) net_outcome=1 ;;
         esac
         python3 test/differential.py --harness tls_der_fuzz
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
+        python3 test/differential.py --harness tls_hs_fuzz
         case $? in
         0) ;;
         2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;

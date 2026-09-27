@@ -40,7 +40,9 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
 - [x] Header names, controls, obsolete folding, chunk lines, extensions, and
   trailers have bounded grammar tests.
 - [x] Stream framing is tested at every socket/header split.
-- [x] Redirect count and HTTPS downgrade are bounded/refused.
+- [x] Redirect count and HTTPS downgrade are bounded/refused
+  (`python3 test/differential.py --harness https_downgrade` for e2e
+  HTTPS→HTTP Location refusal under wget manners).
 - [x] Differentially test response framing against multiple independent HTTP
   implementations, retaining a written policy where references disagree
   (`python3 test/differential.py --harness http_response_framing`).
@@ -65,7 +67,11 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
       (`tls_der_fuzz` seeds plus `tls_certificate_body_open` / list walk with
       `tls_parse_cert` on slices, then the same empty-list / leftover refuse as
       `tls_verify_chain`; expected `TLS_FAIL` ignored).
-- [ ] Add persistent coverage-guided fuzzing for handshake fragmentation.
+- [x] Add persistent coverage-guided fuzzing for handshake fragmentation
+      (`python3 test/differential.py --harness tls_hs_fuzz`; lifts
+      `tls_handshake_one_append` / `tls_encrypted_flight_append` with `tls=null`
+      framing; seeds under `test/fuzz_corpus/tls_hs/`; ASan/UBSan via clang
+      libFuzzer when available, else NOT RUN).
 
 ## Shell and operating-system boundary
 

@@ -33523,6 +33523,227 @@ def harness_tls_chains(argv):
     return checks.verdict("tls chains", "tls-chains")
 
 
+def harness_https_downgrade(argv):
+    """HTTPS→HTTP Location refusal under wget manners, on a TLS loopback.
+
+    Freestanding CHECK_net's redirect_urls can only unit-test
+    http_transport_allowed: there is no TLS server in that harness. This
+    builds the same anchored wget as tls_chains (follow + allow_tls), serves
+    a TLS 1.3 302 whose Location is http://, and requires the downgrade
+    refuse — not success and not the hop-budget refuse.
+
+        python3 test/differential.py --harness https_downgrade
+    """
+    import datetime
+    import shutil
+    import socket
+    import ssl
+    import subprocess
+    import tempfile
+    import threading
+
+    parser = argparse.ArgumentParser(prog="differential.py --harness https_downgrade")
+    parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux" or not shutil.which("openssl"):
+        print("https downgrade: NOT RUN -- needs Linux and openssl")
+        return 2
+
+    checks = Checks()
+    with tempfile.TemporaryDirectory(prefix="https-downgrade-") as temporary:
+        work = Path(temporary)
+
+        def openssl(*arguments):
+            subprocess.run(["openssl", *arguments], check=True, cwd=work,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        openssl("req", "-x509", "-newkey", "ec",
+                "-pkeyopt", "ec_paramgen_curve:secp384r1", "-nodes",
+                "-keyout", "root.key", "-out", "root.pem", "-days", "3650",
+                "-sha384", "-subj", "/CN=https downgrade root",
+                "-addext", "basicConstraints=critical,CA:TRUE",
+                "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+        (work / "leaf.ext").write_text(
+            "[extensions]\n"
+            "basicConstraints=critical,CA:FALSE\n"
+            "keyUsage=critical,digitalSignature\n"
+            "extendedKeyUsage=serverAuth\n"
+            "subjectAltName=IP:127.0.0.1\n")
+        openssl("req", "-new", "-newkey", "ec",
+                "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+                "-keyout", "leaf.key", "-out", "leaf.csr",
+                "-subj", "/CN=127.0.0.1")
+        # Prefer x509 -not_before when present; else ca -startdate (tls_chains).
+        x509_help = subprocess.run(["openssl", "x509", "-help"], cwd=work,
+                                   capture_output=True, text=True)
+        if "-not_before" in (x509_help.stdout + x509_help.stderr):
+            now = datetime.datetime.now(datetime.timezone.utc)
+            openssl("x509", "-req", "-in", "leaf.csr", "-CA", "root.pem",
+                    "-CAkey", "root.key", "-set_serial", "1",
+                    "-not_before", (now - datetime.timedelta(days=1)).strftime(
+                        "%Y%m%d%H%M%SZ"),
+                    "-not_after", (now + datetime.timedelta(days=90)).strftime(
+                        "%Y%m%d%H%M%SZ"),
+                    "-out", "leaf.pem", "-sha384",
+                    "-extfile", "leaf.ext", "-extensions", "extensions")
+        else:
+            (work / "ca.conf").write_text(
+                "[ca]\ndefault_ca=local\n[local]\ndatabase=index\n"
+                "new_certs_dir=.\nserial=serial\ndefault_md=sha384\n"
+                "policy=names\nunique_subject=no\n[names]\ncommonName=supplied\n")
+            (work / "index").write_text("")
+            (work / "serial").write_text("01\n")
+            now = datetime.datetime.now(datetime.timezone.utc)
+            openssl("ca", "-batch", "-config", "ca.conf", "-in", "leaf.csr",
+                    "-cert", "root.pem", "-keyfile", "root.key",
+                    "-startdate", (now - datetime.timedelta(days=1)).strftime(
+                        "%Y%m%d%H%M%SZ"),
+                    "-enddate", (now + datetime.timedelta(days=90)).strftime(
+                        "%Y%m%d%H%M%SZ"),
+                    "-out", "leaf.pem", "-notext", "-md", "sha384",
+                    "-extfile", "leaf.ext", "-extensions", "extensions")
+        (work / "chain.pem").write_text(
+            (work / "leaf.pem").read_text() + (work / "root.pem").read_text())
+
+        spki = subprocess.run(
+            ["openssl", "pkey", "-in", str(work / "root.key"), "-pubout",
+             "-outform", "DER"], check=True, capture_output=True).stdout
+        point = spki[-97:]
+        (work / "anchor.inc").write_text("".join(
+            "static const p8 tls_bench_anchor_%s[48] = {%s};\n" % (
+                axis, ", ".join("0x%02x" % b for b in coordinate))
+            for axis, coordinate in (("x", point[1:49]), ("y", point[49:97]))))
+
+        host = platform.machine().lower()
+        if host in ("x86_64", "amd64"):
+            arch_flags = ["-march=x86-64"]
+        elif host in ("aarch64", "arm64"):
+            arch_flags = ["-mno-outline-atomics"]
+        elif host == "riscv64":
+            arch_flags = ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"]
+        else:
+            arch_flags = []
+        built = subprocess.run(
+            [args.cc, "-O2", "-static", "-nostdlib", "-nostartfiles",
+             "-fno-stack-protector", "-fno-builtin", *arch_flags, "-w",
+             "-T", "src/build/spark.ld", "-Wl,-e,_start",
+             "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments",
+             '-DTLS_BENCH_ANCHOR="%s"' % (work / "anchor.inc"),
+             "-o", str(work / "shell"), "programs/shell.c"],
+            cwd=HARNESS_ROOT, capture_output=True, text=True)
+        if built.returncode:
+            print(built.stderr[-3000:])
+            return 1
+        (work / "wget").symlink_to(work / "shell")
+
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_3
+        context.load_cert_chain(work / "chain.pem", work / "leaf.key")
+        context.set_ecdh_curve("prime256v1")
+
+        def serve_map(routes, accepts):
+            listener = socket.socket()
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(accepts)
+            listener.settimeout(20)
+            port = listener.getsockname()[1]
+            done = threading.Event()
+
+            def handle():
+                try:
+                    for _ in range(accepts):
+                        raw, _ = listener.accept()
+                        raw.settimeout(20)
+                        with context.wrap_socket(raw, server_side=True) as tls:
+                            head = b""
+                            while b"\r\n\r\n" not in head:
+                                got = tls.recv(4096)
+                                if not got:
+                                    break
+                                head += got
+                            request_line = head.split(b"\r\n", 1)[0]
+                            path = b"/"
+                            parts = request_line.split(b" ")
+                            if len(parts) >= 2:
+                                path = parts[1].split(b"?", 1)[0]
+                            reply = routes.get(path, (
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n"
+                                b"Connection: close\r\n\r\n"))
+                            if callable(reply):
+                                reply = reply(port)
+                            tls.sendall(reply)
+                except (OSError, ssl.SSLError):
+                    pass
+                finally:
+                    done.set()
+                    try:
+                        listener.close()
+                    except OSError:
+                        pass
+
+            threading.Thread(target=handle, daemon=True).start()
+            return port, done
+
+        def redirect(location):
+            return (b"HTTP/1.1 302 Found\r\nLocation: " + location +
+                    b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+
+        def body_ok(_port=None):
+            return (b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                    b"Connection: close\r\n\r\nok")
+
+        def wget(url):
+            return subprocess.run(
+                [str(work / "wget"), "-q", "-O", "-", url],
+                capture_output=True, timeout=30,
+                env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+
+        # 1. First hop already HTTPS; Location is plain HTTP — refuse before
+        #    connecting to the http:// target (hop budget still has room).
+        port, done = serve_map({
+            b"/": lambda p: redirect(b"http://127.0.0.1:9/"),
+        }, 1)
+        fetched = wget("https://127.0.0.1:%d/" % port)
+        done.wait(25)
+        err = fetched.stderr.decode(errors="replace")
+        checks(fetched.returncode != 0 and
+               "refused an HTTPS to HTTP redirect" in err and
+               "too many redirects" not in err,
+               "HTTPS Location to http://127.0.0.1 is refused as a downgrade (%s)" %
+               err.strip()[:200])
+
+        # 2. After an HTTPS→HTTPS upgrade hop, a later http:// Location is
+        #    still refused (secure sticky across hops).
+        port, done = serve_map({
+            b"/up": lambda p: redirect(
+                ("https://127.0.0.1:%d/then" % p).encode()),
+            b"/then": lambda p: redirect(b"http://127.0.0.1:9/"),
+        }, 2)
+        fetched = wget("https://127.0.0.1:%d/up" % port)
+        done.wait(25)
+        err = fetched.stderr.decode(errors="replace")
+        checks(fetched.returncode != 0 and
+               "refused an HTTPS to HTTP redirect" in err and
+               "too many redirects" not in err,
+               "HTTP Location after an HTTPS hop is still refused (%s)" %
+               err.strip()[:200])
+
+        # 3. Same-scheme HTTPS redirects still succeed — proves follow works
+        #    and the refuse above is the downgrade guard, not hop budget.
+        port, done = serve_map({
+            b"/hop": lambda p: redirect(
+                ("https://127.0.0.1:%d/ok" % p).encode()),
+            b"/ok": body_ok,
+        }, 2)
+        fetched = wget("https://127.0.0.1:%d/hop" % port)
+        done.wait(25)
+        checks(fetched.returncode == 0 and fetched.stdout == b"ok",
+               "an HTTPS to HTTPS redirect is still followed (%s)" %
+               fetched.stderr.decode(errors="replace").strip()[:200])
+
+    return checks.verdict("https downgrade", "https-downgrade")
+
 
 def harness_http_response_framing(argv):
     """Moonwater HTTP response framing against a written accept/refuse matrix.
@@ -34265,6 +34486,403 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         print("  tls der fuzz: %d seeds, libFuzzer ASan/UBSan run clean" %
               len(seeds))
         write_tally("tls-der-fuzz", 1, 1)
+        return 0
+
+
+def harness_tls_hs_fuzz(argv):
+    """Coverage-guided libFuzzer over handshake fragmentation / reassembly.
+
+    Lifts production tls_handshake_one_append, tls_server_flight_step, and
+    tls_encrypted_flight_append (tls=null framing mode) from src/net/net.c the
+    way tls_der_fuzz lifts DER parsers. Seed corpus under
+    test/fuzz_corpus/tls_hs/ mirrors ServerHello fragment and encrypted-flight
+    cases from checks.c. Bounded fixed-seed run; return 2 (NOT RUN) when
+    clang/libFuzzer is unavailable. Expected TLS_FAIL is ignored; only
+    ASan/UBSan aborts fail the lane.
+
+        python3 test/differential.py --harness tls_hs_fuzz
+    """
+    del argv
+    import shutil
+    import tempfile
+
+    clang = shutil.which("clang")
+    if not clang:
+        print("tls hs fuzz: NOT RUN -- no clang")
+        return 2
+
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    corpus = HARNESS_ROOT / "test/fuzz_corpus/tls_hs"
+    if not corpus.is_dir():
+        print("tls hs fuzz: NOT RUN -- missing seed corpus at " + str(corpus))
+        return 2
+    seeds = sorted(p for p in corpus.iterdir() if p.is_file())
+    if not seeds:
+        print("tls hs fuzz: NOT RUN -- seed corpus is empty")
+        return 2
+
+    def sec(text, first, following):
+        i = text.index(first)
+        return text[i:text.index(following, i)]
+
+    load24 = sec(
+        net,
+        "// A TLS handshake length: three bytes, most significant first.\n"
+        "static PURE positive tls_load_24",
+        "static COLD bool tls_certificate_body_open")
+    one_append = sec(
+        net,
+        "#define TLS_HANDSHAKE_MORE 0\n"
+        "#define TLS_HANDSHAKE_COMPLETE 1\n\n"
+        "/* The handshake protocol is a byte stream layered over records.  ServerHello\n"
+        "   may therefore cross record boundaries, but it is the last plaintext\n"
+        "   handshake message: bytes after its declared end cannot legally share that\n"
+        "   plaintext stream. */\n"
+        "static COLD bipolar tls_handshake_one_append",
+        "static COLD bipolar tls_install_handshake_keys")
+    flight_step = sec(
+        net,
+        "#define TLS_SERVER_FLIGHT_EE 0\n"
+        "#define TLS_SERVER_FLIGHT_CERTIFICATE 1\n"
+        "#define TLS_SERVER_FLIGHT_CERT_VERIFY 2\n"
+        "#define TLS_SERVER_FLIGHT_FINISHED 3\n"
+        "#define TLS_SERVER_FLIGHT_COMPLETE 4\n\n"
+        "/* This client offers neither PSK nor client authentication, so the server\n"
+        "   flight has exactly one legal shape.",
+        "/* RFC 8446 forbids duplicate extensions.")
+    flight_append = sec(
+        net,
+        "/* Encrypted server flight: handshake bytes are a stream across records, so\n"
+        "   each plaintext fragment is appended to hs[] and every complete message is\n"
+        "   peeled from the front.",
+        "static COLD bipolar tls_handshake(")
+
+    shim = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+typedef uint8_t p8;
+typedef uint8_t b8;
+typedef uint16_t p16;
+typedef uint32_t p32;
+typedef uint64_t p64;
+typedef int32_t b32;
+typedef long bipolar;
+typedef unsigned long positive;
+typedef void *address_any;
+typedef char *string_address;
+typedef const char *const_string;
+#define COLD
+#define CONST
+#define PURE
+#define fn void
+#define address_to *
+#define address_of &
+#define null NULL
+#define end ((p8)0)
+#define positive_max (~(positive)0)
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define memory_compare memcmp
+/* Production memory_copy is memmove; flight peel copies within hs[] overlap. */
+#define memory_copy memmove
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define TLS_OK 0
+#define TLS_FAIL (-1)
+#define TLS_HS_MAX 16384
+#define TLS_HS_SERVER_HELLO 2
+#define TLS_HS_ENCRYPTED_EXTS 8
+#define TLS_HS_CERTIFICATE 11
+#define TLS_HS_CERT_VERIFY 15
+#define TLS_HS_FINISHED 20
+static p16 network_load_16(const p8 *bytes)
+{
+        return (p16)(((p16)bytes[0] << 8) | (p16)bytes[1]);
+}
+/* tls_encrypted_flight_append only touches tls->host when tls is non-null;
+   the fuzzer always passes null (framing mode). A complete type is still
+   required so the lifted production body compiles. */
+typedef struct tls_conn
+{
+        string_address host;
+} tls_conn;
+static fn tls_transcript_add(tls_conn address_to tls, p8 address_to msg,
+                             positive length)
+{
+        (void)tls;
+        (void)msg;
+        (void)length;
+}
+static COLD bool tls_encrypted_extensions_valid(p8 address_to body,
+                                                positive length)
+{
+        (void)body;
+        (void)length;
+        return false;
+}
+static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
+                                  string_address host, tls_conn address_to tls)
+{
+        (void)body;
+        (void)body_length;
+        (void)host;
+        (void)tls;
+        return false;
+}
+static COLD bipolar tls_check_cert_verify(tls_conn address_to tls,
+                                          p8 address_to msg, positive length)
+{
+        (void)tls;
+        (void)msg;
+        (void)length;
+        return TLS_FAIL;
+}
+static COLD bipolar tls_check_finished(tls_conn address_to tls,
+                                       p8 address_to verify, positive length)
+{
+        (void)tls;
+        (void)verify;
+        (void)length;
+        return TLS_FAIL;
+}
+"""
+
+    driver = r"""
+static void fuzz_flight_chunks(p8 *data, positive length)
+{
+        p8 *hs;
+        positive used = 0;
+        p8 flight = TLS_SERVER_FLIGHT_EE;
+        positive messages = 0;
+        positive at = 0;
+
+        hs = (p8 *)malloc(TLS_HS_MAX);
+        if (!hs)
+                return;
+        memory_fill(hs, 0, TLS_HS_MAX);
+
+        while (at + 2 <= length)
+        {
+                positive frag = ((positive)data[at] << 8) | data[at + 1];
+                at += 2;
+                if (at + frag > length)
+                        frag = length - at;
+                (void)tls_encrypted_flight_append(
+                    null, hs, TLS_HS_MAX, address_of used, address_of flight,
+                    data + at, frag, address_of messages);
+                at += frag;
+                if (used == TLS_HS_MAX)
+                {
+                        p8 one = 0;
+                        (void)tls_encrypted_flight_append(
+                            null, hs, TLS_HS_MAX, address_of used,
+                            address_of flight, address_of one, 1,
+                            address_of messages);
+                        break;
+                }
+        }
+        free(hs);
+}
+
+static void fuzz_flight_splits(p8 *data, positive length)
+{
+        p8 *hs;
+        positive used;
+        p8 flight;
+        positive messages;
+        positive split;
+
+        if (!length || length > 512)
+                return;
+
+        hs = (p8 *)malloc(TLS_HS_MAX);
+        if (!hs)
+                return;
+
+        for (split = 0; split <= length; split++)
+        {
+                used = 0;
+                flight = TLS_SERVER_FLIGHT_EE;
+                messages = 0;
+                memory_fill(hs, 0, TLS_HS_MAX);
+                if (split)
+                        (void)tls_encrypted_flight_append(
+                            null, hs, TLS_HS_MAX, address_of used,
+                            address_of flight, data, split,
+                            address_of messages);
+                if (split < length)
+                        (void)tls_encrypted_flight_append(
+                            null, hs, TLS_HS_MAX, address_of used,
+                            address_of flight, data + split, length - split,
+                            address_of messages);
+        }
+        free(hs);
+}
+
+static void fuzz_flight_whole(p8 *data, positive length)
+{
+        p8 *hs;
+        positive used = 0;
+        p8 flight = TLS_SERVER_FLIGHT_EE;
+        positive messages = 0;
+
+        hs = (p8 *)malloc(TLS_HS_MAX);
+        if (!hs)
+                return;
+        memory_fill(hs, 0, TLS_HS_MAX);
+        (void)tls_encrypted_flight_append(
+            null, hs, TLS_HS_MAX, address_of used, address_of flight, data,
+            length, address_of messages);
+        if (used == TLS_HS_MAX)
+        {
+                p8 one = 0;
+                (void)tls_encrypted_flight_append(
+                    null, hs, TLS_HS_MAX, address_of used, address_of flight,
+                    address_of one, 1, address_of messages);
+        }
+        free(hs);
+}
+
+static void fuzz_server_hello_chunks(p8 *data, positive length)
+{
+        p8 held[512];
+        positive used = 0;
+        positive at = 0;
+
+        memory_fill(held, 0, sizeof held);
+        while (at + 2 <= length)
+        {
+                positive frag = ((positive)data[at] << 8) | data[at + 1];
+                at += 2;
+                if (at + frag > length)
+                        frag = length - at;
+                (void)tls_handshake_one_append(held, sizeof held,
+                                               address_of used, data + at,
+                                               frag);
+                at += frag;
+                if (used >= sizeof held)
+                        break;
+        }
+}
+
+static void fuzz_server_hello_whole(p8 *data, positive length)
+{
+        p8 held[512];
+        positive used = 0;
+        positive split;
+
+        memory_fill(held, 0, sizeof held);
+        (void)tls_handshake_one_append(held, sizeof held, address_of used, data,
+                                       length);
+
+        if (!length || length > 256)
+                return;
+        for (split = 1; split < length; split++)
+        {
+                used = 0;
+                memory_fill(held, 0, sizeof held);
+                (void)tls_handshake_one_append(held, sizeof held,
+                                               address_of used, data, split);
+                (void)tls_handshake_one_append(held, sizeof held,
+                                               address_of used, data + split,
+                                               length - split);
+        }
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        p8 *buf;
+        positive length;
+        p8 *payload;
+        positive payload_length;
+
+        if (size > 65536)
+                size = 65536;
+        length = (positive)size;
+        buf = (p8 *)malloc(length ? length : 1);
+        if (!buf)
+                return 0;
+        if (length)
+                memcpy(buf, data, length);
+
+        payload = buf;
+        payload_length = length;
+        /* Optional magic selects a focused path; remainder is the payload. */
+        if (length > 0 && buf[0] == 0xf1)
+        {
+                payload = buf + 1;
+                payload_length = length - 1;
+                fuzz_flight_chunks(payload, payload_length);
+                fuzz_flight_whole(payload, payload_length);
+                fuzz_flight_splits(payload, payload_length);
+        }
+        else if (length > 0 && buf[0] == 0xf2)
+        {
+                payload = buf + 1;
+                payload_length = length - 1;
+                fuzz_server_hello_chunks(payload, payload_length);
+                fuzz_server_hello_whole(payload, payload_length);
+        }
+        else
+        {
+                fuzz_flight_whole(buf, length);
+                fuzz_flight_chunks(buf, length);
+                fuzz_flight_splits(buf, length);
+                fuzz_server_hello_whole(buf, length);
+                fuzz_server_hello_chunks(buf, length);
+        }
+
+        free(buf);
+        return 0;
+}
+"""
+
+    source = (shim + "\n" + load24 + "\n" + one_append + "\n" + flight_step +
+              "\n" + flight_append + "\n" + driver)
+    environment = dict(os.environ,
+                       ASAN_OPTIONS="detect_leaks=0:halt_on_error=1",
+                       UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=0")
+
+    with tempfile.TemporaryDirectory(prefix="tls-hs-fuzz-") as temporary:
+        work = Path(temporary)
+        unit = work / "tls_hs_fuzz.c"
+        binary = work / "tls_hs_fuzz"
+        unit.write_text(source)
+        built = subprocess.run(
+            [clang, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
+             "-fno-sanitize-recover=all",
+             "-fsanitize=fuzzer,address,undefined",
+             str(unit), "-o", str(binary)],
+            capture_output=True, text=True)
+        if built.returncode:
+            print("tls hs fuzz: NOT RUN -- clang lacks libFuzzer "
+                  "(need -fsanitize=fuzzer):\n" + built.stderr[-2000:])
+            return 2
+
+        run_corpus = work / "corpus"
+        run_corpus.mkdir()
+        for seed in seeds:
+            (run_corpus / seed.name).write_bytes(seed.read_bytes())
+
+        ran = subprocess.run(
+            [str(binary), str(run_corpus),
+             "-seed=1", "-runs=20000", "-max_total_time=5",
+             "-max_len=20480",
+             "-artifact_prefix=" + str(work) + "/",
+             "-print_final_stats=0"],
+            capture_output=True, text=True, env=environment, timeout=60)
+        ok = ran.returncode == 0 and "ERROR" not in ran.stderr and \
+            "Sanitizer" not in ran.stderr and "runtime error" not in ran.stderr
+        if not ok:
+            print("  FAIL tls hs libFuzzer:\n" +
+                  (ran.stderr or ran.stdout)[-3000:])
+            write_tally("tls-hs-fuzz", 0, 1)
+            return 1
+        print("  tls hs fuzz: %d seeds, libFuzzer ASan/UBSan run clean" %
+              len(seeds))
+        write_tally("tls-hs-fuzz", 1, 1)
         return 0
 
 
@@ -38153,8 +38771,10 @@ HARNESS_CHECKS = {
     "moonwater_cli": harness_moonwater_cli,
     "machine_reap": harness_machine_reap,
     "tls_chains": harness_tls_chains,
+    "https_downgrade": harness_https_downgrade,
     "http_response_framing": harness_http_response_framing,
     "tls_der_fuzz": harness_tls_der_fuzz,
+    "tls_hs_fuzz": harness_tls_hs_fuzz,
     "machine_scan": harness_machine_scan,
     "waterlink_noise": harness_waterlink_noise,
     "waterlink_mdns": harness_waterlink_mdns,
