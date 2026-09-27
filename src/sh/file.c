@@ -25365,8 +25365,15 @@ static bool file_backup_made_at(string_address program, bipolar directory,
             directory, kept, AT_SYMLINK_NOFOLLOW,
             address_of kept_facts);
         bool kept_exists = kept_looked >= 0;
+        /* A suffix may end in a slash (x/ is one name component), and the
+           kernel refuses to rename anything but a directory onto a name
+           spelled with one, whatever is there. */
+        bool kept_slashed = kept[string_length(kept) - 1] == '/';
         bipolar moved = original < 0
                             ? original
+                        : kept_slashed &&
+                                  (facts.mode & MODE_FORMAT) != MODE_DIRECTORY
+                            ? -ERROR_NOT_DIRECTORY
                         : kept_looked < 0 && kept_looked != -ERROR_NO_ENTRY
                             ? kept_looked
                         : kept_exists &&
@@ -25421,16 +25428,21 @@ static bool file_backup_taken(file_taking address_to taking, string_address prog
         file_backup_kind = 0;
         (void)program;
         file_backup_suffix = file_option_value(taking, 'S');
-
-        if (file_backup_suffix && !string_get(file_backup_suffix))
-                file_backup_suffix = (string_address) "~";
-        else if (!file_backup_suffix)
-        {
+        if (!file_backup_suffix)
                 file_backup_suffix = file_environment((string_address) "SIMPLE_BACKUP_SUFFIX");
 
-                if (!file_backup_suffix || !string_get(file_backup_suffix))
-                        file_backup_suffix = (string_address) "~";
-        }
+        /* gnulib's set_simple_backup_suffix: the suffix is glued onto the
+           destination's own name, so it must be one name component. One
+           holding a slash before more name -- _/../c -- would make the
+           backup name a path to somewhere else, and is replaced by ~ the
+           way an empty one is. Trailing slashes alone leave it one. */
+        bool component = file_backup_suffix && string_get(file_backup_suffix) &&
+                         file_backup_suffix[0] != '/';
+        for (string_address at = file_backup_suffix; component && *at; at++)
+                if (at[0] == '/' && at[1] && at[1] != '/')
+                        component = false;
+        if (!component)
+                file_backup_suffix = (string_address) "~";
 
         if (taking->flags & (FILE_FLAG('b') | FILE_FLAG('S')))
                 file_backup_kind = 'e';

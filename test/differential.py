@@ -541,18 +541,27 @@ class Case:
     family: str = None
     input_kind: str = "command"
     tier: str = "grammar"
+    #   Variables set for this case alone, over the utility's own: pairs,
+    #   and part of the identity only when there are any, so every case
+    #   written before it keeps the identity its pins were taken under.
+    env: tuple = ()
 
     def identity(self):
         material = json.dumps([self.domain, self.utility, self.argv, self.stdin,
-                               self.fixture, self.mode, self.input_kind],
+                               self.fixture, self.mode, self.input_kind]
+                              + ([[list(pair) for pair in self.env]] if self.env else []),
                               separators=(",", ":"), ensure_ascii=False)
         return hashlib.sha256(material.encode()).hexdigest()[:16]
 
     def as_dict(self):
-        return dataclasses.asdict(self)
+        data = dataclasses.asdict(self)
+        if not data["env"]:
+            del data["env"]
+        return data
 
     def words(self):
-        return " ".join(shlex.quote(word) for word in self.argv)
+        return " ".join([shlex.quote(name + "=" + value) for name, value in self.env] +
+                        [shlex.quote(word) for word in self.argv])
 
 
 # ----------------------------------------------------------------------------
@@ -651,10 +660,11 @@ def grammar_cases(domain, utility, budget, rng):
     count = len(utility.options)
     seen = set()
 
-    def emit(argv, stdin, tier, fixture=None):
+    def emit(argv, stdin, tier, fixture=None, env=()):
         if utility.valid and not _valid(utility.valid, argv, stdin):
             return
-        case = Case(domain, utility.name, argv, stdin, fixture or utility.fixture, tier=tier)
+        case = Case(domain, utility.name, argv, stdin, fixture or utility.fixture, tier=tier,
+                    env=tuple(tuple(pair) for pair in env))
         key = case.identity()
         if key in seen:
             return
@@ -679,11 +689,12 @@ def grammar_cases(domain, utility, budget, rng):
     #       An extra case is an argv, or a dict naming the fixture set it
     #       runs in when the files it needs are not in the utility's own:
     #       a new set gives its cases their own identities and leaves every
-    #       pinned row of the shared one where it was.
+    #       pinned row of the shared one where it was. A dict may also set
+    #       variables for that case alone.
     for argv in utility.extra:
         if isinstance(argv, dict):
             yield from emit(list(argv["argv"]), argv.get("stdin", utility.stdin[0]), "extra",
-                            argv["fixture"])
+                            argv.get("fixture"), argv.get("env", ()))
         else:
             yield from emit(list(argv), utility.stdin[0], "extra")
     if budget == "singles":
@@ -1002,6 +1013,7 @@ class Runner:
                        "TERM": "dumb"}
         if spec is not None:
             environment.update(dict(spec.env))
+        environment.update(dict(case.env))
         timeout = spec.timeout if spec is not None else 5.0
         feed = INPUTS[case.stdin] if case.stdin in INPUTS else b""
         if case.mode and case.input_kind == "stdin":
@@ -1218,7 +1230,8 @@ def row_case(row):
     case = row["case"]
     return Case(case["domain"], case["utility"], list(case["argv"]), case.get("stdin", "text"),
                 case.get("fixture", "basic"), case.get("mode"), case.get("family"),
-                case.get("input_kind", "command"), tier="pinned")
+                case.get("input_kind", "command"), tier="pinned",
+                env=tuple(tuple(pair) for pair in case.get("env", ())))
 
 
 def digest(result, spec=None, case=None):
@@ -6629,6 +6642,45 @@ def files_slash_destinations(tool, flags, sources):
     return tuple(cases)
 
 
+#       What a backup is named, and what it is named over: the suffix
+#       spelled with -S, --suffix and SIMPLE_BACKUP_SUFFIX, each kind of
+#       control, and a destination whose backup name is a path somewhere
+#       else. The suffix is glued onto the destination's own name, so one
+#       holding a slash before more name -- b + _/../c -- once named c
+#       through the directory b_ and moved the destination over it.
+FIXTURES["files_backup"] = {
+    "a": files_file(b"A\n", 1000000000),
+    "b": files_file(b"B\n", 1100000000),
+    "c": files_file(b"victim\n", 1200000000),
+    "b_": files_dir(1300000000),
+    "bx": files_dir(1310000000),
+    "d/b": files_file(b"inner\n", 1400000000),
+    "d": files_dir(1410000000),
+}
+
+
+def files_backup_cases(tool, words):
+    """Every way a suffix reaches the backup name, crossed with every control
+    word and each way the tool is told to make one, drawn per tool so a
+    second tool is not the first one's cases under another name."""
+    rng = random.Random(int.from_bytes(hashlib.sha256(
+        ("backup:" + tool).encode()).digest()[:8], "little"))
+    suffixes = ("_/../c", "/../c", "_//../c", "x/", "/", "x//", ".bak", "", "_/", "/c")
+    controls = ((), ("-b",), ("--backup",), ("--backup=simple",), ("--backup=numbered",),
+                ("--backup=existing",), ("--backup=none",))
+    targets = (("a", "b"), ("a", "d"), ("a", "d/b"))
+    cases = []
+    for suffix in suffixes:
+        for control in rng.sample(controls, 3):
+            argv = tuple(words) + tuple(control)
+            target = rng.choice(targets)
+            cases.append({"fixture": "files_backup", "argv": argv + ("-S", suffix) + target})
+            cases.append({"fixture": "files_backup", "argv": argv + ("--suffix=" + suffix,) + target})
+            cases.append({"fixture": "files_backup", "argv": argv + target,
+                          "env": (("SIMPLE_BACKUP_SUFFIX", suffix),)})
+    return tuple(cases)
+
+
 FILES_UTILITIES = (
     # yes is the one program here the engine cannot bound: it writes until
     # something stops it, so both sides die on the harness's file-size limit
@@ -6937,7 +6989,8 @@ FILES_UTILITIES = (
                    ("-s", "a.txt", "missing/x"), ("a.txt", "missing/x"), ("-sv", "a.txt", "shut/x"))
             + files_slash_destinations(
                 "ln", ("-s", "-f", "-n", "-v", "-T", "-b", "-r", "-L", "-P", "--backup=numbered"),
-                ("a.txt", "dir", "link", "dangling"))),
+                ("a.txt", "dir", "link", "dangling"))
+            + files_backup_cases("ln", ("-s",)) + files_backup_cases("ln", ("-f",))),
     Utility("link", operands=(("a.txt", "hard"), ("link", "hard"), ("a.txt", "-W"), ("--", "-dash", "hard"), ("missing", "hard"),
                               ("dir", "hard"), ("a.txt", "b.txt"), ("a.txt",), (), ("one", "two", "three"), ("a.txt", "dir"),
                               ("a.txt", "dir/"), ("dangling", "hard"), ("a.txt", "shut/hard"), ("two words", "sp ace"),
@@ -7137,7 +7190,8 @@ FILES_UTILITIES = (
                 "cp", ("-r", "-l", "-s", "-P", "-d", "-v", "-n", "-f", "-b", "-T", "-u", "-a", "-L", "--attributes-only",
                        "--remove-destination", "--strip-trailing-slashes", "--update=none-fail"),
                 ("a.txt", "dir", "link", "dirlink", "empty"))
-                if not ("dir" in case and ("-s" in case or "dirlink/" in case or "dir/new/" in case))),
+                if not ("dir" in case and ("-s" in case or "dirlink/" in case or "dir/new/" in case)))
+            + files_backup_cases("cp", ()) + files_backup_cases("cp", ("-a",)),
             normalize=files_sorted_lines),
     Utility("install", options=(Option("-b"), Option("-c"), Option("-C"), Option("-d"), Option("-D"), Option("-p"), Option("-s"),
                                 Option("-T"), Option("-v"), Option("-Z"), Option("--backup"),
@@ -7168,7 +7222,8 @@ FILES_UTILITIES = (
                    ("-D", "a.txt", "loop/y"), ("-D", "a.txt", "a.txt/y"), ("-D", "a.txt", "shut/new/y"), ("-D", "-v", "a.txt", "new/deep/made"))
             + files_slash_destinations(
                 "install", ("-D", "-v", "-T", "-b", "-C", "-p", "--mode=0600", "--backup=numbered"),
-                ("a.txt", "link", "empty"))),
+                ("a.txt", "link", "empty"))
+            + files_backup_cases("install", ())),
     Utility("mv", options=(Option("-b"), Option("-f"), Option("-i"), Option("-n"), Option("-u"), Option("-v"), Option("-T"),
                            Option("--backup"), Option("--backup", ("numbered", "simple", "none", "existing", "bogus"), True),
                            Option("--force"), Option("--interactive"), Option("--no-clobber"), Option("--update"),
@@ -7197,7 +7252,8 @@ FILES_UTILITIES = (
             + tuple(case for case in files_slash_destinations(
                 "mv", ("-f", "-n", "-u", "-v", "-b", "-T", "--update=none-fail", "--no-copy", "--debug"),
                 ("a.txt", "dir", "link", "dirlink", "dangling"))
-                if "dangling/" not in case)),
+                if "dangling/" not in case)
+            + files_backup_cases("mv", ())),
     Utility("rm", options=(Option("-f"), Option("-i"), Option("-I"), Option("-r"), Option("-R"), Option("-d"), Option("-v"),
                            Option("--force"), Option("--interactive"), Option("--interactive", ("always", "once", "never", "bogus"), True),
                            Option("--one-file-system"), Option("--no-preserve-root"), Option("--preserve-root"),
