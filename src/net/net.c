@@ -9241,11 +9241,15 @@ static COLD bipolar dhcp_complete(bipolar handle, p8 address_to packet,
         It was getrandom. With no flags it waits for the kernel's entropy pool
         to be initialised, and early in boot it is not. Twelve seconds of a
         boot were spent there, before a single packet moved, asking for a
-        number to put in a header. GRND_NONBLOCK asks not to wait, and the
-        kernel's explicit early-boot stream answers until the pool is ready.
+        number to put in a header. That wait used to be avoided with
+        GRND_NONBLOCK and the kernel's explicit early-boot insecure stream.
+        DHCP now prefers the initialized CSPRNG without waiting, then blocks
+        on that same CSPRNG rather than drawing a guessable xid; if neither
+        path can fill the transaction id, acquisition fails before I/O.
 
-        Three seconds to carrier, four to an address. The second of those is
-        qemu, not this.
+        Three seconds to carrier, four to an address, when the pool is ready.
+        The second of those is qemu, not this. Early boot without entropy is
+        a failed lease, not a predictable one.
 */
 static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                         dhcp_lease address_to lease)
