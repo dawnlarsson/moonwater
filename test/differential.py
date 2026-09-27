@@ -17188,7 +17188,16 @@ TEXT_UTILITIES = (
                       ("cleft", "empty"), ("dir", "cright"), ("wide", "wide"), ("-", "-"), ("a.txt", "b.txt"),
                       ("repeats", "repeats"), ("big", "big")),
             stdin=("text_sorted_a", "empty", "nonl", "nul", "text", "text_fifteen", "edge_65535", "edge_65536", "edge_65537", "text_utf8"), fixture="text",
-            extra=(("--nosuchflag", "cleft", "cright"), ("-Q", "cleft", "cright"))),
+            extra=(("--nosuchflag", "cleft", "cright"), ("-Q", "cleft", "cright"),
+                   #       Two different delimiters are refused as the second
+                   #       is read; the same one twice, or empty twice, is one.
+                   ("--output-delimiter=:", "--output-delimiter=,", "cleft", "cright"),
+                   ("--output-delimiter=:", "--output-delimiter=:", "cleft", "cright"),
+                   ("--output-delimiter=", "--output-delimiter=", "cleft", "cright"),
+                   ("--output-delimiter=", "--output-delimiter=:", "cleft", "cright"),
+                   ("--output-delimiter=:", "--output-delimiter=", "cleft"),
+                   ("--output-delimiter=:", "--output-delimiter=,", "--nosuchflag", "cleft", "cright"),
+                   ("--nosuchflag", "--output-delimiter=:", "--output-delimiter=,", "cleft", "cright"))),
     Utility("cut",
             options=(Option("-b", _TEXT_CUT_LISTS, True), Option("--bytes", ("1-3", "2-"), True),
                      Option("-c", _TEXT_CUT_LISTS, None), Option("--characters", ("1-3",), True),

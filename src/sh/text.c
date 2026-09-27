@@ -2257,6 +2257,27 @@ enum
         RELATION_ORDER_NONE,
 };
 
+/*
+        --output-delimiter given twice is refused where the two differ, the
+        moment the second is read, as GNU's option loop does: a later bad
+        option or a missing operand is never reached. The same string twice
+        is one delimiter and goes through.
+*/
+static string_address comm_delimiter_said;
+
+static bool comm_option_seen(p8 letter, string_address value)
+{
+        if (letter != 'O')
+                return true;
+
+        if (comm_delimiter_said && !string_equals(comm_delimiter_said, value))
+                return string_diagnostic(&text_diagnostic, 0, null,
+                                         "multiple output delimiters specified");
+
+        comm_delimiter_said = value;
+        return true;
+}
+
 static fn comm_separator(string_address delimiter)
 {
         /* GNU uses one NUL when an explicitly empty delimiter is named. */
@@ -2305,9 +2326,11 @@ static b32 text_comm()
             .options = comm_options,
             .selection = &comm_order_mode,
             .operand = text_file_add,
+            .seen = comm_option_seen,
         };
 
         text_begin("comm");
+        comm_delimiter_said = null;
         text_delimiter = '\n';
         utility_arena.used = 0;
 
