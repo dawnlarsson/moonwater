@@ -616,7 +616,11 @@ static bipolar process_nohup_output_open(string_address path)
                                address_of facts) ||
                     (facts.mode & MODE_FORMAT) != MODE_FILE ||
                     facts.hard_links != 1 ||
-                    facts.owner != (p32)system_call_1(syscall(geteuid), 0))
+                    facts.owner != (p32)system_call_1(syscall(geteuid), 0) ||
+                    /* O_NONBLOCK was only for the open; the command's output
+                       blocks, as GNU nohup's does. */
+                    system_call_3(syscall(fcntl), (positive)answer,
+                                  FILE_F_SETFL, FILE_APPEND) < 0)
                 {
                         system_close((positive)answer);
                         answer = -ERROR_ACCESS;
