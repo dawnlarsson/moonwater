@@ -25220,15 +25220,16 @@ static const file_word file_backup_words[] = {
     {(string_address) "t", 'n', false},
 };
 
-static bool file_backup_control(string_address program, string_address word)
+static bool file_backup_control(string_address program, string_address context,
+                                string_address word)
 {
-        if (!word)
+        if (!word || !string_get(word))
         {
                 file_backup_kind = 'e';
                 return true;
         }
 
-        b32 which = file_word_among(program, (string_address) "backup type",
+        b32 which = file_word_among(program, context,
                                     word, file_backup_words,
                                     array_count(file_backup_words));
 
@@ -25463,23 +25464,23 @@ static bool file_backup_taken(file_taking address_to taking, string_address prog
         if (!component)
                 file_backup_suffix = (string_address) "~";
 
-        if (taking->flags & (FILE_FLAG('b') | FILE_FLAG('S')))
-                file_backup_kind = 'e';
-
-        if (taking->flags & FILE_FLAG('B'))
+        /* gnulib's xget_version: a control word given with --backup decides;
+           without one, whether the backup was asked for by -b, -S or a bare
+           --backup, VERSION_CONTROL does, and names itself when it is not
+           a word; set to nothing or not set at all, it means existing. */
+        if (!(taking->flags & (FILE_FLAG('b') | FILE_FLAG('S') | FILE_FLAG('B'))))
+                return true;
+        if (!named && (taking->flags & FILE_FLAG('B')))
         {
                 string_address control = file_option_value(taking, 'B');
 
                 if (control && string_get(control))
                         named = control;
-                else if (!named)
-                        named = file_environment((string_address) "VERSION_CONTROL");
-
-                if (!file_backup_control(program, named))
-                        return false;
         }
-
-        return true;
+        if (named)
+                return file_backup_control(program, (string_address) "backup type", named);
+        return file_backup_control(program, (string_address) "$VERSION_CONTROL",
+                                   file_environment((string_address) "VERSION_CONTROL"));
 }
 
 /* Ordinary fchmod handles writable files and directories. O_PATH special
@@ -27998,7 +27999,7 @@ static bool file_backup_seen(string_address program, p8 letter,
                 return true;
         }
         file_backup_control_named = value;
-        return file_backup_control(program, value);
+        return file_backup_control(program, (string_address) "backup type", value);
 }
 
 static bool file_update_seen(string_address program, p8 letter,

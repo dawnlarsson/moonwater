@@ -6651,6 +6651,7 @@ def files_slash_destinations(tool, flags, sources):
 FIXTURES["files_backup"] = {
     "a": files_file(b"A\n", 1000000000),
     "b": files_file(b"B\n", 1100000000),
+    "b.~2~": files_file(b"B two\n", 1110000000),
     "c": files_file(b"victim\n", 1200000000),
     "b_": files_dir(1300000000),
     "bx": files_dir(1310000000),
@@ -6678,6 +6679,14 @@ def files_backup_cases(tool, words):
             cases.append({"fixture": "files_backup", "argv": argv + ("--suffix=" + suffix,) + target})
             cases.append({"fixture": "files_backup", "argv": argv + target,
                           "env": (("SIMPLE_BACKUP_SUFFIX", suffix),)})
+    #   VERSION_CONTROL decides whenever no --backup word does, however the
+    #   backup was asked for; a word given decides over it, and a word it
+    #   does not know is refused under its own name.
+    for control in ("numbered", "t", "simple", "never", "existing", "nil", "none", "off", "bogus", ""):
+        for asked in rng.sample(((("-b",), ("--backup",), ("-S", ".s"), ("--backup=",),
+                                  ("--backup=simple",), ("-b", "--backup=numbered"))), 3):
+            cases.append({"fixture": "files_backup", "argv": tuple(words) + asked + rng.choice(targets),
+                          "env": (("VERSION_CONTROL", control),)})
     return tuple(cases)
 
 
