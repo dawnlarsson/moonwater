@@ -302,7 +302,8 @@ DOMAIN_FLOOR = {
                    "with the work under /tmp: a run whose root is on a "
                    "filesystem mounted without nosuid and nodev cannot see "
                    "the mounts this build used to break"),
-    "files": (73300, 75681, 150,
+    "files": (77200, 79660, 150,
+              "raised 2026-09-27 from 73300: the lane measured 77370 of 79660 on 2131efe3 after the system-tools pass (deleted working directory, fnmatch carets, stat's format engine, df's filters and sizes, scenes for FIFOs, closed and full streams, bind-mount cycles, access lists and the environment's ls settings, date's parse-datetime reading) and the file-tools pass beside it; the floor sits 170 under it for the cases that flip. "
               "retaken 2026-09-24 at 73344 of 75681 on this tree and on e0af8421 alike, after the box moved util-linux, gzip, xz and tar and rebooted: the 73450 below had been measured on the box before that, where the same code agreed about 170 more times. "
               "raised 2026-09-23 from 71691 of 74132 to keep the bug pass's "
               "gains: slash destinations in cp, mv, ln and install, du -X, "
