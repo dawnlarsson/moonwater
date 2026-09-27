@@ -8233,6 +8233,11 @@ static b32 exec_call(positive slot)
                 exec_frames[exec_frame_count++].name =
                     exec_functions[slot].name;
                 exec_frames_published = false;
+                // Arrays made for the caller answer a plain lookup, which
+                // does not ask again; take them down so this frame's are
+                // made when read.
+                if (exec_frames_standing)
+                        exec_frames_forget();
         }
 
         status = exec_node(body);
@@ -8256,8 +8261,11 @@ static b32 exec_call(positive slot)
                 exec_frames_published = false;
 
                 // The three only exist while a function does, and they were
-                // only ever made if something read them.
-                if (!exec_frame_count && exec_frames_standing)
+                // only ever made if something read them. Made inside the
+                // callee they name it, and $FUNCNAME in the caller read
+                // inner after inner had returned; they go, to be made again
+                // for this frame when read.
+                if (exec_frames_standing)
                         exec_frames_forget();
         }
 

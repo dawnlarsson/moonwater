@@ -13968,6 +13968,21 @@ def shell_lang_trap_return(rng):
         "trap " + shell_quote(action) + " USR1", body, 'echo "f=$?"', "wait"))
 
 
+#       FUNCNAME and its companions read in a caller after a callee read
+#       them: the arrays made inside the callee stayed standing, so $FUNCNAME
+#       in outer said inner once inner had returned.
+def shell_lang_funcname_stack(rng):
+    probe = rng.choice(('$FUNCNAME', '${FUNCNAME[@]}', '${FUNCNAME[1]-none}', '${#FUNCNAME[@]}',
+                        '${#BASH_LINENO[@]}', '${#BASH_SOURCE[@]}'))
+    inner_reads = rng.choice(("", 'echo "in:' + probe + '"; '))
+    calls = rng.choice(("inner", "inner; inner", "inner; deeper", "(inner)", "x=$(inner); echo \"$x\""))
+    return ("funcname-stack", shell_BASH, shell_program(
+        "inner() { " + inner_reads + ": ; }",
+        "deeper() { inner; echo \"deep:" + probe + "\"; }",
+        "outer() { echo \"before:" + probe + "\"; " + calls + "; echo \"after:" + probe + "\"; }",
+        "outer", 'echo "top:[' + probe + ']"'))
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16605,6 +16620,7 @@ SHELL_FAMILIES = (
     shell_lang_regex_operand,
     shell_lang_loop_control_arguments,
     shell_lang_trap_return,
+    shell_lang_funcname_stack,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),
