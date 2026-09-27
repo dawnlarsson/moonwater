@@ -2281,6 +2281,23 @@ static b32 parse_do_body(b32 index)
         return index;
 }
 
+/* bash takes a brace group for a for or select body, `for i in a b; {
+   echo $i; }` and `for ((i = 0; i < 2; i++)) { ...; }`, where do ... done
+   stands in POSIX; while and until have no such form. */
+static b32 parse_enclosed(b32 kind);
+
+static b32 parse_for_body(b32 index)
+{
+        if (shell_bash_compat && parse_word_is(0, "{"))
+        {
+                parse_nodes[index].right = parse_enclosed(NODE_GROUP);
+
+                return parse_state ? 0 : index;
+        }
+
+        return parse_do_body(index);
+}
+
 static b32 parse_loop(b32 kind)
 {
         b32 index = parse_node_new(kind);
@@ -2322,7 +2339,7 @@ static b32 parse_for(b32 kind)
 
                 parse_skip_newlines();
 
-                return parse_do_body(index);
+                return parse_for_body(index);
         }
 
         if (!parse_want_word(index))
@@ -2356,7 +2373,7 @@ static b32 parse_for(b32 kind)
 
         parse_skip_separators();
 
-        return parse_do_body(index);
+        return parse_for_body(index);
 }
 
 static b32 parse_case()
