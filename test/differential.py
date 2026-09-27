@@ -7074,6 +7074,34 @@ def files_rmdir_cases():
     return tuple(cases)
 
 
+#       Odd corners of cp the suite found: a source link spelled with a
+#       slash on the end, a backup onto a directory that is not backed up, a
+#       directory named twice into one target, a file copied onto itself
+#       with --force and a backup (GNU's way of making a backup copy), and a
+#       sysfs file whose size overstates what it reads.
+FIXTURES["files_cpcorner"] = {
+    "dd/f": files_file(b"f\n", 1000000000),
+    "dd": files_dir(1010000000),
+    "ld": files_link("dd", 1020000000),
+    "F": files_file(b"F\n", 1030000000),
+    "x/a": files_file(b"a\n", 1040000000),
+    "x": files_dir(1050000000),
+    "y/x": files_dir(1060000000),
+    "y": files_dir(1070000000),
+    "t": files_dir(1080000000),
+}
+
+
+def files_cpcorner_cases():
+    argvs = (("-dR", "ld/", "s"), ("-R", "ld/", "s"), ("-PR", "ld/", "s"), ("-dR", "ld", "s"), ("-a", "ld/", "s"),
+             ("-dR", "ld//", "s"), ("-ab", "x", "y"), ("-rb", "x", "y"), ("-a", "--backup=numbered", "x", "y"),
+             ("--backup", "-r", "x", "x", "t/"), ("-r", "x", "x", "t"), ("-r", "x", "./x", "t"), ("-rv", "x", "x", "t"),
+             ("-f", "--backup=simple", "--suffix=.b", "F", "F"), ("-f", "-b", "F", "F"), ("--backup=numbered", "-f", "F", "F"),
+             ("-b", "F", "F"), ("-f", "F", "F"), ("-fb", "./F", "F"), ("-fb", "F", "t/../F"), ("-fbv", "F", "F"),
+             ("/sys/kernel/profiling", "c"), ("-f", "/sys/kernel/profiling", "F"), ("--sparse=always", "/sys/kernel/profiling", "c"))
+    return tuple({"fixture": "files_cpcorner", "argv": argv} for argv in argvs)
+
+
 FILES_UTILITIES = (
     # yes is the one program here the engine cannot bound: it writes until
     # something stops it, so both sides die on the harness's file-size limit
@@ -7693,7 +7721,7 @@ FILES_UTILITIES = (
             + tuple({"fixture": "files_self", "argv": words + ("sl", "x")}
                     for words in (("-rl",), ("--link", "-R"), ("-rlP",), ("-rlH",), ("-rld",), ("-al",),
                                   ("-rlL",), ("-l",), ("-lP",)))
-            + files_skip_cases("cp") + files_readonly_cases()
+            + files_skip_cases("cp") + files_readonly_cases() + files_cpcorner_cases()
             + files_made_cases("cp", ("-f", "-b", "--backup=numbered", "-d", "-R", "-l", "-s", "-v", "-a",
                                       "-dR", "--remove-destination", "-n")),
             normalize=files_sorted_lines),

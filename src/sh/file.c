@@ -5538,6 +5538,15 @@ static bipolar file_copy_sparse(bipolar in, bipolar out,
         if (facts->blocks >= facts->size / 512)
                 return 0;
 
+        /* Holes are kept only in a regular file: a pipe or a device takes
+           the zeros, as GNU writes them -- cp sparse pipe once failed on
+           the seek and truncate a FIFO cannot take. */
+        file_facts into;
+        if (file_look_code(out, (string_address)"", AT_EMPTY_PATH,
+                           address_of into) < 0 ||
+            (into.mode & MODE_FORMAT) != MODE_FILE)
+                return 0;
+
         bipolar data = system_seek(in, 0, 3);
 
         if (data == -ERROR_NO_DEVICE_ADDRESS)
@@ -5557,11 +5566,20 @@ static bipolar file_copy_sparse(bipolar in, bipolar out,
                 if ((p64)hole > facts->size)
                         hole = (bipolar)facts->size;
 
+                /* An extent that cannot be copied whole may be one the
+                   file system only claimed: sysfs says 4096 bytes and no
+                   blocks for a file that reads two, and answers SEEK_DATA
+                   and SEEK_HOLE from that size. What was written goes, and
+                   the stream copies what reading finds, to its end, as GNU
+                   does; a real failure fails there again and is named. */
                 if (!file_copy_extent(in, out, (p64)data,
                                       (positive)(hole - data),
                                       address_of range_copy,
                                       address_of send_copy))
-                        return -1;
+                        return system_truncate_handle(out, 0) < 0 ||
+                                       system_seek(out, 0, 0) < 0 ||
+                                       system_seek(in, 0, 0) < 0
+                                   ? -1 : 0;
 
                 data = system_seek(in, (positive)hole, 3);
                 if (data == -ERROR_NO_DEVICE_ADDRESS)
@@ -27281,6 +27299,44 @@ static bipolar file_backup_number_at(
         return result;
 }
 
+/* The name a backup of destination in directory would take, as the
+   backup below chooses it, into (FILE_PATH_MAX); in may be into. */
+static bool file_backup_name_at(bipolar directory, string_address destination,
+                                string_address in, p8 address_to into)
+{
+        p8 name[FILE_PATH_MAX];
+        positive length = string_length(in);
+        positive next_number = 1;
+        bool any_numbered = false;
+        p8 kind = file_backup_kind;
+
+        (void)destination;
+        if (length >= FILE_PATH_MAX)
+                return false;
+        memory_copy_apart_end(name, in, length);
+        if ((kind == 'e' || kind == 'n') &&
+            file_backup_number_at(directory, name, address_of next_number,
+                                  address_of any_numbered) < 0)
+                return false;
+        if (kind == 'e')
+                kind = any_numbered ? 'n' : 's';
+        positive suffix = string_length(file_backup_suffix);
+        if (length + (kind == 'n' ? 3 + sizeof(positive) * 3 : suffix) >= FILE_PATH_MAX)
+                return false;
+        memory_copy_apart(into, name, length);
+        if (kind == 'n')
+        {
+                into[length++] = '.';
+                into[length++] = '~';
+                length += positive_into_string(into + length, next_number);
+                into[length++] = '~';
+                into[length] = end;
+        }
+        else
+                memory_copy_apart_end(into + length, file_backup_suffix, suffix);
+        return true;
+}
+
 static bool file_backup_made_at(string_address program, bipolar directory,
                                 string_address destination,
                                 string_address shown,
@@ -30156,6 +30212,7 @@ static fn cp_pair(string_address source, string_address destination)
                 cp_status = 1;
                 return;
         }
+        string_address named_source = named;
         source = named;
 
         string_address given = destination;
@@ -30201,7 +30258,12 @@ static fn cp_pair(string_address source, string_address destination)
         file_facts source_facts;
         file_facts destination_facts;
         file_facts destination_entry;
-        bool follow = cp_dereference == 1 || cp_dereference == 2;
+        //      A source spelled with a slash on the end names the directory
+        //      a link to one leads to, whatever -d or -P say: the kernel
+        //      follows that spelling, and GNU's lstat of it does too, so
+        //      cp -dR link/ copy copies the directory.
+        bool follow = cp_dereference == 1 || cp_dereference == 2 ||
+                      file_name_has_trailing_slash(named_source);
         bipolar source_looked = file_look_code(
             source_directory, source_leaf,
             follow ? 0 : AT_SYMLINK_NOFOLLOW, address_of source_facts);
@@ -30242,6 +30304,24 @@ static fn cp_pair(string_address source, string_address destination)
                 file_set_record(address_of file_given_buckets, source,
                                 address_of source_facts);
         }
+        /* And a directory named twice into one target is copied once, with
+           GNU's warning, whatever the backups: the second copy would land on
+           the first. */
+        if (kind == MODE_DIRECTORY && cp_recursive)
+        {
+                if (file_set_seen(file_given_buckets, destination_leaf,
+                                  address_of source_facts))
+                {
+                        string_format(log_error,
+                                      "cp: warning: source directory %w specified more than once\n",
+                                      writer_shell_quoted_name, source);
+                        system_close(source_directory);
+                        system_close(destination_directory);
+                        return;
+                }
+                file_set_record(address_of file_given_buckets, destination_leaf,
+                                address_of source_facts);
+        }
         if (file_name_has_trailing_slash(given) &&
             !cp_slash_allowed(source, given, kind, destination_directory,
                               destination_leaf))
@@ -30250,6 +30330,34 @@ static fn cp_pair(string_address source, string_address destination)
                 system_close(destination_directory);
                 cp_status = 1;
                 return;
+        }
+
+        /* GNU cp.c: cp --force --backup F F, one regular file named as both,
+           copies it to the name its backup would have and backs nothing up
+           -- a way to make a backup copy in place, which the same-file
+           refusal would otherwise stop. */
+        static p8 self_backup[FILE_PATH_MAX];
+        p8 self_leaf[FILE_PATH_MAX];
+        p8 saved_backup_kind = file_backup_kind;
+        file_facts self_there;
+        if (cp_force && file_backup_kind && !file_into_mode &&
+            string_equals(named_source, given) && kind == MODE_FILE &&
+            file_look(destination_directory, destination_leaf,
+                      AT_SYMLINK_NOFOLLOW, address_of self_there) &&
+            file_backup_name_at(destination_directory, destination_leaf,
+                                destination_leaf, self_leaf))
+        {
+                string_address leaf = file_last_component(destination);
+                positive head = (positive)(leaf - destination);
+                positive tail = string_length(self_leaf);
+                if (head + tail < FILE_PATH_MAX)
+                {
+                        memory_copy_apart(self_backup, destination, head);
+                        memory_copy_apart_end(self_backup + head, self_leaf, tail);
+                        memory_copy_apart_end(destination_leaf, self_leaf, tail);
+                        destination = self_backup;
+                        file_backup_kind = 0;
+                }
         }
         positive source_flags =
             kind == MODE_DIRECTORY
@@ -30416,7 +30524,11 @@ static fn cp_pair(string_address source, string_address destination)
                 cp_destination_facts = destination_facts;
         if (entry_exists)
                 cp_destination_entry_facts = destination_entry;
-        if (file_backup_kind && entry_exists)
+        /* Only a destination the backup really moved aside is gone: cp keeps
+           a directory in place (GNU backs one up only when moving), so
+           cp -ab x y onto an existing y/x found it still there and called
+           that a change. */
+        if (file_backup_kind && entry_exists && file_backup_did)
         {
                 cp_destination_existed = false;
                 cp_destination_entry_existed = false;
@@ -30429,6 +30541,7 @@ static fn cp_pair(string_address source, string_address destination)
                            destination_slashed ? FILE_COPY_SLASHED : 0))
                 cp_status = 1;
         file_made_now(destination_directory, destination_leaf);
+        file_backup_kind = saved_backup_kind;
         system_close(source_pinned);
         system_close(source_directory);
         system_close(destination_directory);
