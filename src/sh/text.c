@@ -523,6 +523,8 @@ typedef struct
         // How many reads have filled the buffer, so a walk holding offsets
         // into it can tell they are of a read that is gone.
         positive fills;
+        // The negated errno of the failure, for a caller that words it.
+        bipolar error;
         p8 buffer[TEXT_READ_MAX];
 } text_reader;
 
@@ -571,6 +573,7 @@ static fn text_reader_reset(text_reader address_to reader,
         reader->finished = false;
         reader->failed = false;
         reader->opened = false;
+        reader->error = 0;
         reader->name = shown;
 }
 
@@ -692,6 +695,7 @@ static bool text_reader_attach(text_reader address_to reader,
                 if (!text_quiet_open)
                         text_file_failed(shown, handle, false);
                 reader->failed = true;
+                reader->error = handle;
                 return false;
         }
 
@@ -771,6 +775,7 @@ static bool text_reader_fill_amount(text_reader address_to reader,
                         if (!text_quiet_read)
                                 text_file_failed(reader->name, got, true);
                         reader->failed = true;
+                        reader->error = got;
                 }
 
                 return false;
@@ -1057,6 +1062,9 @@ static bool text_files_failed;
 // --files0-from replaces the operand list with names cut from a file.
 static string_address address_to text_file_list;
 static positive text_files_from_bad;
+// What text_files_from says about the list beside the names: see there.
+static positive text_files_from_names;
+static bool text_files_from_ahead;
 static bool text_files_from(string_address path);
 
 static fn text_begin(string_address name)
@@ -4936,8 +4944,14 @@ static b32 text_wc()
         if (flags & FILE_FLAG('Z'))
         {
                 if (text_files_count)
-                        return text_done(string_diagnostic(&text_diagnostic, 1, text_file_name(0),
-                                                          "extra operand; file operands cannot be combined with --files0-from"));
+                {
+                        text_flush();
+                        string_format(writer_stderr,
+                                      "wc: extra operand '%w'\nfile operands cannot be combined with --files0-from\n"
+                                      "Try 'wc --help' for more information.\n",
+                                      writer_terminal_quoted_name, text_file_name(0));
+                        return text_done(1);
+                }
 
                 if (!text_files_from(file_option_value(address_of taking, 'Z')))
                         return text_done(1);
@@ -4978,7 +4992,13 @@ static b32 text_wc()
         bool utf8 = (want_chars || want_words || want_longest) && text_locale_utf8();
         bool posix = file_environment((string_address) "POSIXLY_CORRECT") != null;
 
-        if (total_mode != WC_TOTAL_ONLY && (selected > 1 || inputs > 1))
+        //      A list of names GNU could not read ahead -- one on standard
+        //      input, a pipe, a file past ten megabytes -- gives it no sizes
+        //      to pad to, so those columns are as wide as each count.
+        bool widths_known = !text_file_list || text_files_from_ahead;
+
+        if (total_mode != WC_TOTAL_ONLY && (selected > 1 || inputs > 1) &&
+            widths_known)
         {
                 for (b32 i = 0; i < inputs; i++)
                 {
@@ -5182,9 +5202,13 @@ static b32 text_wc()
                         wc_row(lines, words, chars, bytes, longest, width, name);
         }
 
+        //      A list of names counts every name it held toward a total,
+        //      the refused ones too: `printf '\\0\\0' | wc --files0-from=-`
+        //      is two names and a total of nothing, as GNU answers it.
+        positive named = text_file_list ? text_files_from_names : text_files_count;
         bool total = total_mode == WC_TOTAL_ALWAYS ||
                      total_mode == WC_TOTAL_ONLY ||
-                     (total_mode == WC_TOTAL_AUTO && text_files_count > 1);
+                     (total_mode == WC_TOTAL_AUTO && named > 1);
 
         if (total)
         {
@@ -5903,54 +5927,117 @@ static bool text_read_at(positive handle, positive offset, p8 address_to into, p
 /*
         --files0-from: NUL-separated names in a file, or on standard input
         when the file is -, standing in for the operand list. The names are
-        copied into the arena with their terminators, and the two GNU refuses
-        -- an empty name, and - itself when the list came from standard input
-        -- are dropped and counted so the caller can answer as its tool does.
+        kept on the heap with their terminators, so a list is as long as the
+        machine allows rather than as long as the arena is, and the two GNU
+        refuses -- an empty name, and - itself when the list came from
+        standard input -- are dropped and counted so the caller can answer as
+        its tool does. Each refusal names the list and the name's place in
+        it, as GNU's "LIST:N: invalid zero-length file name" does.
+
+        What else the caller needs to answer as GNU does is kept beside it:
+        how many names the list held, refused ones included, which is what
+        decides a total; and whether the list was a regular file of at most
+        ten megabytes, which is the only kind GNU reads ahead of time and so
+        the only kind whose sizes can set the column width.
 */
+static byte_store text_files_from_store;
+static string_address address_to text_files_from_list;
+static positive text_files_from_room;
+
 static bool text_files_from(string_address path)
 {
         bool from_stdin = string_equals(path, "-");
-        positive have = 0;
+        byte_store address_to store = address_of text_files_from_store;
 
         text_files_from_bad = 0;
+        text_files_from_names = 0;
+        store->used = 0;
 
-        if (!text_open(from_stdin ? null : path))
+        if (!array_store_reserve(text_files_from_list, text_files_from_room, 0, 1, 64))
+                return string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+
+        //      wc says it could not open the list in words of its own, as
+        //      GNU's wc does, and a list it cannot read as a read error.
+        bool worded = string_equals(text_name, "wc");
+
+        text_quiet_open = worded;
+        text_quiet_read = worded;
+
+        bool opened = text_open(from_stdin ? null : path);
+
+        text_quiet_open = false;
+
+        if (!opened)
+        {
+                text_quiet_read = false;
+                if (worded)
+                {
+                        text_flush();
+                        string_format(writer_stderr, "wc: cannot open '%w' for reading: %s\n",
+                                      writer_terminal_quoted_name, path,
+                                      file_reason(text_input.error ? text_input.error : -2));
+                }
                 return false;
+        }
 
-        p8 address_to held = utility_arena_hold_rest(address_of have);
+        positive size = 0;
+
+        text_files_from_ahead = text_regular_size(text_input.handle, address_of size) &&
+                                size <= (10 << 20);
+
+        while (text_fill())
+        {
+                positive left = text_input.filled - text_input.position;
+
+                if (!byte_store_reserve(store, store->used + left + 1, 1 << 16))
+                {
+                        text_close();
+                        return string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                }
+
+                memory_copy(store->bytes + store->used,
+                            text_input.buffer + text_input.position, left);
+                store->used += left;
+                text_input.position = text_input.filled;
+        }
+
         bool failed = text_input.failed;
+        bipolar reason = text_input.error;
 
+        text_quiet_read = false;
         text_close();
-
-        if (!held)
-                return false;
 
         if (failed)
         {
-                text_file_list = (string_address address_to)utility_arena_take(
-                    sizeof(string_address));
+                if (worded)
+                {
+                        text_flush();
+                        string_format(writer_stderr, "wc: %w: read error: %s\n",
+                                      writer_shell_name, path, file_reason(reason ? reason : -5));
+                }
+                text_file_list = text_files_from_list;
                 text_files_count = 0;
                 text_status = 1;
-                return text_file_list != null;
+                return true;
         }
 
-        p8 address_to names = (p8 address_to)utility_arena_take(have + 1);
+        positive have = store->used;
+        p8 address_to names = store->bytes;
 
-        if (!names)
-                return false;
+        if (!byte_store_reserve(store, have + 1, 1 << 16))
+                return string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
 
-        memory_copy(names, held, have);
+        names = store->bytes;
         names[have] = '\0';
 
         // Every name ends at a NUL, and the last one may end at the end.
         positive count = memory_count(names, have, 0) + (have && names[have - 1]);
 
-        string_address address_to list = (string_address address_to)
-            utility_arena_take((count + 1) * sizeof(string_address));
+        if (!array_store_reserve(text_files_from_list, text_files_from_room, 0,
+                                 count + 1, 64))
+                return string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
 
-        if (!list)
-                return false;
-
+        string_address address_to list = text_files_from_list;
         positive made = 0;
 
         for (positive at = 0; at < have;)
@@ -5959,10 +6046,13 @@ static bool text_files_from(string_address path)
                 positive length = string_length(name);
 
                 at += length + 1;
+                text_files_from_names++;
 
                 if (!length)
                 {
-                        string_diagnostic(&text_diagnostic, 0, path, "invalid zero-length file name");
+                        text_flush();
+                        string_format(writer_stderr, "%s: %w:%p: invalid zero-length file name\n",
+                                      text_name, writer_shell_name, path, text_files_from_names);
                         text_files_from_bad++;
                         continue;
                 }

@@ -16384,6 +16384,10 @@ INPUTS.update({
     "text_a": b"alpha\nbeta\ngamma\n",
     "text_a_prefix": b"alpha\nbe",
     "text_tac_runs": b"1._2.__3.___4._5{_6__{7\n8._",
+    "text_names0_empty": b"a.txt\x00\x00b.txt\x00",
+    "text_names0_only_empty": b"\x00\x00",
+    "text_names0_big": b"big\x00a.txt\x00",
+    "text_names0_dash": b"-\x00a.txt\x00\x00",
     "text_fifteen": b"".join(b"%d\n" % n for n in range(1, 16)),
     "text_regex": (b"aaa\nab\nabab\na\n\nbbb\nabc\nAbC\nxyz\n a b\nfoo123bar\nend.\n*x\n**\n"
                    b"aabb\nba\nalpha beta gamma\nx-y_z\n"),
@@ -18225,6 +18229,17 @@ TEXT_UTILITIES = (
             fixture="text", extra=(("--nosuchflag",), ("-Q",), ("-lwcmL", "tabs"), ("-lwmc",), ("-lm",), ("-wc",), ("-wm",),
                                    ("--total=only", "--total=always", "a.txt"), ("--total=auto", "missing", "a.txt"),
                                    ("-c", "empty"), ("-c", "/proc/version"), ("-L", "a.txt", "tabs"),
+                                   #   A list of names on standard input: a refused
+                                   #   name still counts toward the total, and a list
+                                   #   not read ahead sets no column width.
+                                   *({"argv": argv, "stdin": stdin, "fixture": "text"} for argv, stdin in (
+                                       (("--files0-from=-",), "text_names0_empty"),
+                                       (("--files0-from=-",), "text_names0_only_empty"),
+                                       (("--files0-from=-", "--total=never"), "text_names0_only_empty"),
+                                       (("--files0-from=-",), "text_names0_big"),
+                                       (("-l", "--files0-from=-"), "text_names0_big"),
+                                       (("--files0-from=-",), "text_names0_dash"),
+                                       (("-L", "--files0-from=-"), "text_names0_empty"))),
                                    *({"fixture": "text_wide", "argv": argv} for argv in (
                                        ("-m", "utf8.txt"), ("-w", "utf8.txt"), ("-L", "utf8.txt"),
                                        ("utf8.txt",), ("-lwmcL", "utf8.txt", "utf8_edge.txt"),
