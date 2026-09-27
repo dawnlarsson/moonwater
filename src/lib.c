@@ -11159,7 +11159,7 @@ __asm__(
     //      stop; that i is the answer, and the cell there is not written. A
     //      cell at or past guarded may be read, but it never decides anything.
     //
-    //      src/sh/term.c's text_ascii is the one caller and stop is the two
+    //      src/canvas/term.c's text_ascii is the one caller and stop is the two
     //      flags that make a cell half of a wide character. A stop on one of
     //      those is the caller's to settle -- it unpairs that cell in C, puts
     //      it, and calls again -- so nothing here knows what a wide character

@@ -12,14 +12,30 @@
         architecture, and everything Canvas draws goes through them.
 
         The rest is the sections below, in dependency order: paint, text,
-        pane, console, compose, plane, drag, output, keys, client, pointer.
-        Included by core.c, which is where the headers are, and before
-        lib.c, which redefines bool and defines "end" as a macro.
+        pane, console, compose, plane, drag, output, keys, client, pointer,
+        and last the ioctls the device hands on. Included by core.c after
+        lib.c, whose "end" macro is why the DRM headers the module needs
+        before lib.c are at the top of core.c rather than here.
 
         There is one desktop across every card, and one cursor on it. Windows
         and the cursor are in desktop coordinates; an output is a rectangle of
         the desktop that some crtc scans out. Nothing has a fixed maximum.
 */
+
+#include <linux/workqueue.h>
+#include <linux/kthread.h>
+#include <linux/rtmutex.h>
+#include <uapi/linux/sched/types.h>
+#include <linux/pm_qos.h>
+#include <linux/input.h>
+#include <linux/math64.h>
+#include <linux/minmax.h>
+#include <linux/list_sort.h>
+#include <linux/hrtimer.h>
+#include <linux/font.h>
+#include <linux/cacheflush.h>
+#include <drm/drm_file.h>
+#include <drm/drm_rect.h>
 
 #include "window.c"
 
@@ -3513,7 +3529,7 @@ static void desktop_frame_pass(void)
         rt_mutex_unlock(&desktop.lock);
 }
 
-#include "../sh/term.c"
+#include "term.c"
 /* ---- console: the kernel log window ---- */
 
 /*
@@ -3537,7 +3553,7 @@ static void desktop_frame_pass(void)
 
         The lines, the ring they sit in and the wheel that moves over it are
         the ones every window of cells has, in pane above, and what turns a stream
-        of bytes into lines is the emulator in sh/term.c -- the same one the
+        of bytes into lines is the emulator in term.c -- the same one the
         shell's terminal is. So a carriage return, a tab and an escape sequence
         mean here what they mean there, and this file is only the wiring.
 */
@@ -10975,4 +10991,77 @@ static void canvas_cursor_stats(struct cursor_stats *out)
         out->recovering = cursor_plane_recovery;
 
         rt_mutex_unlock(&desktop.lock);
+}
+
+/* ---- ioctl: what the device asks of Canvas ---- */
+
+#define REPORT_CANVAS(name, type, collect)                                   \
+        static long name(struct type __user *out)                            \
+        {                                                                    \
+                struct type stats;                                           \
+                collect(&stats);                                             \
+                return copy_to_user(out, &stats, sizeof(stats)) ? -EFAULT : 0; \
+        }
+
+REPORT_CANVAS(report_input, input_stats, canvas_input_stats)
+REPORT_CANVAS(report_cursor, cursor_stats, canvas_cursor_stats)
+REPORT_CANVAS(report_devices, input_devices, canvas_input_devices)
+#undef REPORT_CANVAS
+
+/*
+        Canvas off and on, and what it holds.
+
+        The state is copied back whatever the request answers, so a refused on
+        can name the program that holds the display. Reading needs nothing;
+        on and off stop and start the desktop everyone at the machine is
+        using, so they need CAP_SYS_ADMIN.
+*/
+static long report_canvas(struct canvas_control __user *out)
+{
+        struct canvas_control control;
+        unsigned int request;
+        long answer = 0;
+        char layout[16];
+
+        if (copy_from_user(&control, out, sizeof(control)))
+                return -EFAULT;
+
+        request = control.request;
+        memcpy(layout, control.master_command, sizeof(layout));
+        layout[sizeof(layout) - 1] = 0;
+        if (request > SPARK_CANVAS_LAYOUT)
+                return -EINVAL;
+        if (request == SPARK_CANVAS_LAYOUT)
+        {
+                if (layout[0] && !capable(CAP_SYS_ADMIN))
+                        return -EPERM;
+        }
+        else if (request != SPARK_CANVAS_STATUS && !capable(CAP_SYS_ADMIN))
+                return -EPERM;
+
+        memset(&control, 0, sizeof(control));
+        control.request = request;
+
+        if (request == SPARK_CANVAS_LAYOUT)
+        {
+                if (layout[0])
+                        answer = canvas_layout_set(layout);
+                strscpy(control.master_command, canvas_layout_name(),
+                        sizeof(control.master_command));
+                if (copy_to_user(out, &control, sizeof(control)))
+                        return -EFAULT;
+                return answer;
+        }
+
+        if (request == SPARK_CANVAS_ON)
+                answer = canvas_turn_on(&control);
+        else if (request == SPARK_CANVAS_OFF)
+                answer = canvas_turn_off();
+
+        canvas_state(&control);
+
+        if (copy_to_user(out, &control, sizeof(control)))
+                return -EFAULT;
+
+        return answer;
 }

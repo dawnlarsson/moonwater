@@ -33,7 +33,7 @@ Definition = namedtuple('Definition', 'path line name kind')
 # first macro argument.  Keeping this table tiny and explicit also makes a new
 # body-generating macro a visible inventory event rather than a parser guess.
 GENERATORS = {
-    ('src/moonwater/core.c', 'REPORT_CANVAS'): ('{}',),
+    ('src/canvas/canvas.c', 'REPORT_CANVAS'): ('{}',),
     ('src/lib.util.c', 'SEARCH_KNOWN'): ('{}',),
     ('src/sh/awk.c', 'AWK_BINARY_LEVEL'): ('{}',),
     ('src/sh/awk.c', 'AWK_EVALUATOR'): ('{}',),
@@ -277,7 +277,7 @@ def main():
         return 1
 
     library, library_bodies, library_aliases = library_routines()
-    canvas = marked_assembly(ROOT / 'src/moonwater')
+    canvas = marked_assembly(ROOT / 'src/canvas')
     canvas_names = {item[2] for item in canvas}
     kernel = marked_assembly(ROOT / 'kernel/replace')
 

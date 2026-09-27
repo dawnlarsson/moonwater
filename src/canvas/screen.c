@@ -4,7 +4,7 @@
         Each was its own program and each is a window on the compositor: a
         terminal, a field of colour, a page of text, a report on how long the
         pointer takes to move. They are together because they want the same
-        thing -- src/moonwater/window.c, the client side of Canvas -- and that is
+        thing -- src/canvas/window.c, the client side of Canvas -- and that is
         included once, above.
 
         A window that cannot be opened is not an error worth a special path:

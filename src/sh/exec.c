@@ -3520,7 +3520,7 @@ static b32 job_foreground_child(bipolar child, b32 node)
         one: the line editor for its arrow keys, and `fc` for something to
         edit. They are not two stores here, and the reason is that they were
         never even two halves of one process. The editor's ring is in the
-        terminal emulator -- src/sh/term.c, which draws the screen and
+        terminal emulator -- src/canvas/term.c, which draws the screen and
         assembles the line -- and it reaches this shell down a pseudo-terminal
         as finished lines. Nothing in this address space can see it.
 

@@ -6253,7 +6253,7 @@ static fn montgomery_reference_square(p64 address_to d, const p64 address_to a,
 #elif defined(SHARED_unicode_width_reference)
 /*
         The two display-width functions unicode_width answers for, as their
-        files had them: src/sh/term.c's character_width, Unicode 16 range
+        files had them: src/canvas/term.c's character_width, Unicode 16 range
         tables with the ideograph shortcut in front of them, and
         src/sh/text.c's wc_width, glibc 2.44's wcwidth with nought for what
         iswprint refuses. The terminal has since taken glibc's width where
@@ -71604,7 +71604,7 @@ b32 main(void)
 
 #ifdef BENCH_unicode_width
 /*
-        Display widths, variant by variant: the C src/sh/term.c and
+        Display widths, variant by variant: the C src/canvas/term.c and
         src/sh/text.c ran -- character_width's two range searches behind its
         shortcuts, with the ranges glibc widths since, and wc_width's search
         of 1,044 rows -- against
@@ -72354,7 +72354,7 @@ static void check_pane_layout(void) {
    reading the whole unit finds the same spans reading pane.c alone once did.
 */
 static void check_pane_focus_policy(void) {
-    FILE *source=fopen("src/moonwater/canvas.c","rb");check(source!=NULL);
+    FILE *source=fopen("src/canvas/canvas.c","rb");check(source!=NULL);
     assert(!fseek(source,0,SEEK_END));long size=ftell(source);assert(size>0);
     rewind(source);char *text=malloc((size_t)size+1);assert(text);
     assert(fread(text,1,(size_t)size,source)==(size_t)size);text[size]=0;
@@ -79681,7 +79681,7 @@ b32 main(void)
 
 #ifdef BENCH_cells_ascii
 /*
-        Terminal cells from a printable run: the loop src/sh/term.c's
+        Terminal cells from a printable run: the loop src/canvas/term.c's
         text_ascii ran before cells_from_ascii, against the loop it runs now,
         in cycles and instructions a cell from the processor's own counters,
         on every body the machine has. Both loops are here word for word, the

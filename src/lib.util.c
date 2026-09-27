@@ -10254,7 +10254,7 @@ pub bool parallel_tree(parallel_node_job enter, parallel_node_job leave,
         all three.
 
         Guarded one at a time because the tree already spells some of these
-        elsewhere: src/sh/term.c defines EINTR as 4 and src/moonwater/core.c uses bare
+        elsewhere: src/canvas/term.c defines EINTR as 4 and src/moonwater/core.c uses bare
         -EINTR and -ENOENT, and the shell is one binary. A plain #define here
         would be a redefinition the moment those two land in a translation
         unit with this one.

@@ -1639,7 +1639,8 @@ kernel_simd_callers()
                         }
                         exit bad
                 }
-        ' src/moonwater/*.c src/sh/term.c
+        ' src/moonwater/*.c src/canvas/canvas.c src/canvas/window.c \
+                src/canvas/term.c
 }
 
 x86_kernel_vector_audit()
@@ -6195,7 +6196,7 @@ lane_awk()
 #
 #           sh test/run term          (it does not use the farm)
 #
-#       src/sh/term.c makes no system call, which is what makes it testable
+#       src/canvas/term.c makes no system call, which is what makes it testable
 #       without a kernel, a compositor or a pty. The harness below is the
 #       emulator with a page of memory standing in for the window Canvas
 #       would have mapped: bytes go in, the grid of cells comes out, and a
@@ -6250,12 +6251,12 @@ section_total=0
 cat > "$work/harness.c" <<'HARNESS'
 #include "src/lib.util.c"
 #include "src/moonwater/spark.c"
-#include "src/moonwater/window.c"
-#include "src/sh/term.c"
+#include "src/canvas/window.c"
+#include "src/canvas/term.c"
 #include "src/sh/pty.c"
 // The terminal fixture does not execute the desktop launcher.
 #define BOWL_DEFAULT_PATH "/fixture/bin"
-#include "src/sh/terminfo.c"
+#include "src/canvas/terminfo.c"
 static fn host_terminal_opening() {}
 static bipolar shell_exec_file(string_address path,
                                string_address address_to arguments,
@@ -6288,7 +6289,7 @@ static string_address address_to bowl_environment(
 {
         return inherited;
 }
-#include "src/sh/screen.c"
+#include "src/canvas/screen.c"
 
 #define TERMINAL_FIXTURE_OUTPUT 16384
 #define TERMINAL_FIXTURE_BELL
@@ -7994,9 +7995,9 @@ section_total=0
 cat > "$work/harness.c" <<'HARNESS'
 #include "src/lib.util.c"
 #include "src/moonwater/spark.c"
-#include "src/moonwater/window.c"
+#include "src/canvas/window.c"
 #include "src/sh/pty.c"
-#include "src/sh/term.c"
+#include "src/canvas/term.c"
 
 //      The editor, with nothing under it. The driver is the only part of the
 //      file that needs a kernel and it is the only part left out.

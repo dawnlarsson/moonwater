@@ -18640,7 +18640,7 @@ import unittest
 from unittest.mock import patch
 
 def canvas_part(canvas, name):
-    """One named section of src/moonwater/canvas.c, the way it used to be a file.
+    """One named section of src/canvas/canvas.c, the way it used to be a file.
 
     The eleven files canvas.c expanded are folded into it, each behind a
     one-line banner, "/* ---- <name>: <what it is> ---- */". The anchors the
@@ -18915,7 +18915,7 @@ def harness_core_state(argv):
     # The bind subsystem and the machine script moved out of core.c into
     # moonwater.c; core.c includes it. The slices below follow them.
     moonwater = (root / "src/moonwater/moonwater.c").read_text()
-    canvas = (root / "src/moonwater/canvas.c").read_text()
+    canvas = (root / "src/canvas/canvas.c").read_text()
     pane = canvas_part(canvas, "pane")
     compose = canvas_part(canvas, "compose")
     console = canvas_part(canvas, "console")
@@ -18939,7 +18939,7 @@ def harness_core_state(argv):
     def canvas_sources(work, arch):
         paint = canvas_part(canvas, "paint")
         text = canvas_part(canvas, "text")
-        window = (root / "src/moonwater/window.c").read_text()
+        window = (root / "src/canvas/window.c").read_text()
         cells = section(window, "// The colour an index names", "#define WINDOW_CELL_BOLD")
         cells += section(canvas, "#define target_mark(pixels)",
                          "// The border and titlebar")
@@ -19222,7 +19222,7 @@ struct pid; struct cred; struct pane;
 #define refcount_dec_and_test(p) (--*(p) == 0)
 '''
     source += section(core, "struct spawn_strings",
-                      "#ifdef CONFIG_MOONWATER_CANVAS\n#include <linux/workqueue.h>")
+                      "#ifdef CONFIG_MOONWATER_CANVAS\n#include \"../canvas/canvas.c\"")
     # The real request path, not a stub: one opcode now carries every launch,
     # so what used to be decided by the opcode number -- interpretation policy
     # and the descriptors -- is decided by fields the caller controls, and the
@@ -19812,8 +19812,7 @@ static long canvas_turn_on(struct canvas_control *answer) {
 static long canvas_turn_off(void) { canvas_offs++; return canvas_off_answer; }
 static void canvas_state(struct canvas_control *answer) { canvas_states++;answer->running=1;answer->cards=1; }
 '''
-    source += section(core, "static long report_canvas",
-                      "#endif\n\nstatic long device_ioctl")
+    source += canvas[canvas.index("static long report_canvas"):]
     # Here rather than beside the geometry it reshapes: resize_move reads the
     # drag state off desktop, and desktop is the mock declared just above.
     source += r'''
@@ -23938,17 +23937,17 @@ static void drm_client_release(struct drm_client_dev *c) {
 '''
 
     bodies = "".join(function(file, name) for file, name in [
-        ("src/moonwater/canvas.c", "cursor_buffers_drop"),
-        ("src/moonwater/canvas.c", "plane_drop"),
-        ("src/moonwater/canvas.c", "plane_lost"),
-        ("src/moonwater/canvas.c", "plane_claim"),
-        ("src/moonwater/canvas.c", "output_free"),
-        ("src/moonwater/canvas.c", "output_flush_done"),
-        ("src/moonwater/canvas.c", "output_drop"),
-        ("src/moonwater/canvas.c", "cursor_plane_recover"),
-        ("src/moonwater/canvas.c", "canvas_release"),
-        ("src/moonwater/canvas.c", "canvas_claimed_forget"),
-        ("src/moonwater/canvas.c", "client_unregister"),
+        ("src/canvas/canvas.c", "cursor_buffers_drop"),
+        ("src/canvas/canvas.c", "plane_drop"),
+        ("src/canvas/canvas.c", "plane_lost"),
+        ("src/canvas/canvas.c", "plane_claim"),
+        ("src/canvas/canvas.c", "output_free"),
+        ("src/canvas/canvas.c", "output_flush_done"),
+        ("src/canvas/canvas.c", "output_drop"),
+        ("src/canvas/canvas.c", "cursor_plane_recover"),
+        ("src/canvas/canvas.c", "canvas_release"),
+        ("src/canvas/canvas.c", "canvas_claimed_forget"),
+        ("src/canvas/canvas.c", "client_unregister"),
     ])
 
     runner = r'''
@@ -24226,7 +24225,7 @@ def harness_canvas_view(argv):
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
 
-    pane = canvas_part((args.source_root / "src/moonwater/canvas.c").read_text(),
+    pane = canvas_part((args.source_root / "src/canvas/canvas.c").read_text(),
                        "pane")
     first = "// One line of the ring"
     following = "/*\n        A window, of pixels or of cells."
@@ -24530,7 +24529,8 @@ def harness_floodlight(argv):
 
     #   Which applets can start a program, transitively, through any helper.
     graph = defaultdict(set)
-    for pattern in ('src/sh/*.c', 'src/moonwater/core.c', 'src/bowl.c',
+    for pattern in ('src/sh/*.c', 'src/canvas/term.c', 'src/canvas/screen.c',
+                    'src/canvas/terminfo.c', 'src/moonwater/core.c', 'src/bowl.c',
                     'src/lib.util.c'):
         for path in sorted(ROOT.glob(pattern)):
             for name, seen in bodies(graph_source(path)).items():
@@ -27615,7 +27615,7 @@ def harness_image_nodes(argv):
     spark = (ROOT / 'src/moonwater/spark.c').read_text()
     flood = (ROOT / 'src/moonwater/floodlight.c').read_text()
     bowl = (ROOT / 'src/bowl.c').read_text()
-    window = (ROOT / 'src/moonwater/window.c').read_text()
+    window = (ROOT / 'src/canvas/window.c').read_text()
     host = (ROOT / 'src/sh/host.c').read_text()
 
     def setting(name):
@@ -30514,8 +30514,8 @@ def harness_objtool_shape(argv):
     def kernel_names():
         names, macros = set(), {}
         for name in ("src/moonwater/core.c", "src/moonwater/spark.c",
-                     "src/moonwater/moonwater.c", "src/moonwater/canvas.c",
-                     "src/moonwater/window.c", "src/sh/term.c", "src/lib.util.c"):
+                     "src/moonwater/moonwater.c", "src/canvas/canvas.c",
+                     "src/canvas/window.c", "src/canvas/term.c", "src/lib.util.c"):
             tokens, directives = lex((HARNESS_ROOT / name).read_text(errors="replace"))
             events = sorted([(d.start, 0, d) for d in directives] +
                             [(t.start, 1, t) for t in tokens], key=lambda e: (e[0], e[1]))
@@ -30609,7 +30609,7 @@ def harness_host_writes(argv):
     #   lock's FILE_CREATE made its file wherever one pointed, and neither
     #   was looked at because the pattern named only write flags. A device
     #   named by a literal /dev/ path is the kernel's node, not a file.
-    for name in ("src/sh/host.c", "src/moonwater/moonwater.c", "src/sh/screen.c",
+    for name in ("src/sh/host.c", "src/moonwater/moonwater.c", "src/canvas/screen.c",
                  "src/sh/net.c"):
         text = (root / name).read_text()
         if name.endswith("moonwater.c"):
@@ -30855,7 +30855,7 @@ def harness_console_queue(argv):
     import subprocess
     import tempfile
     seeds = int(argv[0]) if argv else 64
-    text = (HARNESS_ROOT / "src/moonwater/canvas.c").read_text()
+    text = (HARNESS_ROOT / "src/canvas/canvas.c").read_text()
     start = text.index("#define CONSOLE_QUEUE")
     cut = text[start:text.index("// Every record the ring holds into the emulator", start)]
     cut = cut.replace("static char console_record[CONSOLE_RECORD];",
@@ -31033,7 +31033,7 @@ def harness_pane_restride(argv):
     import subprocess
     import tempfile
     seeds = int(argv[0]) if argv else 4000
-    text = (HARNESS_ROOT / "src/moonwater/canvas.c").read_text()
+    text = (HARNESS_ROOT / "src/canvas/canvas.c").read_text()
 
     def cut(first, following):
         start = text.index(first)
@@ -31941,7 +31941,7 @@ def harness_terminfo_install(argv):
     which carries O_CREAT and O_TRUNC: a symlink left at one of these names by
     anyone who got there first made the install truncate and rewrite whatever
     it pointed at, with the privilege the terminal or bowl was started with.
-    The installer is cut out of src/sh/terminfo.c and run for real against a
+    The installer is cut out of src/canvas/terminfo.c and run for real against a
     temporary directory with a link planted at every step of the path -- the
     directories the walk makes and the four files it writes -- and each
     planted link must still point at an untouched file afterwards.
@@ -31952,7 +31952,7 @@ def harness_terminfo_install(argv):
     """
     del argv
     root = HARNESS_ROOT
-    text = (root / "src/sh/terminfo.c").read_text()
+    text = (root / "src/canvas/terminfo.c").read_text()
     kept = text[text.index("static fn terminal_terminfo_write"):]
 
     parent = r'''

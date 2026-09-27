@@ -789,7 +789,7 @@ static bipolar file_exec_path_try(string_address address_to words);
         nothing of the shell but file.c's environment, so it can come this
         early and be the one place that says where a root is.
 */
-#include "terminfo.c"
+#include "../canvas/terminfo.c"
 #include "../bowl.c"
 #include "process_tools.c"
 #include "monitor.c"
@@ -801,10 +801,10 @@ static bool floodlight_descendants_blocking();
 static fn job_child_watch();
 static bool floodlight_parent_supervised;
 #include "expand.c"
-#include "../moonwater/window.c"
-#include "term.c"
+#include "../canvas/window.c"
+#include "../canvas/term.c"
 #include "host.c"
-#include "screen.c"
+#include "../canvas/screen.c"
 #include "edit.c"
 #include "system.c"
 #define PROMPT TERM_RESET TERM_BOLD " $ " TERM_RESET

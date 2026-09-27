@@ -8,7 +8,7 @@
         written: older ncurses used the hex of the first character, newer
         ones the character itself.
 
-        Regenerated with: tic -x -o DIR src/sh/terminfo.ti
+        Regenerated with: tic -x -o DIR src/canvas/terminfo.ti
 */
 
 #define TERM_NAME "xterm-256color"

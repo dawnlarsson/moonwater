@@ -5,7 +5,7 @@
         this file is the only place that knows about all three at once.
         spark.c is the binary format and the loader, spawn and reports that
         serve it. moonwater.c is the bindings, the machine script and the
-        scanner. canvas/canvas.c is the compositor. Each keeps to itself;
+        scanner. src/canvas/canvas.c is the compositor. Each keeps to itself;
         the ioctl switch below is where they meet, because /dev/spark is one
         device and a caller does not care which of them answers.
 
@@ -151,21 +151,7 @@ struct device_context
 };
 
 #ifdef CONFIG_MOONWATER_CANVAS
-#include <linux/workqueue.h>
-#include <linux/kthread.h>
-#include <linux/rtmutex.h>
-#include <uapi/linux/sched/types.h>
-#include <linux/pm_qos.h>
-#include <linux/input.h>
-#include <linux/math64.h>
-#include <linux/minmax.h>
-#include <linux/list_sort.h>
-#include <linux/hrtimer.h>
-#include <linux/font.h>
-#include <linux/cacheflush.h>
-#include <drm/drm_file.h>
-#include <drm/drm_rect.h>
-#include "canvas.c"
+#include "../canvas/canvas.c"
 #endif
 
 /*
@@ -223,79 +209,6 @@ static const MountPoints mounts[] = {
     */
     {null, null},
 };
-
-#ifdef CONFIG_MOONWATER_CANVAS
-#define REPORT_CANVAS(name, type, collect)                                   \
-        static long name(struct type __user *out)                            \
-        {                                                                    \
-                struct type stats;                                           \
-                collect(&stats);                                             \
-                return copy_to_user(out, &stats, sizeof(stats)) ? -EFAULT : 0; \
-        }
-
-REPORT_CANVAS(report_input, input_stats, canvas_input_stats)
-REPORT_CANVAS(report_cursor, cursor_stats, canvas_cursor_stats)
-REPORT_CANVAS(report_devices, input_devices, canvas_input_devices)
-#undef REPORT_CANVAS
-
-/*
-        Canvas off and on, and what it holds.
-
-        The state is copied back whatever the request answers, so a refused on
-        can name the program that holds the display. Reading needs nothing;
-        on and off stop and start the desktop everyone at the machine is
-        using, so they need CAP_SYS_ADMIN.
-*/
-static long report_canvas(struct canvas_control __user *out)
-{
-        struct canvas_control control;
-        unsigned int request;
-        long answer = 0;
-        char layout[16];
-
-        if (copy_from_user(&control, out, sizeof(control)))
-                return -EFAULT;
-
-        request = control.request;
-        memcpy(layout, control.master_command, sizeof(layout));
-        layout[sizeof(layout) - 1] = 0;
-        if (request > SPARK_CANVAS_LAYOUT)
-                return -EINVAL;
-        if (request == SPARK_CANVAS_LAYOUT)
-        {
-                if (layout[0] && !capable(CAP_SYS_ADMIN))
-                        return -EPERM;
-        }
-        else if (request != SPARK_CANVAS_STATUS && !capable(CAP_SYS_ADMIN))
-                return -EPERM;
-
-        memset(&control, 0, sizeof(control));
-        control.request = request;
-
-        if (request == SPARK_CANVAS_LAYOUT)
-        {
-                if (layout[0])
-                        answer = canvas_layout_set(layout);
-                strscpy(control.master_command, canvas_layout_name(),
-                        sizeof(control.master_command));
-                if (copy_to_user(out, &control, sizeof(control)))
-                        return -EFAULT;
-                return answer;
-        }
-
-        if (request == SPARK_CANVAS_ON)
-                answer = canvas_turn_on(&control);
-        else if (request == SPARK_CANVAS_OFF)
-                answer = canvas_turn_off();
-
-        canvas_state(&control);
-
-        if (copy_to_user(out, &control, sizeof(control)))
-                return -EFAULT;
-
-        return answer;
-}
-#endif
 
 static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
