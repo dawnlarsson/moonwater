@@ -326,9 +326,13 @@ static bool stdbuf_mode(string_address text, bool input,
         if (string_is(at, '+'))
                 at++;
 
-        positive value;
+        positive value = 1;
 
-        if (!string_digits_checked(address_of at, 10, address_of value))
+        // A unit alone is one of it, as xstrtoumax reads -oK: a kibibyte.
+        if (!byte_is_digit(string_get(at)) && string_get(at) &&
+            (string_get(at) == 'k' || size_suffix_power(string_get(at), false)))
+                ;
+        else if (!string_digits_checked(address_of at, 10, address_of value))
                 goto invalid;
 
         positive power = 0;

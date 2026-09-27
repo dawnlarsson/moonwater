@@ -10255,7 +10255,8 @@ MISC_UTILITIES = (
 
     Utility("stdbuf",
             options=(Option("-i", ("0", "L", "1", "4K", "bad", "-1"), None), Option("--input", ("0",), True),
-                     Option("-o", ("0", "L", "1", "4K", "4KB", "4KiB", "1M", "l", "bad", "0Q", "+1", "004K"), None),
+                     Option("-o", ("0", "L", "1", "4K", "4KB", "4KiB", "1M", "l", "bad", "0Q", "+1", "004K",
+                                   "K", "M", "KiB", "KB", "k", "x"), None),
                      Option("--output", ("L",), True),
                      Option("-e", ("0", "L", "4KiB", "bad"), None), Option("--error", ("0",), True)),
             operands=(("./exe", "a"), ("sh", "-c", "echo \"$_STDBUF_I|$_STDBUF_O|$_STDBUF_E|$LD_PRELOAD\""),
