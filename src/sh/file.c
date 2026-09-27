@@ -32230,9 +32230,14 @@ static b32 file_touch()
                 {
                         bipolar done = system_update_times_at(1, null, times, 0);
 
+                        //      touch -c - >&- has nothing to make and no
+                        //      one to tell, and GNU says nothing.
+                        if (done == -ERROR_BAD_DESCRIPTOR && no_create)
+                                continue;
+
                         if (done < 0)
                         {
-                                string_format(log_error, "touch: cannot touch %w: %s\n",
+                                string_format(log_error, "touch: setting times of %w: %s\n",
                                               writer_shell_quoted_name, path, file_reason(done));
                                 status = 1;
                         }
@@ -32246,10 +32251,14 @@ static b32 file_touch()
                    -c is silent only for ENOENT. */
                 bipolar created = 0;
 
+                /* Never waiting on the open: a FIFO with no reader would
+                   hold it forever, where without O_NONBLOCK it refuses at
+                   once and its times are set by name like any other. */
                 if (!no_create && through)
                 {
                         created = system_open_at_mode(AT_FDCWD,
-                                                     path, FILE_WRITE & ~O_TRUNC,
+                                                     path, (FILE_WRITE & ~O_TRUNC) |
+                                                               O_NONBLOCK | O_NOCTTY,
                                                      0666);
 
                         if (created >= 0)

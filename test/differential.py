@@ -7509,29 +7509,40 @@ FILES_UTILITIES = (
                    ("-x",), ("-d",), ("-r",), ("-f",), ("-I", "-R", "-d", "@0"), ("-R", "-I", "-d", "@0"), ("-u", "-d", "2001-09-09 12:00 +0200", "+%H %Z"))),
 )
 
-#       A working directory that has been removed under the program. A
-#       relative name then has nothing to hang from: coreutils' canonicalize
-#       refuses it where getcwd does, and readlink -e . once answered / here,
-#       which a script would then have acted on. The words are the program
-#       and its own; the directory is made and removed by the shell first.
-FILES_GONE_CWD_CASES = (
-    ("readlink", "-e", "."), ("readlink", "-f", "."), ("readlink", "-m", "."), ("readlink", "-f", "x"),
-    ("readlink", "-m", "x/y"), ("readlink", "-ev", "."), ("readlink", "-f", ".."), ("readlink", "-e", "/"),
-    ("realpath", "."), ("realpath", "-m", "x"), ("realpath", "-s", "."), ("realpath", "-e", ".."),
-    ("realpath", "-L", "."), ("realpath", "-q", "."), ("realpath", "/", "."), ("realpath", "--relative-to=/", "/tmp"),
+#       Scenes a fixture cannot hold, made by the shell before the program
+#       runs: a working directory removed under it (a relative name then has
+#       nothing to hang from, and readlink -e . once answered / there), a FIFO
+#       nobody reads (touch once waited on it forever), and standard output
+#       closed. The words are the scene, the program and its own.
+FILES_SCENES = {
+    "gone": ("env mkdir -p gone/here\ncd gone/here || exit 9\nenv rmdir ../here || exit 9\n", "",
+             "cd / || exit 9\n"),
+    "fifo": ("env mkfifo fifo || exit 9\n", "", "env ls -l fifo | env cut -c1\n"),
+    "closed": ("", " >&-", ""),
+}
+FILES_SCENE_CASES = (
+    ("gone", "readlink", "-e", "."), ("gone", "readlink", "-f", "."), ("gone", "readlink", "-m", "."),
+    ("gone", "readlink", "-f", "x"), ("gone", "readlink", "-m", "x/y"), ("gone", "readlink", "-ev", "."),
+    ("gone", "readlink", "-f", ".."), ("gone", "readlink", "-e", "/"), ("gone", "realpath", "."),
+    ("gone", "realpath", "-m", "x"), ("gone", "realpath", "-s", "."), ("gone", "realpath", "-e", ".."),
+    ("gone", "realpath", "-L", "."), ("gone", "realpath", "-q", "."), ("gone", "realpath", "/", "."),
+    ("gone", "realpath", "--relative-to=/", "/tmp"),
+    ("fifo", "touch", "fifo"), ("fifo", "touch", "-c", "fifo"), ("fifo", "touch", "-a", "fifo", "new"),
+    ("fifo", "touch", "-h", "fifo"),
+    ("closed", "touch", "-c", "-"), ("closed", "touch", "-"), ("closed", "touch", "--no-create", "-", "a.txt"),
 )
 
 
-def files_gone_cwd_script(argv, stdin_name):
-    body = ("env mkdir -p gone/here\ncd gone/here || exit 9\nenv rmdir ../here || exit 9\n"
-            "run " + ul_words(argv[1:]) + "\nstatus=$?\ncd / || exit 9\nexit $status\n")
-    return ul_live(argv[0], body)
+def files_scene_script(argv, stdin_name):
+    setup, redirect, after = FILES_SCENES[argv[0]]
+    body = (setup + "run " + ul_words(argv[2:]) + redirect + "\nstatus=$?\n" + after + "exit $status\n")
+    return ul_live(argv[1], body)
 
 
 FILES_UTILITIES = FILES_UTILITIES + (
-    Utility("gone_cwd", operands=FILES_GONE_CWD_CASES, stdin=("empty",), fixture="files", stderr="exact",
-            modes=("bash",), script=files_gone_cwd_script,
-            valid=lambda argv: bool(argv) and argv[0] in ("readlink", "realpath")),
+    Utility("scenes", operands=FILES_SCENE_CASES, stdin=("empty",), fixture="files", stderr="exact",
+            modes=("bash",), script=files_scene_script, timeout=4.0,
+            valid=lambda argv: len(argv) > 1 and argv[0] in FILES_SCENES),
 )
 
 # Every utility drops GNU's --help hint from its diagnostics, whether or not it
