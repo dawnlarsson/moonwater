@@ -4657,6 +4657,11 @@ typedef struct
         /* getopt's order under POSIXLY_CORRECT: the first operand ends the
            options, and every word after it is an operand too. */
         bool posix_order;
+        /* The digits are getopt options of their own, one letter each, as
+           in uniq's "-0123456789Dcd...": -1c is -1 then -c, where the
+           default takes a word that starts with a digit whole, as expand's
+           -3,5 list is. */
+        bool digits_in_clusters;
 } file_taking;
 
 /* Help wins over version; callers retain their writer and flush/status policy. */
@@ -4742,7 +4747,8 @@ static bool file_take_from(file_taking address_to taking, positive index)
                         {
                                 if (taking->numbers && (byte_is_digit(word[1]) || word[1] == '.'))
                                         break;
-                                if (taking->digits && byte_is_digit(word[1]))
+                                if (taking->digits && !taking->digits_in_clusters &&
+                                    byte_is_digit(word[1]))
                                 {
                                         positive bit = file_letter_bit(taking->digits);
                                         taking->repeated |= taking->flags & ((positive)1 << bit);

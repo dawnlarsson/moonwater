@@ -7013,7 +7013,7 @@ static b32 head_obsolete(head_tail_old address_to old)
 */
 static bipolar tail_posix_version()
 {
-        string_address said = env_get("_POSIX2_VERSION");
+        string_address said = file_environment((string_address) "_POSIX2_VERSION");
 
         if (!said || !said[0])
                 return 200809;
@@ -17770,13 +17770,55 @@ static bool uniq_grouping_of(string_address word, bool ends, positive address_to
 }
 
 static positive uniq_fields;
+// Whether the last word to set the fields to skip was -f, which the obsolete
+// -N does not add to but starts again from nothing.
+static bool uniq_fields_new;
 static positive uniq_characters;
 static positive uniq_width;
 static positive uniq_all_how;
 static positive uniq_group_how;
 
+// argmatch's refusal: the word, the words it knows, where to look.
+static bool uniq_argument_refused(string_address value, string_address option,
+                                  string_address known)
+{
+        text_flush();
+        string_format(writer_stderr,
+                      "uniq: invalid argument '%w' for '%s'\nValid arguments are:\n%s"
+                      "Try 'uniq --help' for more information.\n",
+                      writer_terminal_quoted_name, value, option, known);
+        return false;
+}
+
 static bool uniq_option_seen(p8 letter, string_address value)
 {
+        /*
+                The obsolete -N: each digit is one more of GNU's getopt
+                options, so -1 -2 is twelve fields and -1c is one field and
+                -c; after -f the count starts again from nothing, and -f
+                after it replaces it.
+        */
+        if (letter == 'N')
+        {
+                if (uniq_fields_new)
+                        uniq_fields = 0;
+
+                for (string_address at = value; byte_is_digit((p8)*at); at++)
+                {
+                        positive digit = (positive)(*at - '0');
+
+                        uniq_fields = uniq_fields > (positive_max - digit) / 10
+                                          ? positive_max
+                                          : uniq_fields * 10 + digit;
+                }
+
+                uniq_fields_new = false;
+                return true;
+        }
+
+        if (letter == 'f')
+                uniq_fields_new = true;
+
         if ((letter == 'f' || letter == 's' || letter == 'w') &&
             !text_unsigned_option(value, true,
                                   letter == 'f'   ? address_of uniq_fields
@@ -17801,7 +17843,8 @@ static bool uniq_option_seen(p8 letter, string_address value)
                 if (letter == 'D' || !value)
                         uniq_all_how = UNIQ_GROUP_NONE;
                 else if (!uniq_grouping_of(value, false, address_of uniq_all_how))
-                        return string_diagnostic(&text_diagnostic, 0, value, "invalid argument");
+                        return uniq_argument_refused(value, "--all-repeated",
+                                                     "  - 'none'\n  - 'prepend'\n  - 'separate'\n");
         }
 
         if (letter == 'G')
@@ -17809,7 +17852,8 @@ static bool uniq_option_seen(p8 letter, string_address value)
                 if (!value)
                         uniq_group_how = UNIQ_GROUP_SEPARATE;
                 else if (!uniq_grouping_of(value, true, address_of uniq_group_how))
-                        return string_diagnostic(&text_diagnostic, 0, value, "invalid argument");
+                        return uniq_argument_refused(value, "--group",
+                                                     "  - 'prepend'\n  - 'append'\n  - 'separate'\n  - 'both'\n");
         }
 
         return true;
@@ -17839,17 +17883,64 @@ static positive uniq_skipped(p8 address_to line, positive length,
         return skip + min(characters, length - skip);
 }
 
+/*
+        The obsolete +N: an operand that is a plus and a number is the bytes
+        to skip, unless _POSIX2_VERSION names the 2001 edition, which had no
+        such thing, or it comes after --; and under POSIXLY_CORRECT a word
+        after the first file is a file whatever it looks like. A number too
+        large skips everything.
+*/
+static fn uniq_operand(b32 which)
+{
+        string_address word = program_argument(which);
+        bipolar version = tail_posix_version();
+        bool strict = version >= 200112 && version < 200809;
+
+        //      After --, getopt is done and every word is a file.
+        bool ended = false;
+
+        for (b32 at = 1; at < which && !ended; at++)
+        {
+                string_address before = program_argument(at);
+
+                ended = string_equals(before, "--");
+                //      A word that is an option's value is not the end.
+                if (!ended && before[0] == '-' && before[1] != '-' &&
+                    (before[1] == 's' || before[1] == 'f' || before[1] == 'w') && !before[2])
+                        at++;
+        }
+
+        if (word[0] == '+' && !strict && !ended &&
+            !(text_files_count && file_environment((string_address) "POSIXLY_CORRECT")))
+        {
+                string_address at = word + 1;
+                positive digits = string_span(at, string_set_digits);
+
+                if (digits && !at[digits])
+                {
+                        uniq_characters = head_tail_old_count(at, digits, 1);
+                        return;
+                }
+        }
+
+        text_file_add(which);
+}
+
 static b32 text_uniq()
 {
         file_taking taking = {
             .program = (string_address) "uniq",
             .options = uniq_options,
-            .operand = text_file_add,
+            .operand = uniq_operand,
             .seen = uniq_option_seen,
+            .digits = 'N',
+            .digits_in_clusters = true,
+            .posix_order = true,
         };
 
         text_begin("uniq");
         uniq_fields = 0;
+        uniq_fields_new = false;
         uniq_characters = 0;
         uniq_width = 0;
         uniq_all_how = UNIQ_GROUP_NONE;
@@ -17876,10 +17967,12 @@ static b32 text_uniq()
                 text_delimiter = '\0';
 
         if (all_repeated && counting)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "printing all duplicated lines and repeat counts is meaningless"));
+                return text_done(text_operand_trouble("printing all duplicated lines and repeat counts is meaningless",
+                                                      null, null));
 
         if (grouping && (counting || repeated_only || unique_only || all_repeated))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "--group is mutually exclusive with -c/-d/-D/-u"));
+                return text_done(text_operand_trouble("--group is mutually exclusive with -c/-d/-D/-u",
+                                                      null, null));
 
         if (text_files_count > 2)
                 return text_done(text_operand_trouble("extra operand", program_argument(text_files[2]), null));

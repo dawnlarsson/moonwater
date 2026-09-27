@@ -18763,7 +18763,16 @@ TEXT_UTILITIES = (
             stdin=("repeats", "text", "empty", "nonl", "mixed_case", "nul", "edge_65536", "text_uniq", "unsorted", "blanks",
                    "text_uniq_edge", "text_random_lines", "text_sort_keys", "blank_runs", "edge_65535", "edge_65537", "text_utf8"),
             fixture="text", extra=(("--nosuchflag",), ("-Q",), ("-cd",), ("-c", "-D"), ("--group", "-c"), ("-f1", "-f2", "keys"),
-                                   ("-z", "-c", "-"), ("-ic",), ("-f2", "keys"), ("-w2", "-s1"), ("-D", "-i"))),
+                                   ("-z", "-c", "-"), ("-ic",), ("-f2", "keys"), ("-w2", "-s1"), ("-D", "-i"),
+                                   #   The obsolete -N skips fields and +N skips
+                                   #   bytes: each digit is an option of its own,
+                                   #   -f starts the count again, +N after -- or
+                                   #   under the 2001 edition is a file.
+                                   ("-1",), ("-12",), ("-1", "-2"), ("-1c",), ("-c1",), ("-c12d",), ("-f1", "-1"),
+                                   ("-1", "-f0"), ("-1", "keys"), ("+1",), ("+2", "keys"), ("+1", "--"), ("--", "+1"),
+                                   ("+x",), ("+99999999999999999999999",), ("-s1", "+2"), ("+2", "-s1"), ("keys", "+1"),
+                                   {"argv": ("+1", "keys"), "env": (("_POSIX2_VERSION", "200112"),), "fixture": "text"},
+                                   ("--all-repeated=badoption",), ("--group=badoption",), ("--group", "-D"))),
     Utility("wc",
             options=(Option("-c"), Option("--bytes"), Option("-m"), Option("--chars"), Option("-l"), Option("--lines"),
                      Option("-L"), Option("--max-line-length"), Option("-w"), Option("--words"), Option("--debug"),
