@@ -325,7 +325,7 @@ cover('folds_already', 'bytes', 'memory_take',
       'the shelf number folds at a literal request, but the saving has not '
       'been separated from the free-list chain that dominates the pair')
 
-# The one specializer here that folds no argument. It exists because the
+# A specializer that folds no argument. It exists because the
 # routine is small enough that the call is a measurable part of it, so the
 # same instructions are placed at the call site instead.
 cover('placed', None, 'string_to_decimal_short',
@@ -348,6 +348,15 @@ cover('placed', None, 'string_to_decimal_short',
       'with seven it takes 10.2 against the integer-only placement\'s 10.0 '
       'in 68 instructions against 75',
       expansion='decimal_short_placed', evidence='test/checks.c#CHECK_number')
+
+# The second placement, and a partial one: the macro answers the common
+# nothing-to-trim case from the last byte at the call site and calls the
+# routine only when there is a suffix to walk. Nothing folds -- every caller
+# strips a length it counted at run time.
+cover('placed', None, 'memory_span_byte_reverse',
+      'the last-byte test is placed at the call site ahead of the routine; '
+      'the parenthesized name reaches the routine itself for the checks',
+      expansion='_reverse_byte', evidence='test/checks.c#CHECK_standard')
 
 cover('nothing_to_fold', None, '''
 string_append_bounded string_copy_bounded string_duplicate string_duplicate_max
