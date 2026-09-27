@@ -549,9 +549,14 @@ static bool text_quiet_read;
    --pid to watch, and GNU takes a read that would block as the end of what
    there is for now rather than as a failure. */
 static bool text_again_ends;
-/* One sentinel slot is used while a sed script file is turned into text. */
+/* One sentinel slot is used while a sed script file is turned into text.
+   The array is mapped on first touch (UTILITY_HELD); a record longer than
+   TEXT_LINE_MAX moves text_line to a heap store of its own (see
+   text_spill_room), which text_line_moved names once it has. */
 static p8 (address_to text_line_held)[TEXT_LINE_MAX + 1];
-#define text_line UTILITY_HELD(text_line)
+static p8 address_to text_line_moved;
+#define text_line (text_line_moved ? text_line_moved \
+                                   : (p8 address_to)UTILITY_HELD(text_line))
 static positive text_line_length;
 static bool text_line_ended;
 
@@ -839,13 +844,92 @@ static inline INLINE bool text_fill()
                text_fill_amount(TEXT_READ_MAX);
 }
 
+/*
+        Room for a record longer than the fixed stores hold.
+
+        GNU's line tools keep a line of any length -- cut, fold, paste, pr,
+        fmt, nl and uniq all answer a three megabyte line -- where these
+        refused one past TEXT_LINE_MAX as "line too long". The three shared
+        stores, text_line, text_record_hold and relation_spill, and each
+        record cursor's own, start as their fixed arrays and move to a heap
+        store of their own the first time a record outgrows one: what the
+        record already holds is copied across, and the pointer the tools
+        read the store through is moved with it, so nothing else changes.
+        The fixed arrays stay the common case and cost nothing new.
+*/
+static p8 (address_to relation_spill_held)[TEXT_LINE_MAX + 1];
+static p8 address_to relation_spill_moved;
+#define relation_spill (relation_spill_moved ? relation_spill_moved \
+                                             : (p8 address_to)UTILITY_HELD(relation_spill))
+/* uniq already needed one retained record.  The merge walkers use the same
+   mutually-exclusive store for the one prior record crossing a refill. */
+static p8 (address_to text_record_hold_held)[TEXT_LINE_MAX + 1];
+static p8 address_to text_record_hold_moved;
+#define text_record_hold (text_record_hold_moved ? text_record_hold_moved \
+                                                 : (p8 address_to)UTILITY_HELD(text_record_hold))
+static byte_store text_line_grown;
+static byte_store relation_spill_grown;
+static byte_store text_record_hold_grown;
+
+static bool text_spill_room(p8 address_to address_to storage, positive used,
+                            positive need, byte_store address_to own)
+{
+        byte_store address_to store = own;
+        p8 address_to address_to home = storage;
+
+        if (!store)
+        {
+                //      A tool may hold a store's first address past a move
+                //      (fmt, comm and uniq take theirs once), so the fixed
+                //      array is known as the store as well as where it moved.
+                p8 address_to at = address_to storage;
+
+                if (at == text_line_moved || at == (p8 address_to)text_line_held)
+                        store = address_of text_line_grown, home = address_of text_line_moved;
+                else if (at == text_record_hold_moved ||
+                         at == (p8 address_to)text_record_hold_held)
+                        store = address_of text_record_hold_grown,
+                        home = address_of text_record_hold_moved;
+                else if (at == relation_spill_moved ||
+                         at == (p8 address_to)relation_spill_held)
+                        store = address_of relation_spill_grown,
+                        home = address_of relation_spill_moved;
+                else
+                        return need <= TEXT_LINE_MAX;
+        }
+
+        positive capacity = address_to storage == store->bytes && store->room
+                                ? store->room - 1
+                                : TEXT_LINE_MAX;
+
+        if (need <= capacity)
+                return true;
+
+        bool moving = address_to storage != store->bytes;
+
+        if (need >= positive_max - 1 ||
+            !byte_store_reserve(store, need + 1, (positive)1 << 20))
+                return false;
+
+        if (moving && used)
+                memory_copy(store->bytes, address_to storage, used);
+
+        address_to storage = store->bytes;
+        address_to home = store->bytes;
+        return true;
+}
+
 /* The copying edge shared by ordinary lines and multi-input record views.
-   Complete views bypass this; split records retain exact NUL/delimiter bytes. */
+   Complete views bypass this; split records retain exact NUL/delimiter bytes.
+   *storage may move to a larger store: see text_spill_room. */
 static bool text_reader_spill(text_reader address_to reader, p8 delimiter,
-                               p8 address_to storage, positive address_to length,
+                               p8 address_to address_to storage_at,
+                               byte_store address_to own,
+                               positive address_to length,
                                bool address_to ended, string_address about)
 {
         positive used = address_to length;
+        p8 address_to storage = address_to storage_at;
         if (!text_reader_fill(reader))
                 return used != 0;
 
@@ -856,15 +940,23 @@ static bool text_reader_spill(text_reader address_to reader, p8 delimiter,
                 p8 address_to found = memory_first_of(at, delimiter, left);
                 positive take = found ? (positive)(found - at) : left;
 
-                if (take > TEXT_LINE_MAX - used)
+                //      Every store holds TEXT_LINE_MAX, so only a record
+                //      past that asks whether its store can grow.
+                if (unlikely(used + take > TEXT_LINE_MAX))
                 {
-                        // A later sed N must not mistake the rejected tail
-                        // for another record, nor expose a truncated prefix.
-                        reader->position = reader->filled;
-                        reader->finished = true;
-                        reader->failed = true;
-                        address_to length = 0;
-                        return string_diagnostic(&text_diagnostic, 0, about, "line too long");
+                        if (!text_spill_room(storage_at, used, used + take, own))
+                        {
+                                // A later sed N must not mistake the rejected
+                                // tail for another record, nor expose a
+                                // truncated prefix.
+                                reader->position = reader->filled;
+                                reader->finished = true;
+                                reader->failed = true;
+                                address_to length = 0;
+                                return string_diagnostic(&text_diagnostic, 0, about, "line too long");
+                        }
+
+                        storage = address_to storage_at;
                 }
 
                 memory_copy(storage + used, at, take);
@@ -887,13 +979,19 @@ static bool text_reader_spill(text_reader address_to reader, p8 delimiter,
         }
 }
 
-static bool text_line_next(p8 address_to storage, positive used)
+// Where the last text_line_next put its line: the store it was given, or the
+// one that store moved to when the line outgrew it.
+static p8 address_to text_line_store;
+
+static inline INLINE bool text_line_next(p8 address_to storage, positive used)
 {
         text_line_length = used;
         text_line_ended = false;
         bool have = text_reader_spill(address_of text_input, text_delimiter,
-                                      storage, address_of text_line_length,
+                                      address_of storage, null,
+                                      address_of text_line_length,
                                       address_of text_line_ended, null);
+        text_line_store = storage;
         if (text_input.failed)
                 text_status = text_status ? text_status : 1;
         return have;
@@ -911,6 +1009,11 @@ static fn text_record_preserve(p8 address_to address_to previous,
 {
         if (previous && address_to previous && address_to previous != storage)
         {
+                //      A long record moves the store it is kept in first.
+                if (bytes > TEXT_LINE_MAX + 1 &&
+                    !text_spill_room(address_of storage, 0, bytes, null))
+                        return;
+
                 memory_copy(storage, address_to previous, bytes);
                 address_to previous = storage;
         }
@@ -2163,6 +2266,8 @@ typedef struct
 {
         text_reader reader;
         p8 address_to spill;
+        // Where spill moves when a record outgrows the store it began in.
+        byte_store grown;
         /* paste aliases repeated '-' operands to one cursor so its 64 KiB
            reads are shared instead of making byte-sized reads or letting
            independent buffers steal chunks from the same descriptor. */
@@ -2181,6 +2286,7 @@ static bool text_record_open(text_record_cursor address_to cursor,
                              string_address path, p8 address_to spill)
 {
         cursor->spill = spill;
+        cursor->grown = (byte_store){0};
         cursor->source = 0;
         cursor->record = null;
         cursor->length = 0;
@@ -2195,6 +2301,7 @@ static fn text_record_close(text_record_cursor address_to cursor)
 {
         text_close_handle(address_of cursor->reader.opened,
                           cursor->reader.handle);
+        byte_store_release(address_of cursor->grown);
 }
 
 static bool text_record_next(text_record_cursor address_to cursor,
@@ -2249,7 +2356,8 @@ static bool text_record_next(text_record_cursor address_to cursor,
                 memory_copy(cursor->spill, at, left);
                 cursor->length = left;
                 reader->position = reader->filled;
-                if (!text_reader_spill(reader, delimiter, cursor->spill,
+                if (!text_reader_spill(reader, delimiter, address_of cursor->spill,
+                                       address_of cursor->grown,
                                        address_of cursor->length,
                                        address_of cursor->ended, reader->name))
                         return false;
@@ -2297,12 +2405,8 @@ static fn text_record_take_peeked(text_record_cursor address_to cursor,
    refill-spanning store.  Only the second spill and one transient prior need
    new storage: the prior is consumed by the comparison before another side
    advances, so it is shared by both sides. */
-static p8 (address_to relation_spill_held)[TEXT_LINE_MAX + 1];
-#define relation_spill UTILITY_HELD(relation_spill)
-/* uniq already needed one retained record.  The merge walkers use the same
-   mutually-exclusive store for the one prior record crossing a refill. */
-static p8 (address_to text_record_hold_held)[TEXT_LINE_MAX + 1];
-#define text_record_hold UTILITY_HELD(text_record_hold)
+/* relation_spill and text_record_hold are declared with text_spill_room,
+   which moves them. */
 
 /* comm ---------------------------------------------------- */
 
@@ -10049,9 +10153,19 @@ static b32 text_unexpand() { return text_tabs(true); }
         nor another line/output buffer.
 */
 #define FMT_WIDTH_DEFAULT 75
-/* Word separators are represented in descriptors rather than copied into the
-   spill, so a one-byte word on each physical line is the true upper bound. */
-#define FMT_WORD_MAX TEXT_LINE_MAX
+/*
+        GNU's fmt holds at most MAXWORDS words and MAXCHARS bytes of a
+        paragraph. Past either it formats what it holds, writes it out to the
+        cheapest break near the end and keeps the rest as the start of the
+        paragraph -- flush_paragraph -- so a paragraph of any length is
+        formatted, a piece at a time, and those pieces are part of the answer:
+        seq 3000 run into one line breaks where the pieces end. The same two
+        limits and the same flush are kept here, and with them no paragraph
+        is too large.
+*/
+#define FMT_WORD_MAX 1000
+#define FMT_CHAR_MAX 5000
+#define FMT_LINE_CREDIT 9
 #define FMT_COST_MAX ((bipolar)(positive_max >> 1))
 
 typedef struct
@@ -10230,7 +10344,7 @@ static bool fmt_read_line(fmt_line address_to line)
         if (!text_line_next(fmt_hold, 0))
                 return false;
 
-        line->at = fmt_hold;
+        line->at = text_line_store;
         line->length = text_line_length;
         line->ended = text_line_ended;
         line->suitable = false;
@@ -10241,26 +10355,124 @@ static bool fmt_read_line(fmt_line address_to line)
         return true;
 }
 
-static bool fmt_add_word(p8 address_to at, positive length, positive space,
-                         bool end_line)
+static fn fmt_choose_breaks();
+static fn fmt_put_line(positive begin, positive indent);
+
+// GNU's set_other_indent (true), for a flush in the middle of a paragraph.
+static fn fmt_other_same(positive column)
 {
-        if (fmt_word_count == FMT_WORD_MAX ||
-            length > TEXT_LINE_MAX - fmt_character_count)
+        if (fmt_split)
+                fmt_other_indent = fmt_first_indent;
+        else if (fmt_crown)
+                fmt_other_indent = column;
+        else if (fmt_tagged)
         {
-                string_diagnostic(&text_diagnostic, 0, null, "paragraph is too large");
-                fmt_failed = true;
-                return false;
+                if (column != fmt_first_indent)
+                        fmt_other_indent = column;
+                else if (fmt_other_indent == fmt_first_indent)
+                        fmt_other_indent = fmt_first_indent ? 0 : 3;
+        }
+        else
+                fmt_other_indent = fmt_first_indent;
+}
+
+/*
+        flush_paragraph: the words held so far are formatted, the break whose
+        saving over the rest is least -- with a small credit for every line
+        later -- is chosen, the lines before it are written, and the words
+        from it on, the one being read included, become the paragraph's
+        start. Held nothing but a word being read, that word's bytes are
+        written as they are and the buffer starts again.
+*/
+static fn fmt_flush()
+{
+        fmt_word address_to current = fmt_words + fmt_word_count;
+
+        if (!fmt_word_count)
+        {
+                text_put(relation_spill, fmt_character_count);
+                fmt_character_count = 0;
+                current->text = relation_spill;
+                return;
         }
 
-        fmt_word address_to word = fmt_words + fmt_word_count++;
+        positive saved = current->length;
 
-        word->text = fmt_spill + fmt_character_count;
-        memory_copy_apart(word->text, at, length);
-        fmt_character_count += length;
-        word->length = length;
+        fmt_choose_breaks();
+        current->length = saved;
+
+        positive split = fmt_word_count;
+        bipolar best = FMT_COST_MAX;
+
+        for (positive w = fmt_words[0].next_break; w != fmt_word_count;
+             w = fmt_words[w].next_break)
+        {
+                bipolar saving = fmt_words[w].best_cost -
+                                 fmt_words[fmt_words[w].next_break].best_cost;
+
+                if (saving < best)
+                {
+                        split = w;
+                        best = saving;
+                }
+
+                if (best <= FMT_COST_MAX - FMT_LINE_CREDIT)
+                        best += FMT_LINE_CREDIT;
+        }
+
+        fmt_put_line(0, fmt_first_indent);
+
+        for (positive w = fmt_words[0].next_break; w != split; w = fmt_words[w].next_break)
+                fmt_put_line(w, fmt_other_indent);
+
+        positive shift = (positive)(fmt_words[split].text - relation_spill);
+
+        memory_copy(relation_spill, relation_spill + shift, fmt_character_count - shift);
+        fmt_character_count -= shift;
+
+        for (positive w = split; w <= fmt_word_count; w++)
+                fmt_words[w].text -= shift;
+
+        memory_copy(fmt_words, fmt_words + split,
+                    (fmt_word_count - split + 1) * sizeof(fmt_word));
+        fmt_word_count -= split;
+}
+
+/*
+        One word into the paragraph, as GNU's get_line reads it: its bytes
+        a byte at a time into the paragraph buffer, flushing when the buffer
+        is full, and then, once its spacing is known, a flush if it is the
+        last word the buffer can take. The columns are where the word began
+        and where the spacing after it ends, which is what GNU's in_column
+        holds at those two moments.
+*/
+static bool fmt_add_word(p8 address_to at, positive length, positive space,
+                         bool end_line, positive column_before,
+                         positive column_after)
+{
+        fmt_words[fmt_word_count].text = relation_spill + fmt_character_count;
+
+        for (positive copied = 0; copied < length;)
+        {
+                if (fmt_character_count == FMT_CHAR_MAX)
+                {
+                        fmt_other_same(column_before);
+                        fmt_flush();
+                }
+
+                positive take = min(length - copied, FMT_CHAR_MAX - fmt_character_count);
+
+                memory_copy_apart(relation_spill + fmt_character_count, at + copied, take);
+                fmt_character_count += take;
+                copied += take;
+        }
+
+        fmt_word address_to word = fmt_words + fmt_word_count;
+
+        word->length = (positive)(relation_spill + fmt_character_count - word->text);
         word->space = space;
         word->line_length = 0;
-        word->next_break = fmt_word_count;
+        word->next_break = fmt_word_count + 1;
         word->best_cost = 0;
         word->paren = false;
         word->period = false;
@@ -10272,6 +10484,13 @@ static bool fmt_add_word(p8 address_to at, positive length, positive space,
         if (end_line || fmt_uniform)
                 word->space = word->final ? 2 : 1;
 
+        if (fmt_word_count == FMT_WORD_MAX - 2)
+        {
+                fmt_other_same(column_after);
+                fmt_flush();
+        }
+
+        fmt_word_count++;
         return true;
 }
 
@@ -10294,6 +10513,7 @@ static bool fmt_add_line(fmt_line address_to line)
                         at++;
 
                 positive length = at - begin;
+                positive start = column;
                 column += length;
                 positive before = column;
 
@@ -10302,7 +10522,8 @@ static bool fmt_add_line(fmt_line address_to line)
                 positive space = column - before;
                 bool end_line = at == line->length;
 
-                if (!fmt_add_word(line->at + begin, length, space, end_line))
+                if (!fmt_add_word(line->at + begin, length, space, end_line,
+                                  start, column))
                         return false;
         }
 
@@ -10934,12 +11155,21 @@ static fn pr_put_number(bipolar number, positive field_start)
         }
 }
 
+/*
+        pr's two stores, taken once where it starts rather than looked up
+        per record: the page's records by offset, and the line being read.
+        Either may move to the heap when a record outgrows it, and moves
+        these with it.
+*/
+static p8 address_to pr_spill_base;
+static p8 address_to pr_hold_base;
+
 static fn pr_put_record(pr_record address_to record, positive width)
 {
         if (!record->present)
                 return;
 
-        p8 address_to bytes = relation_spill + record->offset;
+        p8 address_to bytes = pr_spill_base + record->offset;
         positive record_column = 0;
 
         for (positive at = 0; at < record->length; at++)
@@ -11015,7 +11245,12 @@ static fn pr_put_record(pr_record address_to record, positive width)
 static bool pr_store(p8 address_to bytes, positive length, bipolar number,
                      pr_record address_to record)
 {
-        if (length > TEXT_LINE_MAX - pr_spill_used)
+        //      A page's records are kept by offset, so the store may move to
+        //      the heap when a page outgrows it, as GNU's pr keeps a line
+        //      of any length.
+        if (pr_spill_used + length > TEXT_LINE_MAX &&
+            !text_spill_room(address_of pr_spill_base, pr_spill_used,
+                             pr_spill_used + length, null))
         {
                 string_diagnostic(&text_diagnostic, 0, null, "page is too large");
                 pr_failed = true;
@@ -11026,7 +11261,7 @@ static bool pr_store(p8 address_to bytes, positive length, bipolar number,
         record->number = number;
         record->present = true;
         record->length = length;
-        memory_copy(relation_spill + pr_spill_used, bytes, length);
+        memory_copy(pr_spill_base + pr_spill_used, bytes, length);
         pr_spill_used += length;
         return true;
 }
@@ -11039,16 +11274,17 @@ static b32 pr_source_record(pr_record address_to record)
 
         if (pr_pending)
         {
-                bytes = text_record_hold;
+                bytes = pr_hold_base;
                 length = pr_pending_length;
                 pr_pending = false;
         }
         else
         {
-                if (!text_line_next(text_record_hold, 0))
+                if (!text_line_next(pr_hold_base, 0))
                         return 0;
 
-                bytes = text_record_hold;
+                pr_hold_base = text_line_store;
+                bytes = pr_hold_base;
                 length = text_line_length;
         }
 
@@ -11068,7 +11304,7 @@ static b32 pr_source_record(pr_record address_to record)
 
                         if (suffix)
                         {
-                                memory_copy(text_record_hold, page + 1, suffix);
+                                memory_copy(pr_hold_base, page + 1, suffix);
                                 pr_pending_length = suffix;
                                 pr_pending = true;
                         }
@@ -11505,6 +11741,8 @@ static b32 text_pr()
 
         text_begin("pr");
         utility_arena.used = 0;
+        pr_spill_base = relation_spill;
+        pr_hold_base = text_record_hold;
         pr_page_option_failed = false;
         pr_first_page = 1;
         pr_last_page = positive_max;
@@ -23541,7 +23779,8 @@ static fn sed_put_reader_line(b32 which)
         positive length = 0;
         bool ended = false;
 
-        bool spilled = text_reader_spill(reader, '\n', sed_reader_line,
+        p8 address_to line = sed_reader_line;
+        bool spilled = text_reader_spill(reader, '\n', address_of line, null,
                                          address_of length, address_of ended, null);
 
         text_quiet_read = false;

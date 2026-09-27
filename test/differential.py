@@ -16993,6 +16993,14 @@ INPUTS.update({
     "text_b64_plus_slash": b"VA/c8A+vSg==\n",
     "text_b64url_long_slash": b"QUJD" * 1400 + b"QUJD" * 10 + b"/QUJD\n",
     "text_b64url_garbage": b"VAx%y\n",
+    #       Records past the one megabyte the fixed stores hold, and
+    #       paragraphs past the thousand words and five thousand bytes GNU's
+    #       fmt formats before it writes a piece out.
+    "text_line_3m": b"x:" + b"a" * 3000000 + b"\nb:c\n" + b"d" * 1500000,
+    "text_lines_two_long": b"d" * 1200000 + b"\n" + b"d" * 1200000 + b"\nx\n",
+    "text_fmt_3000_words": b" ".join(b"%d" % n for n in range(1, 3001)) + b"\n",
+    "text_fmt_yes": b"y\n" * 5000,
+    "text_fmt_long_word": b"  " + b"a" * 12000 + b"\nb c.\n",
     "text_names0_empty": b"a.txt\x00\x00b.txt\x00",
     "text_names0_only_empty": b"\x00\x00",
     "text_names0_big": b"big\x00a.txt\x00",
@@ -19010,6 +19018,37 @@ TEXT_UTILITIES = (
                                        ("-m", "utf8_edge.txt"), ("-w", "utf8_edge.txt"),
                                        ("-L", "utf8_edge.txt"), ("-mw", "binary"), ("-c", "utf8.txt"))))),
 )
+
+#       Records longer than the fixed one-megabyte stores, which every line
+#       tool here refused as "line too long" where GNU's answer them, and
+#       fmt's paragraphs past GNU's thousand words and five thousand bytes,
+#       which GNU formats a piece at a time. Added to each grammar's extras
+#       so the cases carry their own identities.
+_TEXT_LONG_RECORD_ROWS = {
+    "cut": (("-c1-3",), ("-d:", "-f1"), ("-b2-",), ("-f2",), ("-d:", "-f2", "-s"), ("--complement", "-c", "1-5")),
+    "fold": (("-w", "100"), ("-w7",), ("-s", "-w", "40")),
+    "paste": (("-", "a.txt"), ("-s",), ("-d:", "-", "-")),
+    "pr": (("-t",), ("-2", "-t"), ("-n", "-t"), ("-m", "-t", "-", "a.txt"), ("-J", "-2", "-t")),
+    "fmt": ((), ("-w", "30")),
+    "nl": ((), ("-ba",)),
+    "uniq": ((), ("-c",), ("-f1",)),
+    "join": (("-", "a.txt"),),
+    "comm": (("-", "a.txt"),),
+}
+#       GNU's own fmt runs away under -c and -t on a word longer than its
+#       buffer (it fills the file-size limit), so those two are asked only of
+#       the many-word paragraphs.
+_TEXT_FMT_BIG_ROWS = tuple({"argv": argv, "stdin": stdin, "fixture": "text"}
+                           for stdin in ("text_fmt_3000_words", "text_fmt_yes", "text_fmt_long_word")
+                           for argv in ((), ("-w", "20"), ("-c",), ("-t",), ("-u",), ("-p", "y"), ("-s",))
+                           if stdin != "text_fmt_long_word" or argv[:1] not in (("-c",), ("-t",)))
+TEXT_UTILITIES = tuple(
+    dataclasses.replace(utility, extra=utility.extra + tuple(
+        {"argv": argv, "stdin": stdin, "fixture": "text"}
+        for stdin in ("text_line_3m", "text_lines_two_long")
+        for argv in _TEXT_LONG_RECORD_ROWS.get(utility.name, ())) +
+        (_TEXT_FMT_BIG_ROWS if utility.name == "fmt" else ()))
+    for utility in TEXT_UTILITIES)
 
 # ---- domain: util_linux (from spec_util_linux.py) ----
 
@@ -43440,8 +43479,6 @@ PINNED = r"""
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"26d928ca7798882c482edb82cf892a2036308dff7482080e65ac947719112ef2"},"case":{"argv":["-9223372036854775808","-","1"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","utility":"expr"},"domain":"text","id":"aa4c7ab1c2b5380e","kind":"deliberate","list":"ledger","reason_id":"r250","utility":"expr"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"6597fb5664deb37b5413ea87a2566ffb9da2fb1376d820e4a40dd30c05aa8b04"},"case":{"argv":["9223372036854775807","+","1"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","utility":"expr"},"domain":"text","id":"bf726812b3aaf56b","kind":"deliberate","list":"ledger","reason_id":"r250","utility":"expr"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"4b883e04ed1a2af32c21811a12f2ccc766a1d73040b533ae4bcdfad8aca74293"},"case":{"argv":["9223372036854775807","*","2"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","utility":"expr"},"domain":"text","id":"e028e9d30ce008bc","kind":"deliberate","list":"ledger","reason_id":"r250","utility":"expr"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"6d04645fa607b575ce5ab65cbec8d7bc1a2d310e407082a84018e95eb673a3cb"},"case":{"argv":["-"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"wide_words","utility":"fmt"},"domain":"text","id":"0f42dfc7dfa9e468","kind":"bug","list":"ledger","reason_id":"r251","utility":"fmt"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"6d04645fa607b575ce5ab65cbec8d7bc1a2d310e407082a84018e95eb673a3cb"},"case":{"argv":[],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"wide_words","utility":"fmt"},"domain":"text","id":"d05879a8210c3820","kind":"bug","list":"ledger","reason_id":"r251","utility":"fmt"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--extended-regexp","--ignore-case","--color","-s","--text","-e","\\","-","a.txt"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"words","utility":"grep"},"domain":"text","id":"02706653d5c7ac10","kind":"bug","list":"ledger","reason_id":"r252","utility":"grep"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":0,"stdout":"160427b14e37d0fa30d7f9bdea63c7227fb6dae1361512ed28c46da32f34c91a"},"case":{"argv":["--exclude-dir=inner/","-e","\\(a\\)","--initial-tab","-C0","--regexp=^$","-R","tree","a.txt"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text_words","tier":"pinned","utility":"grep"},"domain":"text","id":"029208e442fb9660","kind":"bug","list":"ledger","reason":"grep's output for -o, -l and -L together, and its counting of empty matches, differ from GNU's.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":0,"stdout":"b3e0d27d655fde94c720a329cdb3dfb9622f101f8610505d7cf617a41335b8ad"},"utility":"grep"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":2,"stdout":"8501fd76cceaa79adc51345ad3849bfcc7946332d511d5ee0153ce9ef8ae0084"},"case":{"argv":["--after-context=1","--color=sometimes","--files-without-match","--byte-offset","-R","--colour=always","tree"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"long","tier":"pinned","utility":"grep"},"domain":"text","id":"03cec1e01e098224","kind":"bug","list":"ledger","reason":"grep's recursive walk differs from GNU's in which directories, loops and unreadable files it names, and in when -s silences them.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","order":"records","status":0,"stdout":"005634d881f6768f466456f0c8bc96adae89080621a4b9832d10029e8dd21cae"},"utility":"grep"},
