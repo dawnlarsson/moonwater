@@ -7888,6 +7888,8 @@ FILES_SCENES = {
     "human": ("export LS_BLOCK_SIZE=human-readable\n", "", ""),
     "timestyle": ("export TIME_STYLE=+%Y\n", "", ""),
     "longiso": ("export TIME_STYLE=long-iso\n", "", ""),
+    "acl": ("env touch plain acl && env mkdir dd && env setfacl -m u:nobody:r acl && "
+            "env setfacl -d -m u:nobody:r dd || exit 9\n", "", ""),
     "bind2": ("env mkdir -p a/b/c && echo x > a/f && env mount --bind a a/b/c || exit 9\n", "", ""),
 }
 FILES_SCENE_CASES = (
@@ -7923,6 +7925,11 @@ FILES_SCENE_CASES = (
     ("blocks", "ls", "-s", "a.txt", "long"), ("lsblocks", "ls", "-ls", "long"), ("human", "ls", "-ls", "long"),
     ("timestyle", "ls", "-l", "a.txt"), ("longiso", "ls", "-l", "a.txt"), 
     ("timestyle", "ls", "a.txt"), ("blocks", "ls", "-s", "--block-size=K", "long"),
+    # A long listing marks access lists with +, a space beside the rest once
+    # one has; a hyperlinked listing drops --dired.
+    ("acl", "ls", "-lgo", "--time-style=+x", "plain", "acl"), ("acl", "ls", "-lgo", "--time-style=+x", "plain"),
+    ("acl", "ls", "-dlgo", "--time-style=+x", "dd", "plain"), ("acl", "ls", "-1", "plain", "acl"),
+    ("none", "ls", "-lgo", "--time-style=+x", "--dired", "--hyperlink=always", "a.txt"),
 )
 
 
@@ -17763,6 +17770,8 @@ _TEXT_WRITE_TARGETS = {
     "human": ("export LS_BLOCK_SIZE=human-readable\n", "", ""),
     "timestyle": ("export TIME_STYLE=+%Y\n", "", ""),
     "longiso": ("export TIME_STYLE=long-iso\n", "", ""),
+    "acl": ("env touch plain acl && env mkdir dd && env setfacl -m u:nobody:r acl && "
+            "env setfacl -d -m u:nobody:r dd || exit 9\n", "", ""),
     "bind2": ("env mkdir -p a/b/c && echo x > a/f && env mount --bind a a/b/c || exit 9\n", "", ""),
 }
 _TEXT_WRITE_CASES = (

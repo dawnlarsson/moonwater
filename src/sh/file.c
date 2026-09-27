@@ -6793,6 +6793,7 @@ typedef struct
         bool created_known;
         bool points_at_directory;
         bool quoted;
+        bool acl;
 } ls_entry;
 
 _Static_assert(sizeof(ls_entry) == 128, "an ls entry packs to 128 bytes");
@@ -8395,6 +8396,10 @@ static fn ls_print_long(string_address directory)
         positive group_width = 1;
         positive major_width = 0;
         positive minor_width = 0;
+        bool any_acl = false;
+
+        for (positive i = 0; i < ls_count; i++)
+                any_acl |= ls_entries[i].acl;
 
         // An entry the kernel would not describe is a "?" in every column,
         // which is one character wide and so counts for nothing here.
@@ -8505,8 +8510,13 @@ static fn ls_print_long(string_address directory)
                 }
                 else
                 {
+                        /* An eleventh column once any entry has an access
+                           list: + beside those that do, a space beside the
+                           rest, as GNU's filemodestring does. */
                         file_mode_letters(letters, entry->mode);
                         ls_out(letters, 10);
+                        if (any_acl)
+                                ls_out(entry->acl ? "+" : " ", 1);
                         ls_out(" ", 1);
                         positive_to_padded(ls_out, entry->links, link_width, ' ', 0);
                         ls_out(" ", 1);
@@ -8886,6 +8896,19 @@ static bool ls_add(bipolar directory, string_address path, string_address shown,
         if (looked == 0)
         {
                 ls_fill(entry, address_of facts);
+
+                // A long listing marks a file with an access control list.
+                if (ls_format == 'l' && (facts.mode & MODE_FORMAT) != MODE_LINK)
+                {
+                        p8 full[FILE_PATH_MAX];
+
+                        entry->acl = ls_full_path(full, under, path) &&
+                                     (system_call_4(syscall(lgetxattr), (positive)full,
+                                                    (positive) "system.posix_acl_access", 0, 0) > 0 ||
+                                      ((facts.mode & MODE_FORMAT) == MODE_DIRECTORY &&
+                                       system_call_4(syscall(lgetxattr), (positive)full,
+                                                     (positive) "system.posix_acl_default", 0, 0) > 0));
+                }
 
                 // A link's target decides which group it sorts with and what
                 // mark or colour it gets, when any of those was asked for.
@@ -9906,6 +9929,10 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
         if (flags & FILE_FLAG('y'))
         {
                 ls_hyperlink = ls_when_active(ls_hyperlink_when);
+                // A hyperlinked name's offsets would count the escapes, and
+                // GNU drops --dired rather than write them.
+                if (ls_hyperlink)
+                        ls_dired = false;
 
                 if (ls_hyperlink)
                 {
