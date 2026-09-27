@@ -34245,6 +34245,49 @@ def tls_fuzz_budget(default_runs=20000, default_seconds=5):
     return runs, seconds, timeout
 
 
+def moonwater_msan_requested():
+    """True when MOONWATER_MSAN asks the TLS fuzz harnesses for MemorySanitizer."""
+    return os.environ.get("MOONWATER_MSAN", "").strip().lower() not in (
+        "", "0", "false", "no")
+
+
+def clang_supports_msan(clang):
+    """Hosted clang accepts -fsanitize=memory (Linux clang; not Apple clang)."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="msan-probe-") as temporary:
+        work = Path(temporary)
+        unit = work / "probe.c"
+        binary = work / "probe"
+        unit.write_text("int main(void){return 0;}\n")
+        built = subprocess.run(
+            [clang, "-O1", "-fsanitize=memory", str(unit), "-o", str(binary)],
+            capture_output=True, text=True)
+        return built.returncode == 0
+
+
+def tls_fuzz_sanitize_config(clang):
+    """Sanitize flag, run env, and label for tls_*_fuzz; or (None, None, reason).
+
+    Default is libFuzzer + ASan/UBSan. MOONWATER_MSAN=1 switches to
+    libFuzzer + MSan (cannot combine with ASan). Returns reason string when
+    the requested sanitizer is unavailable so callers can NOT RUN.
+    """
+    if moonwater_msan_requested():
+        if not clang_supports_msan(clang):
+            return None, None, (
+                "MOONWATER_MSAN set but clang lacks -fsanitize=memory "
+                "(common on Apple clang and some qemu images)")
+        return ("-fsanitize=fuzzer,memory",
+                dict(os.environ, MSAN_OPTIONS="halt_on_error=1:exitcode=1"),
+                "libFuzzer MSan")
+    return ("-fsanitize=fuzzer,address,undefined",
+            dict(os.environ,
+                 ASAN_OPTIONS="detect_leaks=0:halt_on_error=1",
+                 UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=0"),
+            "libFuzzer ASan/UBSan")
+
+
 def harness_tls_der_fuzz(argv):
     """Coverage-guided libFuzzer over DER certs and Certificate HS framing.
 
@@ -34255,8 +34298,9 @@ def harness_tls_der_fuzz(argv):
     (extension fixtures from checks.c plus Certificate handshake bodies).
     Bounded fixed-seed run so a lane cannot hang; return 2 (NOT RUN) when
     clang/libFuzzer is unavailable. Expected TLS_FAIL is ignored; only
-    ASan/UBSan aborts fail the lane. Override MOONWATER_FUZZ_RUNS /
-    MOONWATER_FUZZ_SECONDS for longer local runs (see test/fuzz_net).
+    ASan/UBSan aborts fail the lane (or MSan when MOONWATER_MSAN=1). Override
+    MOONWATER_FUZZ_RUNS / MOONWATER_FUZZ_SECONDS for longer local runs (see
+    test/fuzz_net and test/msan_net).
 
         python3 test/differential.py --harness tls_der_fuzz
     """
@@ -34268,6 +34312,10 @@ def harness_tls_der_fuzz(argv):
     clang = shutil.which("clang")
     if not clang:
         print("tls der fuzz: NOT RUN -- no clang")
+        return 2
+    sanitize, environment, san_label = tls_fuzz_sanitize_config(clang)
+    if sanitize is None:
+        print("tls der fuzz: NOT RUN -- " + san_label)
         return 2
 
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
@@ -34461,9 +34509,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 """
 
     source = shim + oids + "\n" + parsers + framing + driver
-    environment = dict(os.environ,
-                       ASAN_OPTIONS="detect_leaks=0:halt_on_error=1",
-                       UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=0")
 
     with tempfile.TemporaryDirectory(prefix="tls-der-fuzz-") as temporary:
         work = Path(temporary)
@@ -34472,13 +34517,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         unit.write_text(source)
         built = subprocess.run(
             [clang, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
-             "-fno-sanitize-recover=all",
-             "-fsanitize=fuzzer,address,undefined",
+             "-fno-sanitize-recover=all", sanitize,
              str(unit), "-o", str(binary)],
             capture_output=True, text=True)
         if built.returncode:
+            need = "fuzzer,memory" if moonwater_msan_requested() else "fuzzer"
             print("tls der fuzz: NOT RUN -- clang lacks libFuzzer "
-                  "(need -fsanitize=fuzzer):\n" + built.stderr[-2000:])
+                  "(need -fsanitize=%s):\n" % need + built.stderr[-2000:])
             return 2
 
         run_corpus = work / "corpus"
@@ -34500,9 +34545,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                   (ran.stderr or ran.stdout)[-3000:])
             write_tally("tls-der-fuzz", 0, 1)
             return 1
-        print("  tls der fuzz: %d seeds, libFuzzer ASan/UBSan "
+        print("  tls der fuzz: %d seeds, %s "
               "(-runs=%d -max_total_time=%d) clean" %
-              (len(seeds), runs, seconds))
+              (len(seeds), san_label, runs, seconds))
         write_tally("tls-der-fuzz", 1, 1)
         return 0
 
@@ -34516,8 +34561,9 @@ def harness_tls_hs_fuzz(argv):
     test/fuzz_corpus/tls_hs/ mirrors ServerHello fragment and encrypted-flight
     cases from checks.c. Bounded fixed-seed run; return 2 (NOT RUN) when
     clang/libFuzzer is unavailable. Expected TLS_FAIL is ignored; only
-    ASan/UBSan aborts fail the lane. Override MOONWATER_FUZZ_RUNS /
-    MOONWATER_FUZZ_SECONDS for longer local runs (see test/fuzz_net).
+    ASan/UBSan aborts fail the lane (or MSan when MOONWATER_MSAN=1). Override
+    MOONWATER_FUZZ_RUNS / MOONWATER_FUZZ_SECONDS for longer local runs (see
+    test/fuzz_net and test/msan_net).
 
         python3 test/differential.py --harness tls_hs_fuzz
     """
@@ -34529,6 +34575,10 @@ def harness_tls_hs_fuzz(argv):
     clang = shutil.which("clang")
     if not clang:
         print("tls hs fuzz: NOT RUN -- no clang")
+        return 2
+    sanitize, environment, san_label = tls_fuzz_sanitize_config(clang)
+    if sanitize is None:
+        print("tls hs fuzz: NOT RUN -- " + san_label)
         return 2
 
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
@@ -34861,9 +34911,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
     source = (shim + "\n" + load24 + "\n" + one_append + "\n" + flight_step +
               "\n" + flight_append + "\n" + driver)
-    environment = dict(os.environ,
-                       ASAN_OPTIONS="detect_leaks=0:halt_on_error=1",
-                       UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=0")
 
     with tempfile.TemporaryDirectory(prefix="tls-hs-fuzz-") as temporary:
         work = Path(temporary)
@@ -34872,13 +34919,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         unit.write_text(source)
         built = subprocess.run(
             [clang, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
-             "-fno-sanitize-recover=all",
-             "-fsanitize=fuzzer,address,undefined",
+             "-fno-sanitize-recover=all", sanitize,
              str(unit), "-o", str(binary)],
             capture_output=True, text=True)
         if built.returncode:
+            need = "fuzzer,memory" if moonwater_msan_requested() else "fuzzer"
             print("tls hs fuzz: NOT RUN -- clang lacks libFuzzer "
-                  "(need -fsanitize=fuzzer):\n" + built.stderr[-2000:])
+                  "(need -fsanitize=%s):\n" % need + built.stderr[-2000:])
             return 2
 
         run_corpus = work / "corpus"
@@ -34900,11 +34947,123 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                   (ran.stderr or ran.stdout)[-3000:])
             write_tally("tls-hs-fuzz", 0, 1)
             return 1
-        print("  tls hs fuzz: %d seeds, libFuzzer ASan/UBSan "
+        print("  tls hs fuzz: %d seeds, %s "
               "(-runs=%d -max_total_time=%d) clean" %
-              (len(seeds), runs, seconds))
+              (len(seeds), san_label, runs, seconds))
         write_tally("tls-hs-fuzz", 1, 1)
         return 0
+
+
+def harness_msan_net(argv):
+    """Local/hosted MemorySanitizer lane for net wire parsers.
+
+    Opt-in only (not lane_net, not CI push). Proves clang MSan can see
+    uninitialized ABI padding in a wire-style header, then runs the TLS DER
+    and handshake fuzz smokes under MOONWATER_MSAN=1. Returns 2 (NOT RUN)
+    when -fsanitize=memory is unavailable.
+
+        sh test/msan_net
+        MOONWATER_MSAN=1 python3 test/differential.py --harness tls_der_fuzz
+    """
+    del argv
+    import shutil
+    import tempfile
+
+    clang = shutil.which("clang")
+    if not clang:
+        print("msan net: NOT RUN -- no clang")
+        return 2
+    if not clang_supports_msan(clang):
+        print("msan net: NOT RUN -- clang lacks -fsanitize=memory "
+              "(Apple clang and many qemu images)")
+        return 2
+
+    checks = Checks()
+    pad_source = r"""
+#include <stdint.h>
+#include <stdio.h>
+#include <stddef.h>
+#include <sanitizer/msan_interface.h>
+
+/* Wire-style header with ABI padding between type and id. A serializer that
+   memcpy(sizeof) without zeroing the hole would ship stack junk; this probe
+   leaves the hole uninitialized and asks MSan to notice. Not a production
+   bug — it proves the sanitizer lane can see padding. */
+struct wire_hdr {
+        uint16_t len;
+        uint8_t type;
+        uint32_t id;
+};
+
+int main(void)
+{
+        struct wire_hdr pkt;
+        size_t pad_off;
+
+        pkt.len = 4;
+        pkt.type = 1;
+        pkt.id = 0xAABBCCDD;
+        pad_off = offsetof(struct wire_hdr, type) + 1;
+        fprintf(stderr,
+                "msan pad prove: sizeof=%zu type@%zu id@%zu pad@%zu\n",
+                sizeof pkt, offsetof(struct wire_hdr, type),
+                offsetof(struct wire_hdr, id), pad_off);
+        if (pad_off >= offsetof(struct wire_hdr, id)) {
+                fprintf(stderr, "msan pad prove: no padding on this ABI\n");
+                return 2;
+        }
+        __msan_check_mem_is_initialized((char *)&pkt + pad_off, 1);
+        fprintf(stderr, "msan pad prove: REACHED (MSan missed padding)\n");
+        return 0;
+}
+"""
+    with tempfile.TemporaryDirectory(prefix="msan-pad-") as temporary:
+        work = Path(temporary)
+        unit = work / "pad_prove.c"
+        binary = work / "pad_prove"
+        unit.write_text(pad_source)
+        built = subprocess.run(
+            [clang, "-O1", "-g", "-std=gnu11", "-fno-sanitize-recover=all",
+             "-fsanitize=memory", str(unit), "-o", str(binary)],
+            capture_output=True, text=True)
+        if built.returncode:
+            print("msan net: NOT RUN -- cannot link MSan probe:\n" +
+                  built.stderr[-2000:])
+            return 2
+        environment = dict(os.environ,
+                           MSAN_OPTIONS="halt_on_error=1:exitcode=1")
+        ran = subprocess.run([str(binary)], capture_output=True, text=True,
+                             env=environment)
+        fired = (ran.returncode != 0 and
+                 "uninitialized" in (ran.stderr or "").lower())
+        if ran.stderr:
+            print(ran.stderr, end="" if ran.stderr.endswith("\n") else "\n")
+        checks(fired,
+               "intentional ABI wire-header padding is visible to MSan")
+        if not fired:
+            print("  FAIL msan pad prove did not fire "
+                  "(rc=%d):\n" % ran.returncode + (ran.stderr or "")[-1500:])
+
+    # Seed-corpus smokes under MSan (short lane defaults unless overridden).
+    prior = os.environ.get("MOONWATER_MSAN")
+    os.environ["MOONWATER_MSAN"] = "1"
+    try:
+        der = harness_tls_der_fuzz([])
+        hs = harness_tls_hs_fuzz([])
+    finally:
+        if prior is None:
+            os.environ.pop("MOONWATER_MSAN", None)
+        else:
+            os.environ["MOONWATER_MSAN"] = prior
+
+    if der == 2 or hs == 2:
+        # MSan compile of the fuzz targets failed after the probe worked.
+        print("msan net: NOT RUN -- tls fuzz under MSan unavailable "
+              "(der=%s hs=%s)" % (der, hs))
+        return 2
+    checks(der == 0, "tls_der_fuzz clean under MSan")
+    checks(hs == 0, "tls_hs_fuzz clean under MSan")
+    return checks.verdict("msan net", "msan-net")
 
 
 def harness_machine_scan(argv):
@@ -38796,6 +38955,7 @@ HARNESS_CHECKS = {
     "http_response_framing": harness_http_response_framing,
     "tls_der_fuzz": harness_tls_der_fuzz,
     "tls_hs_fuzz": harness_tls_hs_fuzz,
+    "msan_net": harness_msan_net,
     "machine_scan": harness_machine_scan,
     "waterlink_noise": harness_waterlink_noise,
     "waterlink_mdns": harness_waterlink_mdns,

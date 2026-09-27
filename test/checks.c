@@ -48749,6 +48749,10 @@ static bipolar http_net_call3(positive number, positive one, positive two,
           option map         gathered[256] by option code (structural index, not a walk budget)
           junk discard       absolute deadline (not a packet-count CPU budget)
             hit:             "DHCP discards replay, junk and wrong peers before the valid reply"
+
+        Resource exhaustion (descriptor / mapping) — soft RLIMIT sweeps
+          HTTP/TLS     http_tls_resource_exhaustion
+          DNS/DHCP/NL  dns_dhcp_netlink_resource_exhaustion
 */
 
 /*
@@ -51561,6 +51565,118 @@ static fn http_tls_resource_exhaustion(void)
                               status == HTTP_NO_REPLY && !store.used &&
                                   !store.bytes);
                 http_forget(address_of store);
+        }
+}
+
+/*
+        Descriptor- and mapping-/allocation-exhaustion for the other
+        externally reachable service loops in src/net.
+
+        Inventory (no invented servers): DNS is a client resolver only;
+        DHCP is a client only; HTTP is client-only (covered above); netlink
+        is request/reply rtnetlink (groups=0), not a multicast event daemon.
+        DNS and DHCP keep request/reply bytes on the stack — their hot-path
+        resource is the socket. Netlink grows request/reply buffers through
+        net_room → array_store_reserve → memory_reserve → mmap.
+
+        Soft RLIMIT_NOFILE / RLIMIT_AS match http_tls_resource_exhaustion.
+        User-mode emulators that ignore guest limits log NOT RUN rather than
+        counting a false pass.
+*/
+static fn dns_dhcp_netlink_resource_exhaustion(void)
+{
+        positive nofile[2] = {0, 0};
+        positive as_limit[2] = {0, 0};
+        bipolar asked;
+
+        asked = system_call_4(syscall(prlimit64), 0, 7, 0,
+                              (positive)address_of nofile);
+        if (asked)
+                log_direct(str("net: DNS/DHCP/netlink descriptor exhaustion NOT RUN -- prlimit unavailable\n"));
+        else
+        {
+                positive capped[2];
+                bipolar probe;
+                p32 found = 0;
+                bipolar status;
+                p8 hardware[6] = {2, 0, 0, 0, 0, 1};
+                dhcp_lease lease = {0};
+                bipolar handle;
+
+                capped[0] = 0;
+                capped[1] = nofile[1];
+                asked = system_call_4(syscall(prlimit64), 0, 7,
+                                      (positive)address_of capped, 0);
+                check("DNS/DHCP/netlink descriptor table can be capped at EMFILE",
+                      asked == 0);
+                if (!asked)
+                {
+                        probe = system_open_at(AT_FDCWD,
+                                               (string_address)"/dev/null",
+                                               FILE_READ | O_CLOEXEC);
+                        check("a capped table refuses a new open with EMFILE before DNS/DHCP/netlink",
+                              probe == -EMFILE);
+                        if (probe >= 0)
+                                system_close(probe);
+
+                        status = dns_resolve_at(HOST_LOOPBACK, DNS_PORT,
+                                                (string_address)"exhaust.test",
+                                                address_of found, 1);
+                        check("DNS resolve fails closed when the UDP socket cannot open",
+                              status == DNS_NO_SERVER && !found);
+
+                        status = dhcp_ask((string_address)"moonwater-no-interface",
+                                          hardware, address_of lease);
+                        check("DHCP acquisition fails closed when the client socket cannot open",
+                              status == DHCP_NO_SOCKET);
+
+                        handle = netlink_open_groups(0);
+                        check("netlink open fails closed when the socket cannot open",
+                              handle < 0);
+                        if (handle >= 0)
+                                socket_close((b32)handle);
+
+                        asked = system_call_4(syscall(prlimit64), 0, 7,
+                                              (positive)address_of nofile, 0);
+                        check("DNS/DHCP/netlink descriptor limit is restored",
+                              asked == 0);
+                }
+        }
+
+        asked = system_call_4(syscall(prlimit64), 0, 9, 0,
+                              (positive)address_of as_limit);
+        if (asked)
+                log_direct(str("net: netlink buffer reserve exhaustion NOT RUN -- prlimit unavailable\n"));
+        else
+        {
+                netlink_buffer buffer = {0};
+                positive constrained[2];
+                bool reserved = true;
+
+                constrained[0] = 0;
+                constrained[1] = as_limit[1];
+                asked = system_call_4(syscall(prlimit64), 0, 9,
+                                      (positive)address_of constrained, 0);
+                check("netlink buffer address space can be constrained",
+                      asked == 0);
+                if (!asked)
+                {
+                        reserved = net_room(address_of buffer, 64);
+                        asked = system_call_4(syscall(prlimit64), 0, 9,
+                                              (positive)address_of as_limit, 0);
+                        check("netlink buffer address-space limit is restored",
+                              asked == 0);
+                }
+
+                /* Guest mmaps may still land inside a host VMA reserved
+                   before the soft limit dropped (qemu-user and similar). */
+                if (reserved && buffer.bytes)
+                        log_direct(str("net: netlink buffer reserve exhaustion NOT RUN -- address-space limit ignored (likely emulation)\n"));
+                else
+                        check("netlink buffer fails closed when net_room cannot grow",
+                              !reserved && buffer.failed && !buffer.bytes &&
+                                  !buffer.room);
+                netlink_forget(address_of buffer);
         }
 }
 
@@ -57546,6 +57662,7 @@ b32 main(void)
         http_header_deadlines();
         http_body_write_failure();
         http_tls_resource_exhaustion();
+        dns_dhcp_netlink_resource_exhaustion();
         http_write_spans_partial();
         network_stream_sigpipe();
         tls_closure_boundaries();

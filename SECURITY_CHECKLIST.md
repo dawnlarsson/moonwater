@@ -15,7 +15,13 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
   (local via `sh test/fuzz_net`; defaults one hour / unbounded run count;
   override with `MOONWATER_FUZZ_SECONDS` / `MOONWATER_FUZZ_RUNS`. lane_net
   keeps the short bounded smoke only).
-- [ ] Run an MSan lane on a hosted build to find uninitialized wire padding.
+- [x] Run an MSan lane on a hosted build to find uninitialized wire padding
+  (local/hosted via `sh test/msan_net` or
+  `python3 test/differential.py --harness msan_net`; also
+  `MOONWATER_MSAN=1` on `tls_der_fuzz` / `tls_hs_fuzz`. Intentional ABI
+  wire-header padding prove plus short DER/HS corpus smoke under
+  `-fsanitize=memory`. Exercised on Lima aarch64 Linux clang; Apple clang
+  and many qemu images: NOT RUN. CI remains parked — no push auto-job).
 - [x] Record a per-parser allocation, item-count, recursion, and CPU budget.
   Ledger of length/item/recursion ceilings (no invented CPU budgets) lives in
   `test/checks.c` (CHECK_net) and `SECURITY_TEST_MATRIX.md`; exact-limit and
@@ -112,6 +118,20 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
   HTTP fetch / TLS client open loops (`EMFILE` → `HTTP_NO_ROUTE`; reserve
   failure → `HTTP_NO_REPLY`). Accept N/A (client connect only); TLS
   handshake has no separate mmap.
-- [ ] Add descriptor-, mapping-, and allocation-exhaustion sweeps to every
-  remaining externally reachable service loop.
-- [ ] Publish fuzz corpus coverage and sanitizer versions with each release.
+- [x] Descriptor-, mapping-, and allocation-exhaustion sweeps for every
+  remaining externally reachable service loop in `src/net` (inventory: DNS
+  client only, DHCP client only, rtnetlink request/reply — no DNS/DHCP/HTTP
+  servers, no netlink multicast listener). DNS `EMFILE` → `DNS_NO_SERVER`
+  (stack messages; no separate map); DHCP `EMFILE` → `DHCP_NO_SOCKET`
+  (stack packet; no separate map); netlink open `EMFILE` and
+  `net_room`/`array_store_reserve` under soft `RLIMIT_AS` → failed/empty.
+  Honest NOT RUN when `prlimit` is unavailable or address-space limits are
+  ignored under emulation (`dns_dhcp_netlink_resource_exhaustion`).
+- [x] Publish fuzz corpus coverage and sanitizer versions with each release.
+  Run `sh test/fuzz_net --report` (writes `artifacts/fuzz-report.txt` and
+  stdout: clang/sanitizer version, seed counts under `test/fuzz_corpus/`,
+  runs/duration/exit per `tls_der_fuzz` / `tls_hs_fuzz`). Attach that report
+  plus `test/fuzz_corpus/` (or a tarball of it) to the release notes/assets.
+  Defaults match lane_net smoke (20k/5s); set `MOONWATER_FUZZ_*` for longer
+  evidence. Exit 2 means libFuzzer unavailable (NOT RUN) — still attach the
+  honest report. See `SECURITY_TEST_MATRIX.md`.

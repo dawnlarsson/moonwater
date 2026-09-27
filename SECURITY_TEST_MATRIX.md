@@ -8,6 +8,7 @@
 | Certificate path semantics | generated chains against OpenSSL | `python3 test/differential.py --harness tls_chains` |
 | HTTPS→HTTP redirect downgrade | TLS loopback 302 with `http://` Location under wget manners | `python3 test/differential.py --harness https_downgrade` |
 | HTTP response framing (chunked, TE/CL, headers, trailers) | written MUST_ACCEPT/MUST_REFUSE matrix; http.client as second oracle with named deliberate disagreements | `python3 test/differential.py --harness http_response_framing` |
+| Uninitialized wire / ABI padding (MSan) | intentional padding prove + TLS DER/HS seed smoke under MemorySanitizer; NOT RUN without clang MSan; not CI push | `sh test/msan_net` |
 | SNTP nonce, ancillary timestamps, timing arithmetic, server selection | machine checks | `sh test/run machine` |
 | Shell parsing, expansion, environment, status and effects | generated Bash/Dash comparison | `sh test/run shell builtins` |
 | File traversal, symlink and replacement behavior | effect-based coreutils differential | `sh test/run files` |
@@ -15,6 +16,36 @@
 | Codec hostile lengths and guard pages | codec-specific and floor lanes | `sh test/run codec compression_floor` |
 | Waterlink replay, seal and lossy delivery (separate review scope) | pure transform and namespace integration | `sh test/run waterlink link` |
 | Whole available suite | all locally supported lanes | `sh test/run` |
+| TLS DER / handshake fuzz (lane smoke) | bounded libFuzzer ASan/UBSan; soft NOT RUN without clang fuzzer | `sh test/run net` (via `tls_der_fuzz` / `tls_hs_fuzz`, 20k/5s) |
+| TLS net fuzz continuous (local) | same harnesses; longer budget | `sh test/fuzz_net` (`MOONWATER_FUZZ_*`) |
+| Release fuzz attach | machine-readable sanitizer + corpus inventory + run exits | `sh test/fuzz_net --report` → `artifacts/fuzz-report.txt` |
+
+## Fuzz corpora and release publish
+
+Seed corpora live in-tree (attach the tree or a tarball; do not invent coverage):
+
+| Corpus | Path | Harness | What it exercises |
+| --- | --- | --- | --- |
+| DER / Certificate list | `test/fuzz_corpus/tls_der/` | `tls_der_fuzz` | `tls_parse_extensions` / `tls_parse_cert` / certificate-list framing |
+| Handshake fragmentation | `test/fuzz_corpus/tls_hs/` | `tls_hs_fuzz` | `tls_handshake_one_append` / `tls_encrypted_flight_append` |
+
+Seed counts are whatever files are present; `sh test/fuzz_net --report`
+records them.
+**lane_net** leaves `MOONWATER_FUZZ_*` unset (20 000 runs / 5 s smoke). Harnesses
+print `N seeds, libFuzzer ASan/UBSan (-runs=… -max_total_time=…) clean` on
+success, or exit 2 (NOT RUN) when clang cannot link `-fsanitize=fuzzer`.
+They do not emit LLVM source-line coverage; `-print_final_stats=0`.
+
+**Release attach (manual, no CI automation):**
+
+1. `sh test/fuzz_net --report` — smoke budget unless `MOONWATER_FUZZ_RUNS` /
+   `MOONWATER_FUZZ_SECONDS` already set; longer: e.g.
+   `MOONWATER_FUZZ_SECONDS=3600 sh test/fuzz_net --report`.
+2. Attach `artifacts/fuzz-report.txt` (JSON: clang version, seed counts,
+   budget, per-target duration/exit, `overall_exit`) and
+   `test/fuzz_corpus/` (or `tar czf fuzz_corpus.tgz test/fuzz_corpus`).
+3. `overall_exit` 0 = both clean; 1 = sanitizer/fail; 2 = NOT RUN on this
+   host (still publish the report — it records the toolchain gap).
 
 ## Required test shapes for a new parser
 

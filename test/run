@@ -3592,6 +3592,8 @@ lane_socket() { freestanding_checks_lane socket socket; }
 #       tls_hs_fuzz is the same bounded pattern over handshake fragmentation
 #       (tls_handshake_one_append / tls_encrypted_flight_append; corpus under
 #       test/fuzz_corpus/tls_hs/).
+#       MSan is opt-in only (`sh test/msan_net` / MOONWATER_MSAN=1); not part of
+#       lane_net and not a CI push job.
 #       Fuzz exit 2 is soft: missing clang must not turn a green freestanding+
 #       oracle lane into "did not run". Exit 1 from fuzz stays a hard fail.
 #       Oracle harnesses (tls_chains / https_downgrade / http_response_framing)
