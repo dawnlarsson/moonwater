@@ -50643,6 +50643,94 @@ static fn http_bounded_store(void)
                 socket_close(pair[0]);
                 http_forget(address_of store);
         }
+
+        /* Content-Length above HTTP_FETCH_MAX is refused before any body
+           bytes are copied into the memory sink. */
+        {
+                socket_address_internet where;
+                p32 size = sizeof where;
+                bipolar listening;
+                bipolar child;
+                p16 port;
+                b32 one = 1;
+
+                listening = socket_new(AF_INET, SOCK_STREAM, 0);
+                check("a fetch-ceiling listener opens", listening >= 0);
+                if (listening < 0)
+                        return;
+
+                socket_option_set((b32)listening, SOL_SOCKET, SO_REUSEADDR,
+                                  address_of one, sizeof one);
+                memory_fill(address_of where, 0, sizeof where);
+                where.family = AF_INET;
+                where.host = network_order_32(HOST_LOOPBACK);
+                check("a fetch-ceiling listener binds",
+                      socket_bind((b32)listening, address_of where,
+                                  sizeof where) == 0);
+                check("a fetch-ceiling listener listens",
+                      socket_listen((b32)listening, 1) == 0);
+                memory_fill(address_of where, 0, sizeof where);
+                socket_name((b32)listening, address_of where, address_of size);
+                port = network_order_16(where.port);
+
+                child = system_call_2(syscall(clone), SIGCHLD, 0);
+                if (child == 0)
+                {
+                        p8 said[256];
+                        p8 answer[96];
+                        p8 length_text[24];
+                        positive used = 0;
+                        bipolar taken;
+
+                        used = positive_into(length_text, HTTP_FETCH_MAX + 1);
+                        length_text[used] = end;
+                        memory_copy(answer, "HTTP/1.0 200 OK\r\n"
+                                            "Content-Length: ",
+                                    sizeof("HTTP/1.0 200 OK\r\n"
+                                           "Content-Length: ") -
+                                        1);
+                        used = sizeof("HTTP/1.0 200 OK\r\n"
+                                      "Content-Length: ") -
+                               1;
+                        memory_copy(answer + used, length_text,
+                                    string_length(length_text));
+                        used += string_length(length_text);
+                        memory_copy(answer + used, "\r\n\r\n", 4);
+                        used += 4;
+
+                        taken = socket_accept((b32)listening, 0, 0, 0);
+                        if (taken >= 0)
+                        {
+                                socket_receive((b32)taken, said, sizeof said,
+                                               0, 0, 0);
+                                system_write_all((positive)taken, answer, used);
+                                socket_shutdown((b32)taken, SHUT_BOTH);
+                                socket_close((b32)taken);
+                        }
+                        system_call_1(syscall(exit_group), 0);
+                }
+
+                {
+                        http_buffer body = {0};
+                        b32 code = 0;
+                        bipolar status;
+                        p8 url[64];
+                        positive url_used = sizeof("http://127.0.0.1:") - 1;
+
+                        memory_copy(url, "http://127.0.0.1:", url_used);
+                        url_used += positive_into(url + url_used, port);
+                        url[url_used++] = '/';
+                        url[url_used] = end;
+
+                        status = http_get(url, address_of body, address_of code);
+                        check("Content-Length past HTTP_FETCH_MAX is refused in memory",
+                              status == HTTP_MALFORMED && !body.used);
+                        http_forget(address_of body);
+                }
+
+                system_wait4_retry((b32)child, null, 0, null);
+                socket_close((b32)listening);
+        }
 }
 
 static fn network_stream_timeouts(void)
@@ -51537,6 +51625,78 @@ static fn tls_certificate_identity_rules(void)
             0x03, 0x02, 0x07, 0x80,
             0x30, 0x0b, 0x06, 0x03, 0x55, 0x1d, 0x0f, 0x04, 0x04,
             0x03, 0x02, 0x07, 0x80};
+        /* Control: canonical basicConstraints OID {0x55,0x1d,0x13} with
+           CA:TRUE and pathLen 0.  Proves the value bytes below are accepted
+           when tls_oid_is hits, so the overlong-OID cases are not failing
+           for a malformed constraints SEQUENCE. */
+        static p8 bc_canonical_ca_pathlen[] = {
+            0xa3, 0x13,
+            0x30, 0x11,
+            0x30, 0x0f,
+            0x06, 0x03, 0x55, 0x1d, 0x13,
+            0x04, 0x08,
+            0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x00};
+        /* DER forbids long-form lengths below 128.  tls_asn1_length refuses
+           0x81 0x03 before any OID bytes are compared, so this never reaches
+           tls_oid_is / basicConstraints policy. */
+        static p8 bc_oid_long_form_length[] = {
+            0xa3, 0x11,
+            0x30, 0x0f,
+            0x30, 0x0d,
+            0x06, 0x81, 0x03, 0x55, 0x1d, 0x13,
+            0x04, 0x05,
+            0x30, 0x03, 0x01, 0x01, 0xff};
+        /* Non-minimal base-128 for the final arc of 2.5.29.19
+           (06 04 55 1d 80 13).  Still a valid OID TLV for tls_asn1_enter;
+           tls_oid_is is exact memcmp against {0x55,0x1d,0x13}, so the
+           extension is unknown and must not set CA/pathLen from the same
+           value bytes the control above accepts. */
+        static p8 bc_oid_overlong_final_arc[] = {
+            0xa3, 0x14,
+            0x30, 0x12,
+            0x30, 0x10,
+            0x06, 0x04, 0x55, 0x1d, 0x80, 0x13,
+            0x04, 0x08,
+            0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x00};
+        /* Same overlong OID marked critical: unknown-critical path, still
+           no basicConstraints flags. */
+        static p8 bc_oid_overlong_critical[] = {
+            0xa3, 0x14,
+            0x30, 0x12,
+            0x30, 0x10,
+            0x06, 0x04, 0x55, 0x1d, 0x80, 0x13,
+            0x01, 0x01, 0xff,
+            0x04, 0x05,
+            0x30, 0x03, 0x01, 0x01, 0xff};
+        /* Canonical BC (CA:FALSE) then overlong wire for the same logical
+           OID (CA:TRUE payload).  Seen-OID tracking compares raw bytes, so
+           the second instance is not a duplicate; it is unknown and ignored.
+           Residual against peers that normalize OID encodings first. */
+        static p8 bc_oid_canonical_then_overlong[] = {
+            0xa3, 0x1c,
+            0x30, 0x1a,
+            0x30, 0x09, 0x06, 0x03, 0x55, 0x1d, 0x13, 0x04, 0x02,
+            0x30, 0x00,
+            0x30, 0x0d, 0x06, 0x04, 0x55, 0x1d, 0x80, 0x13, 0x04, 0x05,
+            0x30, 0x03, 0x01, 0x01, 0xff};
+        /* Two different overlong encodings of 2.5.29.19
+           (final-arc vs middle-arc padding).  Both miss tls_oid_is and each
+           other; duplicate detection does not fire.  Residual. */
+        static p8 bc_oid_two_overlong_aliases[] = {
+            0xa3, 0x1a,
+            0x30, 0x18,
+            0x30, 0x0a, 0x06, 0x04, 0x55, 0x1d, 0x80, 0x13, 0x04, 0x02,
+            0x30, 0x00,
+            0x30, 0x0a, 0x06, 0x04, 0x55, 0x80, 0x1d, 0x13, 0x04, 0x02,
+            0x30, 0x00};
+        /* Identical overlong wires are still exact-byte duplicates. */
+        static p8 bc_oid_overlong_duplicate[] = {
+            0xa3, 0x1a,
+            0x30, 0x18,
+            0x30, 0x0a, 0x06, 0x04, 0x55, 0x1d, 0x80, 0x13, 0x04, 0x02,
+            0x30, 0x00,
+            0x30, 0x0a, 0x06, 0x04, 0x55, 0x1d, 0x80, 0x13, 0x04, 0x02,
+            0x30, 0x00};
         static p8 distinct_unknown[] = {
             0xa3, 0x14, 0x30, 0x12,
             0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x01, 0x00,
@@ -51626,6 +51786,54 @@ static fn tls_certificate_identity_rules(void)
         check("duplicate keyUsage extensions are refused by OID identity",
               tls_parse_extensions(duplicate_key_usage,
                                    sizeof duplicate_key_usage, 0, 2,
+                                   address_of cert, null) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("canonical basicConstraints OID sets CA and pathLen from its value",
+              tls_parse_extensions(bc_canonical_ca_pathlen,
+                                   sizeof bc_canonical_ca_pathlen, 0, 2,
+                                   address_of cert, null) == TLS_OK &&
+                  cert.basic_constraints && cert.ca &&
+                  cert.path_length_present && cert.path_length == 0 &&
+                  !cert.unsupported_critical);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("long-form basicConstraints OID length is refused at the DER layer",
+              tls_parse_extensions(bc_oid_long_form_length,
+                                   sizeof bc_oid_long_form_length, 0, 2,
+                                   address_of cert, null) == TLS_FAIL &&
+                  !cert.basic_constraints && !cert.ca &&
+                  !cert.path_length_present);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("overlong basicConstraints OID content misses tls_oid_is and sets no CA",
+              tls_parse_extensions(bc_oid_overlong_final_arc,
+                                   sizeof bc_oid_overlong_final_arc, 0, 2,
+                                   address_of cert, null) == TLS_OK &&
+                  !cert.basic_constraints && !cert.ca &&
+                  !cert.path_length_present && !cert.unsupported_critical);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("critical overlong basicConstraints OID is unknown-critical not CA",
+              tls_parse_extensions(bc_oid_overlong_critical,
+                                   sizeof bc_oid_overlong_critical, 0, 2,
+                                   address_of cert, null) == TLS_OK &&
+                  !cert.basic_constraints && !cert.ca &&
+                  !cert.path_length_present && cert.unsupported_critical);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("canonical then overlong basicConstraints OID is residual duplicate miss",
+              tls_parse_extensions(bc_oid_canonical_then_overlong,
+                                   sizeof bc_oid_canonical_then_overlong, 0, 2,
+                                   address_of cert, null) == TLS_OK &&
+                  cert.basic_constraints && !cert.ca &&
+                  !cert.path_length_present && !cert.unsupported_critical);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("two overlong encodings of basicConstraints OID are residual alias miss",
+              tls_parse_extensions(bc_oid_two_overlong_aliases,
+                                   sizeof bc_oid_two_overlong_aliases, 0, 2,
+                                   address_of cert, null) == TLS_OK &&
+                  !cert.basic_constraints && !cert.ca &&
+                  !cert.path_length_present && !cert.unsupported_critical);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("identical overlong basicConstraints OID wires are refused as duplicates",
+              tls_parse_extensions(bc_oid_overlong_duplicate,
+                                   sizeof bc_oid_overlong_duplicate, 0, 2,
                                    address_of cert, null) == TLS_FAIL);
         memory_fill(address_of cert, 0, sizeof cert);
         check("nonadjacent duplicate unknown extensions are refused",
@@ -51829,6 +52037,129 @@ static fn tls_certificate_extension_adversarial(void)
                       tls_parse_extensions(octet_overrun, sizeof octet_overrun,
                                            0, 2, address_of cert, null) ==
                           TLS_FAIL);
+        }
+}
+
+/*
+        Certificate handshake list depth for tls_verify_chain's certs[8].
+
+        A minimal v1 ECDSA P-256 DER certificate (CN=a, UTCTime validity,
+        SPKI, tiny signature BIT STRING).  Signature bytes are not verified
+        when check_cert is false; the fixture only has to survive
+        tls_parse_cert so the list walker can exercise count and list_end
+        framing.  Each CertificateEntry is 3-byte length + DER + empty
+        per-cert extensions (2-byte 0).
+*/
+static positive tls_certificate_list_pack(p8 address_to body, positive room,
+                                          positive count, p8 address_to der,
+                                          positive der_length)
+{
+        positive entry = 3 + der_length + 2;
+        positive list = count * entry;
+        positive at = 0;
+        positive i;
+
+        if (!count || 4 + list > room)
+                return 0;
+        body[at++] = 0;
+        body[at++] = (p8)(list >> 16);
+        body[at++] = (p8)(list >> 8);
+        body[at++] = (p8)list;
+        for (i = 0; i < count; i++)
+        {
+                body[at++] = (p8)(der_length >> 16);
+                body[at++] = (p8)(der_length >> 8);
+                body[at++] = (p8)der_length;
+                memory_copy(body + at, der, der_length);
+                at += der_length;
+                body[at++] = 0;
+                body[at++] = 0;
+        }
+        return at;
+}
+
+static fn tls_certificate_list_depth(void)
+{
+        /* Minimal v1 ECDSA P-256 Certificate DER tls_parse_cert accepts:
+           CN=a Names, UTCTime YYMMDDHHMMSSZ, real P-256 SPKI, and a tiny
+           non-empty signature BIT STRING.  check_cert=false skips verify. */
+        static p8 minimal[] = {
+            0x30, 0x81, 0xc0, 0x30, 0x81, 0xa6, 0x02, 0x01, 0x01, 0x30, 0x0a,
+            0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02, 0x30,
+            0x0c, 0x31, 0x0a, 0x30, 0x08, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c,
+            0x01, 0x61, 0x30, 0x1e, 0x17, 0x0d, 0x30, 0x31, 0x30, 0x31, 0x30,
+            0x31, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x5a, 0x17, 0x0d, 0x34,
+            0x39, 0x31, 0x32, 0x33, 0x31, 0x32, 0x33, 0x35, 0x39, 0x35, 0x39,
+            0x5a, 0x30, 0x0c, 0x31, 0x0a, 0x30, 0x08, 0x06, 0x03, 0x55, 0x04,
+            0x03, 0x0c, 0x01, 0x61, 0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a,
+            0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48,
+            0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04, 0xf5, 0x6e,
+            0xa0, 0x7c, 0x0c, 0x20, 0xd3, 0x14, 0xd8, 0x9a, 0x24, 0x94, 0x01,
+            0x21, 0x55, 0x86, 0x76, 0x96, 0xf9, 0xa0, 0xe5, 0xa5, 0x76, 0x28,
+            0x15, 0xb1, 0xd1, 0x97, 0xbd, 0x64, 0x2a, 0xa4, 0x1e, 0xd0, 0xed,
+            0x17, 0xea, 0xa6, 0xc2, 0x9b, 0x36, 0x26, 0x0c, 0x36, 0x5c, 0xd1,
+            0x72, 0x57, 0x7b, 0xd1, 0x80, 0xbf, 0x5e, 0xf8, 0x12, 0xf7, 0x90,
+            0xe6, 0x51, 0x42, 0xd3, 0xa8, 0xcd, 0x17, 0x30, 0x0a, 0x06, 0x08,
+            0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02, 0x03, 0x09, 0x00,
+            0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01};
+        p8 body[9 * (3 + sizeof minimal + 2) + 8];
+        tls_cert parsed = {0};
+        tls_conn tls = {0};
+        positive length;
+
+        check("a minimal ECDSA certificate parses for list-depth fixtures",
+              !tls_parse_cert(minimal, sizeof minimal, address_of parsed,
+                              null) &&
+                  parsed.curve == 1);
+
+        tls.check_cert = false;
+
+        length = tls_certificate_list_pack(body, sizeof body, 7, minimal,
+                                           sizeof minimal);
+        check("a Certificate list of seven certificates is accepted",
+              length && tls_verify_chain(body, length, null, address_of tls));
+
+        length = tls_certificate_list_pack(body, sizeof body, 8, minimal,
+                                           sizeof minimal);
+        check("a Certificate list of eight certificates fills certs[8]",
+              length && tls_verify_chain(body, length, null, address_of tls));
+
+        length = tls_certificate_list_pack(body, sizeof body, 9, minimal,
+                                           sizeof minimal);
+        check("a ninth Certificate list entry past certs[8] is refused",
+              length &&
+                  !tls_verify_chain(body, length, null, address_of tls));
+
+        {
+                /* One valid entry, then one leftover list byte so at !=
+                   list_end after the walker stops. */
+                positive entry = 3 + sizeof minimal + 2;
+                positive list = entry + 1;
+                positive at = 0;
+
+                memory_fill(body, 0, sizeof body);
+                body[at++] = 0;
+                body[at++] = (p8)(list >> 16);
+                body[at++] = (p8)(list >> 8);
+                body[at++] = (p8)list;
+                body[at++] = (p8)(sizeof minimal >> 16);
+                body[at++] = (p8)(sizeof minimal >> 8);
+                body[at++] = (p8)sizeof minimal;
+                memory_copy(body + at, minimal, sizeof minimal);
+                at += sizeof minimal;
+                body[at++] = 0;
+                body[at++] = 0;
+                body[at++] = 0xff;
+                check("a Certificate list with bytes past its last entry is refused",
+                      !tls_verify_chain(body, at, null, address_of tls));
+        }
+
+        {
+                static p8 empty[] = {0, 0, 0, 0};
+
+                check("an empty Certificate list is refused",
+                      !tls_verify_chain(empty, sizeof empty, null,
+                                        address_of tls));
         }
 }
 
@@ -54290,6 +54621,99 @@ static fn redirect_urls(void)
                                           address_of port, address_of path,
                                           address_of tls) == HTTP_BAD_URL);
         }
+
+        /* HTTP_URL_MAX is inclusive of the terminator: a start URL of
+           HTTP_URL_MAX - 1 is still a URL, and one of HTTP_URL_MAX is not. */
+        {
+                p8 url[HTTP_URL_MAX + 2];
+                p8 long_host[64];
+                string_address long_path;
+                p16 long_port;
+                bool long_tls;
+                b32 code = 0;
+                http_buffer body = {0};
+                /* Loopback with a closed port: length checks run before the
+                   connect, and a refused connect is fast if we get that far. */
+                positive prefix = sizeof("http://127.0.0.1:1/") - 1;
+                positive fit = HTTP_URL_MAX - 1;
+
+                memory_copy(url, "http://127.0.0.1:1/", prefix);
+                memory_fill(url + prefix, 'a', fit - prefix);
+                url[fit] = end;
+                check("a start URL one under HTTP_URL_MAX is accepted by the splitter",
+                      string_length(url) == fit &&
+                          http_split_into(url, long_host, sizeof long_host,
+                                          address_of long_port,
+                                          address_of long_path,
+                                          address_of long_tls) == HTTP_OK &&
+                          !long_tls && long_port == 1 &&
+                          string_length(long_path) == fit - prefix + 1);
+                check("a start URL one under HTTP_URL_MAX is not refused as a bad URL",
+                      http_get(url, address_of body, address_of code) !=
+                          HTTP_BAD_URL);
+                http_forget(address_of body);
+
+                memory_fill(url + prefix, 'a', HTTP_URL_MAX - prefix);
+                url[HTTP_URL_MAX] = end;
+                check("a start URL at HTTP_URL_MAX is refused before any hop",
+                      string_length(url) == HTTP_URL_MAX &&
+                          http_get(url, address_of body, address_of code) ==
+                              HTTP_BAD_URL);
+                check("wget's start URL ceiling matches fetch",
+                      http_fetch_to(url, -1, false, address_of code) ==
+                          HTTP_BAD_URL);
+
+                /* Absolute Location that already fills the next-URL buffer. */
+                {
+                        p8 kept[HTTP_URL_MAX];
+                        p8 over[HTTP_URL_MAX + 1];
+                        positive over_prefix = sizeof("http://h/") - 1;
+
+                        memory_copy(over, "http://h/", over_prefix);
+                        memory_fill(over + over_prefix, 'b',
+                                    HTTP_URL_MAX - over_prefix);
+                        over[HTTP_URL_MAX] = end;
+                        check("an absolute Location at HTTP_URL_MAX is refused",
+                              http_absolutize(false, "h", 80, "/old", over,
+                                              kept, sizeof kept) ==
+                                  HTTP_BAD_URL);
+
+                        memory_fill(over + over_prefix, 'b',
+                                    fit - over_prefix);
+                        over[fit] = end;
+                        check("an absolute Location one under HTTP_URL_MAX is kept",
+                              http_absolutize(false, "h", 80, "/old", over,
+                                              kept, sizeof kept) == HTTP_OK &&
+                                  string_equals(kept, over));
+                }
+
+                /* Relative Location that absolutizes past the buffer. */
+                {
+                        p8 kept[HTTP_URL_MAX];
+                        p8 relative[HTTP_URL_MAX];
+                        /* http://example.com:8080 + path must not fit. */
+                        positive base = sizeof("http://example.com:8080") - 1;
+                        positive max_path = HTTP_URL_MAX - 1 - base;
+
+                        relative[0] = '/';
+                        memory_fill(relative + 1, 'c', max_path - 1);
+                        relative[max_path] = end;
+                        check("a relative Location that absolutizes to HTTP_URL_MAX - 1 is kept",
+                              string_length(relative) == max_path &&
+                                  http_absolutize(false, "example.com", 8080,
+                                                  "/old", relative, kept,
+                                                  sizeof kept) == HTTP_OK &&
+                                  string_length(kept) == HTTP_URL_MAX - 1);
+
+                        memory_fill(relative + 1, 'c', max_path);
+                        relative[max_path + 1] = end;
+                        check("a relative Location that absolutizes past HTTP_URL_MAX is refused",
+                              string_length(relative) == max_path + 1 &&
+                                  http_absolutize(false, "example.com", 8080,
+                                                  "/old", relative, kept,
+                                                  sizeof kept) == HTTP_BAD_URL);
+                }
+        }
 }
 
 /*
@@ -54687,6 +55111,185 @@ static fn fetching_for_real(void)
 
         system_wait4_retry((b32)child, null, 0, null);
         socket_close((b32)listening);
+
+        /* HTTP_HOPS: wget follows through nine redirects, then refuses a
+           tenth that still points elsewhere. Location stays on this
+           listener so the hop count is the only thing under test. */
+        {
+                socket_address_internet hops_where;
+                p32 hops_size = sizeof hops_where;
+                bipolar hops_listening;
+                bipolar hops_child;
+                p16 hops_port;
+                b32 hops_one = 1;
+
+                hops_listening = socket_new(AF_INET, SOCK_STREAM, 0);
+                check("a redirect-ceiling listener opens", hops_listening >= 0);
+                if (hops_listening < 0)
+                        return;
+
+                socket_option_set((b32)hops_listening, SOL_SOCKET, SO_REUSEADDR,
+                                  address_of hops_one, sizeof hops_one);
+                memory_fill(address_of hops_where, 0, sizeof hops_where);
+                hops_where.family = AF_INET;
+                hops_where.host = network_order_32(HOST_LOOPBACK);
+                check("a redirect-ceiling listener binds",
+                      socket_bind((b32)hops_listening, address_of hops_where,
+                                  sizeof hops_where) == 0);
+                check("a redirect-ceiling listener listens",
+                      socket_listen((b32)hops_listening, 4) == 0);
+                memory_fill(address_of hops_where, 0, sizeof hops_where);
+                socket_name((b32)hops_listening, address_of hops_where,
+                            address_of hops_size);
+                hops_port = network_order_16(hops_where.port);
+
+                hops_child = system_call_2(syscall(clone), SIGCHLD, 0);
+                if (hops_child == 0)
+                {
+                        p8 said[256];
+                        p8 answer_redirect[] = "HTTP/1.1 302 Found\r\n"
+                                               "Location: /\r\n"
+                                               "Content-Length: 0\r\n"
+                                               "\r\n";
+                        /* Empty final body: http_fetch_to(-1) has nowhere to
+                           write payload bytes, and this case only proves the
+                           hop ceiling. */
+                        p8 answer_ok[] = "HTTP/1.1 200 OK\r\n"
+                                         "Content-Length: 0\r\n"
+                                         "\r\n";
+                        /* Nine redirects then a final body, then ten
+                           redirects that never land. */
+                        positive answers = HTTP_HOPS - 1 + 1 + HTTP_HOPS;
+
+                        for (positive at = 0; at < answers; at++)
+                        {
+                                bipolar taken = socket_accept(
+                                    (b32)hops_listening, 0, 0, 0);
+                                string_address answer = answer_redirect;
+                                positive length = sizeof(answer_redirect) - 1;
+
+                                if (at == HTTP_HOPS - 1)
+                                {
+                                        answer = answer_ok;
+                                        length = sizeof(answer_ok) - 1;
+                                }
+                                if (taken >= 0)
+                                {
+                                        socket_receive((b32)taken, said,
+                                                       sizeof said, 0, 0, 0);
+                                        system_write_all((positive)taken,
+                                                         answer, length);
+                                        socket_shutdown((b32)taken, SHUT_BOTH);
+                                        socket_close((b32)taken);
+                                }
+                        }
+                        system_call_1(syscall(exit_group), 0);
+                }
+
+                {
+                        b32 code = 0;
+                        bipolar status;
+                        p8 url[64];
+                        positive url_used = sizeof("http://127.0.0.1:") - 1;
+
+                        memory_copy(url, "http://127.0.0.1:", url_used);
+                        url_used += positive_into(url + url_used, hops_port);
+                        url[url_used++] = '/';
+                        url[url_used] = end;
+
+                        status = http_fetch_to(url, -1, false, address_of code);
+                        check("nine redirects then a final response succeed",
+                              status == HTTP_OK && code == 200);
+
+                        status = http_fetch_to(url, -1, false, address_of code);
+                        check("ten redirects still pointing elsewhere are refused",
+                              status == HTTP_REDIRECTS);
+                }
+
+                system_wait4_retry((b32)hops_child, null, 0, null);
+                socket_close((b32)hops_listening);
+        }
+
+        /* A Location whose length alone fills the next-URL buffer is refused
+           as a bad URL before the next hop is attempted. */
+        {
+                socket_address_internet where;
+                p32 size = sizeof where;
+                bipolar listening;
+                bipolar child;
+                p16 port;
+                b32 one = 1;
+
+                listening = socket_new(AF_INET, SOCK_STREAM, 0);
+                check("an oversized-Location listener opens", listening >= 0);
+                if (listening < 0)
+                        return;
+
+                socket_option_set((b32)listening, SOL_SOCKET, SO_REUSEADDR,
+                                  address_of one, sizeof one);
+                memory_fill(address_of where, 0, sizeof where);
+                where.family = AF_INET;
+                where.host = network_order_32(HOST_LOOPBACK);
+                check("an oversized-Location listener binds",
+                      socket_bind((b32)listening, address_of where,
+                                  sizeof where) == 0);
+                check("an oversized-Location listener listens",
+                      socket_listen((b32)listening, 1) == 0);
+                memory_fill(address_of where, 0, sizeof where);
+                socket_name((b32)listening, address_of where, address_of size);
+                port = network_order_16(where.port);
+
+                child = system_call_2(syscall(clone), SIGCHLD, 0);
+                if (child == 0)
+                {
+                        p8 said[256];
+                        p8 answer[64 + HTTP_URL_MAX];
+                        positive used = 0;
+                        bipolar taken;
+                        static const p8 head[] = "HTTP/1.1 302 Found\r\n"
+                                                 "Location: /";
+                        static const p8 tail[] = "\r\nContent-Length: 0\r\n"
+                                                 "\r\n";
+
+                        memory_copy(answer, head, sizeof head - 1);
+                        used = sizeof head - 1;
+                        /* Location is '/' plus HTTP_URL_MAX - 1 letters, so
+                           the value length is exactly HTTP_URL_MAX. */
+                        memory_fill(answer + used, 'L', HTTP_URL_MAX - 1);
+                        used += HTTP_URL_MAX - 1;
+                        memory_copy(answer + used, tail, sizeof tail - 1);
+                        used += sizeof tail - 1;
+
+                        taken = socket_accept((b32)listening, 0, 0, 0);
+                        if (taken >= 0)
+                        {
+                                socket_receive((b32)taken, said, sizeof said,
+                                               0, 0, 0);
+                                system_write_all((positive)taken, answer, used);
+                                socket_shutdown((b32)taken, SHUT_BOTH);
+                                socket_close((b32)taken);
+                        }
+                        system_call_1(syscall(exit_group), 0);
+                }
+
+                {
+                        b32 code = 0;
+                        p8 url[64];
+                        positive url_used = sizeof("http://127.0.0.1:") - 1;
+
+                        memory_copy(url, "http://127.0.0.1:", url_used);
+                        url_used += positive_into(url + url_used, port);
+                        url[url_used++] = '/';
+                        url[url_used] = end;
+
+                        check("a redirect Location of HTTP_URL_MAX is refused end to end",
+                              http_fetch_to(url, -1, false, address_of code) ==
+                                  HTTP_BAD_URL);
+                }
+
+                system_wait4_retry((b32)child, null, 0, null);
+                socket_close((b32)listening);
+        }
 }
 
 /*
@@ -55417,6 +56020,7 @@ static fn dhcp_transaction_randomness(void)
         {
                 bipolar child = system_call_2(syscall(clone), SIGCHLD, 0);
                 positive raw = 0;
+                b32 code;
 
                 check("DHCP entropy-policy child starts", child >= 0);
                 if (child < 0)
@@ -55424,11 +56028,21 @@ static fn dhcp_transaction_randomness(void)
                 if (!child)
                         dhcp_test_random_child(which);
 
+                if (system_wait4_retry((b32)child, address_of raw, 0, null) !=
+                    child)
+                {
+                        check("DHCP uses only secure kernel entropy and fails before I/O",
+                              false);
+                        continue;
+                }
+                code = wait_status_code(raw);
+                if (code == 77)
+                {
+                        log_direct(str("DHCP: entropy-policy assertion NOT RUN -- seccomp unavailable\n"));
+                        return;
+                }
                 check("DHCP uses only secure kernel entropy and fails before I/O",
-                      system_wait4_retry((b32)child, address_of raw, 0, null) ==
-                              child &&
-                          (wait_status_code(raw) == 0 ||
-                           wait_status_code(raw) == 77));
+                      code == 0);
         }
 }
 
@@ -55459,6 +56073,7 @@ b32 main(void)
         tls_certificate_dates();
         tls_certificate_identity_rules();
         tls_certificate_extension_adversarial();
+        tls_certificate_list_depth();
         tls_client_hello_bounds();
         tls_client_hello_groups();
         tls_server_hello_validation();
@@ -70086,6 +70701,7 @@ static fn machine_sntp(void)
 {
         bipolar child;
         positive raw = 0;
+        b32 code;
 
         check("RFC 5905 offset, min-delay pick and poison guards hold",
               sntp_math_ok());
@@ -70096,12 +70712,22 @@ static fn machine_sntp(void)
         check("SNTP entropy-policy child starts", child >= 0);
         if (!child)
                 sntp_test_random_child();
-        if (child > 0)
+        if (child <= 0)
+                return;
+        if (system_wait4_retry((b32)child, address_of raw, 0, null) != child)
+        {
                 check("SNTP fails closed when blocking entropy is unavailable",
-                      system_wait4_retry((b32)child, address_of raw, 0, null) ==
-                              child &&
-                          (wait_status_code(raw) == 0 ||
-                           wait_status_code(raw) == 77));
+                      false);
+                return;
+        }
+        code = wait_status_code(raw);
+        if (code == 77)
+        {
+                log_direct(str("SNTP: entropy-policy assertion NOT RUN -- seccomp unavailable\n"));
+                return;
+        }
+        check("SNTP fails closed when blocking entropy is unavailable",
+              code == 0);
 }
 
 /*
