@@ -18,6 +18,28 @@
 static memory_arena utility_arena = {.room = UTILITY_ARENA_BYTES};
 static const diagnostic text_diagnostic;
 
+/* Under a cap on address space (ulimit -v) the whole reserve is refused.
+   The largest reserve the cap allows is found by halving, and half of that
+   is kept, so what the tool maps afterwards still has room; a tool that then
+   needs more than it has says the input is too large, as it would past the
+   full reserve. */
+static COLD address_any utility_arena_reserve(positive address_to room)
+{
+        positive size = UTILITY_ARENA_BYTES;
+        address_any got = null;
+
+        while (!got && size > (1u << 20))
+        {
+                size /= 2;
+                got = memory_checked(size);
+        }
+        if (!got)
+                return null;
+        memory_free(got, size);
+        address_to room = size / 2;
+        return memory_checked(size / 2);
+}
+
 static address_any utility_arena_take(positive bytes)
 {
         if (bytes > UTILITY_ARENA_BYTES || bytes > positive_max - 15)
@@ -26,13 +48,17 @@ static address_any utility_arena_take(positive bytes)
         {
                 // memory() and not memory_checked: the lscpu harness lifts
                 // this function into a prelude that has only the first.
+                positive room = UTILITY_ARENA_BYTES;
                 positive got = (positive)memory(UTILITY_ARENA_BYTES);
+                if (!got || system_failed(got))
+                        got = (positive)utility_arena_reserve(address_of room);
                 if (!got || system_failed(got))
                 {
                         string_diagnostic(&text_diagnostic, 0, null, "out of memory");
                         return null;
                 }
                 utility_arena.bytes = (p8 address_to)got;
+                utility_arena.room = room;
                 utility_arena.used = 0;
         }
         address_any at = memory_arena_take(address_of utility_arena, bytes, 16);
@@ -42,6 +68,49 @@ full:
         string_diagnostic(&text_diagnostic, 0, null, "input too large");
         return null;
 }
+
+/*
+        Buffers a few tools need, mapped by the first use in a process rather
+        than carried in the bss of every one. The multicall image had 59.6 MB
+        of them, and bss is address space from the first instruction on:
+        under ulimit -v 50000 every tool, cat and true among them, died of a
+        segmentation fault before it could say anything, where a GNU tool
+        starts in three or four. Each such buffer is a pointer to the array
+        type it was, and a macro under the array's old name reads through it,
+        so every use is written as it was; the tool that owns a buffer holds
+        it at its start and answers "memory exhausted" when the mapping is
+        refused, and a buffer shared by many takes itself on first touch.
+*/
+static bool utility_hold(address_any address_to held, positive bytes,
+                         string_address program)
+{
+        if (address_to held)
+                return true;
+        address_any got = memory_checked(bytes);
+        if (!got)
+                return string_report(log_error, false, "%s: memory exhausted\n",
+                                     program);
+        address_to held = got;
+        return true;
+}
+
+/* The shared form: the first touch maps, and a process that cannot have the
+   memory has no way on, so it says so and ends as GNU's xalloc_die does. */
+static COLD address_any utility_held_now(address_any address_to held,
+                                         positive bytes)
+{
+        string_address named = program_argument(0);
+        string_address slash = named ? string_last_of(named, '/') : null;
+
+        if (!utility_hold(held, bytes,
+                          slash ? slash + 1 : named ? named : (string_address) "sh"))
+                exit(1);
+        return address_to held;
+}
+
+#define UTILITY_HELD(name) \
+        (*(__typeof__(name##_held))((name##_held) ? (address_any)(name##_held) \
+                : utility_held_now((address_any address_to)&(name##_held), sizeof(*(name##_held)))))
 
 static bool utility_arena_grow(
     address_any table, positive address_to room, positive used,
@@ -6804,11 +6873,15 @@ typedef struct
 
 _Static_assert(sizeof(ls_entry) == 128, "an ls entry packs to 128 bytes");
 
-static ls_entry ls_entries[LS_MAX_ENTRIES];
-static positive ls_sorted[LS_MAX_ENTRIES];
-static positive ls_sort_spare[LS_MAX_ENTRIES];
+static ls_entry (address_to ls_entries_held)[LS_MAX_ENTRIES];
+static positive (address_to ls_sorted_held)[LS_MAX_ENTRIES];
+static positive (address_to ls_sort_spare_held)[LS_MAX_ENTRIES];
+#define ls_entries (*ls_entries_held)
+#define ls_sorted (*ls_sorted_held)
+#define ls_sort_spare (*ls_sort_spare_held)
 static positive ls_count;
-static p8 ls_arena[LS_ARENA];
+static p8 (address_to ls_arena_held)[LS_ARENA];
+#define ls_arena (*ls_arena_held)
 
 /*
         The subdirectory names each level of -R holds while it descends.
@@ -6829,7 +6902,8 @@ static p8 ls_arena[LS_ARENA];
         did not need, so trees that used to be refused now list.
 */
 #define LS_BELOW_ARENA (1 << 22)
-static p8 ls_below_names[LS_BELOW_ARENA];
+static p8 (address_to ls_below_names_held)[LS_BELOW_ARENA];
+#define ls_below_names (*ls_below_names_held)
 static positive ls_below_used;
 
 /*
@@ -6844,8 +6918,10 @@ static positive ls_below_used;
         real. What is left on the stack for a deep listing is FILE_PATH_MAX a
         level, which is what the path being built actually needs.
 */
-static positive ls_operand_order[LS_MAX_ENTRIES];
-static p8 ls_operand_names[LS_ARENA / 4];
+static positive (address_to ls_operand_order_held)[LS_MAX_ENTRIES];
+static p8 (address_to ls_operand_names_held)[LS_ARENA / 4];
+#define ls_operand_order (*ls_operand_order_held)
+#define ls_operand_names (*ls_operand_names_held)
 static positive ls_used;
 
 // What was asked for, one letter per question.
@@ -6912,7 +6988,8 @@ static string_address ls_program;
 // --dired needs to know where every name landed in the output, so every
 // byte the listing writes goes through one counter.
 static positive ls_out_bytes;
-static positive ls_dired_marks[2 * LS_MAX_ENTRIES];
+static positive (address_to ls_dired_marks_held)[2 * LS_MAX_ENTRIES];
+#define ls_dired_marks (*ls_dired_marks_held)
 static positive ls_dired_count;
 static positive ls_subdired_marks[2 * LS_LISTED];
 static positive ls_subdired_count;
@@ -8697,7 +8774,8 @@ static fn ls_print_long(string_address directory)
         Down the columns for -C, across the rows for -x, with tabs filling the
         gaps where they can.
 */
-static positive ls_column_widths[LS_MAX_ENTRIES];
+static positive (address_to ls_column_widths_held)[LS_MAX_ENTRIES];
+#define ls_column_widths (*ls_column_widths_held)
 
 static fn ls_print_columns(string_address directory, bool across)
 {
@@ -9708,6 +9786,17 @@ static bool ls_operand(string_address path, file_facts address_to facts, bool ad
 static b32 file_ls_as(string_address program, p8 default_format, p8 default_quoting)
 {
         positive count = (positive)program_argument_count();
+
+        if (!utility_hold((address_any address_to)&ls_entries_held, sizeof(ls_entries), program) ||
+            !utility_hold((address_any address_to)&ls_sorted_held, sizeof(ls_sorted), program) ||
+            !utility_hold((address_any address_to)&ls_sort_spare_held, sizeof(ls_sort_spare), program) ||
+            !utility_hold((address_any address_to)&ls_arena_held, sizeof(ls_arena), program) ||
+            !utility_hold((address_any address_to)&ls_below_names_held, sizeof(ls_below_names), program) ||
+            !utility_hold((address_any address_to)&ls_operand_order_held, sizeof(ls_operand_order), program) ||
+            !utility_hold((address_any address_to)&ls_operand_names_held, sizeof(ls_operand_names), program) ||
+            !utility_hold((address_any address_to)&ls_dired_marks_held, sizeof(ls_dired_marks), program) ||
+            !utility_hold((address_any address_to)&ls_column_widths_held, sizeof(ls_column_widths), program))
+                return 2;
 
         ls_program = program;
         ls_selected = (ls_selection){};

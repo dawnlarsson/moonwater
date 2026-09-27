@@ -550,7 +550,8 @@ static bool text_quiet_read;
    there is for now rather than as a failure. */
 static bool text_again_ends;
 /* One sentinel slot is used while a sed script file is turned into text. */
-static p8 text_line[TEXT_LINE_MAX + 1];
+static p8 (address_to text_line_held)[TEXT_LINE_MAX + 1];
+#define text_line UTILITY_HELD(text_line)
 static positive text_line_length;
 static bool text_line_ended;
 
@@ -2296,10 +2297,12 @@ static fn text_record_take_peeked(text_record_cursor address_to cursor,
    refill-spanning store.  Only the second spill and one transient prior need
    new storage: the prior is consumed by the comparison before another side
    advances, so it is shared by both sides. */
-static p8 relation_spill[TEXT_LINE_MAX + 1];
+static p8 (address_to relation_spill_held)[TEXT_LINE_MAX + 1];
+#define relation_spill UTILITY_HELD(relation_spill)
 /* uniq already needed one retained record.  The merge walkers use the same
    mutually-exclusive store for the one prior record crossing a refill. */
-static p8 text_record_hold[TEXT_LINE_MAX + 1];
+static p8 (address_to text_record_hold_held)[TEXT_LINE_MAX + 1];
+#define text_record_hold UTILITY_HELD(text_record_hold)
 
 /* comm ---------------------------------------------------- */
 
@@ -2361,6 +2364,9 @@ static fn comm_record(p8 address_to record, positive length, positive column,
         text_put_character(delimiter);
 }
 
+// text_record_hold as text_comm took it, once, so a line is not a look.
+static p8 address_to comm_hold;
+
 static bool comm_advance(text_record_cursor address_to cursor,
                          p8 delimiter, bool check,
                          bool address_to disorder)
@@ -2369,7 +2375,7 @@ static bool comm_advance(text_record_cursor address_to cursor,
         positive old_length = cursor->length;
         bool more = text_record_next(
             cursor, delimiter, check ? address_of old : null,
-            old_length, text_record_hold);
+            old_length, comm_hold);
 
         if (more && check && sort_compare_bytes(old, old_length,
                                                  cursor->record,
@@ -2383,6 +2389,7 @@ static bool comm_advance(text_record_cursor address_to cursor,
 
 static b32 text_comm()
 {
+        comm_hold = text_record_hold;
         p8 comm_order_mode = 0;
         file_taking taking = {
             .program = (string_address)"comm",
@@ -10212,12 +10219,18 @@ static fn fmt_analyze_line(fmt_line address_to line)
                          column >= line->prefix_indent + fmt_prefix_full_length;
 }
 
+// The two stores fmt reads into and gathers a paragraph in, as text_fmt
+// took them once: both are mapped on first touch, and a look per line or
+// per word is a check per line or per word.
+static p8 address_to fmt_hold;
+static p8 address_to fmt_spill;
+
 static bool fmt_read_line(fmt_line address_to line)
 {
-        if (!text_line_next(text_record_hold, 0))
+        if (!text_line_next(fmt_hold, 0))
                 return false;
 
-        line->at = text_record_hold;
+        line->at = fmt_hold;
         line->length = text_line_length;
         line->ended = text_line_ended;
         line->suitable = false;
@@ -10241,7 +10254,7 @@ static bool fmt_add_word(p8 address_to at, positive length, positive space,
 
         fmt_word address_to word = fmt_words + fmt_word_count++;
 
-        word->text = relation_spill + fmt_character_count;
+        word->text = fmt_spill + fmt_character_count;
         memory_copy_apart(word->text, at, length);
         fmt_character_count += length;
         word->length = length;
@@ -10580,6 +10593,8 @@ static const argument_option fmt_options[] = {
 
 static b32 text_fmt()
 {
+        fmt_hold = text_record_hold;
+        fmt_spill = relation_spill;
         file_taking taking = {
             .program = (string_address) "fmt",
             .options = fmt_options,
@@ -15562,7 +15577,8 @@ static b32 text_fold()
 */
 #define TEXT_LIST_MAX (TEXT_LINE_MAX + 2)
 
-static p8 text_list[TEXT_LIST_MAX];
+static p8 (address_to text_list_held)[TEXT_LIST_MAX];
+#define text_list UTILITY_HELD(text_list)
 
 /*
         Where each range began, for --output-delimiter.
@@ -15574,7 +15590,8 @@ static p8 text_list[TEXT_LIST_MAX];
         ranges shows up here; two overlapping ranges written the wrong way
         round is the one spec this still parts differently from GNU.
 */
-static p8 text_list_begins[TEXT_LIST_MAX];
+static p8 (address_to text_list_begins_held)[TEXT_LIST_MAX];
+#define text_list_begins UTILITY_HELD(text_list_begins)
 
 static positive text_list_open;
 
@@ -18011,7 +18028,10 @@ static b32 text_uniq()
         // Most adjacent records live in the same reader fill. Keep a view of
         // the prior one and copy it here only before a refill can invalidate
         // that view. The spare byte carries its terminator with it.
-        p8 address_to previous = text_record_hold;
+        // Taken once: the store is mapped on first touch, and a look per
+        // line is a check per line.
+        p8 address_to hold = text_record_hold;
+        p8 address_to previous = hold;
         positive previous_length = 0;
         bool have_previous = false;
         bool shown_group = false;
@@ -18025,7 +18045,7 @@ static b32 text_uniq()
                 bool more = text_line_view(address_of line,
                                            address_of line_length,
                                            address_of previous,
-                                           previous_length, text_record_hold);
+                                           previous_length, hold);
 
                 if (more)
                 {
@@ -23243,16 +23263,18 @@ static b32 sed_broken_status = 1;
 
 /* The three stores keep their distinct roles by pointer. Exchange and a
    completed substitution publish a store; neither copies a whole line back. */
-static p8 sed_buffers[3][TEXT_LINE_MAX];
+static p8 (address_to sed_buffers_held)[3][TEXT_LINE_MAX];
+#define sed_buffers (*sed_buffers_held)  // held by text_sed as it starts
 typedef struct
 {
         p8 address_to bytes;
         positive length;
         bool ended;
 } sed_buffer;
-static sed_buffer sed_pattern = {sed_buffers[0], 0, true};
-static sed_buffer sed_holding = {sed_buffers[2], 0, true};
-static p8 address_to sed_work = sed_buffers[1];
+// Pointed at the buffers by text_sed before anything reads them.
+static sed_buffer sed_pattern = {null, 0, true};
+static sed_buffer sed_holding = {null, 0, true};
+static p8 address_to sed_work;
 static positive sed_number;
 static bool sed_quiet;
 static bool sed_last;
@@ -23454,14 +23476,16 @@ static fn sed_write_diagnostic(bipolar reason, positive buffer)
         string_diagnostic(&text_diagnostic, 0, (string_address)said, file_reason(reason));
 }
 
-static text_reader sed_readers[SED_FILES_MAX];
+static text_reader (address_to sed_readers_held)[SED_FILES_MAX];
+#define sed_readers (*sed_readers_held)  // held by text_sed as it starts
 static b32 sed_reader_names[SED_FILES_MAX];
 static bool sed_reader_open[SED_FILES_MAX];
 static b32 sed_reader_count;
 static p8 sed_line_scratch[TEXT_PATH_MAX];
 
 // What R appends is a whole line of its file, as long as any line may be.
-static p8 sed_reader_line[TEXT_LINE_MAX];
+static p8 (address_to sed_reader_line_held)[TEXT_LINE_MAX];
+#define sed_reader_line (*sed_reader_line_held)  // held by text_sed as it starts
 
 // Where w or R keeps a name: found among the names before it, or added.
 static b32 sed_name_of(b32 address_to names, b32 address_to count,
@@ -25106,6 +25130,18 @@ publish:
 
 static b32 text_sed()
 {
+        //      Held here, and ended here without them as GNU's xalloc_die
+        //      ends: a way out of this function is one the compiler splits
+        //      its hot loop away from.
+        if (!sed_buffers_held)
+                utility_held_now((address_any address_to)&sed_buffers_held,
+                                 sizeof(sed_buffers));
+        if (!sed_readers_held)
+                utility_held_now((address_any address_to)&sed_readers_held,
+                                 sizeof(sed_readers));
+        if (!sed_reader_line_held)
+                utility_held_now((address_any address_to)&sed_reader_line_held,
+                                 sizeof(sed_reader_line));
         b32 leaving = -1;
         file_taking taking = {
             .program = (string_address) "sed",

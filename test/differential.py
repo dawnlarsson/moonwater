@@ -9012,8 +9012,56 @@ def files_hostname_set(farm):
     return passed, total, notes
 
 
+def files_address_cap(farm):
+    """Tools under a cap on address space, as coreutils' own tests put them
+    with ulimit -v: every tool once carried 59.6 MB of static buffers in its
+    bss and died of a segmentation fault under ulimit -v 50000 before its
+    first word, cat and rm among them. Each runs a small real job under a
+    20 MB cap and must answer as the reference does under the same cap;
+    ls is left out, since its tables are still 36 MB mapped at its start,
+    and fmt, which takes a million-word table from the arena at once."""
+    import resource
+    import subprocess
+    import tempfile
+
+    cap = 20 << 20
+    jobs = (("cat", "f"), ("cut", "-b1", "f"), ("expand", "f"), ("unexpand", "f"), ("basenc", "--base64", "f"),
+            ("pr", "f"), ("dd", "if=f", "of=g", "status=none"), ("rm", "-f", "nothing"), ("cp", "f", "g"),
+            ("mv", "f", "g"), ("ln", "-s", "f", "g"), ("chmod", "600", "f"), ("sed", "s/a/b/", "f"),
+            ("head", "-n1", "f"), ("tail", "-n1", "f"), ("wc", "f"), ("sort", "f"), ("uniq", "f"), ("tr", "a", "b"),
+            ("grep", "a", "f"), ("csplit", "f", "2"), ("touch", "g"), ("mkdir", "d"), ("stat", "-c", "%s", "f"))
+    passed = total = 0
+    notes = []
+
+    def limited():
+        resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
+
+    for job in jobs:
+        candidate = Path(farm) / job[0]
+        reference = shutil.which(job[0], path="/usr/bin:/bin")
+        if not candidate.exists() or not reference:
+            continue
+        total += 1
+        answers = []
+        for program in (reference, str(candidate)):
+            work = Path(tempfile.mkdtemp())
+            try:
+                (work / "f").write_bytes(b"alpha\nbeta\ngamma\n")
+                done = subprocess.run([program, *job[1:]], cwd=work, input=b"abc\n", capture_output=True,
+                                      timeout=10, preexec_fn=limited)
+                answers.append((done.returncode, done.stdout))
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+        if answers[0] == answers[1]:
+            passed += 1
+        else:
+            notes.append(f"{' '.join(job)} under a {cap >> 20} MB cap: {answers[0]!r} against {answers[1]!r}"[:300])
+    return passed, total, notes
+
+
 FILES_CHECKS = (files_column_layout, files_xargs_parallel, files_zones, files_tar,
-                files_find_terminal, files_zone_names, files_hostname_set, files_move_across)
+                files_find_terminal, files_zone_names, files_hostname_set, files_move_across,
+                files_address_cap)
 
 # ---- domain: misc (from spec_misc.py) ----
 
@@ -20216,6 +20264,7 @@ static b32 string_diagnostic(diagnostic const address_to sink, b32 result,
                              string_address about, string_address reason)
 { (void)sink; (void)about; (void)reason; fixture_errors++; return result; }
 static void *memory(positive bytes) { (void)bytes; abort(); }
+static void *utility_arena_reserve(positive *room) { (void)room; abort(); }
 static bool system_failed(positive value) { return value >= positive_max-4095; }
 static positive positive_into_string(p8 *p,positive n) { return (positive)sprintf((char *)p,"%llu",(unsigned long long)n); }
 static void positive_to_string(writer w,positive n) { p8 b[24]; positive k=positive_into_string(b,n); w(b,k); }

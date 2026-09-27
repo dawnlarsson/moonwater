@@ -1937,18 +1937,39 @@ static string_address rx_dfa_scan(rx_dfa_cache *cache, string_address at,
 
 #define REGEX_SCRATCH_MAX 20000
 
-static rx_pool regex_pool;
+static rx_pool address_to regex_pool_held;
 static rx_mark regex_retained;
 static regex_program regex_current;
-static rx_frame regex_frames[REGEX_SCRATCH_MAX];
-static rx_choice regex_choices[REGEX_SCRATCH_MAX];
-static rx_undo regex_undo[REGEX_SCRATCH_MAX];
+static rx_frame (address_to regex_frames_held)[REGEX_SCRATCH_MAX];
+#define regex_frames UTILITY_HELD(regex_frames)
+static rx_choice (address_to regex_choices_held)[REGEX_SCRATCH_MAX];
+#define regex_choices UTILITY_HELD(regex_choices)
+static rx_undo (address_to regex_undo_held)[REGEX_SCRATCH_MAX];
+#define regex_undo UTILITY_HELD(regex_undo)
+//      Its scratch is mapped by rx_run the first time a match backtracks.
 static rx_match regex_match = {
-    .frames = regex_frames, .choices = regex_choices, .undo = regex_undo,
     .frame_capacity = REGEX_SCRATCH_MAX, .choice_capacity = REGEX_SCRATCH_MAX,
     .undo_capacity = REGEX_SCRATCH_MAX,
     .work_limit = 100000000,
 };
+
+static COLD fn rx_match_scratch(rx_match *match)
+{
+        match->frames = regex_frames;
+        match->choices = regex_choices;
+        match->undo = regex_undo;
+}
+
+/* Every match runs a program compiled into the pool, so the pool's first
+   use is where the scratch the matcher backtracks in is put in place:
+   once, and nowhere a line or a starting position pays for it. */
+static inline rx_pool address_to regex_pool_ready(void)
+{
+        if (unlikely(!regex_match.frames))
+                rx_match_scratch(&regex_match);
+        return &UTILITY_HELD(regex_pool);
+}
+#define regex_pool (*regex_pool_ready())
 
 /*
         The deterministic machine, and the states it has learned.
@@ -1963,7 +1984,8 @@ static rx_match regex_match = {
         automaton loaded knows to build its own.
 */
 static rx_dfa regex_dfa;
-static rx_dfa_cache regex_dfa_cache;
+static rx_dfa_cache address_to regex_dfa_cache_held;
+#define regex_dfa_cache UTILITY_HELD(regex_dfa_cache)
 
 #define regex_slots regex_match.slots
 #define regex_group_count regex_current.groups
