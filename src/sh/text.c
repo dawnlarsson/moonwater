@@ -6846,10 +6846,12 @@ static b32 text_tail() { return text_head_tail(true); }
 /*
         The long spellings tee answers to.
 
-        -i asks for SIGINT to be ignored while the copy runs, and -p for a
-        pipe that has gone away not to end it. Neither is a fact about the
-        bytes, and both are taken and dropped -- but a letter that is not one
-        of tee's is refused, because a script that misspelled one is told so.
+        -i asks for SIGINT to be ignored while the copy runs, and is taken
+        and dropped. -p and --output-error choose what a destination that
+        fails does to the copy: -p and a bare --output-error are warn-nopipe,
+        and without either tee is killed by SIGPIPE like any other writer.
+        A letter that is not one of tee's is refused, because a script that
+        misspelled one is told so.
 */
 static const argument_option tee_options[] = {
     {"append", 'a'},
@@ -6859,16 +6861,27 @@ static const argument_option tee_options[] = {
     {null},
 };
 
-// The four words --output-error takes, and the two that end tee where a
-// destination fails rather than carrying on past it.
+/*
+        The four words --output-error takes, in GNU's order, and the mode
+        they leave: TEE_SIGPIPE when neither -p nor --output-error was
+        given, then one past the word's index. The last of -p and
+        --output-error on the line decides, as each overwrites GNU's one
+        output_error variable.
+*/
 static const string_address tee_error_modes[4] = {
     (string_address) "warn", (string_address) "warn-nopipe",
     (string_address) "exit", (string_address) "exit-nopipe"};
-static bool tee_leave;
+
+enum { TEE_SIGPIPE, TEE_WARN, TEE_WARN_NOPIPE, TEE_EXIT, TEE_EXIT_NOPIPE };
+
+static positive tee_mode;
 
 static bool tee_option_seen(p8 letter, string_address value)
 {
         positive chosen;
+
+        if (letter == 'p' || (letter == 'O' && !value))
+                tee_mode = TEE_WARN_NOPIPE;
 
         if (letter != 'O' || !value)
                 return true;
@@ -6876,126 +6889,251 @@ static bool tee_option_seen(p8 letter, string_address value)
         if (!text_word_of(value, tee_error_modes, 4, address_of chosen))
                 return string_diagnostic(&text_diagnostic, 0, value, "invalid argument for --output-error");
 
-        tee_leave = chosen >= 2;
+        tee_mode = TEE_WARN + chosen;
         return true;
 }
 
+/*
+        One write, all of it, the way GNU's write_wait makes it: a
+        descriptor someone left non-blocking answers EAGAIN when its pipe is
+        full, which is a wait for room and not a failure, so tee polls for
+        room and goes on from the first byte not taken. An interrupted write
+        goes on too. Anything else is the reason the destination failed.
+*/
+static bipolar tee_write(positive handle, p8 address_to at, positive left)
+{
+        while (left)
+        {
+                system_write_result wrote = system_write_all_checked(handle, at, left);
+
+                at += wrote.bytes;
+                left -= wrote.bytes;
+
+                if (!left)
+                        return 0;
+
+                if (wrote.error == -4) // EINTR
+                        continue;
+
+                if (wrote.error != -ERROR_AGAIN)
+                        return wrote.error ? wrote.error : -ERROR_INPUT_OUTPUT;
+
+                system_poll_descriptor room = {(b32)handle, SYSTEM_POLL_WRITE, 0};
+
+                if (system_poll_wait(address_of room, 1, null, null) < 0)
+                        return -ERROR_AGAIN;
+        }
+
+        return 0;
+}
+
+// A pipe or a socket, which is what GNU's isapipe answers for and what can
+// be seen to have lost its reader before anything is written to it.
+static bool tee_pipe(positive handle)
+{
+        file_facts facts;
+
+        if (!text_handle_facts(handle, address_of facts))
+                return false;
+
+        positive kind = facts.mode & MODE_FORMAT;
+
+        return kind == MODE_PIPE || kind == MODE_SOCKET;
+}
+
+/*
+        tee copies standard input to standard output and to every file it
+        was given, and GNU's tee_files is the model: each destination is
+        dropped at its first refusal with its name and the reason, standard
+        output as 'standard output', and the copy goes on to the ones left
+        until there are none -- so `yes | tee /dev/full >/dev/full` names
+        both and stops, where carrying on to no destination at all read an
+        endless input for ever.
+
+        A pipe whose reader has gone is EPIPE once SIGPIPE is ignored, which
+        it is in every mode but the default one: the *-nopipe modes and -p
+        drop that destination without a word, warn and exit say so, and the
+        exit modes end tee at the first failure they name. With a nopipe
+        mode and an input that can keep tee waiting, the first destination
+        still open is watched while tee waits for input, so a pipe that loses
+        its reader ends tee there and then, rather than at a write that may
+        never come.
+*/
 static b32 text_tee()
 {
-        positive address_to handles = null;
-        positive handle_count = 0;
+        bipolar address_to handles = null;
+        positive mapped_bytes = 0;
         file_taking taking = {
             .program = (string_address) "tee",
             .options = tee_options,
-            // --output-error names a kind of failure to go on through, and
-            // the word it carries is taken and dropped like -i and -p are. O
-            // is a letter tee has not got, so -p stays a plain flag.
             .operand = text_file_add,
             .seen = tee_option_seen,
         };
 
         text_begin("tee");
-        tee_leave = false;
+        tee_mode = TEE_SIGPIPE;
 
         if (!text_took(address_of taking))
                 return text_done(1);
 
         bool append = (taking.flags & FILE_FLAG('a')) != 0;
-        bool leave = tee_leave;
+        positive mode = tee_mode;
+        bool leave = mode == TEE_EXIT || mode == TEE_EXIT_NOPIPE;
+        bool nopipe = mode == TEE_WARN_NOPIPE || mode == TEE_EXIT_NOPIPE;
+        positive count = text_files_count + 1;
 
-        if (text_files_count)
+        if (text_files_count > positive_max / sizeof(bipolar) - 1)
+                return text_done(string_diagnostic(&text_diagnostic, 1, null, "too many operands"));
+
+        mapped_bytes = count * sizeof(bipolar);
+        handles = (bipolar address_to)memory_checked(mapped_bytes);
+
+        if (!handles)
+                return text_done(string_diagnostic(&text_diagnostic, 1, null, "too many operands"));
+
+        // Set aside for the copy only, and put back after it, so the shell
+        // this may be running in goes on as it was.
+        positive previous[4];
+        bool quiet = mode != TEE_SIGPIPE &&
+                     system_signal_install(SIGNAL_PIPE, 1, 0, 0, previous);
+
+        positive outputs = 1;
+        b32 status = 0;
+
+        handles[0] = 1;
+
+        for (positive i = 1; i < count; i++)
         {
-                if (text_files_count > positive_max / sizeof(positive))
-                        return text_done(string_diagnostic(&text_diagnostic, 1, null, "too many operands"));
+                string_address name = program_argument(text_files[i - 1]);
 
-                positive mapped =
-                    (positive)memory_checked(text_files_count * sizeof(positive));
-
-                if (!mapped)
-                        return text_done(string_diagnostic(&text_diagnostic, 1, null, "too many operands"));
-
-                handles = (positive address_to)mapped;
-        }
-
-        for (positive i = 0; i < text_files_count; i++)
-        {
-                string_address name = program_argument(text_files[i]);
-                bipolar target = text_open_handle(
+                handles[i] = text_open_handle(
                     name, append ? TEXT_APPEND : TEXT_WRITE, 0666);
 
-                if (target < 0)
+                if (handles[i] >= 0)
                 {
-                        text_file_failed(name, target, false);
-                        text_status = 1;
-
-                        // An exit mode ends tee where the open failed:
-                        // nothing is copied, to any destination.
-                        if (leave)
-                        {
-                                for (positive c = 0; c < handle_count; c++)
-                                        system_close(handles[c]);
-
-                                system_call_2(syscall(munmap), (positive)handles,
-                                              text_files_count * sizeof(positive));
-                                return text_done(1);
-                        }
-
+                        outputs++;
                         continue;
                 }
 
-                handles[handle_count++] = (positive)target;
+                text_file_failed(name, handles[i], false);
+                status = 1;
+
+                // An exit mode ends tee where the open failed: nothing is
+                // copied, to any destination.
+                if (leave)
+                        goto finished;
         }
 
         if (!text_open(null))
         {
-                if (handles)
-                        system_call_2(syscall(munmap), (positive)handles,
-                                      text_files_count * sizeof(positive));
-
-                return text_done(1);
+                status = 1;
+                goto finished;
         }
 
-        // GNU tee names a standard output that refuses once and goes on
-        // copying to the files, so the refusal is kept here: text_out_failed
-        // would end the reading.
-        bipolar stdout_error = 0;
+        bool watch = false;
 
-        while (text_fill())
+        if (nopipe)
         {
-                p8 address_to at = text_input.buffer + text_input.position;
-                positive left = text_input.filled - text_input.position;
+                file_facts input;
 
-                if (!stdout_error)
+                watch = !text_handle_facts(text_input.handle, address_of input) ||
+                        ((input.mode & MODE_FORMAT) != MODE_FILE &&
+                         (input.mode & MODE_FORMAT) != MODE_BLOCK);
+        }
+
+        // The first destination still open, and whether it is a pipe that
+        // can be watched: worked out again only when that destination goes.
+        positive first = 0;
+        bool first_pipe = watch && tee_pipe(1);
+
+        while (outputs)
+        {
+                if (first_pipe && text_input.position >= text_input.filled)
                 {
-                        system_write_result wrote = system_write_all_checked(1, at, left);
+                        system_poll_descriptor waited[2] = {
+                            {(b32)text_input.handle, SYSTEM_POLL_READ, 0},
+                            {(b32)handles[first], 0, 0}};
 
-                        if (wrote.bytes != left)
+                        while (system_poll_wait(waited, 2, null, null) == -4) // EINTR
+                                ;
+
+                        if (!waited[0].returned &&
+                            (waited[1].returned & (SYSTEM_POLL_ERROR | SYSTEM_POLL_HANGUP |
+                                                   SYSTEM_POLL_INVALID)))
                         {
-                                stdout_error = wrote.error ? wrote.error
-                                                           : -ERROR_INPUT_OUTPUT;
-                                string_diagnostic(&text_diagnostic, 0,
-                                                  (string_address) "'standard output'",
-                                                  file_reason(stdout_error));
-                                text_status = 1;
+                                if (first)
+                                        system_close((positive)handles[first]);
+                                handles[first] = -1;
+                                outputs--;
+
+                                while (outputs && handles[first] < 0)
+                                        first++;
+                                first_pipe = outputs && watch &&
+                                             tee_pipe((positive)handles[first]);
+                                continue;
                         }
                 }
 
-                for (positive i = 0; i < handle_count; i++)
-                        if (system_write_all(handles[i], at, left) != left)
-                                text_status = 1;
+                if (!text_fill())
+                        break;
+
+                p8 address_to at = text_input.buffer + text_input.position;
+                positive left = text_input.filled - text_input.position;
+
+                for (positive i = 0; i < count; i++)
+                {
+                        if (handles[i] < 0)
+                                continue;
+
+                        bipolar reason = tee_write((positive)handles[i], at, left);
+
+                        if (!reason)
+                                continue;
+
+                        // EPIPE is said only by warn and exit: the nopipe
+                        // modes are there to be quiet about it, and the
+                        // default mode only sees it when SIGPIPE was ignored
+                        // before tee started, where GNU is quiet too.
+                        if (reason != -ERROR_BROKEN_PIPE || mode == TEE_WARN ||
+                            mode == TEE_EXIT)
+                        {
+                                text_file_failed(i ? program_argument(text_files[i - 1])
+                                                   : (string_address) "standard output",
+                                                 reason, false);
+                                status = 1;
+
+                                if (leave)
+                                        goto finished;
+                        }
+
+                        if (i)
+                                system_close((positive)handles[i]);
+                        handles[i] = -1;
+                        outputs--;
+
+                        while (outputs && handles[first] < 0)
+                                first++;
+                        first_pipe = outputs && watch &&
+                                     tee_pipe((positive)handles[first]);
+                }
 
                 text_input.position = text_input.filled;
         }
 
-        for (positive i = 0; i < handle_count; i++)
-                if (system_close(handles[i]) < 0)
-                        text_status = 1;
+        if (text_status)
+                status = 1;
 
-        if (handles)
-                system_call_2(syscall(munmap), (positive)handles,
-                              text_files_count * sizeof(positive));
+finished:
+        for (positive i = 1; i < count; i++)
+                if (handles[i] >= 0 && system_close((positive)handles[i]) < 0)
+                        status = 1;
 
-        return text_done(text_status);
+        system_call_2(syscall(munmap), (positive)handles, mapped_bytes);
+
+        if (quiet)
+                system_signal_action(SIGNAL_PIPE, previous, null, 8);
+
+        return text_done(status);
 }
 
 /*

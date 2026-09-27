@@ -16882,6 +16882,14 @@ _TEXT_WRITE_SOURCES = {
     "zerobound": "env head -c 1M /dev/zero | env tr '\\0' '\\n' | run {words} {target}",
     "numbers": "env seq 1 400000 > big\nrun {words} big {target}",
     "numbersin": "env seq 1 400000 > big\nrun {words} < big {target}",
+    #       An input that says nothing until the tool is done, or five
+    #       seconds have gone: tee -p watching a standard output whose reader
+    #       has left ends at once, and one that only notices at its next
+    #       write is still waiting when the writer gives up.
+    "idle": ("n=0\n{{ until test -f done; do test $n -ge 50 && {{ : > late; break; }}; "
+             "env sleep 0.1; n=$((n + 1)); done; }} | "
+             "{{ run {words} {target}; echo \"tee $?\" > said; : > done; }} | :\n"
+             "env cat said\ntest -f late && echo late\n"),
 }
 _TEXT_WRITE_TARGETS = {
     "tmpfs": ("", "> m/f", 'echo "wrote $(env wc -c < m/f)"\n'),
@@ -16894,6 +16902,10 @@ _TEXT_WRITE_TARGETS = {
               'echo "wrote $(env wc -c < out)"\n'),
     "gone": ("trap '' PIPE\nenv mkfifo p\nenv head -c 1 p > /dev/null &\n", "> p", "wait\n"),
     "copyfull": ("", "> /dev/full", 'echo "copy $(env wc -c < copy)"\n'),
+    "copyout": ("", "> out", 'echo "out $(env wc -c < out) copy $(env wc -c < copy)"\n'),
+    #       gone without the trap: SIGPIPE as the tool was started with it.
+    "broken": ("env mkfifo p\nenv head -c 1 p > /dev/null &\n", "> p", "wait\n"),
+    "none": ("", "", ""),
 }
 _TEXT_WRITE_CASES = (
     ("cat", "file", "tmpfs"), ("cat", "pipe", "tmpfs"), ("cat", "zero", "tmpfs"),
@@ -16940,6 +16952,17 @@ _TEXT_WRITE_CASES = (
     ("wc", "small", "filled"), ("wc", "small", "closed"),
     ("rev", "small", "filled"), ("rev", "small", "closed"), ("rev", "smallin", "closed"),
     ("tee", "numbersin", "copyfull", "copy"),
+    #       tee drops each destination at its first refusal and stops when
+    #       none is left; -p and --output-error choose what EPIPE does.
+    ("tee", "yes", "full", "/dev/full"), ("tee", "numbersin", "copyout", "/dev/full", "copy"),
+    ("tee", "numbersin", "full", "copy", "/dev/full"),
+    ("tee", "yes", "broken"), ("tee", "yes", "broken", "-p"), ("tee", "yes", "broken", "--output-error"),
+    ("tee", "yes", "broken", "--output-error=warn"), ("tee", "yes", "broken", "--output-error=warn-nopipe"),
+    ("tee", "yes", "broken", "--output-error=exit"), ("tee", "yes", "broken", "--output-error=exit-nopipe"),
+    ("tee", "yes", "broken", "--output-error=exit", "/dev/null"), ("tee", "yes", "broken", "-p", "--output-error=exit"),
+    ("tee", "yes", "broken", "--output-error=warn", "-p"), ("tee", "yes", "gone"),
+    ("tee", "yes", "full", "--output-error=exit", "/dev/full"), ("tee", "yes", "full", "-p", "/dev/full"),
+    ("tee", "idle", "none", "-p"), ("tee", "idle", "none", "--output-error=exit-nopipe"),
 )
 
 
