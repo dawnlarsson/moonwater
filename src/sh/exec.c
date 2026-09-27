@@ -153,9 +153,12 @@ static fn exec_floodlight_child_began()
         floodlight_inplace_terminal = false;
 }
 
+static fn exec_saves_child_drop();
+
 fn exec_child_began()
 {
         exec_forked = true;
+        exec_saves_child_drop();
         exec_floodlight_child_began();
         trap_child_began();
         // One more shell between this process and the one the script began
@@ -5687,6 +5690,27 @@ typedef struct
 
 static exec_saved_fd exec_saves[REDIRECT_SAVE_MAX];
 static b32 exec_save_count;
+
+/*
+        A child never puts back what its parent put aside: it leaves before
+        the parent's commands end. The copies were close-on-exec, which kept
+        them from programs the child ran but not from the child itself, so a
+        subshell waiting on a program held the parent's saved stdout open --
+        and x=$( (sleep 1) >/dev/null ) waited a second for a pipe it had
+        redirected away from. The parser's own descriptor stays.
+*/
+static b32 exec_child_root;
+
+static fn exec_saves_child_drop()
+{
+        for (b32 at = 0; at < exec_save_count; at++)
+                if (exec_saves[at].saved >= 0 &&
+                    !(shell_parser_source_active &&
+                      shell_parser_source_handle == exec_saves[at].saved))
+                        system_close(exec_saves[at].saved);
+        exec_save_count = 0;
+        exec_child_root = 0;
+}
 static b32 exec_redirect_status;
 // Only the top-level script reader streams an open file across commands.
 // Its descriptor can move when user redirections claim the same number.
@@ -5895,8 +5919,32 @@ static bool exec_save_fd(b32 fd, parse_node address_to node)
             shell_parser_source_handle == fd)
                 shell_parser_source_fork_prepare();
 
+        /* The command a forked child was made for is the last thing it
+           runs, so what its own redirections replace is never put back:
+           { sleep 1; } >/dev/null & inside $( ) held the substitution's pipe
+           for the second the group ran, and bash has it closed at once. */
+        if (exec_child_root && node == parse_nodes + exec_child_root)
+                return true;
+
         if (exec_save_count >= REDIRECT_SAVE_MAX)
                 return string_report(log_error, false, "Too many redirections\n");
+
+        /* A descriptor holding an outer save is about to be replaced --
+           exec 10>&1 inside { ...; } > f -- so the save moves first, or the
+           group's end would put f back on stdout. */
+        for (b32 at = 0; at < exec_save_count; at++)
+        {
+                if (exec_saves[at].saved != fd)
+                        continue;
+
+                bipolar moved = exec_save_duplicate(fd, node, 10);
+
+                if (moved < 0)
+                        return string_report(log_error, false,
+                                             "Cannot preserve descriptor %p\n",
+                                             (positive)fd);
+                exec_saves[at].saved = (b32)moved;
+        }
 
         saved = exec_save_duplicate(fd, node, 10);
 
@@ -12569,6 +12617,7 @@ static bipolar exec_spawn_node(b32 index, bool background)
                    it: bash's (break) there says it is only meaningful in a
                    loop, whatever its operand. */
                 exec_loop_depth = 0;
+                exec_child_root = index;
 
                 /* The async environment is already a subshell. Turning an
                    explicit (...) node into its equivalent group avoids a

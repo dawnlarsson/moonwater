@@ -14019,6 +14019,32 @@ def shell_lang_source_frames(rng):
             shell_program(files, lines[where], 'echo "end=$?"'), ("command", "stdin", "file"))
 
 
+#       Where a redirection's saved copy of a descriptor lives. A child held
+#       its parent's saved stdout open while it waited on a program, so a
+#       substitution around a redirected background group or subshell waited
+#       for it; and exec N>&... inside a redirected group overwrote the save
+#       at N, so the group's end left stdout on the group's file.
+def shell_lang_redirect_save_scope(rng):
+    #   exec 10>&- in the group closes bash's own save, and bash loses its
+    #   stdout for the rest of the script; that is not copied.
+    shape = rng.choice(("subst-group", "subst-subshell", "subst-foreground", "exec-over-save", "exec-dup-save",
+                        "nested-groups"))
+    if shape == "subst-group":
+        line = 'x=$({ sleep 2; } >/dev/null 2>&1 & echo started); echo "[$x] $SECONDS"'
+    elif shape == "subst-subshell":
+        line = 'x=$( ( sleep 2 ) >/dev/null 2>&1 & echo started); echo "[$x] $SECONDS"'
+    elif shape == "subst-foreground":
+        line = 'x=$( { echo in; ( echo sub ) >&2; } 2>/dev/null ); echo "[$x]"'
+    elif shape == "exec-over-save":
+        line = "{ exec " + rng.choice(("10", "11", "12")) + ">&1; echo in; } > f; echo after; cat f"
+    elif shape == "exec-dup-save":
+        line = "{ exec 10<&0 11>&2; echo in; } > f 2>/dev/null; echo after; cat f"
+    else:
+        line = "{ { exec 10>&1 11>&1; echo deep; } > g; echo mid; } > f; echo after; cat f g"
+    return ("redirect-save-scope-" + shape, shell_BASH if "$SECONDS" in line else shell_ALL,
+            shell_program("SECONDS=0 2>/dev/null; rm -f f g", line + " 2>&1", 'echo "end=$?"'))
+
+
 def shell_lang_process_substitution(rng):
     shape = rng.choice(("cat", "two", "while-read", "wc", "path", "joined", "digit", "nested", "in-subst", "diff",
                         "function", "for", "pipeline", "if", "exec-keep", "unopened", "writer", "many"))
@@ -16659,6 +16685,7 @@ SHELL_FAMILIES = (
     shell_lang_funcname_stack,
     shell_lang_empty_at_joins,
     shell_lang_source_frames,
+    shell_lang_redirect_save_scope,
     shell_lang_process_substitution,
     shell_lang_coproc,
     shell_delivered(shell_lang_heredoc),
