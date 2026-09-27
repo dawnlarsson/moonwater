@@ -7171,7 +7171,7 @@ static inline INLINE bipolar sntp_now_ns(void)
 */
 static inline INLINE bool sntp_put_stamp(p8 address_to field)
 {
-        return system_random_fill(field, 8, 0) >= 0;
+        return system_random_fill(field, 8, 0) == 0;
 }
 
 static inline INLINE PURE bipolar sntp_load_stamp(p8 address_to field)

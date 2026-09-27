@@ -50082,6 +50082,46 @@ static fn fetching(void)
                                        "example.com", 80, "/safe", false,
                                        '1', "Moonwater test", &used) ==
                           HTTP_OK);
+                /* TAB is the historical obs-fold / smuggling whitespace that
+                   some peers still treat as a header separator even when CR
+                   and LF are filtered.  Name it explicitly so a future
+                   allowlist cannot reintroduce it as "just whitespace". */
+                check("request components refuse TAB as header whitespace",
+                      http_get_request(request, sizeof request,
+                                       "exam\tple.com", 80, "/safe", false,
+                                       '1', "agent", &used) == HTTP_BAD_URL &&
+                          http_get_request(request, sizeof request,
+                                           "example.com", 80, "/sa\tfe", false,
+                                           '1', "agent", &used) ==
+                              HTTP_BAD_URL &&
+                          http_get_request(request, sizeof request,
+                                           "example.com", 80, "/safe", false,
+                                           '1', "ag\tent", &used) ==
+                              HTTP_BAD_URL);
+                /* Ambiguous request-target bytes above 0x7f are not
+                   origin-form URI characters.  Leaving them through would
+                   recreate the serializer-vs-peer differential the control
+                   and backslash checks already close for ASCII. */
+                {
+                        p8 high_path[] = {'/', (p8)0x80, 'x', 0};
+                        p8 high_agent[] = {'a', (p8)0xff, 'z', 0};
+
+                        check("request targets refuse non-ASCII origin-form bytes",
+                              http_get_request(request, sizeof request,
+                                               "example.com", 80, high_path,
+                                               false, '1', "agent",
+                                               &used) == HTTP_BAD_URL);
+                        check("obs-text remains valid inside User-Agent",
+                              http_get_request(request, sizeof request,
+                                               "example.com", 80, "/safe",
+                                               false, '1', high_agent,
+                                               &used) == HTTP_OK);
+                }
+                check("an empty request target becomes the origin-form root",
+                      http_get_request(request, sizeof request,
+                                       "example.com", 80, "", false, '1',
+                                       "agent", &used) == HTTP_OK &&
+                          used >= 4 && !memory_compare(request, "GET /", 5));
         }
 
         {
@@ -51273,6 +51313,23 @@ static fn tls_certificate_identity_rules(void)
             0xa3, 0x14, 0x30, 0x12,
             0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x01, 0x00,
             0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x01, 0x00};
+        /* Same OID twice with different critical flags: RFC 5280 still
+           permits only one instance, and the OID tracker must not be
+           confused by the BOOLEAN that sits between OID and value. */
+        static p8 duplicate_unknown_mixed_critical[] = {
+            0xa3, 0x17, 0x30, 0x15,
+            0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x01, 0x00,
+            0x30, 0x0a, 0x06, 0x02, 0x2a, 0x03, 0x01, 0x01, 0xff,
+            0x04, 0x01, 0x00};
+        /* Two subjectAltName OIDs (2.5.29.17).  The typed SAN flag would
+           also catch this, but the OID work-list must refuse it before a
+           later component that only understands unknown OIDs would. */
+        static p8 duplicate_san[] = {
+            0xa3, 0x1e, 0x30, 0x1c,
+            0x30, 0x0c, 0x06, 0x03, 0x55, 0x1d, 0x11, 0x04, 0x05,
+            0x30, 0x03, 0x82, 0x01, 'a',
+            0x30, 0x0c, 0x06, 0x03, 0x55, 0x1d, 0x11, 0x04, 0x05,
+            0x30, 0x03, 0x82, 0x01, 'b'};
         static p8 distinct_unknown[] = {
             0xa3, 0x14, 0x30, 0x12,
             0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x01, 0x00,
@@ -51337,6 +51394,15 @@ static fn tls_certificate_identity_rules(void)
                                    sizeof duplicate_unknown, 0, 2,
                                    address_of cert, null) == TLS_FAIL);
         memory_fill(address_of cert, 0, sizeof cert);
+        check("duplicate unknown extensions stay refused across critical flags",
+              tls_parse_extensions(duplicate_unknown_mixed_critical,
+                                   sizeof duplicate_unknown_mixed_critical, 0,
+                                   2, address_of cert, null) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("duplicate subjectAltName extensions are refused by OID identity",
+              tls_parse_extensions(duplicate_san, sizeof duplicate_san, 0, 2,
+                                   address_of cert, null) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
         check("distinct unknown non-critical certificate extensions remain valid",
               tls_parse_extensions(distinct_unknown,
                                    sizeof distinct_unknown, 0, 2,
@@ -51363,6 +51429,32 @@ static fn tls_certificate_identity_rules(void)
         check("certificate extension work stops at its explicit ceiling",
               tls_parse_extensions(too_many, sizeof too_many, 0, 2,
                                    address_of cert, null) == TLS_FAIL);
+
+        /* Exact ceiling: sixty-four distinct unknown extensions must still
+           parse.  Shrinking the outer lengths from the sixty-five case keeps
+           the long-form path while proving the bound is inclusive. */
+        {
+                p8 at_ceiling[584];
+
+                at_ceiling[0] = 0xa3; at_ceiling[1] = 0x82;
+                at_ceiling[2] = 0x02; at_ceiling[3] = 0x44;
+                at_ceiling[4] = 0x30; at_ceiling[5] = 0x82;
+                at_ceiling[6] = 0x02; at_ceiling[7] = 0x40;
+                for (positive extension = 0; extension < 64; extension++)
+                {
+                        positive at = 8 + extension * 9;
+                        static const p8 shape[] = {
+                            0x30, 0x07, 0x06, 0x02, 0x2a, 0, 0x04, 0x01, 0};
+
+                        memory_copy(at_ceiling + at, shape, sizeof shape);
+                        at_ceiling[at + 5] = (p8)extension;
+                }
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("certificate extension ceiling is inclusive of sixty-four",
+                      tls_parse_extensions(at_ceiling, sizeof at_ceiling, 0, 2,
+                                           address_of cert, null) == TLS_OK &&
+                          !cert.unsupported_critical);
+        }
 }
 
 static fn tls_client_hello_bounds(void)

@@ -33128,6 +33128,12 @@ def harness_tls_chains(argv):
          good_leaf + "1.2.3.4=critical,DER:05:00\n", {}),
         ("unknown noncritical leaf extension", 2,
          good_leaf + "1.2.3.4=DER:05:00\n", {}),
+        # OpenSSL's extfile parser keeps one value per OID name, so repeating
+        # "1.2.3.4=..." cannot produce a wire duplicate.  Re-state subjectAltName
+        # under its numeric OID beside the named one: that is two Extension
+        # objects with identical 2.5.29.17 contents on the wire.
+        ("duplicate subjectAltName leaf extension", 2,
+         good_leaf + "2.5.29.17=DER:30:03:82:01:61\n", {}),
         ("a stranger's root", 2, good_leaf, {"stranger": True}),
         ("an intermediate left out", 2, good_leaf, {"skip_second": True}),
         ("leaf is a CA", 2, good_leaf.replace("CA:FALSE", "CA:TRUE"), {}),
@@ -33140,6 +33146,7 @@ def harness_tls_chains(argv):
         "no subject alternative name": "a name is taken from subjectAltName only, never the CN",
         "leaf is a CA": "a certificate that says CA:TRUE is not an end entity (tls_leaf_authorized)",
         "intermediate carries name constraints": "name constraints fail closed until implemented",
+        "duplicate subjectAltName leaf extension": "RFC 5280 one-instance rule; OpenSSL may still accept",
     }
     MUST_ACCEPT = {
         "good", "under the root", "one intermediate", "root served too",
@@ -33206,9 +33213,22 @@ def harness_tls_chains(argv):
             "static const p8 tls_bench_anchor_%s[48] = {%s};\n" % (
                 axis, ", ".join("0x%02x" % b for b in coordinate))
             for axis, coordinate in (("x", point[1:49]), ("y", point[49:97]))))
+        # Match freestanding spark builds: pin baseline x86-64 (no BMI2), keep
+        # AArch64 atomics inline without libgcc, and keep RISC-V at the IMAFD
+        # floor. Hard-coding -march=x86-64 silently disabled this oracle on
+        # every non-x86 host.
+        host = platform.machine().lower()
+        if host in ("x86_64", "amd64"):
+            arch_flags = ["-march=x86-64"]
+        elif host in ("aarch64", "arm64"):
+            arch_flags = ["-mno-outline-atomics"]
+        elif host == "riscv64":
+            arch_flags = ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"]
+        else:
+            arch_flags = []
         built = subprocess.run(
             [args.cc, "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
-             "-fno-builtin", "-march=x86-64", "-w", "-T", "src/build/spark.ld", "-Wl,-e,_start",
+             "-fno-builtin", *arch_flags, "-w", "-T", "src/build/spark.ld", "-Wl,-e,_start",
              "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments",
              '-DTLS_BENCH_ANCHOR="%s"' % (work / "anchor.inc"), "-o", str(work / "shell"),
              "programs/shell.c"], cwd=HARNESS_ROOT, capture_output=True, text=True)
