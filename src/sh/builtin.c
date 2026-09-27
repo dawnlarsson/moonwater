@@ -19648,7 +19648,12 @@ static COLD fn shell_command_kind_written(writer write, string_address name,
                 //      "f is a shell function", so the word "shell" is the
                 //      personality's and not the kind's.
                 if (shell_bash_compat && word_is(kind, "function"))
+                {
+                        //      bash follows the line with the definition,
+                        //      the way declare -f writes it.
                         string_format(write, "%s is a function\n", name);
+                        exec_function_write(write, name, 0);
+                }
                 else
                         string_format(write, "%s is a shell %s\n", name, kind);
         }
