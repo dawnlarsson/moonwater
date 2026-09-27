@@ -5269,39 +5269,170 @@ static b32 text_sum()
 
 // tac ----------------------------------------------------------------
 
-typedef byte_store tac_buffer;
+/*
+        tac writes nothing until it has the last line, so the whole input has
+        to be somewhere first. Where depends on what the input is, and it is
+        never all of it in this process's memory: `yes | tac` would otherwise
+        take every byte of RAM the machine has in half a second.
+
+        A regular file is already somewhere. It is mapped, read where it lies
+        and never copied, and it is read from its start whatever the offset
+        of the descriptor: GNU seeks to the end for the size and reads back to
+        byte zero, so `{ read x; tac; } < file` reverses all of the file, not
+        the part after the line read.
+
+        Anything else -- a pipe, a terminal, a file whose size the kernel will
+        not say, as in /proc -- is read. What fits in TAC_HELD is kept here,
+        which is every pipe a person types into; past it the input goes to a
+        temporary file in TMPDIR, as GNU's does, and that file is mapped in
+        its turn. The temporary is sort's: O_TMPFILE, so it has no name and
+        goes with its descriptor, or a name unlinked the moment it is open
+        where the filesystem has no O_TMPFILE. A TMPDIR that fills is a write
+        error on the temporary and the input is not reversed, which is GNU's
+        answer too.
+*/
+#define TAC_HELD (4 << 20)
+
+static bipolar sort_temporary();
+
+typedef struct
+{
+        p8 address_to bytes;
+        positive used;
+        positive mapped;
+        byte_store held;
+} tac_buffer;
+
+static fn tac_unmap(tac_buffer address_to buffer)
+{
+        if (buffer->mapped)
+                memory_free((address_any)buffer->bytes, buffer->mapped);
+
+        buffer->mapped = 0;
+}
+
+static bool tac_map(tac_buffer address_to buffer, positive handle,
+                    positive size)
+{
+        bipolar mapped = system_call_6(syscall(mmap), 0, size,
+                                       FILE_PROTECT_READ, FILE_MAP_PRIVATE,
+                                       handle, 0);
+
+        if (system_failed(mapped))
+                return false;
+
+        buffer->bytes = (p8 address_to)mapped;
+        buffer->used = size;
+        buffer->mapped = size;
+        return true;
+}
+
+static bool tac_spilled(positive handle, p8 address_to bytes, positive length)
+{
+        system_write_result wrote = system_write_all_checked(handle, bytes,
+                                                             length);
+
+        if (wrote.bytes == length)
+                return true;
+
+        text_flush();
+        string_format(writer_stderr, "tac: temporary file: write error: %s\n",
+                      file_reason(wrote.error ? wrote.error : -28));
+        text_status = 1;
+        return false;
+}
 
 static bool tac_read(tac_buffer address_to buffer, string_address name)
 {
+        byte_store address_to held = address_of buffer->held;
+        positive size;
+
         buffer->used = 0;
-        bool failed = false;
+        held->used = 0;
 
         if (!text_open(name))
                 return false;
 
-        while (text_fill())
+        if (text_regular_size(text_input.handle, address_of size) && size &&
+            tac_map(buffer, text_input.handle, size))
+        {
+                text_close();
+                return true;
+        }
+
+        bipolar spill = -1;
+        positive spilled = 0;
+        bool failed = false;
+
+        while (!failed && text_fill())
         {
                 p8 address_to at = text_input.buffer + text_input.position;
                 positive length = text_input.filled - text_input.position;
 
-                if (length > positive_max - buffer->used ||
-                    !byte_store_reserve(buffer, buffer->used + length,
-                                        TEXT_READ_MAX))
+                text_input.position = text_input.filled;
+
+                if (spill < 0 && held->used + length <= TAC_HELD)
                 {
-                        string_diagnostic(&text_diagnostic, 0, name, "input too large");
-                        text_status = 1;
-                        text_input.finished = true;
-                        failed = true;
-                        break;
+                        if (!byte_store_reserve(held, held->used + length,
+                                                TEXT_READ_MAX))
+                        {
+                                string_diagnostic(&text_diagnostic, 0, name,
+                                                  "input too large");
+                                text_status = 1;
+                                failed = true;
+                                break;
+                        }
+
+                        memory_copy(held->bytes + held->used, at, length);
+                        held->used += length;
+                        continue;
                 }
 
-                memory_copy(buffer->bytes + buffer->used, at, length);
-                buffer->used += length;
-                text_input.position = text_input.filled;
+                if (spill < 0)
+                {
+                        spill = sort_temporary();
+
+                        if (spill < 0)
+                        {
+                                text_status = 1;
+                                failed = true;
+                                break;
+                        }
+
+                        failed = !tac_spilled((positive)spill, held->bytes,
+                                              held->used);
+                        spilled = held->used;
+                        held->used = 0;
+                }
+
+                if (!failed)
+                        failed = !tac_spilled((positive)spill, at, length);
+
+                spilled += length;
         }
 
         bool okay = !text_input.failed && !failed;
+
         text_close();
+
+        if (spill >= 0)
+        {
+                if (okay && spilled && !tac_map(buffer, (positive)spill, spilled))
+                {
+                        text_flush();
+                        string_format(writer_stderr,
+                                      "tac: temporary file: read error: %s\n",
+                                      file_reason(-12));
+                        text_status = 1;
+                        okay = false;
+                }
+
+                system_close((positive)spill);
+                return okay;
+        }
+
+        buffer->bytes = held->bytes;
+        buffer->used = held->used;
         return okay;
 }
 
@@ -5447,6 +5578,7 @@ static b32 text_tac()
         b32 inputs = text_input_count();
 
         for (b32 i = 0; i < inputs; i++)
+        {
                 if (tac_read(address_of input, text_file_name(i)))
                 {
                         if (regex)
@@ -5456,7 +5588,10 @@ static b32 text_tac()
                                             separator_length, before);
                 }
 
-        byte_store_release(address_of input);
+                tac_unmap(address_of input);
+        }
+
+        byte_store_release(address_of input.held);
         return text_done(text_status);
 }
 

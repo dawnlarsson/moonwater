@@ -15817,6 +15817,7 @@ _TEXT_UL = b"_\x08u_\x08n_\x08d\nover\x08s\x08t\x1b[4mesc\x1b[0m\n_\x08_\x08x\n\
 INPUTS.update({
     "text_a": b"alpha\nbeta\ngamma\n",
     "text_a_prefix": b"alpha\nbe",
+    "text_tac_runs": b"1._2.__3.___4._5{_6__{7\n8._",
     "text_fifteen": b"".join(b"%d\n" % n for n in range(1, 16)),
     "text_regex": (b"aaa\nab\nabab\na\n\nbbb\nabc\nAbC\nxyz\n a b\nfoo123bar\nend.\n*x\n**\n"
                    b"aabb\nba\nalpha beta gamma\nx-y_z\n"),
@@ -16955,13 +16956,16 @@ _TEXT_STREAM_SOURCES = {
              "{{ run {words}; echo \"status $?\"; }} | {{ env head -n 1; echo > go; env cat; }}"),
 }
 _TEXT_STREAM_CASES = (
+    ("tac", "pipe"), ("tac", "file"), ("tac", "offset"), ("tac", "big"), ("tac", "full"),
+    ("tac", "pipe", "-b"), ("tac", "big", "-s", "0"), ("tac", "full", "-r", "-s", "[05]"),
+    ("tac", "sharedpipe"),
     ("cat", "live"), ("cat", "live", "-v"), ("cat", "live", "-n"), ("cat", "live", "-E"),
     ("cat", "live", "-A"), ("cat", "live", "-s"), ("cat", "live", "-b"), ("cat", "live", "-T"),
     ("cat", "pipe", "-n"), ("cat", "big", "-v"), ("cat", "offset", "-n"),
     ("head", "shared", "-c", "3"), ("head", "shared", "-n", "1"),
     ("wc", "offset"), ("wc", "offset", "-c"), ("nl", "pipe"),
 )
-_TEXT_STREAM_TOOLS = ("cat", "head", "wc", "nl")
+_TEXT_STREAM_TOOLS = ("tac", "cat", "head", "wc", "nl")
 
 
 def _text_stream_valid(argv):
@@ -17476,7 +17480,15 @@ TEXT_UTILITIES = (
                       ("wide",), ("fields",), ("a.txt", "missing", "b.txt"), ("unreadable",), ("regex",)),
             stdin=("text", "empty", "nonl", "blanks", "fields", "nul_lines", "edge_65537", "many_lines", "words",
                    "text_regex", "blank_runs", "high", "text_random_lines", "edge_65535", "edge_65536", "text_utf8"),
-            fixture="text", extra=(("--nosuchflag",), ("-Q",), ("-r", "-s", "a\\|b"), ("-b", "-r", "-s", "[ae]"))),
+            fixture="text", extra=(("--nosuchflag",), ("-Q",), ("-r", "-s", "a\\|b"), ("-b", "-r", "-s", "[ae]"),
+                                   #   GNU compiles the separator in the syntax its
+                                   #   regex falls back to, Emacs's: + and ? repeat
+                                   #   unescaped, \| and \( keep their backslash,
+                                   #   and { is itself.
+                                   *({"fixture": "text", "stdin": "text_tac_runs", "argv": argv} for argv in (
+                                       ("-r", "-s", "\\._+"), ("-b", "-r", "-s", "\\._+"), ("-r", "-s", "_?\\."),
+                                       ("-r", "-s", "\\.\\+"), ("-r", "-s", "_\\{2\\}"), ("-r", "-s", "_{"),
+                                       ("-r", "-s", "\\(_\\|\\.\\)+"), ("-r", "-s", "[0-9]+\\._*"))))),
     Utility("tee",
             options=(Option("-a"), Option("--append"), Option("-i"), Option("--ignore-interrupts"), Option("-p"),
                      Option("--output-error"), Option("--output-error", ("warn", "warn-nopipe", "exit", "exit-nopipe", "bogus"), True)),

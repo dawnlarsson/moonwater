@@ -28,9 +28,14 @@ enum { RX_HAS_BACKREF = 2, RX_BRANCHING = 4,
        RX_LITERAL_PROVES = 64, RX_IGNORE_CASE = 128 };
 enum { RX_NO_MATCH, RX_MATCH, RX_COMPLEX };
 enum { REGEX_DOT_NEWLINE = 1, REGEX_LINE_ANCHORS = 2, REGEX_BASIC_REPEATS = 4,
-       REGEX_POLICY_DEFAULT = 5, REGEX_POLICY_TAC = 2,
        /* A dot and a bracket stand for one character rather than one byte. */
-       REGEX_CHARACTERS = 8 };
+       REGEX_CHARACTERS = 8,
+       /* + and ? repeat unescaped, as in the syntax GNU's regex falls back
+          to when a program sets none -- Emacs's: \| and \( still need their
+          backslash, and there are no intervals, so { is itself. tac -r is
+          that program: `\._+` is a dot and one underscore or more. */
+       REGEX_PLAIN_REPEATS = 16,
+       REGEX_POLICY_DEFAULT = 5, REGEX_POLICY_TAC = 2 | 16 };
 enum { REGEX_BOUNDARY_NONE, REGEX_BOUNDARY_WORD, REGEX_BOUNDARY_LINE };
 enum { REGEX_EDGE_WORD, REGEX_EDGE_NOT_WORD, REGEX_EDGE_START, REGEX_EDGE_STOP };
 
@@ -562,6 +567,13 @@ static rx_fragment rx_piece(rx_compiler *c)
                         low = rx_operator(c, '+');
                         high = low ? RX_UNBOUNDED : 1;
                         c->at += c->extended ? 1 : 2;
+                }
+                else if ((c->program.policy & REGEX_PLAIN_REPEATS) &&
+                         (byte == '+' || byte == '?'))
+                {
+                        low = byte == '+';
+                        high = low ? RX_UNBOUNDED : 1;
+                        c->at++;
                 }
                 else if ((c->extended || (c->program.policy & REGEX_BASIC_REPEATS)) && rx_operator(c, '{'))
                 {
