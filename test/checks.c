@@ -73713,6 +73713,63 @@ static fn storage_test_carrier_bounce(void)
         netlink_forget(address_of net_states);
 }
 
+/* Link news faster than the watcher reads it: the kernel drops what does
+   not fit and says ENOBUFS, which must not end the watcher -- it asks
+   again instead, and forgets every carrier snapshot, where reading the
+   news would have kept one for the link. Exit 4: the watcher gave up; 5:
+   it read on as if nothing were lost. */
+static fn storage_test_link_news_overrun(void)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                bipolar handle = storage_test_net_namespace();
+                netlink_search link = {.wanted = (string_address) "wd1"};
+                netlink_buffer message = {0};
+                net_holding held = {0};
+                b32 small = 1;
+                bipolar events = netlink_open_groups(RTNLGRP_LINK_MASK);
+
+                if (events < 0 || storage_test_dummy((b32)handle, "wd1") < 0 ||
+                    netlink_link_find((b32)handle, address_of link) < 0 ||
+                    socket_option_set((b32)events, SOL_SOCKET, SO_RCVBUF,
+                                      address_of small, sizeof small) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                //      Every MTU change is news at once, where carrier news
+                //      waits on linkwatch and folds together.
+                for (positive flip = 0; flip < 64; flip++)
+                        storage_test_link_set((b32)handle, link.index, IFLA_MTU,
+                                              flip & 1 ? 1400 : 1500);
+                //      Gone again, so the resync finds nothing to ask a
+                //      lease for.
+                {
+                        netlink_buffer request = {0};
+                        p32 sequence = netlink_sequence_take();
+
+                        if (netlink_begin(address_of request, RTM_DELLINK,
+                                          NLM_REQUEST | NLM_ACK, sequence,
+                                          sizeof(netlink_link)))
+                        {
+                                ((netlink_link address_to)netlink_body(
+                                     address_of request))->index = link.index;
+                                netlink_transact((b32)handle, address_of request,
+                                                 sequence, null, null);
+                        }
+                }
+                if (net_watch_events((b32)events, address_of message,
+                                     address_of held) < 0)
+                        system_call_1(syscall(exit_group), 4);
+                system_call_1(syscall(exit_group), net_states.used ? 5 : 0);
+        }
+        b32 status = storage_test_child_status(child);
+        if (status == 2)
+                log_direct(str("storage_io: link news overrun NOT RUN -- no namespaces or dummy links\n"));
+        else
+                check("dropped link news resyncs the watcher instead of ending it",
+                      status == 0);
+}
+
 static fn storage_test_netlink_output(void)
 {
         writer saved = net_out;
@@ -74361,6 +74418,7 @@ b32 main(void)
         storage_test_lease_over_existing();
         storage_test_lease_inherited();
         storage_test_carrier_bounce();
+        storage_test_link_news_overrun();
         storage_test_netlink_output();
         storage_test_net_files();
         return test_report(null);

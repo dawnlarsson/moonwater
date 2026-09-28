@@ -1895,6 +1895,54 @@ static COLD fn net_wake_drain(b32 handle)
         }
 }
 
+/* One datagram of link news, acted on: 1 when it reconfigured, 0 when
+   nothing in it mattered, negative when the socket failed for good. News
+   that came faster than it was read is dropped by the kernel with ENOBUFS,
+   which is not the end of the socket: what it would have said is asked
+   instead. Every carrier snapshot is forgotten, so each link's next news
+   counts, the held link is asked whether it kept its carrier since the
+   lease, and the best link is picked again. */
+static COLD bipolar net_watch_events(b32 events, netlink_buffer address_to message,
+                                     net_holding address_to held)
+{
+        bipolar got = netlink_receive(events, message, null);
+        positive at = 0;
+        bipolar acted = 0;
+
+        /* recvfrom can still be interrupted in the narrow interval after the
+           readiness poll.  Nothing was consumed, and the lease deadline is
+           recomputed by the caller. */
+        if (got == NETWORK_INTERRUPTED)
+                return 0;
+        if (got == -ENOBUFS)
+        {
+                netlink_forget(address_of net_states);
+                if (held->index && !held->lost && !net_link_carrier_kept(held))
+                        held->lost = true;
+                net_reconfigure_fresh(held);
+                return 1;
+        }
+        if (got < 0)
+                return got;
+
+        while (at + NETLINK_HEADER <= message->used)
+        {
+                netlink_header address_to header =
+                    (netlink_header address_to)(message->bytes + at);
+
+                if (header->length < NETLINK_HEADER ||
+                    at + header->length > message->used)
+                        break;
+                at += netlink_align(header->length);
+                if (net_link_event(header, held))
+                {
+                        acted = 1;
+                        net_reconfigure_fresh(held);
+                }
+        }
+        return acted;
+}
+
 static COLD b32 net_watch(void)
 {
         netlink_buffer message = {0};
@@ -1941,8 +1989,6 @@ static COLD b32 net_watch(void)
 
         for (;;)
         {
-                netlink_header address_to header;
-                positive at = 0;
                 bipolar got;
                 bool link_ready = false;
                 bool woken = false;
@@ -2103,40 +2149,15 @@ static COLD b32 net_watch(void)
 
                 if (link_ready)
                 {
-                        got = netlink_receive((b32)events, address_of message,
-                                              null);
-
-                        /* recvfrom can still be interrupted in the narrow
-                           interval after the readiness poll.  Nothing was
-                           consumed, and the lease deadline is recomputed at
-                           the top of the loop. */
-                        if (got == NETWORK_INTERRUPTED)
-                                continue;
+                        got = net_watch_events((b32)events,
+                                               address_of message,
+                                               address_of held);
                         if (got < 0)
                                 break;
-
-                        while (at + NETLINK_HEADER <= message.used)
+                        if (got > 0)
                         {
-                                bool interesting = false;
-
-                                header = (netlink_header address_to)(
-                                    message.bytes + at);
-
-                                if (header->length < NETLINK_HEADER ||
-                                    at + header->length > message.used)
-                                        break;
-
-                                interesting = net_link_event(header,
-                                                             address_of held);
-
-                                at += netlink_align(header->length);
-
-                                if (interesting)
-                                {
-                                        retry_seconds = 4;
-                                        net_reconfigure_fresh(address_of held);
-                                        woken = false;
-                                }
+                                retry_seconds = 4;
+                                woken = false;
                         }
                 }
 
