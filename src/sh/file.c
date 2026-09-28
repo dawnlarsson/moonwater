@@ -10084,7 +10084,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                 and with -lt it is -t that orders it. So this is the case
                 where neither was named.
         */
-        if (ls_time_key != 'm' && !ls_selected.sort && ls_format != 'l')
+        if (ls_selected.time && !ls_selected.sort && ls_format != 'l')
                 ls_sorting = 't';
 
         /*
