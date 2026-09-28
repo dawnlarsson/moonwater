@@ -14751,6 +14751,18 @@ def shell_lang_not_found_handle(rng):
         ("command", "stdin", "file"))
 
 
+#       The last name read takes the rest of the line, less a delimiter that
+#       ends it alone -- and the blanks in front of that delimiter go with it:
+#       "a b :" under IFS=": " is a and b. The blanks stayed, "b ".
+def shell_lang_read_trailing_delimiter(rng):
+    ifs = rng.choice(("': '", "' :'", "':'", "': \t'", "','", "', '"))
+    line = rng.choice(("a b :", " a : ", "x y : ", "x:y::", "x:y:", "a , b ,", "p q", "a: b :  ", "a:", ": :", "a b c : "))
+    names = rng.choice(("a", "a b", "a b c"))
+    return ("read-trailing-delimiter", shell_ALL + ("sh",), shell_program(
+        "printf '%s\\n' " + shell_quote(line) + " | { IFS=" + ifs + " read " + names +
+        "; for v in " + names + "; do eval \"printf '[%s]' \\\"\\$$v\\\"\"; done; echo; }"))
+
+
 #       Digits in front of > are a descriptor only while they fit one: bash
 #       reads a number past INT_MAX there as an ordinary word, so `echo a
 #       2147483648>f` writes "a 2147483648" to f. This called it a syntax
@@ -17615,6 +17627,7 @@ SHELL_FAMILIES = (
     shell_lang_builtin_discard,
     shell_lang_fd_prefix_range,
     shell_lang_case_substitution_lines,
+    shell_lang_read_trailing_delimiter,
     shell_lang_debug_trap_places,
     shell_lang_globignore,
     shell_lang_funcnest,

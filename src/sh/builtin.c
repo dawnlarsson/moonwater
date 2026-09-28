@@ -12937,17 +12937,29 @@ static string_address read_field(string_address ifs, positive address_to cursor,
                 positive stop = read_length;
                 while (stop > begin && read_blank(ifs, stop - 1))
                         stop--;
-                if (stop > begin && read_separates(ifs, stop - 1) &&
-                    !read_blank(ifs, stop - 1))
+
+                /*
+                        bash reads one more word out of the rest: when that
+                        word and the delimiter after it -- blanks, one other
+                        IFS byte, blanks -- are the whole of it, the word is
+                        the value, so "b :" under IFS=": " is b. Anything
+                        more and the rest stands whole: "a b :" and "y::".
+                */
+                positive word_end = begin;
+                while (word_end < stop && !read_separates(ifs, word_end))
+                        word_end++;
+                positive after = word_end;
+                while (after < stop && read_blank(ifs, after))
+                        after++;
+                if (after < stop && read_separates(ifs, after) &&
+                    !read_blank(ifs, after))
                 {
-                        positive separator = begin;
-                        while (separator + 1 < stop &&
-                               (!read_separates(ifs, separator) ||
-                                read_blank(ifs, separator)))
-                                separator++;
-                        if (separator + 1 == stop)
-                                stop--;
+                        after++;
+                        while (after < stop && read_blank(ifs, after))
+                                after++;
                 }
+                if (word_end < stop && after == stop)
+                        stop = word_end;
                 read_line[stop] = end;
         }
         else
