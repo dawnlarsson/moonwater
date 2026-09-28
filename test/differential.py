@@ -8383,6 +8383,14 @@ FILES_SCENES = {
     # sticky bit, and what is left of it looked at afterwards.
     "wide": ("(umask 000; env mkdir -p w/x/y && env touch w/x/f w/g) || exit 9\n", "",
              "env ls -d w w/x w/x/y 2>&1\n"),
+    # Moments with a fraction: two files a fifth of a second either side of
+    # N.5, and afterwards whether what touch made has a fraction at all --
+    # now has one, and a date that keeps now's time of day keeps it. What
+    # it made is then taken away, since its time is the clock's.
+    "fraction": ("python3 -c 'import os\nfor n, t in ((\"a\", .3), (\"b\", .7)):\n"
+                 "    open(n, \"w\").close(); os.utime(n, ns=(1700000000 * 10**9 + int(t * 10**9),) * 2)' "
+                 "|| exit 9\n", "",
+                 "[ -e t ] && env stat -c %y t | env grep -c '[.]000000000 '\nenv rm -f t\n"),
 }
 FILES_SCENE_CASES = (
     # rm and rmdir remove from a directory others can write into, as GNU's
@@ -8443,6 +8451,11 @@ FILES_SCENE_CASES = (
     ("tmax", "ls", "-lgo", "--time-style=+%Y", "f"),
     ("noco", "ls", "--color=always", "-d", "dir", "a.txt", "exe", "link", "dangling", "/dev/null", "loop"),
     ("dumbterm", "ls", "--color=always", "-d", "dir", "exe"), ("colorterm", "ls", "--color=always", "-d", "dir", "exe"),
+    ("fraction", "touch", "-d", "now", "t"), ("fraction", "touch", "-d", "1.5 seconds ago", "t"),
+    ("fraction", "touch", "-d", "+1 hour", "t"), ("fraction", "touch", "-d", "12:00", "t"),
+    ("fraction", "touch", "-d", "@5.25", "t"), ("fraction", "find", "a", "b", "-newermt", "@1700000000.5"),
+    ("fraction", "find", "a", "b", "-newerat", "@1700000000.5"), ("fraction", "find", "a", "b", "-newermt", "@1700000000"),
+    ("fraction", "find", "a", "b", "!", "-newermt", "@1700000000.7"),
 )
 
 

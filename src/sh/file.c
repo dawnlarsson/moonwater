@@ -2466,13 +2466,21 @@ fn file_stamp(writer write, b64 seconds, positive nanoseconds)
         date_shape(write, seconds, 0, (string_address)" %z");
 }
 
-b64 file_now()
+// The wall clock, and its nanoseconds when they are asked for.
+b64 file_now_exact(positive address_to nanoseconds)
 {
         p64 wall[2] = {0, 0};
 
         system_call_2(syscall(clock_gettime), 0, (positive)wall);
+        if (nanoseconds)
+                address_to nanoseconds = (positive)wall[1];
 
         return (b64)wall[0];
+}
+
+b64 file_now()
+{
+        return file_now_exact(null);
 }
 
 // Month and weekday names as the reference date's own output spells them:
@@ -4806,13 +4814,6 @@ bool file_moment_read_exact(string_address text, b64 now, b64 address_to out,
                             positive address_to nanoseconds)
 {
         return file_moment_read_from(text, now, 0, out, nanoseconds);
-}
-
-bool file_moment_read(string_address text, b64 now, b64 address_to out)
-{
-        positive nanoseconds;
-
-        return file_moment_read_exact(text, now, out, address_of nanoseconds);
 }
 
 // Walking directories ---------------------------------------
@@ -13181,7 +13182,15 @@ static b32 find_parse_primary(positive depth)
 
                 if (word[7] == 't')
                 {
-                        if (!file_moment_read(named, find_moment, address_of made->number))
+                        positive fraction = 0;
+                        bool read = file_moment_read_exact(named, find_moment,
+                                                           address_of made->number,
+                                                           address_of fraction);
+
+                        //      The fraction counts: -newermt @N.5 is past
+                        //      a file made at N.3.
+                        made->extra = (b64)fraction;
+                        if (!read)
                         {
                                 string_format(log_error, "find: invalid date '%w'\n",
                                               writer_terminal_quoted_name, named);
@@ -13625,7 +13634,13 @@ static b32 find_parse_primary(positive depth)
                                                               : 'm';
                 if (find_is(word, "-newermt"))
                 {
-                        if (!file_moment_read(value, find_moment, address_of node->number))
+                        positive fraction = 0;
+                        bool read = file_moment_read_exact(value, find_moment,
+                                                           address_of node->number,
+                                                           address_of fraction);
+
+                        node->extra = (b64)fraction;
+                        if (!read)
                         {
                                 string_format(log_error, "find: invalid date '%w'\n",
                                               writer_terminal_quoted_name, value);
@@ -38344,16 +38359,17 @@ static b32 file_touch()
 
         if (written)
         {
-                // Relative dates start from each reference timestamp,
-                // including its own fraction; absolute dates replace it.
-                b64 now = from ? 0 : file_now();
+                // Relative dates start from each reference timestamp, or
+                // from now, fraction and all; absolute dates replace it.
+                positive now_ns = 0;
+                b64 now = from ? 0 : file_now_exact(address_of now_ns);
                 for (positive at = 0; at < 4; at += 2)
                 {
                         b64 seconds;
                         positive fraction;
                         if (!file_moment_read_from(written,
                                                    from ? (b64)times[at] : now,
-                                                   from ? times[at + 1] : 0,
+                                                   from ? times[at + 1] : now_ns,
                                                    address_of seconds,
                                                    address_of fraction))
                                 return string_report(log_error, 1, "touch: invalid date format '%w'\n", writer_terminal_quoted_name, written);
@@ -46099,19 +46115,6 @@ static fn date_operand(b32 index)
         date_operand_count++;
 }
 
-//      Now, to the nanosecond, which a date that names no time of day
-//      keeps (date -d '+1 hour' is now and an hour, fraction and all).
-static positive date_now_ns;
-
-static b64 date_now_seconds()
-{
-        p64 wall[2] = {0, 0};
-
-        system_call_2(syscall(clock_gettime), 0, (positive)wall);
-        date_now_ns = (positive)wall[1];
-        return (b64)wall[0];
-}
-
 //      The format as given, which --debug names before each date.
 static string_address date_given_format;
 
@@ -46146,7 +46149,10 @@ static bool date_emit(string_address format, b64 when, positive nanoseconds)
         return true;
 }
 
-static bool date_batch(string_address path, string_address format, b64 now)
+/* now_ns is now's fraction, which a date that names no time of day keeps
+   (date -d '+1 hour' is now and an hour, fraction and all). */
+static bool date_batch(string_address path, string_address format, b64 now,
+                       positive now_ns)
 {
         bipolar handle;
         bool close_handle = false;
@@ -46222,7 +46228,7 @@ static bool date_batch(string_address path, string_address format, b64 now)
                 p8 saved = lines.bytes[length];
 
                 lines.bytes[length] = end;
-                if (!pd_parse(lines.bytes, now, date_now_ns, pd_debug, address_of when,
+                if (!pd_parse(lines.bytes, now, now_ns, pd_debug, address_of when,
                               address_of ns))
                 {
                         string_format(log_error, "date: invalid date '%w'\n",
@@ -46346,7 +46352,10 @@ static b32 file_date()
 
         if (batch)
         {
-                status = date_batch(batch, format, date_now_seconds()) ? 0 : 1;
+                positive now_ns;
+                b64 now = file_now_exact(address_of now_ns);
+
+                status = date_batch(batch, format, now, now_ns) ? 0 : 1;
                 return file_output_told((string_address) "date") ? status : 1;
         }
 
@@ -46376,21 +46385,16 @@ static b32 file_date()
         {
                 string_address text = set_text ? set_text : given;
 
-                b64 now = date_now_seconds();
+                positive now_ns;
+                b64 now = file_now_exact(address_of now_ns);
 
-                if (!pd_parse(text, now, date_now_ns, pd_debug,
+                if (!pd_parse(text, now, now_ns, pd_debug,
                               address_of when, address_of nanoseconds))
                         return string_report(log_error, 1,
                                              "date: invalid date '%w'\n", writer_terminal_quoted_name, text);
         }
         else
-        {
-                p64 wall[2] = {0, 0};
-
-                system_call_2(syscall(clock_gettime), 0, (positive)wall);
-                when = (b64)wall[0];
-                nanoseconds = (positive)wall[1];
-        }
+                when = file_now_exact(address_of nanoseconds);
 
         if (set_date)
         {
