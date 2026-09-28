@@ -48909,6 +48909,10 @@ static p8 fz_pmk[32], fz_anonce[32], fz_ptk[64], fz_pending[64], fz_rsc[8];
 static const p8 fz_ap[6] = {2, 0, 0, 0, 1, 0}, fz_sta[6] = {2, 0, 0, 0, 2, 0};
 static p64 fz_replay, fz_verified;
 static bool fz_pending_set, fz_ptk_set, fz_clean;
+/* A replayed, bent or raw frame the station answered leaves it where the
+   model cannot follow; the rules on installs still hold, the expectations
+   of each answer no longer do. */
+static bool fz_lost;
 static p8 fz_frames[8][512];
 static positive fz_frame_length[8], fz_frame_count;
 static p8 fz_m3[512];
@@ -49027,6 +49031,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
         fz_verified = 0;
         fz_pending_set = fz_ptk_set = false;
         fz_clean = true;
+        fz_lost = false;
         fz_frame_count = fz_m3_length = fz_g1_length = 0;
         fz_sta_tk_set = fz_authorized = false;
         fz_made_count = 0;
@@ -49055,7 +49060,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                  fz_pending);
                         fz_answer(0x010a, fz_pending);
                         fz_pending_set = true;
-                        fz_clean = true;
+                        fz_clean = !fz_lost;
                 }
                 else if (op == 1 && fz_pending_set)     /* message 3 */
                 {
@@ -49143,6 +49148,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         if (crypto_be64(frame + 9) <= fz_verified && fz_verified &&
                             (step != 0 || fz_sends))
                                 abort();
+                        fz_lost |= step != 0 || fz_sends;
                         fz_clean = false;
                 }
                 else if (op == 6 && fz_frame_count)     /* one bit bent */
@@ -49157,14 +49163,14 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         at = (fz_byte() | fz_byte() << 8) % (n * 8);
                         frame[at / 8] ^= (p8)(1u << (at % 8));
                         crypto_put_be64(frame + 9, ++fz_replay);
-                        fz_deliver(frame, n);
+                        fz_lost |= fz_deliver(frame, n) != 0 || fz_sends;
                         fz_clean = false;
                 }
                 else if (op == 7)                       /* anything at all */
                 {
                         n = fz_byte() | (fz_byte() & 1) << 8;
                         fz_take(frame, n);
-                        fz_deliver(frame, n);
+                        fz_lost |= fz_deliver(frame, n) != 0 || fz_sends;
                         fz_clean = false;
                 }
         }
