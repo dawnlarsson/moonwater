@@ -7098,7 +7098,8 @@ def files_rmdir_cases():
     cases = []
     for flags in ((), ("--ignore-fail-on-non-empty",), ("-p",), ("-p", "--ignore-fail-on-non-empty"), ("-v",),
                   ("-pv", "--ignore-fail-on-non-empty")):
-        for operands in (("x/y",), ("x/e",), ("x",), ("p/q",), ("p/q/r",), ("ro/n/m",), ("ro/n",), ("x/y", "p/q/r")):
+        for operands in (("x/y",), ("x/e",), ("x",), ("p/q",), ("p/q/r",), ("ro/n/m",), ("ro/n",), ("x/y", "p/q/r"),
+                         ("fl/",), ("sl/",), ("dl/",), ("sl/d",)):
             cases.append({"fixture": "files_rmdir", "argv": flags + operands})
     return tuple(cases)
 
@@ -7223,7 +7224,11 @@ FILES_UTILITIES = (
                       ("dir/../a.txt",), ("dirlink/inside",), ("dirlink/..",), ("dir/sub/back/inside",), ("two words",),
                       (), ("",), ("/",), ("badwalk",), ("badwalk/",), ("shut/inside",), ("dir/sub/back/sub/back/sub",),
                       ("link", "missing", "dirlink"), ("loop/",), ("-",), ("/dev/null",)),
-            stdin=("empty",), fixture="files", stderr="exact"),
+            stdin=("empty",), fixture="files", stderr="exact",
+            #   POSIX wants a word for a name that is not a link, over -q.
+            extra=tuple({"argv": argv, "env": (("POSIXLY_CORRECT", "1"),)}
+                        for argv in (("a.txt",), ("-q", "a.txt"), ("link",), ("-f", "a.txt"), ("missing",)))
+            + (("a.txt", "-v"), ("link", "dirlink", "-z"))),
     Utility("realpath", options=(Option("-e"), Option("-m"), Option("-L"), Option("-P"), Option("-q"),
                                  Option("-E"), Option("--canonicalize"),
                                  Option("-s"), Option("-z"), Option("--canonicalize-existing"),

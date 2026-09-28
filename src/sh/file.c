@@ -23349,7 +23349,10 @@ static b32 file_readlink()
         bool no_newline = (flags & FILE_FLAG('n')) != 0;
         // Silent unless asked: readlink says nothing about a name it could
         // not read, and -q and -s are there only to say so twice.
-        bool loud = readlink_selected.loudness == 'v';
+        // POSIX wants a word and a failure for a name that is not a link,
+        // so POSIXLY_CORRECT turns it on over -q and -s, as GNU does.
+        bool loud = readlink_selected.loudness == 'v' ||
+                    file_environment((string_address) "POSIXLY_CORRECT");
         bool zero = (flags & FILE_FLAG('z')) != 0;
         b32 status = 0;
 
@@ -31361,20 +31364,51 @@ static b32 file_rmdir()
                                         break;
 
                                 // A name that ends in a slash and is a link
-                                // named a directory that was never followed.
+                                // named a directory that was never followed:
+                                // said so only when following it finds a
+                                // directory or fails for another reason than
+                                // a file on the way, as GNU tells them apart;
+                                // a link to a file is just Not a directory.
                                 positive length = string_length(path);
+                                bool unfollowed = false;
+
+                                if (gone == -ERROR_NOT_DIRECTORY && length &&
+                                    path[length - 1] == '/')
+                                {
+                                        file_facts facts;
+                                        p8 bare[FILE_PATH_MAX];
+                                        bipolar looked = file_look_code(
+                                            AT_FDCWD, path, 0,
+                                            address_of facts);
+
+                                        unfollowed =
+                                            ((looked < 0 &&
+                                              looked != -ERROR_NOT_DIRECTORY) ||
+                                             (looked >= 0 &&
+                                              (facts.mode & MODE_FORMAT) ==
+                                                  MODE_DIRECTORY)) &&
+                                            file_name_without_trailing_slashes(
+                                                bare, path) &&
+                                            file_look_code(
+                                                AT_FDCWD, bare,
+                                                AT_SYMLINK_NOFOLLOW,
+                                                address_of facts) >= 0 &&
+                                            (facts.mode & MODE_FORMAT) ==
+                                                MODE_LINK;
+                                }
 
                                 //      The operand is reported as a name and
                                 //      a parent walked up to as a directory,
                                 //      which is how the reference's two
-                                //      messages differ.
+                                //      messages differ -- unless the parent
+                                //      turned out not to be one, a link
+                                //      perhaps, which is a name again.
                                 string_format(log_error, "%s%w: ",
-                                              named ? (string_address) "rmdir: failed to remove " : (string_address) "rmdir: failed to remove directory ",
+                                              named || gone == -ERROR_NOT_DIRECTORY ? (string_address) "rmdir: failed to remove " : (string_address) "rmdir: failed to remove directory ",
                                               writer_shell_quoted_name, path);
                                 string_format(
                                     log_error, "%s\n",
-                                    gone == -ERROR_NOT_DIRECTORY && length &&
-                                            path[length - 1] == '/'
+                                    unfollowed
                                         ? (string_address)
                                               "Symbolic link not followed"
                                         : file_reason(gone));
