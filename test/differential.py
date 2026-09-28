@@ -14891,6 +14891,22 @@ def shell_lang_local_listing(rng):
         'echo "end=$?"'), ("command", "stdin", "file"))
 
 
+#       A [[ =~ ]] pattern glibc's regcomp refuses: bash 5.3 names it with
+#       regcomp's reason and answers 2, where this took a leading * or an
+#       unfinished interval for a literal as grep -E does. A ) with nothing
+#       open is a literal to glibc, and [.a.] and [=a=] name a.
+def shell_lang_regex_refusals(rng):
+    pattern = rng.choice(("'*'", "'+a'", "'^*'", "'a|?'", "'(*a)'", "'{1}'", "'a{1'", "'a{'", "'a{x}'", "'a{2,1}'",
+                          "'a{1,x}'", "'a{99999}'", "'x{,2}'", "'a{,}'", "'a**'", "'['", "'[a'", "'[[:foo:]]'",
+                          "'[b-a]'", "'[a-b-c]'", "'[--/]'", "'[]a]'", "'\\'", "'\\1'", "'(a)\\1'", "'(a\\2)(b)'",
+                          "'\\b*'", "'$*'", "'a)'", "')'", "'[[.a.]]'", "'[[=a=]]x'", "'[[.ab.]]'", "'()'",
+                          "'a||b'", "'(|a)'"))
+    subject = rng.choice(("a", "a)", "ax", "b", ""))
+    return ("regex-refusals", shell_BASH, shell_program(
+        "p=" + pattern, "[[ " + (subject or "''") + " =~ $p ]]; echo \"st=$?\"", 'echo "end=$?"'),
+        ("command", "stdin", "file"))
+
+
 #       A readonly assignment outside posix mode drops the rest of the line
 #       the reader was on: eval answers 1 and a sourced file goes on at its
 #       next line, where a function's caller still loses its whole line.
@@ -17861,6 +17877,7 @@ SHELL_FAMILIES = (
     shell_lang_printf_quote_time,
     shell_lang_compound_order,
     shell_lang_local_listing,
+    shell_lang_regex_refusals,
     shell_lang_readonly_discard_scope,
     shell_lang_readonly_subshell_status,
     shell_lang_prompt_expansion,
