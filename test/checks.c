@@ -53356,6 +53356,53 @@ static fn tls_closure_boundaries(void)
         }
 
         /*
+                A peer that keeps the socket full of records that deliver
+                nothing (empty application data here; tickets take the same
+                path) never lets a read wait, and the budget was only asked
+                when one did. A hundred empty records and a close_notify are
+                queued before a read whose budget has already run out: the
+                read has to fail, not open them all and report a clean close.
+        */
+        {
+                b32 pair[2];
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_STREAM, 0,
+                                                (positive)pair);
+                check("TLS empty-record flood socket pair opens", opened == 0);
+                if (!opened)
+                {
+                        tls_conn sender = {0};
+                        tls_conn receiver = {0};
+                        network_deadline deadline;
+                        p8 alert[] = {1, 0};
+                        p8 byte = 0;
+                        positive got = 99;
+                        bool queued = true;
+
+                        sender.handle = pair[1];
+                        receiver.handle = pair[0];
+                        receiver.encrypted = true;
+                        receiver.application = true;
+                        for (positive at = 0; at < 100; at++)
+                                queued &= tls_send_enc(address_of sender,
+                                                       TLS_CT_APP, alert,
+                                                       0) == TLS_OK;
+                        queued &= tls_send_enc(address_of sender, TLS_CT_ALERT,
+                                               alert, sizeof alert) == TLS_OK;
+                        check("TLS empty-record flood queues", queued);
+                        network_deadline_begin(address_of deadline, 0, 1);
+                        check("TLS queued empty records cannot outlast a read's budget",
+                              tls_read_until(address_of receiver,
+                                             address_of byte, 1,
+                                             address_of got,
+                                             address_of deadline) ==
+                                  TLS_FAIL);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                }
+        }
+
+        /*
                 More records than one receive holds, written by a child so the
                 socket never has to hold them all: many arrive per receive,
                 one straddles each refill and moves to the front, and rooms

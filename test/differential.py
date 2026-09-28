@@ -39579,6 +39579,17 @@ static bipolar network_stream_read_some_until(
                 abort();
         return fuzz_read(into, length);
 }
+/* One wait in sixty-four finds the budget spent. */
+static bool network_deadline_left(const network_deadline address_to deadline,
+                                  positive address_to seconds,
+                                  positive address_to nanoseconds)
+{
+        if (!deadline->budget)
+                abort();
+        *seconds = 1;
+        *nanoseconds = 0;
+        return fuzz_next() % 64 != 0;
+}
 static bool network_deadline_begin(network_deadline address_to deadline,
                                    positive seconds, positive nanoseconds)
 {

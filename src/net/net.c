@@ -4787,13 +4787,21 @@ static bool tls_record_version_valid(p8 address_to header)
    record, so a record arriving in pieces is not moved again per piece. The
    read is tried before any wait, because mid-transfer the socket almost
    always has bytes queued; only an empty socket polls, under the deadline,
-   and nothing blocks past it. */
+   and nothing blocks past it. A peer keeping the socket full of records
+   that deliver nothing never lets a read wait, so the deadline is asked
+   before every read as well. */
 static bool tls_receive(tls_conn address_to tls,
                         const network_deadline address_to deadline)
 {
         positive have = tls->receive_end - tls->receive_start;
         positive room;
+        positive seconds;
+        positive nanoseconds;
         bipolar got;
+
+        if (deadline && !network_deadline_left(deadline, address_of seconds,
+                                               address_of nanoseconds))
+                return false;
 
         if (!have)
         {
