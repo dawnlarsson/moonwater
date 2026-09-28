@@ -7094,44 +7094,7 @@ static inline INLINE fn rev_characters(p8 address_to at, positive length)
 // what util-linux asks before rev prints any of the file.
 static bool rev_text_whole(p8 address_to at, positive length)
 {
-        positive i = 0;
-
-        while (i < length)
-        {
-                // A run of plain bytes reverses with the line and needs
-                // no character found in it, so step over it eight at a
-                // time. The span engine is a call, and these lines are
-                // short enough that the call is the cost.
-                while (i + 8 <= length)
-                {
-                        p64 word;
-
-                        memory_copy_apart(address_of word, at + i, 8);
-
-                        if (word & 0x8080808080808080ull)
-                                break;
-
-                        i += 8;
-                }
-
-                if (i < length)
-                        i += string_span_max(at + i, length - i,
-                                             string_set_ascii);
-
-                if (i == length)
-                        break;
-
-                p32 code;
-                positive size;
-
-                if (wc_utf8_decode(at + i, length - i, address_of code,
-                                   address_of size) != WC_VALID)
-                        return false;
-
-                i += size;
-        }
-
-        return true;
+        return memory_utf8_valid_span(at, length).x == length;
 }
 #endif
 
