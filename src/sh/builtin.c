@@ -20358,6 +20358,9 @@ fn shell_hash(writer write, string_address input)
         program had to be named by its full path.
 */
 static bool shell_find_directories;
+//      Set while bash's type or command -v asks, which leaves the table
+//      alone.
+static bool shell_find_asking;
 
 static b32 shell_find_in_path_mode(string_address name, p8 address_to into,
                                    positive room, positive access,
@@ -20431,9 +20434,10 @@ static b32 shell_find_in_path_mode(string_address name, p8 address_to into,
                                 continue;
                 }
 
-                // Remembered only as the executor's answer: a query asks
-                // with access 0 and may name a file nobody could run.
-                if (use_hash && shell_hashall_on() && access == ACCESS_EXECUTE)
+                // Remembered only as the executor's answer: a query reads
+                // the table and writes nothing into it.
+                if (use_hash && shell_hashall_on() &&
+                    access == ACCESS_EXECUTE && !shell_find_asking)
                         hash_remember(name, into);
 
                 return true;
@@ -20508,26 +20512,25 @@ static bipolar shell_find_in_path_alloc_mode(string_address name,
                 return -1;
 
         /*
-                A query asks where the name is, not whether it could run:
-                type and command -v name the first file of that name, as the
-                reference shell's do, and read the table the same as the
-                executor does. What a query finds is not written into it,
-                though: the table is the executor's answer to "what runs",
-                and a name remembered from a query put a file nobody could
-                run in front of the one that would have.
-        */
-        /*
                 A query names what could run. dash reports an executable
                 file and nothing else; bash does too for a name with a slash,
                 and along PATH falls back to the first file of the name when
                 none can run -- unless a directory of the name stood first.
+                It reads the table as the executor does and, in bash,
+                writes nothing into it: type, command -v and type -P leave
+                bash's hash empty, where dash's remembers what they found.
         */
         if (query)
         {
                 file_facts facts;
+                bool runs;
 
-                if (shell_find_in_path_mode(name, *into, *room, ACCESS_EXECUTE,
-                                            !fixed_path, fixed_path) &&
+                shell_find_asking = shell_bash_compat;
+                runs = shell_find_in_path_mode(name, *into, *room,
+                                               ACCESS_EXECUTE, !fixed_path,
+                                               fixed_path);
+                shell_find_asking = false;
+                if (runs &&
                     !(string_first_of(name, '/') &&
                       test_facts(*into, address_of facts, true) &&
                       (facts.mode & MODE_FORMAT) == MODE_DIRECTORY))

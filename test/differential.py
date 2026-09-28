@@ -5262,7 +5262,9 @@ def builtins_query_namespaces(rng):
               "/bin/cp first/mw_name second/mw_name\n"
               "/bin/chmod +x first/mw_name second/mw_name\n" +
               "PATH=" + path + "\n" + state + "\n" + query + " " + names +
-              "\nprintf 'status:%s\\n' \"$?\"\n")
+              "\nprintf 'status:%s\\n' \"$?\"\n"
+              # A query reads the table and leaves it as it was.
+              "hash 2>&1 | /bin/grep -c /mw_name\n")
     return "builtins-query-namespaces", ("bash", "posix"), script
 
 
@@ -14957,6 +14959,16 @@ def shell_lang_debug_trap_places(rng):
         ("command", "stdin", "file"))
 
 
+#       type and command -v read the command table the executor keeps.
+#       dash's write what they find into it and bash's leave it as it was;
+#       this wrote in both, then in neither.
+def shell_lang_query_table(rng):
+    query = rng.choice(("command -v", "type", "command -V"))
+    return ("query-table", shell_ALL, shell_program(
+        "mkdir -p qd; printf '#!/bin/sh\\n' > qd/mw_q; chmod +x qd/mw_q; PATH=\"$PWD/qd:$PATH\"",
+        "hash -r", query + " mw_q >/dev/null", "hash 2>&1 | grep -c mw_q", 'echo "end=$?"'))
+
+
 #       GLOBIGNORE takes names out of a pathname expansion, and . and ..,
 #       and lets a * find dotted names; it was not read at all.
 def shell_lang_globignore(rng):
@@ -18371,6 +18383,7 @@ SHELL_FAMILIES = (
     shell_lang_globstar_exists,
     shell_lang_read_trailing_delimiter,
     shell_lang_debug_trap_places,
+    shell_lang_query_table,
     shell_lang_globignore,
     shell_lang_funcnest,
     shell_lang_not_found_handle,
