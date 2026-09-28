@@ -13348,33 +13348,13 @@ static bool conditional_primary(bool invert)
 
                 exec_trace_conditional_term(invert, operand, raw, null);
 
-                if (word_is(raw, "-a"))
-                        return test_unary('e', operand);
-
-                if (word_is(raw, "-v"))
-                        return test_variable_set(operand);
-
-                /*
-                        -R names a variable, not a path. After expansion an
-                        unset $name is empty under set +u, and that empty
-                        name is false rather than an error. -v is "set";
-                        this is "this name is a nameref".
-                */
-                if (word_is(raw, "-R"))
-                        return operand && string_get(operand) &&
-                               (shell_variable_attributes(
-                                    operand, string_length(operand)) &
-                                SHELL_ARRAY_NAMEREF) != 0;
-
-                if (word_is(raw, "-o"))
-                {
-                        positive option = string_table_find(
-                            operand, shell_option_names,
-                            sizeof(shell_option_names[0]), SHELL_OPTION_NAMES);
-
-                        return option < SHELL_OPTION_NAMES &&
-                               shell_option_on(option);
-                }
+                //      -a, -v, -R and -o ask what bash's test asks, a name
+                //      or an option and not a path: an unset $name is empty
+                //      under set +u, and that empty name is false.
+                if (string_first_of("avRo", string_get(raw + 1)))
+                        return operand &&
+                               test_bash_unary_value(string_get(raw + 1),
+                                                     operand);
 
                 test_bad = false;
                 {
