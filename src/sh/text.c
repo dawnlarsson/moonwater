@@ -18532,11 +18532,37 @@ static b32 text_list_trouble()
                 string_address mark = string_first_of(text_list_complaint, '%');
                 positive before = (positive)(mark - text_list_complaint);
 
+                // quote()'s marks are the locale's: curly under UTF-8.
+                bool curly = text_locale_utf8();
+
                 writer_stderr(text_list_complaint, before);
-                writer_stderr("'", 1);
-                writer_terminal_quoted_name_span(writer_stderr, text_list_subject,
-                                                 text_list_subject_length);
-                writer_stderr("'", 1);
+                writer_stderr(curly ? "\xe2\x80\x98" : "'", curly ? 3 : 1);
+                if (!curly)
+                        writer_terminal_quoted_name_span(writer_stderr, text_list_subject,
+                                                         text_list_subject_length);
+                else
+                {
+                        // Inside curly marks an apostrophe needs no escape.
+                        string_address at = text_list_subject;
+                        positive left = text_list_subject_length;
+
+                        while (left)
+                        {
+                                p8 address_to quote = memory_first_of(at, '\'', left);
+                                positive span = quote ? (positive)(quote - (p8 address_to)at) : left;
+
+                                writer_terminal_quoted_name_span(writer_stderr, at, span);
+                                at += span;
+                                left -= span;
+                                if (left)
+                                {
+                                        writer_stderr("'", 1);
+                                        at++;
+                                        left--;
+                                }
+                        }
+                }
+                writer_stderr(curly ? "\xe2\x80\x99" : "'", curly ? 3 : 1);
                 writer_stderr(mark + 2, 0);
         }
         else
@@ -19106,8 +19132,22 @@ static bool cut_option_seen(p8 letter, string_address value)
         if (letter == 'w' && value &&
             (string_length(value) > 7 ||
              memory_compare("trimmed", value, string_length(value))))
-                return !text_argmatch("--whitespace-delimited", value,
-                                      "Valid arguments are:\n  - 'trimmed'\n", null);
+        {
+                // argmatch's words, in the locale's quote marks.
+                string_address open = text_locale_utf8() ? (string_address) "\xe2\x80\x98"
+                                                         : (string_address) "'";
+                string_address close = text_locale_utf8() ? (string_address) "\xe2\x80\x99"
+                                                          : (string_address) "'";
+
+                text_flush();
+                string_format(writer_stderr,
+                              "%s: invalid argument %s%w%s for %s--whitespace-delimited%s\n"
+                              "Valid arguments are:\n  - %strimmed%s\n"
+                              "Try '%s --help' for more information.\n",
+                              text_name, open, writer_terminal_quoted_name, value, close,
+                              open, close, open, close, text_name);
+                return false;
+        }
 
         return true;
 }
