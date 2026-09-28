@@ -37071,6 +37071,30 @@ def harness_tls_chains(argv):
         # leaf and the intermediate that signs it both RSA-8192.
         ("RSA-8192 leaf under an RSA-8192 intermediate", 2, good_leaf,
          {"keys": ("RSA-8192",), "second_key": "RSA-8192"}),
+        # A left-out intermediate named by the leaf's caIssuers location and
+        # served over plain HTTP from loopback, which the harness build may
+        # reach (TLS_BENCH_ANCHOR). openssl verify fetches nothing, so it is
+        # handed what a browser would have fetched.
+        ("a left-out intermediate fetched from the leaf's caIssuers", 2, good_leaf,
+         {"skip_second": True, "aia": "http://127.0.0.1:%d/second.der",
+          "openssl_untrusted": ["second"], "keys": ("P-256",)}),
+        ("caIssuers answers 404", 2, good_leaf,
+         {"skip_second": True, "aia": "http://127.0.0.1:%d/absent.der",
+          "keys": ("P-256",)}),
+        ("caIssuers serves PEM, not DER", 2, good_leaf,
+         {"skip_second": True, "aia": "http://127.0.0.1:%d/second.pem",
+          "keys": ("P-256",)}),
+        ("caIssuers is https", 2, good_leaf,
+         {"skip_second": True, "aia": "https://127.0.0.1:%d/second.der",
+          "keys": ("P-256",)}),
+        ("caIssuers serves another CA's certificate", 2, good_leaf,
+         {"skip_second": True, "aia": "http://127.0.0.1:%d/first.der",
+          "keys": ("P-256",)}),
+        ("two intermediates left out, each named by caIssuers", 2, good_leaf,
+         {"skip_second": True, "skip_first": True,
+          "aia": "http://127.0.0.1:%d/second.der",
+          "second_extra": "authorityInfoAccess=caIssuers;URI:http://127.0.0.1:%d/first.der\n",
+          "openssl_untrusted": ["second", "first"], "keys": ("P-256",)}),
         ("path length exceeded", 2, good_leaf, {"first_pathlen": 0}),
         ("leaf for clients only", 2, good_leaf.replace("serverAuth", "clientAuth"), {}),
         ("leaf may only sign certificates", 2, good_leaf.replace("digitalSignature", "keyCertSign"), {}),
@@ -37137,6 +37161,8 @@ def harness_tls_chains(argv):
         "leaf wildcard whose star can be an excluded label":
             "a wildcard falls in an excluded subtree its star can name, as Chrome reads it",
         "leaf URI under URI constraints": "a name form under constraints it cannot evaluate fails closed",
+        "two intermediates left out, each named by caIssuers":
+            "a caIssuers fetch is one level: a fetched certificate's own issuer is not fetched",
         "duplicate subjectAltName leaf extension": "RFC 5280 one-instance rule; OpenSSL may still accept",
         "leaf duplicate unknown extension": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
         "leaf nonadjacent duplicate unknown": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
@@ -37164,6 +37190,7 @@ def harness_tls_chains(argv):
         "intermediate permits the leaf's DNS name", "intermediate permits the leaf's subject",
         "a permitted subject compared case-folded", "leaf mailbox on a permitted host",
         "RSA-8192 leaf under an RSA-8192 intermediate",
+        "a left-out intermediate fetched from the leaf's caIssuers",
     }
 
     checks = Checks()
@@ -37328,6 +37355,19 @@ def harness_tls_chains(argv):
             return 1
         (work / "wget").symlink_to(work / "shell")
 
+        #   caIssuers locations are served from the work directory.
+        import functools
+        import http.server
+
+        class Quiet(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *arguments):
+                pass
+
+        files = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), functools.partial(Quiet, directory=str(work)))
+        threading.Thread(target=files.serve_forever, daemon=True).start()
+        files_port = files.server_address[1]
+
         for mutation, depth, leaf_ext, change in mutations:
             for key_name, key in keys:
                 if key_name not in change.get("keys", every_key):
@@ -37358,7 +37398,8 @@ def harness_tls_chains(argv):
                         "basicConstraints=critical,%s\nkeyUsage=critical,%s\n" %
                         (change.get("second_ca", "CA:TRUE,pathlen:0"),
                          change.get("second_key_usage", "keyCertSign,cRLSign")))
-                    second_extensions += change.get("second_extra", "")
+                    second_extensions += change.get("second_extra", "").replace(
+                        "%d", str(files_port))
                     issue("second", dict(keys).get(change.get("second_key"), p384),
                           "/CN=tls chains second", "first",
                           second_extensions,
@@ -37371,13 +37412,20 @@ def harness_tls_chains(argv):
                     if change.get("impostor"):
                         issue("impostor", p384, "/CN=tls chains second", "first",
                               second_extensions)
+                if change.get("aia"):
+                    leaf_ext += "authorityInfoAccess=caIssuers;URI:%s\n" % (
+                        change["aia"] % files_port)
+                    for name in chain:
+                        openssl("x509", "-in", name + ".pem", "-outform", "DER",
+                                "-out", name + ".der")
                 issue("leaf", key, change.get("leaf_subject", "/CN=127.0.0.1"), issuer, leaf_ext,
                       change.get("leaf_dates", (-1, 90)),
                       change.get("leaf_digest", "sha384"))
                 if change.get("der_rewrite_oids") or change.get("der_dup_unknown"):
                     mutate_cert_der("leaf", issuer, change,
                                     "der_rewrite_oids", "der_dup_unknown")
-                served = [c for c in chain if not (change.get("skip_second") and c == "second")]
+                served = [c for c in chain if not (change.get("skip_second") and c == "second")
+                          and not (change.get("skip_first") and c == "first")]
                 if change.get("serve_root"):
                     served.append(top)
                 if change.get("reverse"):
@@ -37391,10 +37439,11 @@ def harness_tls_chains(argv):
                 (work / "chain.pem").write_text("".join(
                     (work / (n + ".pem")).read_text() for n in ["leaf"] + served))
                 (work / "untrusted.pem").write_text("".join(
-                    (work / (n + ".pem")).read_text() for n in served) or "")
+                    (work / (n + ".pem")).read_text()
+                    for n in served + change.get("openssl_untrusted", [])) or "")
                 verify = ["openssl", "verify", "-CAfile", "root.pem", "-purpose", "sslserver",
                           "-verify_ip", "127.0.0.1"]
-                if served:
+                if served or change.get("openssl_untrusted"):
                     verify += ["-untrusted", "untrusted.pem"]
                 openssl_ok = subprocess.run(verify + ["leaf.pem"], cwd=work,
                                             capture_output=True).returncode == 0
@@ -37475,6 +37524,7 @@ def harness_tls_chains(argv):
                            name, "accepts" if openssl_ok else "refuses",
                            "accepts" if ours_ok else "refuses",
                            fetched.stderr.decode(errors="replace").strip()[:200]))
+        files.shutdown()
     return checks.verdict("tls chains", "tls-chains")
 
 
@@ -40302,6 +40352,14 @@ def tls_fuzz_seeds(corpus):
         "ext_nc_both.bin": one(nc, nc_both),
         "ext_nc_critical.bin": one(nc, nc_perm, True),
         "ext_nc_ip.bin": one(nc, nc_ip),
+        "ext_aia_ca_issuers.bin": one(b"\x2b\x06\x01\x05\x05\x07\x01\x01", tls_seed_tlv(
+            0x30, tls_seed_tlv(0x30, b"\x06\x08\x2b\x06\x01\x05\x05\x07\x30\x01",
+                               b"\x86\x0ehttp://ocsp.x/"),
+            tls_seed_tlv(0x30, b"\x06\x08\x2b\x06\x01\x05\x05\x07\x30\x02",
+                         b"\x86\x10http://ca.x/i.der"))),
+        "ext_aia_critical.bin": one(b"\x2b\x06\x01\x05\x05\x07\x01\x01", tls_seed_tlv(
+            0x30, tls_seed_tlv(0x30, b"\x06\x08\x2b\x06\x01\x05\x05\x07\x30\x02",
+                               b"\x86\x0bhttp://x/i")), True),
         "ext_nc_directory.bin": one(nc, nc_dir, True),
         **nc_seeds,
         "ext_san_dns.bin": one(san, san_dns),
@@ -40344,6 +40402,7 @@ def tls_fuzz_seeds(corpus):
         "verify_chain_shuffled.bin": b"\xcb\x00\x04\x02\x01\x03",
         "verify_chain_repeats.bin": b"\xcb\x00\x01\x01\x02\x01\x02\x03\x03\x04",
         "verify_chain_overwrite.bin": b"\xca\x01\x00\xff\x00",
+        "verify_chain_short_of_one.bin": b"\xcb\x00\x02",
     })
     return seeds
 
@@ -41004,7 +41063,8 @@ def tls_verify_ecdsa_chain():
     """C arrays of a fresh chain, leaf first, whose links are ECDSA P-256
     under SHA-256, P-384 under SHA-384, P-384 under SHA-512 and RSA-2048
     under SHA-512: the kinds WR2 under GTS Root R1 (RSA SHA-256) leaves.
-    The leaf names example.com and 192.0.2.1; the rest say CA:TRUE. Link 2
+    The leaf names example.com and 192.0.2.1, and link 1 as its caIssuers
+    at http://example.com/link1.der; the rest say CA:TRUE. Link 2
     permits example.com and 192.0.2.0/24, and a sixth certificate is link 2
     again -- its name and key, under link 3 -- excluding example.com, the
     constrained impostor a path must pass over."""
@@ -41039,6 +41099,11 @@ def tls_verify_ecdsa_chain():
             signed = signed.add_extension(x509.SubjectAlternativeName([
                 x509.DNSName("example.com"),
                 x509.IPAddress(ipaddress.ip_address("192.0.2.1"))]), critical=False)
+            signed = signed.add_extension(x509.AuthorityInformationAccess([
+                x509.AccessDescription(x509.oid.AuthorityInformationAccessOID.CA_ISSUERS,
+                                       x509.UniformResourceIdentifier(
+                                           "http://example.com/link1.der"))]),
+                critical=False)
         ders.append(signed.sign(keys[signer], digests[at]).public_bytes(
             serialization.Encoding.DER))
     ders.append(x509.CertificateBuilder().subject_name(
@@ -42172,13 +42237,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         81920)
 
 
-def tls_verify_chain_lift(net, now=None):
+def tls_verify_chain_lift(net, now=None, aia=None):
     """Production tls_verify_chain and what it calls past tls_verify_one:
     anchors.inc, tls_anchor_key, tls_spki_is_anchor, tls_anchor_verifies,
     tls_keep_leaf over a tls_conn holding only what they touch, and
-    tls_date_now -- libc's clock, or the constant named by now. Appended to
-    tls_verify_hosted_source's program; a TLS_BENCH_ANCHOR defined before it
-    is used as net.c uses it. Raises ValueError when a slice is gone."""
+    tls_date_now -- libc's clock, or the constant named by now -- and
+    tls_aia_fetch, whose network half lives in the HTTP client: aia is the C
+    body that stands in for it, by default a fetch that finds nothing.
+    Appended to tls_verify_hosted_source's program; a TLS_BENCH_ANCHOR
+    defined before it is used as net.c uses it. Raises ValueError when a
+    slice is gone."""
     anchor_types = tls_fuzz_sec(net, "typedef struct\n{\n        p8 name[8];",
                                 '#include "anchors.inc"')
     anchor_code = tls_fuzz_sec(
@@ -42207,6 +42275,10 @@ typedef struct
         p8 leaf_curve;
 } tls_conn;
 """ + anchor_types + (HARNESS_ROOT / "src/net/anchors.inc").read_text() + anchor_code + date +
+            "static COLD positive tls_aia_fetch(const p8 address_to url, positive length,\n"
+            "                                   p8 address_to into, positive room)\n{\n" +
+            (aia or "        (void)url;\n        (void)length;\n        (void)into;\n"
+                    "        (void)room;\n        return 0;\n") + "}\n" +
             tls_fuzz_sec(net, "static COLD bool tls_verify_chain(p8 address_to body",
                          "static COLD bool tls_hello_append("))
 
@@ -42572,6 +42644,11 @@ def harness_x509_corpus(argv):
     2026-09-28, live: 644 chains, 635 of the 635 openssl accepts verify,
     and none of the 9 it refuses.
 
+    A certificate's http: caIssuers location is fetched too, once, into
+    --work/aia (the lift's tls_aia_fetch reads it from there), and handed
+    to openssl as untrusted, so openssl's verdict is the browser's that
+    completes a short chain the same way.
+
         python3 test/differential.py --harness x509_corpus --work DIR
     """
     import base64
@@ -42604,8 +42681,61 @@ def harness_x509_corpus(argv):
     with concurrent.futures.ThreadPoolExecutor(24) as pool:
         chains = [(h, p) for h, p in zip(X509_CORPUS_HOSTS, pool.map(fetch, X509_CORPUS_HOSTS))
                   if p]
+    pem = re.compile(rb"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", re.S)
+    (work / "aia").mkdir(exist_ok=True)
+
+    def aia_name(url):
+        return re.sub(r"[^A-Za-z0-9._-]", "_", url)
+
+    def aia_urls(text):
+        from cryptography import x509
+        urls = []
+        for found in pem.finditer(text):
+            try:
+                cert = x509.load_der_x509_certificate(
+                    base64.b64decode(b"".join(found.group(1).split())))
+                access = cert.extensions.get_extension_for_class(
+                    x509.AuthorityInformationAccess).value
+            except Exception:
+                continue
+            urls += [d.access_location.value for d in access
+                     if d.access_method == x509.oid.AuthorityInformationAccessOID.CA_ISSUERS
+                     and isinstance(d.access_location, x509.UniformResourceIdentifier)
+                     and d.access_location.value.lower().startswith("http://")][:1]
+        return urls
+
+    def aia_fetch(url):
+        import urllib.request
+        path = work / "aia" / aia_name(url)
+        if not args.offline and not path.exists():
+            try:
+                with urllib.request.urlopen(url, timeout=10) as reply:
+                    path.write_bytes(reply.read(16384))
+            except Exception:
+                pass
+        return path
+
+    urls = sorted({u for _, path in chains for u in aia_urls(path.read_bytes())})
+    with concurrent.futures.ThreadPoolExecutor(16) as pool:
+        list(pool.map(aia_fetch, urls))
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
-    driver = tls_verify_chain_lift(net) + r"""
+    aia = r"""
+        char path[4096];
+        int at = snprintf(path, sizeof path, "%s/", getenv("X509_AIA"));
+        FILE *f;
+        positive got;
+
+        for (positive i = 0; i < length && at < (int)sizeof path - 1; i++)
+                path[at++] = isalnum(url[i]) || url[i] == '.' || url[i] == '-' ||
+                                     url[i] == '_' ? url[i] : '_';
+        path[at] = 0;
+        f = fopen(path, "rb");
+        got = f ? fread(into, 1, room, f) : 0;
+        if (f)
+                fclose(f);
+        return got;
+"""
+    driver = tls_verify_chain_lift(net, aia=aia) + r"""
 static p8 body[1 << 20];
 
 /* argv: host, then the served DER files in order; prints 1 or 0. */
@@ -42645,7 +42775,6 @@ int main(int argc, char **argv)
     if built.returncode:
         print("x509 corpus: FAIL -- the lift does not build:\n" + built.stderr[-2000:])
         return 1
-    pem = re.compile(rb"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", re.S)
 
     def judge(item):
         host, path = item
@@ -42659,6 +42788,15 @@ int main(int argc, char **argv)
         rest = work / "chains" / (host + ".rest.pem")
         blocks = [m.group(0) + b"\n" for m in pem.finditer(text)]
         leaf.write_bytes(blocks[0])
+        for url in aia_urls(text):
+            fetched = work / "aia" / aia_name(url)
+            try:
+                from cryptography import x509
+                from cryptography.hazmat.primitives import serialization
+                blocks.append(x509.load_der_x509_certificate(fetched.read_bytes()).public_bytes(
+                    serialization.Encoding.PEM))
+            except Exception:
+                pass
         rest.write_bytes(b"".join(blocks[1:]))
         verify = ["openssl", "verify", "-CAfile", args.bundle, "-purpose", "sslserver",
                   "-verify_ip" if re.fullmatch(r"[0-9.]+", host) else "-verify_hostname", host]
@@ -42666,7 +42804,8 @@ int main(int argc, char **argv)
             verify += ["-untrusted", str(rest)]
         theirs = subprocess.run(verify + [str(leaf)], capture_output=True).returncode == 0
         ours = subprocess.run([str(work / "verify"), host] + ders, capture_output=True,
-                              text=True).stdout.strip() == "1"
+                              text=True, env=dict(os.environ, X509_AIA=str(work / "aia"))
+                              ).stdout.strip() == "1"
         return host, ours, theirs
 
     with concurrent.futures.ThreadPoolExecutor(8) as pool:
@@ -42707,8 +42846,18 @@ def harness_tls_verify_fuzz(argv):
     del argv
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     checks = (HARNESS_ROOT / "test/checks.c").read_text()
+    #   The leaf's caIssuers location serves link 1 while fuzz_aia is set.
+    aia = r"""
+        static const char named[] = "http://example.com/link1.der";
+
+        if (!fuzz_aia || length != sizeof named - 1 ||
+            memory_compare(url, named, length) || fuzz_ecdsa_length[1] > room)
+                return 0;
+        memory_copy(into, fuzz_ecdsa_der[1], fuzz_ecdsa_length[1]);
+        return fuzz_ecdsa_length[1];
+"""
     try:
-        chain = tls_verify_chain_lift(net, "FUZZ_TLS_NOW")
+        chain = tls_verify_chain_lift(net, "FUZZ_TLS_NOW", aia)
     except ValueError as exc:
         print("tls verify fuzz: FAIL -- net.c slice anchor moved: %s" % exc)
         return 1
@@ -42718,6 +42867,7 @@ def harness_tls_verify_fuzz(argv):
 enum { FUZZ_TLS_NOW = 20200101000000ull };
 static p8 tls_bench_anchor_x[48];
 static p8 tls_bench_anchor_y[48];
+static bool fuzz_aia;
 """ + chain + r"""
 static p8 fuzz_body[9 * (1024 + 5) + 4];
 
@@ -42760,6 +42910,7 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
         static const p8 good[3] = {0, 1, 2};
         static const p8 shuffled[4] = {0, 4, 2, 1};
         static const p8 impostor[4] = {0, 1, 5, 2};
+        static const p8 short_of_one[2] = {0, 2};
         tls_cert anchor;
         positive length;
         bool proved;
@@ -42795,6 +42946,15 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
         length = fuzz_chain_body(impostor, 4);
         proved = proved &&
                  fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        /* Link 1 left out: refused until the leaf's caIssuers serves it,
+           then a path through the fetched link 1. */
+        length = fuzz_chain_body(short_of_one, 2);
+        proved = proved &&
+                 !fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        fuzz_aia = true;
+        proved = proved &&
+                 fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        fuzz_aia = false;
         if (!proved)
         {
                 fprintf(stderr, "tls_verify_fuzz: WR2/GTS or generated-chain prove failed\n");
@@ -42845,17 +43005,28 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 positive body = fuzz_chain_body(buf + 1, n);
                 bool served[FUZZ_ECDSA_CHAIN] = {false};
                 bool framed = n <= 8;
+                bool first = buf[1] % FUZZ_ECDSA_CHAIN == 0;
 
                 for (positive i = 1; i < n; i++)
                         served[buf[1 + i] % FUZZ_ECDSA_CHAIN] = true;
+                /* With the leaf's caIssuers answering, link 1 need not be
+                   served: it is fetched, and still needs link 2 above it. */
+                fuzz_aia = false;
                 if (fuzz_verify(fuzz_body, body, (string_address)"example.com") !=
-                        (framed && buf[1] % FUZZ_ECDSA_CHAIN == 0 && served[1] &&
-                         served[2]) ||
+                        (framed && first && served[1] && served[2]) ||
                     fuzz_verify(fuzz_body, body, null) != framed)
                 {
                         fprintf(stderr, "tls_verify_fuzz: wrong verdict for a served order\n");
                         abort();
                 }
+                fuzz_aia = true;
+                if (fuzz_verify(fuzz_body, body, (string_address)"example.com") !=
+                    (framed && first && served[2]))
+                {
+                        fprintf(stderr, "tls_verify_fuzz: wrong verdict with caIssuers\n");
+                        abort();
+                }
+                fuzz_aia = false;
         }
 
         free(buf);

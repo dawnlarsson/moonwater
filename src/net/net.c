@@ -4464,6 +4464,8 @@ static const p8 tls_oid_key_usage[3] = {0x55, 0x1d, 0x0f};
 static const p8 tls_oid_extended_key_usage[3] = {0x55, 0x1d, 0x25};
 static const p8 tls_oid_server_auth[8] = {0x2b, 0x06, 0x01, 0x05,
                                           0x05, 0x07, 0x03, 0x01};
+static const p8 tls_oid_authority_info[8] = {0x2b, 0x06, 0x01, 0x05,
+                                             0x05, 0x07, 0x01, 0x01};
 
 typedef struct
 {
@@ -5824,6 +5826,9 @@ typedef struct
         positive san_length;
         p8 address_to name_constraints;
         positive name_constraints_length;
+        /* The first http: caIssuers location, or null (tls_parse_ca_issuers). */
+        p8 address_to ca_issuers;
+        positive ca_issuers_length;
         p8 curve;
         p8 qx[48];
         p8 qy[48];
@@ -6044,6 +6049,46 @@ static COLD bipolar tls_parse_extended_key_usage(p8 address_to value, positive l
         return TLS_OK;
 }
 
+/* The first caIssuers location of an AuthorityInfoAccess value (RFC 5280
+   4.2.2.1) that is an http: URI, for tls_verify_chain to fetch when a
+   server leaves an intermediate out. It is only a hint -- whatever it
+   names is parsed and verified like a served certificate -- so a value
+   that does not parse is read as naming nothing. */
+static COLD fn tls_parse_ca_issuers(p8 address_to value, positive length,
+                                    tls_cert address_to cert)
+{
+        static const p8 ca_issuers[8] = {0x2b, 0x06, 0x01, 0x05,
+                                         0x05, 0x07, 0x30, 0x02};
+        positive at = 0;
+        positive stop = 0;
+
+        if (tls_asn1_enter(value, length, 0x30, address_of at, address_of stop))
+                return;
+        while (at < stop && !cert->ca_issuers)
+        {
+                positive access_stop = 0;
+                positive location = 0;
+                positive location_stop = 0;
+
+                if (tls_asn1_enter(value, stop, 0x30, address_of at,
+                                   address_of access_stop) ||
+                    tls_asn1_enter_oid(value, access_stop, address_of at,
+                                       address_of location))
+                        return;
+                if (tls_oid_is(value + at, location - at, ca_issuers, 8) &&
+                    !tls_asn1_enter(value, access_stop, 0x86, address_of location,
+                                    address_of location_stop) &&
+                    location_stop == access_stop && location_stop - location > 7 &&
+                    tls_printable(value + location, location_stop - location) &&
+                    !memory_compare_ascii_case(value + location, "http://", 7))
+                {
+                        cert->ca_issuers = value + location;
+                        cert->ca_issuers_length = location_stop - location;
+                }
+                at = access_stop;
+        }
+}
+
 static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                                     positive at, p8 version,
                                     tls_cert address_to cert,
@@ -6177,6 +6222,10 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                         cert->name_constraints = der + at;
                         cert->name_constraints_length = value_stop - at;
                 }
+                else if (!critical &&
+                         tls_oid_is(der + oid_at, oid_stop - oid_at,
+                                    tls_oid_authority_info, 8))
+                        tls_parse_ca_issuers(der + at, value_stop - at, cert);
                 else if (critical)
                         cert->unsupported_critical = true;
 
@@ -6722,6 +6771,13 @@ static COLD bool tls_certificate_body_open(p8 address_to body,
         return true;
 }
 
+/* The issuer certificate a caIssuers URL names, fetched into room over the
+   HTTP client (defined there, beside it): its length, or 0. */
+#define TLS_AIA_MAX 16384
+
+static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
+                                   p8 address_to into, positive room);
+
 /* The leaf comes first; the rest is a pool, as RFC 8446 section 4.4.2 asks
    clients to treat it. Of 640 public HTTPS hosts openssl verified on
    2026-09-28, 25 served intermediates out of order or an extra certificate
@@ -6736,18 +6792,29 @@ static COLD bool tls_certificate_body_open(p8 address_to body,
    the anchor's key if an anchor signed -- and would cost the https_bench
    anchor a failed P-384 verify per chain. A certificate that fails to
    parse is never a candidate. A chain served in order costs what it did;
-   each entry is used once, at most 28 served signature checks. */
+   each entry is used once, at most 28 served signature checks.
+
+   A server that leaves an intermediate out (3 of 642 hosts on 2026-09-28:
+   gob.mx, monster.com, ssa.gov) gets what browsers give it: when neither
+   the pool nor the anchors sign for a step, the issuer that step's
+   certificate names in its caIssuers location is fetched once
+   (tls_aia_fetch) and joins the pool as one more candidate, held to every
+   test a served one is. A fetched certificate's own missing issuer is not
+   fetched in turn. */
 static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                              string_address host, tls_conn address_to tls)
 {
-        tls_cert certs[8];
-        positive path[8] = {0};
+        tls_cert certs[9];
+        positive path[9] = {0};
+        p8 fetched[TLS_AIA_MAX];
         positive count = 0;
         positive at;
         positive list_end;
         positive unusable = 0;
         positive child = 0;
+        positive depth = 0;
         p64 now = 0;
+        bool asked = false;
 
         if (!tls_certificate_body_open(body, body_length,
                                        address_of at, address_of list_end))
@@ -6790,7 +6857,7 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         if (!tls_date_now(address_of now) || !tls_leaf_authorized(certs, now) ||
             tls_spki_is_anchor(certs))
                 return false;
-        for (positive depth = 0;; depth++)
+        for (;;)
         {
                 positive next;
                 bool anchor = false;
@@ -6806,12 +6873,28 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                                                certs + next))
                                 break;
                 if (next == count)
-                        return tls_anchor_verifies(certs + child);
+                {
+                        positive length;
+
+                        if (tls_anchor_verifies(certs + child))
+                                return true;
+                        if (asked || !certs[child].ca_issuers)
+                                return false;
+                        asked = true;
+                        length = tls_aia_fetch(certs[child].ca_issuers,
+                                               certs[child].ca_issuers_length,
+                                               fetched, sizeof fetched);
+                        if (!length || tls_parse_cert(fetched, length,
+                                                      certs + count, null))
+                                return false;
+                        count++;
+                        continue;
+                }
                 if (anchor)
                         return true;
                 unusable |= (positive)1 << next;
                 child = next;
-                path[depth + 1] = next;
+                path[++depth] = next;
         }
 }
 
@@ -8373,7 +8456,7 @@ static bipolar http_get_request(p8 address_to request, positive room,
                                 p8 version_minor, string_address agent,
                                 positive address_to used);
 
-static bipolar http_stream_open(p32 host, p16 port)
+static bipolar http_stream_open(p32 host, p16 port, positive seconds)
 {
         socket_address_internet where = {
             .family = AF_INET, .port = network_order_16(port),
@@ -8382,7 +8465,7 @@ static bipolar http_stream_open(p32 host, p16 port)
 
         if (handle < 0)
                 return HTTP_NO_ROUTE;
-        if (!network_stream_timeout(handle, HTTP_IDLE_SECONDS, 0) ||
+        if (!network_stream_timeout(handle, seconds, 0) ||
             socket_connect((b32)handle, address_of where, sizeof where) < 0)
         {
                 socket_close((b32)handle);
@@ -8413,7 +8496,7 @@ static bipolar http_link_open(http_link address_to link, p32 ip, p16 port,
 {
         //      The session's buffers are tls_connect's to leave alone.
         memory_fill(link, 0, __builtin_offsetof(http_link, session));
-        link->handle = http_stream_open(ip, port);
+        link->handle = http_stream_open(ip, port, HTTP_IDLE_SECONDS);
         if (link->handle < 0)
                 return link->handle;
         if (tls)
@@ -9146,6 +9229,113 @@ static p32 http_lookup(string_address host)
                             3) != DNS_OK)
                 return 0;
         return ip;
+}
+
+/* Whether a fetch whose destination the peer chose may go to ip: not this
+   network, loopback, private, shared (100.64/10), link-local, IETF
+   protocol (192.0.0/24), benchmarking (198.18/15), multicast or reserved
+   space. Checked on the address the name resolved to, so a name that
+   rebinds to an inside address is refused too. The harness builds that
+   define TLS_BENCH_ANCHOR serve from loopback and may reach it. */
+static bool http_address_public(p32 ip)
+{
+        p8 a = (p8)(ip >> 24);
+        p8 b = (p8)(ip >> 16);
+
+#ifdef TLS_BENCH_ANCHOR
+        if (a == 127)
+                return true;
+#endif
+        return a && a != 10 && a != 127 && a < 224 &&
+               (a != 100 || (b & 0xc0) != 64) && (a != 169 || b != 254) &&
+               (a != 172 || (b & 0xf0) != 16) && (a != 192 || b != 168) &&
+               (a != 192 || b || (p8)(ip >> 8)) && (a != 198 || (b & 0xfe) != 18);
+}
+
+#define TLS_AIA_SECONDS 5
+
+/*
+        tls_verify_chain's missing issuer: the certificate a caIssuers
+        location names (RFC 5280 4.2.2.1), which browsers fetch when a server
+        leaves an intermediate out. The URL comes from a certificate nothing
+        has verified yet, so the peer chooses the destination, and the fetch
+        is held to what a certificate needs: http: only (https would be a
+        handshake inside a handshake), port 80 unless a harness serves it,
+        no userinfo, a public address, one HTTP/1.0 GET with no redirect
+        followed, five seconds for the connection and the reply together,
+        a 200, and a body of at most room bytes less the head, which the
+        caller parses and verifies like any served certificate -- DER only,
+        so a PKCS#7 bundle or PEM text is refused there. Returns the body's
+        length at the front of into, or 0.
+*/
+static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
+                                   p8 address_to into, positive room)
+{
+        p8 text[HTTP_URL_MAX];
+        p8 host[256];
+        p8 request[HTTP_URL_MAX + 256];
+        string_address path;
+        p16 port;
+        bool tls;
+        p32 ip;
+        positive sent = 0;
+        positive used = 0;
+        positive header = 0;
+        http_response response;
+        network_deadline deadline;
+        bipolar handle;
+        bool closed = false;
+
+        if (length >= sizeof text)
+                return 0;
+        memory_copy(text, url, length);
+        text[length] = end;
+        if (http_split_into((string_address)text, host, sizeof host,
+                            address_of port, address_of path, address_of tls) ||
+            tls ||
+#ifndef TLS_BENCH_ANCHOR
+            port != HTTP_PORT ||
+#endif
+            http_get_request(request, sizeof request, (string_address)host, port,
+                             path, false, '0', (string_address)"Wget",
+                             address_of sent) ||
+            !(ip = http_lookup((string_address)host)) || !http_address_public(ip) ||
+            !network_deadline_begin(address_of deadline, TLS_AIA_SECONDS, 0))
+                return 0;
+        handle = http_stream_open(ip, port, TLS_AIA_SECONDS);
+        if (handle < 0)
+                return 0;
+        if (network_stream_send_all(handle, request, sent))
+                for (;;)
+                {
+                        bipolar got;
+
+                        if (!http_response_framing(into, used, address_of header,
+                                                   address_of response) &&
+                            response.body_kind == HTTP_BODY_LENGTH &&
+                            used - header >= response.body_length)
+                                break;
+                        if (used == room)
+                                break;
+                        got = network_stream_read_some_until(
+                            handle, into + used, room - used, address_of deadline);
+                        if (got <= 0)
+                        {
+                                closed = !got;
+                                break;
+                        }
+                        used += (positive)got;
+                }
+        socket_close((b32)handle);
+        if (http_response_framing(into, used, address_of header,
+                                  address_of response) ||
+            response.code != 200 ||
+            (response.body_kind == HTTP_BODY_LENGTH
+                 ? used - header != response.body_length
+                 : response.body_kind != HTTP_BODY_CLOSE || !closed))
+                return 0;
+        memory_copy(into, into + header, used - header);
+        return used - header;
 }
 
 static fn http_url_leaf(string_address path, p8 address_to into, positive room)

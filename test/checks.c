@@ -58114,6 +58114,73 @@ static fn tls_name_constraint_rules(void)
 }
 
 /*
+        The caIssuers fetch's two gates that need no network: which
+        addresses a URL chosen by the peer may reach, and which location
+        tls_parse_ca_issuers takes from an AuthorityInfoAccess value.
+        CHECK_net builds without TLS_BENCH_ANCHOR, so loopback is refused
+        here as it is in wget.
+*/
+static fn tls_ca_issuers_rules(void)
+{
+        static const struct
+        {
+                p8 address[4];
+                bool reachable;
+        } addresses[] = {
+            {{8, 8, 8, 8}, true},          {{1, 1, 1, 1}, true},
+            {{0, 0, 0, 0}, false},         {{0, 1, 2, 3}, false},
+            {{10, 0, 0, 1}, false},        {{127, 0, 0, 1}, false},
+            {{100, 63, 255, 255}, true},   {{100, 64, 0, 1}, false},
+            {{100, 127, 255, 255}, false}, {{100, 128, 0, 0}, true},
+            {{169, 254, 169, 254}, false}, {{169, 253, 0, 1}, true},
+            {{172, 15, 0, 1}, true},       {{172, 16, 0, 1}, false},
+            {{172, 31, 255, 255}, false},  {{172, 32, 0, 1}, true},
+            {{192, 0, 0, 1}, false},       {{192, 0, 1, 1}, true},
+            {{192, 168, 1, 1}, false},     {{192, 169, 0, 1}, true},
+            {{198, 17, 255, 255}, true},   {{198, 18, 0, 1}, false},
+            {{198, 19, 255, 255}, false},  {{198, 20, 0, 0}, true},
+            {{223, 255, 255, 255}, true},  {{224, 0, 0, 1}, false},
+            {{239, 255, 255, 250}, false}, {{240, 0, 0, 1}, false},
+            {{255, 255, 255, 255}, false},
+        };
+        /* ocsp first, then an https caIssuers, then the http one taken. */
+        static p8 access[] = {
+            0x30, 0x43,
+            0x30, 0x15, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30,
+            0x01, 0x86, 0x09, 'h', 't', 't', 'p', ':', '/', '/', 'o', '/',
+            0x30, 0x14, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30,
+            0x02, 0x86, 0x08, 'h', 't', 't', 'p', 's', ':', '/', '/',
+            0x30, 0x14, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30,
+            0x02, 0x86, 0x08, 'H', 'T', 'T', 'P', ':', '/', '/', 'c'};
+        positive wrong = 0;
+        tls_cert cert;
+
+        for (positive i = 0; i < array_count(addresses); i++)
+                wrong += http_address_public(network_load_32(addresses[i].address)) !=
+                         addresses[i].reachable;
+        check("caIssuers reaches public addresses only: not this network, "
+              "private, loopback, shared, link-local, IETF, benchmarking, "
+              "multicast or reserved",
+              wrong == 0);
+
+        memory_fill(address_of cert, 0, sizeof cert);
+        tls_parse_ca_issuers(access, sizeof access, address_of cert);
+        check("the first http: caIssuers location is taken, past OCSP and https",
+              cert.ca_issuers == access + sizeof access - 8 &&
+                  cert.ca_issuers_length == 8);
+        memory_fill(address_of cert, 0, sizeof cert);
+        access[sizeof access - 1] = 0x01;
+        tls_parse_ca_issuers(access, sizeof access, address_of cert);
+        check("a caIssuers location with a control byte is not taken",
+              !cert.ca_issuers);
+        access[sizeof access - 1] = 'c';
+        memory_fill(address_of cert, 0, sizeof cert);
+        tls_parse_ca_issuers(access, sizeof access - 1, address_of cert);
+        check("a truncated AuthorityInfoAccess names nothing",
+              !cert.ca_issuers);
+}
+
+/*
         The anchor table against chains that failed before it existed.
 
         www.kernel.org serves its leaf and GlobalSign Atlas R3 DV TLS CA 2025
@@ -60319,6 +60386,7 @@ b32 main(void)
         crypto_floor_aes();
         crypto_rsa_served_sizes();
         tls_name_constraint_rules();
+        tls_ca_issuers_rules();
         tls_trust_anchor_chains();
         redirect_urls();
         fetching_for_real();
