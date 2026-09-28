@@ -8304,6 +8304,13 @@ FILES_SCENES = {
     "dumbterm": ("unset LS_COLORS COLORTERM\nexport TERM=dumb\n", "", ""),
     "colorterm": ("unset LS_COLORS TERM\nexport COLORTERM=truecolor\n", "", ""),
     "bind2": ("env mkdir -p a/b/c && echo x > a/f && env mount --bind a a/b/c || exit 9\n", "", ""),
+    # a file and a directory carrying a user attribute and an access list,
+    # and what the copies carry looked at afterwards.
+    "xattr": ("env mkdir sd && env touch sf && env setfattr -n user.foo -v bar sf sd && "
+              "env setfacl -m u:nobody:rw sf && env setfacl -d -m u:nobody:r sd || exit 9\n", "",
+              "for n in c cd cd/sf m; do [ -e $n ] || continue; echo \"== $n\"; "
+              "env getfattr -d --absolute-names $n 2>&1 | env grep -v '^#'; "
+              "env getfacl -cp $n 2>/dev/null; done\n"),
     # a tree made under umask 000: every directory writable by all, no
     # sticky bit, and what is left of it looked at afterwards.
     "wide": ("(umask 000; env mkdir -p w/x/y && env touch w/x/f w/g) || exit 9\n", "",
@@ -8313,6 +8320,13 @@ FILES_SCENE_CASES = (
     # rm and rmdir remove from a directory others can write into, as GNU's
     # do, in every walk: the quiet one, the careful one that asks or tells,
     # and a terminal's.
+    # Extended attributes and access lists go with -p, -a, --preserve=xattr
+    # and all, and with every move; plain cp and --no-preserve leave them.
+    ("xattr", "cp", "-p", "sf", "c"), ("xattr", "cp", "-a", "sf", "c"), ("xattr", "cp", "sf", "c"),
+    ("xattr", "cp", "--preserve=xattr", "sf", "c"), ("xattr", "cp", "--preserve=mode", "sf", "c"),
+    ("xattr", "cp", "--preserve=all", "sf", "c"), ("xattr", "cp", "-a", "--no-preserve=xattr", "sf", "c"),
+    ("xattr", "cp", "-a", "sd", "cd"), ("xattr", "cp", "-rp", "sd", "cd"), ("xattr", "mv", "sf", "m"),
+    ("xattr", "cp", "-a", "sd", "cd"), ("xattr", "install", "-p", "sf", "c"),
     ("wide", "rm", "-rf", "w"), ("wide", "rm", "-r", "w"), ("wide", "rm", "-rv", "w"),
     ("wide", "rm", "-ri", "w"), ("wide", "rm", "-rI", "w"), ("wide", "rm", "-r", "---presume-input-tty", "w"),
     ("wide", "rm", "-r", "--one-file-system", "w"), ("wide", "rm", "-d", "w/x/y"), ("wide", "rmdir", "w/x/y"),

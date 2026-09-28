@@ -210,6 +210,7 @@ static fn writer_shell_quoted_name(writer output, string_address value);
 #define ERROR_OUT_OF_RANGE 34
 #define ERROR_TOO_MANY_LEVELS 40
 #define ERROR_NOT_SUPPORTED 95
+#define ERROR_NO_DATA 61
 #define ERROR_PROTOCOL_TYPE 91
 #define ERROR_NOT_CONNECTED 107
 #define ERROR_CONNECTION_REFUSED 111
@@ -7903,8 +7904,15 @@ static bool file_join_source_path;
 #define FILE_KEEP_MODE 1
 #define FILE_KEEP_OWNER 2
 #define FILE_KEEP_TIMES 4
-#define FILE_KEEP_ALL (FILE_KEEP_MODE | FILE_KEEP_OWNER | FILE_KEEP_TIMES)
+#define FILE_KEEP_XATTR 8
+// -p and a bare --preserve: mode, ownership and timestamps.
+#define FILE_KEEP_BASIC (FILE_KEEP_MODE | FILE_KEEP_OWNER | FILE_KEEP_TIMES)
+#define FILE_KEEP_ALL (FILE_KEEP_BASIC | FILE_KEEP_XATTR)
 static positive file_keeps = FILE_KEEP_ALL;
+// --preserve=xattr by name: an attribute that cannot be set is an error.
+static bool file_xattr_required;
+// -a: GNU's reduce_diagnostics, which says nothing of an attribute lost.
+static bool file_xattr_quiet;
 // --no-preserve=mode, which GNU tells apart from not asking for the mode.
 static bool cp_no_mode;
 
@@ -32326,6 +32334,200 @@ static bipolar file_preserve_owner_mode(
         return owned < 0 ? owned : changed;
 }
 
+/*
+        Extended attributes, as GNU's copy_attr and copy_acl carry them: the
+        POSIX ACLs go with the mode, everything else with xattr (-a,
+        --preserve=xattr or all, and every move). Left out, as
+        attr_copy_check_permissions leaves them out, are the other system.
+        names and the security labels this kernel does not keep. Both
+        descriptors are real ones; the copy is made before the mode is
+        given, while the owner may still write it. An attribute that
+        cannot be set is said only when xattr was asked for by name, or for
+        an ACL, whose loss changes who may use the file.
+*/
+#define FILE_XATTR_ROOM 65536
+static p8 file_xattr_names[FILE_XATTR_ROOM];
+static p8 file_xattr_value[FILE_XATTR_ROOM];
+
+static bool file_xattr_is_acl(string_address name)
+{
+        return string_equals(name, (string_address) "system.posix_acl_access") ||
+               string_equals(name, (string_address) "system.posix_acl_default");
+}
+
+/* A name inside a directory held open, as a path the l* calls can take
+   without following the name itself. */
+static bool file_xattr_path(p8 address_to into, bipolar directory,
+                            string_address name)
+{
+        static const p8 head[] = "/proc/self/fd/";
+        positive length = sizeof(head) - 1;
+        positive named = string_length(name);
+
+        if (directory == AT_FDCWD)
+        {
+                if (named >= FILE_PATH_MAX)
+                        return false;
+                memory_copy_apart_end(into, name, named);
+                return true;
+        }
+        memory_copy_apart(into, head, length);
+        length += positive_into_string(into + length, (positive)directory);
+        if (length + 1 + named >= FILE_PATH_MAX)
+                return false;
+        into[length++] = '/';
+        memory_copy_apart_end(into + length, name, named);
+        return true;
+}
+
+/* With room for them passed in, so a pool job can use its own; one whose
+   room is too small answers ERANGE and leaves the name to the serial copy,
+   as a job does with anything it cannot finish. shown null says nothing and
+   answers a failure wherever something would have been said. A name after
+   a descriptor makes the descriptor its directory and the calls the l*
+   ones, for a symbolic link or a special file, which cannot be opened.
+
+   What is said is GNU's, through libattr: under --preserve=xattr or
+   --attributes-only every failure, an unsupported one once for the file as
+   "setting attributes for"; otherwise, but for -a, only the failures that
+   are not unsupported; and it is only the first kind that fails the copy.
+   An ACL that cannot be set is copy_acl's "preserving permissions for". */
+static bipolar file_xattrs_copy_in(bipolar from, string_address from_name,
+                                   bipolar to, string_address to_name,
+                                   string_address program, string_address shown,
+                                   p8 address_to names, positive names_room,
+                                   p8 address_to value, positive value_room)
+{
+        positive keeps = file_keeps;
+        p8 from_path[FILE_PATH_MAX];
+        p8 to_path[FILE_PATH_MAX];
+        bool by_name = from_name != null;
+
+        if (!(keeps & (FILE_KEEP_MODE | FILE_KEEP_XATTR)) || from < 0 || to < 0)
+                return 0;
+        if (by_name && (!file_xattr_path(from_path, from, from_name) ||
+                        !file_xattr_path(to_path, to, to_name)))
+                return 0;
+
+        bipolar listed = by_name
+                             ? system_call_3(syscall(llistxattr),
+                                             (positive)from_path,
+                                             (positive)names, names_room)
+                             : system_call_3(syscall(flistxattr), (positive)from,
+                                             (positive)names, names_room);
+        if (listed == -ERROR_OUT_OF_RANGE)
+                return listed;
+        if (listed <= 0)
+                return 0;
+
+        bool required = file_xattr_required || cp_attributes_only;
+        bool some = !required && !file_xattr_quiet;
+        bool unsupported = false;
+        bipolar failed = 0;
+
+        for (positive at = 0; at < (positive)listed;)
+        {
+                string_address name = (string_address)names + at;
+                positive length = string_length(name);
+                bool acl = file_xattr_is_acl(name);
+
+                at += length + 1;
+                //      What attr_copy_check_permissions leaves out: the
+                //      other permission attributes and the EVM signature.
+                if (acl ? !(keeps & FILE_KEEP_MODE)
+                        : !(keeps & FILE_KEEP_XATTR) ||
+                              !memory_compare(name, "system.", 7) ||
+                              string_equals(name, (string_address) "security.evm"))
+                        continue;
+
+                bipolar size = by_name
+                                   ? system_call_4(syscall(lgetxattr),
+                                                   (positive)from_path,
+                                                   (positive)name,
+                                                   (positive)value, value_room)
+                                   : system_call_4(syscall(fgetxattr),
+                                                   (positive)from,
+                                                   (positive)name,
+                                                   (positive)value, value_room);
+                if (size == -ERROR_OUT_OF_RANGE)
+                        return size;
+                if (size < 0)
+                        continue;
+
+                bipolar set = by_name
+                                  ? system_call_5(syscall(lsetxattr),
+                                                  (positive)to_path,
+                                                  (positive)name,
+                                                  (positive)value,
+                                                  (positive)size, 0)
+                                  : system_call_5(syscall(fsetxattr),
+                                                  (positive)to,
+                                                  (positive)name,
+                                                  (positive)value,
+                                                  (positive)size, 0);
+                if (set >= 0)
+                        continue;
+
+                bool not_there = set == -ERROR_NOT_SUPPORTED ||
+                                 set == -ERROR_NO_DATA;
+                if (acl)
+                {
+                        if (shown)
+                                string_format(log_error,
+                                              "%s: preserving permissions for %w: %s\n",
+                                              program, writer_shell_quoted_name,
+                                              shown, file_reason(set));
+                        failed = set;
+                }
+                else if (not_there)
+                {
+                        if (required)
+                        {
+                                unsupported = true;
+                                failed = set;
+                        }
+                }
+                else if (required || some)
+                {
+                        if (shown)
+                                string_format(log_error,
+                                              "%s: setting attribute %w for %w: %s\n",
+                                              program, writer_shell_quoted_name, name,
+                                              writer_shell_quoted_name, shown,
+                                              file_reason(set));
+                        if (required || !shown)
+                                failed = set;
+                }
+        }
+        if (unsupported && shown)
+                string_format(log_error, "%s: setting attributes for %w: %s\n",
+                              program, writer_shell_quoted_name, shown,
+                              file_reason(-ERROR_NOT_SUPPORTED));
+        return failed;
+}
+
+static bipolar file_xattrs_copy(bipolar from, bipolar to,
+                                string_address program, string_address shown)
+{
+        return file_xattrs_copy_in(from, null, to, null, program, shown,
+                                   file_xattr_names, sizeof(file_xattr_names),
+                                   file_xattr_value, sizeof(file_xattr_value));
+}
+
+// A pool job's room: an attribute list or value past it goes the serial way.
+#define FILE_XATTR_JOB_ROOM 1024
+
+/* When a file's attributes are copied against its owner and mode. The
+   kernel drops a file capability (security.capability) when the owner is
+   changed, so root, who can give files away, copies them after the chown,
+   as GNU does; anyone else cannot set a capability and cannot give the
+   file away, but needs the write permission the final mode may take away
+   to set a user. attribute, so copies them first. */
+static bool file_xattrs_after_owner(void)
+{
+        return system_call(syscall(geteuid)) == 0;
+}
+
 /* The attributes file_keeps names, given to what was copied. made says
    the object is new here, so a mode not kept is the plain copy's; one that
    was there keeps its own. */
@@ -33016,17 +33218,33 @@ static fn cp_copy_job(address_any context, positive index)
         }
 
         bool copied = file_copy_handles_known(in, out, facts);
-
-        system_close(in);
-
+        p8 names[FILE_XATTR_JOB_ROOM];
+        p8 value[FILE_XATTR_JOB_ROOM];
+        bool tag = copied && cp_preserve;
+        bool tag_late = tag && file_xattrs_after_owner();
+        bipolar tagged = tag && !tag_late
+                             ? file_xattrs_copy_in(in, null, out, null,
+                                                   (string_address) "cp", null,
+                                                   names, sizeof(names),
+                                                   value, sizeof(value))
+                             : 0;
         bipolar kept = copied && cp_preserve
                            ? file_keep_handle(out, -1, null, facts, false) : 0;
+
+        if (tag_late && kept >= 0)
+                tagged = file_xattrs_copy_in(in, null, out, null,
+                                             (string_address) "cp", null, names,
+                                             sizeof(names), value,
+                                             sizeof(value));
+        system_close(in);
         bipolar closed = system_close(out);
 
-        if (!copied || kept < 0 || closed < 0)
+        //      Attributes it could not carry leave the name to the serial
+        //      copy, which says why.
+        if (!copied || tagged < 0 || kept < 0 || closed < 0)
         {
                 (void)system_remove_at(item->target, name, 0);
-                item->result = -ERROR_INPUT_OUTPUT;
+                item->result = tagged < 0 ? -ERROR_AGAIN : -ERROR_INPUT_OUTPUT;
                 return;
         }
         item->result = 0;
@@ -33094,6 +33312,23 @@ static bool cp_batch_replay(walk_batch address_to batch, positive depth)
                                 break;
 
                         file_facts address_to facts = batch->facts + index;
+                        //      A directory's ACLs and attributes, from the
+                        //      source directory it was made from.
+                        if (cp_preserve)
+                        {
+                                bipolar source = system_open_at(
+                                    AT_FDCWD, from,
+                                    FILE_READ | O_DIRECTORY | O_NOFOLLOW |
+                                        O_CLOEXEC);
+
+                                if (source >= 0 &&
+                                    file_xattrs_copy(source, item->target,
+                                                     (string_address) "cp",
+                                                     to) < 0)
+                                        complete = false;
+                                if (source >= 0)
+                                        system_close(source);
+                        }
                         bipolar attributed = cp_preserve
                                                  ? file_keep_handle(item->target, -1, null, facts, true)
                                                  : file_change_mode_handle(
@@ -33286,14 +33521,28 @@ static bool cp_tree_file(bipolar source, bipolar copy, string_address name)
         }
 
         bool copied = file_copy_handles_known(in, out, address_of facts);
-
-        system_close(in);
-
+        p8 names[FILE_XATTR_JOB_ROOM];
+        p8 value[FILE_XATTR_JOB_ROOM];
+        bool tag = copied && cp_preserve;
+        bool tag_late = tag && file_xattrs_after_owner();
+        bipolar tagged = tag && !tag_late
+                             ? file_xattrs_copy_in(in, null, out, null,
+                                                   (string_address) "cp", null,
+                                                   names, sizeof(names),
+                                                   value, sizeof(value))
+                             : 0;
         bipolar kept = copied && cp_preserve
                            ? file_keep_handle(out, -1, null, address_of facts, false) : 0;
+
+        if (tag_late && kept >= 0)
+                tagged = file_xattrs_copy_in(in, null, out, null,
+                                             (string_address) "cp", null, names,
+                                             sizeof(names), value,
+                                             sizeof(value));
+        system_close(in);
         bipolar closed = system_close(out);
 
-        if (!copied || kept < 0 || closed < 0)
+        if (!copied || tagged < 0 || kept < 0 || closed < 0)
         {
                 (void)system_remove_at(copy, name, 0);
                 return false;
@@ -33465,8 +33714,32 @@ static fn cp_tree_leave(address_any context, address_any node_address,
 
         bipolar copy = cp_tree_open_below(cp_tree_destination_root,
                                           (string_address)node->path, node->length);
+        bipolar tagged = 0;
+
+        //      A directory's ACLs and attributes, from the source directory
+        //      it was made from; one with more than a job has room for is
+        //      refused as its attributes are.
+        if (copy >= 0 && cp_preserve)
+        {
+                p8 names[FILE_XATTR_JOB_ROOM];
+                p8 value[FILE_XATTR_JOB_ROOM];
+                bipolar source = cp_tree_open_below(cp_tree_source_root,
+                                                    (string_address)node->path,
+                                                    node->length);
+
+                if (source >= 0)
+                {
+                        tagged = file_xattrs_copy_in(source, null, copy, null,
+                                                     (string_address) "cp",
+                                                     null, names, sizeof(names),
+                                                     value, sizeof(value));
+                        system_close(source);
+                }
+        }
         bipolar attributed = copy < 0
                                  ? copy
+                                 : tagged < 0
+                                 ? tagged
                                  : cp_preserve
                                  ? file_keep_handle(copy, -1, null, address_of node->facts, true)
                                  : file_change_mode_handle(copy,
@@ -33602,8 +33875,25 @@ static bool cp_tree_sink(address_any context, address_any node_address,
 
                         bipolar copy = cp_tree_open_below(cp_tree_destination_root, path,
                                                           path_length);
+                        bipolar tagged = 0;
+
+                        if (copy >= 0 && cp_preserve)
+                        {
+                                bipolar source = cp_tree_open_below(
+                                    cp_tree_source_root, path, path_length);
+
+                                if (source >= 0)
+                                {
+                                        tagged = file_xattrs_copy(
+                                            source, copy, (string_address) "cp",
+                                            null);
+                                        system_close(source);
+                                }
+                        }
                         bipolar attributed = copy < 0
                                                  ? copy
+                                                 : tagged < 0
+                                                 ? tagged
                                                  : cp_preserve
                                                  ? file_keep_handle(copy, -1, null, address_of facts, true)
                                                  : file_change_mode_handle(
@@ -34430,13 +34720,23 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                             "%s: cannot preserve attributes for %w: %s\n",
                             program, writer_shell_quoted_name,
                             destination_shown, file_reason(protected_result));
+                //      A link or a node cannot be opened, so its attributes
+                //      go by name, from where it is to where it is made.
+                bipolar tagged_node =
+                    moving || (file_keeps & FILE_KEEP_XATTR)
+                        ? file_xattrs_copy_in(
+                              source_directory, source, protected.directory,
+                              SYSTEM_PATH_STAGE_LEAF, program, destination_shown,
+                              file_xattr_names, sizeof(file_xattr_names),
+                              file_xattr_value, sizeof(file_xattr_value))
+                        : 0;
 
                 bipolar published = file_copy_publish(
                     address_of protected, destination_directory,
                     destination, made, protected_result, moving,
                     destination_entry_exists, address_of destination_entry,
                     0);
-                if (published < 0)
+                if (published < 0 || tagged_node < 0)
                         return false;
                 goto copied_without_metadata;
         }
@@ -34586,11 +34886,17 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                     ? file_copy_handles_known(in, out,
                                                               address_of facts)
                                     : file_copy_handles(in, out);
-                if (known_source_handle < 0)
-                        system_close(in);
+                bool tag = complete && (moving || cp_preserve);
+                bool tag_late = tag && file_xattrs_after_owner();
+                bipolar tagged = tag && !tag_late
+                                     ? file_xattrs_copy(in, out, program,
+                                                        destination_shown)
+                                     : 0;
 
                 if (!complete)
                 {
+                        if (known_source_handle < 0)
+                                system_close(in);
                         if (staged)
                                 (void)file_stage_publish_protected_at(
                                     address_of protected,
@@ -34620,6 +34926,11 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                                      file_copy_creation_mode(
                                                          address_of facts))
                                                : 0;
+                if (tag_late)
+                        tagged = file_xattrs_copy(in, out, program,
+                                                  destination_shown);
+                if (known_source_handle < 0)
+                        system_close(in);
                 bipolar published = staged
                     ? file_copy_publish(
                           address_of protected, destination_directory,
@@ -34634,7 +34945,8 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                             "%s: cannot preserve attributes for %w: %s\n",
                             program, writer_shell_quoted_name,
                             destination_shown, file_reason(attributed));
-                if (attributed < 0 || published < 0 || closed < 0)
+                if (attributed < 0 || published < 0 || closed < 0 ||
+                    tagged < 0)
                         return false;
 
                 goto copied_without_metadata;
@@ -34827,6 +35139,10 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 mv_across_said |= moving;
                 complete = false;
         }
+        if ((moving || cp_preserve) &&
+            file_xattrs_copy(walk.handle, destination_handle, program,
+                             destination_shown) < 0)
+                complete = false;
         if (!facts_held)
                 file_walk_close(address_of walk);
 
@@ -35522,6 +35838,7 @@ static fn cp_keeps_read(string_address value, bool on)
                 positive bits = letter == 'm'   ? FILE_KEEP_MODE
                                 : letter == 'o' ? FILE_KEEP_OWNER
                                 : letter == 't' ? FILE_KEEP_TIMES
+                                : letter == 'x' ? FILE_KEEP_XATTR
                                 : letter == 'a' ? FILE_KEEP_ALL
                                                 : 0;
 
@@ -35530,6 +35847,8 @@ static fn cp_keeps_read(string_address value, bool on)
                         cp_keep_links = on;
                 if (bits & FILE_KEEP_MODE)
                         cp_no_mode = !on;
+                if (letter == 'x')
+                        file_xattr_required = on;
                 if (value[at] == ',')
                         at++;
         }
@@ -35544,9 +35863,12 @@ static bool cp_option_seen(p8 letter, string_address value)
         if (letter == 'a' || letter == 'd')
                 cp_keep_links = true;
         if (letter == 'a')
+        {
                 file_keeps = FILE_KEEP_ALL;
+                file_xattr_quiet = true;
+        }
         if (letter == 'p' && !value)
-                file_keeps |= FILE_KEEP_ALL;
+                file_keeps |= FILE_KEEP_BASIC;
         if (letter == 'p')
         {
                 cp_wants_context = false;
@@ -35674,6 +35996,8 @@ static b32 file_cp()
         cp_keep_links = false;
         file_keeps = 0;
         cp_no_mode = false;
+        file_xattr_required = false;
+        file_xattr_quiet = false;
         file_into_seen = null;
         file_join_source_path = false;
         file_backup_control_named = null;
@@ -37182,6 +37506,8 @@ static b32 file_mv()
         //      A move across devices keeps everything it can.
         file_keeps = FILE_KEEP_ALL;
         cp_no_mode = false;
+        file_xattr_required = false;
+        file_xattr_quiet = false;
 
         file_operands_begin();
         if (!file_take(address_of taking))
