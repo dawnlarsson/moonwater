@@ -45290,8 +45290,10 @@ def harness_crypto_fuzz(argv):
     The whole crypto section of src/net/net.c is lifted hosted -- lib.c's
     field, digest, GHASH and AES routines replaced by plain C (the stdin
     lane crypto_vectors is what holds the assembly to OpenSSL) -- and
-    linked against libcrypto. Each input picks a lane by its first byte:
-    X25519, ECDH and key shares on P-256/P-384 (OpenSSL's share of the
+    linked against libcrypto. x25519 is the exception on an x86_64 host:
+    lib.c's own body is linked (library_routine_assembly), and every X25519
+    input runs its mulx and its mulq body both. Each input picks a lane by
+    its first byte: X25519, ECDH and key shares on P-256/P-384 (OpenSSL's share of the
     input's scalar, then optionally a bit bent), ECDSA signed here with the
     input's key and nonce and then bent (high S, r or s flipped, digest or
     key bit flipped, leading zero dropped) or taken raw, RSA PKCS#1
