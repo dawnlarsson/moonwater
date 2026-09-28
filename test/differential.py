@@ -14520,6 +14520,24 @@ def shell_lang_count_operators(rng):
         ("command", "stdin", "file"))
 
 
+#       A backslash-newline inside ${ } and $(( )) is a line continuation like
+#       any other outside real single quotes; the reader held the line open
+#       there and kept both bytes, so "${v-a \<newline>b}" printed the
+#       backslash and $((1 + \<newline>2)) was an arithmetic error.
+def shell_lang_brace_continuation(rng):
+    forms = ('"${v-a \\\nb}"', "${v-c \\\nd}", "$((1 + \\\n2))", "\"${v-'a \\\nb'}\"", "${v-'a \\\nb'}",
+             "\"${v:-$(echo 'q \\\nr')}\"", "${#v\\\n}", "\"${v:+e \\\nf}\"", "${v#\\\n}", "\"$((2 *\\\n3))\"")
+    word = rng.choice(forms)
+    setup = rng.choice(("unset v", "v=set", "v=''"))
+    modes = shell_ALL + ("sh",)
+    line = "printf '<%s>' " + word + "; echo"
+    if rng.random() < 0.2:
+        line = "(( x = 1 + \\\n2 )); echo $x"
+        modes = shell_BASH
+    return ("brace-continuation", modes, shell_program(setup, line, 'echo "end=$?"'),
+            ("command", "stdin", "file"))
+
+
 #       What bash does with a builtin handed words it has no place for, and
 #       with a subscript it cannot evaluate: the whole command the reader was
 #       running is dropped -- through eval, a sourced file and a function --
@@ -17358,6 +17376,7 @@ SHELL_FAMILIES = (
     shell_lang_loop_control_arguments,
     shell_lang_builtin_discard,
     shell_lang_count_operators,
+    shell_lang_brace_continuation,
     shell_lang_trap_return,
     shell_lang_funcname_stack,
     shell_lang_empty_at_joins,
