@@ -43302,8 +43302,8 @@ def netlink_fuzz_seeds():
     def rta(kind, data):
         return pad(struct.pack("<HH", 4 + len(data), kind) + data)
 
-    def link(index, flags, name, *more):
-        return message(16, struct.pack("<BBHiII", 0, 0, 1, index, flags, 0) +
+    def link(index, flags, name, *more, kind=1):
+        return message(16, struct.pack("<BBHiII", 0, 0, kind, index, flags, 0) +
                        rta(3, name + b"\0") + b"".join(more))
 
     def done(status=0, sequence=1):
@@ -43337,6 +43337,10 @@ def netlink_fuzz_seeds():
         "discover.bin": b"\0" + kernel(lo, eth, down) + kernel(done()),
         "discover_wifi.bin": b"\x20" + kernel(lo, eth, wifi, done()),
         "discover_wired.bin": b"\x10" + kernel(lo, wifi, eth, done()),
+        # A radio's monitor (ARPHRD_IEEE80211_RADIOTAP) and a tunnel, running,
+        # ahead of a wired link that is not: discovery passes over both.
+        "discover_monitor.bin": b"\0" + kernel(lo, link(5, 1 | 2 | 64, b"hwsim0", hardware, kind=803),
+                                                link(6, 1 | 64, b"wg0", kind=65534), down, done()),
         "named.bin": b"\1" + kernel(lo, eth, wifi, done()),
         "link_show.bin": b"\3" + kernel(lo, eth, wifi, down, done()),
         "addr_show.bin": b"\4" + kernel(address, message(
