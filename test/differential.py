@@ -10686,8 +10686,9 @@ MISC_UTILITIES = (
                       ("115792089237316195423570985008687907853269984665640564039457584007913129639936",
                        "1208925819614629174706177", "1267650600228229401496703205377",
                        "324518553658426726783156020576257", "19807040628566084398385987585"),
-                      # The widest number carried, with its top bit set.
-                      (str(2003 ** 363 * 2011 ** 407),)),
+                      # The widest number carried, with its top bit set, and
+                      # past it only in leading zeros.
+                      (str(2003 ** 363 * 2011 ** 407),), ("0" * 2600 + "12",)),
             stdin=("misc_factor", "misc_factor_random", "numbers", "empty", "text", "nonl", "blanks", "long",
                    "many_lines", "nul", "high", "wide_words"),
             # The widest operand costs a Miller-Rabin power over 8448 bits,

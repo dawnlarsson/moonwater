@@ -7304,6 +7304,10 @@ static bool factor_number(p8 address_to bytes, positive length,
         start += memory_span_byte(bytes + start, ' ', length - start);
         if (start < length && bytes[start] == '+')
                 start++;
+        //      Leading zeros are no part of the size: GNU factors
+        //      thousands of them before a 12.
+        if (start < length)
+                start += memory_span_byte(bytes + start, '0', length - start - 1);
 
         if (start == length || length - start >= sizeof(decimal))
                 goto invalid;
