@@ -46107,54 +46107,78 @@ static bool date_batch(string_address path, string_address format, b64 now)
                 close_handle = true;
         }
 
-        positive length = 0;
-        bool read_failed = false;
-        p8 address_to input = utility_arena_read_all(
-            (positive)handle, 4096, address_of length, address_of read_failed);
-
-        if (close_handle)
-                system_close(handle);
-
-        if (!input)
-        {
-                if (read_failed)
-                        string_format(log_error, "date: %w: read error\n",
-                                      writer_shell_name, path);
-                return false;
-        }
-
+        /*
+                Line by line as the lines arrive, as GNU's getline loop takes
+                them, so date -f - on a pipe answers each line before the
+                next is written (and under stdbuf -oL writes it out first).
+        */
+        static byte_store lines;
         bool ok = true;
-        positive at = 0;
+        bool ended = false;
+        positive held = 0;
 
-        while (at < length)
+        lines.used = 0;
+        while (!ended || held)
         {
-                positive start = at;
+                p8 address_to stop = held ? memory_first_of(lines.bytes, '\n', held) : null;
+
+                if (!stop && !ended)
+                {
+                        if (stdbuf_prompt())
+                                log_flush();
+                        if (!byte_store_reserve(address_of lines, held + 4096, 4096))
+                        {
+                                ok = false;
+                                break;
+                        }
+
+                        bipolar got = system_read_retry((positive)handle, lines.bytes + held,
+                                                        lines.room - held);
+
+                        if (got < 0)
+                        {
+                                string_format(log_error, "date: %w: read error: %s\n",
+                                              writer_shell_name, path, file_reason(got));
+                                ok = false;
+                                break;
+                        }
+                        if (!got)
+                                ended = true;
+                        held += (positive)got;
+                        continue;
+                }
+
+                positive length = stop ? (positive)(stop - lines.bytes) : held;
                 b64 when;
                 positive ns = 0;
 
-                at += memory_span_without_byte(input + at, '\n', length - at);
+                if (!byte_store_reserve(address_of lines, held + 1, 4096))
+                {
+                        ok = false;
+                        break;
+                }
+                p8 saved = lines.bytes[length];
 
-                p8 saved = input[at];
-                input[at] = end;
-
-                if (!pd_parse(input + start, now, date_now_ns, pd_debug, address_of when,
+                lines.bytes[length] = end;
+                if (!pd_parse(lines.bytes, now, date_now_ns, pd_debug, address_of when,
                               address_of ns))
                 {
                         string_format(log_error, "date: invalid date '%w'\n",
-                                      writer_terminal_quoted_name, input + start);
+                                      writer_terminal_quoted_name, lines.bytes);
                         ok = false;
                 }
                 else if (!date_emit(format, when, ns))
                         ok = false;
+                lines.bytes[length] = saved;
 
-                if (at < length)
-                {
-                        input[at] = saved;
-                        at++;
-                }
+                positive used = stop ? length + 1 : length;
+
+                memory_copy(lines.bytes, lines.bytes + used, held - used);
+                held -= used;
         }
 
-        utility_arena.used = 0;
+        if (close_handle)
+                system_close(handle);
         return ok;
 }
 

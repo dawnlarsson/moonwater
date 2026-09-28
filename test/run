@@ -5033,22 +5033,24 @@ lane_misc()
                 #       into a pipe comes out while the writer still holds
                 #       the pipe open (it used to wait for the end, or for
                 #       stdbuf to refuse the static program outright).
-                rm -f "$work/prompt.in" "$work/prompt.out"
-                mkfifo "$work/prompt.in"
-                "$farm/stdbuf" -oL "$farm/cut" -b1 < "$work/prompt.in" \
-                        > "$work/prompt.out" 2>&1 &
-                prompt_reader=$!
-                { printf '1\n'; sleep 3; } > "$work/prompt.in" &
-                prompt_writer=$!
-                sleep 1
-                if [ "$(cat "$work/prompt.out")" = 1 ]; then
-                        tally stdbuf-line-prompt 1 1
-                else
-                        tally stdbuf-line-prompt 0 1
-                        note "stdbuf -oL cut -b1 wrote nothing while its pipe stayed open"
-                        misc_failed=1
-                fi
-                wait "$prompt_writer" "$prompt_reader"
+                for prompt_reader in "cut -b1" "date -u -f - +%H"; do
+                        rm -f "$work/prompt.in" "$work/prompt.out"
+                        mkfifo "$work/prompt.in"
+                        # shellcheck disable=SC2086
+                        "$farm/stdbuf" -oL $farm/$prompt_reader < "$work/prompt.in" \
+                                > "$work/prompt.out" 2>&1 &
+                        prompt_pid=$!
+                        { printf '1\n'; sleep 3; } > "$work/prompt.in" &
+                        prompt_writer=$!
+                        sleep 1
+                        case $(cat "$work/prompt.out") in
+                        1|01)   tally stdbuf-line-prompt 1 1 ;;
+                        *)      tally stdbuf-line-prompt 0 1
+                                note "stdbuf -oL $prompt_reader wrote nothing while its pipe stayed open"
+                                misc_failed=1 ;;
+                        esac
+                        wait "$prompt_writer" "$prompt_pid"
+                done
 
                 #       upstream timeout/timeout-group: a timeout killed
                 #       outright still has its signal sent to the command,
