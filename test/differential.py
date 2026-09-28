@@ -14605,6 +14605,18 @@ def shell_lang_interactive_pipe(rng):
         'echo "end=$?"'))
 
 
+#       A syntax error inside $( ) is found where the substitution is
+#       written, before anything on its line runs, and ends a script like any
+#       other; dash does the same for a backquoted body. This parsed the body
+#       only when it ran, printed an empty line and went on.
+def shell_lang_substitution_syntax(rng):
+    body = rng.choice(("if true", "fi", "for", "case", "(", "echo )", "if :; then :; fi", "echo ok", "while :; do", "done"))
+    form = rng.choice(("$(%s)", '"$(%s)"', "x=$(%s)", "`%s`", "${u:-$(%s)}"))
+    line = "echo " + form % body if not form.startswith("x=") else form % body
+    return ("substitution-syntax", shell_ALL, shell_program(
+        "echo before", line, 'echo "reached=$?"'), ("command", "stdin", "file"))
+
+
 #       Digits in front of > are a descriptor only while they fit one: bash
 #       reads a number past INT_MAX there as an ordinary word, so `echo a
 #       2147483648>f` writes "a 2147483648" to f. This called it a syntax
@@ -17474,6 +17486,7 @@ SHELL_FAMILIES = (
     shell_lang_builtin_refusals,
     shell_lang_background_reap,
     shell_lang_interactive_pipe,
+    shell_lang_substitution_syntax,
     shell_lang_count_operators,
     shell_lang_brace_continuation,
     shell_lang_trap_return,
