@@ -8316,7 +8316,6 @@ typedef struct
         positive have;
 } file_identity_set;
 
-static file_identity_set ls_listed;
 
 static p8 ls_host[FILE_NAME_MAX];
 static p8 ls_cwd[FILE_PATH_MAX];
@@ -8406,6 +8405,14 @@ static bool file_fnmatch(string_address pattern, string_address text)
         return shell_match(small, text);
 }
 
+// A minor trouble answers 1 unless a serious one has already made it 2,
+// as GNU's set_exit_status never lowers the status.
+static fn ls_minor()
+{
+        if (!ls_status)
+                ls_status = 1;
+}
+
 static fn ls_out(address_any text, positive length)
 {
         if (!length)
@@ -8444,7 +8451,7 @@ static fn ls_limit(string_address why)
         }
 
         ls_broken = true;
-        ls_status = 1;
+        ls_minor();
 }
 
 static bool ls_keep(string_address name, positive address_to where)
@@ -10244,7 +10251,7 @@ static fn ls_mark_after(string_address directory, ls_entry address_to entry, str
                               ls_program, writer_terminal_quoted_name, directory,
                               writer_terminal_quoted_name, name,
                               file_reason(-ERROR_NAME_TOO_LONG));
-                ls_status = 1;
+                ls_minor();
                 return;
         }
         if (file_link_text(full, where, FILE_PATH_MAX) < 0)
@@ -10937,7 +10944,7 @@ static bool ls_add(bipolar directory, string_address path, string_address shown,
                                       string_equals(under, ".") || !file_path_join(full, under, shown)
                                           ? shown : (string_address)full,
                                       file_reason(looked));
-                        ls_status = 1;
+                        ls_minor();
                 }
         }
 
@@ -11015,10 +11022,30 @@ static fn file_identity_set_clear(file_identity_set address_to set)
         set->have = 0;
 }
 
+/*
+        The directories -R is inside of, outermost first: GNU's active_dir_set,
+        which holds a directory only while it and what is under it are being
+        listed. A directory met again elsewhere -- a second link to it under
+        -L, a bind mount beside it -- is listed again, as GNU lists it; only
+        one that is its own ancestor is refused as already listed.
+*/
+static file_identity address_to ls_active;
+static positive ls_active_room;
+static positive ls_active_depth;
+
 static bool ls_already_listed(file_facts address_to facts)
 {
+        p64 device = file_device_key(facts->device_major, facts->device_minor);
+
+        for (positive at = 0; at < ls_active_depth; at++)
+                if (ls_active[at].inode == facts->inode && ls_active[at].device == device)
+                        return true;
+
         // A directory that cannot be recorded is listed rather than refused.
-        return file_identity_seen(address_of ls_listed, facts) > 0;
+        if (memory_resize_reserve(address_of ls_active, address_of ls_active_room,
+                                  (ls_active_depth + 1) * sizeof(file_identity), 1024))
+                ls_active[ls_active_depth++] = (file_identity){facts->inode, device};
+        return false;
 }
 
 static fn ls_below(string_address path, positive depth)
@@ -11109,7 +11136,7 @@ static fn ls_below(string_address path, positive depth)
                         string_format(log_error, "%s: '%w/%w' is nested too deep\n", ls_program,
                                       writer_terminal_quoted_name, path,
                                       writer_terminal_quoted_name, name);
-                        ls_status = 1;
+                        ls_minor();
                         continue;
                 }
 
@@ -11119,7 +11146,7 @@ static fn ls_below(string_address path, positive depth)
                                       ls_program, writer_terminal_quoted_name, path,
                                       writer_terminal_quoted_name, name,
                                       file_reason(-ERROR_NAME_TOO_LONG));
-                        ls_status = 1;
+                        ls_minor();
                         continue;
                 }
 
@@ -11137,6 +11164,7 @@ static fn ls_directory(string_address path, bool heading, positive depth,
 {
         file_walk walk;
         file_facts identity;
+        positive active = ls_active_depth;
 
         if (ls_recursive && file_look_at(path, address_of identity) &&
             ls_already_listed(address_of identity))
@@ -11151,7 +11179,11 @@ static fn ls_directory(string_address path, bool heading, positive depth,
         {
                 string_format(log_error, "%s: cannot open directory %w: %s\n", ls_program,
                               writer_shell_quoted_name, path, file_reason(walk.handle));
-                ls_status = named ? 2 : 1;
+                if (named)
+                        ls_status = 2;
+                else
+                        ls_minor();
+                ls_active_depth = active;
                 return;
         }
 
@@ -11183,7 +11215,10 @@ static fn ls_directory(string_address path, bool heading, positive depth,
         file_walk_close(address_of walk);
 
         if (ls_broken)
+        {
+                ls_active_depth = active;
                 return;
+        }
 
         ls_sort();
 
@@ -11225,6 +11260,7 @@ static fn ls_directory(string_address path, bool heading, positive depth,
 
         if (ls_recursive)
                 ls_below(path, depth);
+        ls_active_depth = active;
 }
 
 // ---- Options -------------------------------------------------------------
@@ -11699,7 +11735,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
         ls_out_bytes = 0;
         ls_dired_count = 0;
         ls_subdired_count = 0;
-        file_identity_set_clear(address_of ls_listed);
+        ls_active_depth = 0;
 
         file_taking taking = {
             .program = program,

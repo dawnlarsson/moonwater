@@ -7357,7 +7357,10 @@ FILES_UTILITIES = (
                    ("-U", "-r", "-d", "dir", "a.txt", "exe"), ("-f", "-r", "dir"),
                    ("-U", "--group-directories-first", "-r", "-d", "a.txt", "dir"),
                    # An empty directory has no line of names under -m.
-                   ("-m", "hollow"), ("-sm", "a.txt", "hollow"), ("-w0", "-C", "hollow"))),
+                   ("-m", "hollow"), ("-sm", "a.txt", "hollow"), ("-w0", "-C", "hollow"),
+                   # -R refuses only a directory that is its own ancestor,
+                   # and a minor trouble never lowers a serious one's 2.
+                   ("-RL", "dir", "dirlink"), ("-RLf", "."), ("-RL", "missing", "dir/sub"))),
     #       dir and vdir are ls with a different default format, so they
     #       answer for the same surface and are walked over it. A shorter
     #       list of their own left sixty-nine of ls's options untouched in
