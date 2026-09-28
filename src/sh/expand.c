@@ -2184,6 +2184,12 @@ static string_address expand_capture(string_address text, bool quoted, b32 mode)
 
         if (mode == EXPAND_CAPTURE_WORD && !quoted && string_is(text, '~'))
                 text = expand_tilde(text, false);
+        //      bash tilde-expands a pattern and a replacement word too,
+        //      quoted or not: ${p//~/z} replaces the home directory.
+        else if ((mode == EXPAND_CAPTURE_PATTERN ||
+                  mode == EXPAND_CAPTURE_REPLACEMENT) &&
+                 shell_bash_compat && string_is(text, '~'))
+                text = expand_tilde(text, false);
 
         expand_into(text, quoted, MARK_PLAIN, false);
 
@@ -7640,7 +7646,11 @@ static fn expand_modifier(expand_reference reference, p8 operation, bool doubled
         }
         else if (operation == '/')
         {
-                string_address separator = expand_replace_separator(word);
+                //      A pattern may begin with a slash: bash looks for the
+                //      one that ends it after that, so ${x////c} replaces
+                //      each / with c.
+                string_address separator = expand_replace_separator(
+                    string_is(word, '/') ? word + 1 : word);
                 string_address replacement = (string_address)"";
                 if (separator)
                 {

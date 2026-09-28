@@ -15006,6 +15006,20 @@ def shell_lang_nameref_indirect(rng):
         "foo=FOO; x=foo", line, 'echo "end=$?"'), ("command", "stdin", "file"))
 
 
+#       A replacement pattern may begin with a slash, which bash takes as
+#       the pattern and looks past for the separator: ${x////c} replaces
+#       each / with c and ${x///} deletes them. The pattern and replacement
+#       words, and a trim's pattern, are tilde-expanded, quoted or not.
+#       These took the leading slash for the separator and kept ~ literal.
+def shell_lang_patsub_slash_tilde(rng):
+    form = rng.choice(("${x////c}", "${x///}", '"${x////c}"', "${x//'/'/c}", "${x/\\//Q}", "${x////\\\\/}",
+                       "${p//~/z}", '"${p//~/z}"', "${p/#~/z}", "${p#~}", "${p##~}", "x${p/g/~}x", "${q/~/z}",
+                       "${q/a~/z}", "${q//\\~/Z}", "${@////c}", "${p/~\\//z}"))
+    return ("patsub-slash-tilde", shell_BASH, shell_program(
+        "HOME=/h; x=/_/; p=/h/g; q=a~b; set -- /a /b", "echo " + form, 'echo "end=$?"'),
+        ("command", "stdin", "file"))
+
+
 #       printf's quoting and time conversions as bash 5.3 has them: %q takes
 #       a width and cuts the quoted text to the precision, %Q cuts the
 #       argument and quotes the rest, a quoted character is its code point
@@ -17956,6 +17970,7 @@ SHELL_FAMILIES = (
     shell_lang_readonly_subshell_status,
     shell_lang_editing_modes,
     shell_lang_nameref_indirect,
+    shell_lang_patsub_slash_tilde,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,
