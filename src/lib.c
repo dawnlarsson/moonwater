@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        355 routines (341 public, 14 local), 353 of them on all three and 2 local to one.
+        356 routines (342 public, 14 local), 354 of them on all three and 2 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -250,6 +250,7 @@
           memory_to_upper_ascii          public  yes     yes     yes
           memory_translate               public  yes     yes     yes
           memory_utf8_span               public  yes     yes     yes
+          memory_utf8_valid_span         public  yes     yes     yes
           memory_zero                    public  yes     yes     yes
           montgomery_multiply            public  yes     yes     yes
           moonwater_cpu_detect           public  yes     yes     yes
@@ -59303,6 +59304,448 @@ __asm__(
 #undef THREAD_TEXT
 #undef THREAD_TEXT_INNER
 #endif // KERNEL_MODE
+
+/*
+        memory_utf8_valid_span: the longest prefix of a block that is
+        well-formed UTF-8, as {bytes, characters}.
+
+        Well-formed is wc_utf8_decode's and memory_utf8_span's strictness: a
+        lead from C2 to F4, no overlong form (E0 needs A0 or more after it, F0
+        needs 90), no surrogate (ED needs 9F or less), nothing past U+10FFFF
+        (F4 needs 8F or less), and every continuation 80 to BF. The prefix
+        stops before the lead of the first sequence that is not one, and
+        before the lead of a sequence size cuts off, so a caller tells "short"
+        from "invalid" by whether block[x]'s sequence would run past size.
+        Zero size reads nothing.
+
+        This is the question grep asks of every line it prints in a UTF-8
+        locale and wc -m asks of every read. memory_utf8_span answers it one
+        character at a time; here the answer is a block at a time.
+
+        The vector bodies (x86_64 AVX2, arm64 NEON) are Keiser and Lemire's
+        validator: three nibble lookups -- the high nibble of the byte before,
+        its low nibble, and the high nibble of this byte -- are ANDed, and a
+        set bit is an error of some kind between the two; a byte two or three
+        after a three or four byte lead must be a continuation, which the
+        lookups cannot see and a saturating subtract does. The bytes before a
+        block are loaded from memory where the block has them, so a sequence
+        that crosses a block edge is checked by the block it ends in, and the
+        first block, which has none, shifts zeros in. Characters are the bytes
+        that are not continuations, counted with popcnt (addv on arm64).
+
+        A vector only proves a block clean. Where one finds an error, and for
+        the last bytes when they make no whole block and cannot be covered by
+        one ending at size, the scalar walk takes over from the start of the
+        character the block begins inside -- at most three bytes back, and a
+        lead the vector already counted is uncounted -- so the exact stopping
+        byte is always the scalar walk's. That walk is memory_utf8_span's
+        byte logic, stopping where that one would count a byte on its own.
+
+        A block that is all ASCII costs one movemask; the lookups start at
+        the first block that is not, and a block after one whose last three
+        bytes were ASCII goes back to the movemask. The tail is one block that
+        ends at size, overlapping bytes already proven, whose new bytes are
+        counted by shifting the proven ones out of the mask. A sequence cut
+        off by size is found by looking at the last three bytes.
+
+        x86_64 without AVX2 (SSSE3's pshufb is not in the baseline) takes
+        the scalar walk, with SSE2's movemask for its ASCII runs; riscv64 has
+        no V it can assume and takes it too, with naturally aligned words.
+        The section sits in lib.c's userspace tail, so no kernel object has
+        it; its KERNEL_MODE guards only keep it honest if it moves.
+*/
+PURE READS(1, 2) positive2 memory_utf8_valid_span(address_any block, positive size);
+
+//      Keiser--Lemire's error bits, as named in their paper: a sequence too
+//      short or too long, two continuations where one is allowed, the three
+//      overlong forms, a surrogate, and a value past U+10FFFF.
+//      TOO_SHORT 1, TOO_LONG 2, OVERLONG_3 4, TOO_LARGE 8, SURROGATE 16,
+//      OVERLONG_2 32, TOO_LARGE_1000 and OVERLONG_4 64, TWO_CONTS 128.
+//      The three tables are indexed by the byte before's high nibble, its
+//      low nibble, and this byte's high nibble; after them come the bytes
+//      the bodies broadcast.
+#define UTF8_VALID_TABLES                                                     \
+    "   .byte 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02\n"              \
+    "   .byte 0x80, 0x80, 0x80, 0x80, 0x21, 0x01, 0x15, 0x49\n"              \
+    "   .byte 0xe7, 0xa3, 0x83, 0x83, 0x8b, 0xcb, 0xcb, 0xcb\n"              \
+    "   .byte 0xcb, 0xcb, 0xcb, 0xcb, 0xcb, 0xdb, 0xcb, 0xcb\n"              \
+    "   .byte 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01\n"              \
+    "   .byte 0xe6, 0xae, 0xba, 0xba, 0x01, 0x01, 0x01, 0x01\n"              \
+    "   .byte 0x0f, 0xbf, 0x60, 0x70, 0x80, 0, 0, 0\n"
+
+#if X64
+//      One block's check: v in ymm0, the bytes one, two and three before it
+//      in ymm1 to ymm3; the tables in ymm8 to ymm10 and the bytes 0x0f, 0xbf,
+//      0x60, 0x70 and 0x80 in ymm11 to ymm15. Any error jumps to fail.
+#define UTF8_VALID_X64_CHECK(fail)                                            \
+    "vpsrlw $4, %ymm1, %ymm4\n   vpand %ymm11, %ymm4, %ymm4\n"                \
+    "vpshufb %ymm4, %ymm8, %ymm4\n"                                           \
+    "vpand %ymm11, %ymm1, %ymm5\n   vpshufb %ymm5, %ymm9, %ymm5\n"            \
+    "vpsrlw $4, %ymm0, %ymm6\n   vpand %ymm11, %ymm6, %ymm6\n"                \
+    "vpshufb %ymm6, %ymm10, %ymm6\n"                                          \
+    "vpand %ymm5, %ymm4, %ymm4\n   vpand %ymm6, %ymm4, %ymm4\n"               \
+    "vpsubusb %ymm13, %ymm2, %ymm5\n   vpsubusb %ymm14, %ymm3, %ymm6\n"       \
+    "vpor %ymm6, %ymm5, %ymm5\n   vpand %ymm15, %ymm5, %ymm5\n"               \
+    "vpxor %ymm5, %ymm4, %ymm4\n   vptest %ymm4, %ymm4\n   jnz " fail "\n"
+
+__asm__(
+    ASM_SECTION
+    ASM_FUNC(memory_utf8_valid_span)
+    //   rdi = block, rsi = size; rax = bytes proven, rdx = characters
+    "xor %eax, %eax\n   xor %edx, %edx\n"
+#ifndef KERNEL_MODE
+    "cmp $32, %rsi\n   jae .Lutf8_valid_x64_long\n"
+#endif
+    //  The walk: sixteen ASCII bytes a movemask outside the kernel, eight a
+    //  test in it, the last few in one word ending at size, straight to the
+    //  first byte past ASCII in any of them; then one sequence at a time,
+    //  with only a three or four byte lead asking about its second byte's
+    //  bounds. Laid out so a short line that is all ASCII takes no branch
+    //  but its last.
+    ".Lutf8_valid_x64_scalar:\n"
+    "movabs $0x8080808080808080, %r10\n"
+    ".Lutf8_valid_x64_word:\n"
+#ifndef KERNEL_MODE
+    "lea 16(%rax), %r9\n   cmp %rsi, %r9\n   ja .Lutf8_valid_x64_under16\n"
+    ".Lutf8_valid_x64_16:\n"
+    "movdqu (%rdi,%rax), %xmm0\n   pmovmskb %xmm0, %r8d\n"
+    "test %r8d, %r8d\n   jnz .Lutf8_valid_x64_skip\n"
+    "mov %r9, %rax\n   add $16, %rdx\n   lea 16(%rax), %r9\n   cmp %rsi, %r9\n"
+    "jbe .Lutf8_valid_x64_16\n"
+    ".Lutf8_valid_x64_under16:\n"
+#endif
+    "mov %rsi, %rcx\n   sub %rax, %rcx\n   cmp $8, %rcx\n"
+    "jb .Lutf8_valid_x64_short\n"
+    "mov (%rdi,%rax), %r8\n   and %r10, %r8\n   jnz .Lutf8_valid_x64_skip8\n"
+    "add $8, %rax\n   add $8, %rdx\n"
+#ifdef KERNEL_MODE
+    "jmp .Lutf8_valid_x64_word\n"
+#else
+    "sub $8, %rcx\n"
+#endif
+    //  Under eight left: the word that ends at size, the bytes already
+    //  walked shifted out of it, when the block has eight.
+    ".Lutf8_valid_x64_short:\n"
+    "test %rcx, %rcx\n   jz .Lutf8_valid_x64_done\n"
+    "cmp $8, %rsi\n   jb .Lutf8_valid_x64_byte\n"
+    "mov -8(%rdi,%rsi), %r8\n   and %r10, %r8\n"
+    "mov %ecx, %r9d\n   neg %ecx\n   lea 64(,%rcx,8), %ecx\n   shr %cl, %r8\n"
+    "jnz .Lutf8_valid_x64_skip8\n"
+    "add %r9, %rax\n   add %r9, %rdx\n"
+    ASM_RET
+    ".Lutf8_valid_x64_skip8:\n"
+    "bsf %r8, %r8\n   shr $3, %r8d\n   jmp .Lutf8_valid_x64_skipped\n"
+    ".Lutf8_valid_x64_skip:\n   bsf %r8d, %r8d\n"
+    ".Lutf8_valid_x64_skipped:\n"
+    "add %r8, %rax\n   add %r8, %rdx\n   mov %rsi, %rcx\n   sub %rax, %rcx\n"
+    "movzbl (%rdi,%rax), %r8d\n   jmp .Lutf8_valid_x64_lead\n"
+    ".Lutf8_valid_x64_byte:\n"
+    "movzbl (%rdi,%rax), %r8d\n   cmp $0x80, %r8d\n   jae .Lutf8_valid_x64_lead\n"
+    "inc %rax\n   inc %rdx\n   jmp .Lutf8_valid_x64_word\n"
+    //  r8 the lead, rcx what is left from it.
+    ".Lutf8_valid_x64_lead:\n"
+    "cmp $0xc2, %r8d\n   jb .Lutf8_valid_x64_done\n"
+    "cmp $0xe0, %r8d\n   jae .Lutf8_valid_x64_three\n"
+    "cmp $2, %rcx\n   jb .Lutf8_valid_x64_done\n"
+    "movzbl 1(%rdi,%rax), %ecx\n   and $0xc0, %ecx\n   cmp $0x80, %ecx\n"
+    "jne .Lutf8_valid_x64_done\n"
+    "add $2, %rax\n   inc %rdx\n   jmp .Lutf8_valid_x64_word\n"
+    ".Lutf8_valid_x64_three:\n"
+    "cmp $0xf0, %r8d\n   jae .Lutf8_valid_x64_four\n"
+    "cmp $3, %rcx\n   jb .Lutf8_valid_x64_done\n"
+    "movzbl 1(%rdi,%rax), %r9d\n"
+    "cmp $0xe0, %r8d\n   jne 1f\n   cmp $0xa0, %r9d\n   jb .Lutf8_valid_x64_done\n"
+    "1:  cmp $0xed, %r8d\n   jne 2f\n   cmp $0xa0, %r9d\n   jae .Lutf8_valid_x64_done\n"
+    "2:  and $0xc0, %r9d\n   cmp $0x80, %r9d\n   jne .Lutf8_valid_x64_done\n"
+    "movzbl 2(%rdi,%rax), %ecx\n   and $0xc0, %ecx\n   cmp $0x80, %ecx\n"
+    "jne .Lutf8_valid_x64_done\n"
+    "add $3, %rax\n   inc %rdx\n   jmp .Lutf8_valid_x64_word\n"
+    ".Lutf8_valid_x64_four:\n"
+    "cmp $0xf4, %r8d\n   ja .Lutf8_valid_x64_done\n"
+    "cmp $4, %rcx\n   jb .Lutf8_valid_x64_done\n"
+    "movzbl 1(%rdi,%rax), %r9d\n"
+    "cmp $0xf0, %r8d\n   jne 1f\n   cmp $0x90, %r9d\n   jb .Lutf8_valid_x64_done\n"
+    "1:  cmp $0xf4, %r8d\n   jne 2f\n   cmp $0x90, %r9d\n   jae .Lutf8_valid_x64_done\n"
+    "2:  and $0xc0, %r9d\n   cmp $0x80, %r9d\n   jne .Lutf8_valid_x64_done\n"
+    "movzbl 2(%rdi,%rax), %ecx\n   and $0xc0, %ecx\n   cmp $0x80, %ecx\n"
+    "jne .Lutf8_valid_x64_done\n"
+    "movzbl 3(%rdi,%rax), %ecx\n   and $0xc0, %ecx\n   cmp $0x80, %ecx\n"
+    "jne .Lutf8_valid_x64_done\n"
+    "add $4, %rax\n   inc %rdx\n   jmp .Lutf8_valid_x64_word\n"
+    ".Lutf8_valid_x64_done:\n"
+    ASM_RET
+#ifndef KERNEL_MODE
+    //  32 or more: blocks through the validator when there is AVX2.
+    ".Lutf8_valid_x64_long:\n"
+    "cmpb $0, cpu_has_avx2(%rip)\n   je .Lutf8_valid_x64_scalar\n"
+    //  ASCII blocks: one movemask each, and characters are bytes.
+    ".Lutf8_valid_x64_ascii:\n"
+    "vmovdqu (%rdi,%rax), %ymm0\n   vpmovmskb %ymm0, %ecx\n"
+    "test %ecx, %ecx\n   jnz .Lutf8_valid_x64_enter\n"
+    "add $32, %rax\n   lea 32(%rax), %rcx\n   cmp %rsi, %rcx\n"
+    "jbe .Lutf8_valid_x64_ascii\n"
+    "mov %rax, %rdx\n   cmp %rsi, %rax\n   je .Lutf8_valid_x64_return\n"
+    "vmovdqu -32(%rdi,%rsi), %ymm0\n   vpmovmskb %ymm0, %ecx\n"
+    "test %ecx, %ecx\n   jnz .Lutf8_valid_x64_enter\n"
+    "mov %rsi, %rax\n   mov %rsi, %rdx\n"
+    ".Lutf8_valid_x64_return:\n   vzeroupper\n"
+    ASM_RET
+    //  The first block that is not ASCII, or a tail that is not.
+    ".Lutf8_valid_x64_enter:\n   mov %rax, %rdx\n"
+    "vbroadcasti128 .Lutf8_valid_x64_tables(%rip), %ymm8\n"
+    "vbroadcasti128 .Lutf8_valid_x64_tables+16(%rip), %ymm9\n"
+    "vbroadcasti128 .Lutf8_valid_x64_tables+32(%rip), %ymm10\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+48(%rip), %ymm11\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+49(%rip), %ymm12\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+50(%rip), %ymm13\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+51(%rip), %ymm14\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+52(%rip), %ymm15\n"
+    "lea 32(%rax), %rcx\n   cmp %rsi, %rcx\n   ja .Lutf8_valid_x64_tail\n"
+    "vpmovmskb %ymm0, %ecx\n"
+    "test %rax, %rax\n   jnz .Lutf8_valid_x64_before\n"
+    //  At the block's start nothing comes before: shift zeros in.
+    "vperm2i128 $0x08, %ymm0, %ymm0, %ymm4\n"
+    "vpalignr $15, %ymm4, %ymm0, %ymm1\n   vpalignr $14, %ymm4, %ymm0, %ymm2\n"
+    "vpalignr $13, %ymm4, %ymm0, %ymm3\n"
+    "jmp .Lutf8_valid_x64_check\n"
+    //  r8 holds the last block's movemask bits for its final three bytes:
+    //  a sequence may be open across the edge only if one is set.
+    ".balign 16\n"
+    ".Lutf8_valid_x64_block:\n"
+    "vmovdqu (%rdi,%rax), %ymm0\n   vpmovmskb %ymm0, %ecx\n"
+    "or %ecx, %r8d\n   jnz .Lutf8_valid_x64_before\n"
+    "add $32, %rax\n   add $32, %rdx\n"
+    "lea 32(%rax), %r9\n   cmp %rsi, %r9\n   jbe .Lutf8_valid_x64_block\n"
+    "jmp .Lutf8_valid_x64_tail\n"
+    ".Lutf8_valid_x64_before:\n"
+    "vmovdqu -1(%rdi,%rax), %ymm1\n   vmovdqu -2(%rdi,%rax), %ymm2\n"
+    "vmovdqu -3(%rdi,%rax), %ymm3\n"
+    ".Lutf8_valid_x64_check:\n"
+    UTF8_VALID_X64_CHECK(".Lutf8_valid_x64_backup")
+    "vpcmpgtb %ymm12, %ymm0, %ymm5\n   vpmovmskb %ymm5, %r9d\n"
+    "popcnt %r9d, %r9d\n   add %r9, %rdx\n"
+    "mov %ecx, %r8d\n   and $0xe0000000, %r8d\n   add $32, %rax\n"
+    "lea 32(%rax), %r9\n   cmp %rsi, %r9\n   jbe .Lutf8_valid_x64_block\n"
+    //  Fewer than 32 left. One block ending at size proves them, when there
+    //  are three bytes before it to load; its first 32 - left are proven.
+    ".Lutf8_valid_x64_tail:\n"
+    "xor %r9d, %r9d\n   mov %rsi, %rcx\n   sub %rax, %rcx\n"
+    "jz .Lutf8_valid_x64_end\n"
+    "cmp $35, %rsi\n   jb .Lutf8_valid_x64_backup\n"
+    "vmovdqu -32(%rdi,%rsi), %ymm0\n   vmovdqu -33(%rdi,%rsi), %ymm1\n"
+    "vmovdqu -34(%rdi,%rsi), %ymm2\n   vmovdqu -35(%rdi,%rsi), %ymm3\n"
+    UTF8_VALID_X64_CHECK(".Lutf8_valid_x64_backup")
+    "vpcmpgtb %ymm12, %ymm0, %ymm5\n   vpmovmskb %ymm5, %r9d\n"
+    "neg %ecx\n   add $32, %ecx\n   shr %cl, %r9d\n   popcnt %r9d, %r9d\n"
+    //  A sequence size cuts off: a lead in the last three bytes that needs
+    //  more than there is.
+    ".Lutf8_valid_x64_end:\n"
+    "movzbl -1(%rdi,%rsi), %ecx\n   cmp $0xc0, %ecx\n   jae .Lutf8_valid_x64_backup\n"
+    "movzbl -2(%rdi,%rsi), %ecx\n   cmp $0xe0, %ecx\n   jae .Lutf8_valid_x64_backup\n"
+    "movzbl -3(%rdi,%rsi), %ecx\n   cmp $0xf0, %ecx\n   jae .Lutf8_valid_x64_backup\n"
+    "add %r9, %rdx\n   mov %rsi, %rax\n   vzeroupper\n"
+    ASM_RET
+    //  Everything before rax is proven but a sequence that may be open at
+    //  it: step back to that sequence's lead, uncount it, and walk.
+    ".Lutf8_valid_x64_backup:\n   vzeroupper\n"
+    "test %rax, %rax\n   jz .Lutf8_valid_x64_scalar\n"
+    "movzbl -1(%rdi,%rax), %ecx\n   cmp $0xc0, %ecx\n   jae .Lutf8_valid_x64_back1\n"
+    "cmp $0x80, %ecx\n   jb .Lutf8_valid_x64_scalar\n"
+    "cmp $2, %rax\n   jb .Lutf8_valid_x64_scalar\n"
+    "movzbl -2(%rdi,%rax), %ecx\n   cmp $0xc0, %ecx\n   jae .Lutf8_valid_x64_back2\n"
+    "cmp $0x80, %ecx\n   jb .Lutf8_valid_x64_scalar\n"
+    "cmp $3, %rax\n   jb .Lutf8_valid_x64_scalar\n"
+    "movzbl -3(%rdi,%rax), %ecx\n   cmp $0xc0, %ecx\n   jb .Lutf8_valid_x64_scalar\n"
+    "dec %rax\n"
+    ".Lutf8_valid_x64_back2:\n   dec %rax\n"
+    ".Lutf8_valid_x64_back1:\n   dec %rax\n   dec %rdx\n"
+    "jmp .Lutf8_valid_x64_scalar\n"
+    ".pushsection .rodata\n   .balign 16\n"
+    ".Lutf8_valid_x64_tables:\n"
+    UTF8_VALID_TABLES
+    ".popsection\n"
+#endif
+    ASM_END(memory_utf8_valid_span)
+);
+#undef UTF8_VALID_X64_CHECK
+#elif ARM64
+//      The same check a quad at a time: v in v0, the bytes before in v1 to
+//      v3; tables in v28 to v30, and 0x0f, 0x60, 0x70 and 0x80 in v27, v25,
+//      v24 and v23. Any error jumps to fail.
+#define UTF8_VALID_ARM64_CHECK(fail)                                          \
+    "ushr v4.16b, v1.16b, #4\n   tbl v4.16b, {v28.16b}, v4.16b\n"             \
+    "and v5.16b, v1.16b, v27.16b\n   tbl v5.16b, {v29.16b}, v5.16b\n"         \
+    "ushr v6.16b, v0.16b, #4\n   tbl v6.16b, {v30.16b}, v6.16b\n"             \
+    "and v4.16b, v4.16b, v5.16b\n   and v4.16b, v4.16b, v6.16b\n"             \
+    "uqsub v5.16b, v2.16b, v25.16b\n   uqsub v6.16b, v3.16b, v24.16b\n"       \
+    "orr v5.16b, v5.16b, v6.16b\n   and v5.16b, v5.16b, v23.16b\n"            \
+    "eor v4.16b, v4.16b, v5.16b\n   umaxv b4, v4.16b\n   fmov w9, s4\n"       \
+    "cbnz w9, " fail "\n"
+
+__asm__(
+    ASM_SECTION
+    ASM_FUNC(memory_utf8_valid_span)
+    //   x0 = block, x1 = size; x2 = bytes proven, x3 = characters
+    "mov x2, #0\n   mov x3, #0\n"
+#ifndef KERNEL_MODE
+    "cmp x1, #16\n   b.lo .Lutf8_valid_arm64_scalar\n"
+    ".Lutf8_valid_arm64_ascii:\n"
+    "ldr q0, [x0, x2]\n   umaxv b4, v0.16b\n   fmov w9, s4\n"
+    "tbnz w9, #7, .Lutf8_valid_arm64_enter\n"
+    "add x2, x2, #16\n   add x10, x2, #16\n   cmp x10, x1\n"
+    "b.ls .Lutf8_valid_arm64_ascii\n"
+    "mov x3, x2\n   cmp x2, x1\n   b.eq .Lutf8_valid_arm64_return\n"
+    "sub x10, x1, #16\n   ldr q0, [x0, x10]\n   umaxv b4, v0.16b\n"
+    "fmov w9, s4\n   tbnz w9, #7, .Lutf8_valid_arm64_enter\n"
+    "mov x2, x1\n   mov x3, x1\n"
+    ".Lutf8_valid_arm64_return:\n   mov x0, x2\n   mov x1, x3\n"
+    ASM_RET
+    ".Lutf8_valid_arm64_enter:\n   mov x3, x2\n"
+    "adr x9, .Lutf8_valid_arm64_tables\n"
+    "ldp q28, q29, [x9]\n   ldr q30, [x9, #32]\n"
+    "movi v27.16b, #0x0f\n   movi v26.16b, #0xbf\n   movi v25.16b, #0x60\n"
+    "movi v24.16b, #0x70\n   movi v23.16b, #0x80\n   movi v22.16b, #0\n"
+    "add x10, x2, #16\n   cmp x10, x1\n   b.hi .Lutf8_valid_arm64_tail\n"
+    "cbnz x2, .Lutf8_valid_arm64_before\n"
+    "ext v1.16b, v22.16b, v0.16b, #15\n   ext v2.16b, v22.16b, v0.16b, #14\n"
+    "ext v3.16b, v22.16b, v0.16b, #13\n"
+    "b .Lutf8_valid_arm64_check\n"
+    //  w11 is nonzero when the last block's final three bytes are not all
+    //  ASCII, so a sequence may be open across the edge.
+    ".p2align 4\n"
+    ".Lutf8_valid_arm64_block:\n"
+    "ldr q0, [x0, x2]\n   umaxv b4, v0.16b\n   fmov w9, s4\n"
+    "and w9, w9, #0x80\n   orr w9, w9, w11\n   cbnz w9, .Lutf8_valid_arm64_before\n"
+    "add x2, x2, #16\n   add x3, x3, #16\n"
+    "add x10, x2, #16\n   cmp x10, x1\n   b.ls .Lutf8_valid_arm64_block\n"
+    "b .Lutf8_valid_arm64_tail\n"
+    ".Lutf8_valid_arm64_before:\n"
+    "add x10, x0, x2\n   ldur q1, [x10, #-1]\n   ldur q2, [x10, #-2]\n"
+    "ldur q3, [x10, #-3]\n"
+    ".Lutf8_valid_arm64_check:\n"
+    UTF8_VALID_ARM64_CHECK(".Lutf8_valid_arm64_backup")
+    "cmgt v5.16b, v0.16b, v26.16b\n   ushr v5.16b, v5.16b, #7\n"
+    "addv b5, v5.16b\n   fmov w9, s5\n   add x3, x3, x9\n"
+    "umov w11, v0.s[3]\n   lsr w11, w11, #8\n   and w11, w11, #0x80808080\n"
+    "add x2, x2, #16\n"
+    "add x10, x2, #16\n   cmp x10, x1\n   b.ls .Lutf8_valid_arm64_block\n"
+    ".Lutf8_valid_arm64_tail:\n"
+    "mov x12, #0\n   sub x13, x1, x2\n   cbz x13, .Lutf8_valid_arm64_end\n"
+    "cmp x1, #19\n   b.lo .Lutf8_valid_arm64_backup\n"
+    "add x10, x0, x1\n   ldur q0, [x10, #-16]\n   ldur q1, [x10, #-17]\n"
+    "ldur q2, [x10, #-18]\n   ldur q3, [x10, #-19]\n"
+    UTF8_VALID_ARM64_CHECK(".Lutf8_valid_arm64_backup")
+    //  A nibble a byte of mask, shifted past the proven bytes, counted.
+    "cmgt v5.16b, v0.16b, v26.16b\n   shrn v5.8b, v5.8h, #4\n   fmov x12, d5\n"
+    "mov x9, #16\n   sub x9, x9, x13\n   lsl x9, x9, #2\n   lsr x12, x12, x9\n"
+    "fmov d5, x12\n   cnt v5.8b, v5.8b\n   addv b5, v5.8b\n   fmov w12, s5\n"
+    "lsr w12, w12, #2\n"
+    ".Lutf8_valid_arm64_end:\n"
+    "add x10, x0, x1\n"
+    "ldurb w9, [x10, #-1]\n   cmp w9, #0xc0\n   b.hs .Lutf8_valid_arm64_backup\n"
+    "ldurb w9, [x10, #-2]\n   cmp w9, #0xe0\n   b.hs .Lutf8_valid_arm64_backup\n"
+    "ldurb w9, [x10, #-3]\n   cmp w9, #0xf0\n   b.hs .Lutf8_valid_arm64_backup\n"
+    "add x3, x3, x12\n   mov x0, x1\n   mov x1, x3\n"
+    ASM_RET
+    ".Lutf8_valid_arm64_backup:\n"
+    "cbz x2, .Lutf8_valid_arm64_scalar\n"
+    "add x10, x0, x2\n   mov x12, #1\n"
+    ".Lutf8_valid_arm64_back:\n"
+    "sub x9, x10, x12\n   ldrb w9, [x9]\n"
+    "cmp w9, #0xc0\n   b.hs .Lutf8_valid_arm64_lead_back\n"
+    "cmp w9, #0x80\n   b.lo .Lutf8_valid_arm64_scalar\n"
+    "cmp x12, #3\n   b.hs .Lutf8_valid_arm64_scalar\n"
+    "add x12, x12, #1\n   cmp x12, x2\n   b.ls .Lutf8_valid_arm64_back\n"
+    "b .Lutf8_valid_arm64_scalar\n"
+    ".Lutf8_valid_arm64_lead_back:\n"
+    "sub x2, x2, x12\n   sub x3, x3, #1\n"
+    ".Lutf8_valid_arm64_scalar:\n"
+#endif
+    "mov x5, #0x8080808080808080\n"
+    ".Lutf8_valid_arm64_word:\n"
+    "sub x6, x1, x2\n   cmp x6, #8\n   b.lo .Lutf8_valid_arm64_byte\n"
+    "ldr x7, [x0, x2]\n   ands x7, x7, x5\n   b.ne .Lutf8_valid_arm64_skip\n"
+    "add x2, x2, #8\n   add x3, x3, #8\n   b .Lutf8_valid_arm64_word\n"
+    ".Lutf8_valid_arm64_skip:\n"
+    "rbit x7, x7\n   clz x7, x7\n   lsr x7, x7, #3\n"
+    "add x2, x2, x7\n   add x3, x3, x7\n   sub x6, x6, x7\n"
+    "ldrb w7, [x0, x2]\n   b .Lutf8_valid_arm64_lead\n"
+    ".Lutf8_valid_arm64_byte:\n   cbz x6, .Lutf8_valid_arm64_done\n"
+    "ldrb w7, [x0, x2]\n   cmp w7, #0x80\n   b.hs .Lutf8_valid_arm64_lead\n"
+    "add x2, x2, #1\n   add x3, x3, #1\n   b .Lutf8_valid_arm64_word\n"
+    //  w7 the lead, x6 what is left from it.
+    ".Lutf8_valid_arm64_lead:\n"
+    "cmp w7, #0xc2\n   b.lo .Lutf8_valid_arm64_done\n"
+    "cmp w7, #0xf4\n   b.hi .Lutf8_valid_arm64_done\n"
+    "mov x4, #2\n   cmp w7, #0xdf\n   b.ls 1f\n"
+    "mov x4, #3\n   cmp w7, #0xef\n   b.ls 1f\n   mov x4, #4\n"
+    "1:  cmp x6, x4\n   b.lo .Lutf8_valid_arm64_done\n"
+    "add x10, x0, x2\n   ldrb w8, [x10, #1]\n   and w9, w8, #0xc0\n"
+    "cmp w9, #0x80\n   b.ne .Lutf8_valid_arm64_done\n"
+    "cmp w7, #0xe0\n   b.ne 2f\n   cmp w8, #0xa0\n   b.lo .Lutf8_valid_arm64_done\n"
+    "2:  cmp w7, #0xed\n   b.ne 3f\n   cmp w8, #0xa0\n   b.hs .Lutf8_valid_arm64_done\n"
+    "3:  cmp w7, #0xf0\n   b.ne 4f\n   cmp w8, #0x90\n   b.lo .Lutf8_valid_arm64_done\n"
+    "4:  cmp w7, #0xf4\n   b.ne 5f\n   cmp w8, #0x90\n   b.hs .Lutf8_valid_arm64_done\n"
+    "5:  cmp x4, #2\n   b.eq 6f\n"
+    "ldrb w8, [x10, #2]\n   and w8, w8, #0xc0\n   cmp w8, #0x80\n"
+    "b.ne .Lutf8_valid_arm64_done\n"
+    "cmp x4, #3\n   b.eq 6f\n"
+    "ldrb w8, [x10, #3]\n   and w8, w8, #0xc0\n   cmp w8, #0x80\n"
+    "b.ne .Lutf8_valid_arm64_done\n"
+    "6:  add x2, x2, x4\n   add x3, x3, #1\n   b .Lutf8_valid_arm64_word\n"
+    ".Lutf8_valid_arm64_done:\n   mov x0, x2\n   mov x1, x3\n"
+    ASM_RET
+#ifndef KERNEL_MODE
+    ".p2align 4\n"
+    ".Lutf8_valid_arm64_tables:\n"
+    UTF8_VALID_TABLES
+#endif
+    ASM_END(memory_utf8_valid_span)
+);
+#undef UTF8_VALID_ARM64_CHECK
+#elif RISCV64
+__asm__(
+    ASM_SECTION
+    ASM_FUNC(memory_utf8_valid_span)
+    //   a0 = block, a1 = size; t0 = bytes proven, t1 = characters. No V is
+    //   assumed and there is no Zbb, so ASCII runs go eight bytes a test
+    //   from a naturally aligned word, and everything else a byte.
+    "li t0, 0\n   li t1, 0\n   li t2, 0x8080808080808080\n"
+    ".Lutf8_valid_rv_word:\n"
+    "sub t3, a1, t0\n   li t6, 8\n   bltu t3, t6, .Lutf8_valid_rv_byte\n"
+    "add a2, a0, t0\n   andi t6, a2, 7\n   bnez t6, .Lutf8_valid_rv_byte\n"
+    "ld t4, 0(a2)\n   and t4, t4, t2\n   bnez t4, .Lutf8_valid_rv_byte\n"
+    "addi t0, t0, 8\n   addi t1, t1, 8\n   j .Lutf8_valid_rv_word\n"
+    ".Lutf8_valid_rv_byte:\n   beqz t3, .Lutf8_valid_rv_done\n"
+    "add a2, a0, t0\n   lbu t4, 0(a2)\n   li t6, 0x80\n"
+    "bgeu t4, t6, .Lutf8_valid_rv_lead\n"
+    "addi t0, t0, 1\n   addi t1, t1, 1\n   j .Lutf8_valid_rv_word\n"
+    //  t4 the lead, t3 what is left from it, a2 its address.
+    ".Lutf8_valid_rv_lead:\n"
+    "li t6, 0xc2\n   bltu t4, t6, .Lutf8_valid_rv_done\n"
+    "li t6, 0xf4\n   bgtu t4, t6, .Lutf8_valid_rv_done\n"
+    "li t5, 2\n   li t6, 0xdf\n   bleu t4, t6, 1f\n"
+    "li t5, 3\n   li t6, 0xef\n   bleu t4, t6, 1f\n   li t5, 4\n"
+    "1:  bltu t3, t5, .Lutf8_valid_rv_done\n"
+    "lbu a3, 1(a2)\n   andi a4, a3, 0xc0\n   li t6, 0x80\n"
+    "bne a4, t6, .Lutf8_valid_rv_done\n"
+    "li t6, 0xe0\n   bne t4, t6, 2f\n   li t6, 0xa0\n   bltu a3, t6, .Lutf8_valid_rv_done\n"
+    "2:  li t6, 0xed\n   bne t4, t6, 3f\n   li t6, 0xa0\n   bgeu a3, t6, .Lutf8_valid_rv_done\n"
+    "3:  li t6, 0xf0\n   bne t4, t6, 4f\n   li t6, 0x90\n   bltu a3, t6, .Lutf8_valid_rv_done\n"
+    "4:  li t6, 0xf4\n   bne t4, t6, 5f\n   li t6, 0x90\n   bgeu a3, t6, .Lutf8_valid_rv_done\n"
+    "5:  li t6, 2\n   beq t5, t6, 6f\n"
+    "lbu a3, 2(a2)\n   andi a3, a3, 0xc0\n   li t6, 0x80\n"
+    "bne a3, t6, .Lutf8_valid_rv_done\n"
+    "li t6, 3\n   beq t5, t6, 6f\n"
+    "lbu a3, 3(a2)\n   andi a3, a3, 0xc0\n   li t6, 0x80\n"
+    "bne a3, t6, .Lutf8_valid_rv_done\n"
+    "6:  add t0, t0, t5\n   addi t1, t1, 1\n   j .Lutf8_valid_rv_word\n"
+    ".Lutf8_valid_rv_done:\n   mv a0, t0\n   mv a1, t1\n"
+    ASM_RET
+    ASM_END(memory_utf8_valid_span)
+);
+#endif
+#undef UTF8_VALID_TABLES
 
 /*
         The short decimal, read without the frame a hard one needs.

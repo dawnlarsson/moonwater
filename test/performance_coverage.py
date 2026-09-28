@@ -280,6 +280,9 @@ cover('benchmark_context', 'test/checks.c#BENCH_writer_field', 'writer_field_cor
 cover('benchmark_context', 'test/checks.c#BENCH_writer_text', 'buffered_write_core',
       'private core reached by both directly timed buffer-policy wrappers',
       {'buffered_write_core': 'buffered_write'})
+cover('direct_benchmark', 'test/checks.c#BENCH_utf8_valid', 'memory_utf8_valid_span',
+      'paired against grep_text_valid\'s former C over ASCII and mixed lines '
+      'of grep\'s sizes, with and without the AVX2 body')
 cover('benchmark_context', 'test/checks.c#BENCH_span_byte', 'memory_span_byte_wide',
       'the out-of-line SSE and AVX bulk of the directly timed span, which the '
       'same row reaches for every run past sixteen bytes',

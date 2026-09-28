@@ -23544,41 +23544,7 @@ static bool grep_literal_bounded(const grep_plan address_to plan,
 */
 static PURE bool grep_text_valid(string_address bytes, positive length)
 {
-        const p8 address_to at = (const p8 address_to)bytes;
-        positive i = 0;
-
-        while (i < length)
-        {
-                while (i + 8 <= length)
-                {
-                        p64 word;
-
-                        memory_copy_apart(address_of word, at + i, 8);
-
-                        if (word & 0x8080808080808080ull)
-                                break;
-
-                        i += 8;
-                }
-
-                if (i < length)
-                        i += string_span_max(at + i, length - i,
-                                             string_set_ascii);
-
-                if (i == length)
-                        break;
-
-                p32 code;
-                positive size;
-
-                if (wc_utf8_decode(at + i, length - i, address_of code,
-                                   address_of size) != WC_VALID)
-                        return false;
-
-                i += size;
-        }
-
-        return true;
+        return memory_utf8_valid_span(bytes, length).x == length;
 }
 
 static bool grep_line_matches(const grep_plan address_to plan,

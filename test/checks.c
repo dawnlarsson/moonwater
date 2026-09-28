@@ -13965,7 +13965,7 @@ fn check_span_byte()
         X(string_to_number_unsigned_checked) X(program_argument)              \
         X(program_environment) X(jump_to_mark) X(signal_jump_mark)            \
         X(signal_jump_to_mark) X(memchr) X(memrchr) X(memccpy) X(memset)      \
-        X(strchr) X(strrchr) X(strchrnul) X(strnchr)
+        X(strchr) X(strrchr) X(strchrnul) X(strnchr) X(memory_utf8_valid_span)
 
 #ifdef VERIFY_NARROW_KERNEL
 #define DIRTY_ROUTINE(name) kernel_##name
@@ -14159,6 +14159,7 @@ typedef positive (*dirty_6)(positive, positive, positive, positive, positive,
                             positive);
 typedef positive (*dirty_7)(positive, positive, positive, positive, positive,
                             positive, positive);
+typedef positive2 (*dirty_pair_2)(positive, positive);
 typedef positive2 (*dirty_pair_3)(positive, positive, positive);
 typedef positive2 (*dirty_pair_5)(positive, positive, positive, positive,
                                   positive);
@@ -14575,6 +14576,69 @@ static fn dirty_words_one(positive size, positive residue, positive turn)
 }
 
 static fn dirty_words(void) { dirty_plane(dirty_words_one, 1000); }
+
+/*
+        The well-formed UTF-8 prefix, against a walk written here: pieces of
+        one to four bytes, well formed and not, so the stop falls at every
+        place and a sequence is cut by size at every length. Its arguments are
+        a pointer and a size, nothing narrower; the entry is here for the
+        kernel object's body, which only this lane calls.
+*/
+static positive2 dirty_utf8_reference(const p8 address_to at, positive size)
+{
+        positive2 answer = {0};
+
+        while (answer.x < size)
+        {
+                p8 lead = at[answer.x];
+                positive need = lead < 0x80 ? 1 : lead < 0xc2 ? 0 : lead < 0xe0 ? 2
+                                : lead < 0xf0 ? 3 : lead < 0xf5 ? 4 : 0;
+                if (!need || need > size - answer.x)
+                        break;
+                p8 low = lead == 0xe0 ? 0xa0 : lead == 0xf0 ? 0x90 : 0x80;
+                p8 high = lead == 0xed ? 0x9f : lead == 0xf4 ? 0x8f : 0xbf;
+                bool good = true;
+                for (positive i = 1; i < need; i++)
+                {
+                        p8 byte = at[answer.x + i];
+                        if (byte < (i == 1 ? low : 0x80) || byte > (i == 1 ? high : 0xbf))
+                                good = false;
+                }
+                if (!good)
+                        break;
+                answer.x += need;
+                answer.y++;
+        }
+        return answer;
+}
+
+static fn dirty_utf8_valid_one(positive size, positive residue, positive turn)
+{
+        static const p8 pieces[][5] = {
+                {1, 'a'}, {2, 0xc3, 0xa9}, {3, 0xe6, 0xbc, 0xa2}, {4, 0xf0, 0x9f, 0x99, 0x82},
+                {3, 0xed, 0x9f, 0xbf}, {4, 0xf4, 0x8f, 0xbf, 0xbf}, {3, 0xe0, 0xa0, 0x80},
+                {1, 0x80}, {2, 0xc0, 0xaf}, {3, 0xed, 0xa0, 0x80}, {1, 0xf5},
+                {4, 0xf4, 0x90, 0x80, 0x80}, {3, 0xe0, 0x9f, 0xbf}, {1, 0xe6},
+        };
+        p8 address_to at = dirty_in + 64 + residue;
+        //      Mostly well formed, so the stop lands late as often as early.
+        positive bad = 7 + turn % 7, odds = 2 + turn % 60;
+
+        for (positive i = 0; i < size + 8;)
+        {
+                positive pick = dirty_random() % odds ? dirty_random() % 7 : bad;
+                for (positive k = 0; k < pieces[pick][0] && i < size + 8; k++)
+                        at[i++] = pieces[pick][1 + k];
+        }
+        if (!DIRTY_HAS(memory_utf8_valid_span))
+                return;
+        positive2 clean = dirty_utf8_reference(at, size);
+        positive2 answer = DIRTY(pair_2, memory_utf8_valid_span)(P(at), size);
+        AGREE(memory_utf8_valid_span, clean.x, answer.x, size << 16 | residue << 8);
+        AGREE(memory_utf8_valid_span, clean.y, answer.y, size << 16 | residue << 8);
+}
+
+static fn dirty_utf8_valid(void) { dirty_plane(dirty_utf8_valid_one, 4000); }
 
 /*
         Records holding a needle, split at a delimiter that is a newline,
@@ -15446,6 +15510,7 @@ fn check_dirty_arguments(void)
         dirty_tiers(dirty_records);
         dirty_tiers(dirty_prepare);
         dirty_tiers(dirty_strings);
+        dirty_tiers(dirty_utf8_valid);
         dirty_writers();
         dirty_into();
         dirty_buffered();
@@ -31799,6 +31864,154 @@ static fn utf8_span_check(p8 address_to bytes, positive size, positive count)
         check("bounded UTF-8 span", got.x == at && got.y == characters);
 }
 
+/*
+        memory_utf8_valid_span against the same oracle: the prefix stops at
+        the first byte past ASCII that the oracle takes on its own, which is
+        both an invalid sequence and one size cuts short.
+*/
+static positive utf8_valid_wrong;
+
+static fn utf8_valid_check(p8 address_to bytes, positive size)
+{
+        positive at = 0, characters = 0;
+        while (at < size)
+        {
+                positive width = utf8_reference_width(bytes + at, size - at);
+                if (width == 1 && bytes[at] >= 0x80)
+                        break;
+                at += width;
+                characters++;
+        }
+        positive2 got = memory_utf8_valid_span(bytes, size);
+        checks++;
+        if (got.x != at || got.y != characters)
+        {
+                failures++;
+                if (utf8_valid_wrong++ < 8)
+                        string_format(log, "  FAIL memory_utf8_valid_span size %p: "
+                                           "%p/%p where %p/%p\n",
+                                      size, got.x, got.y, at, characters);
+        }
+}
+
+//      Characters of each width, well formed, at each bound the strict
+//      rules draw; and the sequences that are not, one a kind.
+static const p8 utf8_valid_good[][5] = {
+        {1, 'a'}, {1, 0x7f}, {2, 0xc2, 0x80}, {2, 0xc3, 0xa9}, {2, 0xdf, 0xbf},
+        {3, 0xe0, 0xa0, 0x80}, {3, 0xe6, 0xbc, 0xa2}, {3, 0xed, 0x9f, 0xbf},
+        {3, 0xef, 0xbf, 0xbf}, {4, 0xf0, 0x90, 0x80, 0x80},
+        {4, 0xf0, 0x9f, 0x99, 0x82}, {4, 0xf4, 0x8f, 0xbf, 0xbf},
+};
+static const p8 utf8_valid_bad[][5] = {
+        {1, 0x80}, {1, 0xbf}, {2, 0xc0, 0x80}, {2, 0xc1, 0xbf}, {1, 0xf5},
+        {1, 0xff}, {3, 0xe0, 0x80, 0x80}, {3, 0xe0, 0x9f, 0xbf},
+        {3, 0xed, 0xa0, 0x80}, {3, 0xed, 0xbf, 0xbf},
+        {4, 0xf0, 0x80, 0x80, 0x80}, {4, 0xf0, 0x8f, 0xbf, 0xbf},
+        {4, 0xf4, 0x90, 0x80, 0x80}, {4, 0xf8, 0x88, 0x80, 0x80},
+        {2, 0xc3, 'a'}, {2, 0xe6, 0xbc}, {3, 0xf0, 0x9f, 0x99},
+        {2, 0xe6, 0xc3}, {3, 0xc3, 0xa9, 0xa9},
+};
+
+//      A run of background characters: all ASCII, all of one width, or a
+//      mix, with the first character at phase so every block edge falls
+//      inside one somewhere.
+static fn utf8_valid_fill(p8 address_to out, positive size, positive background,
+                          positive phase, positive address_to random)
+{
+        static const positive only[4] = {0, 3, 6, 10};
+        positive at = 0, turn = phase;
+        while (at < size)
+        {
+                positive pick;
+                if (background < 4)
+                        pick = only[background] + (turn % 2) * (background ? 1 : 0);
+                else
+                {
+                        address_to random = address_to random * 1664525 + 1013904223;
+                        pick = (address_to random >> 16) % array_count(utf8_valid_good);
+                        if (background == 5 && (address_to random >> 8) % 4)
+                                pick = 0;
+                }
+                const p8 address_to character = utf8_valid_good[pick];
+                for (positive i = 0; i < character[0] && at < size; i++)
+                        out[at++] = character[1 + i];
+                turn++;
+        }
+}
+
+static fn utf8_valid_checks(p8 address_to guarded, positive quantum)
+{
+        static p8 bytes[64 + 400 + 64];
+        positive random = 0x2545f491;
+        for (positive background = 0; background < 6; background++)
+                for (positive align = 0; align < 64; align += background < 4 ? 1 : 3)
+                        for (positive size = 0; size <= 200; size++)
+                        {
+                                p8 address_to at = bytes + align;
+                                utf8_valid_fill(at, size + 8, background, align + size, address_of random);
+                                utf8_valid_check(at, size);
+                                // Every place for an error, each kind in turn,
+                                // at a quarter of the alignments.
+                                if (align % 4 != background % 4)
+                                        continue;
+                                for (positive place = 0; place < size; place += size > 140 ? 7 : 1)
+                                {
+                                        const p8 address_to bad = utf8_valid_bad[
+                                            (place + size + align + background) % array_count(utf8_valid_bad)];
+                                        utf8_valid_fill(at, size + 8, background, align + size, address_of random);
+                                        for (positive i = 0; i < bad[0] && place + i < size + 8; i++)
+                                                at[place + i] = bad[1 + i];
+                                        utf8_valid_check(at, size);
+                                }
+                        }
+        //      Past the tail's reach, with an error far in and none at all.
+        for (positive background = 0; background < 6; background++)
+                for (positive size = 201; size <= 400; size += 13)
+                {
+                        utf8_valid_fill(bytes, size, background, size, address_of random);
+                        utf8_valid_check(bytes, size);
+                        bytes[size - 40] = 0xc0;
+                        utf8_valid_check(bytes, size);
+                }
+        utf8_valid_check(null, 0);
+        if (!guarded)
+                return;
+        //      Against both guards: nothing before the block, nothing after.
+        for (positive background = 0; background < 6; background++)
+                for (positive size = 0; size <= 200; size++)
+                {
+                        p8 address_to tail = guarded + quantum * 2 - size;
+                        p8 address_to head = guarded + quantum;
+                        utf8_valid_fill(tail, size, background, size, address_of random);
+                        utf8_valid_check(tail, size);
+                        utf8_valid_fill(head, size, background, size, address_of random);
+                        utf8_valid_check(head, size);
+                        if (size)
+                        {
+                                tail[size - 1] = 0xe6;
+                                utf8_valid_check(tail, size);
+                                head[0] = 0x80;
+                                utf8_valid_check(head, size);
+                        }
+                }
+}
+
+//      Once per body: on x86_64 the AVX2 validator and the walk under it.
+static fn utf8_valid_tiers(p8 address_to guarded, positive quantum)
+{
+#if X64
+        p8 avx2 = cpu_has_avx2;
+        for (positive tier = 0; tier < 2; tier++)
+        {
+                cpu_has_avx2 = tier ? 0 : avx2;
+                utf8_valid_checks(guarded, quantum);
+        }
+        cpu_has_avx2 = avx2;
+#else
+        utf8_valid_checks(guarded, quantum);
+#endif
+}
+
 static positive utf8_encode_reference(p8 address_to out, positive scalar)
 {
         if (scalar > 0x10ffff || (scalar >= 0xd800 && scalar < 0xe000))
@@ -31963,8 +32176,11 @@ b32 main()
                 }
                 utf8_span_check(guarded, 0, 8);
                 utf8_span_check(guarded, 8, 0);
+                utf8_valid_tiers(guarded, quantum);
                 memory_free(guarded, quantum * 3);
         }
+        else
+                utf8_valid_tiers(null, 0);
         return test_report(null);
 }
 #endif /* CHECK_utf8 */
@@ -89594,6 +89810,183 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_net_parsers */
+
+#ifdef BENCH_utf8_valid
+/*
+        memory_utf8_valid_span against the C it replaced in grep_text_valid:
+        eight ASCII bytes a copy and test, string_span_max over the ASCII set,
+        and a strict decode a sequence at a time. Lines of grep's sizes, all
+        ASCII and the survey's mixed line (Latin, CJK, Greek, Cyrillic, an
+        emoji), whose valid prefix is the whole line in both. On x86_64 also
+        with the AVX2 body turned off, so the walk under it is timed too.
+*/
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define NOT_INLINED __attribute__((noinline, noclone))
+#define TRIES 9
+#define TARGET_BYTES (1u << 24)
+
+static p8 block[1u << 17];
+static volatile positive sink;
+
+static PURE p8 former_decode(const p8 address_to at, positive size,
+                             positive address_to length)
+{
+        p8 lead = at[0], low = 0x80, high = 0xbf;
+        positive need;
+
+        address_to length = 1;
+        if (lead < 0x80)
+                return 1;
+        if (lead < 0xc2 || lead > 0xf4)
+                return 0;
+        if (lead <= 0xdf)
+                need = 2;
+        else if (lead <= 0xef)
+        {
+                need = 3;
+                low = lead == 0xe0 ? 0xa0 : 0x80;
+                high = lead == 0xed ? 0x9f : 0xbf;
+        }
+        else
+        {
+                need = 4;
+                low = lead == 0xf0 ? 0x90 : 0x80;
+                high = lead == 0xf4 ? 0x8f : 0xbf;
+        }
+        for (positive i = 1; i < need; i++)
+        {
+                if (i == size)
+                        return 2;
+                p8 byte = at[i];
+                if (byte < (i == 1 ? low : 0x80) || byte > (i == 1 ? high : 0xbf))
+                        return 0;
+        }
+        address_to length = need;
+        return 1;
+}
+
+NOT_INLINED static positive former_valid(address_any bytes, positive length)
+{
+        const p8 address_to at = bytes;
+        positive i = 0;
+
+        while (i < length)
+        {
+                while (i + 8 <= length)
+                {
+                        p64 word;
+
+                        memory_copy_apart(address_of word, at + i, 8);
+                        if (word & 0x8080808080808080ull)
+                                break;
+                        i += 8;
+                }
+                if (i < length)
+                        i += string_span_max(at + i, length - i, string_set_ascii);
+                if (i == length)
+                        break;
+
+                positive size;
+
+                if (former_decode(at + i, length - i, address_of size) != 1)
+                        return false;
+                i += size;
+        }
+        return true;
+}
+
+//      grep_text_valid as it is now, inlined where it is called: the one call
+//      is the library's, as the former's one call is its own.
+static inline positive library_valid(address_any bytes, positive length)
+{
+        return memory_utf8_valid_span(bytes, length).x == length;
+}
+
+static positive rounds_for(positive n){positive r=TARGET_BYTES/(n?n:1);if(r<64)r=64;if(r>(1u<<21))r=1u<<21;return r;}
+static p64 run(bool assembly, positive n, positive rounds)
+{
+        p64 start = get_cpu_time();
+        if (assembly)
+                while (rounds--) sink += library_valid(block, n);
+        else
+                while (rounds--) sink += former_valid(block, n);
+        return get_cpu_time() - start;
+}
+
+static fn fill(positive n, bool mixed)
+{
+        static const char line[] = "h\xc3\xa9llo w\xc3\xb6rld \xc3\xb1" "and\xc3\xba "
+            "\xe6\xbc\xa2\xe5\xad\x97\xe3\x83\x86\xe3\x82\xad\xe3\x82\xb9\xe3\x83\x88 "
+            "\xce\x95\xce\xbb\xce\xbb\xce\xb7\xce\xbd\xce\xb9\xce\xba\xce\xac "
+            "\xd1\x80\xd1\x83\xd1\x81\xd1\x81\xd0\xba\xd0\xb8\xd0\xb9 "
+            "\xd1\x82\xd0\xb5\xd0\xba\xd1\x81\xd1\x82 emoji \xf0\x9f\x99\x82 "
+            "plain ascii words here ";
+        static const char ascii[] = "        static positive rounds_for(positive n) { return n; } ";
+        const char address_to from = mixed ? line : ascii;
+        positive period = (mixed ? sizeof(line) : sizeof(ascii)) - 1;
+        for (positive i = 0; i < n; i++)
+                block[i] = (p8)from[i % period];
+        //      Whole characters only: blank a sequence the size cuts.
+        positive last = n;
+        while (last && (block[last - 1] & 0xc0) == 0x80)
+                last--;
+        if (last && block[last - 1] >= 0xc0)
+                for (positive i = last - 1; i < n; i++)
+                        block[i] = ' ';
+}
+
+static fn row(positive n, bool mixed)
+{
+        positive raw[TRIES], rounds = rounds_for(n);
+        p64 best_asm = ~(p64)0, best_c = ~(p64)0;
+        fill(n, mixed);
+        if (library_valid(block, n) != 1 || former_valid(block, n) != 1)
+        {
+                string_format(log, "  %p bytes: not valid\n", n);
+                return;
+        }
+        for (positive trial = 0; trial < TRIES; trial++)
+        {
+                p64 wide, former;
+                BENCH_BOTH_ORDERS(trial, wide, former, n, rounds);
+                if (wide < best_asm) best_asm = wide;
+                if (former < best_c) best_c = former;
+                raw[trial] = wide * 10000 / max(former, (p64)1);
+        }
+        order(raw, TRIES);
+        string_format(log, "  %s %p bytes  C %p  asm %p ticks/1000 calls  asm/C %p.%p%%\n",
+                      mixed ? "mixed" : "ascii", n, best_c * 1000 / rounds,
+                      best_asm * 1000 / rounds, raw[TRIES / 2] / 100,
+                      raw[TRIES / 2] % 100);
+}
+
+b32 main(void)
+{
+        static const positive sizes[] = {8, 16, 24, 31, 40, 64, 118, 256, 1024, 65536};
+#if X64
+        p8 avx2 = cpu_has_avx2;
+        for (positive tier = 0; tier < 2; tier++)
+        {
+                cpu_has_avx2 = tier ? 0 : avx2;
+                string_format(log, "memory_utf8_valid_span, %s, paired median of %p\n",
+                              cpu_has_avx2 ? "AVX2" : "without AVX2", (positive)TRIES);
+#else
+        {
+                string_format(log, "memory_utf8_valid_span, paired median of %p\n",
+                              (positive)TRIES);
+#endif
+                for (positive i = 0; i < array_count(sizes); i++)
+                        for (positive mixed = 0; mixed < 2; mixed++)
+                                row(sizes[i], mixed);
+        }
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_utf8_valid */
 
 #ifdef BENCH_cells_ascii
 /*

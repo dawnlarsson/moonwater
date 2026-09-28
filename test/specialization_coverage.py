@@ -420,6 +420,10 @@ cover('folds_already', 'count', 'memory_utf8_span',
       'and input bytes remain runtime, so a separate decoder would duplicate '
       'validation without removing its decisions')
 
+cover('folds_already', 'size', 'memory_utf8_valid_span',
+      'every caller hands a line or read length known only at run time; the '
+      'bytes decide the path, so a fixed size would remove no decision')
+
 cover('folds_already', 'size', 'memory_into_hex',
       'production dump/checksum spans carry runtime lengths; fixed expansions '
       'would duplicate bounded scalar/vector conversion with no constant caller')
