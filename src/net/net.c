@@ -1343,6 +1343,31 @@ static COLD bool dns_reply_identity(
                                request + DNS_HEADER, question_length);
 }
 
+/* Walk every declared resource record, including sections this IPv4 resolver
+   does not otherwise consume. A usable A answer cannot make malformed
+   authority/additional framing or unaccounted trailing bytes disappear. */
+static COLD bipolar dns_records_end(p8 address_to message, positive size,
+                               positive at, positive count)
+{
+        for (positive record = 0; record < count; record++)
+        {
+                bipolar ended = dns_skip_name(message, size, at);
+                p16 data_length;
+
+                if (ended < 0)
+                        return DNS_MALFORMED;
+                at = (positive)ended;
+                if (at > size || size - at < 10)
+                        return DNS_MALFORMED;
+                data_length = network_load_16(message + at + 8);
+                at += 10;
+                if (data_length > size - at)
+                        return DNS_MALFORMED;
+                at += data_length;
+        }
+        return (bipolar)at;
+}
+
 /* UDP and TCP answers pass through the same response, rcode and record
    validation.  Only a validated truncation indication has a distinct internal
    result so the transport can retry it over TCP. */
@@ -1353,6 +1378,8 @@ static COLD bipolar dns_reply_result(
 {
         p16 flags;
         p16 answers;
+        p16 authorities;
+        p16 additional;
         positive at;
 
         positive available = size > DNS_MAX_MESSAGE ? DNS_MAX_MESSAGE : size;
@@ -1378,6 +1405,29 @@ static COLD bipolar dns_reply_result(
         if (size > DNS_MAX_MESSAGE)
                 return DNS_MALFORMED;
 
+        answers = network_load_16(reply + 6);
+        authorities = network_load_16(reply + 8);
+        additional = network_load_16(reply + 10);
+        at = DNS_HEADER + question_length;
+        {
+                bipolar records_end = dns_records_end(reply, size, at, answers);
+
+                if (records_end < 0)
+                        return DNS_MALFORMED;
+                records_end = dns_records_end(reply, size,
+                                              (positive)records_end,
+                                              authorities);
+                if (records_end < 0)
+                        return DNS_MALFORMED;
+                records_end = dns_records_end(reply, size,
+                                              (positive)records_end,
+                                              additional);
+                if (records_end < 0 || (positive)records_end != size)
+                        return DNS_MALFORMED;
+        }
+        /* An error response can carry authority/additional records and is no
+           less attacker-controlled than a successful one. Classify its rcode
+           only after the entire non-truncated message has been validated. */
         switch (flags & DNS_CODE_MASK)
         {
         case 0:
@@ -1387,9 +1437,6 @@ static COLD bipolar dns_reply_result(
         default:
                 return DNS_REFUSED;
         }
-
-        answers = network_load_16(reply + 6);
-        at = DNS_HEADER + question_length;
         return dns_answer_address(reply, size, at, answers, DNS_HEADER, found);
 }
 
@@ -4972,6 +5019,53 @@ static COLD bool tls_oid_is(const p8 address_to bytes, positive length,
         return length == oid_length && !memory_compare(bytes, oid, oid_length);
 }
 
+/* Version is DEFAULT v1. DER omits a field carrying its default value, so an
+   explicit wrapper may contain only v2 or v3. Keep this small state transition
+   separate so the default, both valid encodings, and the non-canonical v1
+   spelling can be tested without constructing a whole signed certificate. */
+static COLD bipolar tls_parse_version(p8 address_to der, positive size,
+                                 positive address_to at,
+                                 p8 address_to version)
+{
+        positive version_stop = 0;
+        positive value_stop = 0;
+
+        address_to version = 0;
+        if (address_to at >= size || der[address_to at] != 0xa0)
+                return TLS_OK;
+        if (tls_asn1_enter(der, size, 0xa0, at, address_of version_stop) ||
+            tls_asn1_enter(der, version_stop, 0x02, at, address_of value_stop) ||
+            address_to at + 1 != value_stop || value_stop != version_stop ||
+            !der[address_to at] || der[address_to at] > 2)
+                return TLS_FAIL;
+        address_to version = der[address_to at];
+        address_to at = version_stop;
+        return TLS_OK;
+}
+
+/* Every OBJECT IDENTIFIER arc is a minimally encoded base-128 integer.  DER
+   forbids a leading zero continuation group (0x80), and every arc must have a
+   terminating octet.  Checking the contents, rather than only the enclosing
+   tag and length, matters to extension identity: otherwise a non-canonical
+   spelling could evade duplicate-OID detection and create a validator
+   differential over the same signed certificate. */
+static COLD bool tls_oid_der_valid(const p8 address_to bytes, positive length)
+{
+        positive at = 0;
+
+        if (!length)
+                return false;
+        while (at < length)
+        {
+                if (bytes[at] == 0x80)
+                        return false;
+                while (bytes[at++] & 0x80)
+                        if (at == length)
+                                return false;
+        }
+        return true;
+}
+
 /* DER INTEGERs used for keys and ECDSA signatures are strictly positive and
    minimally encoded.  Return the magnitude without the one permitted sign
    octet. */
@@ -5118,6 +5212,9 @@ static COLD bool tls_parse_san(p8 address_to value, positive length,
                 if (tag == 0x87 && name_stop - at != 4 &&
                     name_stop - at != 16)
                         return false;
+                if (tag == 0x88 &&
+                    !tls_oid_der_valid(value + at, name_stop - at))
+                        return false;
                 if (host && tls_general_name_match(host, tag, value + at,
                                                    name_stop - at))
                         found = true;
@@ -5229,7 +5326,12 @@ static COLD bool tls_date_value(p8 tag, p8 address_to text, positive length,
                 year = year * 10 + text[i] - '0';
         if (year_digits == 2)
                 year += year >= 50 ? 1900 : 2000;
-        if (!year)
+        /* RFC 5280 fixes the otherwise overlapping ASN.1 time choices:
+           1950..2049 use UTCTime and 2050 onward uses GeneralizedTime. A
+           GeneralizedTime spelling of a 20xx year is numerically clear but
+           non-canonical, and accepting it creates a validator differential
+           over signed validity bytes. */
+        if (!year || (tag == 0x18 && year < 2050))
                 return false;
 
         month = (positive)(text[year_digits] - '0') * 10 +
@@ -5305,9 +5407,11 @@ static COLD bipolar tls_parse_basic_constraints(p8 address_to value, positive le
                 if (tls_asn1_enter(value, stop, 0x01, address_of at,
                                    address_of boolean_stop) ||
                     at + 1 != boolean_stop ||
-                    (value[at] != 0 && value[at] != 0xff))
+                    value[at] != 0xff)
                         return TLS_FAIL;
-                cert->ca = value[at] != 0;
+                /* cA also has DEFAULT FALSE and must be omitted when false in
+                   DER. An encoded value is therefore canonical TRUE only. */
+                cert->ca = true;
                 at = boolean_stop;
         }
         if (at < stop && value[at] == 0x02)
@@ -5339,13 +5443,38 @@ static COLD bipolar tls_parse_key_usage(p8 address_to value, positive length,
         positive at = 0;
         positive stop = 0;
         p8 unused;
+        p8 canonical_unused = 0;
+        p8 final;
 
         if (tls_asn1_enter(value, length, 0x03, address_of at, address_of stop) ||
             stop != length || at >= stop)
                 return TLS_FAIL;
         unused = value[at++];
-        if (unused > 7 || at >= stop ||
-            (unused && (value[stop - 1] & (((p8)1 << unused) - 1))))
+        if (unused > 7 || at >= stop)
+                return TLS_FAIL;
+        final = value[stop - 1];
+        if (!final)
+                return TLS_FAIL;
+        while (!(final & 1))
+        {
+                canonical_unused++;
+                final >>= 1;
+        }
+        /* KeyUsage is a named bit list. DER removes every trailing zero bit,
+           so the unused-bit count must be exactly the trailing-zero count in
+           the final nonzero octet. Merely checking that declared unused bits
+           are zero accepts alternate signed encodings and trailing zero
+           octets which stricter certificate validators reject. */
+        if (unused != canonical_unused)
+                return TLS_FAIL;
+        /* RFC 5280 defines exactly nine KeyUsage bits. The ninth is
+           decipherOnly and is permitted only with keyAgreement. Rejecting
+           further set bits matters even though this client does not act on
+           them: silently ignoring undefined authorization bits creates a
+           profile differential with validators that enforce the schema. */
+        if (stop - at > 2 ||
+            (stop - at == 2 &&
+             (value[at + 1] != 0x80 || !(value[at] & 0x08))))
                 return TLS_FAIL;
         cert->digital_signature = (value[at] & 0x80) != 0;
         cert->key_cert_sign = (value[at] & 0x04) != 0;
@@ -5366,7 +5495,8 @@ static COLD bipolar tls_parse_extended_key_usage(p8 address_to value, positive l
                 positive oid_stop = 0;
 
                 if (tls_asn1_enter(value, stop, 0x06, address_of at,
-                                   address_of oid_stop))
+                                   address_of oid_stop) ||
+                    !tls_oid_der_valid(value + at, oid_stop - at))
                         return TLS_FAIL;
                 if (tls_oid_is(value + at, oid_stop - at, tls_oid_server_auth, 8))
                         cert->server_auth = true;
@@ -5380,6 +5510,10 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                                     tls_cert address_to cert,
                                     string_address host)
 {
+        enum { TLS_CERT_EXTENSIONS_MAX = 64 };
+        p8 address_to seen_oid[TLS_CERT_EXTENSIONS_MAX];
+        positive seen_length[TLS_CERT_EXTENSIONS_MAX];
+        positive seen_count = 0;
         bool issuer_unique = false;
         bool subject_unique = false;
         positive extensions_stop = 0;
@@ -5411,7 +5545,7 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
             extensions_stop != tbs_stop ||
             tls_asn1_enter(der, extensions_stop, 0x30, address_of at,
                            address_of sequence_stop) ||
-            sequence_stop != extensions_stop)
+            sequence_stop != extensions_stop || at == sequence_stop)
                 return TLS_FAIL;
 
         while (at < sequence_stop)
@@ -5427,8 +5561,24 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                         return TLS_FAIL;
                 oid_at = at;
                 if (tls_asn1_enter(der, extension_stop, 0x06, address_of oid_at,
-                                   address_of oid_stop))
+                                   address_of oid_stop) ||
+                    !tls_oid_der_valid(der + oid_at, oid_stop - oid_at))
                         return TLS_FAIL;
+                /* RFC 5280 permits one instance of an extension in a
+                   certificate. Track unknown OIDs too: accepting two merely
+                   because this client does not currently interpret them
+                   creates a parser differential the day another component
+                   does. The ceiling also bounds comparison work for a signed
+                   but hostile certificate. */
+                if (seen_count == TLS_CERT_EXTENSIONS_MAX)
+                        return TLS_FAIL;
+                for (positive seen = 0; seen < seen_count; seen++)
+                        if (seen_length[seen] == oid_stop - oid_at &&
+                            !memory_compare(seen_oid[seen], der + oid_at,
+                                            seen_length[seen]))
+                                return TLS_FAIL;
+                seen_oid[seen_count] = der + oid_at;
+                seen_length[seen_count++] = oid_stop - oid_at;
                 at = oid_stop;
                 if (at < extension_stop && der[at] == 0x01)
                 {
@@ -5437,9 +5587,14 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                         if (tls_asn1_enter(der, extension_stop, 0x01, address_of at,
                                            address_of boolean_stop) ||
                             at + 1 != boolean_stop ||
-                            (der[at] != 0 && der[at] != 0xff))
+                            der[at] != 0xff)
                                 return TLS_FAIL;
-                        critical = der[at] != 0;
+                        /* critical has DEFAULT FALSE. DER omits a component
+                           carrying its default value, so an encoded BOOLEAN
+                           can only be canonical TRUE. Accepting explicit
+                           FALSE lets BER and DER validators disagree over the
+                           same signed extension envelope. */
+                        critical = true;
                         at = boolean_stop;
                 }
                 if (tls_asn1_enter(der, extension_stop, 0x04, address_of at,
@@ -5541,21 +5696,8 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
         at = (positive)(cert->tbs - der);
         if (tls_asn1_enter(der, length, 0x30, address_of at, address_of tbs_stop))
                 return TLS_FAIL;
-        if (at < tbs_stop && der[at] == 0xa0)
-        {
-                positive version_stop = 0;
-                positive value_stop = 0;
-
-                if (tls_asn1_enter(der, tbs_stop, 0xa0, address_of at,
-                                   address_of version_stop) ||
-                    tls_asn1_enter(der, version_stop, 0x02, address_of at,
-                                   address_of value_stop) ||
-                    at + 1 != value_stop || value_stop != version_stop ||
-                    der[at] > 2)
-                        return TLS_FAIL;
-                version = der[at];
-                at = version_stop;
-        }
+        if (tls_parse_version(der, tbs_stop, address_of at, address_of version))
+                return TLS_FAIL;
         {
                 positive serial_stop = 0;
                 positive value_at;
@@ -8216,6 +8358,43 @@ static bipolar http_unchunk(p8 address_to bytes, positive size)
         return (bipolar)(body.output - bytes);
 }
 
+/* Bytes copied into an HTTP/1 request must be safe for the grammar position
+   they occupy even when this low-level builder is called without first going
+   through http_split_into.  Keeping the check at the serialization boundary
+   is important: otherwise a later caller can turn a CR/LF in a target, Host,
+   or User-Agent into a second header or a second request. */
+enum
+{
+        HTTP_REQUEST_FIELD,
+        HTTP_REQUEST_TARGET,
+        HTTP_REQUEST_HOST,
+};
+
+static bool http_request_component_valid(string_address text, p8 kind)
+{
+        if (!text)
+                return false;
+
+        if (kind == HTTP_REQUEST_HOST && !string_get(text))
+                return false;
+
+        for (; string_get(text); text++)
+        {
+                p8 byte = string_get(text);
+
+                if (byte_is_control(byte) || byte == 0x7f ||
+                    (kind != HTTP_REQUEST_FIELD && byte == ' ') ||
+                    (kind == HTTP_REQUEST_TARGET && byte == '\\'))
+                        return false;
+                if (kind == HTTP_REQUEST_HOST &&
+                    !byte_is_alnum(byte) && byte != '-' && byte != '.' &&
+                    byte != '_')
+                        return false;
+        }
+
+        return true;
+}
+
 
 static bipolar http_get_request(p8 address_to request, positive room,
                                 string_address host, p16 port,
@@ -8230,7 +8409,10 @@ static bipolar http_get_request(p8 address_to request, positive room,
                           (!tls && port != HTTP_PORT);
         bool ok;
 
-        if (http_origin_form(path, target, sizeof target) ||
+        if (!http_request_component_valid(host, HTTP_REQUEST_HOST) ||
+            !http_request_component_valid(path, HTTP_REQUEST_TARGET) ||
+            !http_request_component_valid(agent, HTTP_REQUEST_FIELD) ||
+            http_origin_form(path, target, sizeof target) ||
             version_minor < '0' || version_minor > '9')
                 return HTTP_BAD_URL;
 
@@ -8685,15 +8867,15 @@ typedef struct
 } dhcp_lease;
 
 /* A transaction id is visible beside the client's public hardware address and
-   is the only unpredictable field an off-path reply must guess.  Prefer the
-   initialized CSPRNG.  Early boot still needs DHCP before that pool is ready,
-   so retain Linux's explicit GRND_INSECURE stream; unlike system_nonce(), do
-   not fall through to a timing/PID/ASLR value if both kernel entropy policies
-   are unavailable. */
+   is the only unpredictable field an off-path reply must guess. Prefer the
+   initialized CSPRNG without waiting; if early boot has not initialized it,
+   wait for that same CSPRNG rather than drawing from GRND_INSECURE. DHCP runs
+   as root and controls the address, gateway and resolver, so boot-time
+   availability must not turn its reply identity into a predictable value. */
 static bool dhcp_transaction_early(p32 address_to transaction)
 {
         return network_transaction_secure(transaction, sizeof(*transaction)) ||
-               system_random_fill(transaction, sizeof(*transaction), 4) == 0;
+               system_random_fill(transaction, sizeof(*transaction), 0) == 0;
 }
 
 /* A subnet mask is a run of one bits followed by a run of zero bits.  Zero is
@@ -8880,7 +9062,16 @@ static COLD bipolar dhcp_walk(p8 address_to region, positive size,
                 p8 length;
 
                 if (option == DHCP_OPTION_END)
-                        break;
+                {
+                        /* Bytes after END are padding, not a second hidden
+                           option stream. Require canonical PAD bytes so this
+                           parser cannot disagree with a middlebox or another
+                           client which keeps scanning after option 255. */
+                        for (at++; at < size; at++)
+                                if (region[at] != DHCP_OPTION_PAD)
+                                        return -1;
+                        return 0;
+                }
 
                 if (option == DHCP_OPTION_PAD)
                 {
@@ -8896,8 +9087,22 @@ static COLD bipolar dhcp_walk(p8 address_to region, positive size,
                 if (at + 2 + length > size)
                         return -1;
 
-                if (overload && option == DHCP_OPTION_OVERLOAD && length == 1)
-                        address_to overload = region[at + 2];
+                if (option == DHCP_OPTION_OVERLOAD)
+                {
+                        p8 value;
+
+                        /* Option overload is legal exactly once, only in the
+                           primary options area, with its one-byte value in
+                           the RFC-defined 1..3 domain. Accepting malformed or
+                           repeated controls makes file/sname interpretation
+                           depend on which occurrence a parser chooses. */
+                        if (!overload || address_to overload || length != 1)
+                                return -1;
+                        value = region[at + 2];
+                        if (!value || value > 3)
+                                return -1;
+                        address_to overload = value;
+                }
 
                 for (positive taken = 0; taken < length &&
                                          gathered[option].length + taken < 4; taken++)
@@ -8908,7 +9113,10 @@ static COLD bipolar dhcp_walk(p8 address_to region, positive size,
                 at += 2 + length;
         }
 
-        return 0;
+        /* RFC 2132 terminates every option stream with option 255. Reaching
+           the region boundary through padding or an ordinary option is a
+           truncated stream, including in overloaded file/sname regions. */
+        return -1;
 }
 
 static COLD bipolar dhcp_read(p8 address_to packet, positive size, p32 transaction,
