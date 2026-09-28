@@ -4676,6 +4676,19 @@ static bool zstd_encoder_job(zstd_encoder address_to e, const zstd_params addres
         memory_fill(address_of e->price, 0, sizeof(e->price));
         if (prefix && p->strategy <= ZSTD_DFAST)
                 zstd_encoder_prefix(e, 1, 1 + (p32)prefix);
+        /* The row finder takes every position of the prefix, as libzstd
+           loads one; left to the parse, its first update would skip all
+           but 128 of them as the tail of a long match. */
+        else if (prefix > 8 && p->strategy <= ZSTD_LAZY2)
+        {
+                p8 const row_log = zstd_row_log(p);
+                p8 const mls = p->min_match < 4 ? 4 : p->min_match > 6 ? 6 : p->min_match;
+                p32 const target = 1 + (p32)prefix - 8;
+
+                for (p32 at = 1; at < target; at++)
+                        zstd_row_insert(e, at, row_log, mls);
+                e->next = target;
+        }
         do
         {
                 positive const left = e->filled - e->block;
