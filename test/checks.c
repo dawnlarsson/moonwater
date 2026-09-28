@@ -48721,7 +48721,8 @@ static bool http_writev_error_hit;
         which trap sendto/recvfrom directly and never pass through system_call_N.
         Parallel thin wrappers around the net.c include arm mid-path faults after
         the socket already exists: EINTR-once-then-fail, EAGAIN, short progress,
-        hard ENOSPC/EIO, and sticky EINTR for deadline exhaustion.
+        hard ENOSPC/EIO, and a sticky hard send error for a server that never
+        takes a datagram.
 */
 static bipolar net_send_error;
 static bool net_send_error_hit;
@@ -48729,7 +48730,7 @@ static bool net_send_eintr_once;
 static bool net_send_eintr_hit;
 static positive net_send_short_limit;
 static bool net_send_short_hit;
-static bool net_send_eintr_sticky;
+static bool net_send_error_sticky;
 static positive net_send_arm_after;
 static positive net_send_calls;
 
@@ -48827,7 +48828,7 @@ static bipolar net_test_socket_send(b32 handle, address_any data, positive size,
                                      (positive)data, size, (positive)flags,
                                      (positive)to, to_size);
         }
-        if (net_send_eintr_sticky || net_send_eintr_once)
+        if (net_send_eintr_once)
         {
                 net_send_eintr_once = false;
                 net_send_eintr_hit = true;
@@ -48851,7 +48852,8 @@ static bipolar net_test_socket_send(b32 handle, address_any data, positive size,
         {
                 bipolar fault = net_send_error;
 
-                net_send_error = 0;
+                if (!net_send_error_sticky)
+                        net_send_error = 0;
                 net_send_error_hit = true;
                 return fault;
         }
@@ -50354,7 +50356,8 @@ static positive dns_servers_asked(const char address_to text, positive length)
         if (system_write_all((positive)file, (address_any)text, length) == length)
         {
                 net_io_faults_clear();
-                net_send_eintr_sticky = true;
+                net_send_error_sticky = true;
+                net_send_error = -ENETUNREACH;
                 net_send_calls = 0;
                 (void)dns_resolve_any((string_address)path,
                                       (string_address)"servers.example",
@@ -52698,7 +52701,7 @@ static fn net_io_faults_clear(void)
         net_send_eintr_hit = false;
         net_send_short_limit = 0;
         net_send_short_hit = false;
-        net_send_eintr_sticky = false;
+        net_send_error_sticky = false;
         net_send_arm_after = 0;
         net_recv_error = 0;
         net_recv_error_hit = false;
@@ -52820,13 +52823,14 @@ static fn dns_dhcp_midpath_faults(void)
 
         /* UDP send does not retry EINTR; a single interrupted send refuses. */
         net_send_eintr_once = true;
+        net_send_calls = 0;
         found = 0;
         status = dns_resolve_at(HOST_LOOPBACK, DNS_PORT,
                                 (string_address)"send.eintr.example",
                                 address_of found, 1);
-        check("DNS UDP send EINTR fails closed mid-path without retrying",
-              status == DNS_NO_REPLY && !found && net_send_eintr_hit &&
-                  !net_send_eintr_once);
+        check("DNS UDP send EINTR sends the question again",
+              !found && net_send_eintr_hit && !net_send_eintr_once &&
+                  net_send_calls == 2);
         net_io_faults_clear();
 
         /* --- DNS UDP: recv EINTR then hard I/O refuse after a junk peer --- */

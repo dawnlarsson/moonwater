@@ -1617,6 +1617,7 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
         bipolar got;
         bipolar failure = DNS_NO_REPLY;
         positive question_length;
+        positive left[2];
         network_deadline deadline;
 
         /*
@@ -1669,8 +1670,14 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
                 goto failed;
         }
 
-        if (socket_send((b32)handle, request, DNS_HEADER + question_length,
-                        0, 0, 0) < 0)
+        /* A signal before the datagram left is not the server's silence:
+           send it again, within the same budget. */
+        do
+                written = socket_send((b32)handle, request,
+                                      DNS_HEADER + question_length, 0, 0, 0);
+        while (written == NETWORK_INTERRUPTED &&
+               network_deadline_left(address_of deadline, left, left + 1));
+        if (written < 0)
                 goto failed;
 
         /* A connected UDP socket authenticates the source address, not the

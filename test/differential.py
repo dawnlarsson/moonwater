@@ -42884,7 +42884,8 @@ static p8 fuzz_faults;
 static const p8 *fuzz_file;
 static positive fuzz_file_length;
 enum { FAULT_SOCKET = 2, FAULT_CONNECTING = 4, FAULT_SO_ERROR = 8,
-       FAULT_POLL_INVALID = 16, FAULT_SEND = 32, FAULT_INTERRUPT = 64 };
+       FAULT_POLL_INVALID = 16, FAULT_SEND = 32, FAULT_INTERRUPT = 64,
+       FAULT_SEND_INTERRUPT = 128 };
 
 static bool fuzz_frame_is(positive at, b32 handle)
 {
@@ -42998,6 +42999,11 @@ static bipolar socket_send(b32 handle, address_any data, positive size,
         (void)handle, (void)flags, (void)to, (void)to_size;
         for (positive at = 0; at < size; at++)
                 touched ^= ((const p8 *)data)[at];
+        if (fuzz_faults & FAULT_SEND_INTERRUPT)
+        {
+                fuzz_faults &= (p8)~FAULT_SEND_INTERRUPT;
+                return -4;
+        }
         return (fuzz_faults & FAULT_SEND) ? -28 : (bipolar)size;
 }
 static bipolar socket_receive(b32 handle, address_any data, positive size,
@@ -43189,6 +43195,7 @@ def dns_fuzz_seeds():
         "faults_poll_invalid.bin": seed("example.com", udp(plain), mode=16),
         "faults_send.bin": seed("example.com", udp(plain), mode=32),
         "faults_interrupt.bin": seed("example.com", udp(plain), mode=64),
+        "faults_send_interrupt.bin": seed("example.com", udp(plain), mode=128),
     }
 
 
@@ -43234,6 +43241,22 @@ static void fuzz_own_question(fuzz_frame *frame)
         free(copy);
 }
 
+static bipolar fuzz_resolve(const char *name, const p8 *frames, positive left,
+                            p8 faults, p32 *found)
+{
+        bipolar status;
+
+        fuzz_frames_load(frames, left);
+        fuzz_faults = faults;
+        status = fuzz_file
+                     ? dns_resolve_any("/etc/resolv.conf", (string_address)name,
+                                       found, 3)
+                     : dns_resolve_at(0x7f000001, DNS_PORT, (string_address)name,
+                                      found, 3);
+        fuzz_faults = 0;
+        return status;
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         char name[256];
@@ -43241,6 +43264,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         const p8 *at;
         positive left;
         p32 found = 0;
+        p32 again = 0;
+        bipolar status;
 
         if (size < 2 || data[1] > size - 2)
                 return 0;
@@ -43261,13 +43286,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 at += 2 + fuzz_file_length;
                 left -= 2 + fuzz_file_length;
         }
-        fuzz_frames_load(at, left);
-        fuzz_faults = data[0];
-        if (fuzz_file)
-                (void)dns_resolve_any("/etc/resolv.conf", name, &found, 3);
-        else
-                (void)dns_resolve_at(0x7f000001, DNS_PORT, name, &found, 3);
-        fuzz_faults = 0;
+        status = fuzz_resolve(name, at, left, data[0], &found);
+        /* A send a signal interrupted is sent again: the same question has
+           the same answer with or without the interruption. */
+        if (!(data[0] & (FAULT_SEND | FAULT_SEND_INTERRUPT)) &&
+            (fuzz_resolve(name, at, left, data[0] | FAULT_SEND_INTERRUPT,
+                          &again) != status || again != found))
+        {
+                fprintf(stderr, "an interrupted send changed the answer\n");
+                abort();
+        }
         for (positive frame = 0; frame < fuzz_frame_count; frame++)
                 fuzz_own_question(&fuzz_frames[frame]);
         return 0;
