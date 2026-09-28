@@ -9681,6 +9681,16 @@ static COLD bool exec_assignment_error(b32 fatal_status)
                    Bash's terminal 127 path below. */
                 if (fatal_status == EXEC_ASSIGNMENT_LINE_ABORT)
                 {
+                        //      Outside posix mode the dropped line is the
+                        //      reader's: eval answers 1 and a sourced file
+                        //      goes on at its next line, as in bash, where
+                        //      a function's caller still loses its line.
+                        if (shell_bash_compat && !shell_posix_on() &&
+                            !shell_is_interactive)
+                        {
+                                exec_assignment_discard();
+                                return false;
+                        }
                         exec_abort_line(1);
                         return false;
                 }

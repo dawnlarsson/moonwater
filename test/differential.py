@@ -14879,6 +14879,23 @@ def shell_lang_compound_order(rng):
         ("command", "stdin", "file"))
 
 
+#       A readonly assignment outside posix mode drops the rest of the line
+#       the reader was on: eval answers 1 and a sourced file goes on at its
+#       next line, where a function's caller still loses its whole line.
+#       This dropped the line that called eval or . as well.
+def shell_lang_readonly_discard_scope(rng):
+    line = rng.choice((
+        "f() { r=2; echo in-f; }; f; echo after-f $?",
+        "eval 'r=3; echo in-eval'; echo after-eval $?",
+        "g() { eval 'r=4'; echo in-g $?; }; g; echo after-g",
+        "printf 'r=5; echo in-dot\\necho in-dot-2\\n' > s.sh; . ./s.sh; echo after-dot $?",
+        "{ r=8; echo in-group; }; echo after-group",
+        "for i in 1 2; do eval 'r=$i'; echo loop $?; done",
+    ))
+    return ("readonly-discard-scope", shell_BASH, shell_program(
+        "readonly r=1", line, 'echo "next=$?"'), ("command", "stdin", "file"))
+
+
 #       printf's quoting and time conversions as bash 5.3 has them: %q takes
 #       a width and cuts the quoted text to the precision, %Q cuts the
 #       argument and quotes the rest, a quoted character is its code point
@@ -17820,6 +17837,7 @@ SHELL_FAMILIES = (
     shell_lang_list_null_tests,
     shell_lang_printf_quote_time,
     shell_lang_compound_order,
+    shell_lang_readonly_discard_scope,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,
