@@ -7486,8 +7486,18 @@ FILES_UTILITIES = (
                       #       What the signal options hand on, read by the
                       #       command itself: its mask and what it ignores.
                       ("grep", "^Sig[BI]", "/proc/self/status")),
-            stdin=("empty",), fixture="files", stderr="exact",
-            extra=env_debug_cases()),
+            # Kept verbatim: GNU ends every usage error with the "Try" line
+            # (tests/env/env.sh compares it after -C with no command), and
+            # a blank option letter, a shebang's "-v -S" as one word, adds
+            # the -[v]S hint between the two (tests/env/env-S.pl).
+            stdin=("empty",), fixture="files", stderr="exact", normalize=lambda channel, data: data,
+            extra=env_debug_cases() + (("---",), ("-v -S", "cat"), ("-v\t-S", "cat", "-n"), ("-i -u", "x"),
+                                       ("-v", "-\n",), ("-C", "dir"), ("-a", "x"), ("-0", "true"), ("-u",),
+                                       # Each -S restarts the scan where it stood.
+                                       ("-v", "-S", "-S echo a", "b"), ("-S", "--split-string=echo x", "y"),
+                                       ("-S", "-u X -S 'echo ${HOME}'", "z"), ("-v", "-S", "echo ${NOPE_X}"),
+                                       ("-i", "-u", "", "true"), ("-v", "-u", "=", "true"),
+                                       ("-v", "--ignore-signal=33", "true"), ("-C", "a b", "true"))),
     Utility("printenv", options=(Option("-0"), Option("--null")),
             operands=((), ("PATH",), ("PATH", "HOME"), ("NOPE",), ("PATH", "NOPE"), ("PATH=anything",), ("PATH", "-0"),
                       ("",), ("HOME",), ("TZ", "LC_ALL", "LANG"), ("--bad",), ("COLUMNS", "LINES", "TERM")),

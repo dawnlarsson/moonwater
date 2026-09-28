@@ -4952,8 +4952,16 @@ static bool file_take_from(file_taking address_to taking, positive index)
                                 string_format(log_error, "%s: unrecognized option '%s'\n",
                                               taking->program, shown);
                         else
+                        {
                                 string_format(log_error, "%s: invalid option -- '%s'\n",
                                               taking->program, named + 1);
+                                //      A blank where env wants an option letter
+                                //      is a shebang line that wrote "-i cmd"
+                                //      as one word; GNU says how to mean it.
+                                if (string_equals(taking->program, "env") &&
+                                    string_first_of(" \t\n\v\f\r", named[1]) && named[1])
+                                        log_error("env: use -[v]S to pass options in shebang lines\n", 0);
+                        }
                         /*
                                 Both families say where to look next, in the
                                 same words: coreutils out of usage() and
@@ -38976,9 +38984,32 @@ static b32 env_signals_apply(void)
         for (positive number = 1; number <= ENV_SIGNALS; number++)
         {
                 p8 wanted = env_signal_wanted[number];
+                bool quiet = (wanted & ENV_SIGNAL_QUIET) != 0;
+                bool failed;
 
                 if (!wanted)
                         continue;
+                //      The two the C library keeps cannot even be read; any
+                //      other the kernel may refuse to change. A refusal that
+                //      counts stops env before the trace names the signal,
+                //      and the trace is written after the attempt, as GNU's.
+                if (number == 32 || number == 33)
+                {
+                        if (!quiet)
+                                return string_report(log_error, 125,
+                                                     "env: failed to get signal action for signal %p: %s\n",
+                                                     number, file_reason(-ERROR_INVALID));
+                        failed = true;
+                }
+                else
+                {
+                        failed = !system_signal_install((b32)number,
+                                                        wanted & ENV_SIGNAL_IGNORE ? 1 : 0, 0, 0, null);
+                        if (failed && !quiet)
+                                return string_report(log_error, 125,
+                                                     "env: failed to set signal action for signal %p: %s\n",
+                                                     number, file_reason(-ERROR_INVALID));
+                }
                 if (env_loud)
                 {
                         p8 name[16];
@@ -38991,26 +39022,9 @@ static b32 env_signals_apply(void)
                                       (string_address)name, number,
                                       wanted & ENV_SIGNAL_DEFAULT ? (string_address) "DEFAULT"
                                                                   : (string_address) "IGNORE",
-                                      wanted & ENV_SIGNAL_QUIET &&
-                                              (number == 9 || number == 19 ||
-                                               number == 32 || number == 33)
-                                          ? (string_address) " (failure ignored)"
-                                          : (string_address) "");
+                                      failed ? (string_address) " (failure ignored)"
+                                             : (string_address) "");
                 }
-                if (number == 32 || number == 33)
-                {
-                        if (wanted & ENV_SIGNAL_QUIET)
-                                continue;
-                        return string_report(log_error, 125,
-                                             "env: failed to get signal action for signal %p: %s\n",
-                                             number, file_reason(-ERROR_INVALID));
-                }
-                if (!system_signal_install((b32)number,
-                                           wanted & ENV_SIGNAL_IGNORE ? 1 : 0, 0, 0, null) &&
-                    !(wanted & ENV_SIGNAL_QUIET))
-                        return string_report(log_error, 125,
-                                             "env: failed to set signal action for signal %p: %s\n",
-                                             number, file_reason(-ERROR_INVALID));
         }
 
         for (positive number = 1; env_loud && number <= ENV_SIGNALS; number++)
@@ -39128,6 +39142,9 @@ static p8 address_to env_split_store;
 static positive env_split_room;
 static string_address address_to env_words;
 static positive env_words_room;
+static string_address address_to env_rest;
+static positive env_rest_room;
+static shell_store env_keep;
 
 static bool env_split_grow(positive want, positive origin, positive given)
 {
@@ -39152,7 +39169,7 @@ static bool env_split_put(p8 letter, positive address_to filled,
         return true;
 }
 
-static bool env_split(string_address text, positive address_to have)
+static bool env_split(string_address text, positive address_to have, bool loud)
 {
         positive filled = 0;
         positive origin = address_to have;
@@ -39320,7 +39337,17 @@ static bool env_split(string_address text, positive address_to have)
 
                                 string_address value = file_environment(varname);
 
-                                if (sep)
+                                if (loud && value)
+                                        string_format(log_error, "expanding ${%s} into '%w'\n",
+                                                      (string_address)varname,
+                                                      writer_terminal_quoted_name, value);
+                                else if (loud)
+                                        string_format(log_error, "replacing ${%s} with null string\n",
+                                                      (string_address)varname);
+
+                                //      An unset name makes no word; a set one,
+                                //      empty or not, begins one.
+                                if (sep && value)
                                 {
                                         if (!shell_array_room(env_words, env_words_room, given + 2))
                                                 return string_report(log_error, false,
@@ -39396,20 +39423,49 @@ static b32 file_env()
 
         env_taking_now = null;
 
-        if (taking.stop)
+        /*
+                Each -S is GNU's restart of getopt: its words go in where it
+                stood, ahead of what was still to be read, and the scan runs
+                again from there -- so a word of the split can be another -S,
+                and an option after a split that begins with a command is an
+                argument of that command. The words are copied somewhere that
+                does not move, because the next split reuses the split store
+                while values taken from this one are still held.
+        */
+        shell_store_reset(address_of env_keep);
+        while (taking.stop)
         {
                 string_address split = file_option_value(address_of taking, 'S');
+                string_address address_to from = taking.argv ? taking.argv
+                                                             : program_argument_list();
+                positive from_first = taking.first;
+                positive from_count = taking.argv ? taking.argc
+                                                  : (positive)program_argument_count();
+                positive rest = from_count > from_first ? from_count - from_first : 0;
                 positive have = 1;
-                positive origin_first = taking.first;
-                positive origin_count = (positive)program_argument_count();
 
-                if (!shell_array_room(env_words, env_words_room, 2))
+                if (!shell_array_room(env_rest, env_rest_room, rest + 1) ||
+                    !shell_array_room(env_words, env_words_room, 2))
                         return string_report(log_error, 125, "env: argument list is too large\n");
+
+                for (positive i = 0; i < rest; i++)
+                        env_rest[i] = from[from_first + i];
 
                 env_words[0] = (string_address) "env";
 
-                if (split && !env_split(split, address_of have))
+                if (split && !env_split(split, address_of have,
+                                        (taking.flags & FILE_FLAG('v')) != 0))
                         return 125;
+
+                for (positive word = 1; word < have; word++)
+                {
+                        string_address kept = shell_store_copy(address_of env_keep, env_words[word],
+                                                               string_length(env_words[word]));
+
+                        if (!kept)
+                                return string_report(log_error, 125, "env: split string is too large\n");
+                        env_words[word] = kept;
+                }
 
                 /*
                         -v, --debug: what env does, as it does it, on the
@@ -39417,8 +39473,9 @@ static b32 file_env()
                         it cleaned, unset and set, the signals, the
                         directory, and the command with each of its words.
                         The words are quote()'s, the directory quoteaf's.
+                        A split that made no words says nothing.
                 */
-                if (split && (taking.flags & FILE_FLAG('v')))
+                if (split && have > 1 && (taking.flags & FILE_FLAG('v')))
                 {
                         string_format(log_error, "split -S:  '%w'\n",
                                       writer_terminal_quoted_name, split);
@@ -39429,12 +39486,11 @@ static b32 file_env()
                                               writer_terminal_quoted_name, env_words[word]);
                 }
 
-                if (!shell_array_room(env_words, env_words_room,
-                                      have + origin_count - origin_first + 1))
+                if (!shell_array_room(env_words, env_words_room, have + rest + 1))
                         return string_report(log_error, 125, "env: argument list is too large\n");
 
-                while (origin_first < origin_count)
-                        env_words[have++] = program_argument((b32)origin_first++);
+                for (positive i = 0; i < rest; i++)
+                        env_words[have++] = env_rest[i];
 
                 env_words[have] = null;
                 taking.argv = env_words;
@@ -39477,24 +39533,25 @@ static b32 file_env()
                                 return 125;
         }
 
-        for (positive i = 0; i < env_drops; i++)
+        //      -i leaves nothing to unset, and GNU does not look at the
+        //      names at all then, not even to refuse one it could not unset.
+        for (positive i = 0; !empty && i < env_drops; i++)
         {
                 string_address name = env_dropped[i] ? env_dropped[i]
                                                      : (string_address) "";
 
+                //      Said before it is tried, as GNU's trace does.
+                if (env_loud)
+                        string_format(log_error, "unset:    %s\n", name);
                 if (!string_get(name))
                         return string_report(log_error, 125,
                                             "env: cannot unset '': %s\n",
                                             file_reason(-ERROR_INVALID));
                 if (string_first_of(name, '='))
                         return string_report(log_error, 125,
-                                            "env: cannot unset %w: %s\n",
+                                            "env: cannot unset '%w': %s\n",
                                             writer_terminal_quoted_name, name,
                                             file_reason(-ERROR_INVALID));
-                //      Nothing is left to unset in an environment -i
-                //      cleaned, and GNU says nothing of it.
-                if (env_loud && !empty)
-                        string_format(log_error, "unset:    %s\n", name);
                 env_drop(name);
         }
 
@@ -39531,10 +39588,10 @@ static b32 file_env()
                 // printing the environment is not running something; there is
                 // nothing to do with either of them but say so.
                 if (where)
-                        return string_report(log_error, 125, "env: must specify command with --chdir (-C)\n");
+                        return string_report(log_error, 125, "env: must specify command with --chdir (-C)\nTry 'env --help' for more information.\n");
 
                 if (file_option_value(address_of taking, 'a'))
-                        return string_report(log_error, 125, "env: must specify command with --argv0 (-a)\n");
+                        return string_report(log_error, 125, "env: must specify command with --argv0 (-a)\nTry 'env --help' for more information.\n");
 
                 bool zero = (taking.flags & FILE_FLAG('0')) != 0;
 
@@ -39547,7 +39604,8 @@ static b32 file_env()
 
         if (taking.flags & FILE_FLAG('0'))
                 return string_report(log_error, 125,
-                                    "env: cannot specify --null (-0) with command\n");
+                                    "env: cannot specify --null (-0) with command\n"
+                                    "Try 'env --help' for more information.\n");
 
         //      The signals first and then the directory, in GNU's order,
         //      which is the order the trace says them in.
@@ -39567,7 +39625,7 @@ static b32 file_env()
                 if (changed < 0)
                         return string_report(log_error, 125,
                                             "env: cannot change directory to %w: %s\n",
-                                            writer_terminal_quoted_name, where,
+                                            writer_shell_quoted_name, where,
                                             file_reason(changed));
         }
 
