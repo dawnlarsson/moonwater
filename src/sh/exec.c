@@ -8582,6 +8582,57 @@ COLD bool shell_frames_wanted(const_string name, positive length)
         return true;
 }
 
+static b32 exec_call(positive slot);
+
+/*
+        command_not_found_handle: a function of that name, when bash finds
+        no command, is called in a subshell with the command and its words
+        as its arguments, and its status is the command's. Its own misses
+        are not handed back to it.
+*/
+static bool exec_not_found_inside;
+positive shell_function_slot(string_address name);
+
+static COLD bool exec_not_found_handled()
+{
+        positive slot;
+        bipolar child;
+
+        if (!shell_bash_compat || exec_not_found_inside || !exec_function_count ||
+            string_first_of(shell_argv[0], '/'))
+                return false;
+        slot = shell_function_slot((string_address) "command_not_found_handle");
+        if (slot == positive_max)
+                return false;
+
+        log_flush();
+        child = shell_clone();
+        if (child < 0)
+                return false;
+        if (child == 0)
+        {
+                string_address address_to words = null;
+                positive room = 0;
+
+                exec_forked = true;
+                exec_not_found_inside = true;
+                job_forget();
+                exec_loop_depth = 0;
+                if (!shell_array_room(words, room,
+                                      (shell_argc + 2) * sizeof(*words)))
+                        exec_child_leave(127);
+                words[0] = (string_address) "command_not_found_handle";
+                memory_copy(words + 1, shell_argv,
+                            shell_argc * sizeof(*words));
+                words[shell_argc + 1] = null;
+                shell_argv = words;
+                shell_argc++;
+                exec_child_leave(exec_call(slot));
+        }
+        shell_status = exec_child_status(child);
+        return true;
+}
+
 static b32 exec_call(positive slot)
 {
         b32 body = exec_functions[slot].body;
@@ -10413,6 +10464,9 @@ static b32 exec_dispatch(b32 command_word)
                         return shell_status;
                 }
         }
+
+        if (exec_not_found_handled())
+                return shell_status;
 
         shell_status = 127;
         shell_diagnostic_where();

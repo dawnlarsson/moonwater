@@ -14740,6 +14740,17 @@ def shell_lang_funcnest(rng):
         "f 1; echo \"s=$?\"", "echo next", 'echo "end=$?"'), ("command", "stdin", "file"))
 
 
+#       A function called command_not_found_handle answers, in a subshell,
+#       for a command without a slash that is not found; this never called it.
+def shell_lang_not_found_handle(rng):
+    handler = rng.choice(("command_not_found_handle() { echo \"missing: $*\"; return 7; }",
+                          "command_not_found_handle() { x=inner; echo \"x=$x\"; }",
+                          "command_not_found_handle() { echo \"$#:$1\"; exit 3; }", ":"))
+    return ("not-found-handle", shell_BASH, shell_program(
+        handler, "x=outer", "nosuch a 'b c'; echo \"s=$?\" \"x=$x\"", "./nosuch; echo \"slash=$?\"", 'echo "end=$?"'),
+        ("command", "stdin", "file"))
+
+
 #       Digits in front of > are a descriptor only while they fit one: bash
 #       reads a number past INT_MAX there as an ordinary word, so `echo a
 #       2147483648>f` writes "a 2147483648" to f. This called it a syntax
@@ -17607,6 +17618,7 @@ SHELL_FAMILIES = (
     shell_lang_debug_trap_places,
     shell_lang_globignore,
     shell_lang_funcnest,
+    shell_lang_not_found_handle,
     shell_lang_readonly_arrays,
     shell_lang_legacy_arithmetic,
     shell_lang_case_toggle,
