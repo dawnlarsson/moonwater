@@ -781,11 +781,26 @@ static positive tar_directory_spare_room;
    that happened to exist below the extraction root.  Retain the identity of
    each non-directory member this run successfully materialized, replacing a
    path's record when a later member overwrites it. */
+/* A regular member made in a directory this run made is remembered as
+   pending: that directory is private (0700, ours) until the archive ends,
+   so only this run can change what its names hold, and the member's own
+   identity is read only if a hard link ever asks for it.  The parent's
+   identity is kept instead, to prove at link time that the name still
+   resolves inside that same private directory. */
+typedef struct
+{
+        p64 inode;
+        p32 device_major;
+        p32 device_minor;
+} tar_identity_key;
+
 typedef struct
 {
         positive path_at;
         positive path_hash;
         file_facts facts;
+        tar_identity_key parent;
+        bool pending;
 } tar_materialized_file;
 
 static tar_materialized_file address_to tar_materialized;
@@ -1108,19 +1123,22 @@ static tar_materialized_file address_to tar_materialized_find_hashed(
         return null;
 }
 
-static file_facts address_to tar_materialized_find(string_address path)
+static tar_materialized_file address_to tar_materialized_find(
+    string_address path)
 {
         positive2 named = string_hash_33_length(path);
-        tar_materialized_file address_to kept =
-            tar_materialized_find_hashed(path, named.x);
-        return kept ? address_of kept->facts : null;
+        return tar_materialized_find_hashed(path, named.x);
 }
 
+/* parent, when not null, makes the record pending (see above); facts then
+   say only that the member is a regular file. */
 static bipolar tar_materialized_remember(string_address path,
-                                         file_facts address_to facts)
+                                         file_facts address_to facts,
+                                         tar_identity_key address_to parent)
 {
         if ((facts->mask & STATX_BASIC) != STATX_BASIC &&
-            (facts->mask || (facts->mode & MODE_FORMAT) != MODE_LINK))
+            (facts->mask || ((facts->mode & MODE_FORMAT) != MODE_LINK &&
+                             !parent)))
                 return -ERROR_INPUT_OUTPUT;
 
         positive2 named = string_hash_33_length(path);
@@ -1129,6 +1147,9 @@ static bipolar tar_materialized_remember(string_address path,
         if (kept)
         {
                 kept->facts = *facts;
+                kept->pending = parent != null;
+                if (parent)
+                        kept->parent = *parent;
                 return 0;
         }
 
@@ -1149,6 +1170,9 @@ static bipolar tar_materialized_remember(string_address path,
         kept->path_at = tar_materialized_paths_used;
         kept->path_hash = named.x;
         kept->facts = *facts;
+        kept->pending = parent != null;
+        if (parent)
+                kept->parent = *parent;
         memory_copy(tar_materialized_paths + tar_materialized_paths_used,
                     path, length);
         tar_materialized_paths_used += length;
@@ -1217,7 +1241,14 @@ typedef struct
         bipolar handle;
         positive stop;
         bool made;
+        bool private;
+        tar_identity_key identity;
 } tar_stack_entry;
+
+/* What tar_stack_parent answered last: whether that parent is a directory
+   this run made, still private, and which inode it is. */
+static bool tar_parent_private;
+static tar_identity_key tar_parent_identity;
 
 static tar_stack_entry tar_stack[TAR_STACK_DEPTH];
 static positive tar_stack_used;
@@ -1261,7 +1292,8 @@ static bipolar tar_stack_base(void)
 /* Hold handle as the child named leaf of the directory the last lookup
    matched.  False leaves handle with the caller. */
 static bool tar_stack_push(bipolar handle, string_address leaf,
-                           positive length, bool made)
+                           positive length, bool made,
+                           file_facts address_to facts)
 {
         positive depth = tar_stack_matched;
         positive start = depth ? tar_stack[depth - 1].stop + 1 : 0;
@@ -1277,6 +1309,11 @@ static bool tar_stack_push(bipolar handle, string_address leaf,
         tar_stack[depth].handle = handle;
         tar_stack[depth].stop = start + length;
         tar_stack[depth].made = made;
+        tar_stack[depth].private = made && facts &&
+                                   (facts->mask & STATX_BASIC) == STATX_BASIC;
+        if (tar_stack[depth].private)
+                tar_stack[depth].identity = (tar_identity_key){
+                    facts->inode, facts->device_major, facts->device_minor};
         tar_stack_used = depth + 1;
         tar_stack_matched = depth + 1;
         return true;
@@ -1320,6 +1357,7 @@ static bipolar tar_parent_walk(string_address path, p8 address_to leaf,
             tar_extract_directory_trusted);
 
         address_to owned = parent >= 0;
+        tar_parent_private = false;
         return parent;
 }
 
@@ -1404,10 +1442,12 @@ static bipolar tar_stack_parent(string_address path, p8 address_to leaf,
                 /* A parent no member names ends as GNU makes it, 0777
                    under the umask, once the private working mode is no
                    longer needed; an entry naming it later replaces this. */
+                file_facts facts;
+                bool known = false;
+
                 if (made)
                 {
                         p8 prefix[TAR_PATH];
-                        file_facts facts;
                         tar_member_meta meta = {0};
 
                         memory_copy(prefix, path, stop);
@@ -1415,6 +1455,7 @@ static bipolar tar_stack_parent(string_address path, p8 address_to leaf,
                         if (file_look_code(next, (string_address) "", AT_EMPTY_PATH,
                                            address_of facts) >= 0)
                         {
+                                known = true;
                                 meta.user = facts.owner;
                                 meta.group = facts.group;
                                 if (!tar_directory_remember(prefix, 0777 & ~tar_session_mask,
@@ -1425,7 +1466,8 @@ static bipolar tar_stack_parent(string_address path, p8 address_to leaf,
                                 }
                         }
                 }
-                if (!tar_stack_push(next, component, stop - at, made))
+                if (!tar_stack_push(next, component, stop - at, made,
+                                    known ? address_of facts : null))
                 {
                         (void)system_close(next);
                         return tar_parent_walk(path, leaf, room, owned);
@@ -1436,6 +1478,11 @@ static bipolar tar_stack_parent(string_address path, p8 address_to leaf,
 
         memory_copy(leaf, path + cut, length - cut);
         leaf[length - cut] = end;
+        tar_parent_private = tar_stack_matched &&
+                             tar_stack[tar_stack_matched - 1].handle == held &&
+                             tar_stack[tar_stack_matched - 1].private;
+        if (tar_parent_private)
+                tar_parent_identity = tar_stack[tar_stack_matched - 1].identity;
         return held;
 }
 
@@ -1501,6 +1548,46 @@ static bipolar tar_open_beneath_same(string_address path,
                 return looked < 0 ? looked : -ERROR_AGAIN;
         }
         return handle;
+}
+
+/* The regular file a pending record names, opened O_PATH through the
+   parent it was made in: the parent must still be that private directory,
+   whose names only this run can change, and the leaf is not followed. */
+static bipolar tar_open_pending(string_address path,
+                                tar_materialized_file address_to kept)
+{
+        positive length = string_length(path);
+        string_address slash = memory_last_of(path, '/', length);
+        p8 above[TAR_PATH];
+        file_facts facts;
+
+        if (!slash || slash == path || length >= sizeof(above))
+                return -ERROR_ACCESS;
+        memory_copy(above, path, (positive)(slash - path));
+        above[slash - path] = end;
+
+        bipolar parent = tar_open_beneath(above, O_PATH | O_DIRECTORY);
+        bipolar looked = parent < 0 ? parent :
+                         file_look_code(parent, (string_address)"",
+                                        AT_EMPTY_PATH, address_of facts);
+        if (looked >= 0 &&
+            ((facts.mask & STATX_BASIC) != STATX_BASIC ||
+             (facts.mode & MODE_FORMAT) != MODE_DIRECTORY ||
+             facts.inode != kept->parent.inode ||
+             facts.device_major != kept->parent.device_major ||
+             facts.device_minor != kept->parent.device_minor))
+                looked = -ERROR_ACCESS;
+        if (looked < 0)
+        {
+                if (parent >= 0)
+                        (void)system_close(parent);
+                return looked;
+        }
+
+        bipolar opened = system_open_at(parent, slash + 1,
+                                        O_PATH | O_NOFOLLOW | O_CLOEXEC);
+        (void)system_close(parent);
+        return opened;
 }
 
 /* A symlink member is remembered by kind alone.  A hard link to it names
@@ -2838,7 +2925,7 @@ static bool tar_extract_regular_staged(bipolar archive, bipolar directory,
                 (void)system_close(published_handle);
         if (published >= 0)
                 published = tar_materialized_remember(
-                    path, address_of materialized);
+                    path, address_of materialized, null);
         if (published < 0)
                 tar_fail(path, published);
         return published >= 0;
@@ -2883,12 +2970,21 @@ static bool tar_extract_regular(bipolar archive, bipolar directory,
                 return false;
         }
 
+        /* In a private parent the identity waits for a hard link to ask
+           for it; elsewhere it is read now, through the descriptor. */
+        bool pending = tar_parent_private;
+        tar_identity_key parent = tar_parent_identity;
         bipolar settled = tar_member_settle(made, mode, meta, false);
-        if (settled >= 0)
+        if (settled >= 0 && pending)
+        {
+                memory_fill(address_of materialized, 0, sizeof(materialized));
+                materialized.mode = MODE_FILE;
+        }
+        else if (settled >= 0)
                 settled = file_look_code(made, (string_address)"",
                                          AT_EMPTY_PATH,
                                          address_of materialized);
-        if (settled >= 0 &&
+        if (settled >= 0 && !pending &&
             (materialized.mask & STATX_BASIC) != STATX_BASIC)
                 settled = -ERROR_INPUT_OUTPUT;
         bipolar closed = system_close(made);
@@ -2896,7 +2992,8 @@ static bool tar_extract_regular(bipolar archive, bipolar directory,
                 settled = closed;
         if (settled >= 0)
                 settled = tar_materialized_remember(
-                    path, address_of materialized);
+                    path, address_of materialized,
+                    pending ? address_of parent : null);
         if (settled < 0)
                 tar_fail(path, settled);
         return settled >= 0;
@@ -2986,7 +3083,8 @@ static bipolar tar_extract_directory(bipolar parent, bool parent_owned,
         if (!held &&
             (made < 0 || parent_owned ||
              (!ours && !tar_extract_directory_trusted(exact)) ||
-             !tar_stack_push(exact, leaf, length, ours)))
+             !tar_stack_push(exact, leaf, length, ours,
+                             address_of facts)))
                 system_close(exact);
         return made;
 }
@@ -3075,14 +3173,15 @@ static fn tar_extract_member(bipolar archive, p8 type, string_address path,
                    the destination checks and the staged transaction. */
                 if (type == '1')
                 {
-                        file_facts address_to authorized =
+                        tar_materialized_file address_to authorized =
                             tar_materialized_find(link);
 
                         made = authorized ? 0 : -ERROR_ACCESS;
                         if (made >= 0)
                         {
-                                source_handle = tar_open_beneath(
-                                    link, O_PATH);
+                                source_handle = authorized->pending
+                                    ? tar_open_pending(link, authorized)
+                                    : tar_open_beneath(link, O_PATH);
                                 made = source_handle < 0 ? source_handle :
                                     file_look_code(source_handle,
                                         (string_address)"", AT_EMPTY_PATH,
@@ -3092,8 +3191,11 @@ static fn tar_extract_member(bipolar archive, p8 type, string_address path,
                             (source_facts.mask & STATX_BASIC) != STATX_BASIC)
                                 made = -ERROR_INPUT_OUTPUT;
                         if (made >= 0 &&
-                            !tar_materialized_same(authorized,
-                                                   address_of source_facts))
+                            (authorized->pending
+                                 ? (source_facts.mode & MODE_FORMAT) != MODE_FILE
+                                 : !tar_materialized_same(
+                                       address_of authorized->facts,
+                                       address_of source_facts)))
                                 made = -ERROR_ACCESS;
                         /*      A directory where the target was: link()
                                 meets the name already there first, and the
@@ -3210,7 +3312,7 @@ static fn tar_extract_member(bipolar archive, p8 type, string_address path,
                 }
                 if (made >= 0 && materialized_known)
                         made = tar_materialized_remember(
-                            path, address_of materialized);
+                            path, address_of materialized, null);
                 if (source_handle >= 0)
                         system_close(source_handle);
         }
