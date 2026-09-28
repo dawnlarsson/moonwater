@@ -8057,7 +8057,11 @@ FILES_UTILITIES = (
                    #   A slash on the end of a link to a directory: the
                    #   contents go, the link stays and the removal of the
                    #   name itself is an ENOTDIR that -f forgives.
-                   ("-rf", "dirlink/"), ("-rfv", "dirlink/"), ("-Rf", "dirlink/"))
+                   ("-rf", "dirlink/"), ("-rfv", "dirlink/"), ("-Rf", "dirlink/"),
+                   #   An option rm does not know, when a word starting
+                   #   with a dash names a file that is there, is followed
+                   #   by how to remove that file.
+                   ("-dash",), ("-dash", "a.txt"), ("-x", "-dash"), ("--bogus", "-dash"), ("-x", "-missing"))
             #   GNU's RMI_SOMETIMES: with no -f or -i (or with -I) and a
             #   terminal on standard input -- which GNU's hidden
             #   ---presume-input-tty stands for -- a name that cannot be

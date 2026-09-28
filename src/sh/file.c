@@ -150,6 +150,7 @@ static bool regex_find(p8 mode, string_address text, positive length, positive f
 /* A file name in a diagnostic, delimiters included, the way coreutils' quoteaf
    writes one; defined beside ls's shell styles, which it is. */
 static fn writer_shell_quoted_name(writer output, string_address value);
+static fn rm_leading_hyphen_hint(string_address address_to argv, positive argc);
 
 
 /*
@@ -6205,6 +6206,8 @@ static bool file_take_from(file_taking address_to taking, positive index)
                                     string_first_of(" \t\n\v\f\r", named[1]) && named[1])
                                         log_error("env: use -[v]S to pass options in shebang lines\n", 0);
                         }
+                        if (string_equals(taking->program, "rm"))
+                                rm_leading_hyphen_hint(taking->argv, taking->argc);
                         /*
                                 Both families say where to look next, in the
                                 same words: coreutils out of usage() and
@@ -37600,6 +37603,39 @@ static bipolar rm_remove_same(bipolar directory, string_address name,
         if (!file_same_identity(address_of now, expected))
                 return gone;
         return system_remove_at(directory, name, flags);
+}
+
+/*
+        GNU's diagnose_leading_hyphen: an option rm does not know, when a word
+        that starts with a dash names a file that is there, is followed by
+        how to remove that file -- "Try 'rm ./-foo' to remove the file
+        '-foo'." -- the name escaped for a shell only where one needs it, then
+        quoted as quoteaf quotes it.
+*/
+static fn rm_quote_where_needed(writer output, string_address value)
+{
+        ls_quote_shell(output, value, string_length(value), false, true);
+}
+
+static fn rm_leading_hyphen_hint(string_address address_to argv, positive argc)
+{
+        if (!argv)
+        {
+                argv = program_argument_list();
+                argc = (positive)program_argument_count();
+        }
+        for (positive i = 1; i < argc && argv[i]; i++)
+        {
+                string_address word = argv[i];
+                file_facts facts;
+
+                if (word[0] != '-' || !word[1] ||
+                    file_look_code(AT_FDCWD, word, AT_SYMLINK_NOFOLLOW, address_of facts) < 0)
+                        continue;
+                string_format(log_error, "Try 'rm ./%w' to remove the file %w.\n",
+                              rm_quote_where_needed, word, writer_shell_quoted_name, word);
+                return;
+        }
 }
 
 static bool rm_force;
