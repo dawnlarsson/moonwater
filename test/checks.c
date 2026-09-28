@@ -53199,6 +53199,28 @@ static fn network_stream_sigpipe(void)
         socket_close(pair[0]);
 }
 
+/* The checks' reads: no deadline, so a read waits in the kernel. */
+static bipolar tls_read(tls_conn address_to tls, p8 address_to into,
+                        positive room, positive address_to got)
+{
+        return tls_read_until(tls, into, room, got, null);
+}
+
+/* A post-handshake stream, whole: every message complete and allowed. */
+static bool tls_post_handshake_valid(p8 address_to messages,
+                                     positive length)
+{
+        p8 held[TLS_HS_MAX];
+        positive held_length = 0;
+        bool valid;
+
+        valid = tls_post_handshake_append(held, address_of held_length,
+                                          messages, length) == TLS_OK &&
+                !held_length;
+        crypto_forget(held, sizeof held);
+        return valid;
+}
+
 static fn tls_closure_boundaries(void)
 {
         {

@@ -6792,20 +6792,6 @@ static COLD bipolar tls_post_handshake_append(p8 address_to held,
         return TLS_OK;
 }
 
-static COLD bool tls_post_handshake_valid(p8 address_to messages,
-                                     positive length)
-{
-        p8 held[TLS_HS_MAX];
-        positive held_length = 0;
-        bool valid;
-
-        valid = tls_post_handshake_append(held, address_of held_length,
-                                          messages, length) == TLS_OK &&
-                !held_length;
-        crypto_forget(held, sizeof held);
-        return valid;
-}
-
 /* Encrypted server flight: handshake bytes are a stream across records, so
    each plaintext fragment is appended to hs[] and every complete message is
    peeled from the front.  Unlike tls_handshake_one_append, an empty fragment
@@ -7148,12 +7134,6 @@ static bipolar tls_read_until(
         if (!status && address_to got)
                 memory_copy(into, span, address_to got);
         return status;
-}
-
-static bipolar tls_read(tls_conn address_to tls, p8 address_to into,
-                        positive room, positive address_to got)
-{
-        return tls_read_until(tls, into, room, got, null);
 }
 
 #endif

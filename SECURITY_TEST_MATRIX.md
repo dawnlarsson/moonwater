@@ -33,7 +33,7 @@ corpus directory; no seed file lives in the tree.
 | --- | --- | --- | --- |
 | DER / Certificate list | `tls_der` | `tls_der_fuzz` | `tls_parse_extensions` / `tls_parse_cert` / certificate-list framing; EKU/SAN/BC/KU value lanes; names_chain + leaf/issuer policy; magic prefixes C1–C9 |
 | DER verify + sig | `tls_der` (same) | `tls_verify_fuzz` | `tls_verify_chain` parse/policy/names walker plus production `tls_verify_one` (hosted C montgomery + SHA); WR2→GTS prove in `LLVMFuzzerInitialize`; **not** lane_net smoke (hand / `sh test/run fuzz`) |
-| TLS 1.3 client protocol | `tls_hs` | `tls_hs_fuzz` | the whole record layer and handshake/application state machine (`tls_connect` through `tls_read`, crypto and certificate verdict stubbed, AEAD identity) over a fuzzed server stream in PRNG-sized reads (magic F3), with offset, lent-span and stays-closed asserts; framing walks over `tls_handshake_one_append` / `tls_encrypted_flight_append` (F1/F2) |
+| TLS 1.3 client protocol | `tls_hs` | `tls_hs_fuzz` | the whole record layer and handshake/application state machine (`tls_connect` through `tls_read_until`, crypto and certificate verdict stubbed, AEAD identity) over a fuzzed server stream in PRNG-sized reads (magic F3), with offset, lent-span and stays-closed asserts; framing walks over `tls_handshake_one_append` / `tls_encrypted_flight_append` (F1/F2) |
 
 Seed counts are whatever `tls_fuzz_seeds` returns; the fuzz lane's report
 records them.

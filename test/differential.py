@@ -39251,7 +39251,7 @@ def harness_tls_hs_fuzz(argv):
 
     Lifts src/net/net.c's record layer (tls_forget through the transcript)
     and its handshake and application half (tls_hello_append through
-    tls_read) verbatim, with the crypto, the socket and the certificate
+    tls_read_until) verbatim, with the crypto, the socket and the certificate
     verdict stubbed in BoringSSL's fuzzer-mode shape: the AEAD is the
     identity and opens when the tag's first byte is zero, the Finished MAC is
     zeros, and a signature or certificate passes unless its marked byte is

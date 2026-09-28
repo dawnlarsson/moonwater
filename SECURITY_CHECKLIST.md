@@ -105,7 +105,7 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
       continuous: see `sh test/run fuzz` / `MOONWATER_FUZZ_*`.
 - [x] Bounded lane-smoke coverage-guided fuzzing for the TLS client protocol
       (`python3 test/differential.py --harness tls_hs_fuzz`, 5s / 20k; lifts the
-      record layer and state machine from `tls_forget` through `tls_read` and
+      record layer and state machine from `tls_forget` through `tls_read_until` and
       drives `tls_connect` / `tls_read_until` / `tls_borrow` / `tls_lend` /
       `tls_write` from a fuzzed server stream, plus the `tls=null` framing
       walks; seeds from `tls_fuzz_seeds("tls_hs")`; ASan/UBSan via clang
