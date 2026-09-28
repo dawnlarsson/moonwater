@@ -38011,14 +38011,6 @@ static b32 file_rm()
                         path = rm_trimmed;
                 }
 
-                if (rm_recursive && rm_dot_operand(path))
-                {
-                        string_format(log_error, "rm: refusing to remove '.' or '..' directory: skipping %w\n",
-                                      writer_shell_quoted_name, path);
-                        rm_status = 1;
-                        continue;
-                }
-
                 looked = file_look_code(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW,
                                         address_of facts);
 
@@ -38038,6 +38030,17 @@ static b32 file_rm()
                                 rm_status = 1;
                         }
 
+                        continue;
+                }
+
+                /* After the look, as fts meets a root: nonexist/.. is a
+                   name that is not there -- forgiven by -f, reported
+                   without it -- before it is a dot to refuse. */
+                if (rm_recursive && rm_dot_operand(path))
+                {
+                        string_format(log_error, "rm: refusing to remove '.' or '..' directory: skipping %w\n",
+                                      writer_shell_quoted_name, path);
+                        rm_status = 1;
                         continue;
                 }
 

@@ -8099,7 +8099,11 @@ FILES_UTILITIES = (
             operands=(("a.txt",), ("dir",), ("missing",), ("link",), ("dangling",), ("dirlink",), ("dirlink/",), ("hollow",),
                       ("a.txt", "b.txt", "missing"), ("shut",), ("unreadable",), ("deep",), ("two words",), ("--", "-dash"), (),
                       ("dir", "a.txt", "hollow"), ("loop",), ("dir/sub/back",), (".",), ("./",), ("a.txt/",), ("dir/",), ("twin",),
-                      ("nest",), ("dup", "nest", "hollow"), ("a.txt", "a.txt"), ("new\nline",), ("shut/inside",), ("dir/sub",)),
+                      ("nest",), ("dup", "nest", "hollow"), ("a.txt", "a.txt"), ("new\nline",), ("shut/inside",), ("dir/sub",)) +
+                     # A dot below a name that is not there, or is not a
+                     # directory, is that failure first and a dot after.
+                     tuple((name + dot,) for name in ("missing", "a.txt", "dangling", "dir")
+                           for dot in ("/.", "/..", "/../", "//.")),
             stdin=("files_yes", "files_no", "files_mixed", "files_answers_nyy", "files_answers_yyn"),
             fixture="files", stderr="exact",
             extra=(("-rf", "dir", "a.txt", "missing"), ("-ri", "dir"), ("-rv", "dir"), ("-dv", "hollow"), ("-fd", "dir"),
