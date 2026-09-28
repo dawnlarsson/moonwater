@@ -47795,6 +47795,19 @@ say(status == 0 and out == b"slept\n" and spent < 0.5,
     "a client whose input is at its end sleeps while the command runs "
     "(%.2f s of CPU over 2 s)" % spent)
 
+#       A reader that stops just before the end, behind a standard output
+#       that says "not now" rather than blocking: the last of the output and
+#       the exit are held here while the far command is long done. The
+#       listener must not take held for taken and close the link on them.
+nonblocking = ("python3 -c 'import fcntl, os, sys; "
+               "fcntl.fcntl(1, fcntl.F_SETFL, fcntl.fcntl(1, fcntl.F_GETFL) | os.O_NONBLOCK); "
+               "os.execv(sys.argv[1], sys.argv[1:])' ")
+status, out, err = on("a", nonblocking + moon + " link run b 'seq 1 400000' | "
+                      "(head -c 2600000 > /dev/null; sleep 3; wc -c)", timeout=120)
+say(status == 0 and out.strip() == b"88895" and b"closed" not in err,
+    "sec: output held for a slow reader is not dropped when the command ends "
+    "(%r %r)" % (out.strip(), err[-80:]))
+
 status, out, err = on("a", moon + " link run b 'for i in $(seq 1 25); do echo line $i; sleep 0.2; done'",
                       extra={"WATERLINK_REKEY_SECONDS": "1"}, timeout=60)
 keyed = [int(w) for w in err.split() if w.isdigit()]
