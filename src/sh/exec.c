@@ -4952,6 +4952,37 @@ fn history_start()
         if (!shell_is_interactive)
                 return;
 
+        //      An interactive bash keeps its history in ~/.bash_history
+        //      unless told otherwise, and remembers five hundred lines.
+        if (shell_bash_compat && !env_get("HISTFILE"))
+        {
+                string_address home = env_get("HOME");
+
+                if (home && string_get(home))
+                {
+                        p8 address_to made = null;
+                        positive room = 0;
+                        positive length = string_length(home);
+
+                        if (shell_array_room(made, room, length + 16))
+                        {
+                                memory_copy(made, home, length);
+                                memory_copy_end(made + length, "/.bash_history",
+                                                14);
+                                env_assign("HISTFILE", made);
+                                memory_free(made, room);
+                        }
+                }
+                //      Not for -c, which reads no lines to remember.
+                if (!string_is(shell_option_flags, 'c'))
+                {
+                        if (!env_get("HISTSIZE"))
+                                env_assign("HISTSIZE", "500");
+                        if (!env_get("HISTFILESIZE"))
+                                env_assign("HISTFILESIZE", "500");
+                }
+        }
+
         path = history_file();
 
         if (path)
@@ -4973,6 +5004,11 @@ fn history_leaving()
         path = history_file();
 
         if (!path)
+                return;
+
+        //      bash writes the file only when this session remembered a
+        //      line: bash -i -c, which remembers none, leaves no file.
+        if (shell_bash_compat && history_used == history_saved)
                 return;
 
         history_trim((string_address) "HISTFILESIZE");

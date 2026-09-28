@@ -14595,6 +14595,16 @@ def shell_lang_background_reap(rng):
         job + " &", "p=$!", watch, 'echo "watched=$?"', 'wait "$p"; echo "wait=$?"'))
 
 
+#       -i with no terminal on standard input: prompts go to standard error
+#       and nothing is drawn for a screen. This wrote the alternate-screen and
+#       cursor escapes and every prompt to standard output.
+def shell_lang_interactive_pipe(rng):
+    script = rng.choice(("echo hi", "if true\nthen\n  echo hi\nfi", "x=1\necho $x", "echo a; echo b"))
+    return ("interactive-pipe", shell_ALL, shell_program(
+        shell_SELF + "printf '" + script + "\\n' | HISTFILE= ./$shell_me -i 2>/dev/null | od -c | sed 's/^[0-9]* *//'",
+        'echo "end=$?"'))
+
+
 #       What bash does with a builtin handed words it has no place for, and
 #       with a subscript it cannot evaluate: the whole command the reader was
 #       running is dropped -- through eval, a sourced file and a function --
@@ -17436,6 +17446,7 @@ SHELL_FAMILIES = (
     shell_lang_directory_state,
     shell_lang_builtin_refusals,
     shell_lang_background_reap,
+    shell_lang_interactive_pipe,
     shell_lang_count_operators,
     shell_lang_brace_continuation,
     shell_lang_trap_return,

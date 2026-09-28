@@ -1060,7 +1060,8 @@ b32 main()
                 has not reached yet. A terminal already hands over one line
                 per read, so it keeps the wider read.
         */
-        bool shared_input = !script_file && !shell_interactive();
+        bool terminal_input = !script_file && shell_interactive();
+        bool shared_input = !script_file && !terminal_input;
         bool seekable_input = shared_input && system_seek(input, 0, 1) >= 0;
 
         /* Keep one authenticated identity for the whole live reader. This is
@@ -1071,11 +1072,27 @@ b32 main()
                 bipolar got;
                 positive total, at;
 
-                if (interactive)
+                if (interactive && terminal_input)
                 {
                         log_direct(str(TERM_MAIN_BUFFER TERM_RESET
                                            TERM_SHOW_CURSOR));
                         shell_prompt_write(log_direct, shell_reading_more());
+                }
+                //      -i with no terminal on standard input: the prompt
+                //      goes to standard error, as both references write it,
+                //      and nothing here is for a screen to draw.
+                else if (interactive)
+                {
+                        bool more = shell_reading_more();
+                        string_address text = env_get(more ? "PS2" : "PS1");
+
+                        if (!text)
+                                text = more ? (string_address) "> "
+                                       : shell_bash_compat
+                                           ? (string_address) "\\s-\\v\\$ "
+                                           : (string_address) "$ ";
+                        shell_prompt_written(log_error, text);
+                        log_flush();
                 }
 
                 //      Room for another read on top of whatever is being
