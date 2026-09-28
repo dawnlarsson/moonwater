@@ -7391,7 +7391,18 @@ FILES_UTILITIES = (
                    ("-B1", "/"), ("-B1536", "/"), ("-B512", "/"), ("-PB1M", "/"), ("-BKiB", "/"), ("-B3K", "/"),
                    ("-BMB", "/"), ("-B", "1000000", "/"), ("-Bx", "/"), ("--block-size=10", "/"), ("-H", "/"),
                    ("--si", "/", "/dev"), ("--total", "/", "/dev"), ("--total", "-i", "/dev"), ("--total", "missing"),
-                   ("--total", "-T", "-BK", "/dev"), ("--total", "-h", "/"), ("-h", "-B1K", "/"), ("-B1K", "-h", "/"))),
+                   ("--total", "-T", "-BK", "/dev"), ("--total", "-h", "/"), ("-h", "-B1K", "/"), ("-B1K", "-h", "/"),
+                   # --output in its abbreviations, repeated, beside the
+                   # fixed tables either way round, a field twice or unknown,
+                   # the total row with and without a Filesystem column, the
+                   # File column; -F is -t.
+                   ("--out=source", "/"), ("--o", "-h", "/"), ("--output", "-i", "/"), ("-i", "--output", "/"),
+                   ("-T", "--output=source", "/"), ("--output", "-P", "/"), ("-P", "--output", "/"),
+                   ("--output=target,source,target", "/"), ("--out=target", "--out=target", "/"),
+                   ("--output=size", "--output=used", "/"), ("--output=bogus,target", "/"),
+                   ("--output=source,target", "--total", "/"), ("--output=target", "--total", "/"),
+                   ("--output=file,target", ".", "a.txt", "/"), ("-B1K", "--output=size", "/"),
+                   ("-h", "--output=itotal,size", "/"), ("-F", "tmpfs", "/tmp"), ("-Fnosuch",))),
     Utility("env", options=(Option("-i"), Option("-0"), Option("-v"), Option("--ignore-environment"), Option("--null"),
                             Option("--debug"), Option("--list-signal-handling"),
                             Option("-u", ("HOME", "PATH", "NOPE", "A", ""), None), Option("--unset", ("HOME", "A"), True),
@@ -41771,7 +41782,6 @@ PINNED = r"""
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"ac27f0a19c6dcc210687994bc217e7644bffa9158eb94d98885e00baa5d0aa1e"},"case":{"argv":["-d","2001-09-09 23:59:60","+%Y-%m-%d %H:%M:%S"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"a5d74ff50f7990a6","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-d","@-9223372036854775808","+%Y-%m-%d %H:%M:%S"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"c6db97f2549f59a7","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
 {"domain":"files","kind":"bug","list":"ledger","option":"--debug","reason_id":"r93","utility":"date"},
-{"domain":"files","kind":"bug","list":"ledger","option":"--output","reason_id":"r95","utility":"df"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"4f8a99ed0c16119c8fa1efa29781c2a0da32035321867c078573676dbc50ddaa"},"case":{"argv":["--file-type"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","tier":"singles","utility":"dir"},"domain":"files","id":"25dc8df95d82301b","kind":"bug","list":"ledger","reason_id":"r324","reference":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"e96d555d024146db7480d9cd2c593796efb676d7ac3fd0a5130aaac38c293b08"},"utility":"dir"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"32da2c07c604a0967a080c5a30009166605e8dd7f51ebb36544e4d9e22946468"},"case":{"argv":["--time=mtime"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","tier":"singles","utility":"dir"},"domain":"files","id":"2c9aaebab9354560","kind":"bug","list":"ledger","reason_id":"r324","reference":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"010c15b3f82313c61b832b440809a92321aad6fce08c09aad88c1cfbb33c7c82"},"utility":"dir"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"32da2c07c604a0967a080c5a30009166605e8dd7f51ebb36544e4d9e22946468"},"case":{"argv":["-L"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","tier":"singles","utility":"dir"},"domain":"files","id":"3caa045682f00a62","kind":"bug","list":"ledger","reason_id":"r324","reference":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"32da2c07c604a0967a080c5a30009166605e8dd7f51ebb36544e4d9e22946468"},"utility":"dir"},

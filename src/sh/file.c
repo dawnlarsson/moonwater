@@ -16735,15 +16735,6 @@ static p64 df_unit;
 static bool df_si;
 static p8 df_suffix[8];
 
-static positive df_device_width;
-static positive df_type_width;
-static positive df_full_width;
-
-typedef struct
-{
-        string_address heading;
-        positive width;
-} df_amount_column;
 
 typedef struct
 {
@@ -16759,6 +16750,9 @@ static df_sample address_to df_samples;
 static positive df_sample_room;
 static positive address_to df_order;
 static positive df_order_room;
+// Which operand named each row, for the File column.
+static positive address_to df_order_file;
+static positive df_order_file_room;
 
 /*
         Which mounts df looks at, gnulib's way: -l leaves out a remote one
@@ -16807,6 +16801,119 @@ static bool df_wanted(storage_mount address_to mount)
         return !df_type_listed(mount->type, df_excluded, df_excluded_count);
 }
 
+/*
+        The columns df can show, in the order --output with no list shows
+        them, with the narrowest each may be, the side a short cell is padded
+        on, and whether it counts inodes. A table is a list of these: the
+        default, -h, -i and -P lists are fixed, and --output builds one.
+*/
+enum
+{
+        DF_SOURCE,
+        DF_FSTYPE,
+        DF_ITOTAL,
+        DF_IUSED,
+        DF_IAVAIL,
+        DF_IPCENT,
+        DF_SIZE,
+        DF_USED,
+        DF_AVAIL,
+        DF_PCENT,
+        DF_FILE,
+        DF_TARGET,
+        DF_FIELDS
+};
+
+static const struct
+{
+        string_address word;
+        string_address heading;
+        p8 floor;
+        bool right;
+        bool inodes;
+} df_fields[DF_FIELDS] = {
+    {"source", "Filesystem", 14, false, false},
+    {"fstype", "Type", 4, false, false},
+    {"itotal", "Inodes", 5, true, true},
+    {"iused", "IUsed", 5, true, true},
+    {"iavail", "IFree", 5, true, true},
+    {"ipcent", "IUse%", 4, true, true},
+    {"size", "blocks", 5, true, false},
+    {"used", "Used", 5, true, false},
+    {"avail", "Available", 5, true, false},
+    {"pcent", "Use%", 4, true, false},
+    {"file", "File", 0, false, false},
+    {"target", "Mounted on", 0, false, false},
+};
+
+static p8 df_shown[DF_FIELDS];
+static positive df_shown_count;
+static string_address df_headings[DF_FIELDS];
+static positive df_widths[DF_FIELDS];
+static bool df_output;
+
+static fn df_field_add(p8 field, string_address heading)
+{
+        df_headings[df_shown_count] = heading ? heading : df_fields[field].heading;
+        df_shown[df_shown_count++] = field;
+}
+
+static bool df_field_used(p8 field)
+{
+        for (positive at = 0; at < df_shown_count; at++)
+                if (df_shown[at] == field)
+                        return true;
+        return false;
+}
+
+static bool df_refused(string_address message, string_address word)
+{
+        if (string_first_of(message, '%')[1] == 's')
+                string_format(log_error, message, word);
+        else
+                string_format(log_error, message, writer_terminal_quoted_name, word);
+        return string_report(log_error, false, "Try 'df --help' for more information.\n");
+}
+
+// One --output: its list, comma separated, goes on the end of the table.
+static bool df_output_read(string_address list)
+{
+        string_address at = list;
+
+        for (;;)
+        {
+                string_address comma = string_first_of_or_end(at, ',');
+                positive length = (positive)(comma - at);
+                p8 word[16];
+                p8 field = DF_FIELDS;
+
+                string_copy_max_end(word, at, min(length, sizeof(word) - 1));
+                for (p8 each = 0; each < DF_FIELDS && length < sizeof(word); each++)
+                        if (string_equals(word, df_fields[each].word))
+                                field = each;
+
+                if (field == DF_FIELDS)
+                {
+                        p8 whole[FILE_NAME_MAX];
+
+                        string_copy_max_end(whole, at, min(length, sizeof(whole) - 1));
+                        return df_refused((string_address) "df: option --output: field '%w' unknown\n",
+                                          whole);
+                }
+                if (df_field_used(field))
+                        return df_refused(
+                            (string_address) "df: option --output: field '%w' used more than once\n",
+                            df_fields[field].word);
+
+                df_field_add(field, field == DF_SIZE    ? (string_address) "Size"
+                                    : field == DF_AVAIL ? (string_address) "Avail"
+                                                        : null);
+                if (!string_get(comma))
+                        return true;
+                at = comma + 1;
+        }
+}
+
 static file_taking address_to df_taking;
 
 static bool df_seen(p8 letter, string_address value)
@@ -16828,6 +16935,42 @@ static bool df_seen(p8 letter, string_address value)
                                          : (string_address) "-B",
                                      value);
         }
+        /*
+                --output builds a table of its own, so it cannot stand with
+                the options that choose one of the fixed tables: whichever
+                comes second is refused, naming the one that is not --output.
+                -P is refused only while the table is still the default one.
+        */
+        if (letter == 'o')
+        {
+                string_address other = df_inodes ? (string_address) "-i"
+                                       : df_posix && !df_output ? (string_address) "-P"
+                                       : df_types ? (string_address) "-T"
+                                                  : null;
+
+                if (other)
+                        return df_refused((string_address) "df: options %s and --output are mutually exclusive\n",
+                                          other);
+                df_output = true;
+                return !value || df_output_read(value);
+        }
+        if (letter == 'i' || letter == 'P' || letter == 'T')
+        {
+                p8 named[3] = {'-', letter, end};
+
+                if (df_output)
+                        return df_refused((string_address) "df: options %s and --output are mutually exclusive\n",
+                                          named);
+                if (letter == 'i')
+                        df_inodes = true;
+                else if (letter == 'P')
+                        df_posix = true;
+                else
+                        df_types = true;
+                return true;
+        }
+        if (letter == 'F')
+                letter = 't';
         if (letter != 't' && letter != 'x')
                 return true;
 
@@ -16840,6 +16983,72 @@ static bool df_seen(p8 letter, string_address value)
         list[address_to count] = value;
         address_to count += 1;
         return true;
+}
+
+/*
+        The mount a device node operand names: the entries whose source is
+        the same file once both are resolved, and of those the one with the
+        shortest mount point that can be reached -- the root at once. A
+        device whose mount point has since had another device mounted over
+        it is refused, as GNU refuses it. The answer is the entry's index
+        plus one, 0 for none, and -1 for the over-mounted case.
+*/
+static bipolar df_device_mount(storage_mount_table address_to mounts, string_address path)
+{
+        p8 wanted[FILE_PATH_MAX];
+        p8 source[FILE_PATH_MAX];
+        positive best = 0;
+        positive best_length = positive_max;
+        bool best_reached = false;
+        bool eclipsed = false;
+
+        if (!file_resolve_as(path, wanted, true, 0))
+                string_copy_max_end(wanted, path, FILE_PATH_MAX - 1);
+
+        for (positive at = 0; at < mounts->count; at++)
+        {
+                storage_mount address_to mount = mounts->entry + at;
+                string_address name = mount->source;
+
+                if (string_is(name, '/') && file_resolve_as(name, source, true, 0))
+                        name = source;
+                if (!string_equals(name, wanted))
+                        continue;
+
+                // The last mount on the same point is the one showing there.
+                positive last = at;
+
+                for (positive later = at + 1; later < mounts->count; later++)
+                        if (string_equals(mounts->entry[later].target, mount->target))
+                                last = later;
+
+                p8 top[FILE_PATH_MAX];
+                string_address shown = mounts->entry[last].source;
+
+                if (string_is(shown, '/') && file_resolve_as(shown, top, true, 0))
+                        shown = top;
+                eclipsed = !string_equals(shown, wanted);
+
+                positive length = string_length(mount->target);
+
+                if (eclipsed || (best_reached && length >= best_length))
+                        continue;
+
+                file_facts facts;
+                bool reached = file_look_at(mount->target, address_of facts);
+
+                if (reached)
+                        best_reached = true;
+                if (reached || (!best_reached && length < best_length))
+                {
+                        best = at + 1;
+                        if (length == 1)
+                                break;
+                        best_length = length;
+                }
+        }
+
+        return best ? (bipolar)best : eclipsed ? -1 : 0;
 }
 
 static fn df_measure(storage_mount address_to mount, df_sample address_to sample)
@@ -16878,17 +17087,22 @@ static fn df_collect(address_any data, positive length)
         }
 }
 
-static positive df_amount(p8 address_to into, p64 blocks, p64 size)
+static positive df_amount(p8 address_to into, p64 blocks, p64 size, bool inodes)
 {
-        if (df_inodes && !df_human)
-                return positive_into_string(into, blocks);
+        if (inodes && !df_human)
+        {
+                positive length = positive_into_string(into, blocks);
+
+                into[length] = end;
+                return length;
+        }
 
         // One writer for ls, du and df: -B's unit and its letter, or -h and
         // -H scaled by 1024 and by 1000.
         df_into = into;
         df_into_used = 0;
-        ls_scaled(df_collect, df_inodes ? blocks : blocks * size, df_inodes ? 1 : df_unit,
-                  df_human, df_si, df_inodes ? (string_address) "" : (string_address)df_suffix);
+        ls_scaled(df_collect, inodes ? blocks : blocks * size, inodes ? 1 : df_unit,
+                  df_human, df_si, inodes ? (string_address) "" : (string_address)df_suffix);
         into[df_into_used] = end;
         return df_into_used;
 }
@@ -16961,17 +17175,12 @@ static fn df_block_heading(p8 address_to into, p64 size, bool binary, bool marke
         memory_copy_apart(into + at, "-blocks", 8);
 }
 
-static fn df_column(p8 address_to text, positive width)
-{
-        string_to_field_bulk(log, text, width, ' ', false);
-        log(" ", 1);
-}
-
-// What is being measured: blocks by default, and the inode table under -i.
+// What is being measured: the blocks, or the inode table.
 static fn df_reading(file_mount_facts address_to facts, p64 address_to total,
-                     p64 address_to used, p64 address_to spare, p64 address_to size)
+                     p64 address_to used, p64 address_to spare, p64 address_to size,
+                     bool inodes)
 {
-        if (df_inodes)
+        if (inodes)
         {
                 address_to size = 1;
                 address_to total = facts->files;
@@ -17017,48 +17226,100 @@ static fn file_write_controls_hidden(writer output, string_address text,
         writer_fill(output, width > length ? width - length : 0, ' ');
 }
 
-static fn df_row(string_address device, string_address type, string_address where,
-                 file_mount_facts address_to facts, bool measured,
-                 df_amount_column address_to columns)
+/*
+        One cell of a row: what the mount table says, or the amount the
+        measure came to, or - where there is nothing to say.
+*/
+static string_address df_cell(p8 field, string_address device, string_address type,
+                              string_address where, string_address file,
+                              file_mount_facts address_to facts, bool measured,
+                              p8 address_to text)
 {
+        switch (field)
+        {
+        case DF_SOURCE:
+                return device;
+        case DF_FSTYPE:
+                return measured ? type : (string_address) "-";
+        case DF_FILE:
+                return file ? file : (string_address) "-";
+        case DF_TARGET:
+                return where;
+        }
+
+        if (!measured)
+                return (string_address) "-";
+
+        bool inodes = df_fields[field].inodes;
         p64 values[3], size;
+
+        df_reading(facts, values, values + 1, values + 2, address_of size, inodes);
+
+        if (field == DF_PCENT || field == DF_IPCENT)
+        {
+                p64 wanted = values[1] + values[2];
+
+                // A filesystem with nothing in it to fill has no proportion
+                // full, and saying nought percent would be an answer where
+                // there is none.
+                if (!wanted)
+                        return (string_address) "-";
+
+                positive length = positive_into_string(text,
+                                                       (values[1] * 100 + wanted - 1) / wanted);
+
+                text[length++] = '%';
+                text[length] = end;
+                return text;
+        }
+
+        positive column = field == DF_SIZE || field == DF_ITOTAL  ? 0
+                          : field == DF_USED || field == DF_IUSED ? 1
+                                                                  : 2;
+
+        df_amount(text, values[column], size, inodes);
+        return text;
+}
+
+static fn df_measure_row(string_address device, string_address type, string_address where,
+                         string_address file, file_mount_facts address_to facts, bool measured)
+{
         p8 text[64];
-        string_address dash = (string_address) "-";
 
-        df_reading(facts, values, values + 1, values + 2,
-                   address_of size);
-
-        file_write_controls_hidden(log, device, df_device_width);
-        log(" ", 1);
-
-        if (df_types)
+        for (positive at = 0; at < df_shown_count; at++)
         {
-                string_to_field_bulk(log, measured ? type : dash, df_type_width, ' ', true);
-                log(" ", 1);
-        }
+                positive length = string_length(df_cell(df_shown[at], device, type, where, file,
+                                                        facts, measured, text));
 
-        for (positive column = 0; column < 3; column++)
+                if (length > df_widths[at])
+                        df_widths[at] = length;
+        }
+}
+
+static fn df_row(string_address device, string_address type, string_address where,
+                 string_address file, file_mount_facts address_to facts, bool measured)
+{
+        p8 text[64];
+
+        for (positive at = 0; at < df_shown_count; at++)
         {
-                if (measured)
-                        df_amount(text, values[column], size);
-                df_column(measured ? text : dash, columns[column].width);
+                string_address cell = df_cell(df_shown[at], device, type, where, file, facts,
+                                              measured, text);
+                positive length = string_length(cell);
+                positive fill = df_widths[at] > length ? df_widths[at] - length : 0;
+                p8 field = df_shown[at];
+
+                if (at)
+                        log(" ", 1);
+                if (df_fields[field].right)
+                        writer_fill(log, fill, ' ');
+                if (field == DF_SOURCE || field == DF_TARGET || field == DF_FILE)
+                        file_write_controls_hidden(log, cell, 0);
+                else
+                        log(cell, length);
+                if (!df_fields[field].right && at + 1 < df_shown_count)
+                        writer_fill(log, fill, ' ');
         }
-
-        p64 wanted = values[1] + values[2];
-
-        // A filesystem with nothing in it to fill has no proportion full, and
-        // saying nought percent would be an answer where there is none.
-        if (!measured || !wanted)
-                df_column(dash, df_full_width);
-        else
-        {
-                positive_to_padded(log,
-                                   (positive)((values[1] * 100 + wanted - 1) / wanted),
-                                   df_full_width - 1, ' ', 0);
-                log("% ", 2);
-        }
-
-        file_write_controls_hidden(log, where, 0);
         log("\n", 1);
 }
 
@@ -17079,6 +17340,9 @@ static const argument_option df_options[] = {
     // Whether df syncs before it asks is nothing a reader can see.
     {"sync", 'Y', ARGUMENT_LONG_ONLY},
     {"no-sync", 'N', ARGUMENT_LONG_ONLY},
+    {"output", 'o', ARGUMENT_LONG_OPTIONAL | ARGUMENT_LONG_ONLY},
+    // Solaris's spelling of -t.
+    {"F", 0, ARGUMENT_REQUIRED},
     {null},
 };
 
@@ -17100,6 +17364,8 @@ static b32 file_df()
         df_unit_option = 0;
         df_selected_count = df_excluded_count = 0;
         df_taking = address_of taking;
+        df_inodes = df_posix = df_types = df_output = false;
+        df_shown_count = 0;
 
         if (!file_take(address_of taking))
                 return 1;
@@ -17162,10 +17428,7 @@ static b32 file_df()
                 if (!human)
                         df_block_heading(block_heading, unit, letter && !decimal, marked);
         }
-        df_inodes = (taking.flags & FILE_FLAG('i')) != 0;
-        df_types = (taking.flags & FILE_FLAG('T')) != 0;
         df_all = (taking.flags & FILE_FLAG('a')) != 0;
-        df_posix = (taking.flags & FILE_FLAG('P')) != 0;
 
         storage_mount_table mounts;
 
@@ -17173,23 +17436,40 @@ static b32 file_df()
                 return string_report(log_error, 1, "df: cannot read mount table\n");
 
         // POSIX spells the unit out in bytes, and GNU does even when -m chose it.
-        df_amount_column columns[] = {
-            {df_inodes ? (string_address) "Inodes"
-             : df_human ? (string_address) "Size"
-             : df_posix && df_unit_option == 'B' ? (string_address)posix_heading
-             : df_posix ? df_unit_option == 'm' ? (string_address) "1048576-blocks"
-                                                : (string_address) "1024-blocks"
-             : df_unit_option == 'B' ? (string_address)block_heading
-             : df_unit_option == 'm' ? (string_address) "1M-blocks"
-                                     : (string_address) "1K-blocks", 5},
-            {df_inodes ? (string_address) "IUsed" : (string_address) "Used", 5},
-            {df_inodes ? (string_address) "IFree"
-             : df_human ? (string_address) "Avail"
-                        : (string_address) "Available", 5},
-        };
-        string_address full_heading = df_inodes ? (string_address) "IUse%"
-                                      : df_posix && !df_human ? (string_address) "Capacity"
-                                                              : (string_address) "Use%";
+        string_address size_heading =
+            df_human ? (string_address) "Size"
+            : df_posix && df_unit_option == 'B' ? (string_address)posix_heading
+            : df_posix ? df_unit_option == 'm' ? (string_address) "1048576-blocks"
+                                               : (string_address) "1024-blocks"
+            : df_unit_option == 'B' ? (string_address)block_heading
+            : df_unit_option == 'm' ? (string_address) "1M-blocks"
+                                    : (string_address) "1K-blocks";
+
+        if (df_output && !df_shown_count)
+                df_output_read((string_address) "source,fstype,itotal,iused,iavail,ipcent,"
+                                                "size,used,avail,pcent,file,target");
+        else if (!df_output)
+        {
+                df_field_add(DF_SOURCE, null);
+                if (df_types)
+                        df_field_add(DF_FSTYPE, null);
+                if (df_inodes)
+                {
+                        df_field_add(DF_ITOTAL, null);
+                        df_field_add(DF_IUSED, null);
+                        df_field_add(DF_IAVAIL, null);
+                        df_field_add(DF_IPCENT, null);
+                }
+                else
+                {
+                        df_field_add(DF_SIZE, size_heading);
+                        df_field_add(DF_USED, null);
+                        df_field_add(DF_AVAIL, df_human ? (string_address) "Avail" : null);
+                        df_field_add(DF_PCENT, df_posix && !df_human ? (string_address) "Capacity"
+                                                                     : null);
+                }
+                df_field_add(DF_TARGET, null);
+        }
 
         /*
                 Each column is the widest of three things: a floor the column
@@ -17198,14 +17478,13 @@ static b32 file_df()
                 the same way, and they are the system's own: fourteen for the
                 filesystem, five for each amount, four for the percentage.
         */
-        df_device_width = 14;
-        df_type_width = 4;
-
-        for (positive column = 0; column < array_count(columns); column++)
-                if (string_length(columns[column].heading) > columns[column].width)
-                        columns[column].width = string_length(columns[column].heading);
-
-        df_full_width = string_length(full_heading);
+        for (positive at = 0; at < df_shown_count; at++)
+        {
+                if (df_shown[at] == DF_SIZE)
+                        df_headings[at] = size_heading;
+                df_widths[at] = max((positive)df_fields[df_shown[at]].floor,
+                                    string_length(df_headings[at]));
+        }
 
         bool filtering = first < count;
         positive showing = 0;
@@ -17214,6 +17493,8 @@ static b32 file_df()
         if (!array_store_reserve(df_samples, df_sample_room, 0, mounts.count,
                                  32) ||
             (filtering && !array_store_reserve(df_order, df_order_room, 0,
+                                               count - first, 8)) ||
+            (filtering && !array_store_reserve(df_order_file, df_order_file_room, 0,
                                                count - first, 8)))
         {
                 storage_mount_table_release(address_of mounts);
@@ -17271,10 +17552,34 @@ static b32 file_df()
                                 continue;
                         }
 
+                        /*
+                                A device node that is mounted names the
+                                filesystem on it rather than the one its
+                                node sits in; one that is not falls back to
+                                the file it is.
+                        */
+                        positive found = 0;
+                        positive kind = MODE_FORMAT & wanted.mode;
+
+                        if (kind == MODE_BLOCK || kind == MODE_CHARACTER)
+                        {
+                                bipolar device = df_device_mount(address_of mounts, path);
+
+                                if (device < 0)
+                                {
+                                        string_format(log_error,
+                                                      "df: cannot access %w: over-mounted by another device\n",
+                                                      writer_shell_quoted_name, path);
+                                        df_failed = true;
+                                        continue;
+                                }
+                                found = (positive)device;
+                        }
+
                         /* The last record is the visible top of a stacked
                            mount, just as storage_mount_find_target chooses. */
                         for (positive at = mounts.count; at; at--)
-                                if (mounts.entry[at - 1].id == wanted.mount_id)
+                                if (found ? at == found : mounts.entry[at - 1].id == wanted.mount_id)
                                 {
                                         df_sample address_to named =
                                             df_samples + at - 1;
@@ -17298,57 +17603,44 @@ static b32 file_df()
                                                    no blocks is still shown. */
                                                 named->shown = named->measured || df_all;
                                                 if (named->shown)
+                                                {
+                                                        df_order_file[ordered] = i;
                                                         df_order[ordered++] = at - 1;
+                                                }
                                         }
 
                                         break;
                                 }
                 }
 
+        positive rows = filtering ? ordered : mounts.count;
+
         for (positive at = 0; at < mounts.count; at++)
+                showing += df_samples[at].shown;
+
+        for (positive row = 0; row < rows; row++)
         {
-                storage_mount address_to mount = mounts.entry + at;
-                df_sample address_to sample = df_samples + at;
-                file_mount_facts address_to facts = address_of sample->facts;
-                string_address device = mount->source;
-                string_address type = mount->type;
-                p8 text[64];
+                positive at = filtering ? df_order[row] : row;
 
-                if (!sample->shown)
-                        continue;
-
-                showing++;
-
-                if (string_length(device) > df_device_width)
-                        df_device_width = string_length(device);
-
-                if (sample->measured && string_length(type) > df_type_width)
-                        df_type_width = string_length(type);
-
-                if (!sample->measured)
-                        continue;
-
-                p64 values[3], size;
-
-                df_reading(facts, values, values + 1, values + 2, address_of size);
-                for (positive column = 0; column < array_count(columns); column++)
-                {
-                        positive length = df_amount(text, values[column], size);
-
-                        if (length > columns[column].width)
-                                columns[column].width = length;
-                }
+                if (df_samples[at].shown)
+                        df_measure_row(mounts.entry[at].source, mounts.entry[at].type,
+                                       mounts.entry[at].target,
+                                       filtering ? program_argument((b32)df_order_file[row]) : null,
+                                       address_of df_samples[at].facts, df_samples[at].measured);
         }
 
         /*
                 --total: every row shown added up, in bytes, as one more row
-                named total with - for its type and its mount.
+                named total with - for its type and its mount -- or total
+                for the mount, when there is no Filesystem column to say it.
         */
         file_mount_facts sum;
+        string_address sum_where = df_field_used(DF_SOURCE) ? (string_address) "-"
+                                                            : (string_address) "total";
 
         memory_fill(address_of sum, 0, sizeof(sum));
         sum.fragment_size = sum.block_size = 1;
-        for (positive row = 0; total && row < (filtering ? ordered : mounts.count); row++)
+        for (positive row = 0; total && row < rows; row++)
         {
                 // Row by row, so a filesystem named twice counts twice.
                 df_sample address_to sample = df_samples + (filtering ? df_order[row] : row);
@@ -17364,19 +17656,8 @@ static b32 file_df()
                 sum.files_free += sample->facts.files_free;
         }
         if (total && showing)
-        {
-                p64 values[3], size;
-                p8 text[64];
-
-                df_reading(address_of sum, values, values + 1, values + 2, address_of size);
-                for (positive column = 0; column < array_count(columns); column++)
-                {
-                        positive length = df_amount(text, values[column], size);
-
-                        if (length > columns[column].width)
-                                columns[column].width = length;
-                }
-        }
+                df_measure_row((string_address) "total", (string_address) "-", sum_where, null,
+                               address_of sum, true);
 
         /* Nothing to head is no table at all, and when nothing went wrong
            on the way that is itself the complaint. */
@@ -17389,35 +17670,34 @@ static b32 file_df()
                 return 1;
         }
 
-        string_to_field_bulk(log, (string_address) "Filesystem", df_device_width,
-                        ' ', true);
-        log(" ", 1);
-
-        if (df_types)
+        for (positive at = 0; at < df_shown_count; at++)
         {
-                string_to_field_bulk(log, (string_address) "Type", df_type_width,
-                                ' ', true);
-                log(" ", 1);
+                positive length = string_length(df_headings[at]);
+                positive fill = df_widths[at] > length ? df_widths[at] - length : 0;
+
+                if (at)
+                        log(" ", 1);
+                if (df_fields[df_shown[at]].right)
+                        writer_fill(log, fill, ' ');
+                log(df_headings[at], length);
+                if (!df_fields[df_shown[at]].right && at + 1 < df_shown_count)
+                        writer_fill(log, fill, ' ');
         }
+        log("\n", 1);
 
-        for (positive column = 0; column < array_count(columns); column++)
-                df_column(columns[column].heading, columns[column].width);
-        log(full_heading, 0);
-        log(" Mounted on\n", 0);
-
-        for (positive row = 0; row < (filtering ? ordered : mounts.count); row++)
+        for (positive row = 0; row < rows; row++)
         {
                 positive at = filtering ? df_order[row] : row;
+
                 if (df_samples[at].shown)
-                        df_row(mounts.entry[at].source,
-                               mounts.entry[at].type,
+                        df_row(mounts.entry[at].source, mounts.entry[at].type,
                                mounts.entry[at].target,
-                               address_of df_samples[at].facts,
-                               df_samples[at].measured, columns);
+                               filtering ? program_argument((b32)df_order_file[row]) : null,
+                               address_of df_samples[at].facts, df_samples[at].measured);
         }
         if (total)
-                df_row((string_address) "total", (string_address) "-", (string_address) "-",
-                       address_of sum, true, columns);
+                df_row((string_address) "total", (string_address) "-", sum_where, null,
+                       address_of sum, true);
 
         storage_mount_table_release(address_of mounts);
         log_flush();
