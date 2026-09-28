@@ -687,6 +687,7 @@ b32 main()
         // personality instead of scanning the path again after the fast exit.
         if (called && *called == '-')
                 called++;
+        shell_invocation_name = called;
         /* rbash is bash's restricted name: the same policy, already
            restricted before any option is read. A leading dash was
            stripped above, so -rbash is a login rbash. */
@@ -1060,7 +1061,8 @@ b32 main()
                 has not reached yet. A terminal already hands over one line
                 per read, so it keeps the wider read.
         */
-        bool shared_input = !script_file && !shell_interactive();
+        bool terminal_input = !script_file && shell_interactive();
+        bool shared_input = !script_file && !terminal_input;
         bool seekable_input = shared_input && system_seek(input, 0, 1) >= 0;
 
         /* Keep one authenticated identity for the whole live reader. This is
@@ -1071,11 +1073,30 @@ b32 main()
                 bipolar got;
                 positive total, at;
 
-                if (interactive)
+                if (interactive && terminal_input)
                 {
                         log_direct(str(TERM_MAIN_BUFFER TERM_RESET
                                            TERM_SHOW_CURSOR));
                         shell_prompt_write(log_direct, shell_reading_more());
+                }
+                //      -i with no terminal on standard input: the prompt
+                //      goes to standard error, as both references write it,
+                //      and nothing here is for a screen to draw.
+                else if (interactive)
+                {
+                        bool more = shell_reading_more();
+                        string_address text = env_get(more ? "PS2" : "PS1");
+
+                        if (!text)
+                                text = more ? (string_address) "> "
+                                       : shell_bash_compat
+                                           ? (string_address) "\\s-\\v\\$ "
+                                           : (string_address) "$ ";
+                        if (shell_bash_compat)
+                                log_error(shell_prompt_expand(text, false), 0);
+                        else
+                                shell_prompt_written(log_error, text);
+                        log_flush();
                 }
 
                 //      Room for another read on top of whatever is being
@@ -1168,11 +1189,10 @@ b32 main()
                 {
                         shell_verbose_from_string = false;
                         shell_verbose_line(ready);
-                        // Bash treats EOF on a script or stdin as a newline,
-                        // so a trailing backslash is still a continuation.
-                        // dash leaves the backslash as a byte of the word.
-                        if (!shell_bash_compat)
-                                lex_physical_newline(false);
+                        // A backslash that meets the end of the input with
+                        // no newline after it is a byte of the word, in
+                        // bash 5.3 and dash alike: `echo a\` prints a\.
+                        lex_physical_newline(false);
                         shell_run_known_line(ready, true);
                 }
         }

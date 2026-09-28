@@ -842,7 +842,8 @@ static awk_text address_to awk_global_names[AWK_GLOBALS_MAX];
 static p8 awk_global_meaning[AWK_GLOBALS_MAX];
 static b32 awk_global_count;
 
-static awk_cell awk_stack[AWK_FRAME_MAX];
+static awk_cell (address_to awk_stack_held)[AWK_FRAME_MAX];
+#define awk_stack UTILITY_HELD(awk_stack)
 static b32 awk_frame;
 static b32 awk_frame_size;
 

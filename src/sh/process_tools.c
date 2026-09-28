@@ -326,9 +326,13 @@ static bool stdbuf_mode(string_address text, bool input,
         if (string_is(at, '+'))
                 at++;
 
-        positive value;
+        positive value = 1;
 
-        if (!string_digits_checked(address_of at, 10, address_of value))
+        // A unit alone is one of it, as xstrtoumax reads -oK: a kibibyte.
+        if (!byte_is_digit(string_get(at)) && string_get(at) &&
+            (string_get(at) == 'k' || size_suffix_power(string_get(at), false)))
+                ;
+        else if (!string_digits_checked(address_of at, 10, address_of value))
                 goto invalid;
 
         positive power = 0;
@@ -472,17 +476,22 @@ static b32 process_stdbuf()
         string_address forced = file_environment(
             (string_address) "MOONWATER_STDBUF_LIBRARY");
 
-        if (!stdbuf_find_library(has_bowl_root ? bowl_root : null))
+        /*
+                A statically linked target -- this shell's own programs among
+                them -- gets the _STDBUF_ variables and no preload: GNU's
+                stdbuf runs it all the same, and ours read _STDBUF_O
+                themselves (stdbuf_prompt). Only a dynamic one needs the
+                library.
+        */
+        bool preload = !(target_found && stdbuf_target_kind(target) == STDBUF_ELF_STATIC);
+
+        if (preload && !stdbuf_find_library(has_bowl_root ? bowl_root : null))
                 return string_report(log_error, 125, forced
                     ? "stdbuf: '%s' is not a compatible libstdbuf.so\n"
                     : "stdbuf: no compatible libstdbuf.so found in the native or Bowl roots\n",
                     forced);
 
-        if (target_found && stdbuf_target_kind(target) == STDBUF_ELF_STATIC)
-                return string_report(log_error, 125, "stdbuf: '%w' is statically linked; preload buffering cannot apply\n",
-                              writer_terminal_quoted_name, words[0]);
-
-        if (!stdbuf_preload(stdbuf_library))
+        if (preload && !stdbuf_preload(stdbuf_library))
                 return string_report(log_error, 125, "stdbuf: environment is too large\n");
 
         env_have = 0;
@@ -500,7 +509,7 @@ static b32 process_stdbuf()
              !env_put(stdbuf_output_assignment)) ||
             ((modes & FILE_FLAG('e')) &&
              !env_put(stdbuf_error_assignment)) ||
-            !env_put(stdbuf_preload_assignment))
+            (preload && !env_put(stdbuf_preload_assignment)))
                 return 125;
 
         env_list[env_have] = null;
@@ -660,11 +669,13 @@ static b32 process_nohup()
     {null},
         }};
         positive count = (positive)program_argument_count();
+        /* POSIX has nohup fail with 127 where coreutils otherwise uses 125. */
+        b32 failure = file_environment((string_address) "POSIXLY_CORRECT") ? 127 : 125;
 
         if (!file_take(address_of taking))
-                return 125;
+                return failure;
         if (taking.first >= count)
-                return string_report(log_error, 125, "nohup: missing operand\n"
+                return string_report(log_error, failure, "nohup: missing operand\n"
                                                      "Try 'nohup --help' for more information.\n");
 
         bool input_terminal = stream_is_terminal(0);
@@ -680,7 +691,7 @@ static b32 process_nohup()
                     (string_address) "/dev/null", FILE_READ | O_CLOEXEC);
 
                 if (null_input < 0)
-                        return string_report(log_error, 125, "nohup: failed to open '/dev/null': %s\n",
+                        return string_report(log_error, failure, "nohup: failed to open '/dev/null': %s\n",
                                       file_reason(null_input));
         }
 
@@ -692,7 +703,7 @@ static b32 process_nohup()
                 {
                         if (null_input >= 0)
                                 system_close(null_input);
-                        return string_report(log_error, 125, "nohup: failed to open 'nohup.out': %s\n",
+                        return string_report(log_error, failure, "nohup: failed to open 'nohup.out': %s\n",
                                       file_reason(output));
                 }
         }
@@ -719,7 +730,7 @@ static b32 process_nohup()
                         system_close(null_input);
                         if (output >= 0)
                                 system_close(output);
-                        return 125;
+                        return failure;
                 }
                 if (null_input != 0)
                         system_close(null_input);
@@ -731,7 +742,7 @@ static b32 process_nohup()
                                               (string_address) "standard output"))
                 {
                         system_close(output);
-                        return 125;
+                        return failure;
                 }
                 if (output != 1)
                         system_close(output);
@@ -739,12 +750,12 @@ static b32 process_nohup()
 
         if (error_terminal &&
             !process_nohup_duplicate(1, 2, (string_address) "standard error"))
-                return 125;
+                return failure;
 
         /* Ignored dispositions survive exec; that is precisely nohup's one
            signal operation. */
         if (!system_signal_install(SIGHUP, SIGNAL_IGNORE, 0, 0, null))
-                return string_report(log_error, 125, "nohup: cannot ignore hangup signal\n");
+                return string_report(log_error, failure, "nohup: cannot ignore hangup signal\n");
 
         return process_tool_exec((string_address) "nohup",
             program_argument_list() + taking.first);
@@ -1164,16 +1175,54 @@ static const argument_option process_timeout_options[] = {
     {null},
 };
 
-/* HUP, INT, QUIT and TERM are relayed to the command. SIGCHLD shares the
-   signalfd only so an old kernel without pidfd support still has an event to
-   wake an unlimited wait. One mask operation and one descriptor replace a
-   handler installation per signal. */
+/*
+        What timeout stands between the command and: coreutils' term_sig --
+        the terminal's and the kill command's signals, and every other one
+        whose default is to end a process, the real-time ones included --
+        less any this process was started with ignored, which a shell hands a
+        background job and which it means to stay unheard; ALRM and the
+        signal asked for are taken whatever. Left to their defaults they
+        ended timeout itself (kill -ALRM answered 142, a closed pipe 141) and
+        orphaned the command it was minding. SIGCHLD shares the signalfd only
+        so an old kernel without pidfd support still has an event to wake an
+        unlimited wait. One mask and one descriptor replace a handler per
+        signal.
+*/
+#define PROCESS_SIGNAL_ALARM 14
+/* script's relay set: HUP, INT, QUIT and TERM, and SIGCHLD to wake it. */
 #define PROCESS_TIMEOUT_SIGNALS                                             \
         (((positive)1 << (SIGHUP - 1)) |                                    \
          ((positive)1 << (SIGINT - 1)) |                                    \
          ((positive)1 << (SIGQUIT - 1)) |                                   \
          ((positive)1 << (SIGTERM - 1)) |                                   \
          ((positive)1 << (SIGCHLD - 1)))
+
+static bool process_timeout_ignored(b32 signal)
+{
+        positive action[4] = {0, 0, 0, 0};
+
+        return system_call_4(syscall(rt_sigaction), (positive)signal, 0,
+                             (positive)action, 8) >= 0 &&
+               action[0] == 1;
+}
+
+static positive process_timeout_relayed(b32 term)
+{
+        static const p8 ending[] = {
+            PROCESS_SIGNAL_ALARM, SIGINT, SIGQUIT, SIGHUP, SIGTERM, 13, 10, 12, 4, 5, 6, 7, 8, 11,
+            24, 25, 31, 26, 27, 29, 30, 16};
+        positive mask = (positive)1 << (SIGCHLD - 1);
+
+        for (positive at = 0; at < array_count(ending) + 31; at++)
+        {
+                b32 signal = at < array_count(ending) ? ending[at]
+                                                      : (b32)(34 + at - array_count(ending));
+
+                if (signal == PROCESS_SIGNAL_ALARM || signal == term || !process_timeout_ignored(signal))
+                        mask |= (positive)1 << (signal - 1);
+        }
+        return mask | (positive)1 << (term - 1);
+}
 
 /* Wait for one child until a monotonic deadline. pidfd+ppoll is the native
    steady-state path: no handler, alarm signal, tick loop, or PID reuse race.
@@ -1321,6 +1370,24 @@ static fn process_timeout_cleanup(bipolar pidfd, bipolar signal_fd,
         if (signal_fd >= 0)
                 system_close(signal_fd);
 
+        /* A signal that came with nothing left to send it to -- the PIPE of
+           a -v line written to a reader already gone -- is spent here, as
+           coreutils' handler spends it, rather than ending timeout the
+           moment the mask comes off and turning 124 into 141. */
+        for (;;)
+        {
+                positive pending = 0;
+                timespec none = {0, 0};
+
+                if (system_call_2(syscall(rt_sigpending), (positive)address_of pending, 8) < 0)
+                        break;
+                pending &= ~previous_mask;
+                if (!pending ||
+                    system_call_4(syscall(rt_sigtimedwait), (positive)address_of pending, 0,
+                                  (positive)address_of none, 8) < 0)
+                        break;
+        }
+
         system_signal_mask(UL_SIGNAL_SET_MASK, address_of previous_mask, null,
                            8);
 }
@@ -1354,6 +1421,14 @@ static fn process_timeout_signal(b32 child, bipolar pidfd, b32 signal,
 static bool process_timeout_duration(string_address text,
                                      positive address_to duration)
 {
+        // strtod's hexadecimal floats, 0x1p-3 among them, as sleep reads them.
+        if (string_is(text, '0') && (text[1] == 'x' || text[1] == 'X') &&
+            sleep_read_other(text, duration))
+        {
+                if (address_to duration == positive_max)
+                        address_to duration = 0;
+                return true;
+        }
         if (string_equals(text, "inf") || string_equals(text, "INF") ||
             string_equals(text, "infinity") || string_equals(text, "+inf"))
         {
@@ -1383,7 +1458,14 @@ static bool process_timeout_duration(string_address text,
                 address_to duration = value * unit * 1000000000u;
                 return true;
         }
-        return file_duration_read(text, true, duration);
+        /* A number past what nanoseconds can count is forever, as the
+           double it is to coreutils saturates rather than refuses. */
+        if (file_duration_read(text, true, duration))
+                return true;
+        if (!file_duration_overflowed)
+                return false;
+        address_to duration = 0;
+        return true;
 }
 
 /* coreutils validates each --signal and --kill-after as it is read. */
@@ -1459,14 +1541,20 @@ static b32 process_timeout()
         bool preserve = (taking.flags & FILE_FLAG('p')) != 0;
         bool verbose = (taking.flags & FILE_FLAG('v')) != 0;
         positive status = 0;
-        positive blocked = PROCESS_TIMEOUT_SIGNALS;
+        positive blocked = process_timeout_relayed(signal);
         positive previous_mask = 0;
+
+        /* A command's end is heard through SIGCHLD, and one inherited as
+           ignored has the kernel reap it unasked, which left nothing to
+           wait for and answered 125 every time. */
+        shell_default(SIGCHLD);
 
         if (system_signal_mask(UL_SIGNAL_BLOCK, address_of blocked,
                                address_of previous_mask, 8) < 0)
                 return string_report(log_error, 125, "timeout: cannot block relay signals\n");
 
         log_flush();
+        bipolar parent = (bipolar)system_call(syscall(getpid));
         bipolar child = system_fork();
 
         if (child < 0)
@@ -1505,6 +1593,16 @@ static b32 process_timeout()
                 if (!foreground)
                         system_call_2(syscall(setpgid), 0, 0);
 
+                /*
+                        A timeout killed outright (SIGKILL) can send nothing,
+                        so the kernel is asked to send the command the signal
+                        for it when timeout dies (PR_SET_PDEATHSIG), as GNU's
+                        does; one already gone by then is sent it at once.
+                */
+                system_call_2(syscall(prctl), 1, (positive)signal);
+                if ((bipolar)system_call(syscall(getppid)) != parent)
+                        system_call_2(syscall(kill), 0, (positive)signal);
+
                 b32 answer = process_tool_exec((string_address) "timeout",
                     program_argument_list() + taking.first);
                 exit(answer);
@@ -1535,98 +1633,62 @@ static b32 process_timeout()
                                ? positive_max : now + duration;
         }
 
-        b32 forwarded = 0;
+        /*
+                coreutils' cleanup(): the deadline passing and an ALRM from
+                outside are both the timeout, and send the signal asked for;
+                any other signal is sent on as it came. Whichever is first
+                starts --kill-after's grace, after which the signal is KILL.
+        */
+        string_address command = program_argument((b32)taking.first);
+        b32 sending = signal;
+        bool timed_out = false;
         bipolar waited;
 
-        do
+        for (;;)
         {
+                b32 forwarded = 0;
+
                 waited = process_timeout_wait((b32)child, pidfd, signal_fd,
                                                deadline, address_of status,
                                                address_of forwarded);
-
-                if (waited == 2)
+                if (waited < 0)
                 {
-                        process_timeout_signal((b32)child, pidfd, forwarded,
-                                               foreground, verbose,
-                                               program_argument(
-                                                   (b32)taking.first));
-                        forwarded = 0;
-                }
-        } while (waited == 2);
-
-        if (waited < 0)
-        {
-                process_timeout_cleanup(pidfd, signal_fd, previous_mask);
-                return string_report(log_error, 125, "timeout: failure while waiting for command\n");
-        }
-
-        if (waited > 0)
-        {
-                process_timeout_cleanup(pidfd, signal_fd, previous_mask);
-                return wait_status_code(status);
-        }
-
-        string_address command = program_argument((b32)taking.first);
-
-        process_timeout_signal((b32)child, pidfd, signal, foreground, verbose,
-                               command);
-
-        bool killed = signal == SIGKILL;
-
-        if (escalate && !killed)
-        {
-                positive now = clock_monotonic_nanoseconds();
-                positive kill_deadline = kill_after > positive_max - now
-                                             ? positive_max
-                                             : now + kill_after;
-
-                do
-                {
-                        waited = process_timeout_wait(
-                            (b32)child, pidfd, signal_fd, kill_deadline,
-                            address_of status, address_of forwarded);
-
-                        if (waited == 2)
-                        {
-                                process_timeout_signal((b32)child, pidfd, forwarded,
-                                                       foreground, verbose,
-                                                       command);
-                                forwarded = 0;
-                        }
-                } while (waited == 2);
-
-                if (!waited)
-                {
-                        process_timeout_signal((b32)child, pidfd, SIGKILL,
-                                               foreground, verbose, command);
-                        killed = true;
-                }
-                else if (waited < 0)
-                {
-                        process_timeout_cleanup(pidfd, signal_fd,
-                                                previous_mask);
+                        process_timeout_cleanup(pidfd, signal_fd, previous_mask);
                         return string_report(log_error, 125, "timeout: failure while waiting for command\n");
                 }
-        }
+                if (waited == 1)
+                        break;
 
-        if (waited <= 0)
-        {
-                if (system_wait4_retry((b32)child, address_of status, 0,
-                                       null) < 0)
+                b32 sent = forwarded;
+
+                if (!waited || forwarded == PROCESS_SIGNAL_ALARM)
                 {
-                        process_timeout_cleanup(pidfd, signal_fd,
-                                                previous_mask);
-                        return 125;
+                        timed_out = true;
+                        sent = sending;
                 }
+                process_timeout_signal((b32)child, pidfd, sent, foreground,
+                                       verbose, command);
+
+                if (escalate)
+                {
+                        positive now = clock_monotonic_nanoseconds();
+
+                        sending = SIGKILL;
+                        deadline = kill_after > positive_max - now
+                                       ? positive_max : now + kill_after;
+                        escalate = false;
+                }
+                else if (!waited)
+                        deadline = 0;
         }
 
         process_timeout_cleanup(pidfd, signal_fd, previous_mask);
 
-        if (killed)
+        if (timed_out && (status & 0x7f) == SIGKILL)
                 return 128 + SIGKILL;
-        if (preserve)
-                return wait_status_code(status);
-        return 124;
+        if (timed_out && !preserve)
+                return 124;
+        return wait_status_code(status);
 }
 
 // script ----------------------------------------------------------

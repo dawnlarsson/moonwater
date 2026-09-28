@@ -1389,18 +1389,41 @@ DEAD_END fn shell_thread_instance_mode(bool preserve_ignored)
                 exit(126);
         }
 
-        bipolar exec_result = shell_exec_file(
-            shell_exec_path ? shell_exec_path : shell_argv[0], shell_argv,
-            shell_argc, environment);
+        string_address path = shell_exec_path ? shell_exec_path : shell_argv[0];
+        bipolar exec_result = shell_exec_file(path, shell_argv, shell_argc,
+                                              environment);
 
         if (floodlight_inplace_terminal)
                 floodlight_silent_stop();
 
-        string_format(log, "failed with error: %s\n",
-                      file_reason(exec_result));
-        log_flush();
+        /* What execve said, on standard error and in the references' words:
+           bash names the file it tried, dash the command and "not found"
+           for a file that is not there. A file that vanished after it was
+           found -- a stale hashed path -- is not found, 127; anything else
+           the kernel refused is 126. This wrote "failed with error: ..." to
+           standard output and left 126 either way. */
+        {
+                bipolar code = exec_result < 0 ? -exec_result : exec_result;
+                string_address why = system_error_message(code);
 
-        exit(126);
+                file_facts facts;
+
+                if (!why)
+                        why = (string_address) "No such file or directory";
+                if (shell_bash_compat && code == ERROR_ACCESS &&
+                    test_facts(path, address_of facts, true) &&
+                    (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                        why = (string_address) "Is a directory";
+
+                shell_diagnostic_where();
+                string_format(log_error, "%s: %s\n",
+                              shell_bash_compat ? path : shell_argv[0],
+                              !shell_bash_compat && code == ERROR_NO_ENTRY
+                                  ? (string_address) "not found"
+                                  : why);
+                log_flush();
+                exit(code == ERROR_NO_ENTRY ? 127 : 126);
+        }
 }
 
 DEAD_END fn shell_thread_instance()
@@ -1703,6 +1726,8 @@ static fn shell_spawn_device_disable()
         spawn_device_opened = true;
 }
 
+static fn exec_wait_background(bipolar child);
+
 /* argv[0] selects a utility in the kernel-owned /shell image. The caller has
    already established that this launch is unrestricted. */
 static bipolar shell_spawn_tool_preflighted(
@@ -1780,12 +1805,14 @@ fn shell_execute_command()
         if (child > 0)
         {
                 positive status = 0;
-                bipolar waited =
-                    system_wait4_retry(child, address_of status, 0, null);
+                bipolar waited;
+
+                exec_wait_background(child);
+                waited = system_wait4_retry(child, address_of status, 0, null);
 
                 if (waited < 0)
                 {
-                        string_format(log, "failed with error: %s\n",
+                        string_format(log_error, "failed with error: %s\n",
                                       file_reason(waited));
                         shell_status = 125;
                 }
@@ -1807,7 +1834,7 @@ fn shell_execute_command()
                 */
         }
         else
-                string_format(log, "failed with error: %s\n",
+                string_format(log_error, "failed with error: %s\n",
                               file_reason(child));
 
         log_flush();
@@ -1961,6 +1988,129 @@ static fn shell_syntax_fatal(b32 status, bool fatal)
         }
 }
 
+/*
+        A command substitution is a command written inside a word, and both
+        references parse it where it is written: `echo $(if true); echo
+        reached` is a syntax error before anything runs, where this parsed the
+        body only when the substitution ran and went on to print reached.
+        dash parses a backquoted body the same way; bash leaves that to the
+        substitution. Each body is parsed here in a nested frame, as eval
+        parses its text, and nothing in it runs; a body's own substitutions
+        are checked by the same walk as its words are read.
+*/
+static bool shell_check_only;
+
+static COLD bool shell_substitution_parses(string_address body,
+                                           positive length, bool backquoted)
+{
+        p8 address_to copy = null;
+        positive room = 0;
+        positive used = 0;
+        positive syntax = shell_syntax_generation;
+        bool held = shell_check_only;
+        lex_frame frame;
+
+        if (!shell_array_room(copy, room, length + 1))
+                return true;
+        for (positive at = 0; at < length; at++)
+        {
+                //      Inside backquotes a backslash keeps only $, ` and \.
+                if (backquoted && body[at] == '\\' && at + 1 < length &&
+                    (body[at + 1] == '$' || body[at + 1] == '`' ||
+                     body[at + 1] == '\\'))
+                        at++;
+                copy[used++] = body[at];
+        }
+        copy[used] = end;
+
+        string_address current = exec_current_line;
+        bool more = shell_more;
+
+        shell_check_only = true;
+        lex_nest_enter(address_of frame);
+        run_lines(copy);
+        shell_input_end();
+        lex_nest_leave(address_of frame);
+        shell_check_only = held;
+        shell_more = more;
+        exec_current_line = current;
+        memory_free(copy, room);
+
+        return shell_syntax_generation == syntax;
+}
+
+static COLD bool shell_substitutions_parse_word(string_address text,
+                                                positive length)
+{
+        positive at = 0;
+        bool quoted = false;
+
+        while (at < length)
+        {
+                p8 value = text[at];
+
+                if (value == '\\')
+                {
+                        at += 2;
+                        continue;
+                }
+                if (value == '\'' && !quoted)
+                {
+                        string_address shut = memory_first_of(
+                            text + at + 1, '\'', length - at - 1);
+
+                        at = shut ? (positive)(shut - text) + 1 : length;
+                        continue;
+                }
+                if (value == '"')
+                        quoted = !quoted;
+                if ((value == '$' && at + 1 < length && text[at + 1] == '(') ||
+                    value == '`')
+                {
+                        string_address from = text + at + (value == '$');
+                        string_address stop = lex_nesting(from);
+                        positive until;
+                        bool arithmetic = value == '$' && at + 2 < length &&
+                                          text[at + 2] == '(';
+
+                        if (!stop || stop == from)
+                                return true;
+                        until = (positive)(stop - text);
+                        if (until > length)
+                                return true;
+                        if (!arithmetic &&
+                            (value == '$' || !shell_bash_compat) &&
+                            !shell_substitution_parses(
+                                text + at + (value == '$' ? 2 : 1),
+                                until - at - (value == '$' ? 3 : 2),
+                                value == '`'))
+                                return false;
+                        at = until;
+                        continue;
+                }
+                at++;
+        }
+        return true;
+}
+
+static COLD bool shell_substitutions_parse(positive from, positive to)
+{
+        for (positive at = from; at < to; at++)
+        {
+                parse_token address_to token = parse_tokens + at;
+
+                if ((token->kind != PT_WORD && token->kind != PT_CONDITIONAL) ||
+                    !token->text ||
+                    (!memory_first_of(token->text, '(', token->length) &&
+                     !memory_first_of(token->text, '`', token->length)))
+                        continue;
+                if (!shell_substitutions_parse_word(token->text,
+                                                    token->length))
+                        return false;
+        }
+        return true;
+}
+
 static fn run_line_inner(string_address line)
 {
         string_address waiting = parse_here_open();
@@ -2090,6 +2240,26 @@ static fn run_line_inner(string_address line)
                 return;
         }
 
+        if (shell_check_only)
+        {
+                (void)shell_substitutions_parse(parse_token_base,
+                                                parse_token_count);
+                parse_reset();
+                return;
+        }
+
+        //      bash -c leaves 127 for this one syntax error, where a
+        //      script read from a file or standard input leaves 2.
+        if (!shell_substitutions_parse(parse_token_base, parse_token_count))
+        {
+                shell_syntax_fatal(shell_bash_compat &&
+                                           string_is(shell_option_flags, 'c')
+                                       ? 127
+                                       : 2,
+                                   true);
+                return;
+        }
+
         if (!(shell_options & SHELL_FLAG('n')) || shell_is_interactive)
         {
                 bool held_tail = shell_tail_command;
@@ -2137,7 +2307,7 @@ fn run_line(string_address line)
         // recovery before this one has reached the user's next command.
         shell_run_depth++;
 
-        if (top || exec_input_error())
+        if (top || (exec_input_error() && !expand_discard_whole_line))
                 exec_line_begin();
 
         run_line_inner(line);
@@ -2278,7 +2448,9 @@ fn shell_input_end()
         */
         if (parse_here_open())
         {
-                if (shell_bash_compat)
+                //      A substitution's body read ahead for its syntax is not
+                //      the input bash warns about; its reader will be.
+                if (shell_bash_compat && !shell_check_only)
                 {
                         positive start = parse_here_start_line();
                         positive now = shell_line_number ? shell_line_number

@@ -153,9 +153,12 @@ static fn exec_floodlight_child_began()
         floodlight_inplace_terminal = false;
 }
 
+static fn exec_saves_child_drop();
+
 fn exec_child_began()
 {
         exec_forked = true;
+        exec_saves_child_drop();
         exec_floodlight_child_began();
         trap_child_began();
         // One more shell between this process and the one the script began
@@ -231,7 +234,7 @@ static PURE bool exec_input_error()
 
 static fn exec_input_finish()
 {
-        if (exec_input_error())
+        if (exec_input_error() && !expand_discard_whole_line)
                 exec_signal = EXEC_SIGNAL_NONE;
 
         // eval and a sourced file catch a recoverable expansion error.
@@ -245,6 +248,7 @@ static fn exec_line_begin()
         if (exec_signal == EXEC_SIGNAL_FATAL || exec_input_error())
         {
                 exec_signal = EXEC_SIGNAL_NONE;
+                expand_discard_whole_line = false;
 
                 // A trap that arrived during the failed expansion belongs
                 // between input lines: not to the tail of the aborted one,
@@ -288,7 +292,7 @@ static PURE bool exec_line_aborted()
 */
 static bool exec_source_stop(b32 address_to startup_status)
 {
-        if (!exec_signal || exec_input_error())
+        if (!exec_signal || (exec_input_error() && !expand_discard_whole_line))
                 return false;
 
         if (exec_signal == EXEC_SIGNAL_RETURN)
@@ -335,20 +339,31 @@ static bool exec_condition_inside;
 
 /* A line run inside the one being run, with lexer storage of its own or
    only parser marks of its own. */
-static fn exec_run_nested(string_address text, bool lexer)
+static fn exec_run_nested(string_address text, bool lexer, positive start)
 {
         lex_frame frame;
+
+        /* A trap action's lines are not the script's: counting them moved
+           $LINENO on by one for good each time a trap ran. The action counts
+           its own from start, the line before its first. */
+        positive line = shell_line_number;
 
         if (lexer)
                 lex_nest_enter(address_of frame);
         else
+        {
                 parse_nest_enter();
+                shell_line_number = start;
+        }
         run_lines(text);
         shell_input_end();
         if (lexer)
                 lex_nest_leave(address_of frame);
         else
+        {
                 parse_nest_leave();
+                shell_line_number = line;
+        }
 }
 
 static COLD fn exec_trap_condition(positive number)
@@ -366,7 +381,14 @@ static COLD fn exec_trap_condition(positive number)
         exec_condition_inside = true;
         exec_signal = EXEC_SIGNAL_NONE;
         exec_tested = false;
-        exec_run_nested(action, false);
+        /* An ERR, DEBUG or RETURN action reads the line of the command that
+           raised it, as bash's does. */
+        {
+                positive line = exec_line ? (positive)exec_line
+                                          : shell_line_number;
+
+                exec_run_nested(action, false, line ? line - 1 : 0);
+        }
         exec_condition_inside = false;
 
         shell_status = kept_status;
@@ -418,32 +440,134 @@ static COLD string_address exec_bash_command_value(positive address_to value_len
         return exec_bash_command;
 }
 
+static positive exec_bash_command_add(positive used, string_address text,
+                                      positive length)
+{
+        if (length > sizeof(exec_bash_command) - 1 - used)
+                length = sizeof(exec_bash_command) - 1 - used;
+        if (length)
+                memory_copy(exec_bash_command + used, text, length);
+        return used + length;
+}
+
+/*
+        bash writes BASH_COMMAND back from its parse tree: the words with one
+        blank between them and each redirection as `2> file`; a for, select
+        or case as its header, `case a in `; and an arithmetic for as the
+        clause about to be evaluated, ((i<1)).
+*/
 static COLD fn exec_bash_command_from(parse_node address_to node)
 {
         positive used = 0;
         b32 at;
+        bool header = node->kind == NODE_FOR || node->kind == NODE_SELECT ||
+                      node->kind == NODE_CASE;
+
+        if (header)
+                used = exec_bash_command_add(
+                    used,
+                    node->kind == NODE_FOR ? (string_address) "for "
+                    : node->kind == NODE_SELECT ? (string_address) "select "
+                                                : (string_address) "case ",
+                    node->kind == NODE_SELECT ? 7 : node->kind == NODE_FOR ? 4 : 5);
 
         for (at = 0; at < node->word_count; at++)
         {
                 b32 word = node->word + at;
-                string_address text = parse_words[word];
-                positive length = parse_word_lengths[word];
 
-                if (used && used + 1 < sizeof(exec_bash_command))
+                if (used && !(header && !at) &&
+                    used + 1 < sizeof(exec_bash_command))
                         exec_bash_command[used++] = ' ';
-
-                if (length > sizeof(exec_bash_command) - 1 - used)
-                        length = sizeof(exec_bash_command) - 1 - used;
-
-                if (length)
-                {
-                        memory_copy(exec_bash_command + used, text, length);
-                        used += length;
-                }
+                if (header && at == 1 && node->kind != NODE_CASE)
+                        used = exec_bash_command_add(
+                            used, (string_address) "in ", 3);
+                used = exec_bash_command_add(used, parse_words[word],
+                                             parse_word_lengths[word]);
+                if (node->kind == NODE_CASE)
+                        break;
         }
+        if (node->kind == NODE_CASE)
+                used = exec_bash_command_add(used, (string_address) " in ", 4);
+        else if ((node->kind == NODE_FOR || node->kind == NODE_SELECT) &&
+                 !node->flags)
+                used = exec_bash_command_add(used,
+                                             (string_address) " in \"$@\"", 8);
+
+        if (node->kind == NODE_SIMPLE)
+                for (at = 0; at < node->redirect_count; at++)
+                {
+                        parse_redirect address_to want =
+                            parse_redirects + node->redirect + at;
+                        static const string_address spelling[] = {
+                            [OP_DLESS] = "<<", [OP_DGREAT] = ">>",
+                            [OP_LESSAND] = "<&", [OP_GREATAND] = ">&",
+                            [OP_LESSGREAT] = "<>", [OP_CLOBBER] = ">|",
+                            [OP_LESS] = "<", [OP_GREAT] = ">",
+                            [OP_ANDGREAT] = "&>", [OP_ANDDGREAT] = "&>>",
+                            [OP_HERESTRING] = "<<<"};
+                        bool input = want->op == OP_LESS ||
+                                     want->op == OP_LESSAND ||
+                                     want->op == OP_DLESS ||
+                                     want->op == OP_LESSGREAT ||
+                                     want->op == OP_HERESTRING;
+                        p8 number[24];
+
+                        if (want->op >= (b32)array_count(spelling) ||
+                            !spelling[want->op])
+                                continue;
+                        if (used && used + 1 < sizeof(exec_bash_command))
+                                exec_bash_command[used++] = ' ';
+                        if (!want->var_length && want->op != OP_ANDGREAT &&
+                            want->op != OP_ANDDGREAT &&
+                            want->fd != (input ? 0 : 1))
+                                used = exec_bash_command_add(
+                                    used, number,
+                                    positive_into_string(number, want->fd));
+                        used = exec_bash_command_add(
+                            used, spelling[want->op],
+                            string_length(spelling[want->op]));
+                        if (want->op != OP_GREATAND && want->op != OP_LESSAND &&
+                            want->op != OP_DLESS &&
+                            used + 1 < sizeof(exec_bash_command))
+                                exec_bash_command[used++] = ' ';
+                        used = exec_bash_command_add(used, want->text,
+                                                     string_length(want->text));
+                }
 
         exec_bash_command[used] = end;
 }
+
+static COLD fn exec_bash_command_clause(string_address clause)
+{
+        positive used = exec_bash_command_add(0, (string_address) "((", 2);
+
+        clause = arith_skip_space(clause);
+        used = exec_bash_command_add(used, clause, string_length(clause));
+        used = exec_bash_command_add(used, (string_address) "))", 2);
+        exec_bash_command[used] = end;
+}
+
+/*
+        The DEBUG trap before one command, with $LINENO on that command's
+        line: it read the line of the command before, one behind all the
+        way down a script. bash raises it before a simple command, before
+        (( )) and [[ ]], before case, before each pass of a for or select,
+        and before each clause of an arithmetic for.
+*/
+static fn exec_debug_clause(parse_node address_to node, string_address clause)
+{
+        if (!trap_debug_here || exec_condition_inside || !exec_debug_reaches())
+                return;
+        if (node->line)
+                exec_line = node->line;
+        if (clause)
+                exec_bash_command_clause(clause);
+        else
+                exec_bash_command_from(node);
+        exec_trap_condition(TRAP_DEBUG);
+}
+
+#define exec_debug_before(node) exec_debug_clause((node), null)
 
 static COLD fn exec_source_return_trap()
 {
@@ -878,6 +1002,12 @@ fn job_monitor_told(bool on)
         }
         else
                 job_monitor_stop();
+}
+
+// How many jobs the shell holds, which a prompt's \j says.
+positive shell_job_count()
+{
+        return job_count;
 }
 
 static positive job_find(positive value, bool process)
@@ -2189,7 +2319,7 @@ static COLD fn shell_jobs_replaced(positive at)
         //      the middle of the jobs that asked for this, and a line fed to
         //      it without its own lexer storage is a second sentence written
         //      over the first.
-        exec_run_nested((string_address)joined.bytes, true);
+        exec_run_nested((string_address)joined.bytes, true, 0);
 }
 
 /* A spec that names no job, or more than one. jobs and disown handed a bare
@@ -3087,8 +3217,48 @@ static b32 job_wait_job(positive found, string_address into,
                         bool address_to interrupted, bool forget, bool drop)
 {
         bipolar last = job_table[found].last;
+        positive number = job_table[found].number;
         b32 answer;
         positive raw;
+
+        /* Under job control a stop is an answer too, in bash: wait %1 on a
+           job that stops says so and gives 128 and the signal. This waited
+           for an exit that a stopped job never makes. */
+        if (shell_bash_compat && job_monitor())
+        {
+                address_to interrupted = false;
+                while (true)
+                {
+                        positive changed = 0;
+                        bipolar got;
+                        positive at = job_find(number, false);
+
+                        if (at >= job_count ||
+                            job_table[at].state != JOB_RUNNING ||
+                            !job_children(last, true))
+                                break;
+
+                        got = job_wait_call(-1, address_of changed,
+                                            JOB_UNTRACED);
+                        if (got == -4)
+                        {
+                                address_to interrupted = true;
+                                return job_wait_interrupted();
+                        }
+                        if (got <= 0)
+                                break;
+                        job_child_changed(got, changed);
+                }
+
+                positive at = job_find(number, false);
+
+                if (at < job_count && job_table[at].state == JOB_STOPPED)
+                {
+                        shell_told("warning: wait_for_job: job %p is stopped\n",
+                                   number);
+                        return 128 + (b32)job_table[at].stopped_by;
+                }
+        }
 
         answer = shell_wait_one(last, interrupted, false, false);
         if (into && !address_to interrupted)
@@ -3565,6 +3735,12 @@ static PURE string_address history_file()
         string_address path = env_get((const_string) "HISTFILE");
 
         return path && string_get(path) ? path : null;
+}
+
+// The number the next line remembered will take, which \! and \# say.
+positive shell_history_next()
+{
+        return history_first + history_used;
 }
 
 static fn history_drop(positive at, positive count)
@@ -4890,6 +5066,37 @@ fn history_start()
         if (!shell_is_interactive)
                 return;
 
+        //      An interactive bash keeps its history in ~/.bash_history
+        //      unless told otherwise, and remembers five hundred lines.
+        if (shell_bash_compat && !env_get("HISTFILE"))
+        {
+                string_address home = env_get("HOME");
+
+                if (home && string_get(home))
+                {
+                        p8 address_to made = null;
+                        positive room = 0;
+                        positive length = string_length(home);
+
+                        if (shell_array_room(made, room, length + 16))
+                        {
+                                memory_copy(made, home, length);
+                                memory_copy_end(made + length, "/.bash_history",
+                                                14);
+                                env_assign("HISTFILE", made);
+                                memory_free(made, room);
+                        }
+                }
+                //      Not for -c, which reads no lines to remember.
+                if (!string_is(shell_option_flags, 'c'))
+                {
+                        if (!env_get("HISTSIZE"))
+                                env_assign("HISTSIZE", "500");
+                        if (!env_get("HISTFILESIZE"))
+                                env_assign("HISTFILESIZE", "500");
+                }
+        }
+
         path = history_file();
 
         if (path)
@@ -4911,6 +5118,11 @@ fn history_leaving()
         path = history_file();
 
         if (!path)
+                return;
+
+        //      bash writes the file only when this session remembered a
+        //      line: bash -i -c, which remembers none, leaves no file.
+        if (shell_bash_compat && history_used == history_saved)
                 return;
 
         history_trim((string_address) "HISTFILESIZE");
@@ -5186,7 +5398,7 @@ static fn history_run_text(writer write, string_address text)
         (void)write;
         string_format(log_error, "%s\n", text);
         log_flush();
-        exec_run_nested(text, true);
+        exec_run_nested(text, true, 0);
 }
 
 /* A name another user cannot prepare before fc gets there.  Entropy failure
@@ -5288,7 +5500,7 @@ static b32 history_edit_run_editor(string_address command)
                 shell_child_default(SIGNAL_INTERRUPT);
                 shell_child_default(SIGNAL_QUIT);
                 exec_child_began();
-                exec_run_nested(command, true);
+                exec_run_nested(command, true, 0);
                 exec_child_leave(shell_status);
         }
 
@@ -5669,6 +5881,27 @@ typedef struct
 
 static exec_saved_fd exec_saves[REDIRECT_SAVE_MAX];
 static b32 exec_save_count;
+
+/*
+        A child never puts back what its parent put aside: it leaves before
+        the parent's commands end. The copies were close-on-exec, which kept
+        them from programs the child ran but not from the child itself, so a
+        subshell waiting on a program held the parent's saved stdout open --
+        and x=$( (sleep 1) >/dev/null ) waited a second for a pipe it had
+        redirected away from. The parser's own descriptor stays.
+*/
+static b32 exec_child_root;
+
+static fn exec_saves_child_drop()
+{
+        for (b32 at = 0; at < exec_save_count; at++)
+                if (exec_saves[at].saved >= 0 &&
+                    !(shell_parser_source_active &&
+                      shell_parser_source_handle == exec_saves[at].saved))
+                        system_close(exec_saves[at].saved);
+        exec_save_count = 0;
+        exec_child_root = 0;
+}
 static b32 exec_redirect_status;
 // Only the top-level script reader streams an open file across commands.
 // Its descriptor can move when user redirections claim the same number.
@@ -5877,8 +6110,32 @@ static bool exec_save_fd(b32 fd, parse_node address_to node)
             shell_parser_source_handle == fd)
                 shell_parser_source_fork_prepare();
 
+        /* The command a forked child was made for is the last thing it
+           runs, so what its own redirections replace is never put back:
+           { sleep 1; } >/dev/null & inside $( ) held the substitution's pipe
+           for the second the group ran, and bash has it closed at once. */
+        if (exec_child_root && node == parse_nodes + exec_child_root)
+                return true;
+
         if (exec_save_count >= REDIRECT_SAVE_MAX)
                 return string_report(log_error, false, "Too many redirections\n");
+
+        /* A descriptor holding an outer save is about to be replaced --
+           exec 10>&1 inside { ...; } > f -- so the save moves first, or the
+           group's end would put f back on stdout. */
+        for (b32 at = 0; at < exec_save_count; at++)
+        {
+                if (exec_saves[at].saved != fd)
+                        continue;
+
+                bipolar moved = exec_save_duplicate(fd, node, 10);
+
+                if (moved < 0)
+                        return string_report(log_error, false,
+                                             "Cannot preserve descriptor %p\n",
+                                             (positive)fd);
+                exec_saves[at].saved = (b32)moved;
+        }
 
         saved = exec_save_duplicate(fd, node, 10);
 
@@ -6409,6 +6666,41 @@ static bool exec_redirect_apply(b32 index)
                 b32 fd = want->fd;
                 bool var_alloc = false;
 
+                /*
+                        bash's >&word with a word that is no descriptor is
+                        &>word, stdout and stderr to one file, and with any
+                        descriptor but 1 in front it is ambiguous. N>&M- moves
+                        M to N: a duplicate, then M closed. dash has neither.
+                */
+                bool file_dup = false;
+                bool move_dup = false;
+
+                if (shell_bash_compat && !want->var_length &&
+                    (want->op == OP_GREATAND || want->op == OP_LESSAND) &&
+                    string_get(target))
+                {
+                        positive digits = string_span(target, string_set_digits);
+
+                        if (digits && string_is(target + digits, '-') &&
+                            !string_get(target + digits + 1))
+                                move_dup = true;
+                        else if (want->op == OP_GREATAND &&
+                                 string_get(target + digits) &&
+                                 !word_is(target, "-"))
+                        {
+                                if (fd != 1)
+                                {
+                                        string_format(log_error,
+                                                      "%s: ambiguous redirect\n",
+                                                      want->text);
+                                        exec_redirect_status = 1;
+                                        return false;
+                                }
+                                file_dup = true;
+                                both = true;
+                        }
+                }
+
                 if (want->var_length)
                 {
                         bool closing =
@@ -6482,7 +6774,8 @@ static bool exec_redirect_apply(b32 index)
                 if (shell_restricted &&
                     (want->op == OP_GREAT || want->op == OP_DGREAT ||
                      want->op == OP_CLOBBER || want->op == OP_LESSGREAT ||
-                     want->op == OP_ANDGREAT || want->op == OP_ANDDGREAT))
+                     want->op == OP_ANDGREAT || want->op == OP_ANDDGREAT ||
+                     file_dup))
                 {
                         exec_redirect_status = 1;
                         return shell_reported(false,
@@ -6586,14 +6879,27 @@ static bool exec_redirect_apply(b32 index)
 
                         opened = exec_here_open(body, length);
                 }
-                else if (want->op == OP_GREATAND || want->op == OP_LESSAND)
+                else if ((want->op == OP_GREATAND || want->op == OP_LESSAND) &&
+                         !file_dup)
                 {
                         positive source;
+                        p8 number[32];
 
                         if (string_is(target, '-') && string_is(target + 1, end))
                         {
                                 system_close(fd);
                                 continue;
+                        }
+
+                        if (move_dup)
+                        {
+                                positive digits = string_span(target,
+                                                              string_set_digits);
+
+                                if (digits >= sizeof(number))
+                                        digits = sizeof(number) - 1;
+                                memory_copy_end(number, target, digits);
+                                target = number;
                         }
 
                         if (!string_digits_checked_exact(target, 10, address_of source) ||
@@ -6615,6 +6921,13 @@ static bool exec_redirect_apply(b32 index)
                                 continue;
                         else
                                 opened = system_duplicate(source, fd, 0);
+
+                        //      The move's second half. bash closes the
+                        //      source for good, even for one command's own
+                        //      move: `cmd 4>&3-` leaves 3 closed after it.
+                        if (move_dup && opened >= 0 && (b32)source != fd &&
+                            (b32)source != (b32)opened)
+                                system_close(source);
                 }
                 else if (want->op == OP_LESS)
                         opened = system_open_at(AT_FDCWD,
@@ -6742,6 +7055,32 @@ typedef struct
 } exec_function;
 
 KEEP __attribute__((externally_visible)) exec_function address_to exec_functions;
+static string_address exec_frames_code_source();
+
+/* The file each slot's definition was read from, which BASH_SOURCE names for
+   the function's frame. Beside the table rather than in it: the slot walk
+   reads the table at a fixed stride. */
+static string_address address_to exec_function_sources;
+static positive exec_function_sources_room;
+
+static fn exec_function_source_set(positive slot, string_address source)
+{
+        positive had = exec_function_sources_room;
+
+        if (!shell_array_room(exec_function_sources, exec_function_sources_room,
+                              slot + 1))
+                return;
+        for (positive at = had; at < exec_function_sources_room; at++)
+                exec_function_sources[at] = null;
+        exec_function_sources[slot] = source;
+}
+
+static string_address exec_function_source(positive slot)
+{
+        return slot < exec_function_sources_room && exec_function_sources[slot]
+                   ? exec_function_sources[slot]
+                   : shell_script_name;
+}
 
 /*
         The next live function at or beyond one slot.
@@ -7739,6 +8078,7 @@ static b32 exec_define(b32 index)
 
         exec_functions[slot].body = body;
         exec_functions[slot].environment_valid = false;
+        exec_function_source_set(slot, exec_frames_code_source());
         exec_function_recent = slot;
         if (exec_functions[slot].exported)
         {
@@ -7929,6 +8269,9 @@ typedef struct
 {
         string_address name;
         positive line;
+        // The file this frame's code was read from: a function's definition
+        // file, or the file a `.` is reading.
+        string_address source;
 } exec_frame;
 
 static exec_frame address_to exec_frames;
@@ -7936,6 +8279,77 @@ static positive exec_frame_room;
 static positive exec_frame_count;
 static bool exec_frames_published;
 static bool exec_frames_standing;
+
+/* A script named on the command line has a bottom frame of its own, main,
+   read from that file; -c, standard input and a terminal have none. */
+static PURE bool exec_frames_main()
+{
+        return !string_get(shell_option_flags) && !shell_is_interactive;
+}
+
+// The file the code now running was read from.
+static string_address exec_frames_code_source()
+{
+        return exec_frame_count ? exec_frames[exec_frame_count - 1].source
+                                : shell_script_name;
+}
+
+/*
+        Names a frame points at outlive the reading that gave them: a
+        function defined in a sourced file names that file for as long as it
+        is defined. Each distinct name is kept once.
+*/
+static string_address address_to exec_source_names;
+static positive exec_source_names_room;
+static positive exec_source_name_count;
+
+static string_address exec_source_intern(string_address name)
+{
+        positive length;
+        p8 address_to made = null;
+        positive made_room = 0;
+
+        for (positive at = 0; at < exec_source_name_count; at++)
+                if (!string_compare(exec_source_names[at], name))
+                        return exec_source_names[at];
+
+        length = string_length(name);
+        if (length == positive_max ||
+            !shell_array_room(made, made_room, length + 1) ||
+            !shell_array_room(exec_source_names, exec_source_names_room,
+                              exec_source_name_count + 1))
+                return shell_script_name;
+
+        memory_copy_end(made, name, length);
+        exec_source_names[exec_source_name_count++] = made;
+        return made;
+}
+
+static COLD fn exec_frames_forget();
+
+// `.` and source: a frame named source for the file being read.
+fn exec_frames_source_enter(string_address path)
+{
+        if (!shell_array_room(exec_frames, exec_frame_room,
+                              exec_frame_count + 1))
+                return;
+        exec_frames[exec_frame_count].line = (positive)exec_line;
+        exec_frames[exec_frame_count].name = (string_address) "source";
+        exec_frames[exec_frame_count++].source = exec_source_intern(path);
+        exec_frames_published = false;
+        if (exec_frames_standing)
+                exec_frames_forget();
+}
+
+fn exec_frames_source_leave()
+{
+        if (!exec_frame_count)
+                return;
+        exec_frame_count--;
+        exec_frames_published = false;
+        if (exec_frames_standing)
+                exec_frames_forget();
+}
 
 static COLD fn exec_frames_forget()
 {
@@ -7945,15 +8359,27 @@ static COLD fn exec_frames_forget()
         exec_frames_standing = false;
 }
 
+/*
+        Innermost first, which is the opposite of the order the frames were
+        pushed in and the order every script that reads them expects, with
+        main at the bottom for a script file. FUNCNAME stands only while a
+        function runs; BASH_SOURCE and BASH_LINENO stand wherever there is a
+        frame, so ${BASH_SOURCE[0]} at the top of a script is its path and
+        in a sourced file that file's. BASH_SOURCE was $0 for every frame
+        and nothing at all outside a function, which is what
+        cd "$(dirname "${BASH_SOURCE[0]}")" reads.
+*/
 static COLD fn exec_frames_publish()
 {
         shell_mark held = shell_store_mark(address_of exec_store);
         string_address address_to walked;
         bipolar address_to lines;
+        bool main = exec_frames_main();
+        positive count = exec_frame_count + main;
 
         exec_frames_published = true;
 
-        if (!exec_frame_count)
+        if (!count)
         {
                 exec_frames_forget();
                 return;
@@ -7962,10 +8388,9 @@ static COLD fn exec_frames_publish()
         exec_frames_standing = true;
 
         walked = (string_address address_to)shell_store_take(
-            address_of exec_store,
-            exec_frame_count * sizeof(walked[0]));
+            address_of exec_store, count * sizeof(walked[0]));
         lines = (bipolar address_to)shell_store_take(
-            address_of exec_store, exec_frame_count * sizeof(lines[0]));
+            address_of exec_store, count * sizeof(lines[0]));
 
         if (!walked || !lines)
         {
@@ -7973,21 +8398,29 @@ static COLD fn exec_frames_publish()
                 return;
         }
 
-        // Innermost first, which is the opposite of the order they were
-        // pushed in and the order every script that reads them expects.
         for (positive at = 0; at < exec_frame_count; at++)
         {
                 walked[at] = exec_frames[exec_frame_count - at - 1].name;
                 lines[at] = (bipolar)exec_frames[exec_frame_count - at - 1].line;
         }
+        if (main)
+        {
+                walked[exec_frame_count] = (string_address) "main";
+                lines[exec_frame_count] = 0;
+        }
 
-        shell_array_words("FUNCNAME", 8, walked, exec_frame_count);
-        shell_array_numbers("BASH_LINENO", 11, lines, exec_frame_count);
+        if (exec_function_depth)
+                shell_array_words("FUNCNAME", 8, walked, count);
+        else
+                env_unset("FUNCNAME");
+        shell_array_numbers("BASH_LINENO", 11, lines, count);
 
         for (positive at = 0; at < exec_frame_count; at++)
-                walked[at] = shell_script_name;
+                walked[at] = exec_frames[exec_frame_count - at - 1].source;
+        if (main)
+                walked[exec_frame_count] = shell_script_name;
 
-        shell_array_words("BASH_SOURCE", 11, walked, exec_frame_count);
+        shell_array_words("BASH_SOURCE", 11, walked, count);
         shell_store_rewind(address_of exec_store, held);
 }
 
@@ -8077,6 +8510,8 @@ fn shell_caller(writer write, string_address input)
 {
         positive want = 0;
         bool numbered = shell_argc > 1;
+        bool main = exec_frames_main();
+        positive count = exec_frame_count + main;
         p8 shown[32];
         positive written;
 
@@ -8099,9 +8534,10 @@ fn shell_caller(writer write, string_address input)
 
         //      Numbered caller is BASH_LINENO[n], FUNCNAME[n+1] and
         //      BASH_SOURCE[n+1]. A function called from the top of -c has
-        //      no n+1 slot, so `caller 0` inside it prints nothing.
+        //      no n+1 slot, so `caller 0` inside it prints nothing; one run
+        //      from a script file has main there.
         if (want >= exec_frame_count ||
-            (numbered && want + 1 >= exec_frame_count))
+            (numbered && want + 1 >= count))
         {
                 shell_answer(1);
                 return;
@@ -8114,16 +8550,21 @@ fn shell_caller(writer write, string_address input)
 
         if (numbered)
         {
-                write(exec_frames[exec_frame_count - want - 2].name, 0);
+                write(want + 1 < exec_frame_count
+                          ? exec_frames[exec_frame_count - want - 2].name
+                          : (string_address) "main",
+                      0);
                 write(" ", 1);
         }
 
-        /* Bash calls an unnamed input source NULL. Keep the real path for a
-           named script, while stdin and -c must not expose argv[0] as though
-           it were the file containing the function. */
+        /* Bash calls an unnamed input source NULL. A named script gives the
+           file the calling frame was read from, while stdin and -c must not
+           expose argv[0] as though it were the file containing the function. */
         write(string_get(shell_option_flags)
                   ? (string_address) "NULL"
-                  : shell_script_name,
+                  : want + 1 < exec_frame_count
+                        ? exec_frames[exec_frame_count - want - 2].source
+                        : shell_script_name,
               0);
         write("\n", 1);
 
@@ -8140,7 +8581,7 @@ fn shell_caller(writer write, string_address input)
 */
 COLD bool shell_frames_wanted(const_string name, positive length)
 {
-        if (exec_frames_published || !exec_frame_count)
+        if (exec_frames_published || (!exec_frame_count && !exec_frames_main()))
                 return false;
 
         if (!memory_is_word((address_any)name, length, "FUNCNAME") &&
@@ -8150,6 +8591,57 @@ COLD bool shell_frames_wanted(const_string name, positive length)
 
         exec_frames_publish();
 
+        return true;
+}
+
+static b32 exec_call(positive slot);
+
+/*
+        command_not_found_handle: a function of that name, when bash finds
+        no command, is called in a subshell with the command and its words
+        as its arguments, and its status is the command's. Its own misses
+        are not handed back to it.
+*/
+static bool exec_not_found_inside;
+positive shell_function_slot(string_address name);
+
+static COLD bool exec_not_found_handled()
+{
+        positive slot;
+        bipolar child;
+
+        if (!shell_bash_compat || exec_not_found_inside || !exec_function_count ||
+            string_first_of(shell_argv[0], '/'))
+                return false;
+        slot = shell_function_slot((string_address) "command_not_found_handle");
+        if (slot == positive_max)
+                return false;
+
+        log_flush();
+        child = shell_clone();
+        if (child < 0)
+                return false;
+        if (child == 0)
+        {
+                string_address address_to words = null;
+                positive room = 0;
+
+                exec_forked = true;
+                exec_not_found_inside = true;
+                job_forget();
+                exec_loop_depth = 0;
+                if (!shell_array_room(words, room,
+                                      (shell_argc + 2) * sizeof(*words)))
+                        exec_child_leave(127);
+                words[0] = (string_address) "command_not_found_handle";
+                memory_copy(words + 1, shell_argv,
+                            shell_argc * sizeof(*words));
+                words[shell_argc + 1] = null;
+                shell_argv = words;
+                shell_argc++;
+                exec_child_leave(exec_call(slot));
+        }
+        shell_status = exec_child_status(child);
         return true;
 }
 
@@ -8171,6 +8663,29 @@ static b32 exec_call(positive slot)
                 log_error(str("Too deep\n"));
                 shell_status = 1;
                 return 1;
+        }
+
+        /*
+                FUNCNEST, a positive number, is as deep as bash lets
+                functions call: one call past it is refused, and the whole
+                command the reader was running goes with it.
+        */
+        if (shell_bash_compat && shell_funcnest_seen)
+        {
+                string_address nest = env_get("FUNCNEST");
+                positive limit;
+
+                if (nest && string_digits_exact(nest, address_of limit) &&
+                    limit && exec_function_depth >= limit)
+                {
+                        shell_diagnostic_where();
+                        string_format(log_error,
+                                      "%s: maximum function nesting level "
+                                      "exceeded (%p)\n",
+                                      shell_argv[0], limit);
+                        expand_discard_whole(1);
+                        return 1;
+                }
         }
 
         if (!shell_local_enter())
@@ -8212,12 +8727,24 @@ static b32 exec_call(positive slot)
                 // Where the call was written, which is the line of the
                 // command making it and not the line the reader is on.
                 exec_frames[exec_frame_count].line = (positive)exec_line;
+                exec_frames[exec_frame_count].source =
+                    exec_function_source(slot);
                 exec_frames[exec_frame_count++].name =
                     exec_functions[slot].name;
                 exec_frames_published = false;
+                // Arrays made for the caller answer a plain lookup, which
+                // does not ask again; take them down so this frame's are
+                // made when read.
+                if (exec_frames_standing)
+                        exec_frames_forget();
         }
 
         status = exec_node(body);
+
+        // A return anywhere below -- a trap action's among them -- left its
+        // answer in shell_status whatever the node it unwound through said.
+        if (exec_signal == EXEC_SIGNAL_RETURN)
+                status = shell_status;
 
         // The function is still standing while its RETURN trap runs, which is
         // what lets the action read FUNCNAME and the status it is returning.
@@ -8233,8 +8760,11 @@ static b32 exec_call(positive slot)
                 exec_frames_published = false;
 
                 // The three only exist while a function does, and they were
-                // only ever made if something read them.
-                if (!exec_frame_count && exec_frames_standing)
+                // only ever made if something read them. Made inside the
+                // callee they name it, and $FUNCNAME in the caller read
+                // inner after inner had returned; they go, to be made again
+                // for this frame when read.
+                if (exec_frames_standing)
                         exec_frames_forget();
         }
 
@@ -8246,7 +8776,8 @@ static b32 exec_call(positive slot)
         // return leaves the function and nothing further out.
         // A failglob inside the body is the same: the rest of the
         // function is skipped, the caller is not.
-        if (exec_signal == EXEC_SIGNAL_RETURN || exec_input_error())
+        if (exec_signal == EXEC_SIGNAL_RETURN ||
+            (exec_input_error() && !expand_discard_whole_line))
                 exec_signal = EXEC_SIGNAL_NONE;
 
         if (held_parameters)
@@ -8472,10 +9003,25 @@ static fn exec_trace_ps4()
                 return;
         }
 
-        exec_ps4_expanding = true;
-        expanded = shell_expand_ps4(prefix);
-        exec_ps4_expanding = false;
-        if (expanded)
+        {
+                bool soft = expand_errors_soft;
+
+                expand_errors_soft = true;
+                exec_ps4_expanding = true;
+                //      bash decodes the prompt escapes first and expands
+                //      what that made; dash only expands.
+                expanded = shell_bash_compat ? shell_prompt_expand(prefix, false)
+                                             : shell_expand_ps4(prefix);
+                exec_ps4_expanding = false;
+                expand_errors_soft = soft;
+        }
+        //      An expansion PS4 could not finish leaves the prompt as it
+        //      was written, and the command still runs.
+        bool failed = expand_failed;
+
+        if (failed)
+                expand_failed = false;
+        else if (expanded)
                 prefix = expanded;
 
         if (shell_bash_compat)
@@ -8495,7 +9041,7 @@ static fn exec_trace_ps4()
                                 log_error(room, 1);
 
                         if (string_get(prefix + 1))
-                                shell_prompt_written(log_error, prefix + 1);
+                                log_error(prefix + 1, 0);
                         return;
                 }
         }
@@ -8686,6 +9232,77 @@ static string_address address_to exec_compound_word;
 static positive exec_compound_room;
 
 /*
+        One element of a compound assignment, held until every piece has
+        been expanded. Bash expands the whole list before it empties or
+        extends the array, so ar=("${ar[@]}" c) is the old elements and c;
+        emptying first left c alone, and ar+=(x "${ar[@]}") saw its own x.
+*/
+typedef struct exec_compound_held
+{
+        string_address key;
+        positive key_length;
+        string_address value;
+        struct exec_compound_held address_to next;
+} exec_compound_held;
+
+/*
+        local and declare in a function make their name before they assign
+        it, so local old=(x "${old[@]}") read the new empty local where bash
+        reads the caller's old: bash expands the list first. The list is read
+        here ahead of the local, and the assignment that follows takes it.
+*/
+static exec_compound_held address_to exec_compound_prepared;
+static string_address exec_compound_prepared_body;
+static bool exec_compound_preparing;
+static bool exec_compound_prepared_keyed;
+
+fn shell_compound_prepare_drop()
+{
+        exec_compound_prepared = null;
+        exec_compound_prepared_body = null;
+}
+
+bool shell_compound_prepare(string_address name, positive name_length,
+                            string_address body, positive body_length,
+                            bool keyed)
+{
+        bool answer;
+
+        exec_compound_preparing = true;
+        exec_compound_prepared_keyed = keyed;
+        answer = shell_compound_assign(name, name_length, body, body_length,
+                                       false);
+        exec_compound_preparing = false;
+        return answer;
+}
+
+static bool exec_compound_put(string_address name, positive name_length,
+                              string_address key, positive key_length,
+                              string_address value,
+                              exec_compound_held address_to address_to tail)
+{
+        exec_compound_held address_to held;
+
+        if (!tail)
+                return shell_array_set(name, name_length, key, key_length,
+                                       value, false);
+
+        held = (exec_compound_held address_to)shell_store_take(
+            address_of exec_store, sizeof(*held));
+        if (!held)
+                return false;
+        held->key = shell_store_copy(address_of exec_store, key, key_length);
+        held->key_length = key_length;
+        held->value = shell_store_copy(address_of exec_store, value,
+                                       string_length(value));
+        held->next = null;
+        if (!held->key || !held->value)
+                return false;
+        *tail = held;
+        return true;
+}
+
+/*
         NAME=(...) and NAME+=(...).
 
         Bash replaces an array rather than merging into one, so a plain
@@ -8716,18 +9333,36 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
 
         name = (string_address)resolved_name;
         name_length = resolved_length;
-        keyed = (shell_array_attributes(name, name_length) &
-                      SHELL_ARRAY_ASSOCIATIVE) != 0;
+        keyed = exec_compound_preparing
+                    ? exec_compound_prepared_keyed
+                    : (shell_array_attributes(name, name_length) &
+                       SHELL_ARRAY_ASSOCIATIVE) != 0;
 
-        if (!shell_variable_attribute_set(
+        if (!exec_compound_preparing &&
+            !shell_variable_attribute_set(
                 name, name_length,
                 (p8)((keyed ? SHELL_ARRAY_ASSOCIATIVE : SHELL_ARRAY_INDEXED) |
                      SHELL_ARRAY_ASSIGNED),
-                0) ||
-            (!append && !shell_array_clear(name, name_length)))
+                0))
         {
                 shell_store_rewind(address_of exec_store, held);
                 return false;
+        }
+
+        exec_compound_held address_to first = null;
+        exec_compound_held address_to address_to tail = address_of first;
+        bool pairs_decided = false;
+        bool pairs = false;
+        string_address pending = null;
+
+        //      The list was already read, before local made the name: take
+        //      what it held rather than read it again.
+        if (exec_compound_prepared_body == body)
+        {
+                first = exec_compound_prepared;
+                exec_compound_prepared = null;
+                exec_compound_prepared_body = null;
+                at = stop;
         }
 
         if (append && shell_array_length(name, name_length))
@@ -8746,6 +9381,15 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                 while (at < stop && (string_is(at, ' ') || string_is(at, '\t') ||
                                      string_is(at, '\n')))
                         at++;
+
+                /* A list written over several lines may carry comments,
+                   which run to the end of their line. */
+                if (at < stop && string_is(at, '#') && lex_comments_on())
+                {
+                        while (at < stop && !string_is(at, '\n'))
+                                at++;
+                        continue;
+                }
 
                 if (at >= stop)
                         break;
@@ -8769,6 +9413,49 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                 if (string_is(piece, '['))
                         shut = expand_bracket_end(piece + 1, '[', ']');
 
+                /*
+                        bash 5.1's other spelling of an associative list:
+                        when its first word is no [key]=value, the words are
+                        keys and values in turn, each expanded as an
+                        assignment's value is, and a key left without a value
+                        gets an empty one.
+                */
+                if (keyed && !pairs_decided)
+                {
+                        pairs_decided = true;
+                        pairs = !(shut && string_is(shut + 1, '='));
+                }
+                if (pairs)
+                {
+                        value = shell_expand_assignment(piece, 0);
+                        if (!value)
+                        {
+                                answer = false;
+                                break;
+                        }
+                        if (!pending)
+                        {
+                                pending = shell_store_copy(
+                                    address_of exec_store, value,
+                                    string_length(value));
+                                if (!pending)
+                                        answer = false;
+                                continue;
+                        }
+                        if (!string_get(pending))
+                                log_error(str("'': bad array subscript\n"));
+                        else
+                        {
+                                answer = exec_compound_put(
+                                    name, name_length, pending,
+                                    string_length(pending), value, tail);
+                                if (tail && *tail)
+                                        tail = address_of (*tail)->next;
+                        }
+                        pending = null;
+                        continue;
+                }
+
                 if (shut && string_is(shut + 1, '='))
                 {
                         string_address key;
@@ -8791,9 +9478,11 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                         }
 
                         value = shell_expand_assignment(piece, value_at);
-                        answer = shell_array_set(name, name_length, key,
-                                                 key_length, value + value_at,
-                                                 false);
+                        answer = exec_compound_put(name, name_length, key,
+                                                   key_length, value + value_at,
+                                                   tail);
+                        if (tail && *tail)
+                                tail = address_of (*tail)->next;
 
                         if (!keyed)
                                 next = array_index_of(key, key_length) + 1;
@@ -8826,12 +9515,45 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                         {
                                 key_length = positive_into_string(written,
                                                                   next++);
-                                answer = shell_array_set(name, name_length,
-                                                         written, key_length,
-                                                         exec_compound_word[one],
-                                                         false);
+                                answer = exec_compound_put(
+                                    name, name_length, written, key_length,
+                                    exec_compound_word[one], tail);
+                                if (tail && *tail)
+                                        tail = address_of (*tail)->next;
                         }
                 }
+        }
+
+        if (exec_compound_preparing)
+        {
+                exec_compound_prepared = answer ? first : null;
+                exec_compound_prepared_body = answer ? body : null;
+                return answer;
+        }
+
+        if (answer && pending)
+        {
+                if (!string_get(pending))
+                        log_error(str("'': bad array subscript\n"));
+                else
+                {
+                        answer = exec_compound_put(name, name_length, pending,
+                                                   string_length(pending), "",
+                                                   tail);
+                        if (tail && *tail)
+                                tail = address_of (*tail)->next;
+                }
+        }
+
+        if (answer)
+        {
+                if (!append)
+                        answer = shell_array_clear(name, name_length);
+                for (exec_compound_held address_to one = first;
+                     one && answer; one = one->next)
+                        answer = shell_array_set(name, name_length, one->key,
+                                                 one->key_length, one->value,
+                                                 false);
         }
 
         shell_store_rewind(address_of exec_store, held);
@@ -9470,10 +10192,12 @@ static bool exec_control_number(string_address word, bool allow_zero,
         return true;
 }
 
+static b32 exec_trap_status;
+
 static COLD fn exec_return_bash()
 {
         positive first = 1;
-        bipolar value = shell_status;
+        bipolar value = trap_inside ? exec_trap_status : shell_status;
         bool valid = true;
 
         if (first < shell_argc && word_is(shell_argv[first], "--"))
@@ -9491,6 +10215,11 @@ static COLD fn exec_return_bash()
                 {
                         shell_diagnostic_where();
                         log_error("return: too many arguments\n", 0);
+                        if (shell_bash_compat)
+                        {
+                                expand_discard_whole(2);
+                                return;
+                        }
                         shell_status = 1;
                         if (!shell_is_interactive || exec_forked ||
                             string_is(shell_option_flags, 'c'))
@@ -9554,13 +10283,27 @@ bool exec_control_builtin(string_address name, bool run)
                         return true;
                 }
 
-                if (shell_argc > 1 &&
-                    !exec_control_number(shell_argv[1], false,
+                positive first = 1;
+
+                //      bash takes an end of options, and one count at most:
+                //      a second word ends the shell with 1.
+                if (shell_bash_compat && first < shell_argc &&
+                    word_is(shell_argv[first], "--"))
+                        first++;
+                if (shell_bash_compat && shell_argc > first + 1)
+                {
+                        shell_told("%s: too many arguments\n", name);
+                        expand_discard_whole(2);
+                        return true;
+                }
+
+                if (shell_argc > first &&
+                    !exec_control_number(shell_argv[first], false,
                                          address_of levels))
                 {
                         bipolar counted = 0;
                         bool numeric = shell_bash_compat &&
-                                       exec_control_integer(shell_argv[1],
+                                       exec_control_integer(shell_argv[first],
                                                             address_of counted);
 
                         //      A count past the field is still a count, and
@@ -9572,7 +10315,7 @@ bool exec_control_builtin(string_address name, bool run)
                         else if (numeric)
                         {
                                 shell_told("%s: %s: loop count out of "
-                                    "range\n", name, shell_argv[1]);
+                                    "range\n", name, shell_argv[first]);
                                 exec_signal = EXEC_SIGNAL_BREAK;
                                 exec_signal_level = (b32)exec_loop_depth;
                                 shell_status = 1;
@@ -9585,12 +10328,20 @@ bool exec_control_builtin(string_address name, bool run)
                                       "argument required\n"
                                     : "%s: Illegal number: "
                                       "%s\n",
-                                    name, shell_argv[1]);
-                                //      A non-integer is a special-builtin
-                                //      error. Aborting the line here made
-                                //      `command continue bad` fatal, and
-                                //      let eval of `break bad` return so
-                                //      the next -c line still printed end=.
+                                    name, shell_argv[first]);
+                                /* bash leaves on a count that is no number,
+                                   command and eval or not; carrying on went
+                                   round `while :; do break oops; done` for
+                                   ever. For dash it is a special-builtin
+                                   error. Aborting the line here made
+                                   `command continue bad` fatal, and let eval
+                                   of `break bad` return so the next -c line
+                                   still printed end=. */
+                                if (shell_bash_compat)
+                                {
+                                        expand_fatal_status(2);
+                                        return true;
+                                }
                                 shell_status = 2;
                                 exec_special_error_note();
                                 return true;
@@ -9624,6 +10375,8 @@ bool exec_control_builtin(string_address name, bool run)
                 exec_return_bash();
                 return true;
         }
+        if (shell_argc <= 1 && trap_inside)
+                shell_status = exec_trap_status;
         if (shell_argc > 1 &&
             !exec_control_number(shell_argv[1], true, address_of shell_status))
         {
@@ -9758,10 +10511,25 @@ static b32 exec_dispatch(b32 command_word)
                         return shell_status;
                 }
 
+                /* A file of that name that is not executable. bash tries
+                   it and reports what execve said about the path, 126;
+                   dash reports the name, and its search ends at 127. */
                 if (located == 2)
                 {
-                        shell_status = 126;
-                        string_format(log_error, "%s: cannot run\n", name);
+                        file_facts facts;
+                        bool slash = string_first_of(name, '/') != null;
+                        bool directory =
+                            test_facts(found, address_of facts, true) &&
+                            (facts.mode & MODE_FORMAT) == MODE_DIRECTORY;
+
+                        shell_status = shell_bash_compat || slash ? 126 : 127;
+                        shell_diagnostic_where();
+                        string_format(log_error, "%s: %s\n",
+                                      shell_bash_compat ? (string_address)found
+                                                        : name,
+                                      shell_bash_compat && directory
+                                          ? (string_address) "Is a directory"
+                                          : (string_address) "Permission denied");
                         return shell_status;
                 }
 
@@ -9775,6 +10543,9 @@ static b32 exec_dispatch(b32 command_word)
                 }
         }
 
+        if (exec_not_found_handled())
+                return shell_status;
+
         shell_status = 127;
         shell_diagnostic_where();
 
@@ -9782,8 +10553,10 @@ static b32 exec_dispatch(b32 command_word)
         //      do not write it the same: bash says the command was not
         //      found, dash says only that it was not.
         string_format(log_error,
-                      shell_bash_compat ? "%s: command not found\n"
-                                        : "%s: not found\n", name);
+                      !shell_bash_compat ? "%s: not found\n"
+                      : string_first_of(name, '/')
+                          ? "%s: No such file or directory\n"
+                          : "%s: command not found\n", name);
 
         return shell_status;
 }
@@ -9799,6 +10572,8 @@ static b32 exec_dispatch(b32 command_word)
         status the interrupted command answered with, and a return or a break
         inside one belongs to the action and not to the loop it landed in.
 */
+/* exec_trap_status: the status a return with no operand gives inside a trap
+   action, the one the interrupted command left, not the action's own last. */
 fn exec_traps()
 {
         b32 kept_status = shell_status;
@@ -9822,17 +10597,32 @@ fn exec_traps()
 
                 exec_signal = EXEC_SIGNAL_NONE;
                 exec_tested = false;
+                exec_trap_status = kept_status;
                 // An action is source, however many lines of it there are,
                 // and what it leaves unfinished is its own syntax error --
                 // the same two calls eval makes. One line at a time used to
                 // be one line only, and the second command of an action was
                 // never run.
-                exec_run_nested(action, false);
+                // A signal's action counts its lines from one, as both
+                // references do.
+                exec_run_nested(action, false, 0);
 
                 if (exec_line_aborted())
                 {
                         action_fatal = true;
                         break;
+                }
+
+                /* A return in the action returns from the function the
+                   trap interrupted, in bash and dash both: trap 'return 5'
+                   USR1 inside f leaves f with 5. It was taken back, so f
+                   ran on, and a function spinning in a loop never left. */
+                if (exec_signal == EXEC_SIGNAL_RETURN &&
+                    (exec_function_depth || shell_source_depth))
+                {
+                        trap_entered(false);
+                        exec_tested = kept_tested;
+                        return;
                 }
         }
 
@@ -10042,6 +10832,7 @@ static b32 exec_simple(b32 index)
         b32 count = 0;
         b32 first = 0;
         b32 declaration_from = -1;
+        bool compound_operand = false;
         b32 leading = 0;
         b32 address_to word_order = null;
         b32 status;
@@ -10194,6 +10985,8 @@ static b32 exec_simple(b32 index)
                 */
                 if (assignment)
                 {
+                        compound_operand |=
+                            (word_flags & PARSE_WORD_COMPOUND) != 0;
                         if (declaration_from < 0)
                                 declaration_from = exec_declaration_from(node);
 
@@ -10487,6 +11280,10 @@ static b32 exec_simple(b32 index)
                         exec_redirect_restore(mark);
                 shell_status = shell_substitution_status;
                 shell_store_rewind(address_of exec_store, arena_mark);
+                //      A command of assignments alone leaves $_ empty in
+                //      bash.
+                if (shell_bash_compat)
+                        shell_last_argument[0] = end;
                 return shell_status;
         }
 
@@ -10501,7 +11298,23 @@ static b32 exec_simple(b32 index)
         // $_ is the last argument of the command before this one, which is
         // what taking it here and not after the run means: this command's
         // words are already expanded and have already read the old value.
-        shell_last_argument_set(shell_argv[shell_argc - 1]);
+        //      A compound operand of declare and its family is its name
+        //      there: declare a=(1 2) leaves a.
+        if (compound_operand && shell_bash_compat &&
+            exec_declaration_compound(shell_argv[shell_argc - 1]))
+        {
+                string_address word = shell_argv[shell_argc - 1];
+                positive length = string_span(word, string_set_name);
+                p8 name[256];
+
+                if (length < sizeof(name))
+                {
+                        memory_copy_end(name, word, length);
+                        shell_last_argument_set(name);
+                }
+        }
+        else
+                shell_last_argument_set(shell_argv[shell_argc - 1]);
 
         // exec with nothing to run is there for its redirections, and those
         // belong to the shell from here on. Decided before anything runs: a
@@ -11081,6 +11894,8 @@ static b32 exec_for(b32 index, bool selecting)
                 else
                 {
                         value = exec_items[base + at++];
+                        if (trap_debug_here)
+                                exec_debug_before(node);
                         exec_trace_for_header(node, false);
                 }
                 if (!env_assign(name, value))
@@ -11135,7 +11950,8 @@ static bool exec_arithmetic_value(string_address text,
                 return true;
         }
 
-        if (!arith_unset)
+        /* A subscript that could not be read has said so already. */
+        if (!arith_unset && !expand_failed)
                 shell_arith_report(log_error, command, ready);
         shell_store_rewind(address_of expand_store, mark);
         return false;
@@ -11277,10 +12093,15 @@ static b32 exec_cfor(b32 index)
         }
 
         address_to second = end;
-        initialize = expressions;
-        condition = first + 1;
-        update = second + 1;
+        /* A clause of nothing but blanks is an empty clause: for (( ; ; ))
+           loops for ever, where the blank condition was read as 0 and the
+           body never ran. */
+        initialize = arith_skip_space(expressions);
+        condition = arith_skip_space(first + 1);
+        update = arith_skip_space(second + 1);
 
+        if (trap_debug_here)
+                exec_debug_clause(node, initialize);
         if (string_get(initialize) &&
             !exec_arithmetic_value(initialize, address_of value, "(("))
         {
@@ -11290,6 +12111,12 @@ static b32 exec_cfor(b32 index)
 
         while (1)
         {
+                //      The clauses are on the for's line, and $LINENO in
+                //      them says so rather than the body's last line.
+                if (node->line)
+                        exec_line = node->line;
+                if (trap_debug_here)
+                        exec_debug_clause(node, condition);
                 if (string_get(condition))
                 {
                         if (!exec_arithmetic_value(condition, address_of value,
@@ -11310,6 +12137,10 @@ static b32 exec_cfor(b32 index)
                 if (!exec_loop_again())
                         break;
 
+                if (node->line)
+                        exec_line = node->line;
+                if (trap_debug_here)
+                        exec_debug_clause(node, update);
                 if (string_get(update) &&
                     !exec_arithmetic_value(update, address_of value, "(("))
                 {
@@ -11396,9 +12227,28 @@ static bool conditional_tokenize(string_address text)
 
                 start = at;
 
-                while (string_get(at) && !lex_is_space(string_get(at)))
+                /* A regex operand is one word through parentheses, blanks
+                   inside them included: [[ $v =~ (one two) ]] has the
+                   pattern "(one two)", as bash reads it. */
+                positive depth = 0;
+
+                while (string_get(at) &&
+                       (depth || !lex_is_space(string_get(at))))
                 {
                         p8 value = string_get(at);
+
+                        if (regex_operand && value == '(')
+                        {
+                                depth++;
+                                at++;
+                                continue;
+                        }
+                        if (regex_operand && value == ')' && depth)
+                        {
+                                depth--;
+                                at++;
+                                continue;
+                        }
 
                         /*
                                 An extended pattern group is one piece of the
@@ -11417,8 +12267,9 @@ static bool conditional_tokenize(string_address text)
                                 }
                         }
 
-                        if ((value == '&' && string_is(at + 1, '&')) ||
-                            (value == '|' && string_is(at + 1, '|')) ||
+                        if ((!depth &&
+                             ((value == '&' && string_is(at + 1, '&')) ||
+                              (value == '|' && string_is(at + 1, '|')))) ||
                             (!regex_operand &&
                              (value == '(' || value == ')')))
                                 break;
@@ -11572,6 +12423,14 @@ static bool conditional_regex_match(string_address text, string_address pattern,
                 matched = regex_find(REGEX_FIRST | REGEX_CAPTURES, text, string_length(text), 0);
                 if (matched)
                         conditional_regex_captures(text);
+                else
+                {
+                        /* A failed match empties BASH_REMATCH, as bash's
+                           does; the last success's groups stayed. */
+                        string_address none[1] = {null};
+
+                        shell_array_words("BASH_REMATCH", 12, none, 0);
+                }
         }
         regex_pool.used = mark;
         regex_current = saved;
@@ -11694,7 +12553,7 @@ static bool conditional_primary(bool invert)
                         return test_unary('e', operand);
 
                 if (word_is(raw, "-v"))
-                        return env_get(operand) != null;
+                        return test_variable_set(operand);
 
                 /*
                         -R names a variable, not a path. After expansion an
@@ -11779,14 +12638,23 @@ static bool conditional_primary(bool invert)
                 {
                         string_address left;
                         string_address right;
+                        bool integer;
                         bool value;
 
                         if (!conditional_binary_ready())
                                 return false;
 
-                        left = conditional_expand(raw, false);
+                        /* An integer operand is arithmetic, whose subscripts
+                           the evaluator expands: expanding them here too
+                           ran a $(...) that a value held. */
+                        integer = kind >= TEST_EQUAL &&
+                                  kind <= TEST_GREATER_EQUAL;
+                        left = conditional_expand(
+                            integer ? arith_subscripts_held(raw) : raw, false);
+                        right = conditional_word[conditional_at++];
                         right = conditional_expand(
-                            conditional_word[conditional_at++], pattern);
+                            integer ? arith_subscripts_held(right) : right,
+                            pattern);
 
                         if (expand_failed)
                                 return false;
@@ -11807,7 +12675,7 @@ static bool conditional_primary(bool invert)
                                 return word_is(op, "!=") ? !value : value;
                         }
 
-                        if (kind >= TEST_EQUAL && kind <= TEST_GREATER_EQUAL)
+                        if (integer)
                                 return conditional_integer(kind, left, right);
 
                         test_bad = false;
@@ -12073,6 +12941,60 @@ static b32 exec_if(b32 index)
         return 0;
 }
 
+/*
+        A foreground wait that still hears the background.
+
+        Blocked in wait4 on the foreground child, the shell left a background
+        job that ended a zombie until the command was over, so `sleep 1 &
+        tail -f --pid=$! x` never ended: the pid tail watches still existed.
+        bash reaps as each child ends. waitid with WNOWAIT says which child
+        ended without taking it; one of this shell's background jobs is swept
+        into its table, and anything else -- the foreground child, or a
+        pipeline stage another waiter owns -- is left to the ordinary wait.
+*/
+#define WAIT_EXITED 4
+#define WAIT_NO_WAIT 0x01000000
+
+static COLD fn exec_wait_hearing(bipolar child)
+{
+        for (positive round = 0; round < 4096; round++)
+        {
+                b32 info[32] = {0};
+                bipolar got = system_call_5(syscall(waitid), 0, 0,
+                                            (positive)info,
+                                            WAIT_EXITED | WAIT_NO_WAIT, 0);
+                bipolar pid;
+                bool background = false;
+
+                if (got == -4)
+                        continue;
+                pid = info[4];
+                if (got < 0 || pid <= 0 || pid == child)
+                        return;
+                for (positive at = 0; at < shell_wait_count; at++)
+                        if (shell_wait_table[at].pid == pid &&
+                            !(shell_wait_table[at].flags & SHELL_WAIT_DONE))
+                                background = true;
+                if (!background)
+                        return;
+                job_reap();
+        }
+}
+
+static PURE bool exec_background_live()
+{
+        for (positive at = 0; at < shell_wait_count; at++)
+                if (!(shell_wait_table[at].flags & SHELL_WAIT_DONE))
+                        return true;
+        return false;
+}
+
+static fn exec_wait_background(bipolar child)
+{
+        if (shell_wait_count && exec_background_live())
+                exec_wait_hearing(child);
+}
+
 static b32 exec_wait_status(bipolar child, positive flags,
                             positive address_to raw)
 {
@@ -12080,6 +13002,9 @@ static b32 exec_wait_status(bipolar child, positive flags,
 
         if (child < 0)
                 return 1;
+
+        if (!flags)
+                exec_wait_background(child);
 
         if (system_wait4_retry(child, raw, flags, null) < 0)
                 return 1;
@@ -12237,6 +13162,12 @@ static bipolar exec_spawn_node(b32 index, bool background)
                    is the exception and keeps them, because `$(jobs -p)` is
                    how a script asks this shell what it is running. */
                 job_forget();
+
+                /* A subshell is outside every loop of the shell that made
+                   it: bash's (break) there says it is only meaningful in a
+                   loop, whatever its operand. */
+                exec_loop_depth = 0;
+                exec_child_root = index;
 
                 /* The async environment is already a subshell. Turning an
                    explicit (...) node into its equivalent group avoids a
@@ -13589,6 +14520,24 @@ static b32 exec_pipeline(b32 index)
                 exec_redirect_failed_node = 0;
         }
 
+        /*
+                bash raises DEBUG for each simple command of a pipeline in
+                the shell itself, before that stage is forked; a stage that
+                is a group or a subshell runs in its child, where the trap
+                does not reach. A lastpipe stage runs here and raises it
+                for itself.
+        */
+        if (count > 1 && trap_debug_here)
+        {
+                bool lastpipe = !job_monitor() && shell_shopt_on(LASTPIPE);
+
+                for (b32 stage = node->left; stage;
+                     stage = parse_nodes[stage].next)
+                        if (parse_nodes[stage].kind == NODE_SIMPLE &&
+                            !(lastpipe && !parse_nodes[stage].next))
+                                exec_debug_before(parse_nodes + stage);
+        }
+
         status = count > 1
                      ? exec_pipe(node->left, count, false, shell_pipefail(),
                                  false)
@@ -13743,7 +14692,13 @@ static b32 exec_node(b32 index)
            discover that no handler has written it. Checking abort state is
            likewise unnecessary until there is a trap to run. */
         if (trap_caught && !trap_inside && !exec_line_aborted())
+        {
                 exec_traps();
+
+                // A return the action made is the function's answer.
+                if (exec_signal == EXEC_SIGNAL_RETURN)
+                        status = shell_status;
+        }
 
         exec_parent_supervision_relax();
 
@@ -13785,12 +14740,8 @@ static b32 exec_node_kind(b32 index)
         {
                 // Before the words are expanded, which is where Bash runs it
                 // and the only place the action can use argv of its own.
-                if (trap_debug_here && !exec_condition_inside &&
-                    exec_debug_reaches())
-                {
-                        exec_bash_command_from(node);
-                        exec_trap_condition(TRAP_DEBUG);
-                }
+                if (trap_debug_here)
+                        exec_debug_before(node);
 
                 bool expand_scratch = node->redirect_count != 0;
                 b32 word_at = node->word;
@@ -13826,6 +14777,10 @@ static b32 exec_node_kind(b32 index)
                 if (shell_bash_compat)
                         exec_pipe_status_one(status);
 
+                /* A function the command called ran lines of its own; an ERR
+                   action for the call reads the line of the call. */
+                if (parse_nodes[index].line)
+                        exec_line = parse_nodes[index].line;
                 exec_errexit(status);
 
                 /* failglob (and other command-level expansion failures)
@@ -13883,6 +14838,11 @@ static b32 exec_node_kind(b32 index)
 
         exec_compound_depth++;
 
+        if (trap_debug_here &&
+            (node->kind == NODE_ARITHMETIC || node->kind == NODE_CONDITIONAL ||
+             node->kind == NODE_CASE))
+                exec_debug_before(node);
+
         if (node->kind == NODE_ARITHMETIC)
                 status = exec_arithmetic_command(index);
         else if (node->kind == NODE_CONDITIONAL)
@@ -13929,6 +14889,10 @@ static b32 exec_node_kind(b32 index)
         else
                 exec_expansion_done(expanded, substitutions);
 
+        // A return unwinding through this compound carries its own status,
+        // which the loop's last body status must not replace.
+        if (exec_signal == EXEC_SIGNAL_RETURN)
+                status = shell_status;
         shell_status = status;
 
         if (conditional_syntax)

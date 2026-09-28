@@ -215,6 +215,9 @@ pieces:
 ./build freestanding [-v] [--run] [--watch] [source] [output]
 ./build floor [arch]                            prove the ISA floor
 ./build key <name>                              a value from artifacts/.config
+./build config-header <config> <header>         the header a .config gives the programs
+./build surface <config>                        the names that .config links into an image
+./build switches [check]                        write or check the per-tool Kconfig switches
 ```
 
 Nothing in it names this project; every path and setting can be overridden
@@ -233,7 +236,56 @@ The bundled userspace is two Kconfig options, both on by default:
 
 `CONFIG_MOONWATER_UTIL_LINUX=n` drops the util-linux applets and
 `CONFIG_MOONWATER_SHELL_MONITOR=n` the monitor; disabled applets are dropped
-from the binary, not just from the path.
+from the binary, not just from the path. The `.config` reaches the programs
+as one header, `artifacts/moonwater_config.h`, and the build refuses an image
+that does not carry that header's record.
+
+Every tool has a switch of its own, `CONFIG_MOONWATER_TOOL_<NAME>` (`TOOL_TAC`,
+`TOOL_WGET`), in a menuconfig menu under its category. One switched off is
+compiled out of the shell's table and linked nowhere, so its name is not
+found. `CONFIG_MOONWATER_TOOLS_ALL=n` turns the default of every one off, for
+an allow list. `/init`, `/term` and `/moonwater` have no switch, because the
+kernel and init run them by path. Builtins have the same,
+`CONFIG_MOONWATER_BUILTIN_<NAME>` (`BUILTIN_ULIMIT`, `BUILTIN_BRACKET` for `[`),
+with `CONFIG_MOONWATER_BUILTINS_ALL` as their default. POSIX's special builtins,
+with `cd`, `true` and `false`, have none: they are the language, not commands
+it runs. A name in both tables, such as `mount` or `kill`, is gone only when
+both of its switches are off. The switches live in
+`src/moonwater/Kconfig.switches`, which `./build switches` writes from
+`src/sh/tools.inc` and the shell's builtin table.
+
+### Security tiers
+
+Four profiles in `kernel/profile/` choose how the build leans where safety and
+the reference disagree:
+
+| Profile | Tools and builtins | `MOONWATER_STRICT` |
+| --- | --- | --- |
+| `sec_reference` | all | 0: the reference exactly, holes and all |
+| `sec_default` | all | 1: sanitise only what hostile input made dangerous |
+| `sec_hardened` | all | 2: refuse where the default sanitises |
+| `sec_locked` | a kiosk's allow list | 2 |
+
+`sec_default` is in the default profile list, and it is the only tier that
+promises bash, dash and GNU behaviour for anything a script does. The others
+are choices, and what they refuse is refused on purpose. All four turn on Yama,
+which Floodlight's restricted launches need. To pick one, name it last after
+the rest of the default list:
+
+```sh
+sh build.sh debug_none limbo desktop wifi serial sec_hardened
+```
+
+To take a single tool or builtin out, add a line to a profile of your own, or
+use menuconfig:
+
+```sh
+# CONFIG_MOONWATER_TOOL_WGET is not set
+# CONFIG_MOONWATER_BUILTIN_HISTORY is not set
+```
+
+`./build config-header <profile> <header>` shows what a profile turns off, and
+`./build surface <profile>` lists the names it would link.
 
 ## Tests
 

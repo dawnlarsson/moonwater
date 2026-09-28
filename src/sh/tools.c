@@ -4193,9 +4193,13 @@ static bool tsort_break_cycle(b32 address_to order, b32 address_to loop)
         return false;
 }
 
+/*      GNU takes -w and does nothing with it: every loop is already
+        reported, and the status is already 1 when one was. */
+static const argument_option tsort_options[] = {{"w", 0}, {null}};
+
 static b32 tools_tsort()
 {
-        tools_taking("tsort", tools_no_options);
+        tools_taking("tsort", tsort_options);
         utility_arena.used = 0;
 
         if (!file_take(address_of taking))
@@ -4255,24 +4259,25 @@ static b32 tools_tsort()
         positive tokens = 0;
         bool inside = false;
 
+        /*      A NUL byte is part of a token, as it is to GNU, whose names
+                are C strings: the node is the token up to its first NUL, so
+                "a\0b" and "a\0c" are one node named a, and a token that
+                starts with one is the empty name. Only the three blanks end
+                a token; each is overwritten with the terminator as the
+                graph is built. */
         for (positive at = 0; at < length; at++)
         {
                 p8 value = bytes[at];
 
-                if (!value)
-                        return text_done(string_diagnostic(&text_diagnostic, 1, path, "input contains a NUL byte"));
-
                 if (value == ' ' || value == '\t' || value == '\n')
-                {
-                        bytes[at] = end;
                         inside = false;
-                }
                 else if (!inside)
                 {
                         tokens++;
                         inside = true;
                 }
         }
+        bytes[length] = end;
 
         if (tokens & 1)
                 return text_done(string_diagnostic(&text_diagnostic, 1, path, "input contains an odd number of tokens"));
@@ -4327,14 +4332,23 @@ static b32 tools_tsort()
 
         while (at < length)
         {
-                at += memory_span_byte(bytes + at, 0, length - at);
+                while (at < length && (bytes[at] == ' ' || bytes[at] == '\t' ||
+                                       bytes[at] == '\n'))
+                        at++;
 
                 if (at == length)
                         break;
 
                 string_address name = bytes + at;
+
+                while (at < length && bytes[at] != ' ' && bytes[at] != '\t' &&
+                       bytes[at] != '\n')
+                        at++;
+                bytes[at] = end;
+                if (at < length)
+                        at++;
+
                 b32 node = tsort_node_for(name);
-                at += string_length(name);
 
                 if (before < 0)
                 {
@@ -4513,6 +4527,9 @@ static numfmt_options numfmt;
 
 static const argument_option numfmt_arguments[] = {
     {"debug", 'D', ARGUMENT_LONG_ONLY},
+    //  GNU's developer switch, spelled ---debug: its messages trace the
+    //  reference's own internals, so here it is taken and says nothing.
+    {"-debug", 'X', ARGUMENT_LONG_ONLY},
     {"delimiter", 'd', ARGUMENT_REQUIRED},
     {"field", 'f', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"format", 'm', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
@@ -4614,351 +4631,168 @@ static bool numfmt_unit(string_address text, positive address_to unit)
         return true;
 }
 
-/* numfmt's format deliberately has a narrower grammar than printf: one %f,
-   optional zero/group/left flags, width and an optional decimal precision.
-   No precision means the ordinary human-format precision, not printf's six. */
-/* Which of the reference's three sentences a format string earns. */
+/*
+        numfmt's format, read as GNU's parse_format_string reads it, which is
+        narrower than printf and odd in two places kept on purpose. Before
+        the directive a %% is one byte of the prefix's count but two of the
+        text, and the prefix written is that many bytes of the format as it
+        stands -- so %%%f writes a %, and a%%b%f writes a%% and drops the b.
+        After it the suffix is written as it stands, %% and all. The flags
+        are blanks, a ' for grouping and a 0, in any order; the width is what
+        strtoimax reads there, a sign and blanks included, negative for left
+        alignment and zero-filled only when positive and the 0 was given; the
+        precision after a dot is strtol's, where no digits at all are zero and
+        a blank, a + or a minus is refused.
+*/
+/* Which of the reference's sentences a format string earns. */
 #define NUMFMT_FORMAT_OK 0
 #define NUMFMT_FORMAT_NONE 1
 #define NUMFMT_FORMAT_MANY 2
 #define NUMFMT_FORMAT_BAD 3
+#define NUMFMT_FORMAT_ENDS 4
+#define NUMFMT_FORMAT_PRECISION 5
 
 static p8 numfmt_format_kind;
 
 static bool numfmt_format_read(string_address text,
                                numfmt_format address_to format)
 {
-        bool found = false;
+        positive at = 0;
+        positive prefix = 0;
 
-        numfmt_format_kind = NUMFMT_FORMAT_BAD;
         memory_fill(format, 0, sizeof(*format));
         format->text = text;
 
-        for (positive at = 0; text[at]; at++)
+        while (!(text[at] == '%' && text[at + 1] != '%'))
         {
-                if (text[at] != '%')
-                        continue;
-
-                if (text[at + 1] == '%')
-                        /* GNU numfmt copies %% literally and can discard the
-                           byte after it while finding the directive.  That
-                           is not printf semantics, so refuse this uncommon
-                           spelling instead of reproducing the corruption. */
-                        return false;
-
-                if (found)
+                if (!text[at])
                 {
-                        numfmt_format_kind = NUMFMT_FORMAT_MANY;
+                        numfmt_format_kind = NUMFMT_FORMAT_NONE;
                         return false;
                 }
 
-                found = true;
-                format->directive = at++;
+                prefix++;
+                at += (text[at] == '%') + 1;
+        }
 
-                while (text[at] == '0' || text[at] == '\'' ||
-                       text[at] == '-')
+        format->directive = prefix;
+        at++;
+
+        bool zero = false;
+
+        for (;;)
+        {
+                positive blanks = 0;
+
+                while (text[at + blanks] == ' ')
+                        blanks++;
+                at += blanks;
+
+                if (text[at] == '\'')
                 {
-                        if (text[at] == '0')
-                                format->zero = true;
-                        else if (text[at] == '\'')
-                                format->grouping = true;
-                        else
-                                format->left = true;
+                        format->grouping = true;
                         at++;
+                }
+                else if (text[at] == '0')
+                {
+                        zero = true;
+                        at++;
+                }
+                else if (!blanks)
+                        break;
+        }
+
+        //      strtoimax: white space, a sign, digits; none leaves the
+        //      reading where it began.
+        positive number = at;
+
+        while (byte_is_space(text[number]))
+                number++;
+
+        bool negative = text[number] == '-';
+
+        if (text[number] == '-' || text[number] == '+')
+                number++;
+
+        if (byte_is_digit(text[number]))
+        {
+                positive width = 0;
+
+                while (byte_is_digit(text[number]))
+                {
+                        positive digit = (positive)(text[number++] - '0');
+
+                        if (width > (TEXT_LINE_MAX - digit) / 10)
+                        {
+                                numfmt_format_kind = NUMFMT_FORMAT_BAD;
+                                return false;
+                        }
+
+                        width = width * 10 + digit;
+                }
+
+                at = number;
+                format->width = width;
+                format->left = negative && width;
+                format->zero = zero && !negative && width;
+        }
+
+        if (!text[at])
+        {
+                numfmt_format_kind = NUMFMT_FORMAT_ENDS;
+                return false;
+        }
+
+        if (text[at] == '.')
+        {
+                at++;
+                format->has_precision = true;
+
+                p8 first = (p8)text[at];
+
+                if (first == ' ' || first == '\t' || first == '+' || first == '-')
+                {
+                        numfmt_format_kind = NUMFMT_FORMAT_PRECISION;
+                        return false;
                 }
 
                 while (byte_is_digit(text[at]))
                 {
                         positive digit = (positive)(text[at++] - '0');
 
-                        if (format->width > (TEXT_LINE_MAX - digit) / 10)
-                                return false;
-
-                        format->width = format->width * 10 + digit;
-                }
-
-                if (text[at] == '.')
-                {
-                        format->has_precision = true;
-                        at++;
-
-                        if (!byte_is_digit(text[at]))
-                                return false;
-
-                        while (byte_is_digit(text[at]))
+                        if (format->precision > 18)
                         {
-                                positive digit = (positive)(text[at++] - '0');
-
-                                if (format->precision > 18)
-                                        return false;
-
-                                format->precision = format->precision * 10 + digit;
+                                numfmt_format_kind = NUMFMT_FORMAT_PRECISION;
+                                return false;
                         }
 
-                        if (format->precision > 18)
-                                return false;
+                        format->precision = format->precision * 10 + digit;
                 }
 
-                if (text[at] != 'f')
+                if (format->precision > 18)
+                {
+                        numfmt_format_kind = NUMFMT_FORMAT_PRECISION;
                         return false;
-
-                format->after = at + 1;
+                }
         }
 
-        if (!found)
-                numfmt_format_kind = NUMFMT_FORMAT_NONE;
-        else
-                numfmt_format_kind = NUMFMT_FORMAT_OK;
-
-        return found;
-}
-
-/* Normalize only enough to let seq's checked parser own the value.  Leading
-   integral zeroes do not consume its coefficient budget, while the original
-   fractional width remains visible in `shown`. */
-static bool numfmt_decimal(p8 address_to bytes, positive length,
-                           seq_decimal address_to number)
-{
-        positive at = 0;
-        bool minus = false;
-
-        if (at < length && bytes[at] == '-')
+        if (text[at] != 'f')
         {
-                minus = true;
-                at++;
-        }
-        else if (at < length && bytes[at] == '+')
+                numfmt_format_kind = NUMFMT_FORMAT_BAD;
                 return false;
+        }
 
-        positive point = positive_max;
-        positive digits = 0;
-        positive fractional = 0;
+        format->after = ++at;
 
-        for (positive scan = at; scan < length; scan++)
-                if (bytes[scan] == '.')
+        for (; text[at]; at += (text[at] == '%') + 1)
+                if (text[at] == '%' && text[at + 1] != '%')
                 {
-                        if (point != positive_max)
-                                return false;
-                        point = scan;
-                }
-                else if (byte_is_digit(bytes[scan]))
-                {
-                        digits++;
-                        if (point != positive_max)
-                                fractional++;
-                }
-                else
+                        numfmt_format_kind = NUMFMT_FORMAT_MANY;
                         return false;
-
-        if (!digits || (point != positive_max &&
-                        (point + 1 == length || fractional > 18)))
-                return false;
-
-        positive integral_end = point == positive_max ? length : point;
-        positive zeros = memory_span_byte(bytes + at, '0', integral_end - at);
-
-        positive integral = integral_end - at - zeros;
-        p8 normalized[48];
-        positive made = 0;
-
-        if (minus)
-                normalized[made++] = '-';
-
-        if (!integral)
-                normalized[made++] = '0';
-        else
-        {
-                if (integral > 20)
-                        return false;
-                memory_copy(normalized + made, bytes + at + zeros, integral);
-                made += integral;
-        }
-
-        if (point != positive_max)
-        {
-                normalized[made++] = '.';
-                memory_copy(normalized + made, bytes + point + 1, fractional);
-                made += fractional;
-        }
-
-        normalized[made] = end;
-        return seq_decimal_number(normalized, number);
-}
-
-static bool numfmt_ratio(seq_decimal address_to number, positive base,
-                         positive power, positive address_to numerator,
-                         positive address_to denominator)
-{
-        positive top[13];
-        positive bottom[2];
-        positive tops = 0;
-        positive bottoms = 0;
-        positive magnitude = (positive)number->coefficient;
-
-        if (number->coefficient < 0)
-                magnitude = (positive)0 - magnitude;
-
-        if (!magnitude)
-        {
-                address_to numerator = 0;
-                address_to denominator = 1;
-                return true;
-        }
-
-        top[tops++] = magnitude;
-        top[tops++] = numfmt.from_unit;
-
-        while (power--)
-                top[tops++] = base;
-
-        if (number->scale)
-                bottom[bottoms++] = positive_power_ten(number->scale);
-        bottom[bottoms++] = numfmt.to_unit;
-
-        for (positive b = 0; b < bottoms; b++)
-                for (positive t = 0; t < tops; t++)
-                {
-                        positive common = tools_gcd(top[t], bottom[b]);
-                        top[t] /= common;
-                        bottom[b] /= common;
                 }
 
-        positive n = 1;
-        positive d = 1;
-
-        for (positive at = 0; at < tops; at++)
-        {
-                if (n > positive_max / top[at])
-                        return false;
-                n *= top[at];
-        }
-
-        for (positive at = 0; at < bottoms; at++)
-        {
-                if (d > positive_max / bottom[at])
-                        return false;
-                d *= bottom[at];
-        }
-
-        address_to numerator = n;
-        address_to denominator = d;
+        numfmt_format_kind = NUMFMT_FORMAT_OK;
         return true;
-}
-
-/* floor(10 * remainder / divisor), without overflowing a native word.  The
-   threshold is k*d/10 rounded up; the new remainder uses the already
-   available double-width multiply but never requests double-width division. */
-static positive numfmt_decimal_digit(positive remainder, positive divisor,
-                                     positive address_to next)
-{
-        positive quotient = divisor / 10;
-        positive tail = divisor % 10;
-        positive low = 0;
-        positive high = 10;
-
-        while (low + 1 < high)
-        {
-                positive middle = (low + high) / 2;
-                positive threshold = middle * quotient +
-                                     (middle * tail + 9) / 10;
-
-                if (remainder >= threshold)
-                        low = middle;
-                else
-                        high = middle;
-        }
-
-        p128 changed = (p128)remainder * 10 - (p128)low * divisor;
-        address_to next = (positive)changed;
-        return low;
-}
-
-static bool numfmt_round(positive numerator, positive denominator,
-                         positive digits, bool negative,
-                         positive address_to whole,
-                         positive address_to fraction)
-{
-        positive integer = numerator / denominator;
-        positive remainder = numerator % denominator;
-        positive decimals = 0;
-
-        for (positive at = 0; at < digits; at++)
-        {
-                positive digit = numfmt_decimal_digit(remainder, denominator,
-                                                       address_of remainder);
-                decimals = decimals * 10 + digit;
-        }
-
-        bool increase = false;
-
-        if (remainder)
-                switch (numfmt.rounding)
-                {
-                case NUMFMT_ROUND_FROM_ZERO: increase = true; break;
-                case NUMFMT_ROUND_UP: increase = !negative; break;
-                case NUMFMT_ROUND_DOWN: increase = negative; break;
-                case NUMFMT_ROUND_TO_ZERO: break;
-                case NUMFMT_ROUND_NEAREST:
-                        increase = remainder >= denominator / 2 +
-                                                   (denominator & 1);
-                        break;
-                }
-
-        if (increase)
-        {
-                positive scale = positive_power_ten(digits);
-                decimals++;
-
-                if (decimals == scale)
-                {
-                        decimals = 0;
-                        if (integer == positive_max)
-                                return false;
-                        integer++;
-                }
-        }
-
-        address_to whole = integer;
-        address_to fraction = decimals;
-        return true;
-}
-
-static fn numfmt_put_number(positive whole, positive fraction,
-                            positive stored_precision,
-                            positive shown_precision, bool negative,
-                            p8 address_to bytes, positive address_to length)
-{
-        positive used = 0;
-
-        if (negative)
-                bytes[used++] = '-';
-
-        used += positive_into_string(bytes + used, whole);
-
-        if (shown_precision)
-        {
-                bytes[used++] = '.';
-
-                if (stored_precision)
-                {
-                        positive missing = stored_precision -
-                                           positive_digits(fraction);
-                        if (!fraction)
-                                missing = stored_precision - 1;
-                        memory_fill(bytes + used, '0', missing);
-                        used += missing;
-                        used += positive_into_string(bytes + used, fraction);
-                }
-
-                if (shown_precision > stored_precision)
-                {
-                        memory_fill(bytes + used, '0',
-                                    shown_precision - stored_precision);
-                        used += shown_precision - stored_precision;
-                }
-        }
-
-        address_to length = used;
 }
 
 static fn numfmt_body_out(p8 address_to number, positive number_length,
@@ -4978,8 +4812,7 @@ static fn numfmt_body_out(p8 address_to number, positive number_length,
 
         if (numfmt.have_format)
         {
-                seq_format_literal(text_put, numfmt.format.text,
-                                   numfmt.format.directive);
+                text_put(numfmt.format.text, numfmt.format.directive);
 
                 if (numfmt.format.zero && !numfmt.format.left)
                 {
@@ -5049,124 +4882,202 @@ static fn numfmt_body_out(p8 address_to number, positive number_length,
 
         if (numfmt.have_format)
         {
-                string_address after = numfmt.format.text + numfmt.format.after;
-                seq_format_literal(text_put, after, string_length(after));
+                text_put_string(numfmt.format.text + numfmt.format.after);
         }
 }
 
-/*      A number too big to print without a scale is named the way the
-        reference names it: six significant digits and an exponent, which is
-        what %Lg gives it. The digits are the ones that were typed, so this
-        is a walk over the decimal string and not any arithmetic -- rounding
-        at the seventh digit, and a carry that can make the mantissa one and
-        the exponent one larger.
+/*
+        GNU numfmt's long double, done in software with seq's arithmetic
+        (add and multiply, rounded as the x87 or soft-fp round), and the
+        few pieces numfmt adds: a correctly rounded division, its powerld
+        and expld, the conversion to intmax_t its rounding functions lean
+        on, and a comparison against a small whole number.
 */
-static fn numfmt_short_form(p8 address_to digits, positive length,
-                            bool negative, p8 address_to into)
+static seq_wide numfmt_wide_word(p64 word)
 {
-        positive at = memory_span_byte(digits, '0', length);
-        p8 kept[8];
-        positive have = 0;
-        positive exponent = length > at ? length - at - 1 : 0;
-
-        have = min(length - at, (positive)7);
-        memory_copy(kept, digits + at, have);
-        memory_fill(kept + have, '0', 7 - have);
-        have = 7;
-        if (kept[6] >= '5')
-        {
-                positive carry = 6;
-                while (carry--)
-                {
-                        if (kept[carry] != '9')
-                        {
-                                kept[carry]++;
-                                break;
-                        }
-                        kept[carry] = '0';
-                        if (!carry)
-                        {
-                                kept[0] = '1';
-                                exponent++;
-                        }
-                }
-        }
-        positive shown = 6;
-        shown -= memory_span_byte_reverse(kept + 1, '0', shown - 1);
-
-        positive used = 0;
-        if (negative)
-                into[used++] = '-';
-        into[used++] = kept[0];
-        if (shown > 1)
-        {
-                into[used++] = '.';
-                memory_copy(into + used, kept + 1, shown - 1);
-                used += shown - 1;
-        }
-        into[used++] = 'e';
-        into[used++] = '+';
-        if (exponent < 10)
-                into[used++] = '0';
-        used += positive_into_base(into + used, exponent, 10, false);
-        into[used] = end;
+        return seq_wide_round(word, 0, false);
 }
 
-static fn numfmt_invalid_value(p8 address_to bytes, positive length)
+static seq_wide numfmt_wide_divide(seq_wide left, seq_wide right)
+{
+        bool negative = left.negative != right.negative;
+
+        if (left.kind == SEQ_WIDE_NAN)
+                return left;
+        if (right.kind == SEQ_WIDE_NAN)
+                return right;
+        if (left.kind == SEQ_WIDE_INFINITE)
+                return right.kind == SEQ_WIDE_INFINITE
+                           ? seq_wide_invalid()
+                           : (seq_wide){0, 0, SEQ_WIDE_INFINITE, negative};
+        if (right.kind == SEQ_WIDE_INFINITE || left.kind == SEQ_WIDE_ZERO)
+                return right.kind == SEQ_WIDE_ZERO ? seq_wide_invalid()
+                                                   : (seq_wide){0, 0, SEQ_WIDE_ZERO, negative};
+        if (right.kind == SEQ_WIDE_ZERO)
+                return (seq_wide){0, 0, SEQ_WIDE_INFINITE, negative};
+
+        p128 rest = left.significand, quotient = 0;
+
+        for (positive at = 0; at < SEQ_WIDE_BITS + 3; at++)
+        {
+                quotient <<= 1;
+                if (rest >= right.significand)
+                {
+                        rest -= right.significand;
+                        quotient |= 1;
+                }
+                rest <<= 1;
+        }
+        quotient = quotient << 1 | (rest != 0);
+        return seq_wide_round(quotient, left.exponent - right.exponent - SEQ_WIDE_BITS - 3,
+                              negative);
+}
+
+// powerld: base times itself power - 1 times, and one for none.
+static seq_wide numfmt_wide_power(seq_wide base, positive power)
+{
+        seq_wide result = base;
+
+        if (!power)
+                return numfmt_wide_word(1);
+        while (--power)
+                result = seq_wide_multiply(result, base);
+        return result;
+}
+
+// |value| < word
+static bool numfmt_wide_below(seq_wide value, p64 word)
+{
+        value.negative = false;
+        return value.kind == SEQ_WIDE_ZERO ||
+               (value.kind == SEQ_WIDE_FINITE &&
+                seq_wide_order(value, numfmt_wide_word(word)) < 0);
+}
+
+// expld: divided by base while it is at least base, counting.
+static seq_wide numfmt_wide_scale(seq_wide value, p64 base, positive address_to power)
+{
+        seq_wide divisor = numfmt_wide_word(base);
+
+        address_to power = 0;
+        if (value.kind != SEQ_WIDE_FINITE && value.kind != SEQ_WIDE_ZERO)
+                return value;
+        while (!numfmt_wide_below(value, base))
+        {
+                (address_to power)++;
+                value = numfmt_wide_divide(value, divisor);
+        }
+        return value;
+}
+
+// (intmax_t) value: toward zero, and the x87's indefinite past the range.
+static bipolar numfmt_wide_integer(seq_wide value)
+{
+        if (value.kind == SEQ_WIDE_ZERO)
+                return 0;
+        if (value.kind != SEQ_WIDE_FINITE)
+                return (bipolar)((positive)1 << 63);
+
+        p128 magnitude;
+
+        if (value.exponent >= 0)
+        {
+                if (value.exponent >= 64 || (value.significand >> (64 - value.exponent)))
+                        return (bipolar)((positive)1 << 63);
+                magnitude = value.significand << value.exponent;
+        }
+        else if (value.exponent <= -128)
+                magnitude = 0;
+        else
+                magnitude = value.significand >> -value.exponent;
+
+        if (magnitude > ((p128)1 << 63) || (magnitude == ((p128)1 << 63) && !value.negative))
+                return (bipolar)((positive)1 << 63);
+        return value.negative ? -(bipolar)magnitude : (bipolar)magnitude;
+}
+
+static seq_wide numfmt_wide_from(bipolar integer)
+{
+        bool negative = integer < 0;
+        positive magnitude = negative ? (positive)0 - (positive)integer : (positive)integer;
+        seq_wide out = numfmt_wide_word(magnitude);
+
+        out.negative = negative && magnitude;
+        return out;
+}
+
+// simple_round: the whole part in steps of INTMAX_MAX, the rest by --round.
+static seq_wide numfmt_wide_round(seq_wide value)
+{
+        seq_wide most = numfmt_wide_word((positive)bipolar_max);
+        bipolar times = numfmt_wide_integer(numfmt_wide_divide(value, most));
+        seq_wide product = seq_wide_multiply(most, numfmt_wide_from(times));
+
+        product.negative = !product.negative;
+        value = seq_wide_add(value, product);
+
+        bipolar truncated = numfmt_wide_integer(value);
+        seq_wide back = numfmt_wide_from(truncated);
+        b32 order = seq_wide_order(back, value);
+        bipolar rounded = truncated;
+
+        switch (numfmt.rounding)
+        {
+        case NUMFMT_ROUND_UP:
+                rounded = order < 0 ? truncated + 1 : truncated;
+                break;
+        case NUMFMT_ROUND_DOWN:
+                rounded = order > 0 ? truncated - 1 : truncated;
+                break;
+        case NUMFMT_ROUND_FROM_ZERO:
+                rounded = value.negative ? (order > 0 ? truncated - 1 : truncated)
+                                         : (order < 0 ? truncated + 1 : truncated);
+                break;
+        case NUMFMT_ROUND_TO_ZERO:
+                break;
+        case NUMFMT_ROUND_NEAREST:
+        {
+                seq_wide half = numfmt_wide_divide(numfmt_wide_word(1), numfmt_wide_word(2));
+
+                if (value.negative)
+                        half.negative = true;
+                rounded = numfmt_wide_integer(seq_wide_add(value, half));
+                break;
+        }
+        }
+
+        return seq_wide_add(seq_wide_multiply(most, numfmt_wide_from(times)),
+                            numfmt_wide_from(rounded));
+}
+
+/* GNU's sentence for each way simple_strtod_human refuses a number. */
+static fn numfmt_refused(p8 kind, p8 address_to bytes, positive length, positive rest)
 {
         numfmt.some_invalid = true;
-        if (numfmt.invalid == NUMFMT_INVALID_ABORT ||
-            numfmt.invalid == NUMFMT_INVALID_FAIL ||
-            numfmt.invalid == NUMFMT_INVALID_WARN)
+        if (numfmt.invalid != NUMFMT_INVALID_IGNORE)
         {
-                p8 shown[128];
+                p8 shown[512];
                 positive take = min(length, sizeof(shown) - 1);
+
                 memory_copy(shown, bytes, take);
                 shown[take] = end;
-
-                /* GNU names the failure: no number at all, a scale letter
-                   refused for want of --from, a scale lacking the i of
-                   --from=iec-i, or a suffix that is no scale. */
-                positive at = length && bytes[0] == '-';
-                positive digits = string_span_max(bytes + at, length - at,
-                                                  string_set_digits);
-                positive rest = at + digits;
-                if (rest < length && bytes[rest] == '.')
-                {
-                        rest++;
-                        digits++;
-                        rest += string_span_max(bytes + rest, length - rest,
-                                                string_set_digits);
-                }
-                string_address reason = "invalid number";
-                string_address note = "";
-                positive power;
-
                 text_flush();
-                if (digits && rest < length &&
-                    numfmt_power_letter(bytes[rest], address_of power))
-                {
-                        if (numfmt.from == NUMFMT_SCALE_NONE)
-                        {
-                                reason = "rejecting suffix in input";
-                                note = " (consider using --from)";
-                        }
-                        else if (numfmt.from == NUMFMT_SCALE_IEC_I &&
-                                 !(rest + 1 < length && bytes[rest + 1] == 'i'))
-                        {
-                                reason = "missing 'i' suffix in input";
-                                note = " (e.g Ki/Mi/Gi)";
-                        }
-                        else
-                                reason = "invalid suffix in input";
-                }
-                else if (digits && rest < length)
-                        reason = "invalid suffix in input";
-
-                string_format(writer_stderr, "numfmt: %s: '%w'%s\n", reason, writer_terminal_quoted_name, shown,
-                              note);
+                if (kind == 'T')
+                        string_format(writer_stderr, "numfmt: invalid suffix in input '%w': '%w'\n",
+                                      writer_terminal_quoted_name, shown,
+                                      writer_terminal_quoted_name, shown + min(rest, take));
+                else
+                        string_format(writer_stderr, "numfmt: %s: '%w'%s\n",
+                                      kind == 'O' ? (string_address)"value too large to be converted"
+                                      : kind == 'N' ? (string_address)"invalid number"
+                                      : kind == 'F' ? (string_address)"rejecting suffix in input"
+                                      : kind == 'I' ? (string_address)"missing 'i' suffix in input"
+                                                    : (string_address)"invalid suffix in input",
+                                      writer_terminal_quoted_name, shown,
+                                      kind == 'F' ? (string_address)" (consider using --from)"
+                                      : kind == 'I' ? (string_address)" (e.g Ki/Mi/Gi)"
+                                                    : (string_address)"");
         }
-
         if (numfmt.invalid == NUMFMT_INVALID_ABORT ||
             numfmt.invalid == NUMFMT_INVALID_FAIL)
                 numfmt.failed = true;
@@ -5187,232 +5098,278 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
         if (numfmt.suffix && tools_span_ends(bytes, stop, numfmt.suffix))
                 stop -= string_length(numfmt.suffix);
 
-        // A supplied suffix matches the exact field end, including any
-        // spaces in the suffix itself. Keep the numeric span separate from
-        // its separator, scale and trailing blanks; the checked decimal
-        // parser below still owns whether the number itself is valid.
-        positive numeric_length = stop && bytes[0] == '-';
-        numeric_length += string_span_max(bytes + numeric_length,
-                                          stop - numeric_length, string_set_digits);
-        if (numeric_length < stop && bytes[numeric_length] == '.')
-        {
-                numeric_length++;
-                numeric_length += string_span_max(bytes + numeric_length,
-                                                  stop - numeric_length, string_set_digits);
-        }
-
-        positive tail = numeric_length;
-        positive separator_length = numfmt.unit_separator
-                                        ? string_length(numfmt.unit_separator) : 0;
-        if (separator_length && separator_length <= stop - tail &&
-            !memory_compare(bytes + tail, numfmt.unit_separator, separator_length))
-                tail += separator_length;
-        else if ((!numfmt.unit_separator || separator_length) && tail < stop &&
-                 byte_is_blank(bytes[tail]))
-                tail++;
-
-        // Before a scale, exactly one blank or the explicit separator is
-        // accepted, never both. After it, any run of blanks is harmless.
+        /*
+                The number as GNU's simple_strtod_human reads it: a sign,
+                digits, a point and digits (a point needs digits after it or
+                a second point), then at most one unit separator or blank,
+                one scale letter with its i, and trailing blanks. What is
+                left after that is a suffix it refuses, and each way of
+                failing has its sentence.
+        */
+        positive numeric_length = 0;
         positive power = 0;
         positive base = 1;
         positive suffix_bytes = 0;
+        p8 refused = 0;
+        positive at = stop && bytes[0] == '-';
+        positive count = 0;
+        bool found = false;
 
-        if (numfmt.from != NUMFMT_SCALE_NONE && tail < stop)
+        for (; at < stop && byte_is_digit(bytes[at]); at++)
         {
-                bool has_i = tail + 1 < stop && bytes[tail + 1] == 'i';
+                found = true;
+                if (count || bytes[at] != '0')
+                        count++;
+        }
+        if (count > 33)
+                refused = 'O';
+        else if (!found && !(at < stop && bytes[at] == '.'))
+                refused = 'N';
+        else if (at < stop && bytes[at] == '.')
+        {
+                at++;
+                if (at < stop && bytes[at] == '-')
+                        refused = 'N';
+                found = false;
+                count = 0;
+                for (; !refused && at < stop && byte_is_digit(bytes[at]); at++)
+                {
+                        found = true;
+                        if (count || bytes[at] != '0')
+                                count++;
+                }
+                if (!refused && count > 33)
+                        refused = 'O';
+                else if (!refused && !found && !(at < stop && bytes[at] == '.'))
+                        refused = 'N';
+        }
+        numeric_length = at;
+
+        positive separator_length = numfmt.unit_separator
+                                        ? string_length(numfmt.unit_separator) : 0;
+
+        while (!refused && at < stop)
+        {
+                if (numfmt.unit_separator)
+                {
+                        if (separator_length <= stop - at &&
+                            !memory_compare(bytes + at, numfmt.unit_separator, separator_length))
+                                at += separator_length;
+                        else if (bytes[at] == ' ' || bytes[at] == '\t')
+                                at++;
+                }
+                else if (bytes[at] == ' ' || bytes[at] == '\t')
+                        at++;
+                if (at == stop)
+                        break;
+
                 positive candidate = 0;
 
-                if (numfmt_power_letter(bytes[tail], address_of candidate) &&
-                    ((has_i && (numfmt.from == NUMFMT_SCALE_AUTO ||
-                                numfmt.from == NUMFMT_SCALE_IEC_I)) ||
-                     (!has_i && numfmt.from != NUMFMT_SCALE_IEC_I)))
+                if (!numfmt_power_letter(bytes[at], address_of candidate))
                 {
-                        power = candidate;
-                        base = has_i || numfmt.from == NUMFMT_SCALE_IEC ? 1024 : 1000;
-                        suffix_bytes = has_i ? 2 : 1;
-                        tail += suffix_bytes;
+                        while (at < stop && (bytes[at] == ' ' || bytes[at] == '\t' ||
+                                             bytes[at] == '\n'))
+                                at++;
+                        if (at < stop)
+                                refused = 'S';
+                        break;
                 }
+                if (numfmt.from == NUMFMT_SCALE_NONE)
+                {
+                        refused = 'F';
+                        break;
+                }
+                power = candidate;
+                base = numfmt.from == NUMFMT_SCALE_IEC ? 1024 : 1000;
+                suffix_bytes = 1;
+                at++;
+                if (numfmt.from == NUMFMT_SCALE_AUTO && at < stop && bytes[at] == 'i')
+                {
+                        base = 1024;
+                        suffix_bytes = 2;
+                        at++;
+                }
+                else if (numfmt.from == NUMFMT_SCALE_IEC_I)
+                {
+                        if (at < stop && bytes[at] == 'i')
+                        {
+                                base = 1024;
+                                suffix_bytes = 2;
+                                at++;
+                        }
+                        else
+                        {
+                                refused = 'I';
+                                break;
+                        }
+                }
+                while (at < stop && (bytes[at] == ' ' || bytes[at] == '\t' ||
+                                     bytes[at] == '\n'))
+                        at++;
+                break;
         }
+        if (!refused && at < stop)
+                refused = 'T';
 
-        tail += string_span_max(bytes + tail, stop - tail, string_set_blanks);
-
-        seq_decimal number;
-        positive numerator;
-        positive denominator;
-
-        if (tail != stop || !numfmt_decimal(bytes, numeric_length, address_of number) ||
-            !numfmt_ratio(address_of number, base, power,
-                          address_of numerator, address_of denominator))
+        if (refused)
         {
-                /*      A number the reference could read and this one cannot
-                        is one whose integer part has passed 1e19, and with
-                        no scale asked for that is what the reference itself
-                        refuses to print. */
-                positive sign = numeric_length && bytes[0] == '-';
-                positive whole = string_span_max(bytes + sign,
-                                                 numeric_length - sign,
-                                                 string_set_digits);
-                positive leading = memory_span_byte(bytes + sign, '0', whole);
-                if (tail == stop && !power && numfmt.to == NUMFMT_SCALE_NONE &&
-                    whole - leading >= 20)
-                {
-                        p8 shown[48];
-
-                        numfmt_short_form(bytes + sign, whole, sign != 0, shown);
-                        text_flush();
-                        string_format(writer_stderr,
-                            "numfmt: value too large to be printed: '%w' (consider using --to)\n",
-                            writer_terminal_quoted_name, shown);
-                        numfmt.failed = true;
-                        numfmt.stop = true;
-                        return false;
-                }
-                numfmt_invalid_value(bytes, length);
+                numfmt_refused(refused, bytes, stop, at);
                 if (!numfmt.stop)
                         text_put(original, original_length);
                 return false;
         }
 
         /*
-                Under --debug the reference says when the integer part of an
-                input carries more digits than a long double holds exactly,
-                because everything after them is the parser's guess.
+                From here the arithmetic is GNU's, in its long double: the
+                digits accumulated one at a time, the fraction divided by
+                its power of ten, the scale multiplied in, the units applied,
+                and the result rounded and printed by double_to_human's
+                steps. The long double is seq's software one, the x87's
+                eighty bits on x86_64 and binary128 elsewhere, so what GNU
+                rounds away on this machine is rounded away here too.
         */
-        if (numfmt.debug)
+        bool minus = numeric_length && bytes[0] == '-';
+        positive digit_at = minus;
+        positive whole_digits = 0, fraction_digits = 0, precision = 0;
+        seq_wide ten = numfmt_wide_word(10);
+        seq_wide value = {0, 0, SEQ_WIDE_ZERO, false};
+        bool loss = false;
+
+        for (; digit_at < numeric_length && byte_is_digit(bytes[digit_at]); digit_at++)
         {
-                positive at = numeric_length && bytes[0] == '-';
-                at += memory_span_byte(bytes + at, '0', numeric_length - at);
+                if (value.kind != SEQ_WIDE_ZERO || bytes[digit_at] != '0')
+                        whole_digits++;
+                value = seq_wide_add(seq_wide_multiply(value, ten),
+                                     numfmt_wide_word((p64)(bytes[digit_at] - '0')));
+        }
+        loss |= whole_digits > 18;
+        if (minus)
+                value.negative = !value.negative;
 
-                positive digits = string_span_max(bytes + at, numeric_length - at,
-                                                  string_set_digits);
+        if (digit_at < numeric_length && bytes[digit_at] == '.')
+        {
+                seq_wide part = {0, 0, SEQ_WIDE_ZERO, false};
+                positive from = ++digit_at;
 
-                at += digits;
-
-                if (digits > 18)
+                for (; digit_at < numeric_length && byte_is_digit(bytes[digit_at]); digit_at++)
                 {
-                        p8 shown[128];
-                        positive take = min(numeric_length, sizeof(shown) - 1);
-
-                        memory_copy(shown, bytes, take);
-                        shown[take] = end;
-                        text_flush();
-                        string_format(writer_stderr,
-                            "numfmt: large input value '%w': possible precision loss\n",
-                            writer_terminal_quoted_name, shown);
+                        if (part.kind != SEQ_WIDE_ZERO || bytes[digit_at] != '0')
+                                fraction_digits++;
+                        part = seq_wide_add(seq_wide_multiply(part, ten),
+                                            numfmt_wide_word((p64)(bytes[digit_at] - '0')));
                 }
+                loss |= fraction_digits > 18;
+                precision = digit_at - from;
+                part = numfmt_wide_divide(part, numfmt_wide_power(ten, precision));
+                if (minus)
+                        part.negative = !part.negative;
+                value = seq_wide_add(value, part);
         }
 
         if (suffix_bytes)
-                number.shown = 0;
+                precision = 0;
+        value = seq_wide_multiply(value, numfmt_wide_power(numfmt_wide_word(base), power));
 
-        bool negative = number.coefficient < 0 && numerator;
-        positive output_power = 0;
-        positive output_base = numfmt.to == NUMFMT_SCALE_SI ? 1000 : 1024;
+        if (loss && numfmt.debug)
+        {
+                p8 shown[256];
+                positive take = min(stop, sizeof(shown) - 1);
 
-        if (numfmt.to != NUMFMT_SCALE_NONE)
-                while (output_power < 10 &&
-                       numerator / output_base >= denominator)
+                memory_copy(shown, bytes, take);
+                shown[take] = end;
+                text_flush();
+                string_format(writer_stderr,
+                    "numfmt: large input value '%w': possible precision loss\n",
+                    writer_terminal_quoted_name, shown);
+        }
+
+        if (numfmt.from_unit != 1 || numfmt.to_unit != 1)
+                value = numfmt_wide_divide(
+                    seq_wide_multiply(value, numfmt_wide_word(numfmt.from_unit)),
+                    numfmt_wide_word(numfmt.to_unit));
+
+        bool user = numfmt.have_format && numfmt.format.has_precision;
+        positive used = user ? numfmt.format.precision : precision;
+        positive tens = 0;
+
+        numfmt_wide_scale(value, 10, address_of tens);
+
+        if ((numfmt.to == NUMFMT_SCALE_NONE && tens + used > 18) || tens > 32)
+        {
+                numfmt.some_invalid = true;
+                if (numfmt.invalid != NUMFMT_INVALID_IGNORE)
                 {
-                        denominator *= output_base;
+                        seq_format shape = {.conversion = 'g', .precise = true, .precision = 6};
+                        string_address shown = seq_wide_printed(address_of shape, value);
+                        p8 held[64];
+                        positive length = shown ? min(string_length(shown), sizeof(held) - 1) : 0;
+
+                        memory_copy(held, shown, length);
+                        held[length] = end;
+                        text_flush();
+                        if (numfmt.to != NUMFMT_SCALE_NONE)
+                                string_format(writer_stderr,
+                                    "numfmt: value too large to be printed: '%s' (cannot handle values > 999Q)\n",
+                                    held);
+                        else if (used)
+                                string_format(writer_stderr,
+                                    "numfmt: value/precision too large to be printed: '%s/%p' (consider using --to)\n",
+                                    held, used);
+                        else
+                                string_format(writer_stderr,
+                                    "numfmt: value too large to be printed: '%s' (consider using --to)\n",
+                                    held);
+                }
+                if (numfmt.invalid == NUMFMT_INVALID_ABORT ||
+                    numfmt.invalid == NUMFMT_INVALID_FAIL)
+                        numfmt.failed = true;
+                if (numfmt.invalid == NUMFMT_INVALID_ABORT)
+                        numfmt.stop = true;
+                if (!numfmt.stop)
+                        text_put(original, original_length);
+                return false;
+        }
+
+        positive output_power = 0;
+        positive shown_precision = used;
+
+        if (numfmt.to == NUMFMT_SCALE_NONE)
+        {
+                seq_wide scale = numfmt_wide_power(ten, used);
+
+                value = numfmt_wide_divide(numfmt_wide_round(seq_wide_multiply(value, scale)),
+                                           scale);
+        }
+        else
+        {
+                positive output_base = numfmt.to == NUMFMT_SCALE_SI ? 1000 : 1024;
+                seq_wide scale_base = numfmt_wide_word(output_base);
+
+                value = numfmt_wide_scale(value, output_base, address_of output_power);
+
+                positive adjust = user ? min(output_power * 3, used)
+                                       : numfmt_wide_below(value, 10) ? 1 : 0;
+                seq_wide scale = numfmt_wide_power(ten, adjust);
+
+                value = numfmt_wide_divide(numfmt_wide_round(seq_wide_multiply(value, scale)),
+                                           scale);
+                if (!numfmt_wide_below(value, output_base))
+                {
+                        value = numfmt_wide_divide(value, scale_base);
                         output_power++;
                 }
-
-        positive print_precision;
-
-        if (numfmt.have_format && numfmt.format.has_precision)
-                print_precision = numfmt.format.precision;
-        else if (numfmt.to == NUMFMT_SCALE_NONE)
-                print_precision = number.shown;
-        else
-                print_precision = output_power &&
-                                          numerator / denominator < 10
-                                      ? 1 : 0;
-
-        positive round_precision = print_precision;
-
-        if (numfmt.to != NUMFMT_SCALE_NONE)
-        {
-                if (numfmt.have_format && numfmt.format.has_precision)
-                        round_precision = min(round_precision,
-                                              output_power * 3);
-                else
-                        /* GNU carries one guard decimal below ten even when
-                           no suffix is needed.  The final integer rendering
-                           then uses nearest-even, which is why 0.5 is 0 but
-                           1.5 is 2. */
-                        round_precision = numerator / denominator < 10 ? 1 : 0;
+                shown_precision = user ? used
+                                       : value.kind != SEQ_WIDE_ZERO &&
+                                         numfmt_wide_below(value, 10) && output_power;
         }
 
-        positive whole;
-        positive fraction;
+        seq_format shape = {.conversion = 'f', .precise = true,
+                            .precision = shown_precision};
+        string_address printed = seq_wide_printed(address_of shape, value);
+        static p8 number_text[5000];
+        positive number_length = printed ? min(string_length(printed), sizeof(number_text)) : 0;
 
-        if (!numfmt_round(numerator, denominator, round_precision, negative,
-                          address_of whole, address_of fraction))
-        {
-                numfmt_invalid_value(bytes, length);
-                if (!numfmt.stop)
-                        text_put(original, original_length);
-                return false;
-        }
-
-        if (numfmt.to != NUMFMT_SCALE_NONE && whole == output_base &&
-            !fraction && output_power < 10)
-        {
-                whole = 1;
-                output_power++;
-        }
-
-        /* Automatic precision is chosen again after rounding.  9999 SI is
-           rounded with one decimal digit while it is 9.999k, but is printed
-           as 10k; 1000 remains 1.0k. */
-        if (numfmt.to != NUMFMT_SCALE_NONE &&
-            !(numfmt.have_format && numfmt.format.has_precision))
-                print_precision = output_power && whole < 10 ? 1 : 0;
-
-        /* snprintf supplies a final nearest-even rounding when the automatic
-           display has fewer places than the guarded value above.  Do that
-           directly in decimal so libc and binary floating point stay out. */
-        if (print_precision < round_precision)
-        {
-                positive divisor = positive_power_ten(round_precision -
-                                                 print_precision);
-                positive kept = fraction / divisor;
-                positive dropped = fraction % divisor;
-                positive half = divisor / 2;
-
-                positive last = print_precision ? kept : whole;
-
-                if (dropped > half || (dropped == half && (last & 1)))
-                        kept++;
-
-                positive display_scale = positive_power_ten(print_precision);
-                if (kept == display_scale)
-                {
-                        kept = 0;
-                        whole++;
-                }
-
-                fraction = kept;
-                round_precision = print_precision;
-        }
-
-        /* Match the exact decimal floor GNU promises for unscaled output:
-           a base-10 exponent plus requested precision above LDBL_DIG cannot
-           be printed reliably there.  Our parser is exact, but accepting a
-           wider surface would make portable scripts disagree on failure. */
-        if (numfmt.to == NUMFMT_SCALE_NONE &&
-            positive_digits(whole) + print_precision > 19)
-        {
-                numfmt_invalid_value(bytes, length);
-                if (!numfmt.stop)
-                        text_put(original, original_length);
-                return false;
-        }
-
-        p8 number_text[64];
-        positive number_length;
-        numfmt_put_number(whole, fraction, round_precision, print_precision,
-                          negative, number_text, address_of number_length);
+        memory_copy(number_text, printed, number_length);
 
         p8 unit[2];
         positive unit_length = 0;
@@ -5541,87 +5498,113 @@ static bool numfmt_word_refuse(string_address option, string_address value,
 }
 
 /*
-        A field list the reference will not read has three sentences of its
-        own, and which one depends on the shape rather than on the parser
-        failing: a byte that belongs to no list at all, a field numbered
-        zero, and a range that runs backwards.
+        A field list the reference will not read, named as its set_fields
+        names it, walking the list the same way: a second dash in one piece
+        is an invalid range, a dash after a zero or a lone zero is a field
+        numbered from 0, a range that runs backwards is decreasing, a number
+        that reaches the largest there is is too large (the digits it began
+        with), and any other byte is an invalid value from that byte on.
 */
 static bool numfmt_fields_refuse(string_address value)
 {
-        bool shaped = true;
-        positive left = 0;
-        positive right = 0;
-        bool have_left = false;
-        bool have_right = false;
-        bool range = false;
-        bool decreasing = false;
-        bool zero = false;
+        string_address at = value;
+        positive number = 0;
+        positive start = 1;
+        bool left = false, right = false, dash = false, digits = false;
+        string_address digits_from = value;
 
-        for (positive at = 0;; at++)
-        {
-                p8 byte = value[at];
-
-                if (byte_is_digit(byte))
-                {
-                        positive digit = (positive)(byte - '0');
-
-                        if (range)
-                        {
-                                have_right = true;
-                                right = right * 10 + digit;
-                        }
-                        else
-                        {
-                                have_left = true;
-                                left = left * 10 + digit;
-                        }
-                        continue;
-                }
-
-                if (byte == '-' && !range)
-                {
-                        range = true;
-                        continue;
-                }
-
-                if (byte && byte != ',' && !byte_is_space(byte))
-                {
-                        shaped = false;
-                        break;
-                }
-
-                /* The end of one component: a lone dash is every field, a
-                   side left empty is the first or the last, and a side
-                   spelled zero is the complaint. */
-                if (!range && !have_left)
-                        zero = true;
-                else if (range && have_left && have_right && right < left)
-                        decreasing = true;
-                if ((have_left && !left) || (have_right && !right))
-                        zero = true;
-
-                left = right = 0;
-                have_left = have_right = range = false;
-
-                if (!byte)
-                        break;
-        }
+        if (string_equals(value, "-"))
+                return true;
 
         text_flush();
+        for (;;)
+        {
+                p8 byte = *at;
 
-        if (!shaped)
-                string_format(writer_stderr,
-                              "numfmt: invalid field value '%w'\n", writer_terminal_quoted_name, value);
-        else if (decreasing)
-                string_format(writer_stderr,
-                              "numfmt: invalid decreasing range\n");
-        else if (zero)
-                string_format(writer_stderr,
-                              "numfmt: fields are numbered from 1\n");
-        else
-                string_format(writer_stderr,
-                              "numfmt: invalid field value '%w'\n", writer_terminal_quoted_name, value);
+                if (byte == '-')
+                {
+                        digits = false;
+                        if (dash)
+                        {
+                                writer_stderr("numfmt: invalid field range\n", 0);
+                                return numfmt_hint();
+                        }
+                        dash = true;
+                        at++;
+                        if (left && !number)
+                        {
+                                writer_stderr("numfmt: fields are numbered from 1\n", 0);
+                                return numfmt_hint();
+                        }
+                        start = left ? number : 1;
+                        number = 0;
+                }
+                else if (byte == ',' || byte == ' ' || byte == '\t' || !byte)
+                {
+                        digits = false;
+                        if (dash)
+                        {
+                                dash = false;
+                                if (right && number < start)
+                                {
+                                        writer_stderr("numfmt: invalid decreasing range\n", 0);
+                                        return numfmt_hint();
+                                }
+                        }
+                        else if (!number)
+                        {
+                                writer_stderr("numfmt: fields are numbered from 1\n", 0);
+                                return numfmt_hint();
+                        }
+                        number = 0;
+                        if (!byte)
+                                break;
+                        at++;
+                        left = right = false;
+                }
+                else if (byte_is_digit(byte))
+                {
+                        if (!digits)
+                                digits_from = at;
+                        digits = true;
+                        if (dash)
+                                right = true;
+                        else
+                                left = true;
 
+                        positive digit = (positive)(byte - '0');
+
+                        if (number > (positive_max - digit) / 10 ||
+                            number * 10 + digit == positive_max)
+                        {
+                                positive length = string_span_max(digits_from,
+                                                                  string_length(digits_from),
+                                                                  string_set_digits);
+                                p8 shown[64];
+
+                                length = min(length, sizeof(shown) - 1);
+                                memory_copy(shown, digits_from, length);
+                                shown[length] = end;
+                                string_format(writer_stderr,
+                                              "numfmt: field number '%w' is too large\n",
+                                              writer_terminal_quoted_name, shown);
+                                return numfmt_hint();
+                        }
+                        number = number * 10 + digit;
+                        at++;
+                }
+                else
+                {
+                        string_format(writer_stderr, "numfmt: invalid field value '%w'\n",
+                                      writer_terminal_quoted_name, at);
+                        return numfmt_hint();
+                }
+        }
+
+        //      Nothing the reference refuses: the list reader's own
+        //      complaint stands in.
+        string_format(writer_stderr, "numfmt: invalid field value '%w'\n",
+                      writer_terminal_quoted_name, value);
         return numfmt_hint();
 }
 
@@ -5830,6 +5813,12 @@ static b32 tools_numfmt()
                         else if (numfmt_format_kind == NUMFMT_FORMAT_MANY)
                                 string_format(writer_stderr,
                                     "numfmt: format '%w' has too many %% directives\n", writer_terminal_quoted_name, value);
+                        else if (numfmt_format_kind == NUMFMT_FORMAT_ENDS)
+                                string_format(writer_stderr,
+                                    "numfmt: format '%w' ends in %%\n", writer_terminal_quoted_name, value);
+                        else if (numfmt_format_kind == NUMFMT_FORMAT_PRECISION)
+                                string_format(writer_stderr,
+                                    "numfmt: invalid precision in format '%w'\n", writer_terminal_quoted_name, value);
                         else
                                 string_format(writer_stderr,
                                     "numfmt: invalid format '%w', directive must be %%[0]['][-][N][.][N]f\n",
@@ -5893,7 +5882,8 @@ static b32 tools_numfmt()
 
         // GNU's two warnings about options that another option overrides,
         // both of which it prints only under --debug.
-        if (numfmt.debug && numfmt.have_format && numfmt.format.width && numfmt.padding)
+        if (numfmt.debug && numfmt.have_format && numfmt.format.width && numfmt.padding &&
+            !numfmt.format.zero)
         {
                 text_flush();
                 writer_stderr("numfmt: --format padding overriding --padding\n", 0);
@@ -5947,13 +5937,24 @@ static b32 tools_numfmt()
                                         if (text_line[at] == '\n')
                                                 text_line[at] = ' ';
 
-                        if (records++ < numfmt.header)
-                                text_put(text_line, text_line_length);
+                        //      GNU reads each line into a C string, so a NUL
+                        //      inside one ends it there: a data line is
+                        //      converted up to the NUL and still terminated,
+                        //      and a header line, which it writes with fputs
+                        //      terminator and all, loses its terminator too.
+                        p8 address_to nul = memory_first_of(text_line, 0,
+                                                            text_line_length);
+                        positive length = nul ? (positive)(nul - text_line)
+                                              : text_line_length;
+                        bool header = records++ < numfmt.header;
+
+                        if (header)
+                                text_put(text_line, length);
                         else
-                                numfmt_record(text_line, text_line_length);
+                                numfmt_record(text_line, length);
 
                         // A last record the input left unterminated stays so.
-                        if (!numfmt.stop && text_line_ended)
+                        if (!numfmt.stop && text_line_ended && !(header && nul))
                                 text_put_character(text_delimiter);
                 }
 
@@ -5972,10 +5973,11 @@ static b32 tools_numfmt()
 // factor ----------------------------------------------------
 
 /*
-        This is deliberately a native-word factorizer, not a miniature
-        bignum package.  The shared checked decimal floor accepts 0 through
-        18446744073709551615 on the 64-bit targets; a longer value is an
-        error, never a truncated factorization.  All visible numbers go back
+        One word at a time first: the shared checked decimal floor reads 0
+        through 18446744073709551615 on the 64-bit targets and those are
+        factored here, with no multi-limb arithmetic anywhere near them; a
+        longer value goes to the multi-limb road below and comes back here
+        for every part of it that fits a word. All visible numbers go back
         through the resident positive_to_string writer.
 
         Odd modular arithmetic uses Montgomery form.  Its reduction needs a
@@ -6249,10 +6251,1037 @@ static bool factor_collect(positive number, positive address_to factors,
                factor_collect(number / divisor, factors, count);
 }
 
+/*
+        Past one machine word. GNU factors any size (GMP past two words);
+        this carries a number in 64-bit limbs, least first, up to
+        FACTOR_LIMBS of them -- 8448 bits, 2543 digits, which is where it
+        says the number is too large rather than truncate it. The arithmetic
+        is what the native path does, widened: trial division by the small
+        odd numbers, Miller-Rabin over the first twenty-five primes in
+        Montgomery form (CIOS, a 64x64->128 multiply per limb pair and no
+        double-width division anywhere), and Brent's rho with a batched gcd.
+        A part that comes down to one word goes back to the native path,
+        whose speed is the floor it was measured at. Division by a word is
+        done in 32-bit halves and by a number bit by bit, so nothing here
+        needs the compiler's runtime.
+*/
+#define FACTOR_LIMBS 132
+#define FACTOR_DIGITS 2543
+#define FACTOR_POOL (FACTOR_LIMBS * 2 + 8704)
+#define FACTOR_MOST 8704
+
+typedef struct
+{
+        positive size;
+        p64 limb[FACTOR_LIMBS];
+} factor_big;
+
+static fn factor_big_trim(factor_big address_to value)
+{
+        while (value->size && !value->limb[value->size - 1])
+                value->size--;
+}
+
+static fn factor_big_word(factor_big address_to value, p64 word)
+{
+        value->limb[0] = word;
+        value->size = word != 0;
+}
+
+static b32 factor_big_order(const factor_big address_to left,
+                            const factor_big address_to right)
+{
+        if (left->size != right->size)
+                return left->size < right->size ? -1 : 1;
+        for (positive at = left->size; at-- > 0;)
+                if (left->limb[at] != right->limb[at])
+                        return left->limb[at] < right->limb[at] ? -1 : 1;
+        return 0;
+}
+
+// left -= right, where left is not the smaller.
+static fn factor_big_subtract(factor_big address_to left,
+                              const factor_big address_to right)
+{
+        p64 borrow = 0;
+
+        for (positive at = 0; at < left->size; at++)
+        {
+                p64 take = at < right->size ? right->limb[at] : 0;
+                p64 before = left->limb[at];
+                p64 after = before - take - borrow;
+
+                borrow = (before < take) | ((before - take) < borrow);
+                left->limb[at] = after;
+        }
+        factor_big_trim(left);
+}
+
+static fn factor_big_half(factor_big address_to value)
+{
+        for (positive at = 0; at < value->size; at++)
+                value->limb[at] = value->limb[at] >> 1 |
+                                  (at + 1 < value->size ? value->limb[at + 1] << 63 : 0);
+        factor_big_trim(value);
+}
+
+// value = value * 2 + bit; false when it would pass the limbs there are.
+static bool factor_big_double(factor_big address_to value, p64 bit)
+{
+        p64 carry = bit;
+
+        for (positive at = 0; at < value->size; at++)
+        {
+                p64 top = value->limb[at] >> 63;
+
+                value->limb[at] = value->limb[at] << 1 | carry;
+                carry = top;
+        }
+        if (carry)
+        {
+                if (value->size == FACTOR_LIMBS)
+                        return false;
+                value->limb[value->size++] = carry;
+        }
+        return true;
+}
+
+static bool factor_big_multiply_add(factor_big address_to value, p64 times, p64 add)
+{
+        p64 carry = add;
+
+        for (positive at = 0; at < value->size; at++)
+        {
+                p128 product = (p128)value->limb[at] * times + carry;
+
+                value->limb[at] = (p64)product;
+                carry = (p64)(product >> 64);
+        }
+        if (carry)
+        {
+                if (value->size == FACTOR_LIMBS)
+                        return false;
+                value->limb[value->size++] = carry;
+        }
+        return true;
+}
+
+// value /= divisor, answering the remainder; the divisor is under 2^32.
+static p64 factor_big_divide_word(factor_big address_to value, p64 divisor)
+{
+        p64 rest = 0;
+
+        for (positive at = value->size; at-- > 0;)
+        {
+                p64 high = rest << 32 | value->limb[at] >> 32;
+                p64 upper = high / divisor;
+
+                rest = high % divisor;
+
+                p64 low = rest << 32 | (value->limb[at] & 0xffffffff);
+                p64 lower = low / divisor;
+
+                rest = low % divisor;
+                value->limb[at] = upper << 32 | lower;
+        }
+        factor_big_trim(value);
+        return rest;
+}
+
+static p64 factor_big_remainder_word(const factor_big address_to value, p64 divisor)
+{
+        p64 rest = 0;
+
+        for (positive at = value->size; at-- > 0;)
+        {
+                rest = (rest << 32 | value->limb[at] >> 32) % divisor;
+                rest = (rest << 32 | (value->limb[at] & 0xffffffff)) % divisor;
+        }
+        return rest;
+}
+
+// quotient = value / divisor, bit by bit.
+static fn factor_big_divide(const factor_big address_to value,
+                            const factor_big address_to divisor,
+                            factor_big address_to quotient)
+{
+        static factor_big rest;
+
+        rest.size = 0;
+        quotient->size = value->size;
+        memory_fill(quotient->limb, 0, value->size * sizeof(p64));
+
+        for (positive bit = value->size * 64; bit-- > 0;)
+        {
+                factor_big_double(address_of rest, (value->limb[bit / 64] >> (bit % 64)) & 1);
+                if (factor_big_order(address_of rest, divisor) >= 0)
+                {
+                        factor_big_subtract(address_of rest, divisor);
+                        quotient->limb[bit / 64] |= (p64)1 << (bit % 64);
+                }
+        }
+        factor_big_trim(quotient);
+}
+
+static fn factor_big_put(const factor_big address_to value)
+{
+        static factor_big copy;
+        static p32 chunk[FACTOR_DIGITS / 9 + 2];
+        positive chunks = 0;
+
+        copy = address_to value;
+        while (copy.size)
+                chunk[chunks++] = (p32)factor_big_divide_word(address_of copy, 1000000000);
+
+        if (!chunks)
+        {
+                text_put_character('0');
+                return;
+        }
+
+        positive_to_string(text_put, chunk[chunks - 1]);
+        for (positive at = chunks - 1; at-- > 0;)
+        {
+                p8 digits[9];
+
+                positive_into_padded(digits, chunk[at], 9, '0');
+                text_put(digits, 9);
+        }
+}
+
+static fn factor_big_gcd(factor_big address_to left, factor_big address_to right)
+{
+        positive shift = 0;
+
+        if (!left->size)
+        {
+                address_to left = address_to right;
+                return;
+        }
+        if (!right->size)
+                return;
+
+        while (!(left->limb[0] & 1) && !(right->limb[0] & 1))
+        {
+                factor_big_half(left);
+                factor_big_half(right);
+                shift++;
+        }
+        while (!(left->limb[0] & 1))
+                factor_big_half(left);
+
+        while (right->size)
+        {
+                while (!(right->limb[0] & 1))
+                        factor_big_half(right);
+                if (factor_big_order(left, right) > 0)
+                {
+                        factor_big swap = address_to left;
+
+                        address_to left = address_to right;
+                        address_to right = swap;
+                }
+                factor_big_subtract(right, left);
+        }
+        while (shift--)
+                factor_big_double(left, 0);
+}
+
+/* Montgomery residues are k limbs wide, untrimmed. */
+typedef struct
+{
+        factor_big modulus;
+        positive width;
+        p64 inverse;
+        p64 one[FACTOR_LIMBS];
+        p64 square[FACTOR_LIMBS];
+} factor_ring;
+
+static fn factor_ring_multiply(const factor_ring address_to ring, const p64 address_to left,
+                               const p64 address_to right, p64 address_to out)
+{
+        positive width = ring->width;
+        p64 sum[FACTOR_LIMBS + 2];
+        const p64 address_to modulus = ring->modulus.limb;
+
+        memory_fill(sum, 0, (width + 2) * sizeof(p64));
+
+        for (positive i = 0; i < width; i++)
+        {
+                p64 carry = 0;
+                p128 step;
+
+                for (positive j = 0; j < width; j++)
+                {
+                        step = (p128)left[j] * right[i] + sum[j] + carry;
+                        sum[j] = (p64)step;
+                        carry = (p64)(step >> 64);
+                }
+                step = (p128)sum[width] + carry;
+                sum[width] = (p64)step;
+                sum[width + 1] = (p64)(step >> 64);
+
+                p64 factor = sum[0] * ring->inverse;
+
+                step = (p128)factor * modulus[0] + sum[0];
+                carry = (p64)(step >> 64);
+                for (positive j = 1; j < width; j++)
+                {
+                        step = (p128)factor * modulus[j] + sum[j] + carry;
+                        sum[j - 1] = (p64)step;
+                        carry = (p64)(step >> 64);
+                }
+                step = (p128)sum[width] + carry;
+                sum[width - 1] = (p64)step;
+                sum[width] = sum[width + 1] + (p64)(step >> 64);
+        }
+
+        bool subtract = sum[width] != 0;
+
+        if (!subtract)
+        {
+                subtract = true;
+                for (positive at = width; at-- > 0;)
+                        if (sum[at] != modulus[at])
+                        {
+                                subtract = sum[at] > modulus[at];
+                                break;
+                        }
+        }
+
+        if (subtract)
+        {
+                p64 borrow = 0;
+
+                for (positive at = 0; at < width; at++)
+                {
+                        p64 before = sum[at];
+
+                        sum[at] = before - modulus[at] - borrow;
+                        borrow = (before < modulus[at]) | ((before - modulus[at]) < borrow);
+                }
+        }
+
+        memory_copy(out, sum, width * sizeof(p64));
+}
+
+// (left + right) mod the modulus, both reduced.
+static fn factor_ring_add(const factor_ring address_to ring, p64 address_to left,
+                          const p64 address_to right)
+{
+        positive width = ring->width;
+        p64 carry = 0;
+
+        for (positive at = 0; at < width; at++)
+        {
+                p128 step = (p128)left[at] + right[at] + carry;
+
+                left[at] = (p64)step;
+                carry = (p64)(step >> 64);
+        }
+
+        bool subtract = carry != 0;
+
+        if (!subtract)
+        {
+                subtract = true;
+                for (positive at = width; at-- > 0;)
+                        if (left[at] != ring->modulus.limb[at])
+                        {
+                                subtract = left[at] > ring->modulus.limb[at];
+                                break;
+                        }
+        }
+        if (subtract)
+        {
+                p64 borrow = 0;
+
+                for (positive at = 0; at < width; at++)
+                {
+                        p64 before = left[at];
+                        p64 take = ring->modulus.limb[at];
+
+                        left[at] = before - take - borrow;
+                        borrow = (before < take) | ((before - take) < borrow);
+                }
+        }
+}
+
+static fn factor_ring_begin(factor_ring address_to ring, const factor_big address_to modulus)
+{
+        positive width = modulus->size;
+        p64 inverse = 1;
+
+        ring->modulus = address_to modulus;
+        ring->width = width;
+        for (positive at = 0; at < 6; at++)
+                inverse *= 2 - modulus->limb[0] * inverse;
+        ring->inverse = (p64)0 - inverse;
+
+        //      R and R squared modulo the modulus, by doubling.
+        static factor_big value;
+
+        factor_big_word(address_of value, 1);
+        for (positive at = 0; at < 2 * 64 * width; at++)
+        {
+                factor_big_double(address_of value, 0);
+                if (factor_big_order(address_of value, modulus) >= 0)
+                        factor_big_subtract(address_of value, modulus);
+                if (at + 1 == 64 * width)
+                {
+                        memory_fill(ring->one, 0, width * sizeof(p64));
+                        memory_copy(ring->one, value.limb, value.size * sizeof(p64));
+                }
+        }
+        memory_fill(ring->square, 0, width * sizeof(p64));
+        memory_copy(ring->square, value.limb, value.size * sizeof(p64));
+}
+
+static fn factor_ring_word(const factor_ring address_to ring, p64 word, p64 address_to out)
+{
+        p64 plain[FACTOR_LIMBS];
+
+        memory_fill(plain, 0, ring->width * sizeof(p64));
+        plain[0] = word;
+        factor_ring_multiply(ring, plain, ring->square, out);
+}
+
+static bool factor_ring_same(const factor_ring address_to ring, const p64 address_to left,
+                             const p64 address_to right)
+{
+        return !memory_compare(left, right, ring->width * sizeof(p64));
+}
+
+static bool factor_big_prime(const factor_big address_to number)
+{
+        static const p8 bases[] = {
+            2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41,
+            43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
+        };
+        static factor_ring ring;
+        static factor_big odd;
+        p64 minus_one[FACTOR_LIMBS], witness[FACTOR_LIMBS], base[FACTOR_LIMBS];
+        positive shifts = 0;
+
+        factor_ring_begin(address_of ring, number);
+        odd = address_to number;
+        odd.limb[0] &= ~(p64)1;
+        while (!(odd.limb[0] & 1))
+        {
+                factor_big_half(address_of odd);
+                shifts++;
+        }
+
+        //      Minus one is the modulus less R.
+        {
+                p64 borrow = 0;
+
+                for (positive at = 0; at < ring.width; at++)
+                {
+                        p64 before = number->limb[at];
+
+                        minus_one[at] = before - ring.one[at] - borrow;
+                        borrow = (before < ring.one[at]) | ((before - ring.one[at]) < borrow);
+                }
+        }
+
+        for (positive which = 0; which < sizeof(bases); which++)
+        {
+                factor_ring_word(address_of ring, bases[which], base);
+                memory_copy(witness, ring.one, ring.width * sizeof(p64));
+
+                for (positive bit = odd.size * 64; bit-- > 0;)
+                {
+                        factor_ring_multiply(address_of ring, witness, witness, witness);
+                        if ((odd.limb[bit / 64] >> (bit % 64)) & 1)
+                                factor_ring_multiply(address_of ring, witness, base, witness);
+                }
+
+                if (factor_ring_same(address_of ring, witness, ring.one) ||
+                    factor_ring_same(address_of ring, witness, minus_one))
+                        continue;
+
+                bool passed = false;
+
+                for (positive square = 1; square < shifts; square++)
+                {
+                        factor_ring_multiply(address_of ring, witness, witness, witness);
+                        if (factor_ring_same(address_of ring, witness, minus_one))
+                        {
+                                passed = true;
+                                break;
+                        }
+                        if (factor_ring_same(address_of ring, witness, ring.one))
+                                return false;
+                }
+                if (!passed)
+                        return false;
+        }
+        return true;
+}
+
+// A proper divisor of an odd composite, or false.
+static bool factor_big_rho(const factor_big address_to number, factor_big address_to divisor)
+{
+        static factor_ring ring;
+        static factor_big gathered, copy;
+        positive width = number->size;
+        p64 constant[FACTOR_LIMBS], x[FACTOR_LIMBS], y[FACTOR_LIMBS];
+        p64 saved[FACTOR_LIMBS], product[FACTOR_LIMBS], difference[FACTOR_LIMBS];
+
+        factor_ring_begin(address_of ring, number);
+
+        for (positive attempt = 0; attempt < 64; attempt++)
+        {
+                factor_ring_word(address_of ring, 1 + attempt * 2, constant);
+                factor_ring_word(address_of ring, 2 + attempt * 3, y);
+                memory_copy(x, y, width * sizeof(p64));
+                memory_copy(saved, y, width * sizeof(p64));
+
+                positive run = 1;
+                bool found = false;
+
+                gathered.size = 0;
+                while (!found && run <= ((positive)1 << 40))
+                {
+                        memory_copy(x, y, width * sizeof(p64));
+                        for (positive at = 0; at < run; at++)
+                        {
+                                factor_ring_multiply(address_of ring, y, y, y);
+                                factor_ring_add(address_of ring, y, constant);
+                        }
+
+                        for (positive done = 0; done < run && !found;)
+                        {
+                                positive block = min((positive)128, run - done);
+
+                                memory_copy(saved, y, width * sizeof(p64));
+                                memory_copy(product, ring.one, width * sizeof(p64));
+                                for (positive at = 0; at < block; at++)
+                                {
+                                        factor_ring_multiply(address_of ring, y, y, y);
+                                        factor_ring_add(address_of ring, y, constant);
+
+                                        factor_big a, b;
+
+                                        a.size = b.size = width;
+                                        memory_copy(a.limb, x, width * sizeof(p64));
+                                        memory_copy(b.limb, y, width * sizeof(p64));
+                                        factor_big_trim(address_of a);
+                                        factor_big_trim(address_of b);
+                                        if (factor_big_order(address_of a, address_of b) >= 0)
+                                                factor_big_subtract(address_of a, address_of b);
+                                        else
+                                        {
+                                                factor_big_subtract(address_of b, address_of a);
+                                                a = b;
+                                        }
+                                        memory_fill(difference, 0, width * sizeof(p64));
+                                        memory_copy(difference, a.limb, a.size * sizeof(p64));
+                                        factor_ring_multiply(address_of ring, product, difference, product);
+                                }
+                                done += block;
+
+                                gathered.size = width;
+                                memory_copy(gathered.limb, product, width * sizeof(p64));
+                                factor_big_trim(address_of gathered);
+                                copy = address_to number;
+                                factor_big_gcd(address_of gathered, address_of copy);
+                                if (!(gathered.size == 1 && gathered.limb[0] == 1))
+                                        found = true;
+                        }
+                        run <<= 1;
+                }
+
+                if (!found)
+                        continue;
+
+                //      The block ran past a factor into the whole: walk it
+                //      again one step at a time from where it began.
+                if (!factor_big_order(address_of gathered, number))
+                {
+                        memory_copy(y, saved, width * sizeof(p64));
+                        do
+                        {
+                                factor_ring_multiply(address_of ring, y, y, y);
+                                factor_ring_add(address_of ring, y, constant);
+
+                                factor_big a, b;
+
+                                a.size = b.size = width;
+                                memory_copy(a.limb, x, width * sizeof(p64));
+                                memory_copy(b.limb, y, width * sizeof(p64));
+                                factor_big_trim(address_of a);
+                                factor_big_trim(address_of b);
+                                if (factor_big_order(address_of a, address_of b) >= 0)
+                                        factor_big_subtract(address_of a, address_of b);
+                                else
+                                {
+                                        factor_big_subtract(address_of b, address_of a);
+                                        a = b;
+                                }
+                                gathered = a;
+                                copy = address_to number;
+                                factor_big_gcd(address_of gathered, address_of copy);
+                        } while (gathered.size == 1 && gathered.limb[0] == 1);
+                }
+
+                if (factor_big_order(address_of gathered, number) < 0)
+                {
+                        address_to divisor = gathered;
+                        return true;
+                }
+        }
+        return false;
+}
+
+/*
+        Two words, which is most of what the multi-limb road sees: the same
+        Montgomery arithmetic with R = 2^128, the product of two residues
+        formed from four 64x64 multiplies. Everything the general road does
+        per step in loops and copies is straight-line here.
+*/
+typedef struct
+{
+        p128 modulus;
+        p128 inverse;
+        p128 one;
+        p128 square;
+} factor_wide;
+
+static inline INLINE fn factor_wide_product(p128 left, p128 right,
+                                            p128 address_to high, p128 address_to low)
+{
+        p64 a0 = (p64)left, a1 = (p64)(left >> 64);
+        p64 b0 = (p64)right, b1 = (p64)(right >> 64);
+        p128 ll = (p128)a0 * b0, lh = (p128)a0 * b1;
+        p128 hl = (p128)a1 * b0, hh = (p128)a1 * b1;
+        p128 middle = (ll >> 64) + (p64)lh + (p64)hl;
+
+        address_to low = (middle << 64) | (p64)ll;
+        address_to high = hh + (lh >> 64) + (hl >> 64) + (middle >> 64);
+}
+
+static inline INLINE p128 factor_wide_multiply(const factor_wide address_to ring,
+                                               p128 left, p128 right)
+{
+        p128 high, low, m_high, m_low;
+
+        factor_wide_product(left, right, address_of high, address_of low);
+        p128 m = low * ring->inverse;
+        factor_wide_product(m, ring->modulus, address_of m_high, address_of m_low);
+
+        p128 carry = (p128)(low + m_low < low);
+        p128 first = high + m_high;
+        bool over = first < high;
+        p128 answer = first + carry;
+
+        over |= answer < first;
+        return over || answer >= ring->modulus ? answer - ring->modulus : answer;
+}
+
+static inline INLINE p128 factor_wide_add(const factor_wide address_to ring,
+                                          p128 left, p128 right)
+{
+        p128 sum = left + right;
+
+        return sum < left || sum >= ring->modulus ? sum - ring->modulus : sum;
+}
+
+static fn factor_wide_begin(factor_wide address_to ring, p128 modulus)
+{
+        p128 inverse = 1, value = 1;
+
+        for (positive at = 0; at < 7; at++)
+                inverse *= 2 - modulus * inverse;
+        ring->modulus = modulus;
+        ring->inverse = (p128)0 - inverse;
+
+        for (positive at = 0; at < 256; at++)
+        {
+                bool top = value >> 127;
+
+                value <<= 1;
+                if (top || value >= modulus)
+                        value -= modulus;
+                if (at == 127)
+                        ring->one = value;
+        }
+        ring->square = value;
+}
+
+static p128 factor_wide_word(const factor_wide address_to ring, p64 word)
+{
+        return factor_wide_multiply(ring, word, ring->square);
+}
+
+static bool factor_wide_prime(p128 number)
+{
+        static const p8 bases[] = {
+            2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41,
+            43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
+        };
+        factor_wide ring;
+        p128 odd = number - 1;
+        positive shifts = 0;
+
+        factor_wide_begin(address_of ring, number);
+        while (!(odd & 1))
+        {
+                odd >>= 1;
+                shifts++;
+        }
+
+        p128 minus_one = number - ring.one;
+
+        for (positive which = 0; which < sizeof(bases); which++)
+        {
+                p128 base = factor_wide_word(address_of ring, bases[which]);
+                p128 witness = ring.one;
+
+                for (positive bit = 128; bit-- > 0;)
+                {
+                        witness = factor_wide_multiply(address_of ring, witness, witness);
+                        if ((odd >> bit) & 1)
+                                witness = factor_wide_multiply(address_of ring, witness, base);
+                }
+                if (witness == ring.one || witness == minus_one)
+                        continue;
+
+                bool passed = false;
+
+                for (positive square = 1; square < shifts; square++)
+                {
+                        witness = factor_wide_multiply(address_of ring, witness, witness);
+                        if (witness == minus_one)
+                        {
+                                passed = true;
+                                break;
+                        }
+                        if (witness == ring.one)
+                                return false;
+                }
+                if (!passed)
+                        return false;
+        }
+        return true;
+}
+
+static p128 factor_wide_gcd(p128 left, p128 right)
+{
+        if (!left)
+                return right;
+        if (!right)
+                return left;
+
+        positive shift = 0;
+
+        while (!((left | right) & 1))
+        {
+                left >>= 1;
+                right >>= 1;
+                shift++;
+        }
+        while (!(left & 1))
+                left >>= 1;
+        while (right)
+        {
+                while (!(right & 1))
+                        right >>= 1;
+                if (left > right)
+                {
+                        p128 swap = left;
+
+                        left = right;
+                        right = swap;
+                }
+                right -= left;
+        }
+        return left << shift;
+}
+
+// A proper divisor of an odd composite of two words, or zero.
+static p128 factor_wide_rho(p128 number)
+{
+        factor_wide ring;
+
+        factor_wide_begin(address_of ring, number);
+        for (positive attempt = 0; attempt < 64; attempt++)
+        {
+                p128 constant = factor_wide_word(address_of ring, 1 + attempt * 2);
+                p128 y = factor_wide_word(address_of ring, 2 + attempt * 3);
+                p128 x = y, saved = y, divisor = 1;
+                positive run = 1;
+
+                while (divisor == 1 && run <= ((positive)1 << 40))
+                {
+                        x = y;
+                        for (positive at = 0; at < run; at++)
+                                y = factor_wide_add(address_of ring,
+                                                    factor_wide_multiply(address_of ring, y, y),
+                                                    constant);
+
+                        for (positive done = 0; done < run && divisor == 1;)
+                        {
+                                positive block = min((positive)128, run - done);
+                                p128 product = ring.one;
+
+                                saved = y;
+                                for (positive at = 0; at < block; at++)
+                                {
+                                        y = factor_wide_add(address_of ring,
+                                                            factor_wide_multiply(address_of ring, y, y),
+                                                            constant);
+                                        product = factor_wide_multiply(address_of ring, product,
+                                                                       x > y ? x - y : y - x);
+                                }
+                                done += block;
+                                divisor = factor_wide_gcd(product, number);
+                        }
+                        run <<= 1;
+                }
+
+                if (divisor == number)
+                {
+                        y = saved;
+                        do
+                        {
+                                y = factor_wide_add(address_of ring,
+                                                    factor_wide_multiply(address_of ring, y, y),
+                                                    constant);
+                                divisor = factor_wide_gcd(x > y ? x - y : y - x, number);
+                        } while (divisor == 1);
+                }
+
+                if (divisor > 1 && divisor < number)
+                        return divisor;
+        }
+        return 0;
+}
+
+// number / divisor, bit by bit, for two words.
+static p128 factor_wide_divide(p128 number, p128 divisor)
+{
+        p128 quotient = 0, rest = 0;
+
+        for (positive bit = 128; bit-- > 0;)
+        {
+                bool top = rest >> 127;
+
+                rest = rest << 1 | ((number >> bit) & 1);
+                if (top || rest >= divisor)
+                {
+                        rest -= divisor;
+                        quotient |= (p128)1 << bit;
+                }
+        }
+        return quotient;
+}
+
+/* The factors found, words and wider, in one pool. */
+static p64 factor_pool[FACTOR_POOL];
+static positive factor_pool_used;
+static struct { p32 at, size; } factor_found[FACTOR_MOST];
+static positive factor_found_count;
+
+static bool factor_found_add(const p64 address_to limb, positive size)
+{
+        if (factor_found_count == FACTOR_MOST || factor_pool_used + size > FACTOR_POOL)
+                return false;
+        memory_copy(factor_pool + factor_pool_used, limb, size * sizeof(p64));
+        factor_found[factor_found_count].at = (p32)factor_pool_used;
+        factor_found[factor_found_count++].size = (p32)size;
+        factor_pool_used += size;
+        return true;
+}
+
+static bool factor_collect(positive number, positive address_to factors,
+                           positive address_to count);
+
+static bool factor_big_collect(factor_big address_to number)
+{
+        if (number->size <= 1)
+        {
+                positive factors[positive_bits];
+                positive count = 0;
+
+                if (number->size && number->limb[0] > 1 &&
+                    !factor_collect(number->limb[0], factors, address_of count))
+                        return false;
+                for (positive at = 0; at < count; at++)
+                        if (!factor_found_add(address_of factors[at], 1))
+                                return false;
+                return true;
+        }
+
+        if (number->size == 2)
+        {
+                p128 value = (p128)number->limb[1] << 64 | number->limb[0];
+
+                if (factor_wide_prime(value))
+                        return factor_found_add(number->limb, 2);
+
+                p128 part = factor_wide_rho(value);
+
+                if (!part)
+                        return false;
+
+                factor_big one, other;
+                p128 rest = factor_wide_divide(value, part);
+
+                one.limb[0] = (p64)part;
+                one.limb[1] = (p64)(part >> 64);
+                one.size = 2;
+                factor_big_trim(address_of one);
+                other.limb[0] = (p64)rest;
+                other.limb[1] = (p64)(rest >> 64);
+                other.size = 2;
+                factor_big_trim(address_of other);
+                return factor_big_collect(address_of one) &&
+                       factor_big_collect(address_of other);
+        }
+
+        if (factor_big_prime(number))
+                return factor_found_add(number->limb, number->size);
+
+        factor_big divisor, quotient;
+
+        if (!factor_big_rho(number, address_of divisor))
+                return false;
+        factor_big_divide(number, address_of divisor, address_of quotient);
+        return factor_big_collect(address_of divisor) &&
+               factor_big_collect(address_of quotient);
+}
+
+static b32 factor_found_order(positive left, positive right)
+{
+        p32 ls = factor_found[left].size, rs = factor_found[right].size;
+
+        if (ls != rs)
+                return ls < rs ? -1 : 1;
+        for (positive at = ls; at-- > 0;)
+        {
+                p64 a = factor_pool[factor_found[left].at + at];
+                p64 b = factor_pool[factor_found[right].at + at];
+
+                if (a != b)
+                        return a < b ? -1 : 1;
+        }
+        return 0;
+}
+
+// A number past one word: its factors, sorted, after it.
+static bool factor_big_number(factor_big address_to number, bool exponents)
+{
+        factor_pool_used = 0;
+        factor_found_count = 0;
+
+        while (!(number->limb[0] & 1))
+        {
+                p64 two = 2;
+
+                if (!factor_found_add(address_of two, 1))
+                        return false;
+                factor_big_half(number);
+        }
+        for (p64 trial = 3; trial < 2000 && number->size > 1; trial += 2)
+                while (number->size > 1 && !factor_big_remainder_word(number, trial))
+                {
+                        if (!factor_found_add(address_of trial, 1))
+                                return false;
+                        factor_big_divide_word(number, trial);
+                }
+
+        if (!factor_big_collect(number))
+                return false;
+
+        for (positive at = 1; at < factor_found_count; at++)
+        {
+                positive before = at;
+
+                while (before && factor_found_order(before - 1, before) > 0)
+                {
+                        __typeof__(factor_found[0]) swap = factor_found[before];
+
+                        factor_found[before] = factor_found[before - 1];
+                        factor_found[before - 1] = swap;
+                        before--;
+                }
+        }
+
+        for (positive at = 0; at < factor_found_count;)
+        {
+                positive after = at + 1;
+
+                while (after < factor_found_count && !factor_found_order(after, at))
+                        after++;
+
+                text_put_character(' ');
+                if (factor_found[at].size == 1)
+                        positive_to_string(text_put, factor_pool[factor_found[at].at]);
+                else
+                {
+                        static factor_big shown;
+
+                        shown.size = factor_found[at].size;
+                        memory_copy(shown.limb, factor_pool + factor_found[at].at,
+                                    shown.size * sizeof(p64));
+                        factor_big_put(address_of shown);
+                }
+                if (exponents && after - at > 1)
+                {
+                        text_put_character('^');
+                        positive_to_string(text_put, after - at);
+                }
+                at = exponents ? after : at + 1;
+        }
+        return true;
+}
+
+/*
+        GNU's factor writes its lines in pieces of at most PIPE_BUF bytes that
+        end at a newline -- several factors sharing one pipe, as split
+        --filter=factor has them, then never cut into each other's lines --
+        and a line at a time to a terminal. After each line: once 4096 bytes
+        are held, what ends at the last newline within them goes out and the
+        rest waits.
+*/
+#define FACTOR_PIPE_BUF 4096
+static b32 factor_terminal;
+
+static fn factor_line_end()
+{
+        if (factor_terminal < 0)
+                factor_terminal = stream_is_terminal(1);
+
+        if (factor_terminal)
+        {
+                text_flush();
+                return;
+        }
+
+        if (text_out_used < FACTOR_PIPE_BUF)
+                return;
+
+        positive cut = FACTOR_PIPE_BUF;
+
+        while (cut && text_out_buffer[cut - 1] != '\n')
+                cut--;
+        if (!cut)
+                cut = FACTOR_PIPE_BUF;
+
+        positive rest = text_out_used - cut;
+
+        text_out_used = cut;
+        text_flush();
+        memory_copy(text_out_buffer, text_out_buffer + cut, rest);
+        text_out_used = rest;
+}
+
 static bool factor_number(p8 address_to bytes, positive length,
                           bool exponents)
 {
-        p8 decimal[32];
+        static p8 decimal[FACTOR_DIGITS + 1];
         /*      The reference walks off leading blanks -- spaces alone, not
                 tabs or newlines -- and then one plus sign, and nothing after
                 the sign. So ' 12' is twelve and '+ 12' is not a number. */
@@ -6276,7 +7305,43 @@ static bool factor_number(p8 address_to bytes, positive length,
         string_address after = decimal;
         if (!string_digits_checked(address_of after, 10, address_of value) ||
             string_get(after))
-                goto invalid;
+        {
+                //      All digits and past one word: the multi-limb road.
+                if (string_span_max(decimal, length - start, string_set_digits) !=
+                    length - start)
+                        goto invalid;
+
+                static factor_big wide;
+
+                wide.size = 0;
+                for (positive at = 0; at < length - start;)
+                {
+                        positive take = min((positive)9, length - start - at);
+                        p64 chunk = 0, scale = 1;
+
+                        for (positive digit = 0; digit < take; digit++)
+                        {
+                                chunk = chunk * 10 + (p64)(decimal[at + digit] - '0');
+                                scale *= 10;
+                        }
+                        if (!factor_big_multiply_add(address_of wide, scale, chunk))
+                                goto invalid;
+                        at += take;
+                }
+
+                factor_big_put(address_of wide);
+                text_put_character(':');
+                if (!factor_big_number(address_of wide, exponents))
+                {
+                        string_diagnostic(&text_diagnostic, 0, decimal, "factorization did not converge");
+                        text_put_character('\n');
+                        factor_line_end();
+                        return false;
+                }
+                text_put_character('\n');
+                factor_line_end();
+                return true;
+        }
 
         positive_to_string(text_put, value);
         text_put_character(':');
@@ -6327,6 +7392,7 @@ static bool factor_number(p8 address_to bytes, positive length,
                 {
                         string_diagnostic(&text_diagnostic, 0, decimal, "factorization did not converge");
                         text_put_character('\n');
+                        factor_line_end();
                         return false;
                 }
 
@@ -6365,48 +7431,47 @@ static bool factor_number(p8 address_to bytes, positive length,
         }
 
         text_put_character('\n');
+        factor_line_end();
         return true;
 
 invalid:
         {
-                p8 shown[256];
-                positive take = 0;
-
-                for (positive at = 0; at < length && take + 4 < sizeof(shown); at++)
-                {
-                        p8 byte = bytes[at];
-
-                        //      The reference quotes a C string, so what it
-                        //      shows ends where the first zero byte does.
-                        if (!byte)
-                                break;
-                        if (byte_is_printable(byte))
-                                shown[take++] = byte;
-                        else
-                        {
-                                shown[take++] = '\\';
-                                shown[take++] = (p8)('0' + (byte >> 6));
-                                shown[take++] = (p8)('0' + ((byte >> 3) & 7));
-                                shown[take++] = (p8)('0' + (byte & 7));
-                        }
-                }
-                shown[take] = end;
-
-                // Digits alone overflowed the native word, this factor's
-                // stated ceiling; anything else is GNU's own complaint.
+                // Digits alone past the most this carries, its ceiling;
+                // anything else is GNU's own complaint, naming the word
+                // whole, as far as its first zero byte.
                 positive digits = start + string_span_max(bytes + start,
                                                           length - start,
                                                           string_set_digits);
+                bool ceiling = digits == length && length > start;
 
                 text_flush();
-                if (digits == length && length > start)
-                        string_format(writer_stderr,
-                                      "factor: %s: not a valid positive native-word integer\n",
-                                      shown);
+                writer_stderr(ceiling ? "factor: " : "factor: '", 0);
+                for (positive at = 0; at < length && bytes[at];)
+                {
+                        p8 shown[256];
+                        positive take = 0;
+
+                        for (; at < length && bytes[at] && take + 4 < sizeof(shown); at++)
+                        {
+                                p8 byte = bytes[at];
+
+                                if (byte_is_printable(byte))
+                                        shown[take++] = byte;
+                                else
+                                {
+                                        shown[take++] = '\\';
+                                        shown[take++] = (p8)('0' + (byte >> 6));
+                                        shown[take++] = (p8)('0' + ((byte >> 3) & 7));
+                                        shown[take++] = (p8)('0' + (byte & 7));
+                                }
+                        }
+                        writer_stderr(shown, take);
+                }
+                if (ceiling)
+                        string_format(writer_stderr, ": too large; at most %p digits are factored\n",
+                                      (positive)FACTOR_DIGITS);
                 else
-                        string_format(writer_stderr,
-                                      "factor: '%s' is not a valid positive integer\n",
-                                      shown);
+                        writer_stderr("' is not a valid positive integer\n", 0);
         }
         return false;
 }
@@ -6427,6 +7492,8 @@ static b32 tools_factor()
         bool exponents = (taking.flags & FILE_FLAG('h')) != 0;
         bool failed = false;
 
+        factor_terminal = -1;
+
         if (file_operand_count)
         {
                 for (positive at = 0; at < file_operand_count && !text_out_failed; at++)
@@ -6443,9 +7510,17 @@ static b32 tools_factor()
                 if (!text_reader_open(address_of input, null))
                         return text_done(1);
 
-                p8 token[32];
+                //      A token is kept whole whatever its length, as GNU
+                //      keeps it, so a long word that is no number is named
+                //      in full; one of digits past the most factored is
+                //      the ceiling's own complaint.
+                static p8 address_to token;
+                static positive token_room;
                 positive length = 0;
                 bool excess = false;
+
+                if (!token && !array_store_reserve(token, token_room, 0, 4096, 4096))
+                        return text_done(1);
 
                 // A refused write ends the run, as GNU's does: a pipe that
                 // never ends would otherwise be factored for ever.
@@ -6462,14 +7537,15 @@ static b32 tools_factor()
                                                            exponents))
                                         {
                                                 if (excess)
-                                                        string_diagnostic(&text_diagnostic, 0, null, "integer exceeds native-word ceiling");
+                                                        string_diagnostic(&text_diagnostic, 0, null, "integer too large; at most 2543 digits are factored");
                                                 failed = true;
                                         }
                                         length = 0;
                                         excess = false;
                                 }
                         }
-                        else if (length < sizeof(token) - 1)
+                        else if (array_store_reserve(token, token_room, length,
+                                                     length + 2, 4096))
                                 token[length++] = byte;
                         else
                                 excess = true;
@@ -6480,7 +7556,7 @@ static b32 tools_factor()
                         if (excess || !factor_number(token, length, exponents))
                         {
                                 if (excess)
-                                        string_diagnostic(&text_diagnostic, 0, null, "integer exceeds native-word ceiling");
+                                        string_diagnostic(&text_diagnostic, 0, null, "integer too large; at most 2543 digits are factored");
                                 failed = true;
                         }
                 }
@@ -7261,6 +8337,13 @@ static b32 tools_mcookie()
 #define DD_SWAB 0x200
 // An output block of nothing but NULs is seeked over, not written.
 #define DD_SPARSE 0x400
+// The character sets and the record reshaping; ascii implies unblock and
+// ebcdic and ibm imply block, as coreutils' table has them.
+#define DD_ASCII 0x800
+#define DD_EBCDIC 0x1000
+#define DD_IBM 0x2000
+#define DD_BLOCK 0x4000
+#define DD_UNBLOCK 0x8000
 // open(2) flags shared by iflag and oflag, above each group's own bits.
 #define DD_DIRECT 0x004
 #define DD_DIRECTORY 0x008
@@ -7305,7 +8388,12 @@ static b32 tools_mcookie()
 #define DD_SIGNAL_INFO 10
 #define DD_NO_SUCH_CALL 38
 
+// More than one of a set of conversions that exclude each other.
+#define dd_several(bits) (((bits) & ((bits) - 1)) != 0)
+
 static positive dd_in_full;
+// Records conv=block cut at cbs, which the summary counts.
+static positive dd_truncated;
 static positive dd_in_partial;
 static positive dd_out_full;
 static positive dd_out_partial;
@@ -7343,41 +8431,70 @@ static bool dd_bare(p8 address_to text, positive length)
         return length >= 2 && text[length - 2] == ' ';
 }
 
-static fn dd_summary()
+/*
+        The statistics go to standard error through a writer that notes a
+        short write, since a dd whose report could not be written has not
+        done what it was asked (2>&- or 2>/dev/full answers 1, as GNU's
+        close_stdout makes it), and counts what it wrote, which a progress
+        line needs to rub out a longer one before it.
+*/
+static bool dd_report_failed;
+static positive dd_report_count;
+static positive dd_progress_length;
+static positive dd_progress_next;
+
+static fn dd_report(address_any data, positive length)
 {
-        if (dd_status_level == DD_STATUS_NONE)
-                return;
+        if (!length)
+                length = string_length((string_address)data);
+        dd_report_count += length;
+        if (system_write_all(2, data, length) != length)
+                dd_report_failed = true;
+}
 
-        text_flush();
+static positive dd_now()
+{
+        p64 wall[2] = {0, 0};
 
-        string_format(writer_stderr, "%p+%p records in\n%p+%p records out\n",
-                      dd_in_full, dd_in_partial, dd_out_full, dd_out_partial);
+        system_call_2(syscall(clock_gettime), 1, (positive)wall);
+        return (positive)wall[0] * 1000000000u + (positive)wall[1];
+}
 
-        if (dd_status_level == DD_STATUS_NOXFER)
-                return;
-
+/* coreutils' print_xfer_stats: the bytes, the time and the rate, on a line
+   of its own at the end or rewritten in place once a second under
+   status=progress, where the seconds are whole. */
+static fn dd_transfer(bool progress)
+{
         p8 si[32];
         p8 iec[32];
         positive si_length = positive_into_human_nearest_string(si, dd_written,
                                                                  false);
         positive iec_length = positive_into_human_nearest_string(iec, dd_written,
                                                                   true);
+        positive elapsed = dd_now() - dd_started;
 
-        positive_to_string(writer_stderr, dd_written);
-        writer_stderr(dd_written == 1 ? " byte" : " bytes", 0);
+        if (!elapsed)
+                elapsed = 1;
+
+        if (progress)
+                dd_report("\r", 1);
+        dd_report_count = 0;
+
+        positive_to_string(dd_report, dd_written);
+        dd_report(dd_written == 1 ? " byte" : " bytes", 0);
 
         if (!dd_bare(si, si_length))
         {
-                writer_stderr(" (", 0);
-                writer_stderr(si, 0);
+                dd_report(" (", 0);
+                dd_report(si, 0);
 
                 if (!dd_bare(iec, iec_length))
                 {
-                        writer_stderr(", ", 0);
-                        writer_stderr(iec, 0);
+                        dd_report(", ", 0);
+                        dd_report(iec, 0);
                 }
 
-                writer_stderr(")", 0);
+                dd_report(")", 0);
         }
 
         /*
@@ -7385,29 +8502,21 @@ static fn dd_summary()
                 the other one did, so they are printed in the shape coreutils
                 prints them in and nothing here compares them.
         */
-        p64 wall[2] = {0, 0};
+        dd_report(" copied, ", 0);
 
-        system_call_2(syscall(clock_gettime), 1, (positive)wall);
+        if (progress)
+                positive_to_string(dd_report, (elapsed + 500000000u) / 1000000000u);
+        else
+        {
+                p8 fraction[9];
 
-        positive elapsed = (positive)wall[0] * 1000000000u + (positive)wall[1] - dd_started;
+                positive_to_string(dd_report, elapsed / 1000000000u);
+                dd_report(".", 0);
+                dd_report(fraction, positive_into_padded(fraction, elapsed % 1000000000u,
+                                                         9, '0'));
+        }
 
-        if (!elapsed)
-                elapsed = 1;
-
-        writer_stderr(" copied, ", 0);
-
-        positive whole = elapsed / 1000000000u;
-        positive rest = elapsed % 1000000000u;
-
-        positive_to_string(writer_stderr, whole);
-        writer_stderr(".", 0);
-
-        p8 fraction[9];
-        positive fraction_length = positive_into_padded(fraction, rest, 9, '0');
-
-        system_write_all(2, fraction, fraction_length);
-
-        writer_stderr(" s, ", 0);
+        dd_report(" s, ", 0);
 
         /*
                 Bytes per second from microseconds, not from whole seconds:
@@ -7427,8 +8536,46 @@ static fn dd_summary()
                            : dd_written / microseconds * 1000000u;
 
         positive_into_human_nearest_string(rate, per, false);
-        writer_stderr(rate, 0);
-        writer_stderr("/s\n", 0);
+        dd_report(rate, 0);
+        dd_report("/s", 0);
+
+        if (!progress)
+        {
+                dd_report("\n", 1);
+                return;
+        }
+
+        positive length = dd_report_count;
+
+        if (length < dd_progress_length)
+                for (positive gap = dd_progress_length - length; gap; gap--)
+                        dd_report(" ", 1);
+        dd_progress_length = length;
+}
+
+static fn dd_summary()
+{
+        if (dd_status_level == DD_STATUS_NONE)
+                return;
+
+        text_flush();
+
+        if (dd_progress_length)
+        {
+                dd_report("\n", 1);
+                dd_progress_length = 0;
+        }
+
+        string_format(dd_report, "%p+%p records in\n%p+%p records out\n",
+                      dd_in_full, dd_in_partial, dd_out_full, dd_out_partial);
+        if (dd_truncated)
+                string_format(dd_report, "%p truncated record%s\n", dd_truncated,
+                              dd_truncated == 1 ? (string_address)"" : (string_address)"s");
+
+        if (dd_status_level == DD_STATUS_NOXFER)
+                return;
+
+        dd_transfer(false);
 }
 
 /*
@@ -7442,25 +8589,50 @@ static bool dd_size(string_address text, positive address_to out)
 {
         positive total = 1;
         string_address at = text;
+        bool over = false;
+        bool zero = false;
 
         dd_overflow = false;
 
         if (!string_get(at))
                 return false;
 
+        /*
+                A product, as coreutils' parse_integer multiplies it: a
+                factor or a product too large to hold is an overflow unless
+                another factor is nought, which makes the whole of it
+                nought -- count=00x99999999999999999999 is no records, not a
+                value too large.
+        */
         while (1)
         {
                 positive value;
+
+                /*      Each factor is read by strtoumax: blanks and a plus
+                        sign may lead it, a minus may not. */
+                while (byte_is_space((p8)string_get(at)))
+                        at++;
+                if (string_get(at) == '+')
+                        at++;
 
                 if (!string_digits_checked(address_of at, 10, address_of value))
                 {
                         // Digits that would not fit are the type's limit;
                         // anything else is a misspelling.
-                        dd_overflow = byte_is_digit(string_get(at));
-                        return false;
+                        if (!byte_is_digit(string_get(at)))
+                                return false;
+                        while (byte_is_digit(string_get(at)))
+                                at++;
+                        over = true;
+                        value = 1;
                 }
 
-                positive power = size_suffix_power(string_get(at), false);
+                //      dd's letters are b c w and the powers, of which
+                //      only k may be written small.
+                p8 letter = (p8)string_get(at);
+                positive power = letter >= 'a' && letter != 'k'
+                                     ? 0
+                                     : size_suffix_power(letter, false);
                 positive multiple = 1;
 
                 if (power)
@@ -7471,6 +8643,17 @@ static bool dd_size(string_address text, positive address_to out)
                 case 'c': at++; break;
                 case 'w': multiple = 2; at++; break;
                 case 'B': at++; break;
+                }
+
+                //      The letters that are not powers still take the
+                //      base spelling after them, which changes nothing.
+                if (!power && letter != 'B' && at > text && at[-1] == letter &&
+                    (letter == 'b' || letter == 'c' || letter == 'w'))
+                {
+                        if (string_get(at) == 'i' && string_get(at + 1) == 'B')
+                                at += 2;
+                        else if (string_get(at) == 'B' || string_get(at) == 'D')
+                                at++;
                 }
 
                 if (power)
@@ -7494,27 +8677,25 @@ static bool dd_size(string_address text, positive address_to out)
                                 multiple, base, (p8)power,
                                 (p64)positive_max, address_of scaled))
                         {
-                                dd_overflow = true;
-                                return false;
+                                over = true;
+                                scaled = 1;
                         }
                         multiple = (positive)scaled;
                 }
 
+                zero |= !value;
+
                 if (value && multiple > positive_max / value)
+                        over = true;
+                else
                 {
-                        dd_overflow = true;
-                        return false;
+                        positive piece = value * multiple;
+
+                        if (piece && total > positive_max / piece)
+                                over = true;
+                        else
+                                total *= piece;
                 }
-
-                positive piece = value * multiple;
-
-                if (piece && total > positive_max / piece)
-                {
-                        dd_overflow = true;
-                        return false;
-                }
-
-                total *= piece;
 
                 if (string_get(at) != 'x')
                         break;
@@ -7525,14 +8706,60 @@ static bool dd_size(string_address text, positive address_to out)
         if (string_get(at))
                 return false;
 
+        if (zero)
+                total = 0;
+        else if (over)
+        {
+                dd_overflow = true;
+                return false;
+        }
+
         address_to out = total;
 
         return true;
 }
 
-// A final B on count, skip or seek changes the unit from blocks to bytes.
-// It is still part of the ordinary size grammar (3KB is 3000), so parsing is
-// shared and only this last-byte fact is carried separately.
+/*
+        coreutils reads a product right to left, one factor and the product
+        of the rest, and every tail that begins 0x and comes to nought is
+        warned about as it is reached: count=0x1 is no records, which is
+        rarely meant, and 00x1 says it was. The word has been read whole
+        already, so every x in it joins two factors, and a tail is nought
+        when any of its factors has only zeros for digits.
+*/
+static fn dd_zero_warnings(string_address text)
+{
+        positive length = string_length(text);
+        bool zero = false;
+
+        for (positive at = length; at-- > 0;)
+        {
+                if (at && text[at - 1] != 'x')
+                        continue;
+
+                positive digit = at;
+
+                while (byte_is_space(text[digit]))
+                        digit++;
+                if (text[digit] == '+')
+                        digit++;
+                bool nought = byte_is_digit(text[digit]);
+                while (byte_is_digit(text[digit]))
+                        nought &= text[digit++] == '0';
+                zero |= nought;
+
+                if (zero && text[at] == '0' && text[at + 1] == 'x')
+                {
+                        text_flush();
+                        string_format(writer_stderr,
+                            "dd: warning: '0x' is a zero multiplier; use '00x' if that is intended\n");
+                }
+        }
+}
+
+// A B on count, skip or seek changes the unit from blocks to bytes. It is
+// still part of the ordinary size grammar (3KB is 3000), so parsing is
+// shared and only whether one is there is carried separately.
 /* The open(2) bits an iflag or oflag word asks for. */
 static positive dd_open_flags(positive flags)
 {
@@ -7567,7 +8794,9 @@ static bool dd_quantity(string_address text, positive address_to out,
         dd_refused = false;
         positive length = string_length(text);
 
-        address_to bytes = length && text[length - 1] == 'B';
+        // coreutils counts bytes when a B is anywhere in the product:
+        // oseek=1Bx2x4 is eight bytes, not eight blocks.
+        address_to bytes = length && string_first_of(text, 'B');
         if (!dd_size(text, out))
                 return false;
 
@@ -7613,6 +8842,10 @@ static bool dd_flags(string_address value, p8 group, positive address_to flags)
             {"nocreat", DD_NOCREAT, 0}, {"lcase", DD_LCASE, 0},
             {"ucase", DD_UCASE, 0}, {"swab", DD_SWAB, 0},
             {"sparse", DD_SPARSE, 0},
+            {"ascii", DD_ASCII | DD_UNBLOCK, 0},
+            {"ebcdic", DD_EBCDIC | DD_BLOCK, 0},
+            {"ibm", DD_IBM | DD_BLOCK, 0},
+            {"block", DD_BLOCK, 0}, {"unblock", DD_UNBLOCK, 0},
             {"fullblock", DD_FULLBLOCK, 1}, {"count_bytes", DD_COUNT_BYTES, 1},
             {"skip_bytes", DD_SKIP_BYTES, 1},
             {"append", DD_APPEND, 2}, {"seek_bytes", DD_SEEK_BYTES, 2},
@@ -7679,28 +8912,10 @@ static fn dd_named(string_address name)
 
 /*
         O_DIRECT hands the buffer to the device, so the kernel wants it on a
-        page boundary; the arena hands out sixteen-byte alignment. coreutils
-        aligns both its buffers to a page whatever the flags are, and pays a
-        page for it, so this does the same rather than deciding per run.
+        page boundary. coreutils aligns both its buffers to a page whatever
+        the flags are; each buffer here is its own mapping, which is.
 */
 #define DD_PAGE 4096u
-
-static p8 address_to dd_buffer(positive bytes)
-{
-        /* Too large to align is too large to hold: let the arena refuse it
-           and keep its complaint, rather than wrapping the page on. */
-        if (bytes > UTILITY_ARENA_BYTES)
-                return (p8 address_to)utility_arena_take(bytes);
-
-        p8 address_to raw = (p8 address_to)utility_arena_take(bytes + DD_PAGE);
-
-        if (!raw)
-                return null;
-
-        positive at = (positive)raw;
-
-        return (p8 address_to)((at + (DD_PAGE - 1)) & ~(positive)(DD_PAGE - 1));
-}
 
 /*
         Every output path has the same failure contract. Keeping it here
@@ -7839,35 +9054,390 @@ static bool dd_truncate_failed(positive handle, string_address output,
                              file_reason(refused));
 }
 
-// swab is one conversion over the byte stream, not one conversion per read.
-// An odd byte therefore waits for the first byte of the next input record.
-static positive dd_swab(p8 address_to into, p8 address_to from, positive length,
-                        bool address_to pending, p8 address_to held)
+/*
+        iflag and oflag on a side dd did not open, which is coreutils'
+        set_fd_flags: what fcntl can change is changed on the descriptor
+        (append, direct, nonblock, noatime, the syncs), the creation-only
+        words are dropped, and directory is a promise checked against what
+        the descriptor is -- dd iflag=directory < file refuses, where it
+        was taken and ignored.
+*/
+static bool dd_flags_set(positive handle, positive wanted, string_address name)
 {
-        positive in = 0;
-        positive out = 0;
+        wanted &= ~(positive)(DD_O_NOCTTY | DD_O_NOFOLLOW);
+        if (!wanted)
+                return true;
 
-        if (address_to pending && length)
+        bipolar old = system_call_3(syscall(fcntl), handle, FILE_F_GETFL, 0);
+        bipolar failed = old < 0 ? old : 0;
+
+        if (!failed && ((positive)old | wanted) != (positive)old)
         {
-                into[out++] = from[in++];
-                into[out++] = address_to held;
-                address_to pending = false;
+                if (wanted & DD_O_DIRECTORY)
+                {
+                        file_facts facts;
+                        bipolar told = system_stat_at(handle, "", AT_EMPTY_PATH,
+                                                      STATX_BASIC, address_of facts);
+
+                        failed = told < 0 ? told
+                               : (facts.mode & MODE_FORMAT) != MODE_DIRECTORY ? -20 : 0;
+                        wanted &= ~(positive)DD_O_DIRECTORY;
+                }
+                if (!failed && ((positive)old | wanted) != (positive)old)
+                {
+                        bipolar set = system_call_3(syscall(fcntl), handle, FILE_F_SETFL,
+                                                    (positive)old | wanted);
+                        failed = set < 0 ? set : 0;
+                }
         }
 
-        while (in + 1 < length)
+        if (!failed)
+                return true;
+
+        text_flush();
+        return string_report(writer_stderr, false, "dd: setting flags for '%w': %s\n",
+                             writer_terminal_name, name, file_reason(failed));
+}
+
+/* The count=0 drop, from where the side stands to its end, a page at a
+   time: a side that cannot say where it stands cannot be dropped. */
+static bool dd_cache_drop(positive handle, string_address name)
+{
+        bipolar at = system_seek(handle, 0, 1);
+        bipolar dropped = at < 0 ? at
+                        : system_call_4(syscall(fadvise64), handle,
+                                        (positive)at - (positive)at % DD_PAGE, 0, 4);
+
+        if (dropped >= 0)
+                return false;
+
+        text_flush();
+        writer_stderr("dd: failed to discard cache for: ", 0);
+        dd_named(name);
+        string_format(writer_stderr, ": %s\n", file_reason(dropped));
+        return true;
+}
+
+/*
+        The character sets POSIX gives dd: conv=ascii reads EBCDIC, ebcdic
+        writes it, and ibm writes IBM's variant of it. They are data, the
+        same bytes in every dd.
+*/
+static const p8 dd_ascii_to_ebcdic[256] = {
+    0x00, 0x01, 0x02, 0x03, 0x37, 0x2d, 0x2e, 0x2f, 0x16, 0x05, 0x25, 0x0b,
+    0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x3c, 0x3d, 0x32, 0x26,
+    0x18, 0x19, 0x3f, 0x27, 0x1c, 0x1d, 0x1e, 0x1f, 0x40, 0x5a, 0x7f, 0x7b,
+    0x5b, 0x6c, 0x50, 0x7d, 0x4d, 0x5d, 0x5c, 0x4e, 0x6b, 0x60, 0x4b, 0x61,
+    0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0x7a, 0x5e,
+    0x4c, 0x7e, 0x6e, 0x6f, 0x7c, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
+    0xc8, 0xc9, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xe2,
+    0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xad, 0xe0, 0xbd, 0x9a, 0x6d,
+    0x79, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x91, 0x92,
+    0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6,
+    0xa7, 0xa8, 0xa9, 0xc0, 0x4f, 0xd0, 0x5f, 0x07, 0x20, 0x21, 0x22, 0x23,
+    0x24, 0x15, 0x06, 0x17, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x09, 0x0a, 0x1b,
+    0x30, 0x31, 0x1a, 0x33, 0x34, 0x35, 0x36, 0x08, 0x38, 0x39, 0x3a, 0x3b,
+    0x04, 0x14, 0x3e, 0xe1, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+    0x49, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x62, 0x63,
+    0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75,
+    0x76, 0x77, 0x78, 0x80, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f, 0x90, 0x6a,
+    0x9b, 0x9c, 0x9d, 0x9e, 0x9f, 0xa0, 0xaa, 0xab, 0xac, 0x4a, 0xae, 0xaf,
+    0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb,
+    0xbc, 0xa1, 0xbe, 0xbf, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xda, 0xdb,
+    0xdc, 0xdd, 0xde, 0xdf, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef, 0xfa, 0xfb,
+    0xfc, 0xfd, 0xfe, 0xff,
+};
+static const p8 dd_ascii_to_ibm[256] = {
+    0x00, 0x01, 0x02, 0x03, 0x37, 0x2d, 0x2e, 0x2f, 0x16, 0x05, 0x25, 0x0b,
+    0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x3c, 0x3d, 0x32, 0x26,
+    0x18, 0x19, 0x3f, 0x27, 0x1c, 0x1d, 0x1e, 0x1f, 0x40, 0x5a, 0x7f, 0x7b,
+    0x5b, 0x6c, 0x50, 0x7d, 0x4d, 0x5d, 0x5c, 0x4e, 0x6b, 0x60, 0x4b, 0x61,
+    0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0x7a, 0x5e,
+    0x4c, 0x7e, 0x6e, 0x6f, 0x7c, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
+    0xc8, 0xc9, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xe2,
+    0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xad, 0xe0, 0xbd, 0x5f, 0x6d,
+    0x79, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x91, 0x92,
+    0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6,
+    0xa7, 0xa8, 0xa9, 0xc0, 0x4f, 0xd0, 0xa1, 0x07, 0x20, 0x21, 0x22, 0x23,
+    0x24, 0x15, 0x06, 0x17, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x09, 0x0a, 0x1b,
+    0x30, 0x31, 0x1a, 0x33, 0x34, 0x35, 0x36, 0x08, 0x38, 0x39, 0x3a, 0x3b,
+    0x04, 0x14, 0x3e, 0xe1, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+    0x49, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x62, 0x63,
+    0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75,
+    0x76, 0x77, 0x78, 0x80, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f, 0x90, 0x9a,
+    0x9b, 0x9c, 0x9d, 0x9e, 0x9f, 0xa0, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
+    0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb,
+    0xbc, 0xbd, 0xbe, 0xbf, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xda, 0xdb,
+    0xdc, 0xdd, 0xde, 0xdf, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef, 0xfa, 0xfb,
+    0xfc, 0xfd, 0xfe, 0xff,
+};
+static const p8 dd_ebcdic_to_ascii[256] = {
+    0x00, 0x01, 0x02, 0x03, 0x9c, 0x09, 0x86, 0x7f, 0x97, 0x8d, 0x8e, 0x0b,
+    0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x9d, 0x85, 0x08, 0x87,
+    0x18, 0x19, 0x92, 0x8f, 0x1c, 0x1d, 0x1e, 0x1f, 0x80, 0x81, 0x82, 0x83,
+    0x84, 0x0a, 0x17, 0x1b, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x05, 0x06, 0x07,
+    0x90, 0x91, 0x16, 0x93, 0x94, 0x95, 0x96, 0x04, 0x98, 0x99, 0x9a, 0x9b,
+    0x14, 0x15, 0x9e, 0x1a, 0x20, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6,
+    0xa7, 0xa8, 0xd5, 0x2e, 0x3c, 0x28, 0x2b, 0x7c, 0x26, 0xa9, 0xaa, 0xab,
+    0xac, 0xad, 0xae, 0xaf, 0xb0, 0xb1, 0x21, 0x24, 0x2a, 0x29, 0x3b, 0x7e,
+    0x2d, 0x2f, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xcb, 0x2c,
+    0x25, 0x5f, 0x3e, 0x3f, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf, 0xc0, 0xc1,
+    0xc2, 0x60, 0x3a, 0x23, 0x40, 0x27, 0x3d, 0x22, 0xc3, 0x61, 0x62, 0x63,
+    0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9,
+    0xca, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x5e, 0xcc,
+    0xcd, 0xce, 0xcf, 0xd0, 0xd1, 0xe5, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78,
+    0x79, 0x7a, 0xd2, 0xd3, 0xd4, 0x5b, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb,
+    0xdc, 0xdd, 0xde, 0xdf, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0x5d, 0xe6, 0xe7,
+    0x7b, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0xe8, 0xe9,
+    0xea, 0xeb, 0xec, 0xed, 0x7d, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50,
+    0x51, 0x52, 0xee, 0xef, 0xf0, 0xf1, 0xf2, 0xf3, 0x5c, 0x9f, 0x53, 0x54,
+    0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9,
+    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0xfa, 0xfb,
+    0xfc, 0xfd, 0xfe, 0xff,
+};
+
+/*
+        The copy's state, which is coreutils' dd_copy's: the two buffers,
+        made when they are first needed and not before -- dd bs=30M count=0
+        under a small address-space limit copies nothing and needs neither
+        -- the output block being filled, and for block and unblock the
+        column within the record and the spaces not yet known to be
+        trailing. dd_quit is a write that failed where coreutils quits.
+*/
+static p8 address_to dd_ibuf;
+static p8 address_to dd_obuf;
+static positive dd_ibuf_size;
+static positive dd_obuf_size;
+static positive dd_ibs;
+static positive dd_obs;
+static positive dd_cbs;
+static positive dd_oc;
+static positive dd_col;
+static positive dd_pending_spaces;
+static p8 dd_newline;
+static p8 dd_space;
+static bool dd_two_buffers;
+static bool dd_quit;
+static positive dd_out_now;
+static string_address dd_out_name;
+static bool dd_warn_partial;
+static bipolar dd_previous_read;
+static positive dd_read_flags;
+
+static p8 address_to dd_buffer(positive bytes, bool input)
+{
+        positive size = bytes <= positive_max - 2 * DD_PAGE
+                            ? (bytes + 32 + DD_PAGE - 1) & ~(positive)(DD_PAGE - 1)
+                            : 0;
+        address_any at = size ? memory_checked(size) : null;
+
+        if (!at)
         {
-                into[out++] = from[in + 1];
-                into[out++] = from[in];
-                in += 2;
+                p8 human[40];
+
+                human[positive_into_human_nearest_string(human, bytes, true)] = end;
+                text_flush();
+                string_format(writer_stderr,
+                              "dd: memory exhausted by %s buffer of size %p bytes (%s)\n",
+                              input ? (string_address)"input" : (string_address)"output",
+                              bytes, (string_address)human);
+                return null;
+        }
+        if (input)
+                dd_ibuf_size = size;
+        else
+                dd_obuf_size = size;
+        return (p8 address_to)at;
+}
+
+static bool dd_alloc_ibuf()
+{
+        if (!dd_ibuf)
+                dd_ibuf = dd_buffer(dd_ibs, true);
+        return dd_ibuf != null;
+}
+
+static bool dd_alloc_obuf()
+{
+        if (dd_obuf)
+                return true;
+        if (dd_two_buffers)
+                dd_obuf = dd_buffer(dd_obs, false);
+        else if (dd_alloc_ibuf())
+                dd_obuf = dd_ibuf;
+        return dd_obuf != null;
+}
+
+/*
+        One read, as coreutils' iread: a read O_DIRECT refuses for the
+        unaligned tail after a short one is the end, and under bs= without
+        fullblock, when records are counted or skipped, the first short read
+        that another read follows is warned about, once.
+*/
+static bipolar dd_read_once(positive handle, p8 address_to buffer, positive size)
+{
+        bipolar got = system_read_retry(handle, buffer, size);
+
+        if (got == -ERROR_INVALID && dd_previous_read > 0 &&
+            (positive)dd_previous_read < size && (dd_read_flags & DD_DIRECT))
+                got = 0;
+
+        if (got > 0 && dd_warn_partial && dd_previous_read > 0 &&
+            (positive)dd_previous_read < size)
+        {
+                if (dd_status_level != DD_STATUS_NONE)
+                {
+                        text_flush();
+                        string_format(writer_stderr,
+                                      "dd: warning: partial read (%p byte%s); suggest iflag=fullblock\n",
+                                      (positive)dd_previous_read,
+                                      dd_previous_read == 1 ? (string_address)"" : (string_address)"s");
+                }
+                dd_warn_partial = false;
         }
 
-        if (in < length)
-        {
-                address_to held = from[in];
-                address_to pending = true;
-        }
+        dd_previous_read = got;
+        return got;
+}
 
-        return out;
+static bipolar dd_read(positive handle, p8 address_to buffer, positive size)
+{
+        if (!(dd_read_flags & DD_FULLBLOCK))
+                return dd_read_once(handle, buffer, size);
+
+        positive gathered = 0;
+
+        while (gathered < size)
+        {
+                bipolar got = dd_read_once(handle, buffer + gathered, size - gathered);
+
+                if (got < 0)
+                        return got;
+                if (!got)
+                        break;
+                gathered += (positive)got;
+        }
+        return (bipolar)gathered;
+}
+
+// A whole output block, and the one failure coreutils quits on.
+static fn dd_write_output()
+{
+        positive wrote = dd_output(dd_out_now, dd_out_name, dd_obuf, dd_obs,
+                                   true, true);
+
+        if (wrote != dd_obs)
+        {
+                if (wrote)
+                        dd_out_partial++;
+                dd_quit = true;
+        }
+        else
+                dd_out_full++;
+        dd_oc = 0;
+}
+
+static inline fn dd_put(p8 byte)
+{
+        if (dd_quit)
+                return;
+        dd_obuf[dd_oc++] = byte;
+        if (dd_oc >= dd_obs)
+                dd_write_output();
+}
+
+static fn dd_copy_simple(const p8 address_to from, positive length)
+{
+        while (length && !dd_quit)
+        {
+                positive take = min(length, dd_obs - dd_oc);
+
+                memory_copy_apart(dd_obuf + dd_oc, from, take);
+                from += take;
+                length -= take;
+                dd_oc += take;
+                if (dd_oc >= dd_obs)
+                        dd_write_output();
+        }
+}
+
+/* conv=block: each newline-ended record padded with spaces to cbs, the
+   newline gone, and a record longer than cbs cut there and counted. */
+static fn dd_copy_block(const p8 address_to from, positive length)
+{
+        for (positive at = 0; at < length && !dd_quit; at++)
+        {
+                if (from[at] == dd_newline)
+                {
+                        for (positive column = dd_col; column < dd_cbs; column++)
+                                dd_put(dd_space);
+                        dd_col = 0;
+                }
+                else
+                {
+                        if (dd_col == dd_cbs)
+                                dd_truncated++;
+                        else if (dd_col < dd_cbs)
+                                dd_put(from[at]);
+                        dd_col++;
+                }
+        }
+}
+
+/* conv=unblock: every cbs bytes a record, its trailing spaces dropped and a
+   newline after it; spaces are held until something other than a space
+   shows they were not trailing. */
+static fn dd_copy_unblock(const p8 address_to from, positive length)
+{
+        for (positive at = 0; at < length && !dd_quit; at++)
+        {
+                p8 byte = from[at];
+
+                if (dd_col++ >= dd_cbs)
+                {
+                        dd_col = dd_pending_spaces = 0;
+                        at--;
+                        dd_put(dd_newline);
+                }
+                else if (byte == dd_space)
+                        dd_pending_spaces++;
+                else
+                {
+                        for (; dd_pending_spaces; dd_pending_spaces--)
+                                dd_put(dd_space);
+                        dd_put(byte);
+                }
+        }
+}
+
+/*
+        swab over the whole stream, in place: every other byte moves two
+        places on, so the block starts one byte in, and an odd byte left
+        over waits in saved for the first byte of the next read. The input
+        buffer has the one byte of room this needs.
+*/
+static p8 address_to dd_swab(p8 address_to buffer, positive address_to length,
+                             bipolar address_to saved)
+{
+        if (!address_to length)
+                return buffer;
+
+        bipolar before = address_to saved;
+
+        if ((before < 0) == ((address_to length & 1) != 0))
+                address_to saved = buffer[--address_to length];
+        else
+                address_to saved = -1;
+
+        for (positive at = address_to length; at > 1; at -= 2)
+                buffer[at] = buffer[at - 2];
+
+        if (before < 0)
+                return buffer + 1;
+
+        buffer[1] = (p8)before;
+        address_to length += 1;
+        return buffer;
 }
 
 // A short read is not the end of the input, and a partial record is not an
@@ -7895,7 +9465,6 @@ static b32 tools_dd(void)
         bool count_bytes = false;
         bool skip_bytes = false;
         bool seek_bytes = false;
-        b32 status = 0;
         struct {
                 string_address name;
                 positive address_to value;
@@ -7921,13 +9490,12 @@ static b32 tools_dd(void)
         dd_status_level = DD_STATUS_ALL;
         dd_info_asked = 0;
         utility_arena.used = 0;
+        dd_report_failed = false;
+        dd_progress_length = 0;
+        dd_started = dd_now();
+        dd_progress_next = dd_started + 1000000000u;
 
-        {
-                p64 wall[2] = {0, 0};
-
-                system_call_2(syscall(clock_gettime), 1, (positive)wall);
-                dd_started = (positive)wall[0] * 1000000000u + (positive)wall[1];
-        }
+        bool progress = false;
 
         for (b32 i = 1; i < text_argument_count; i++)
         {
@@ -7956,6 +9524,9 @@ static b32 tools_dd(void)
                                         ? dd_quantity(value, numbers[n].value, numbers[n].bytes)
                                         : dd_size(value, numbers[n].value);
 
+                        if (took)
+                                dd_zero_warnings(value);
+
                         if (took && sized && !address_to numbers[n].value)
                                 took = false;
 
@@ -7965,11 +9536,6 @@ static b32 tools_dd(void)
                                         return 1;
 
                                 text_flush();
-                                if (string_get(value) == '0' &&
-                                    (string_get(value + 1) == 'x' ||
-                                     string_get(value + 1) == 'X'))
-                                        string_format(writer_stderr,
-                                            "dd: warning: '0x' is a zero multiplier; use '00x' if that is intended\n");
                                 return string_report(writer_stderr, 1,
                                     dd_overflow
                                         ? (string_address)"dd: invalid number: %w: Value too large for defined data type\n"
@@ -7989,12 +9555,16 @@ static b32 tools_dd(void)
                         output = value;
                 else if (dd_operand(argument, "status", address_of value))
                 {
+                        progress = false;
                         if (string_equals(value, "none"))
                                 dd_status_level = DD_STATUS_NONE;
                         else if (string_equals(value, "noxfer"))
                                 dd_status_level = DD_STATUS_NOXFER;
                         else if (string_equals(value, "progress"))
+                        {
                                 dd_status_level = DD_STATUS_ALL;
+                                progress = true;
+                        }
                         else
                                 return dd_complain((string_address)"invalid status level", value);
                 }
@@ -8056,8 +9626,6 @@ static b32 tools_dd(void)
                 }
         }
 
-        (void)cbs;
-
         if (bs_set)
                 ibs = obs = bs;
 
@@ -8065,18 +9633,30 @@ static b32 tools_dd(void)
         skip_bytes |= (iflags & DD_SKIP_BYTES) != 0;
         seek_bytes |= (oflags & DD_SEEK_BYTES) != 0;
 
+        /*      Without cbs there are no records to reshape: block and
+                unblock fall away before anything is checked against them,
+                and ascii, ebcdic and ibm are the translation alone. */
+        if (!cbs)
+                conv &= ~(positive)(DD_BLOCK | DD_UNBLOCK);
+
+        if (dd_several(conv & (DD_ASCII | DD_EBCDIC | DD_IBM)))
+                return string_diagnostic(&text_diagnostic, 1, null, "cannot combine any two of {ascii,ebcdic,ibm}");
+        if (dd_several(conv & (DD_BLOCK | DD_UNBLOCK)))
+                return string_diagnostic(&text_diagnostic, 1, null, "cannot combine block and unblock");
         if ((conv & DD_LCASE) && (conv & DD_UCASE))
                 return string_diagnostic(&text_diagnostic, 1, null, "cannot combine lcase and ucase");
+        if ((conv & DD_EXCL) && (conv & DD_NOCREAT))
+                return string_diagnostic(&text_diagnostic, 1, null, "cannot combine excl and nocreat");
+
+        // nocache asks the page cache to let go and direct never used it;
+        // each side is asked on its own.
+        if (dd_several(iflags & (DD_DIRECT | DD_NOCACHE)) ||
+            dd_several(oflags & (DD_DIRECT | DD_NOCACHE)))
+                return string_diagnostic(&text_diagnostic, 1, null, "cannot combine direct and nocache");
 
         if (!ibs || ibs > positive_max - 31)
         {
                 text_flush();
-                // A leading 0x multiplies by zero, which is rarely meant.
-                if (string_get(input_size) == '0' &&
-                    (string_get(input_size + 1) == 'x' ||
-                     string_get(input_size + 1) == 'X'))
-                        string_format(writer_stderr,
-                            "dd: warning: '0x' is a zero multiplier; use '00x' if that is intended\n");
                 return string_report(writer_stderr, 1,
                                      "dd: invalid number: %w\n", writer_shell_quoted_name, input_size);
         }
@@ -8095,12 +9675,63 @@ static b32 tools_dd(void)
                 return string_diagnostic(&text_diagnostic, 1, null, "offset too large");
         }
 
-        // The whole output blocks a seek covers, which is what coreutils
-        // decides the truncation by; a byte seek short of one block is
-        // none of them.
+        /*
+                What each count is in records and bytes, which is how
+                coreutils keeps them: a byte count is whole blocks and a
+                remainder, and a record is one read, whatever it brought.
+        */
+        positive max_records = positive_max;
+        positive max_bytes = 0;
+
+        if (count_set)
+        {
+                max_records = count_bytes ? count / ibs : count;
+                max_bytes = count_bytes ? count % ibs : 0;
+        }
+
+        positive skip_records = skip_bytes ? skip / ibs : skip;
+        positive skip_rest = skip_bytes ? skip % ibs : 0;
         positive seek_records = seek_bytes ? seek / obs : seek;
+        positive seek_rest = seek_bytes ? seek % obs : 0;
         positive in_handle = 0;
         positive out_handle = 1;
+
+        /*
+                The translation, built in coreutils' order: EBCDIC read in
+                first, then the case, then EBCDIC written out, whose newline
+                and space are the ones block and unblock work with.
+        */
+        p8 table[256];
+        bool translate = (conv & (DD_ASCII | DD_EBCDIC | DD_IBM | DD_LCASE | DD_UCASE)) != 0;
+
+        dd_newline = '\n';
+        dd_space = ' ';
+        for (positive at = 0; at < 256; at++)
+        {
+                p8 byte = (p8)at;
+
+                if (conv & DD_ASCII)
+                        byte = dd_ebcdic_to_ascii[byte];
+                if (conv & DD_UCASE)
+                        byte = byte_to_upper(byte);
+                else if (conv & DD_LCASE)
+                        byte = byte_to_lower(byte);
+                if (conv & DD_EBCDIC)
+                        byte = dd_ascii_to_ebcdic[byte];
+                else if (conv & DD_IBM)
+                        byte = dd_ascii_to_ibm[byte];
+                table[at] = byte;
+        }
+        if (conv & DD_EBCDIC)
+        {
+                dd_newline = dd_ascii_to_ebcdic['\n'];
+                dd_space = dd_ascii_to_ebcdic[' '];
+        }
+        else if (conv & DD_IBM)
+        {
+                dd_newline = dd_ascii_to_ibm['\n'];
+                dd_space = dd_ascii_to_ibm[' '];
+        }
 
         if (input)
         {
@@ -8116,10 +9747,17 @@ static b32 tools_dd(void)
 
                 in_handle = (positive)opened;
         }
+        else if (!dd_flags_set(0, dd_open_flags(iflags), (string_address) "standard input"))
+                return 1;
+
+        bipolar input_start = system_seek(in_handle, 0, 1);
+
+        if (input_start < 0)
+                input_start = 0;
 
         if (output)
         {
-                positive flags = 01;
+                positive flags = 0;
 
                 if (!(conv & DD_NOCREAT))
                         flags |= 0100;
@@ -8138,7 +9776,14 @@ static b32 tools_dd(void)
                 if (!(conv & DD_NOTRUNC) && !seek_records)
                         flags |= O_TRUNC;
 
-                bipolar opened = text_open_handle(output, flags, 0666);
+                //      Read access too when a seek may have to be read
+                //      through, as on a tape; write alone if that is all
+                //      the file allows.
+                bipolar opened = seek_records ? text_open_handle(output, flags | 02, 0666)
+                                              : -1;
+
+                if (opened < 0)
+                        opened = text_open_handle(output, flags | 01, 0666);
 
                 if (opened < 0)
                 {
@@ -8148,7 +9793,21 @@ static b32 tools_dd(void)
                 }
 
                 out_handle = (positive)opened;
+
+                if (seek_records && !(conv & DD_NOTRUNC))
+                {
+                        positive size = seek_records * obs + seek_rest;
+                        bipolar refused = system_truncate_handle(out_handle, size);
+
+                        if (refused < 0 &&
+                            dd_truncate_failed(out_handle, output, size, refused))
+                                return 1;
+                }
         }
+        else if (!dd_flags_set(1, dd_open_flags(oflags) |
+                                      ((oflags & DD_APPEND) ? DD_O_APPEND : 0),
+                               (string_address) "standard output"))
+                return 1;
 
         /*
                 One buffer or two, which is coreutils' rule and not a size
@@ -8158,120 +9817,222 @@ static b32 tools_dd(void)
                 into whole output blocks first. The two differ on a short read
                 and on which complaint a refused write gets.
         */
-        bool two_buffers = !bs_set || (conv & (DD_SWAB | DD_LCASE | DD_UCASE));
-        p8 address_to ibuf = dd_buffer(ibs + 16);
-        p8 address_to obuf = two_buffers ? dd_buffer(obs + 16) : ibuf;
-        p8 address_to converted = conv & DD_SWAB ? dd_buffer(ibs + 16) : ibuf;
+        dd_two_buffers = !bs_set || (conv & (DD_SWAB | DD_LCASE | DD_UCASE | DD_ASCII |
+                                             DD_EBCDIC | DD_IBM | DD_BLOCK | DD_UNBLOCK));
+        dd_ibuf = dd_obuf = null;
+        dd_ibs = ibs;
+        dd_obs = obs;
+        dd_cbs = cbs;
+        dd_oc = dd_col = dd_pending_spaces = dd_truncated = 0;
+        dd_quit = false;
+        dd_out_now = out_handle;
+        dd_out_name = output;
+        dd_read_flags = iflags;
+        dd_previous_read = 0;
+        dd_warn_partial = !dd_two_buffers && !(iflags & DD_FULLBLOCK) &&
+                          (skip_records ||
+                           (max_records && max_records != positive_max) ||
+                           ((iflags | oflags) & DD_DIRECT));
 
         dd_out_direct = (oflags & DD_DIRECT) != 0;
         dd_out_block = obs;
         dd_sparse = (conv & DD_SPARSE) != 0;
         dd_final_seek = false;
 
-        if (!ibuf || !obuf || !converted)
-                return 1;
-
         /* Restart a read interrupted by the report signal, so a short read is
            not mistaken for a partial input record. */
         system_signal_install(DD_SIGNAL_INFO, (positive)dd_info_caught,
                               SIGNAL_CATCH_FLAGS, SIGNAL_CATCH_RESTORER, null);
 
-        if (skip)
+        b32 result = 0;
+        bool quitting = false;
+
+        /*
+                skip= from where the input already is. A seek is the way, and
+                a regular file that ends short of it is reported; an input
+                that cannot seek but has an end it can seek to cannot be
+                skipped at all; anything else is read through a record at a
+                time, a short read counting as a record as it does in the
+                copy.
+        */
+        if (skip_records || skip_rest)
         {
-                positive want = skip_bytes ? skip : skip * ibs;
-                // From where the input already is, not from its start: a dd
-                // reading after another command on the same input skips
-                // from where that command stopped.
+                positive want = skip_records * ibs + skip_rest;
+                positive consumed = 0;
+                bipolar left = 0;
                 bipolar landed = system_seek(in_handle, want, 1);
-                bool short_of_it = false;
 
                 if (landed >= 0)
                 {
-                        bipolar stop = system_seek(in_handle, 0, 2);
+                        file_facts facts;
 
-                        if (stop >= 0)
+                        consumed = want;
+                        if (file_look(in_handle, (string_address)"", AT_EMPTY_PATH,
+                                      address_of facts) &&
+                            (facts.mode & MODE_FORMAT) == MODE_FILE && facts.size &&
+                            (bipolar)facts.size - input_start < (bipolar)want)
                         {
-                                system_seek(in_handle, landed, 0);
-
-                                // A size of zero is what a file that has no
-                                // size to report says, so it is not a file
-                                // that is too short.
-                                if (stop > 0 && stop < landed)
-                                        short_of_it = true;
+                                left = ((bipolar)want - (bipolar)facts.size) / (bipolar)ibs;
+                                consumed = (positive)((bipolar)facts.size - input_start);
                         }
+                }
+                else if (system_seek(in_handle, 0, 2) >= 0)
+                {
+                        text_flush();
+                        writer_stderr("dd: ", 4);
+                        dd_named(input ? input : (string_address)"standard input");
+                        string_format(writer_stderr, ": cannot skip: %s\n", file_reason(landed));
+                        result = 1;
+                        quitting = true;
+                        goto finish;
                 }
                 else
                 {
-                        positive left = want;
+                        positive bytes = skip_rest;
 
-                        while (left)
+                        if (!dd_alloc_ibuf())
                         {
-                                positive ask = min(left, ibs);
-                                bipolar got = system_read_retry(in_handle, ibuf, ask);
-
-                                if (got <= 0)
-                                        break;
-
-                                left -= (positive)got;
+                                result = 1;
+                                goto release;
                         }
+                        left = (bipolar)skip_records;
+                        do
+                        {
+                                bipolar got = dd_read(in_handle, dd_ibuf,
+                                                      left ? ibs : bytes);
 
-                        short_of_it = left != 0;
+                                if (got < 0)
+                                {
+                                        text_flush();
+                                        string_format(writer_stderr,
+                                            "dd: error reading '%w': %s\n",
+                                            writer_terminal_quoted_name,
+                                            input ? input : (string_address)"standard input",
+                                            file_reason(got));
+                                        result = 1;
+                                        quitting = true;
+                                        goto finish;
+                                }
+                                if (!got)
+                                        break;
+                                consumed += (positive)got;
+                                if (left)
+                                        left--;
+                                else
+                                        bytes = 0;
+                        } while (left || bytes);
                 }
 
                 // Asked to skip past what is there. Not fatal, and said only
                 // where a summary would have been said.
-                if (short_of_it && dd_status_level != DD_STATUS_NONE)
+                if ((left || consumed != want) && dd_status_level != DD_STATUS_NONE)
                 {
                         text_flush();
                         writer_stderr("dd: ", 4);
-                        dd_named(input ? input
-                                       : (string_address)"standard input");
+                        dd_named(input ? input : (string_address)"standard input");
                         writer_stderr(": cannot skip to specified offset\n", 0);
                 }
         }
 
         /*
-                seek moves the output on from where it already is, so a dd
-                sharing its standard output with the command before it
-                writes after what that command wrote. What is cut off after
-                the seek is coreutils' rule exactly: only a file dd opened
-                itself, only to a seek of whole blocks, and a refusal counts
-                only from the kinds of file dd_truncate_failed names.
-                Standard output is never truncated, whatever it is.
+                seek= from where the output already is, so a dd sharing its
+                standard output with the command before it writes after what
+                that command wrote. An output that cannot seek is read
+                through, which is how a tape is positioned, and what the
+                reading does not pass over is written as zeros.
         */
-        if (seek)
+        if (seek_records || seek_rest)
         {
-                positive want = seek_bytes ? seek : seek * obs;
+                positive want = seek_records * obs + seek_rest;
                 bipolar landed = system_seek(out_handle, want, 1);
 
                 if (landed < 0)
                 {
-                        text_flush();
-                        string_format(writer_stderr, "dd: '%w': cannot seek: %s\n",
-                                      writer_terminal_quoted_name, output ? output : (string_address)"standard output",
-                                      file_reason(landed));
-                        status = 1;
-                }
-                else if (output && seek_records && !(conv & DD_NOTRUNC))
-                {
-                        bipolar refused =
-                            system_truncate_handle(out_handle, want);
+                        positive left = seek_records;
+                        positive bytes = seek_rest;
+                        bool refused = system_seek(out_handle, 0, 2) >= 0;
 
-                        if (refused < 0 &&
-                            dd_truncate_failed(out_handle, output, want,
-                                               refused))
-                                status = 1;
+                        if (!refused)
+                        {
+                                if (!dd_alloc_obuf())
+                                {
+                                        result = 1;
+                                        goto release;
+                                }
+                                do
+                                {
+                                        bipolar got = dd_read(out_handle, dd_obuf,
+                                                              left ? obs : bytes);
+
+                                        if (got < 0)
+                                        {
+                                                refused = true;
+                                                break;
+                                        }
+                                        if (!got)
+                                                break;
+                                        if (left)
+                                                left--;
+                                        else
+                                                bytes = 0;
+                                } while (left || bytes);
+                        }
+
+                        if (refused)
+                        {
+                                text_flush();
+                                writer_stderr("dd: ", 4);
+                                dd_named(output ? output : (string_address)"standard output");
+                                string_format(writer_stderr, ": cannot seek: %s\n",
+                                              file_reason(landed));
+                                result = 1;
+                                quitting = true;
+                                goto finish;
+                        }
+
+                        if (left || bytes)
+                        {
+                                memory_fill(dd_obuf, 0, left ? obs : bytes);
+                                do
+                                {
+                                        positive size = left ? obs : bytes;
+
+                                        if (dd_output(out_handle, output, dd_obuf, size,
+                                                      false, true) != size)
+                                        {
+                                                result = 1;
+                                                quitting = true;
+                                                goto finish;
+                                        }
+                                        if (left)
+                                                left--;
+                                        else
+                                                bytes = 0;
+                                } while (left || bytes);
+                        }
                 }
         }
 
-        positive held = 0;
-        b32 result = status;
-        positive partial_before = 0;
-        positive input_bytes = 0;
-        bool swab_pending = false;
-        p8 swab_held = 0;
+        if (count_set && !max_records && !max_bytes)
+                goto finish;
 
-        while (count != 0 && !result)
+        //      A buffer that cannot be had ends dd where it stands, as
+        //      coreutils' allocation failure does: no statistics.
+        if (!dd_alloc_ibuf() || !dd_alloc_obuf())
+        {
+                if (out_handle != 1)
+                        system_close(out_handle);
+                if (in_handle != 0)
+                        system_close(in_handle);
+                result = 1;
+                goto release;
+        }
+
+        positive partial_before = 0;
+        bipolar saved_byte = -1;
+        bool blocking = (conv & (DD_BLOCK | DD_UNBLOCK)) != 0;
+
+        while (true)
         {
                 if (dd_info_asked)
                 {
@@ -8279,48 +10040,27 @@ static b32 tools_dd(void)
                         dd_summary();
                 }
 
-                if (!count_bytes && count != TEXT_UNSET &&
-                    dd_in_full + dd_in_partial >= count)
+                if (progress)
+                {
+                        positive now = dd_now();
+
+                        if (now >= dd_progress_next)
+                        {
+                                dd_transfer(true);
+                                dd_progress_next += 1000000000u;
+                        }
+                }
+
+                positive records = dd_in_full + dd_in_partial;
+
+                if (records >= max_records + (max_bytes != 0) && max_records != positive_max)
                         break;
 
-                positive ask = ibs;
+                if ((conv & DD_SYNC) && (conv & DD_NOERROR))
+                        memory_fill(dd_ibuf, blocking ? ' ' : 0, ibs);
 
-                if (count_bytes && count != TEXT_UNSET)
-                {
-                        if (input_bytes >= count)
-                                break;
-
-                        if (ask > count - input_bytes)
-                                ask = count - input_bytes;
-                }
-
-                if (conv & (DD_SYNC | DD_NOERROR))
-                        memory_fill(ibuf, 0, ibs);
-
-                bipolar got;
-
-                if (iflags & DD_FULLBLOCK)
-                {
-                        positive gathered = 0;
-
-                        while (gathered < ask)
-                        {
-                                got = system_read_retry(in_handle, ibuf + gathered,
-                                                        ask - gathered);
-
-                                if (got <= 0)
-                                        break;
-
-                                gathered += (positive)got;
-                        }
-
-                        if (gathered)
-                                got = (bipolar)gathered;
-                }
-                else
-                {
-                        got = system_read_retry(in_handle, ibuf, ask);
-                }
+                bipolar got = dd_read(in_handle, dd_ibuf,
+                                      records >= max_records ? max_bytes : ibs);
 
                 if (!got)
                         break;
@@ -8362,15 +10102,18 @@ static b32 tools_dd(void)
 
                 positive read_bytes = (positive)got;
 
-                input_bytes += read_bytes;
-
                 if (read_bytes < ibs)
                 {
                         dd_in_partial++;
                         partial_before = read_bytes;
 
                         if (conv & DD_SYNC)
+                        {
+                                if (!(conv & DD_NOERROR))
+                                        memory_fill(dd_ibuf + read_bytes, blocking ? ' ' : 0,
+                                                    ibs - read_bytes);
                                 read_bytes = ibs;
+                        }
                 }
                 else
                 {
@@ -8378,25 +10121,9 @@ static b32 tools_dd(void)
                         partial_before = 0;
                 }
 
-                if (conv & DD_LCASE)
-                        memory_to_lower_ascii(ibuf, read_bytes);
-
-                if (conv & DD_UCASE)
-                        memory_to_upper_ascii(ibuf, read_bytes);
-
-                p8 address_to output_bytes = ibuf;
-
-                if (conv & DD_SWAB)
+                if (dd_ibuf == dd_obuf)
                 {
-                        read_bytes = dd_swab(converted, ibuf, read_bytes,
-                                             address_of swab_pending,
-                                             address_of swab_held);
-                        output_bytes = converted;
-                }
-
-                if (ibuf == obuf)
-                {
-                        positive wrote = dd_output(out_handle, output, obuf,
+                        positive wrote = dd_output(out_handle, output, dd_obuf,
                                                    read_bytes, true, false);
 
                         if (wrote != read_bytes)
@@ -8416,61 +10143,79 @@ static b32 tools_dd(void)
                         continue;
                 }
 
-                // The input block regrouped into output blocks, which is what
-                // dd is for whenever ibs and obs differ.
-                for (positive at = 0; at < read_bytes;)
+                if (translate)
                 {
-                        positive take = obs - held;
-
-                        if (take > read_bytes - at)
-                                take = read_bytes - at;
-
-                        memory_copy_apart(obuf + held, output_bytes + at, take);
-                        held += take;
-                        at += take;
-
-                        if (held < obs)
-                                continue;
-
-                        positive wrote = dd_output(out_handle, output, obuf, obs,
-                                                   true, true);
-                        held = 0;
-
-                        if (wrote != obs)
+                        if ((conv & (DD_ASCII | DD_EBCDIC | DD_IBM)) == 0)
                         {
-                                if (wrote)
-                                        dd_out_partial++;
-
-                                result = 1;
-                                break;
+                                if (conv & DD_LCASE)
+                                        memory_to_lower_ascii(dd_ibuf, read_bytes);
+                                else
+                                        memory_to_upper_ascii(dd_ibuf, read_bytes);
                         }
-
-                        dd_out_full++;
+                        else
+                                for (positive at = 0; at < read_bytes; at++)
+                                        dd_ibuf[at] = table[dd_ibuf[at]];
                 }
 
-                if (result)
-                        break;
+                p8 address_to start = dd_ibuf;
+
+                if (conv & DD_SWAB)
+                        start = dd_swab(dd_ibuf, address_of read_bytes, address_of saved_byte);
+
+                if (conv & DD_BLOCK)
+                        dd_copy_block(start, read_bytes);
+                else if (conv & DD_UNBLOCK)
+                        dd_copy_unblock(start, read_bytes);
+                else
+                        dd_copy_simple(start, read_bytes);
+
+                if (dd_quit)
+                {
+                        result = 1;
+                        quitting = true;
+                        goto finish;
+                }
         }
 
-        if (swab_pending)
-                obuf[held++] = swab_held;
-
-        if (held)
+        /*      What swab still holds, the padding of a last record that
+                had no newline, and the newline after the last unblocked
+                record, all go the way the rest of the stream went. */
+        if (saved_byte >= 0)
         {
-                positive wrote = dd_output(out_handle, output, obuf, held, true, false);
+                p8 held = (p8)saved_byte;
+
+                if (conv & DD_BLOCK)
+                        dd_copy_block(address_of held, 1);
+                else if (conv & DD_UNBLOCK)
+                        dd_copy_unblock(address_of held, 1);
+                else
+                        dd_put(held);
+        }
+
+        if ((conv & DD_BLOCK) && dd_col > 0)
+                for (positive column = dd_col; column < cbs; column++)
+                        dd_put(dd_space);
+
+        if (dd_col && (conv & DD_UNBLOCK))
+                dd_put(dd_newline);
+
+        if (dd_quit)
+        {
+                result = 1;
+                quitting = true;
+                goto finish;
+        }
+
+        if (dd_oc && dd_obuf != dd_ibuf)
+        {
+                positive wrote = dd_output(out_handle, output, dd_obuf, dd_oc, true, false);
 
                 if (wrote)
-                {
-                        if (held == obs)
-                                dd_out_full++;
-                        else
-                                dd_out_partial++;
-                }
+                        dd_out_partial++;
 
-                if (wrote != held)
+                if (wrote != dd_oc)
                         result = 1;
         }
-
         /*
                 A copy that ended in a seek has not reached its length yet:
                 a regular file is cut out to where the output stands, which
@@ -8514,6 +10259,7 @@ static b32 tools_dd(void)
                 }
         }
 
+finish:
         /*
                 A stream that cannot be synced says so and is a failure. A
                 pipe answers the narrower call with "invalid argument", and
@@ -8553,6 +10299,30 @@ static b32 tools_dd(void)
                 }
         }
 
+        /*
+                count=0 with nocache is how a cache is dropped for a whole
+                file, and coreutils refuses what cannot be dropped -- a pipe
+                has no offset to drop from -- rather than claim it was.
+        */
+        if (quitting)
+                ;
+        else if (count_set && !max_records && !max_bytes)
+        {
+                if ((iflags & DD_NOCACHE) &&
+                    dd_cache_drop(in_handle, input ? input : (string_address) "standard input"))
+                        result = 1;
+                if ((oflags & DD_NOCACHE) &&
+                    dd_cache_drop(out_handle, output ? output : (string_address) "standard output"))
+                        result = 1;
+        }
+        else
+        {
+                if (iflags & DD_NOCACHE)
+                        system_call_4(syscall(fadvise64), in_handle, 0, 0, 4);
+                if (oflags & DD_NOCACHE)
+                        system_call_4(syscall(fadvise64), out_handle, 0, 0, 4);
+        }
+
         if (out_handle != 1 && system_close(out_handle) < 0)
         {
                 string_diagnostic(&text_diagnostic, 0, output, "close failed");
@@ -8565,7 +10335,14 @@ static b32 tools_dd(void)
         text_flush();
         dd_summary();
 
-        return result;
+release:
+        if (dd_obuf && dd_obuf != dd_ibuf)
+                memory_free(dd_obuf, dd_obuf_size);
+        if (dd_ibuf)
+                memory_free(dd_ibuf, dd_ibuf_size);
+        dd_ibuf = dd_obuf = null;
+
+        return result | dd_report_failed;
 }
 
 // Binary dumps -------------------------------------------------------------
@@ -8588,13 +10365,15 @@ static b32 tools_dd(void)
 #define DUMP_BLOCK 256
 #define DUMP_CANONICAL_WIDTH 16
 #define DUMP_DEFAULT_WIDTH 16
-#define DUMP_LINE_MAX (DUMP_BLOCK * 6 + 64)
+#define DUMP_LINE_MAX (DUMP_BLOCK * 10 + 64)
 #define DUMP_FORMAT_MAX 16
 #define DUMP_INTEGER 0
 #define DUMP_CHARACTER 1
 #define DUMP_CANONICAL 2
 #define DUMP_NAMED 3
 #define DUMP_HEX_BYTES 4
+// od -t f: base holds which, H B F D or L.
+#define DUMP_FLOAT 5
 
 typedef struct
 {
@@ -8607,6 +10386,10 @@ typedef struct
         bool zero;
         bool printable;
         bool hexdump;
+        // od: the row's padding shared among the fields, set per run, and
+        // whether it is one blank a field, the case with no sharing to do.
+        bool even;
+        positive pad;
 } dump_format;
 
 typedef struct
@@ -8873,52 +10656,116 @@ static bool dump_number(string_address source, positive address_to value)
         return dd_size(source, value);
 }
 
-/* od's traditional offset operand: octal unless a 0x prefix (hex) or a
-   trailing . (decimal) says otherwise, and a trailing b counts blocks. */
-static bool dump_od_offset(string_address text, positive address_to value)
+/*
+        od's traditional offset operand, read as GNU's parse_old_offset reads
+        it: one + may lead, and then a digit must. A dot followed by nothing,
+        or by b or B and nothing, makes the digits before it decimal; else a
+        0x or 0X makes them hexadecimal, and anything else is octal. What
+        follows the digits may be one b (512 bytes) or B (1024), and nothing
+        after it -- which is xstrtol with "bB" as its suffixes, so a hex b is
+        a digit and an 8 in octal ends the number where the suffix is refused.
+
+        Three answers rather than two, because GNU has three: a word that is
+        no offset at all is a file name, but one that is an offset too large
+        for an intmax_t stops od there, naming it with ERANGE's reason.
+*/
+#define DUMP_OFFSET_OK 0
+#define DUMP_OFFSET_NOT 1
+#define DUMP_OFFSET_LARGE 2
+
+static p8 dump_od_offset_read(string_address text, positive address_to value)
 {
-        positive base = 8;
+        string_address s = text + (text[0] == '+');
+
+        if (!byte_is_digit((p8)s[0]))
+                return DUMP_OFFSET_NOT;
+
+        string_address dot = null;
+
+        for (string_address at = s; *at; at++)
+                if (*at == '.')
+                {
+                        dot = at;
+                        break;
+                }
+
+        if (dot && dot[(dot[1] == 'b' || dot[1] == 'B') + 1])
+                dot = null;
+
+        positive base = dot ? 10 : s[0] == '0' && (s[1] == 'x' || s[1] == 'X') ? 16 : 8;
+        string_address at = base == 16 ? s + 2 : s;
+        positive parsed = 0;
+        bool large = false;
+        bool any = false;
+
+        for (;; at++)
+        {
+                p8 byte = (p8)*at;
+                positive digit;
+
+                if (byte >= '0' && byte <= '9')
+                        digit = (positive)(byte - '0');
+                else if (base == 16 && (byte | 0x20) >= 'a' && (byte | 0x20) <= 'f')
+                        digit = (positive)((byte | 0x20) - 'a' + 10);
+                else
+                        break;
+
+                if (digit >= base)
+                        break;
+
+                any = true;
+
+                if (parsed > ((positive)1 << 63) / base ||
+                    parsed * base + digit >= ((positive)1 << 63))
+                        large = true;
+                else
+                        parsed = parsed * base + digit;
+        }
+
+        // "0x" with no digit after it is strtol's 0 followed by an x.
+        if (!any)
+        {
+                if (base != 16)
+                        return DUMP_OFFSET_NOT;
+                at = s + 1;
+        }
+
+        if (dot && at == dot)
+                at++;
+
         positive multiple = 1;
-        p8 digits[64];
-        positive length;
 
-        if (string_is(text, '+'))
-                text++;
-        length = string_length(text);
-        if (!length || length >= sizeof(digits))
-                return false;
-        memory_copy(digits, text, length + 1);
-
-        if (digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X'))
+        if (*at == 'b' || *at == 'B')
         {
-                base = 16;
-                memory_copy(digits, digits + 2, length - 1);
-                length -= 2;
+                multiple = *at == 'b' ? 512 : 1024;
+                at++;
         }
-        if (length && digits[length - 1] == 'b')
-        {
-                multiple = 512;
-                digits[--length] = end;
-        }
-        if (length && digits[length - 1] == '.')
-        {
-                if (base == 16)
-                        return false;
-                base = 10;
-                digits[--length] = end;
-        }
-        if (!length)
-                return false;
 
-        string_address at = digits;
-        positive parsed;
+        if (*at)
+                return DUMP_OFFSET_NOT;
 
-        if (!string_digits_checked(address_of at, base, address_of parsed) ||
-            string_get(at) || parsed > positive_max / multiple)
-                return false;
+        if (large || parsed > (((positive)1 << 63) - 1) / multiple)
+                return DUMP_OFFSET_LARGE;
 
         address_to value = parsed * multiple;
-        return true;
+        return DUMP_OFFSET_OK;
+}
+
+/* The same, where a word too large is a failure already reported. */
+static bool dump_od_offset(string_address text, positive address_to value,
+                           bool address_to failed)
+{
+        p8 answer = dump_od_offset_read(text, value);
+
+        if (answer == DUMP_OFFSET_LARGE)
+        {
+                text_flush();
+                string_format(writer_stderr, "od: %w: Numerical result out of range\n",
+                              writer_shell_name, text);
+                address_to failed = true;
+        }
+
+        return answer == DUMP_OFFSET_OK;
 }
 
 /* GNU's integer type widths are the width of the widest value, including a
@@ -8964,6 +10811,7 @@ static bool dump_od_type_failed;
 #define DUMP_OD_TYPE_SIZE 2
 #define DUMP_OD_TYPE_FLOAT 3
 #define DUMP_OD_TYPE_TOO_MANY 4
+#define DUMP_OD_TYPE_WHOLE 5
 
 static p8 dump_od_type_byte;
 static positive dump_od_type_size;
@@ -9003,11 +10851,66 @@ static p8 dump_od_types(string_address word)
                         continue;
                 }
 
-                /* The reference carries four floating widths this does not,
-                   and says so in its own sentence rather than pretending
-                   the letter is unknown. */
+                /*      The floating types: half and bfloat16 in two
+                        bytes, float, double, and the long double in
+                        sixteen, which is the x87's eighty bits on x86_64
+                        and binary128 elsewhere. A width in digits names
+                        the type of that size, two being half; no width
+                        is double. */
                 if (type == 'f')
-                        return DUMP_OD_TYPE_FLOAT;
+                {
+                        p8 which = 'D';
+                        positive size = 8;
+
+                        if (word[at] == 'B' || word[at] == 'H' || word[at] == 'F' ||
+                            word[at] == 'D' || word[at] == 'L')
+                        {
+                                which = word[at++];
+                                size = which == 'B' || which == 'H' ? 2
+                                       : which == 'F'               ? 4
+                                       : which == 'D'               ? 8
+                                                                    : 16;
+                        }
+                        else if (byte_is_digit(word[at]))
+                        {
+                                size = 0;
+                                while (byte_is_digit(word[at]))
+                                {
+                                        size = size * 10 + (positive)(word[at++] - '0');
+                                        if (size > 2147483647)
+                                                return DUMP_OD_TYPE_WHOLE;
+                                }
+                                if (size != 2 && size != 4 && size != 8 && size != 16)
+                                {
+                                        dump_od_type_size = size;
+                                        return DUMP_OD_TYPE_FLOAT;
+                                }
+                                which = size == 2 ? 'H' : size == 4 ? 'F'
+                                        : size == 8 ? 'D' : 'L';
+                        }
+
+                        dump_add((dump_format){
+                            .kind = DUMP_FLOAT,
+                            .base = which,
+                            .size = (p8)size,
+                            .width = size <= 4 ? 15 : size == 8 ? 24
+#if __LDBL_MANT_DIG__ == 64
+                                                                 : 29,
+#else
+                                                                 : 44,
+#endif
+                            .gap = 1,
+                        });
+                        if (dump_arguments.failed)
+                                return DUMP_OD_TYPE_TOO_MANY;
+                        if (word[at] == 'z')
+                        {
+                                dump_arguments.format[dump_arguments.count - 1]
+                                    .printable = true;
+                                at++;
+                        }
+                        continue;
+                }
 
                 if (type != 'd' && type != 'o' && type != 'u' && type != 'x')
                 {
@@ -9025,10 +10928,11 @@ static p8 dump_od_types(string_address word)
                         size = 0;
                         while (byte_is_digit(word[at]))
                         {
-                                if (size <= positive_max / 16)
-                                        size = size * 10 +
-                                               (positive)(word[at] - '0');
+                                size = size * 10 + (positive)(word[at] - '0');
                                 at++;
+                                //      Past an int is no width at all.
+                                if (size > 2147483647)
+                                        return DUMP_OD_TYPE_WHOLE;
                         }
                 }
                 else if (word[at] == 'C' || word[at] == 'S' ||
@@ -9119,8 +11023,7 @@ static bool dump_od_row_width()
                 return true;
         }
 
-        if (dump_arguments.width > DUMP_BLOCK ||
-            dump_arguments.width % unit)
+        if (dump_arguments.width % unit)
         {
                 dump_od_warn_width = dump_arguments.width;
                 dump_od_warn_unit = unit;
@@ -9151,7 +11054,16 @@ static bool dump_od_seen(p8 letter, string_address value)
                 {
                         text_flush();
                         string_format(writer_stderr,
-                            "od: floating point output is unsupported\n");
+                                      "od: invalid type string '%w';\n"
+                                      "this system doesn't provide a %p-byte floating point type\n",
+                                      writer_terminal_quoted_name, value, dump_od_type_size);
+                        dump_od_type_failed = true;
+                }
+                else if (kind == DUMP_OD_TYPE_WHOLE)
+                {
+                        text_flush();
+                        string_format(writer_stderr, "od: invalid type string '%w'\n",
+                                      writer_terminal_quoted_name, value);
                         dump_od_type_failed = true;
                 }
                 else if (kind == DUMP_OD_TYPE_SIZE)
@@ -9262,11 +11174,13 @@ static bool dump_od_seen(p8 letter, string_address value)
                 }
         }
 
+        //      The old letters for the floating types: -e and -F are
+        //      double, -f is float.
         if (letter == 'e' || letter == 'F' || letter == 'f')
         {
-                text_flush();
-                string_format(writer_stderr, "od: floating point output is unsupported\n");
-                dump_od_type_failed = true;
+                dump_od_types(letter == 'f' ? (string_address)"fF" : (string_address)"fD");
+                if (dump_arguments.failed)
+                        return string_diagnostic(&text_diagnostic, 0, null, "too many output formats");
                 return true;
         }
 
@@ -9491,44 +11405,525 @@ static fn dump_canonical_line(p8 address_to bytes, positive length,
         text_out_used -= 96 - made;
 }
 
+/*
+        A row wider than DUMP_BLOCK, which GNU's od takes at any width: -w is
+        a multiple of the widest type and nothing else. The common widths
+        keep their buffers on the stack; a wider one gets its row, the row
+        before it, the formatted line (ten bytes a byte covers the widest
+        field -- a half float's sixteen columns for two bytes -- its gap and
+        the z column) and the hex spelling here, once.
+*/
+static byte_store dump_wide;
+static p8 address_to dump_wide_previous;
+static p8 address_to dump_wide_line;
+static p8 address_to dump_wide_hex;
+
+static bool dump_wide_ready(positive width)
+{
+        if (width <= DUMP_BLOCK)
+                return true;
+
+        if (width > positive_max / 16 ||
+            !byte_store_reserve(address_of dump_wide, width * 14 + 64, 4096))
+        {
+                text_flush();
+                writer_stderr("od: memory exhausted\n", 0);
+                return false;
+        }
+
+        dump_wide_previous = dump_wide.bytes + width;
+        dump_wide_hex = dump_wide.bytes + width * 2;
+        dump_wide_line = dump_wide.bytes + width * 4;
+        return true;
+}
+
+/*
+        A floating field as coreutils' ftoastr writes one: %g at the type's
+        own digits first -- one digit for zero and a subnormal -- and one
+        more each time until the text reads back as the same value, or the
+        most digits the type could ever need are spent, which is where a
+        NaN stops. Half and bfloat16 are widened to float first and read
+        back as floats. The digits are seq's, which print a long double's
+        exact decimal expansion, and the reading back is the library's
+        correctly rounded strtof, strtod and strtold.
+*/
+static seq_wide dump_float_ieee(p64 bits, positive fraction_bits, positive exponent_bits,
+                                bool address_to tiny)
+{
+        positive top = (positive)1 << exponent_bits;
+        positive field = (positive)(bits >> fraction_bits) & (top - 1);
+        p64 fraction = bits & (((p64)1 << fraction_bits) - 1);
+        bool negative = (bits >> (fraction_bits + exponent_bits)) & 1;
+        bipolar bias = (bipolar)(top / 2 - 1);
+
+        address_to tiny = !field;
+        if (field == top - 1)
+                return (seq_wide){0, 0, fraction ? SEQ_WIDE_NAN : SEQ_WIDE_INFINITE, negative};
+        if (!field && !fraction)
+                return (seq_wide){0, 0, SEQ_WIDE_ZERO, negative};
+        if (field)
+                fraction |= (p64)1 << fraction_bits;
+        return seq_wide_round(fraction, (field ? (bipolar)field : 1) - bias -
+                                            (bipolar)fraction_bits, negative);
+}
+
+#if __LDBL_MANT_DIG__ == 64
+/*
+        An x87 value's leading digits, fast. The exact expansion seq makes
+        costs a big integer as long as the value's exponent, which at the far
+        ends of this format is five thousand digits a field; random data is
+        mostly those ends. So the value is scaled by a power of ten held to
+        128 bits -- products of 10 and 1/10 squared, each a few ulps out --
+        until its integer part has the digits wanted, and the rounding is
+        taken from the bits below. The error is far under a millionth of
+        the last digit, so where the fraction is that close to a half, or to
+        a whole where the integer part could be one out, this answers false
+        and the exact expansion decides instead.
+*/
+static p128 dump_ten_up[14];
+static p128 dump_ten_down[14];
+static bipolar dump_ten_up_exponent[14];
+static bipolar dump_ten_down_exponent[14];
+static bool dump_ten_ready;
+
+// The top 128 bits of a product of two normalized mantissas.
+static p128 dump_multiply_high(p128 left, p128 right, bipolar address_to exponent)
+{
+        p64 a1 = (p64)(left >> 64), a0 = (p64)left;
+        p64 b1 = (p64)(right >> 64), b0 = (p64)right;
+        p128 high = (p128)a1 * b1, cross1 = (p128)a1 * b0;
+        p128 cross0 = (p128)a0 * b1, low = (p128)a0 * b0;
+        p128 middle = (p128)(p64)cross1 + (p64)cross0 + (low >> 64);
+        p128 top = high + (cross1 >> 64) + (cross0 >> 64) + (middle >> 64);
+
+        if (top >> 127)
+        {
+                address_to exponent += 128;
+                return top;
+        }
+        address_to exponent += 127;
+        return top << 1 | (p64)middle >> 63;
+}
+
+static fn dump_ten_power(bipolar power, p128 address_to mantissa,
+                         bipolar address_to exponent)
+{
+        if (!dump_ten_ready)
+        {
+                dump_ten_up[0] = (p128)10 << 124;
+                dump_ten_up_exponent[0] = -124;
+                dump_ten_down[0] = ((p128)0xcccccccccccccccc << 64) | 0xcccccccccccccccd;
+                dump_ten_down_exponent[0] = -131;
+                for (positive at = 1; at < 14; at++)
+                {
+                        bipolar up = 2 * dump_ten_up_exponent[at - 1];
+                        bipolar down = 2 * dump_ten_down_exponent[at - 1];
+
+                        dump_ten_up[at] = dump_multiply_high(dump_ten_up[at - 1],
+                                                             dump_ten_up[at - 1], address_of up);
+                        dump_ten_down[at] = dump_multiply_high(dump_ten_down[at - 1],
+                                                               dump_ten_down[at - 1], address_of down);
+                        dump_ten_up_exponent[at] = up;
+                        dump_ten_down_exponent[at] = down;
+                }
+                dump_ten_ready = true;
+        }
+
+        p128 value = (p128)1 << 127;
+        bipolar scale = -127;
+        positive left = (positive)(power < 0 ? -power : power);
+
+        for (positive at = 0; left; at++, left >>= 1)
+                if (left & 1)
+                {
+                        bipolar sum = scale + (power < 0 ? dump_ten_down_exponent[at]
+                                                         : dump_ten_up_exponent[at]);
+
+                        value = dump_multiply_high(value, power < 0 ? dump_ten_down[at]
+                                                                    : dump_ten_up[at],
+                                                   address_of sum);
+                        scale = sum;
+                }
+
+        address_to mantissa = value;
+        address_to exponent = scale;
+}
+
+// Bits from..from+127 of a 192-bit number, zeros below its bottom.
+static p128 dump_bits_at(p64 address_to limb, bipolar from)
+{
+        p128 out = 0;
+
+        for (bipolar bit = 127; bit >= 0; bit--)
+        {
+                bipolar at = from + bit;
+
+                out <<= 1;
+                if (at >= 0 && at < 192)
+                        out |= (limb[at / 64] >> (at % 64)) & 1;
+        }
+        return out;
+}
+
+/*
+        And whether those digits read back as the value, from the same
+        numbers: the digits are |fraction| from the value in units of their
+        last place, and a reader returns the value when that is under half
+        the value's own spacing in the same units -- half the spacing below
+        a power of two, where the spacing halves. back is 1 for yes, 2 for
+        no, and 0 when the two are too close to call, for the library's
+        reader to settle.
+*/
+static bool dump_ld_digits(p64 mantissa, bipolar exponent, positive precision,
+                           p8 address_to digits, bipolar address_to decimal,
+                           p8 address_to back, bool narrower_below)
+{
+        address_to back = 0;
+        if (!mantissa || precision > 21)
+                return false;
+
+        p128 limit = 1;
+
+        for (positive at = 0; at < precision; at++)
+                limit *= 10;
+
+        bipolar bits = (bipolar)(64 - bits_leading_zeros(mantissa));
+        bipolar guess = ((exponent + bits - 1) * 315653) >> 20;
+        bipolar power = guess - (bipolar)precision + 1;
+
+        for (positive tries = 0; tries < 4; tries++)
+        {
+                p128 scale;
+                bipolar shift;
+
+                dump_ten_power(-power, address_of scale, address_of shift);
+
+                p128 low = (p128)mantissa * (p64)scale;
+                p128 high = (p128)mantissa * (p64)(scale >> 64);
+                p128 middle = (low >> 64) + (p64)high;
+                p64 limb[3] = {(p64)low, (p64)middle,
+                               (p64)((high >> 64) + (middle >> 64))};
+                bipolar point = -(exponent + shift);
+                p128 whole = dump_bits_at(limb, point);
+                p64 fraction = (p64)dump_bits_at(limb, point - 64);
+
+                if (point > 192 || whole >= limit)
+                {
+                        power++;
+                        continue;
+                }
+                if (whole < limit / 10)
+                {
+                        power--;
+                        continue;
+                }
+
+                p64 margin = (p64)1 << 32;
+                p64 half = (p64)1 << 63;
+
+                if (fraction < margin || fraction > ~margin ||
+                    (fraction > half - margin && fraction < half + margin))
+                        return false;
+
+                bool up = fraction > half;
+                p64 apart = up ? (p64)0 - fraction : fraction;
+                bipolar room = shift + exponent - 1 + 64 - ((!up && narrower_below) ? 1 : 0);
+
+                //      Half the spacing in 2^-64ths of the last digit: at
+                //      least a whole digit reads back whatever was cut.
+                if (room >= 0)
+                        address_to back = 1;
+                else if (room > -128)
+                {
+                        p128 spacing = scale >> (-room);
+
+                        if (spacing >> 64)
+                                address_to back = 1;
+                        else if ((p64)spacing > apart && (p64)spacing - apart > margin)
+                                address_to back = 1;
+                        else if ((p64)spacing < apart && apart - (p64)spacing > margin)
+                                address_to back = 2;
+                }
+                else
+                        address_to back = 2;
+
+                if (up)
+                        whole++;
+                if (whole == limit)
+                {
+                        whole /= 10;
+                        power++;
+                }
+
+                for (positive at = precision; at-- > 0;)
+                {
+                        digits[at] = (p8)('0' + (p8)(whole % 10));
+                        whole /= 10;
+                }
+                address_to decimal = power + (bipolar)precision - 1;
+                return true;
+        }
+        return false;
+}
+
+// %g over digits already rounded to the precision, without the # flag.
+static string_address dump_g_layout(bool negative, p8 address_to digits,
+                                    positive precision, bipolar decimal,
+                                    p8 address_to into)
+{
+        positive count = precision;
+        positive made = 0;
+
+        while (count > 1 && digits[count - 1] == '0')
+                count--;
+
+        if (negative)
+                into[made++] = '-';
+
+        if (decimal < -4 || decimal >= (bipolar)precision)
+        {
+                into[made++] = digits[0];
+                if (count > 1)
+                {
+                        into[made++] = '.';
+                        memory_copy_apart(into + made, digits + 1, count - 1);
+                        made += count - 1;
+                }
+                into[made++] = 'e';
+                into[made++] = decimal < 0 ? '-' : '+';
+                positive size = (positive)(decimal < 0 ? -decimal : decimal);
+                if (size < 10)
+                        into[made++] = '0';
+                made += positive_into(into + made, size);
+        }
+        else if (decimal < 0)
+        {
+                into[made++] = '0';
+                into[made++] = '.';
+                for (bipolar at = decimal + 1; at < 0; at++)
+                        into[made++] = '0';
+                memory_copy_apart(into + made, digits, count);
+                made += count;
+        }
+        else
+        {
+                positive whole = (positive)decimal + 1;
+
+                for (positive at = 0; at < whole; at++)
+                        into[made++] = at < count ? digits[at] : '0';
+                if (count > whole)
+                {
+                        into[made++] = '.';
+                        memory_copy_apart(into + made, digits + whole, count - whole);
+                        made += count - whole;
+                }
+        }
+        into[made] = end;
+        return into;
+}
+#endif
+
+static positive dump_float_field(p8 address_to into, p8 address_to bytes,
+                                 positive have, dump_format address_to format)
+{
+        p8 raw[16] = {0};
+        positive size = format->size;
+
+        for (positive at = 0; at < size && at < have; at++)
+                raw[dump_arguments.big_endian ? size - 1 - at : at] = bytes[at];
+
+        p128 bits = 0;
+
+        for (positive at = size; at-- > 0;)
+                bits = bits << 8 | raw[at];
+
+        seq_wide value;
+        bool tiny;
+        bool normal = false;
+        p8 which = format->base;
+        positive digits, bound;
+        p64 narrow = 0;
+
+        if (which == 'L')
+        {
+#if __LDBL_MANT_DIG__ == 64
+                bits &= ((p128)1 << 80) - 1;
+                normal = ((bits >> 64) & 0x7fff) && ((bits >> 64) & 0x7fff) != 0x7fff &&
+                         ((bits >> 63) & 1);
+                //      A pseudo-denormal is the smallest normal's value
+                //      spelled with the explicit bit set, and compares
+                //      equal to it; with that bit clear anywhere else the
+                //      eighty bits are no number, and glibc says nan.
+                if (!((bits >> 63) & 1) && ((bits >> 64) & 0x7fff))
+                {
+                        value = (seq_wide){0, 0, SEQ_WIDE_NAN, ((bits >> 79) & 1) != 0};
+                        tiny = false;
+                }
+                else
+                {
+                        tiny = !((bits >> 64) & 0x7fff) && !((bits >> 63) & 1);
+                        value = seq_wide_unpack(bits);
+                        //      glibc prints a pseudo-denormal with a
+                        //      fraction as the denormal its fraction alone
+                        //      would be -- which is not what it compares
+                        //      equal to, so it never reads back.
+                        if (!((bits >> 64) & 0x7fff) && ((bits >> 63) & 1) &&
+                            ((p64)bits << 1))
+                                value = seq_wide_round((p64)bits & ~((p64)1 << 63),
+                                                       -16445, ((bits >> 79) & 1) != 0);
+                }
+                if (!((bits >> 64) & 0x7fff) && ((bits >> 63) & 1))
+                        bits += (p128)1 << 64;
+                digits = 18;
+                bound = 21;
+#else
+                tiny = !((bits >> 112) & 0x7fff);
+                digits = 33;
+                bound = 36;
+                value = seq_wide_unpack(bits);
+#endif
+        }
+        else if (which == 'D')
+        {
+                value = dump_float_ieee((p64)bits, 52, 11, address_of tiny);
+                digits = 15;
+                bound = 17;
+        }
+        else
+        {
+                //      The float the value is, which is what it is read
+                //      back as; a half is always normal as a float.
+                if (which == 'H')
+                {
+                        p64 half = (p64)bits;
+                        positive field = (half >> 10) & 31;
+                        p64 fraction = half & 0x3ff;
+
+                        narrow = (half & 0x8000) << 16;
+                        if (field == 31)
+                                narrow |= 0x7f800000 | fraction << 13;
+                        else if (field)
+                                narrow |= (p64)(field + 112) << 23 | fraction << 13;
+                        else if (fraction)
+                        {
+                                positive shift = 0;
+
+                                while (!(fraction & 0x400))
+                                        fraction <<= 1, shift++;
+                                narrow |= (p64)(113 - shift) << 23 | (fraction & 0x3ff) << 13;
+                        }
+                }
+                else
+                        narrow = which == 'B' ? (p64)bits << 16 : (p64)bits;
+                value = dump_float_ieee(narrow, 23, 8, address_of tiny);
+                digits = 6;
+                bound = 9;
+        }
+
+        string_address text = null;
+
+        for (positive precision = tiny ? 1 : digits; ; precision++)
+        {
+                seq_format shape = {.conversion = 'g', .precise = true,
+                                    .precision = precision};
+
+                text = null;
+                p8 known = 0;
+#if __LDBL_MANT_DIG__ == 64
+                p8 digit[24];
+                static p8 laid[64];
+                bipolar place;
+                positive field = (positive)(bits >> 64) & 0x7fff;
+
+                //      The fast digits for the normal values, whose spacing
+                //      is two to the exponent; the rest are rare enough for
+                //      the exact road.
+                if (which == 'L' && value.kind == SEQ_WIDE_FINITE &&
+                    normal && !(value.significand >> 64) &&
+                    dump_ld_digits((p64)value.significand, value.exponent, precision,
+                                   digit, address_of place, address_of known,
+                                   (p64)bits == (p64)1 << 63 && field > 1))
+                        text = dump_g_layout(value.negative, digit, precision, place, laid);
+#endif
+                if (!text)
+                {
+                        known = 0;
+                        text = seq_wide_printed(address_of shape, value);
+                }
+                if (!text || precision >= bound)
+                        break;
+
+                bool same = false;
+
+                if (known)
+                        same = known == 1;
+                else if (value.kind == SEQ_WIDE_NAN)
+                        same = false;
+                else if (which == 'L')
+                {
+                        union { f128 value; p128 bits; } back = {.bits = 0};
+
+                        back.value = string_to_extended(text, null);
+#if __LDBL_MANT_DIG__ == 64
+                        back.bits &= ((p128)1 << 80) - 1;
+                        p128 sign = (p128)1 << 79;
+#else
+                        p128 sign = (p128)1 << 127;
+#endif
+                        same = back.bits == bits ||
+                               (!(back.bits & ~sign) && !(bits & ~sign));
+                }
+                else if (which == 'D')
+                {
+                        union { decimal value; p64 bits; } back;
+
+                        back.value = string_to_decimal(text, null);
+                        same = back.bits == (p64)bits ||
+                               !((back.bits | (p64)bits) << 1);
+                }
+                else
+                {
+                        union { f32 value; p32 bits; } back;
+
+                        back.value = string_to_narrow(text, null);
+                        same = back.bits == (p32)narrow ||
+                               !(p32)((back.bits | (p32)narrow) << 1);
+                }
+
+                if (same)
+                        break;
+        }
+
+        if (!text)
+                text = (string_address) "";
+        return dump_right(into, text, string_length(text), format->width, ' ');
+}
+
+/* coreutils' share of a row's padding that falls before field i of fields:
+   pad times i over fields, without the product. */
+static positive dump_pad_at(positive fields, positive at, positive pad)
+{
+        return pad / fields * at + pad % fields * at / fields;
+}
+
 static fn dump_regular_line(dump_format address_to format,
                             p8 address_to bytes, positive length,
                             positive address, bool first)
 {
-        p8 line[DUMP_LINE_MAX];
+        p8 stack_line[DUMP_LINE_MAX];
+        p8 address_to line = dump_arguments.width > DUMP_BLOCK ? dump_wide_line
+                                                               : stack_line;
         positive made = 0;
         positive fields = (length + format->size - 1) / format->size;
         positive full_fields = dump_arguments.width / format->size;
         positive gap = format->gap;
 
-        /* With several od formats GNU aligns their value columns to the
-           widest selected row.  Derive the slot width from the formats
-           already parsed rather than storing a second set of padded format
-           descriptors. */
-        if (dump_arguments.od && dump_arguments.count > 1)
-        {
-                positive widest = 0;
-
-                for (positive at = 0; at < dump_arguments.count; at++)
-                {
-                        dump_format address_to other =
-                            dump_arguments.format + at;
-
-                        if (other->kind == DUMP_CANONICAL)
-                                continue;
-
-                        positive span = (other->gap + other->width) *
-                                        (dump_arguments.width / other->size);
-
-                        if (span > widest)
-                                widest = span;
-                }
-
-                positive slot = widest / full_fields;
-
-                if (slot > format->width)
-                        gap = slot - format->width;
-        }
+        /* od aligns its formats' rows to the widest of them, each a field
+           and a blank per value, and shares what a narrower row lacks among
+           its fields as coreutils does: field i of n is preceded by the
+           padding up to it, pad * i / n, less the padding before it. */
+        positive pad = format->pad;
+        bool shared = dump_arguments.od && !format->even;
 
         if (first || format->hexdump)
         {
@@ -9544,11 +11939,17 @@ static fn dump_regular_line(dump_format address_to format,
         // integer/character field loop unchanged for all other formats.
         if (format->kind == DUMP_HEX_BYTES)
         {
-                p8 hex[DUMP_BLOCK * 2];
+                p8 stack_hex[DUMP_BLOCK * 2];
+                p8 address_to hex = dump_arguments.width > DUMP_BLOCK
+                                        ? dump_wide_hex
+                                        : stack_hex;
                 memory_into_hex(hex, bytes, length);
 
                 for (positive field = 0; field < fields; field++)
                 {
+                        if (shared)
+                                gap = dump_pad_at(full_fields, full_fields - field, pad) -
+                                      dump_pad_at(full_fields, full_fields - field - 1, pad);
                         made += dump_pad(line + made, gap, ' ');
                         line[made++] = hex[field * 2];
                         line[made++] = hex[field * 2 + 1];
@@ -9556,12 +11957,18 @@ static fn dump_regular_line(dump_format address_to format,
         }
         else for (positive field = 0; field < fields; field++)
         {
+                if (shared)
+                        gap = dump_pad_at(full_fields, full_fields - field, pad) -
+                              dump_pad_at(full_fields, full_fields - field - 1, pad);
                 made += dump_pad(line + made, gap, ' ');
 
                 if (format->kind == DUMP_CHARACTER)
                         made += dump_character_field(line + made, bytes[field]);
                 else if (format->kind == DUMP_NAMED)
                         made += dump_named_field(line + made, bytes[field]);
+                else if (format->kind == DUMP_FLOAT)
+                        made += dump_float_field(line + made, bytes + field * format->size,
+                                                 length - field * format->size, format);
                 else
                 {
                         positive left = length - field * format->size;
@@ -9582,7 +11989,15 @@ static fn dump_regular_line(dump_format address_to format,
         /* util-linux's stock formats are fixed-width records, including
            blanks for values absent from the final short row.  od does that
            only when its z suffix needs a stable printable column. */
-        if (format->hexdump || format->printable)
+        if (dump_arguments.od && format->printable)
+        {
+                if (fields < full_fields)
+                        made += dump_pad(line + made,
+                                         (full_fields - fields) * format->width +
+                                             dump_pad_at(full_fields, full_fields - fields, pad),
+                                         ' ');
+        }
+        else if (format->hexdump || format->printable)
                 made += dump_pad(line + made,
                                  (full_fields - fields) *
                                      (gap + format->width),
@@ -9620,6 +12035,25 @@ static fn dump_row(p8 address_to bytes, positive length, positive address)
         }
 }
 
+/*
+        GNU's od turns its input's buffering off when -N limits it, so it
+        reads no byte past the last one it formats: `cat f | { od -N3 -c;
+        cat; }` leaves the rest of f for the cat after it. The same read,
+        asked for no more than is still wanted, whenever a limit was given;
+        without one, and for hexdump, the input is read in whole buffers.
+*/
+static bool text_fill_amount_od(positive wanted)
+{
+        if (text_input.position < text_input.filled)
+                return true;
+
+        if (dump_arguments.od && dump_arguments.limit != TEXT_UNSET &&
+            wanted < TEXT_READ_MAX)
+                return text_fill_amount(wanted);
+
+        return text_fill_amount(TEXT_READ_MAX);
+}
+
 /* Skip with one seek for an ordinary file.  procfs' size-zero regular files
    fail text_regular_size's probe and fall back to the same buffered read as a
    pipe, so the optimization never turns a dynamic pseudo-file into EOF. */
@@ -9642,9 +12076,27 @@ static positive dump_skip_input(positive wanted)
                 }
         }
 
+        /*      A device that seeks is skipped by seeking, however far: GNU's
+                od seeks whatever is not a regular file and counts the skip
+                taken when the seek succeeds, so `od -j1 /dev/null` is an
+                empty dump and not a skip past the end. A pipe or a
+                terminal refuses the seek and is read through below. */
+        if (wanted && dump_arguments.od &&
+            text_input.position == text_input.filled)
+        {
+                file_facts facts;
+
+                if (file_look(text_input.handle, (string_address)"",
+                              AT_EMPTY_PATH, address_of facts) &&
+                    (facts.mode & MODE_FORMAT) != MODE_FILE &&
+                    wanted <= (positive)bipolar_max &&
+                    system_seek(text_input.handle, wanted, FILE_SEEK_CUR) >= 0)
+                        return wanted;
+        }
+
         positive taken = 0;
 
-        while (taken < wanted && text_fill())
+        while (taken < wanted && text_fill_amount_od(wanted - taken))
         {
                 positive available = text_input.filled - text_input.position;
                 positive take = wanted - taken < available ? wanted - taken
@@ -9682,11 +12134,57 @@ static bool dump_input_is_directory(string_address name)
         return true;
 }
 
+/*
+        Put back what was read and not used before letting an input go.
+        GNU's od reads through stdio and closes standard input at exit, and
+        glibc's fclose moves a seekable descriptor back to where the reader
+        stopped, so `(od -N3 -c; od -N3 -c) < file` shows abc and then def.
+        A pipe cannot be put back and is not asked to be.
+*/
+static fn dump_close()
+{
+        positive unread = text_input.filled - text_input.position;
+
+        if (unread && text_input.opened == false && !text_input.failed)
+                system_seek(text_input.handle, (positive)-(bipolar)unread,
+                            FILE_SEEK_CUR);
+
+        text_close();
+}
+
 static b32 dump_run(positive first, positive count)
 {
-        p8 block[DUMP_BLOCK];
-        p8 previous[DUMP_BLOCK];
+        p8 stack_block[DUMP_BLOCK];
+        p8 stack_previous[DUMP_BLOCK];
         positive width = dump_arguments.width;
+
+        if (!dump_wide_ready(width))
+                return text_done(1);
+
+        p8 address_to block = width > DUMP_BLOCK ? dump_wide.bytes : stack_block;
+
+        //      od's row padding, once for the run: each format's row is as
+        //      wide as the widest, a field and a blank per value.
+        positive widest = 0;
+
+        for (positive at = 0; at < dump_arguments.count; at++)
+        {
+                dump_format address_to other = dump_arguments.format + at;
+                positive span = (other->width + 1) * (width / other->size);
+
+                if (span > widest)
+                        widest = span;
+        }
+        for (positive at = 0; at < dump_arguments.count; at++)
+        {
+                dump_format address_to other = dump_arguments.format + at;
+                positive fields = width / other->size;
+
+                other->pad = widest - other->width * fields;
+                other->even = other->pad == fields;
+        }
+        p8 address_to previous = width > DUMP_BLOCK ? dump_wide_previous
+                                                    : stack_previous;
         positive held = 0;
         positive offset = 0;
         positive skip = dump_arguments.skip;
@@ -9729,6 +12227,18 @@ static b32 dump_run(positive first, positive count)
                 //      far as it was asked to, says nothing about the width.
                 if (!skip)
                         dump_od_width_warning();
+                else if (dump_arguments.od)
+                {
+                        //      A directory seeks, so a skip into one is
+                        //      taken, and the width is said before the
+                        //      read that then fails.
+                        file_facts facts;
+
+                        if (file_look(text_input.handle, (string_address)"", AT_EMPTY_PATH,
+                                      address_of facts) &&
+                            (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                                dump_od_width_warning();
+                }
 
                 if (dump_input_is_directory(name))
                 {
@@ -9767,11 +12277,12 @@ static b32 dump_run(positive first, positive count)
 
                 if (!left)
                 {
-                        text_close();
+                        dump_close();
                         break;
                 }
 
-                while (!skip && left && !text_out_failed && text_fill())
+                while (!skip && left && !text_out_failed &&
+                       text_fill_amount_od(left))
                 {
                         positive available = text_input.filled - text_input.position;
 
@@ -9831,7 +12342,7 @@ static b32 dump_run(positive first, positive count)
                 if (text_input.failed)
                         read_failed = true;
 
-                text_close();
+                dump_close();
         }
 
         /* A skip that outlived every input is only worth complaining about
@@ -9938,7 +12449,7 @@ static b32 dump_strings(positive first, positive count, positive minimum)
 
                         while (available && !done)
                         {
-                                if (!have && limited && left <= minimum)
+                                if (!have && limited && left < minimum)
                                 {
                                         done = true;
                                         break;
@@ -9970,7 +12481,7 @@ static b32 dump_strings(positive first, positive count, positive minimum)
                         }
                 }
 
-                text_close();
+                dump_close();
         }
 
         if (skip)
@@ -10046,29 +12557,25 @@ static b32 tools_od(void)
         {
                 string_address last = program_argument((b32)(stop - 1));
                 positive offset;
+                bool failed = false;
 
-                if (string_is(last, '+'))
+                //      One operand is an offset only when it says so with a
+                //      +; two are a file and an offset when the second
+                //      starts with + or a digit. A word that is no offset
+                //      after all is a file name, as the reference has it.
+                bool candidate = traditional || string_is(last, '+') ||
+                                 (operands == 2 && byte_is_digit((p8)last[0]));
+
+                if (candidate && dump_od_offset(last, address_of offset,
+                                                address_of failed))
                 {
-                        if (!dump_od_offset(last, address_of offset))
-                        {
-                                string_format(writer_stderr,
-                                              "od: invalid offset '%w'\n", writer_terminal_quoted_name, last);
-                                return text_done(1);
-                        }
                         dump_arguments.skip = offset;
                         stop--;
                         operands--;
                 }
-                else if (operands == 2 &&
-                         dump_od_offset(last, address_of offset))
-                {
-                        //      Two operands and the second reads as an
-                        //      offset: `od FILE OFFSET`, in octal unless it
-                        //      says otherwise.
-                        dump_arguments.skip = offset;
-                        stop--;
-                        operands--;
-                }
+
+                if (failed)
+                        return text_done(1);
         }
 
         if (traditional && operands > 1)
@@ -27731,4 +30238,1876 @@ static b32 tools_fincore_main()
                  (taking.flags & FILE_FLAG('r')) != 0, tools_fincore_field);
         log_flush();
         return failed ? text_done(1) : 0;
+}
+
+/*
+        --help and --version for a tool that does not answer them itself, found
+        where GNU's getopt finds them. Most coreutils permute, so the words are
+        options wherever they stand before a --: yes BEFORE --version prints
+        the version, where the first operand alone was looked at and yes
+        repeated "BEFORE --version" for ever. The tools GNU parses with a
+        leading + in their option string stop at their first operand, as every
+        tool does under POSIXLY_CORRECT, and expr, true and false read the
+        word only when it is the one operand, as gnulib's parse_long_options
+        does. A letter that takes a value hides the word after it, which is
+        what makes timeout -s INT --help a request for help. seq's operands may
+        be negative, so a word that starts -digit or -. ends its options.
+
+        What was answered is the status: 0, or the status GNU gives a failure
+        of that tool when the text could not be written -- 125 for the tools
+        that run a command, 2 for sort, ls, grep and the diff family, 3 for tty
+        and expr, as help-version.sh expects of each with stdout on /dev/full.
+*/
+typedef struct
+{
+        string_address name;
+        string_address valued;
+        p8 stop;
+        p8 failure;
+} tools_meta_rule;
+
+enum { TOOLS_META_PERMUTE, TOOLS_META_FIRST, TOOLS_META_ALONE };
+
+static const tools_meta_rule tools_meta_rules[] = {
+    {"basename", "s", TOOLS_META_FIRST, 1},
+    {"chroot", "", TOOLS_META_FIRST, 125},
+    {"env", "aCSu", TOOLS_META_FIRST, 125},
+    {"nice", "n", TOOLS_META_FIRST, 125},
+    {"nohup", "", TOOLS_META_FIRST, 125},
+    {"pathchk", "", TOOLS_META_FIRST, 1},
+    {"printenv", "u", TOOLS_META_FIRST, 2},
+    {"runcon", "rtul", TOOLS_META_FIRST, 125},
+    {"seq", "fs", TOOLS_META_FIRST, 1},
+    {"stdbuf", "ioe", TOOLS_META_FIRST, 125},
+    {"timeout", "ks", TOOLS_META_FIRST, 125},
+    {"tr", "", TOOLS_META_FIRST, 1},
+    {"expr", "", TOOLS_META_ALONE, 3},
+    {"true", "", TOOLS_META_ALONE, 1},
+    {"false", "", TOOLS_META_ALONE, 1},
+    {"tty", "", TOOLS_META_PERMUTE, 3},
+    {"sort", "koStTy", TOOLS_META_PERMUTE, 2},
+    {"ls", "ITwpFABDtd", TOOLS_META_PERMUTE, 2},
+    {"dir", "ITwpFABDtd", TOOLS_META_PERMUTE, 2},
+    {"vdir", "ITwpFABDtd", TOOLS_META_PERMUTE, 2},
+    {"grep", "efmABCdD", TOOLS_META_PERMUTE, 2},
+    {"egrep", "efmABCdD", TOOLS_META_PERMUTE, 2},
+    {"fgrep", "efmABCdD", TOOLS_META_PERMUTE, 2},
+    {"cmp", "inI", TOOLS_META_PERMUTE, 2},
+    {"diff", "CDFLSUWIxX", TOOLS_META_PERMUTE, 2},
+    {"diff3", "L", TOOLS_META_PERMUTE, 2},
+    {"sdiff", "oIwWFs", TOOLS_META_PERMUTE, 2},
+    {"cut", "bcdfFOw", TOOLS_META_PERMUTE, 1},
+    {"head", "cn", TOOLS_META_PERMUTE, 1},
+    {"tail", "cns", TOOLS_META_PERMUTE, 1},
+    {"split", "Cabnlt", TOOLS_META_PERMUTE, 1},
+    {"csplit", "fbn", TOOLS_META_PERMUTE, 1},
+    {"date", "dfrsI", TOOLS_META_PERMUTE, 1},
+    {"touch", "drt", TOOLS_META_PERMUTE, 1},
+    {"du", "dtBX", TOOLS_META_PERMUTE, 1},
+    {"df", "BFtx", TOOLS_META_PERMUTE, 1},
+    {"cp", "tS", TOOLS_META_PERMUTE, 1},
+    {"mv", "tS", TOOLS_META_PERMUTE, 1},
+    {"ln", "tS", TOOLS_META_PERMUTE, 1},
+    {"install", "gmotS", TOOLS_META_PERMUTE, 1},
+    {"mkdir", "m", TOOLS_META_PERMUTE, 1},
+    {"mkfifo", "m", TOOLS_META_PERMUTE, 1},
+    {"mknod", "m", TOOLS_META_PERMUTE, 1},
+    {"mktemp", "p", TOOLS_META_PERMUTE, 1},
+    {"join", "aeijotv12", TOOLS_META_PERMUTE, 1},
+    {"nl", "hbfvilswnd", TOOLS_META_PERMUTE, 1},
+    {"numfmt", "d", TOOLS_META_PERMUTE, 1},
+    {"paste", "d", TOOLS_META_PERMUTE, 1},
+    {"ptx", "FMSWbigow", TOOLS_META_PERMUTE, 1},
+    {"shred", "ns", TOOLS_META_PERMUTE, 1},
+    {"shuf", "ino", TOOLS_META_PERMUTE, 1},
+    {"stat", "ct", TOOLS_META_PERMUTE, 1},
+    {"tac", "s", TOOLS_META_PERMUTE, 1},
+    {"truncate", "rs", TOOLS_META_PERMUTE, 1},
+    {"tsort", "", TOOLS_META_PERMUTE, 1},
+    {"unexpand", "t", TOOLS_META_PERMUTE, 1},
+    {"expand", "t", TOOLS_META_PERMUTE, 1},
+    {"fold", "w", TOOLS_META_PERMUTE, 1},
+    {"fmt", "wpg", TOOLS_META_PERMUTE, 1},
+    {"basenc", "w", TOOLS_META_PERMUTE, 1},
+    {"base32", "w", TOOLS_META_PERMUTE, 1},
+    {"base64", "w", TOOLS_META_PERMUTE, 1},
+    {"od", "AjNStw", TOOLS_META_PERMUTE, 1},
+    {"pr", "DeiNnowWlhS", TOOLS_META_PERMUTE, 1},
+    {"uniq", "fsw", TOOLS_META_PERMUTE, 1},
+    {"cksum", "al", TOOLS_META_PERMUTE, 1},
+    {"b2sum", "l", TOOLS_META_PERMUTE, 1},
+    {"stty", "F", TOOLS_META_PERMUTE, 1},
+    {null},
+};
+
+/*
+        GNU's coreutils close standard error at exit and end with their failure
+        status when it refused what they wrote there -- a warning into
+        /dev/full turns du -s --max-depth=0's 0 into 1. The mark is the one
+        writer_stderr keeps; the dispatcher clears it before a tool runs and
+        asks this after, for the programs coreutils ships.
+*/
+static const string_address tools_coreutils[] = {
+    "b2sum", "base32", "base64", "basename", "basenc", "cat", "chcon", "chgrp",
+    "chmod", "chown", "chroot", "cksum", "comm", "cp", "csplit", "cut", "date",
+    "dd", "df", "dir", "dircolors", "dirname", "du", "echo", "env", "expand",
+    "expr", "factor", "false", "fmt", "fold", "groups", "head", "hostid",
+    "hostname", "id", "install", "join", "kill", "link", "ln", "logname", "ls",
+    "md5sum", "mkdir", "mkfifo", "mknod", "mktemp", "mv", "nice", "nl", "nohup",
+    "nproc", "numfmt", "od", "paste", "pathchk", "pinky", "pr", "printenv",
+    "printf", "ptx", "pwd", "readlink", "realpath", "rm", "rmdir", "runcon",
+    "seq", "sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum",
+    "shred", "shuf", "sleep", "sort", "split", "stat", "stdbuf", "stty", "sum",
+    "sync", "tac", "tail", "tee", "test", "timeout", "touch", "tr", "true",
+    "truncate", "tsort", "tty", "uname", "unexpand", "uniq", "unlink",
+    "uptime", "users", "vdir", "wc", "who", "whoami", "yes", null};
+
+static b32 tools_stderr_status(string_address name, b32 answered)
+{
+        if (answered || !writer_stderr_failed)
+                return answered;
+
+        for (positive at = 0; tools_coreutils[at]; at++)
+                if (string_equals(name, tools_coreutils[at]))
+                {
+                        for (const tools_meta_rule address_to rule = tools_meta_rules;
+                             rule->name; rule++)
+                                if (string_equals(name, rule->name))
+                                        return rule->failure;
+                        return 1;
+                }
+        return answered;
+}
+
+// Whether any word before a -- could be one of the two: most starts carry
+// neither, and this is a byte or three per operand.
+static bool tools_meta_asked(string_address address_to arguments, positive count)
+{
+        positive seen = 1;
+
+        for (; seen < count && arguments[seen]; seen++)
+        {
+                string_address word = arguments[seen];
+
+                if (word[0] == '-' && word[1] == '-' &&
+                    (!word[2] || word[2] == 'h' || word[2] == 'v'))
+                        break;
+        }
+        return seen < count && arguments[seen] && arguments[seen][2];
+}
+
+/*
+        The --help texts of the coreutils programs, one per program or family.
+        The option column is the interface GNU's own --help shows -- the
+        spellings, the argument names, two spaces before each description --
+        because scripts and GNU's getopt_vs_usage and usage_vs_getopt tests
+        read it; the descriptions are Moonwater's own.  Byte 1 stands for the
+        name the program was run as, so dir and vdir share ls's text and the
+        sha*sum tools share md5sum's; byte 2 followed by a column width stands
+        for the --help and --version lines every text carries.  They are only
+        read when --help was asked for, and cost start-up nothing.
+*/
+static const p8 tools_help_b2sum[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Print or verify BLAKE2b checksums of each FILE, or of standard input.\n"
+    "\n"
+    "  -b, --binary       read the input in binary mode\n"
+    "  -c, --check        verify the sums listed in each FILE\n"
+    "  -l, --length=BITS  digest size in bits, a multiple of 8 up to 512\n"
+    "      --tag          write BSD-style lines naming the algorithm\n"
+    "  -t, --text         read the input in text mode (the default)\n"
+    "  -z, --zero         end output lines with NUL and leave names unescaped\n"
+    "With --check only:\n"
+    "      --ignore-missing\n"
+    "                     skip listed files that do not exist\n"
+    "      --quiet        say nothing for files that verify\n"
+    "      --status       print nothing; the exit status tells\n"
+    "      --strict       fail on any malformed checksum line\n"
+    "  -w, --warn         complain about malformed checksum lines\n"
+    "\002\025\n";
+static const p8 tools_help_md5sum[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Print or verify checksums of each FILE, or of standard input, with the\n"
+    "digest this program is named for.\n"
+    "\n"
+    "  -b, --binary   read the input in binary mode\n"
+    "  -c, --check    verify the sums listed in each FILE\n"
+    "      --tag      write BSD-style lines naming the algorithm\n"
+    "  -t, --text     read the input in text mode (the default)\n"
+    "  -z, --zero     end output lines with NUL and leave names unescaped\n"
+    "With --check only:\n"
+    "      --ignore-missing\n"
+    "                 skip listed files that do not exist\n"
+    "      --quiet    say nothing for files that verify\n"
+    "      --status   print nothing; the exit status tells\n"
+    "      --strict   fail on any malformed checksum line\n"
+    "  -w, --warn     complain about malformed checksum lines\n"
+    "\002\021\n";
+static const p8 tools_help_base32[] =
+    "Usage: \001 [OPTION]... [FILE]\n"
+    "Encode FILE, or standard input, as \001 text, or decode it back.\n"
+    "\n"
+    "  -d, --decode          decode instead of encoding\n"
+    "  -i, --ignore-garbage  when decoding, skip bytes outside the alphabet\n"
+    "  -w, --wrap=COLS       break encoded lines after COLS characters\n"
+    "                        (76 by default; 0 never breaks them)\n"
+    "\002\030\n";
+static const p8 tools_help_basenc[] =
+    "Usage: \001 [OPTION]... [FILE]\n"
+    "Encode FILE, or standard input, in the chosen encoding, or decode it.\n"
+    "\n"
+    "      --base64     the base64 alphabet of RFC 4648\n"
+    "      --base64url  base64 with the file-name and URL safe alphabet\n"
+    "      --base58     base58, without look-alike characters\n"
+    "      --base32     the base32 alphabet of RFC 4648\n"
+    "      --base32hex  base32 with the extended hex alphabet\n"
+    "      --base16     upper-case hexadecimal\n"
+    "      --base2msbf  bits, most significant first\n"
+    "      --base2lsbf  bits, least significant first\n"
+    "  -d, --decode     decode instead of encoding\n"
+    "  -i, --ignore-garbage\n"
+    "                   when decoding, skip bytes outside the alphabet\n"
+    "  -w, --wrap=COLS  break encoded lines after COLS characters\n"
+    "                   (76 by default; 0 never breaks them)\n"
+    "      --z85        ZeroMQ's Z85; input is whole 4-byte groups when\n"
+    "                   encoding and whole 5-character groups when decoding\n"
+    "\002\023\n";
+static const p8 tools_help_cat[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Write each FILE, or standard input, to standard output in turn.\n"
+    "\n"
+    "  -A, --show-all         the same as -vET\n"
+    "  -b, --number-nonblank  number the lines that are not empty (beats -n)\n"
+    "  -e                     the same as -vE\n"
+    "  -E, --show-ends        mark each line end with $\n"
+    "  -n, --number           number every output line\n"
+    "  -s, --squeeze-blank    print runs of empty lines as one\n"
+    "  -t                     the same as -vT\n"
+    "  -T, --show-tabs        show TAB as ^I\n"
+    "  -u                     accepted and ignored\n"
+    "  -v, --show-nonprinting\n"
+    "                         show control bytes as ^X and high bytes as M-\n"
+    "\002\031\n";
+static const p8 tools_help_cksum[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Print or verify checksums of each FILE, or of standard input.\n"
+    "Without -a the sum is the POSIX 32-bit CRC.\n"
+    "\n"
+    "  -a, --algorithm=TYPE\n"
+    "                     use digest TYPE, from the list below\n"
+    "      --base64       print digests in base64 rather than hex\n"
+    "  -c, --check        verify the sums listed in each FILE\n"
+    "  -l, --length=BITS  digest size in bits: for blake2b a multiple\n"
+    "                     of 8, for sha2 and sha3 one of 224, 256, 384, 512\n"
+    "      --raw          print the digest as raw bytes\n"
+    "      --tag          write BSD-style lines naming the algorithm (default)\n"
+    "      --untagged     write the digest before the name, without the type\n"
+    "  -z, --zero         end output lines with NUL and leave names unescaped\n"
+    "With --check only:\n"
+    "      --ignore-missing\n"
+    "                     skip listed files that do not exist\n"
+    "      --quiet        say nothing for files that verify\n"
+    "      --status       print nothing; the exit status tells\n"
+    "      --strict       fail on any malformed checksum line\n"
+    "  -w, --warn         complain about malformed checksum lines\n"
+    "      --debug        say which implementation computes the sum\n"
+    "\002\025\n"
+    "\n"
+    "TYPE is one of:\n"
+    "  sysv      the System V sum, as sum -s\n"
+    "  bsd       the BSD sum, as sum -r\n"
+    "  crc       the POSIX CRC, the default\n"
+    "  crc32b    the CRC-32 of zlib and ITU V.42\n"
+    "  md5       MD5, as md5sum\n"
+    "  sha1      SHA-1, as sha1sum\n"
+    "  sha2      SHA-2, as the sha224sum..sha512sum tools\n"
+    "  sha3      SHA-3\n"
+    "  blake2b   BLAKE2b, as b2sum\n"
+    "  sm3       SM3\n";
+static const p8 tools_help_comm[] =
+    "Usage: \001 [OPTION]... FILE1 FILE2\n"
+    "Compare two sorted files line by line: column one holds lines only in\n"
+    "FILE1, column two lines only in FILE2, column three lines in both.\n"
+    "A FILE of - is standard input.\n"
+    "\n"
+    "  -1                     leave out column one\n"
+    "  -2                     leave out column two\n"
+    "  -3                     leave out column three\n"
+    "      --check-order      fail if an input is not sorted\n"
+    "      --nocheck-order    do not check the input order\n"
+    "      --output-delimiter=STR\n"
+    "                         put STR between columns\n"
+    "      --total            end with a line of counts\n"
+    "  -z, --zero-terminated  lines end with NUL, not newline\n"
+    "\002\031\n";
+static const p8 tools_help_cut[] =
+    "Usage: \001 OPTION... [FILE]...\n"
+    "Print the selected parts of each line of each FILE, or of standard input.\n"
+    "\n"
+    "  -b, --bytes=LIST              keep these byte positions\n"
+    "  -c, --characters=LIST         keep these character positions\n"
+    "      --complement              keep everything but the selection\n"
+    "  -d, --delimiter=DELIM         fields are separated by DELIM, not TAB\n"
+    "  -f, --fields=LIST             keep these fields; lines without a delimiter\n"
+    "                                are printed whole unless -s is given\n"
+    "  -F LIST                       as -f with -w and -O ' '\n"
+    "  -n, --no-partial              with -b, never split a multibyte character\n"
+    "  -O, --output-delimiter=STRING\n"
+    "                                join the output with STRING\n"
+    "  -s, --only-delimited          drop lines that hold no delimiter\n"
+    "  -w, --whitespace-delimited[=trimmed]\n"
+    "                                fields are separated by runs of blanks;\n"
+    "                                'trimmed' also drops blanks at line ends\n"
+    "  -z, --zero-terminated         lines end with NUL, not newline\n"
+    "\002 \n"
+    "\n"
+    "LIST is N, N-, N-M or -M, or several of them joined by commas.\n";
+static const p8 tools_help_dd[] =
+    "Usage: \001 [OPERAND]...\n"
+    "  or:  \001 OPTION\n"
+    "Copy a file block by block, converting it as the operands say.\n"
+    "\n"
+    "  bs=BYTES      read and write BYTES at a time; sets ibs and obs\n"
+    "  cbs=BYTES     conversion record size for block and unblock\n"
+    "  conv=CONVS    apply the comma-separated conversions CONVS\n"
+    "  count=N       copy at most N input blocks\n"
+    "  ibs=BYTES     read BYTES at a time (512 by default)\n"
+    "  if=FILE       read FILE, not standard input\n"
+    "  iflag=FLAGS   open the input with the comma-separated FLAGS\n"
+    "  obs=BYTES     write BYTES at a time (512 by default)\n"
+    "  of=FILE       write FILE, not standard output\n"
+    "  oflag=FLAGS   open the output with the comma-separated FLAGS\n"
+    "  seek=N        skip N output blocks first (also oseek=N)\n"
+    "  skip=N        skip N input blocks first (also iseek=N)\n"
+    "  status=LEVEL  none, noxfer or progress: how much to report\n"
+    "\n"
+    "CONVS: ascii ebcdic ibm block unblock lcase ucase sparse swab sync excl\n"
+    "nocreat notrunc noerror fdatasync fsync.  FLAGS: append direct directory\n"
+    "dsync sync fullblock nonblock noatime nocache noctty nofollow count_bytes\n"
+    "skip_bytes seek_bytes.  N and BYTES take suffixes c w b kB K MB M GB G\n"
+    "and on; an N ending in B counts bytes.  SIGUSR1 prints the statistics.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_od[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "  or:  \001 [-abcdfilosx]... [FILE] [[+]OFFSET[.][b]]\n"
+    "  or:  \001 --traditional [OPTION]... [FILE] [[+]OFFSET[.][b] [+][LABEL][.][b]]\n"
+    "Dump FILEs, or standard input, in octal or the formats chosen below.\n"
+    "\n"
+    "  -A, --address-radix=RADIX   offsets in d, o, x or n (none)\n"
+    "      --endian={big|little}   read multibyte units in this byte order\n"
+    "  -j, --skip-bytes=BYTES      skip BYTES of input first\n"
+    "  -N, --read-bytes=BYTES      dump at most BYTES of input\n"
+    "  -S BYTES, --strings[=BYTES]\n"
+    "                              print only NUL-ended printable strings\n"
+    "                              of at least BYTES characters (3)\n"
+    "  -t, --format=TYPE           dump in format TYPE\n"
+    "  -v, --output-duplicates     print repeated lines rather than *\n"
+    "  -w[BYTES], --width[=BYTES]  dump BYTES per line (32 without a value)\n"
+    "      --traditional           take operands in the third form above\n"
+    "\002\036\n"
+    "\n"
+    "-a -b -c -d -f -i -l -o -s -x stand for -t a, o1, c, u2, fF, dI, dL, o2,\n"
+    "d2, x2.  TYPE is a, c, or d, f, o, u, x with an optional size (a number,\n"
+    "or C S I L; for f also B H F D L), and a z suffix adds the text column.\n";
+static const p8 tools_help_expand[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Turn tabs in each FILE, or in standard input, into spaces.\n"
+    "\n"
+    "  -i, --initial    only convert tabs before the first non-blank\n"
+    "  -t, --tabs=N     put tab stops every N columns, not 8\n"
+    "  -t, --tabs=LIST  put tab stops at these comma-separated columns;\n"
+    "                   a last entry of /N or +N sets stops every N after them\n"
+    "\002\023\n";
+static const p8 tools_help_expr[] =
+    "Usage: \001 EXPRESSION\n"
+    "  or:  \001 OPTION\n"
+    "\n"
+    "\002\021\n"
+    "\n"
+    "Print the value of EXPRESSION.  Operators, loosest first: |  &\n"
+    "< <= = != >= >  + -  * / %  and STRING : REGEXP; also match, substr,\n"
+    "index, length, + TOKEN and parentheses.  Exit status: 0 for a value that\n"
+    "is neither null nor 0, 1 for null or 0, 2 for bad syntax, 3 on error.\n";
+static const p8 tools_help_factor[] =
+    "Usage: \001 [OPTION] [NUMBER]...\n"
+    "Print the prime factors of each NUMBER, or of each number read from\n"
+    "standard input.\n"
+    "\n"
+    "  -h, --exponents  write repeated factors as p^e\n"
+    "\002\023\n";
+static const p8 tools_help_fmt[] =
+    "Usage: \001 [-WIDTH] [OPTION]... [FILE]...\n"
+    "Refill the paragraphs of each FILE, or of standard input.\n"
+    "\n"
+    "  -c, --crown-margin     keep the indents of the first two lines\n"
+    "  -p, --prefix=STRING    refill only lines starting with STRING\n"
+    "  -s, --split-only       break long lines but never join short ones\n"
+    "  -t, --tagged-paragraph\n"
+    "                         the first line is indented unlike the second\n"
+    "  -u, --uniform-spacing  one space between words, two after sentences\n"
+    "  -w, --width=WIDTH      lines at most WIDTH wide (75)\n"
+    "  -g, --goal=WIDTH       aim for lines WIDTH wide (93% of the width)\n"
+    "\002\031\n";
+static const p8 tools_help_fold[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Break the long lines of each FILE, or of standard input.\n"
+    "\n"
+    "  -b, --bytes        measure in bytes, not columns\n"
+    "  -c, --characters   measure in characters, not columns\n"
+    "  -s, --spaces       break after the last blank that fits\n"
+    "  -w, --width=WIDTH  lines at most WIDTH wide (80)\n"
+    "\002\025\n";
+static const p8 tools_help_head[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Print the first 10 lines of each FILE, or of standard input, with a\n"
+    "name header before each when there are several.\n"
+    "\n"
+    "  -c, --bytes=[-]NUM     print the first NUM bytes; -NUM prints all\n"
+    "                         but the last NUM\n"
+    "  -n, --lines=[-]NUM     print the first NUM lines; -NUM prints all\n"
+    "                         but the last NUM\n"
+    "  -q, --quiet, --silent  never print name headers\n"
+    "  -v, --verbose          always print name headers\n"
+    "  -z, --zero-terminated  lines end with NUL, not newline\n"
+    "\002\031\n"
+    "\n"
+    "NUM takes the suffixes b kB K MB M GB G and so on, and KiB MiB.\n";
+static const p8 tools_help_join[] =
+    "Usage: \001 [OPTION]... FILE1 FILE2\n"
+    "Join the lines of two files that share a join field, blank-separated\n"
+    "field 1 by default.  A FILE of - is standard input.\n"
+    "\n"
+    "  -a FILENUM           also print unpaired lines of file 1 or 2\n"
+    "  -e STRING            fill missing fields with STRING\n"
+    "  -i, --ignore-case    compare fields without regard to case\n"
+    "  -j FIELD             the same as -1 FIELD -2 FIELD\n"
+    "  -o FORMAT            print the fields FORMAT lists, as FILENUM.FIELD\n"
+    "                       or 0, or 'auto'\n"
+    "  -t CHAR              fields are separated by CHAR\n"
+    "  -v FILENUM           like -a but print no joined lines\n"
+    "  -1 FIELD             join on this field of file 1\n"
+    "  -2 FIELD             join on this field of file 2\n"
+    "      --check-order    fail if an input is not sorted\n"
+    "      --nocheck-order  do not check the input order\n"
+    "      --header         pair the first lines as headers\n"
+    "  -z, --zero-terminated\n"
+    "                       lines end with NUL, not newline\n"
+    "\002\027\n"
+    "\n"
+    "Both inputs must be sorted on the join field.\n";
+static const p8 tools_help_nl[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Write each FILE, or standard input, with line numbers.\n"
+    "\n"
+    "  -b, --body-numbering=STYLE    which body lines to number\n"
+    "  -d, --section-delimiter=CC    section markers use CC (\\:)\n"
+    "  -f, --footer-numbering=STYLE  which footer lines to number\n"
+    "  -h, --header-numbering=STYLE  which header lines to number\n"
+    "  -i, --line-increment=NUMBER   step between line numbers\n"
+    "  -l, --join-blank-lines=NUMBER\n"
+    "                                count NUMBER empty lines as one\n"
+    "  -n, --number-format=FORMAT    ln, rn or rz\n"
+    "  -p, --no-renumber             keep counting across sections\n"
+    "  -s, --number-separator=STRING\n"
+    "                                put STRING after the number\n"
+    "  -v, --starting-line-number=NUMBER\n"
+    "                                first number of each section\n"
+    "  -w, --number-width=NUMBER     numbers are NUMBER columns wide\n"
+    "\002 \n"
+    "\n"
+    "STYLE is a (all), t (non-empty, the body default), n (none, the header\n"
+    "and footer default) or pBRE (lines matching BRE).\n";
+static const p8 tools_help_paste[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Join the lines of each FILE side by side, separated by TABs.\n"
+    "\n"
+    "  -d, --delimiters=LIST  separate with the characters of LIST in turn\n"
+    "  -s, --serial           join the lines of each file into one line\n"
+    "  -z, --zero-terminated  lines end with NUL, not newline\n"
+    "\002\031\n";
+static const p8 tools_help_pr[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Lay out each FILE, or standard input, in pages for printing.\n"
+    "\n"
+    "  +FIRST_PAGE[:LAST_PAGE], --pages=FIRST_PAGE[:LAST_PAGE]\n"
+    "                                print only these pages\n"
+    "  -COLS, --columns=COLS         print COLS columns, filled down\n"
+    "  -a, --across                  fill columns across, with -COLS\n"
+    "  -c, --show-control-chars      show control bytes as ^X and octal\n"
+    "  -d, --double-space            leave an empty line after each line\n"
+    "  -D, --date-format=FORMAT      date format for the header\n"
+    "  -e[CHAR[WIDTH]], --expand-tabs[=CHAR[WIDTH]]\n"
+    "                                expand input CHARs (TAB) to WIDTH (8)\n"
+    "  -F, -f, --form-feed           end pages with a form feed\n"
+    "  -h, --header=HEADER           put HEADER in page headers, not the name\n"
+    "  -i[CHAR[WIDTH]], --output-tabs[=CHAR[WIDTH]]\n"
+    "                                turn spaces into CHARs (TAB) at WIDTH (8)\n"
+    "  -J, --join-lines              merge full lines, no truncation\n"
+    "  -l, --length=PAGE_LENGTH      pages of PAGE_LENGTH lines (66)\n"
+    "  -m, --merge                   print each file in its own column\n"
+    "  -n[SEP[DIGITS]], --number-lines[=SEP[DIGITS]]\n"
+    "                                number lines with DIGITS (5) and SEP (TAB)\n"
+    "  -N, --first-line-number=NUMBER\n"
+    "                                start numbering at NUMBER\n"
+    "  -o, --indent=MARGIN           indent every line by MARGIN spaces\n"
+    "  -r, --no-file-warnings        say nothing about files that cannot be opened\n"
+    "  -s[CHAR], --separator[=CHAR]  separate columns with one CHAR\n"
+    "  -S[STRING], --sep-string[=STRING]\n"
+    "                                separate columns with STRING\n"
+    "  -t, --omit-header             no page headers or trailers\n"
+    "  -T, --omit-pagination         no headers, trailers or input form feeds\n"
+    "  -v, --show-nonprinting        show control bytes in octal\n"
+    "  -w, --width=PAGE_WIDTH        page width for columns (72)\n"
+    "  -W, --page-width=PAGE_WIDTH   page width always, truncating lines\n"
+    "\002 \n";
+static const p8 tools_help_ptx[] =
+    "Usage: \001 [OPTION]... [INPUT]...   (without -G)\n"
+    "  or:  \001 -G [OPTION]... [INPUT [OUTPUT]]\n"
+    "Write a permuted index of the words of the inputs, with their context.\n"
+    "\n"
+    "  -A, --auto-reference      add FILE:LINE references\n"
+    "  -G, --traditional         behave like System V ptx\n"
+    "  -F, --flag-truncation=STRING\n"
+    "                            mark cut lines with STRING (/)\n"
+    "  -M, --macro-name=STRING   roff macro name, not xx\n"
+    "  -O, --format=roff         write roff directives\n"
+    "  -R, --right-side-refs     put references on the right\n"
+    "  -S, --sentence-regexp=REGEXP\n"
+    "                            REGEXP ends a line or sentence\n"
+    "  -T, --format=tex          write TeX directives\n"
+    "  -W, --word-regexp=REGEXP  REGEXP matches a keyword\n"
+    "  -b, --break-file=FILE     word break characters come from FILE\n"
+    "  -f, --ignore-case         sort without regard to case\n"
+    "  -g, --gap-size=NUMBER     columns between output fields\n"
+    "  -i, --ignore-file=FILE    never index the words in FILE\n"
+    "  -o, --only-file=FILE      index only the words in FILE\n"
+    "  -r, --references          each line starts with its reference\n"
+    "  -t, --typeset-mode        default width 100, not 72\n"
+    "  -w, --width=NUMBER        output width, references excluded\n"
+    "\002\034\n";
+static const p8 tools_help_sort[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "  or:  \001 [OPTION]... --files0-from=F\n"
+    "Write the lines of all FILEs, or of standard input, in sorted order.\n"
+    "\n"
+    "Ordering:\n"
+    "  -b, --ignore-leading-blanks  skip leading blanks of keys\n"
+    "  -d, --dictionary-order       compare only blanks and letters and digits\n"
+    "  -f, --ignore-case            compare lower case as upper case\n"
+    "  -g, --general-numeric-sort   compare as floating-point numbers\n"
+    "  -i, --ignore-nonprinting     compare only printable characters\n"
+    "  -M, --month-sort             compare month names, JAN < ... < DEC\n"
+    "  -h, --human-numeric-sort     compare sizes such as 2K and 1G\n"
+    "  -n, --numeric-sort           compare as decimal numbers\n"
+    "  -R, --random-sort            shuffle, keeping equal keys together\n"
+    "      --random-source=FILE     take random bytes from FILE\n"
+    "  -r, --reverse                reverse every comparison\n"
+    "      --sort=WORD              general-numeric, human-numeric, month,\n"
+    "                               numeric, random or version\n"
+    "  -V, --version-sort           compare numbers inside text as versions\n"
+    "Other:\n"
+    "      --batch-size=NMERGE      merge at most NMERGE inputs at once\n"
+    "  -c, --check, --check=diagnose-first\n"
+    "                               check that input is sorted\n"
+    "  -C, --check=quiet, --check=silent\n"
+    "                               check quietly\n"
+    "      --compress-program=PROG  pack temporary files with PROG\n"
+    "      --debug                  mark each key and warn about odd usage\n"
+    "      --files0-from=F          read NUL-separated input names from F\n"
+    "  -k, --key=KEYDEF             sort on the key KEYDEF\n"
+    "  -m, --merge                  merge inputs that are already sorted\n"
+    "  -o, --output=FILE            write to FILE, not standard output\n"
+    "  -s, --stable                 keep lines with equal keys in input order\n"
+    "  -S, --buffer-size=SIZE       use SIZE of memory (with % b K M G ...)\n"
+    "  -t, --field-separator=SEP    fields end at SEP, not at blanks\n"
+    "  -T, --temporary-directory=DIR\n"
+    "                               put temporary files in DIR\n"
+    "      --parallel=N             run up to N sorts at once\n"
+    "  -u, --unique                 print one line of each run of equal keys\n"
+    "  -z, --zero-terminated        lines end with NUL, not newline\n"
+    "\002\037\n"
+    "\n"
+    "KEYDEF is F[.C][OPTS][,F[.C][OPTS]]: a start and an end field F and\n"
+    "character C, counted from 1, with ordering letters from [bdfgiMhnRrV].\n";
+static const p8 tools_help_sum[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Print the 16-bit checksum and block count of each FILE, or standard input.\n"
+    "\n"
+    "  -r             the BSD sum over 1K blocks (the default)\n"
+    "  -s, --sysv     the System V sum over 512-byte blocks\n"
+    "\002\021\n";
+static const p8 tools_help_tac[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Write each FILE, or standard input, last line first.\n"
+    "\n"
+    "  -b, --before            the separator comes before each record\n"
+    "  -r, --regex             the separator is a regular expression\n"
+    "  -s, --separator=STRING  records end with STRING, not newline\n"
+    "\002\032\n";
+static const p8 tools_help_tail[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Print the last 10 lines of each FILE, or of standard input, with a\n"
+    "name header before each when there are several.\n"
+    "\n"
+    "  -c, --bytes=[+]NUM           the last NUM bytes; +NUM starts at byte NUM\n"
+    "      --debug                  say how --follow watches the files\n"
+    "  -f, --follow[={name|descriptor}]\n"
+    "                               keep printing what is appended\n"
+    "  -F                           the same as --follow=name --retry\n"
+    "  -n, --lines=[+]NUM           the last NUM lines; +NUM starts at line NUM\n"
+    "      --max-unchanged-stats=N  with --follow=name, reopen after N\n"
+    "                               unchanged checks (5)\n"
+    "      --pid=PID                with -f, stop once PID has exited\n"
+    "  -q, --quiet, --silent        never print name headers\n"
+    "      --retry                  keep trying files that cannot be opened\n"
+    "  -s, --sleep-interval=N       with -f, check every N seconds (1)\n"
+    "  -v, --verbose                always print name headers\n"
+    "  -z, --zero-terminated        lines end with NUL, not newline\n"
+    "\002\037\n"
+    "\n"
+    "NUM takes the suffixes b kB K MB M GB G and so on, and KiB MiB.\n";
+static const p8 tools_help_tee[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Copy standard input to standard output and to each FILE.\n"
+    "\n"
+    "  -a, --append               add to the FILEs rather than replacing them\n"
+    "  -i, --ignore-interrupts    ignore SIGINT\n"
+    "  -p                         the same as --output-error=warn-nopipe\n"
+    "      --output-error[=MODE]  on a write error: warn, warn-nopipe,\n"
+    "                             exit or exit-nopipe\n"
+    "\002\035\n";
+static const p8 tools_help_tr[] =
+    "Usage: \001 [OPTION]... STRING1 [STRING2]\n"
+    "Translate, squeeze or delete characters of standard input.\n"
+    "\n"
+    "  -c, -C, --complement   use every character not in STRING1\n"
+    "  -d, --delete           delete the characters of STRING1\n"
+    "  -s, --squeeze-repeats  squeeze runs of a character of the last\n"
+    "                         STRING into one\n"
+    "  -t, --truncate-set1    cut STRING1 to the length of STRING2\n"
+    "\002\031\n"
+    "\n"
+    "STRINGs take \\NNN \\\\ \\a \\b \\f \\n \\r \\t \\v, CHAR1-CHAR2, [CHAR*], [CHAR*N],\n"
+    "[:CLASS:] and [=CHAR=].\n";
+static const p8 tools_help_unexpand[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Turn runs of blanks in each FILE, or in standard input, into tabs.\n"
+    "\n"
+    "  -a, --all         convert all blanks, not only leading ones\n"
+    "      --first-only  convert only leading blanks (beats -a)\n"
+    "  -t, --tabs=N      put tab stops every N columns (implies -a)\n"
+    "  -t, --tabs=LIST   put tab stops at these comma-separated columns;\n"
+    "                    a last entry of /N or +N sets stops every N after them\n"
+    "\002\024\n";
+static const p8 tools_help_uniq[] =
+    "Usage: \001 [OPTION]... [INPUT [OUTPUT]]\n"
+    "Merge runs of equal adjacent lines of INPUT (or standard input) into\n"
+    "one, writing to OUTPUT (or standard output).\n"
+    "\n"
+    "  -c, --count            prefix each line with its run length\n"
+    "  -d, --repeated         print one line of each repeated run\n"
+    "  -D                     print every line of each repeated run\n"
+    "      --all-repeated[=METHOD]\n"
+    "                         like -D, with none, prepend or separate\n"
+    "                         empty lines between runs\n"
+    "  -f, --skip-fields=N    ignore the first N fields\n"
+    "      --group[=METHOD]   print every line, runs set apart by empty\n"
+    "                         lines: separate, prepend, append or both\n"
+    "  -i, --ignore-case      compare without regard to case\n"
+    "  -s, --skip-chars=N     ignore the first N characters\n"
+    "  -u, --unique           print only lines that are not repeated\n"
+    "  -z, --zero-terminated  lines end with NUL, not newline\n"
+    "  -w, --check-chars=N    compare at most N characters\n"
+    "\002\031\n";
+static const p8 tools_help_wc[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "  or:  \001 [OPTION]... --files0-from=F\n"
+    "Print newline, word and byte counts of each FILE, or of standard input,\n"
+    "and a total when there are several.  Counts print in the order lines,\n"
+    "words, characters, bytes, longest line.\n"
+    "\n"
+    "  -c, --bytes          print the byte count\n"
+    "  -m, --chars          print the character count\n"
+    "  -l, --lines          print the newline count\n"
+    "      --debug          say which counting path is used\n"
+    "      --files0-from=F  read NUL-separated input names from F\n"
+    "  -L, --max-line-length\n"
+    "                       print the widest line's width\n"
+    "  -w, --words          print the word count\n"
+    "      --total=WHEN     auto, always, only or never\n"
+    "\002\027\n";
+static const p8 tools_help_basename[] =
+    "Usage: \001 NAME [SUFFIX]\n"
+    "  or:  \001 OPTION... NAME...\n"
+    "Print NAME without its leading directories, and without SUFFIX if given.\n"
+    "\n"
+    "  -a, --multiple       take every operand as a NAME\n"
+    "  -s, --suffix=SUFFIX  remove SUFFIX too; implies -a\n"
+    "  -z, --zero           end each name with NUL, not newline\n"
+    "\002\027\n";
+static const p8 tools_help_chgrp[] =
+    "Usage: \001 [OPTION]... GROUP FILE...\n"
+    "  or:  \001 [OPTION]... --reference=RFILE FILE...\n"
+    "Set the group of each FILE to GROUP, or to RFILE's group.\n"
+    "\n"
+    "  -c, --changes           report only files that change\n"
+    "  -f, --silent, --quiet   leave out most error messages\n"
+    "  -v, --verbose           report every file\n"
+    "      --dereference       change what a symlink points to (the default)\n"
+    "  -h, --no-dereference    change symlinks themselves\n"
+    "      --from=CURRENT_OWNER:CURRENT_GROUP\n"
+    "                          only change files owned so\n"
+    "      --no-preserve-root  let -R reach / (the default)\n"
+    "      --preserve-root     refuse to recurse into /\n"
+    "      --reference=RFILE   copy RFILE's group\n"
+    "  -R, --recursive         descend into directories\n"
+    "With -R, the last of these decides which symlinks are followed:\n"
+    "  -H                      those named as arguments\n"
+    "  -L                      all of them\n"
+    "  -P                      none (the default)\n"
+    "\002\032\n";
+static const p8 tools_help_chmod[] =
+    "Usage: \001 [OPTION]... MODE[,MODE]... FILE...\n"
+    "  or:  \001 [OPTION]... OCTAL-MODE FILE...\n"
+    "  or:  \001 [OPTION]... --reference=RFILE FILE...\n"
+    "Set the mode of each FILE to MODE, or to RFILE's mode.\n"
+    "\n"
+    "  -c, --changes          report only files that change\n"
+    "  -f, --silent, --quiet  leave out most error messages\n"
+    "  -v, --verbose          report every file\n"
+    "      --dereference      change what a symlink points to\n"
+    "  -h, --no-dereference   change symlinks themselves\n"
+    "      --no-preserve-root\n"
+    "                         let -R reach / (the default)\n"
+    "      --preserve-root    refuse to recurse into /\n"
+    "      --reference=RFILE  copy RFILE's mode\n"
+    "  -R, --recursive        descend into directories\n"
+    "With -R, the last of these decides which symlinks are followed:\n"
+    "  -H                     those named as arguments (the default)\n"
+    "  -L                     all of them\n"
+    "  -P                     none\n"
+    "\002\031\n"
+    "\n"
+    "MODE is [ugoa]*([-+=]([rwxXst]*|[ugo]))+ or [-+=][0-7]+.\n";
+static const p8 tools_help_chown[] =
+    "Usage: \001 [OPTION]... [OWNER][:[GROUP]] FILE...\n"
+    "  or:  \001 [OPTION]... --reference=RFILE FILE...\n"
+    "Set the owner and/or group of each FILE, or copy them from RFILE.\n"
+    "\n"
+    "  -c, --changes           report only files that change\n"
+    "  -f, --silent, --quiet   leave out most error messages\n"
+    "  -v, --verbose           report every file\n"
+    "      --dereference       change what a symlink points to (the default)\n"
+    "  -h, --no-dereference    change symlinks themselves\n"
+    "      --from=CURRENT_OWNER:CURRENT_GROUP\n"
+    "                          only change files owned so\n"
+    "      --no-preserve-root  let -R reach / (the default)\n"
+    "      --preserve-root     refuse to recurse into /\n"
+    "      --reference=RFILE   copy RFILE's owner and group\n"
+    "  -R, --recursive         descend into directories\n"
+    "With -R, the last of these decides which symlinks are followed:\n"
+    "  -H                      those named as arguments\n"
+    "  -L                      all of them\n"
+    "  -P                      none (the default)\n"
+    "\002\032\n"
+    "\n"
+    "OWNER: alone keeps the group; OWNER: sets the login group of OWNER.\n";
+static const p8 tools_help_chroot[] =
+    "Usage: \001 [OPTION]... NEWROOT [COMMAND [ARG]...]\n"
+    "Run COMMAND, or \"$SHELL\" -i, with NEWROOT as the root directory.\n"
+    "\n"
+    "      --groups=G_LIST        supplementary groups, g1,g2,...\n"
+    "      --userspec=USER:GROUP  run as this user and group\n"
+    "      --skip-chdir           stay in the current directory\n"
+    "\002\035\n"
+    "\n"
+    "Exit status: 125 when chroot fails, 126 when COMMAND cannot run, 127 when\n"
+    "it is not found, otherwise COMMAND's status.\n";
+static const p8 tools_help_cp[] =
+    "Usage: \001 [OPTION]... [-T] SOURCE DEST\n"
+    "  or:  \001 [OPTION]... SOURCE... DIRECTORY\n"
+    "  or:  \001 [OPTION]... -t DIRECTORY SOURCE...\n"
+    "Copy SOURCE to DEST, or each SOURCE into DIRECTORY.\n"
+    "\n"
+    "  -a, --archive              the same as -dR --preserve=all\n"
+    "      --attributes-only      copy attributes but not data\n"
+    "      --backup[=CONTROL]     back up each destination that exists\n"
+    "  -b                         like --backup, without a value\n"
+    "      --copy-contents        read special files when recursive\n"
+    "  -d                         as --no-dereference --preserve=links\n"
+    "      --debug                explain each copy; implies -v\n"
+    "  -f, --force                remove an unopenable destination and retry\n"
+    "  -i, --interactive          ask before overwriting\n"
+    "  -H                         follow symlinks named as arguments\n"
+    "  -L, --dereference          always follow symlinks in SOURCE\n"
+    "  -P, --no-dereference       never follow symlinks in SOURCE\n"
+    "      --keep-directory-symlink\n"
+    "                             keep symlinks to directories that exist\n"
+    "  -l, --link                 make hard links instead of copies\n"
+    "  -n, --no-clobber           skip existing destinations (prefer --update)\n"
+    "  -p                         as --preserve=mode,ownership,timestamps\n"
+    "      --preserve[=ATTR_LIST]\n"
+    "                             keep these attributes\n"
+    "      --no-preserve=ATTR_LIST\n"
+    "                             do not keep these attributes\n"
+    "      --parents              recreate each SOURCE's path under DIRECTORY\n"
+    "  -R, -r, --recursive        copy directories and what they hold\n"
+    "      --reflink[=WHEN]       clone data blocks: auto, always or never\n"
+    "      --remove-destination   remove each destination before copying\n"
+    "      --sparse=WHEN          holes: auto, always or never\n"
+    "      --strip-trailing-slashes\n"
+    "                             drop trailing slashes from SOURCEs\n"
+    "  -s, --symbolic-link        make symbolic links instead of copies\n"
+    "  -S, --suffix=SUFFIX        backup suffix, not ~\n"
+    "  -t, --target-directory=DIRECTORY\n"
+    "                             copy into DIRECTORY\n"
+    "  -T, --no-target-directory  DEST is never a directory to copy into\n"
+    "      --update[=UPDATE]      replace existing files: all, none,\n"
+    "                             none-fail or older (the default)\n"
+    "  -u                         the same as --update=older\n"
+    "  -v, --verbose              say what is done\n"
+    "  -x, --one-file-system      stay on one file system\n"
+    "  -Z                         give copies the default SELinux context\n"
+    "      --context[=CTX]        like -Z, or set the context to CTX\n"
+    "\002\035\n"
+    "\n"
+    "ATTR_LIST is mode, ownership, timestamps, links, context, xattr or all.\n"
+    "CONTROL is none/off, numbered/t, existing/nil or simple/never, and\n"
+    "VERSION_CONTROL and SIMPLE_BACKUP_SUFFIX give the defaults.\n";
+static const p8 tools_help_csplit[] =
+    "Usage: \001 [OPTION]... FILE PATTERN...\n"
+    "Split FILE, or standard input for -, into files xx00, xx01, ... at each\n"
+    "PATTERN, printing the size of each piece.\n"
+    "\n"
+    "  -b, --suffix-format=FORMAT\n"
+    "                           name pieces with printf FORMAT, not %02d\n"
+    "  -f, --prefix=PREFIX      name pieces PREFIX..., not xx...\n"
+    "  -k, --keep-files         keep the pieces after an error\n"
+    "      --suppress-matched   leave out the lines that match\n"
+    "  -n, --digits=DIGITS      use DIGITS digits, not 2\n"
+    "  -s, --quiet, --silent    do not print the sizes\n"
+    "  -z, --elide-empty-files  do not write empty pieces\n"
+    "\002\033\n"
+    "\n"
+    "PATTERN is a line number, /REGEXP/[OFFSET], %REGEXP%[OFFSET] (skip),\n"
+    "{N} (repeat N times) or {*} (repeat while possible).\n";
+static const p8 tools_help_date[] =
+    "Usage: \001 [OPTION]... [+FORMAT]\n"
+    "  or:  \001 [OPTION]... MMDDhhmm[[CC]YY][.ss]\n"
+    "Print the date and time in FORMAT, or set them with -s or the second form.\n"
+    "\n"
+    "  -d, --date=STRING       show the time STRING describes, not now\n"
+    "      --debug             explain how the date was parsed\n"
+    "  -f, --file=DATEFILE     like --date for each line of DATEFILE\n"
+    "  -I[FMT], --iso-8601[=FMT]\n"
+    "                          ISO 8601 to date, hours, minutes,\n"
+    "                          seconds or ns precision\n"
+    "      --resolution        print the timestamp resolution\n"
+    "  -R, --rfc-email         RFC 5322 form\n"
+    "      --rfc-3339=FMT      RFC 3339 to date, seconds or ns precision\n"
+    "  -r, --reference=FILE    show FILE's modification time\n"
+    "  -s, --set=STRING        set the clock to STRING\n"
+    "  -u, --utc, --universal  use UTC\n"
+    "\002\032\n"
+    "\n"
+    "FORMAT holds strftime-style % sequences, such as %Y-%m-%d %H:%M:%S.\n";
+static const p8 tools_help_df[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Show space on the file system of each FILE, or on all file systems.\n"
+    "\n"
+    "  -a, --all              include pseudo, duplicate and unreachable ones\n"
+    "  -B, --block-size=SIZE  count in units of SIZE\n"
+    "  -h, --human-readable   sizes in powers of 1024, like 1023M\n"
+    "  -H, --si               sizes in powers of 1000, like 1.1G\n"
+    "  -i, --inodes           show inodes rather than blocks\n"
+    "  -k                     the same as --block-size=1K\n"
+    "  -l, --local            only local file systems\n"
+    "      --no-sync          do not sync first (the default)\n"
+    "      --output[=FIELD_LIST]\n"
+    "                         show these columns, or all of them\n"
+    "  -P, --portability      the POSIX format\n"
+    "      --sync             sync before reading the usage\n"
+    "      --total            add a total line\n"
+    "  -t, --type=TYPE        only file systems of TYPE\n"
+    "  -T, --print-type       show each file system's type\n"
+    "  -x, --exclude-type=TYPE\n"
+    "                         leave out file systems of TYPE\n"
+    "  -v                     accepted and ignored\n"
+    "\002\031\n"
+    "\n"
+    "FIELD_LIST: source fstype itotal iused iavail ipcent size used avail\n"
+    "pcent file target.  SIZE is a number with K M G T ... or KB MB ...\n";
+static const p8 tools_help_ls[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "List the FILEs, or the current directory, sorted by name by default.\n"
+    "\n"
+    "  -a, --all                 include names starting with .\n"
+    "  -A, --almost-all          the same, but leave out . and ..\n"
+    "      --author              with -l, show each file's author\n"
+    "  -b, --escape              show unprintable bytes as C escapes\n"
+    "      --block-size=SIZE     with -l, count sizes in units of SIZE\n"
+    "  -B, --ignore-backups      leave out names ending in ~\n"
+    "  -c                        use the status change time (see --time)\n"
+    "  -C                        list in columns\n"
+    "      --color[=WHEN]        colour names by type\n"
+    "  -d, --directory           list directories, not their contents\n"
+    "  -D, --dired               output for Emacs dired\n"
+    "  -f                        the same as -a -U\n"
+    "  -F, --classify[=WHEN]     append a type mark */=>@|\n"
+    "      --file-type           the same, without *\n"
+    "      --format=WORD         across, commas, horizontal, long,\n"
+    "                            single-column, verbose or vertical\n"
+    "      --full-time           the same as -l --time-style=full-iso\n"
+    "  -g                        like -l without the owner\n"
+    "      --group-directories-first\n"
+    "                            list directories before files\n"
+    "  -G, --no-group            leave out groups in long listings\n"
+    "  -h, --human-readable      with -l and -s, sizes like 1K 234M 2G\n"
+    "      --si                  the same in powers of 1000\n"
+    "  -H, --dereference-command-line\n"
+    "                            follow symlinks named as arguments\n"
+    "      --dereference-command-line-symlink-to-dir\n"
+    "                            follow argument symlinks to directories\n"
+    "      --hide=PATTERN        leave out names matching PATTERN (not with -a)\n"
+    "      --hyperlink[=WHEN]    make names hyperlinks\n"
+    "      --indicator-style=WORD\n"
+    "                            none, slash, file-type or classify\n"
+    "  -i, --inode               show inode numbers\n"
+    "  -I, --ignore=PATTERN      leave out names matching PATTERN\n"
+    "  -k, --kibibytes           count blocks in 1024 bytes\n"
+    "  -l                        long listing\n"
+    "  -L, --dereference         show what symlinks point to\n"
+    "  -m                        a comma-separated list\n"
+    "  -n, --numeric-uid-gid     like -l with numeric owners and groups\n"
+    "  -N, --literal             never quote names\n"
+    "  -o                        like -l without the group\n"
+    "  -p, --indicator-style=slash\n"
+    "                            append / to directories\n"
+    "  -q, --hide-control-chars  show unprintable bytes as ?\n"
+    "      --show-control-chars  show unprintable bytes as they are\n"
+    "  -Q, --quote-name          put names in double quotes\n"
+    "      --quoting-style=WORD  literal, locale, shell, shell-always,\n"
+    "                            shell-escape, shell-escape-always, c or escape\n"
+    "  -r, --reverse             reverse the order\n"
+    "  -R, --recursive           list subdirectories too\n"
+    "  -s, --size                show allocated blocks\n"
+    "  -S                        sort by size, largest first\n"
+    "      --sort=WORD           none, size, time, version, extension,\n"
+    "                            name or width\n"
+    "      --time=WORD           the time -l shows and -t sorts by: atime,\n"
+    "                            access, use, ctime, status, mtime, modification,\n"
+    "                            birth or creation\n"
+    "      --time-style=TIME_STYLE\n"
+    "                            full-iso, long-iso, iso, locale or +FORMAT\n"
+    "  -t                        sort by time, newest first\n"
+    "  -T, --tabsize=COLS        tab stops every COLS, not 8\n"
+    "  -u                        use the access time (see --time)\n"
+    "  -U                        do not sort\n"
+    "  -v                        sort numbers inside names as versions\n"
+    "  -w, --width=COLS          output is COLS wide; 0 means no limit\n"
+    "  -x                        list in rows\n"
+    "  -X                        sort by extension\n"
+    "  -Z, --context             show security contexts\n"
+    "      --zero                end each line with NUL\n"
+    "  -1                        one name per line\n"
+    "\002\034\n"
+    "\n"
+    "WHEN is always (without a value), auto or never.  SIZE is a number\n"
+    "with K M G T ... or KB MB ...  Exit status: 0, 1 for minor trouble,\n"
+    "2 for serious trouble.\n";
+static const p8 tools_help_dircolors[] =
+    "Usage: \001 [OPTION]... [FILE]\n"
+    "Print shell code setting LS_COLORS, from FILE or the built-in table.\n"
+    "\n"
+    "  -b, --sh, --bourne-shell  Bourne shell code\n"
+    "  -c, --csh, --c-shell      C shell code\n"
+    "  -p, --print-database      print the built-in table\n"
+    "      --print-ls-colors     print the colours, escaped for display\n"
+    "\002\034\n";
+static const p8 tools_help_dirname[] =
+    "Usage: \001 [OPTION] NAME...\n"
+    "Print each NAME without its last component; . for a name without a /.\n"
+    "\n"
+    "  -z, --zero     end each name with NUL, not newline\n"
+    "\002\021\n";
+static const p8 tools_help_du[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "  or:  \001 [OPTION]... --files0-from=F\n"
+    "Show the space each FILE uses, directories summed recursively.\n"
+    "\n"
+    "  -0, --null             end each line with NUL, not newline\n"
+    "  -a, --all              show files too, not only directories\n"
+    "  -A, --apparent-size    show sizes rather than space used\n"
+    "  -B, --block-size=SIZE  count in units of SIZE\n"
+    "  -b, --bytes            the same as --apparent-size --block-size=1\n"
+    "  -c, --total            add a total line\n"
+    "  -D, --dereference-args\n"
+    "                         follow symlinks named as arguments\n"
+    "  -d, --max-depth=N      show only N levels below each argument\n"
+    "      --files0-from=F    read NUL-separated names from F\n"
+    "  -H                     the same as -D\n"
+    "  -h, --human-readable   sizes like 1K 234M 2G\n"
+    "      --inodes           count inodes rather than blocks\n"
+    "  -k                     the same as --block-size=1K\n"
+    "  -L, --dereference      follow all symlinks\n"
+    "  -l, --count-links      count hard-linked files each time\n"
+    "  -m                     the same as --block-size=1M\n"
+    "  -P, --no-dereference   follow no symlinks (the default)\n"
+    "  -S, --separate-dirs    do not add subdirectories to their parents\n"
+    "      --si               like -h in powers of 1000\n"
+    "  -s, --summarize        show only a total for each argument\n"
+    "  -t, --threshold=SIZE   leave out entries under SIZE, or over -SIZE\n"
+    "      --time             show the newest modification time inside\n"
+    "      --time=WORD        show atime, access, use, ctime or status\n"
+    "      --time-style=STYLE\n"
+    "                         full-iso, long-iso, iso or +FORMAT\n"
+    "  -X, --exclude-from=FILE\n"
+    "                         skip names matching patterns in FILE\n"
+    "      --exclude=PATTERN  skip names matching PATTERN\n"
+    "  -x, --one-file-system  stay on one file system\n"
+    "\002\031\n"
+    "\n"
+    "SIZE is a number with K M G T ... or KB MB ...\n";
+static const p8 tools_help_env[] =
+    "Usage: \001 [OPTION]... [-] [NAME=VALUE]... [COMMAND [ARG]...]\n"
+    "Run COMMAND with each NAME set to VALUE, or print the environment.\n"
+    "\n"
+    "  -a, --argv0=ARG             give COMMAND ARG as its argument zero\n"
+    "  -i, --ignore-environment    start from an empty environment (also -)\n"
+    "  -0, --null                  end each printed variable with NUL\n"
+    "  -u, --unset=NAME            remove NAME from the environment\n"
+    "  -C, --chdir=DIR             change to DIR first\n"
+    "  -S, --split-string=S        split S into arguments, for #! lines\n"
+    "      --block-signal[=SIG]    block SIG in COMMAND\n"
+    "      --default-signal[=SIG]  give SIG its default action\n"
+    "      --ignore-signal[=SIG]   ignore SIG\n"
+    "      --list-signal-handling  list signals not at their default\n"
+    "  -v, --debug                 trace each step\n"
+    "\002\036\n"
+    "\n"
+    "SIG is a name or number list; none means every signal.  Exit status:\n"
+    "125 when env fails, 126 when COMMAND cannot run, 127 when it is not\n"
+    "found, otherwise COMMAND's status.\n";
+static const p8 tools_help_groups[] =
+    "Usage: \001 [OPTION]... [USERNAME]...\n"
+    "Print the groups of each USERNAME, or of this process.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_hostname[] =
+    "Usage: \001 [NAME]\n"
+    "  or:  \001 OPTION\n"
+    "Print the host name, or set it to NAME.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_hostid[] =
+    "Usage: \001 [OPTION]\n"
+    "Print this host's numeric identifier in hex.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_id[] =
+    "Usage: \001 [OPTION]... [USER]...\n"
+    "Print the user and group IDs of each USER, or of this process.\n"
+    "\n"
+    "  -a             accepted and ignored\n"
+    "  -Z, --context  print only the security context\n"
+    "  -g, --group    print only the effective group ID\n"
+    "  -G, --groups   print all group IDs\n"
+    "  -n, --name     print names, not numbers, with -u -g -G\n"
+    "  -r, --real     print real IDs, not effective ones, with -u -g -G\n"
+    "  -u, --user     print only the effective user ID\n"
+    "  -z, --zero     separate entries with NUL, not in the default form\n"
+    "\002\021\n";
+static const p8 tools_help_kill[] =
+    "Usage: \001 [-s SIGNAL | -SIGNAL] PID...\n"
+    "  or:  \001 -l [SIGNAL]...\n"
+    "  or:  \001 -t [SIGNAL]...\n"
+    "Send a signal to processes, or list signals.\n"
+    "\n"
+    "  -s, --signal=SIGNAL, -SIGNAL  the signal to send, by name or number\n"
+    "  -l, --list                    list signal names, or convert names and numbers\n"
+    "  -t, --table                   list signals with their details\n"
+    "\002 \n"
+    "\n"
+    "A negative PID names a process group.\n";
+static const p8 tools_help_link[] =
+    "Usage: \001 FILE1 FILE2\n"
+    "  or:  \001 OPTION\n"
+    "Make FILE2 a hard link to FILE1 with the link call.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_ln[] =
+    "Usage: \001 [OPTION]... [-T] TARGET LINK_NAME\n"
+    "  or:  \001 [OPTION]... TARGET\n"
+    "  or:  \001 [OPTION]... TARGET... DIRECTORY\n"
+    "  or:  \001 [OPTION]... -t DIRECTORY TARGET...\n"
+    "Make links to TARGET: named LINK_NAME, or in the current directory, or\n"
+    "in DIRECTORY.  Links are hard unless --symbolic is given.\n"
+    "\n"
+    "      --backup[=CONTROL]  back up each destination that exists\n"
+    "  -b                      like --backup, without a value\n"
+    "  -d, -F, --directory     let the superuser try hard links to directories\n"
+    "  -f, --force             remove destinations that exist\n"
+    "  -i, --interactive       ask before removing destinations\n"
+    "  -L, --logical           follow TARGETs that are symlinks\n"
+    "  -n, --no-dereference    a LINK_NAME symlink to a directory is a file\n"
+    "  -P, --physical          hard link symlinks themselves\n"
+    "  -r, --relative          with -s, make links relative to their place\n"
+    "  -s, --symbolic          make symbolic links\n"
+    "  -S, --suffix=SUFFIX     backup suffix, not ~\n"
+    "  -t, --target-directory=DIRECTORY\n"
+    "                          make the links in DIRECTORY\n"
+    "  -T, --no-target-directory\n"
+    "                          LINK_NAME is always a file\n"
+    "  -v, --verbose           print each link made\n"
+    "\002\032\n"
+    "\n"
+    "CONTROL is none/off, numbered/t, existing/nil or simple/never.\n";
+static const p8 tools_help_logname[] =
+    "Usage: \001 [OPTION]\n"
+    "Print the name the user logged in with.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_mkdir[] =
+    "Usage: \001 [OPTION]... DIRECTORY...\n"
+    "Make each DIRECTORY that does not exist yet.\n"
+    "\n"
+    "  -m, --mode=MODE      give new directories MODE, as chmod takes\n"
+    "  -p, --parents        make missing parents too; no error if it exists\n"
+    "  -v, --verbose        print each directory made\n"
+    "  -Z                   give new directories the default SELinux context\n"
+    "      --context[=CTX]  like -Z, or set the context to CTX\n"
+    "\002\027\n";
+static const p8 tools_help_mkfifo[] =
+    "Usage: \001 [OPTION]... NAME...\n"
+    "Make a named pipe (FIFO) at each NAME.\n"
+    "\n"
+    "  -m, --mode=MODE      give them MODE, not a=rw minus the umask\n"
+    "  -Z                   give them the default SELinux context\n"
+    "      --context[=CTX]  like -Z, or set the context to CTX\n"
+    "\002\027\n";
+static const p8 tools_help_mknod[] =
+    "Usage: \001 [OPTION]... NAME TYPE [MAJOR MINOR]\n"
+    "Make a special file NAME of TYPE: b (block), c or u (character) with\n"
+    "MAJOR and MINOR, or p (FIFO) without them.\n"
+    "\n"
+    "  -m, --mode=MODE      give it MODE, not a=rw minus the umask\n"
+    "  -Z                   give it the default SELinux context\n"
+    "      --context[=CTX]  like -Z, or set the context to CTX\n"
+    "\002\027\n";
+static const p8 tools_help_mktemp[] =
+    "Usage: \001 [OPTION]... [TEMPLATE]\n"
+    "Make a temporary file or directory safely and print its name.  TEMPLATE\n"
+    "ends in at least 3 X's (tmp.XXXXXXXXXX and --tmpdir by default).\n"
+    "\n"
+    "  -d, --directory         make a directory, not a file\n"
+    "  -u, --dry-run           only print a name (unsafe)\n"
+    "  -q, --quiet             say nothing when creation fails\n"
+    "      --suffix=SUFF       add SUFF after the X's\n"
+    "  -p DIR, --tmpdir[=DIR]  TEMPLATE is relative to DIR, else to\n"
+    "                          $TMPDIR, else to /tmp\n"
+    "  -t                      TEMPLATE is one name component (deprecated)\n"
+    "\002\032\n";
+static const p8 tools_help_mv[] =
+    "Usage: \001 [OPTION]... [-T] SOURCE DEST\n"
+    "  or:  \001 [OPTION]... SOURCE... DIRECTORY\n"
+    "  or:  \001 [OPTION]... -t DIRECTORY SOURCE...\n"
+    "Rename SOURCE to DEST, or move each SOURCE into DIRECTORY.\n"
+    "\n"
+    "      --backup[=CONTROL]     back up each destination that exists\n"
+    "  -b                         like --backup, without a value\n"
+    "      --debug                explain each copy; implies -v\n"
+    "      --exchange             swap each SOURCE and its destination\n"
+    "  -f, --force                never ask before overwriting\n"
+    "  -i, --interactive          ask before overwriting\n"
+    "  -n, --no-clobber           never overwrite (the last of -f -i -n wins)\n"
+    "      --no-copy              fail rather than copy when renaming cannot work\n"
+    "      --strip-trailing-slashes\n"
+    "                             drop trailing slashes from SOURCEs\n"
+    "  -S, --suffix=SUFFIX        backup suffix, not ~\n"
+    "  -t, --target-directory=DIRECTORY\n"
+    "                             move into DIRECTORY\n"
+    "  -T, --no-target-directory  DEST is never a directory to move into\n"
+    "      --update[=UPDATE]      replace existing files: all, none,\n"
+    "                             none-fail or older (the default)\n"
+    "  -u                         the same as --update=older\n"
+    "  -v, --verbose              say what is done\n"
+    "  -Z, --context              give moved files the default SELinux context\n"
+    "\002\035\n";
+static const p8 tools_help_nice[] =
+    "Usage: \001 [OPTION] [COMMAND [ARG]...]\n"
+    "Run COMMAND with a changed niceness, or print the niceness.\n"
+    "\n"
+    "  -n, --adjustment=N  add N to the niceness (10)\n"
+    "\002\026\n"
+    "\n"
+    "Exit status: 125 when nice fails, 126 when COMMAND cannot run, 127 when\n"
+    "it is not found, otherwise COMMAND's status.\n";
+static const p8 tools_help_nohup[] =
+    "Usage: \001 COMMAND [ARG]...\n"
+    "  or:  \001 OPTION\n"
+    "Run COMMAND immune to hangups, with output to nohup.out when standard\n"
+    "output is a terminal.\n"
+    "\n"
+    "\002\021\n"
+    "\n"
+    "Exit status: 125 when nohup fails, 126 when COMMAND cannot run, 127 when\n"
+    "it is not found, otherwise COMMAND's status.\n";
+static const p8 tools_help_nproc[] =
+    "Usage: \001 [OPTION]...\n"
+    "Print how many processors this process may use.\n"
+    "\n"
+    "      --all       print the number installed\n"
+    "      --ignore=N  leave out N, printing at least 1\n"
+    "\002\022\n";
+static const p8 tools_help_numfmt[] =
+    "Usage: \001 [OPTION]... [NUMBER]...\n"
+    "Reformat each NUMBER, or the numbers on standard input.\n"
+    "\n"
+    "      --debug          warn about input that cannot be read\n"
+    "  -d, --delimiter=X    fields are separated by X, not blanks\n"
+    "      --field=FIELDS   convert these fields (1), as cut takes them\n"
+    "      --format=FORMAT  printf-style FORMAT with one %f\n"
+    "      --from=UNIT      read suffixes as UNIT (none)\n"
+    "      --from-unit=N    input unit size (1)\n"
+    "      --grouping       group digits as the locale does\n"
+    "      --header[=N]     pass N header lines through (1)\n"
+    "      --invalid=MODE   abort, fail, warn or ignore\n"
+    "      --padding=N      pad to N columns, left-aligned if negative\n"
+    "      --round=METHOD   up, down, from-zero, towards-zero, nearest\n"
+    "      --suffix=SUFFIX  add SUFFIX to output, accept it on input\n"
+    "      --unit-separator=SEP\n"
+    "                       put SEP between number and unit\n"
+    "      --to=UNIT        write suffixes as UNIT\n"
+    "      --to-unit=N      output unit size (1)\n"
+    "  -z, --zero-terminated\n"
+    "                       lines end with NUL, not newline\n"
+    "\002\027\n"
+    "\n"
+    "UNIT is none, auto, si, iec or iec-i.\n";
+static const p8 tools_help_pathchk[] =
+    "Usage: \001 [OPTION]... NAME...\n"
+    "Report file names that are invalid or not portable.\n"
+    "\n"
+    "  -p                 check against POSIX's minimum limits and characters\n"
+    "  -P                 also refuse empty names and a leading -\n"
+    "      --portability  the same as -p -P\n"
+    "\002\025\n";
+static const p8 tools_help_pinky[] =
+    "Usage: \001 [OPTION]... [USER]...\n"
+    "Print what is known of each USER, or of everyone logged in.\n"
+    "\n"
+    "  -l             long form for the given USERs\n"
+    "  -b             long form without home and shell\n"
+    "  -h             long form without the project file\n"
+    "  -p             long form without the plan file\n"
+    "  -s             short form (the default)\n"
+    "  -f             short form without the heading\n"
+    "  -w             short form without the full name\n"
+    "  -i             short form without full name and host\n"
+    "  -q             short form without full name, host and idle time\n"
+    "      --lookup   look up host names in DNS\n"
+    "\002\021\n";
+static const p8 tools_help_printenv[] =
+    "Usage: \001 [OPTION] [VARIABLE]...\n"
+    "Print the value of each VARIABLE, or every NAME=VALUE pair.\n"
+    "\n"
+    "  -0, --null     end each value with NUL, not newline\n"
+    "\002\021\n";
+static const p8 tools_help_readlink[] =
+    "Usage: \001 [OPTION]... FILE...\n"
+    "Print where each symlink points, or each FILE's canonical name.\n"
+    "\n"
+    "  -f, --canonicalize          follow every link; all but the last part exists\n"
+    "  -e, --canonicalize-existing\n"
+    "                              follow every link; every part exists\n"
+    "  -m, --canonicalize-missing  follow every link; nothing need exist\n"
+    "  -n, --no-newline            print no final delimiter\n"
+    "  -q, --quiet\n"
+    "  -s, --silent                leave out most errors (unless POSIXLY_CORRECT)\n"
+    "  -v, --verbose               report errors\n"
+    "  -z, --zero                  end each name with NUL, not newline\n"
+    "\002\036\n";
+static const p8 tools_help_realpath[] =
+    "Usage: \001 [OPTION]... FILE...\n"
+    "Print the absolute, resolved name of each FILE.\n"
+    "\n"
+    "  -E, --canonicalize          all but the last part must exist (default)\n"
+    "  -e, --canonicalize-existing\n"
+    "                              every part must exist\n"
+    "  -m, --canonicalize-missing  nothing need exist\n"
+    "  -L, --logical               resolve .. before symlinks\n"
+    "  -P, --physical              resolve symlinks as met (default)\n"
+    "  -q, --quiet                 leave out most errors\n"
+    "      --relative-to=DIR       print names relative to DIR\n"
+    "      --relative-base=DIR     relative only for names under DIR\n"
+    "  -s, --strip, --no-symlinks  do not resolve symlinks\n"
+    "  -z, --zero                  end each name with NUL, not newline\n"
+    "\002\036\n";
+static const p8 tools_help_rm[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Remove each FILE.  Directories need -r or -d.\n"
+    "\n"
+    "  -f, --force               never ask; ignore names that do not exist\n"
+    "  -i                        ask before each removal\n"
+    "  -I                        ask once, for over three files or -r\n"
+    "      --interactive[=WHEN]  never, once (-I) or always (-i, the default)\n"
+    "      --one-file-system     when recursive, skip other file systems\n"
+    "      --no-preserve-root    let / be removed\n"
+    "      --preserve-root[=all]\n"
+    "                            refuse / (default); with all, also any\n"
+    "                            argument on another device than its parent\n"
+    "  -r, -R, --recursive       remove directories and all they hold\n"
+    "  -d, --dir                 remove empty directories\n"
+    "  -v, --verbose             say what is done\n"
+    "\002\034\n"
+    "\n"
+    "Remove a name like -foo as ./-foo or after --.\n";
+static const p8 tools_help_rmdir[] =
+    "Usage: \001 [OPTION]... DIRECTORY...\n"
+    "Remove each empty DIRECTORY.\n"
+    "\n"
+    "      --ignore-fail-on-non-empty\n"
+    "                                say nothing of directories that hold files\n"
+    "  -p, --parents                 remove the parents too, as rmdir a/b a\n"
+    "  -v, --verbose                 report every directory\n"
+    "\002 \n";
+static const p8 tools_help_seq[] =
+    "Usage: \001 [OPTION]... LAST\n"
+    "  or:  \001 [OPTION]... FIRST LAST\n"
+    "  or:  \001 [OPTION]... FIRST INCREMENT LAST\n"
+    "Print the numbers from FIRST (1) to LAST in steps of INCREMENT (1).\n"
+    "\n"
+    "  -f, --format=FORMAT     print each number with printf FORMAT\n"
+    "  -s, --separator=STRING  separate numbers with STRING (\\n)\n"
+    "  -w, --equal-width       pad with zeros to one width\n"
+    "\002\032\n";
+static const p8 tools_help_shred[] =
+    "Usage: \001 [OPTION]... FILE...\n"
+    "Overwrite each FILE, or standard output for -, several times so its data\n"
+    "is hard to recover.\n"
+    "\n"
+    "  -f, --force         change permissions to allow writing\n"
+    "  -n, --iterations=N  overwrite N times (3)\n"
+    "      --random-source=FILE\n"
+    "                      take random bytes from FILE\n"
+    "  -s, --size=N        shred N bytes (K, M, G accepted)\n"
+    "  -u                  remove the file afterwards\n"
+    "      --remove[=HOW]  the same, by unlink, wipe or wipesync (default)\n"
+    "  -v, --verbose       report progress\n"
+    "  -x, --exact         do not round sizes up to whole blocks\n"
+    "  -z, --zero          finish with a pass of zeros\n"
+    "\002\026\n";
+static const p8 tools_help_shuf[] =
+    "Usage: \001 [OPTION]... [FILE]\n"
+    "  or:  \001 -e [OPTION]... [ARG]...\n"
+    "  or:  \001 -i LO-HI [OPTION]...\n"
+    "Print the input lines in random order.\n"
+    "\n"
+    "  -e, --echo               take each ARG as a line\n"
+    "  -i, --input-range=LO-HI  take the numbers LO to HI as lines\n"
+    "  -n, --head-count=COUNT   print at most COUNT lines\n"
+    "  -o, --output=FILE        write to FILE, not standard output\n"
+    "      --random-source=FILE\n"
+    "                           take random bytes from FILE\n"
+    "  -r, --repeat             pick with replacement\n"
+    "  -z, --zero-terminated    lines end with NUL, not newline\n"
+    "\002\033\n";
+static const p8 tools_help_sleep[] =
+    "Usage: \001 NUMBER[SUFFIX]...\n"
+    "  or:  \001 OPTION\n"
+    "Wait for the sum of the NUMBERs, in s (default), m, h or d.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_split[] =
+    "Usage: \001 [OPTION]... [FILE [PREFIX]]\n"
+    "Split FILE, or standard input, into PREFIXaa, PREFIXab, ... (PREFIX x),\n"
+    "1000 lines each by default.\n"
+    "\n"
+    "  -a, --suffix-length=N      suffixes N long (2)\n"
+    "      --additional-suffix=SUFFIX\n"
+    "                             add SUFFIX to each name\n"
+    "  -b, --bytes=SIZE           SIZE bytes per file\n"
+    "  -C, --line-bytes=SIZE      at most SIZE bytes of whole lines per file\n"
+    "  -d                         numeric suffixes from 0\n"
+    "      --numeric-suffixes[=FROM]\n"
+    "                             numeric suffixes from FROM\n"
+    "  -x                         hex suffixes from 0\n"
+    "      --hex-suffixes[=FROM]  hex suffixes from FROM\n"
+    "  -e, --elide-empty-files    with -n, write no empty files\n"
+    "      --filter=COMMAND       pipe each piece to COMMAND, with $FILE set\n"
+    "  -l, --lines=NUMBER         NUMBER lines per file\n"
+    "  -n, --number=CHUNKS        N, K/N, l/N, l/K/N, r/N or r/K/N\n"
+    "  -t, --separator=SEP        records end with SEP ('\\0' for NUL)\n"
+    "  -u, --unbuffered           with -n r/..., copy input at once\n"
+    "      --verbose              report each file before it is opened\n"
+    "\002\035\n"
+    "\n"
+    "SIZE is a number with K M G T ... or KB MB ...\n";
+static const p8 tools_help_stat[] =
+    "Usage: \001 [OPTION]... FILE...\n"
+    "Show the status of each FILE or its file system.\n"
+    "\n"
+    "  -L, --dereference    follow symlinks\n"
+    "  -f, --file-system    show the file system instead\n"
+    "      --cached=MODE    always, never or default\n"
+    "  -c, --format=FORMAT  print FORMAT and a newline for each\n"
+    "      --printf=FORMAT  like --format with backslash escapes, no newline\n"
+    "  -t, --terse          print it tersely\n"
+    "\002\027\n";
+static const p8 tools_help_stdbuf[] =
+    "Usage: \001 OPTION... COMMAND\n"
+    "Run COMMAND with changed buffering of its standard streams.\n"
+    "\n"
+    "  -i, --input=MODE   standard input buffering\n"
+    "  -o, --output=MODE  standard output buffering\n"
+    "  -e, --error=MODE   standard error buffering\n"
+    "\002\025\n"
+    "\n"
+    "MODE is L (line), 0 (none) or a size with K M G ... (full).  Exit status:\n"
+    "125 when stdbuf fails, 126 when COMMAND cannot run, 127 when it is not\n"
+    "found, otherwise COMMAND's status.\n";
+static const p8 tools_help_stty[] =
+    "Usage: \001 [-F DEVICE | --file=DEVICE] [SETTING]...\n"
+    "  or:  \001 [-F DEVICE | --file=DEVICE] [-a|--all]\n"
+    "  or:  \001 [-F DEVICE | --file=DEVICE] [-g|--save]\n"
+    "Print or change the settings of the terminal on standard input.\n"
+    "\n"
+    "  -a, --all          print every setting readably\n"
+    "  -g, --save         print every setting in a form stty takes back\n"
+    "  -F, --file=DEVICE  use DEVICE, not standard input\n"
+    "\002\025\n"
+    "\n"
+    "A SETTING is a flag, [-]flag to clear it, a control character with its\n"
+    "CHAR (^c, 0x37, 0177, undef), a speed, rows N, cols N, size, speed, or a\n"
+    "combination such as sane, raw, cooked, cbreak, ek, evenp, oddp or nl.\n";
+static const p8 tools_help_sync[] =
+    "Usage: \001 [OPTION] [FILE]...\n"
+    "Write cached data to storage: all of it, or that of each FILE.\n"
+    "\n"
+    "  -d, --data         only file data, not metadata\n"
+    "  -f, --file-system  the file systems holding the FILEs\n"
+    "\002\025\n";
+static const p8 tools_help_timeout[] =
+    "Usage: \001 [OPTION]... DURATION COMMAND [ARG]...\n"
+    "Run COMMAND and signal it if it still runs after DURATION.\n"
+    "\n"
+    "  -f, --foreground           let COMMAND use the terminal; its children\n"
+    "                             are not timed\n"
+    "  -k, --kill-after=DURATION  send KILL this long after the first signal\n"
+    "  -p, --preserve-status      exit with COMMAND's status even on timeout\n"
+    "  -s, --signal=SIGNAL        send SIGNAL, not TERM\n"
+    "  -v, --verbose              report each signal sent\n"
+    "\002\035\n"
+    "\n"
+    "DURATION is a number with s (default), m, h or d; 0 means no limit.\n"
+    "Exit status: 124 on timeout, 125 when timeout fails, 126 when COMMAND\n"
+    "cannot run, 127 when it is not found, 137 after KILL, otherwise COMMAND's.\n";
+static const p8 tools_help_touch[] =
+    "Usage: \001 [OPTION]... FILE...\n"
+    "Set the access and modification times of each FILE to now, creating\n"
+    "empty files that do not exist.  A FILE of - is standard output.\n"
+    "\n"
+    "  -a                    change only the access time\n"
+    "  -c, --no-create       create no files\n"
+    "  -d, --date=STRING     use the time STRING describes\n"
+    "  -f                    accepted and ignored\n"
+    "  -h, --no-dereference  change symlinks themselves\n"
+    "  -m                    change only the modification time\n"
+    "  -r, --reference=FILE  use FILE's times\n"
+    "  -t [[CC]YY]MMDDhhmm[.ss]\n"
+    "                        use this time\n"
+    "      --time=WORD       change only access, atime, use, modify or mtime\n"
+    "\002\030\n";
+static const p8 tools_help_truncate[] =
+    "Usage: \001 OPTION... FILE...\n"
+    "Shrink or extend each FILE to a size, creating those that do not exist.\n"
+    "\n"
+    "  -c, --no-create        create no files\n"
+    "  -o, --io-blocks        SIZE counts I/O blocks, not bytes\n"
+    "  -r, --reference=RFILE  start from RFILE's size\n"
+    "  -s, --size=SIZE        set or change the size by SIZE\n"
+    "\002\031\n"
+    "\n"
+    "SIZE is a number with K M G T ... or KB MB ..., prefixed by + (extend),\n"
+    "- (reduce), < (at most), > (at least), / or % (round down or up).\n";
+static const p8 tools_help_tsort[] =
+    "Usage: \001 [OPTION] [FILE]\n"
+    "Print a total order consistent with the pairs in FILE, or standard input.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_tty[] =
+    "Usage: \001 [OPTION]...\n"
+    "Print the name of the terminal on standard input.\n"
+    "\n"
+    "  -s, --silent, --quiet  print nothing; the exit status tells\n"
+    "\002\031\n";
+static const p8 tools_help_uname[] =
+    "Usage: \001 [OPTION]...\n"
+    "Print system information; without options, as -s.\n"
+    "\n"
+    "  -a, --all               print everything, leaving out unknown -p and -i\n"
+    "  -s, --kernel-name       the kernel name\n"
+    "  -n, --nodename          the network node name\n"
+    "  -r, --kernel-release    the kernel release\n"
+    "  -v, --kernel-version    the kernel version\n"
+    "  -m, --machine           the machine hardware name\n"
+    "  -p, --processor         the processor type\n"
+    "  -i, --hardware-platform\n"
+    "                          the hardware platform\n"
+    "  -o, --operating-system  the operating system\n"
+    "\002\032\n";
+static const p8 tools_help_unlink[] =
+    "Usage: \001 FILE\n"
+    "  or:  \001 OPTION\n"
+    "Remove FILE with the unlink call.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_uptime[] =
+    "Usage: \001 [OPTION]... [FILE]\n"
+    "Print how long the system has run, the users and the load averages.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_users[] =
+    "Usage: \001 [OPTION]... [FILE]\n"
+    "Print the users logged in, from FILE or /var/run/utmp.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_who[] =
+    "Usage: \001 [OPTION]... [ FILE | ARG1 ARG2 ]\n"
+    "Print who is logged in, from FILE or /var/run/utmp.\n"
+    "\n"
+    "  -a, --all       the same as -b -d --login -p -r -t -T -u\n"
+    "  -b, --boot      time of the last boot\n"
+    "  -d, --dead      dead processes\n"
+    "  -H, --heading   a line of column headings\n"
+    "  -l, --login     login processes\n"
+    "      --lookup    look up host names in DNS\n"
+    "  -m              only the user on standard input (as ARG1 ARG2)\n"
+    "  -p, --process   active processes started by init\n"
+    "  -q, --count     login names and a count\n"
+    "  -r, --runlevel  the current runlevel\n"
+    "  -s, --short     name, line and time (default)\n"
+    "  -t, --time      the last clock change\n"
+    "  -T, -w, --mesg  message status as +, - or ?\n"
+    "  -u, --users     users with idle time\n"
+    "      --message   the same as -T\n"
+    "      --writable  the same as -T\n"
+    "\002\022\n";
+static const p8 tools_help_whoami[] =
+    "Usage: \001 [OPTION]...\n"
+    "Print the effective user's name, as id -un.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_yes[] =
+    "Usage: \001 [STRING]...\n"
+    "  or:  \001 OPTION\n"
+    "Print the STRINGs, or y, on a line over and over.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_install[] =
+    "Usage: \001 [OPTION]... [-T] SOURCE DEST\n"
+    "  or:  \001 [OPTION]... SOURCE... DIRECTORY\n"
+    "  or:  \001 [OPTION]... -t DIRECTORY SOURCE...\n"
+    "  or:  \001 [OPTION]... -d DIRECTORY...\n"
+    "Copy SOURCE to DEST or each SOURCE into DIRECTORY, setting mode and\n"
+    "owner; with -d, make each DIRECTORY and its parents.\n"
+    "\n"
+    "      --backup[=CONTROL]     back up each destination that exists\n"
+    "  -b                         like --backup, without a value\n"
+    "  -c                         accepted and ignored\n"
+    "  -C, --compare              leave destinations that already match alone\n"
+    "  -d, --directory            make the operands as directories\n"
+    "  -D                         first make DEST's parents or -t's directory\n"
+    "      --debug                explain each copy; implies -v\n"
+    "  -g, --group=GROUP          set the group\n"
+    "  -m, --mode=MODE            set the mode, not rwxr-xr-x\n"
+    "  -o, --owner=OWNER          set the owner (superuser only)\n"
+    "  -p, --preserve-timestamps  keep SOURCE's access and modification times\n"
+    "  -s, --strip                strip symbol tables\n"
+    "      --strip-program=PROGRAM\n"
+    "                             strip with PROGRAM\n"
+    "  -S, --suffix=SUFFIX        backup suffix, not ~\n"
+    "  -t, --target-directory=DIRECTORY\n"
+    "                             copy into DIRECTORY\n"
+    "  -T, --no-target-directory  DEST is always a file\n"
+    "  -v, --verbose              print each file or directory made\n"
+    "      --preserve-context     keep SELinux contexts\n"
+    "  -Z                         set the default SELinux context\n"
+    "      --context[=CTX]        like -Z, or set the context to CTX\n"
+    "\002\035\n";
+
+typedef struct
+{
+        string_address name;
+        const_string text;
+} tools_help_entry;
+
+static const tools_help_entry tools_help[] = {
+    {"b2sum", tools_help_b2sum},
+    {"base32", tools_help_base32},
+    {"base64", tools_help_base32},
+    {"basename", tools_help_basename},
+    {"basenc", tools_help_basenc},
+    {"cat", tools_help_cat},
+    {"chgrp", tools_help_chgrp},
+    {"chmod", tools_help_chmod},
+    {"chown", tools_help_chown},
+    {"chroot", tools_help_chroot},
+    {"cksum", tools_help_cksum},
+    {"comm", tools_help_comm},
+    {"cp", tools_help_cp},
+    {"csplit", tools_help_csplit},
+    {"cut", tools_help_cut},
+    {"date", tools_help_date},
+    {"dd", tools_help_dd},
+    {"df", tools_help_df},
+    {"dir", tools_help_ls},
+    {"dircolors", tools_help_dircolors},
+    {"dirname", tools_help_dirname},
+    {"du", tools_help_du},
+    {"env", tools_help_env},
+    {"expand", tools_help_expand},
+    {"expr", tools_help_expr},
+    {"factor", tools_help_factor},
+    {"fmt", tools_help_fmt},
+    {"fold", tools_help_fold},
+    {"groups", tools_help_groups},
+    {"head", tools_help_head},
+    {"hostid", tools_help_hostid},
+    {"hostname", tools_help_hostname},
+    {"id", tools_help_id},
+    {"install", tools_help_install},
+    {"join", tools_help_join},
+    {"kill", tools_help_kill},
+    {"link", tools_help_link},
+    {"ln", tools_help_ln},
+    {"logname", tools_help_logname},
+    {"ls", tools_help_ls},
+    {"md5sum", tools_help_md5sum},
+    {"mkdir", tools_help_mkdir},
+    {"mkfifo", tools_help_mkfifo},
+    {"mknod", tools_help_mknod},
+    {"mktemp", tools_help_mktemp},
+    {"mv", tools_help_mv},
+    {"nice", tools_help_nice},
+    {"nl", tools_help_nl},
+    {"nohup", tools_help_nohup},
+    {"nproc", tools_help_nproc},
+    {"numfmt", tools_help_numfmt},
+    {"od", tools_help_od},
+    {"paste", tools_help_paste},
+    {"pathchk", tools_help_pathchk},
+    {"pinky", tools_help_pinky},
+    {"pr", tools_help_pr},
+    {"printenv", tools_help_printenv},
+    {"ptx", tools_help_ptx},
+    {"readlink", tools_help_readlink},
+    {"realpath", tools_help_realpath},
+    {"rm", tools_help_rm},
+    {"rmdir", tools_help_rmdir},
+    {"seq", tools_help_seq},
+    {"sha1sum", tools_help_md5sum},
+    {"sha224sum", tools_help_md5sum},
+    {"sha256sum", tools_help_md5sum},
+    {"sha384sum", tools_help_md5sum},
+    {"sha512sum", tools_help_md5sum},
+    {"shred", tools_help_shred},
+    {"shuf", tools_help_shuf},
+    {"sleep", tools_help_sleep},
+    {"sort", tools_help_sort},
+    {"split", tools_help_split},
+    {"stat", tools_help_stat},
+    {"stdbuf", tools_help_stdbuf},
+    {"stty", tools_help_stty},
+    {"sum", tools_help_sum},
+    {"sync", tools_help_sync},
+    {"tac", tools_help_tac},
+    {"tail", tools_help_tail},
+    {"tee", tools_help_tee},
+    {"timeout", tools_help_timeout},
+    {"touch", tools_help_touch},
+    {"tr", tools_help_tr},
+    {"truncate", tools_help_truncate},
+    {"tsort", tools_help_tsort},
+    {"tty", tools_help_tty},
+    {"uname", tools_help_uname},
+    {"unexpand", tools_help_unexpand},
+    {"uniq", tools_help_uniq},
+    {"unlink", tools_help_unlink},
+    {"uptime", tools_help_uptime},
+    {"users", tools_help_users},
+    {"vdir", tools_help_ls},
+    {"wc", tools_help_wc},
+    {"who", tools_help_who},
+    {"whoami", tools_help_whoami},
+    {"yes", tools_help_yes},
+    {null},
+};
+
+// Help text leaves in one write when it fits the buffer, which every text
+// does; a longer one would go out in buffer-sized writes rather than be cut.
+typedef struct
+{
+        p8 bytes[8192];
+        positive length;
+        bipolar error;
+} tools_meta_output;
+
+static void tools_meta_flush(tools_meta_output address_to output)
+{
+        if (output->length && !output->error)
+        {
+                system_write_result wrote =
+                    system_write_all_checked(1, output->bytes, output->length);
+
+                if (wrote.bytes != output->length)
+                        output->error = wrote.error ? wrote.error : -5;
+        }
+        output->length = 0;
+}
+
+static void tools_meta_put(tools_meta_output address_to output, const_string text,
+                           positive length)
+{
+        for (positive at = 0; at < length; at++)
+        {
+                if (output->length == sizeof(output->bytes))
+                        tools_meta_flush(output);
+                output->bytes[output->length++] = text[at];
+        }
+}
+
+static void tools_meta_line(tools_meta_output address_to output, const_string option,
+                            positive width, const_string description)
+{
+        positive length = string_length(option);
+
+        tools_meta_put(output, option, length);
+        for (; length < width; length++)
+                tools_meta_put(output, (const_string) " ", 1);
+        tools_meta_put(output, description, string_length(description));
+}
+
+static void tools_meta_help(tools_meta_output address_to output, string_address name,
+                            const_string text)
+{
+        for (; *text; text++)
+                if (*text == 1)
+                        tools_meta_put(output, name, string_length(name));
+                else if (*text == 2 && text[1])
+                {
+                        positive width = *++text;
+
+                        tools_meta_line(output, (const_string) "      --help", width,
+                                        (const_string) "show this help and exit\n");
+                        tools_meta_line(output, (const_string) "      --version", width,
+                                        (const_string) "show the version and exit\n");
+                }
+                else
+                        tools_meta_put(output, text, 1);
+}
+
+static b32 tools_meta(string_address name, string_address address_to arguments,
+                      positive count)
+{
+        if (!tools_meta_asked(arguments, count))
+                return 256;
+
+        const tools_meta_rule address_to rule = null;
+        string_address valued = "";
+        p8 stop = TOOLS_META_PERMUTE;
+        p8 failure = 1;
+        bool help = false;
+        bool found = false;
+
+        for (const tools_meta_rule address_to at = tools_meta_rules; at->name; at++)
+                if (string_equals(name, at->name))
+                {
+                        rule = at;
+                        break;
+                }
+        if (rule)
+        {
+                valued = rule->valued;
+                stop = rule->stop;
+                failure = rule->failure;
+        }
+        if (file_environment("POSIXLY_CORRECT") && stop == TOOLS_META_PERMUTE)
+                stop = TOOLS_META_FIRST;
+
+        for (positive at = 1; at < count && arguments[at]; at++)
+        {
+                string_address word = arguments[at];
+
+                if (stop == TOOLS_META_ALONE && count != 2)
+                        break;
+                if (word[0] != '-' || !word[1])
+                {
+                        if (stop == TOOLS_META_PERMUTE)
+                                continue;
+                        break;
+                }
+                if (word[1] == '-')
+                {
+                        if (!word[2])
+                                break;
+                        if (string_equals(word, "--help") ||
+                            string_equals(word, "--version"))
+                        {
+                                help = word[2] == 'h';
+                                found = true;
+                                break;
+                        }
+                        continue;
+                }
+                if (string_equals(name, "seq") &&
+                    (byte_is_digit(word[1]) || word[1] == '.'))
+                        break;
+                for (positive letter = 1; word[letter]; letter++)
+                        if (string_first_of(valued, word[letter]))
+                        {
+                                if (!word[letter + 1])
+                                        at++;
+                                break;
+                        }
+        }
+        if (!found)
+                return 256;
+
+        // One write, as stdio's one buffer gives GNU: a reader that leaves
+        // after the first bytes cannot cut the text in two.
+        const_string text = null;
+        tools_meta_output output;
+
+        output.length = 0;
+        output.error = 0;
+        if (help)
+                for (const tools_help_entry address_to entry = tools_help; entry->name; entry++)
+                        if (string_equals(name, entry->name))
+                        {
+                                text = entry->text;
+                                break;
+                        }
+        if (text)
+                tools_meta_help(&output, name, text);
+        else
+        {
+                string_address pieces[] = {help ? (string_address) "Usage: " : name,
+                                           help ? name : (string_address) " from moonwater\n",
+                                           help ? (string_address) " [OPTION]... [ARGUMENT]...\n"
+                                                : (string_address) ""};
+
+                for (positive at = 0; at < 3; at++)
+                        tools_meta_put(&output, pieces[at], string_length(pieces[at]));
+        }
+        tools_meta_flush(&output);
+        if (output.error)
+        {
+                string_format(log_error, "%s: write error: %s\n", name,
+                              file_reason(output.error));
+                log_flush();
+                return failure;
+        }
+        return 0;
 }

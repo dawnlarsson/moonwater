@@ -154,6 +154,8 @@ static build_setting build_settings[BUILD_SETTING_ROOM] = {
 
         /*      The sources and scripts a build reads. */
         {"tool_registry", "src/sh/tools.inc"},
+        {"switches_kconfig", "src/moonwater/Kconfig.switches"},
+        {"builtin_registry", "src/sh/builtin.c"},
         {"shell_source", "programs/shell"},
         {"utilities_source", "programs/utilities"},
         {"monitor_source", "programs/monitor.sh"},
@@ -229,7 +231,10 @@ static build_setting build_settings[BUILD_SETTING_ROOM] = {
                 list: it is the machine's own unless --arch or an arch/ profile
                 on the line says otherwise. */
         {"profiles_always", "any general gpu guests latency prod"},
-        {"profiles_default", "debug_none limbo desktop wifi serial"},
+        //      sec_default is the security tier a plain build ships; a tier
+        //      named on the line (sec_reference, sec_hardened, sec_locked)
+        //      takes its place with the rest of this list.
+        {"profiles_default", "debug_none limbo desktop wifi sec_default serial"},
 
         {null, null},
 };
@@ -2128,16 +2133,18 @@ static bool build_asm_pass(string_address text, string_address target,
                 */
                 if (marker)
                 {
-                        string_address text_line = build_join("\tasm_line(",
+                        //      Not text_line: that name is text.c's line
+                        //      store, which a macro reads through.
+                        string_address marker_line = build_join("\tasm_line(",
                                                               build_number(line_number),
                                                               ", \"", source,
                                                               "\")\n", null);
-                        positive length = string_length(text_line);
+                        positive length = string_length(marker_line);
 
                         if (address_to used + length >= room)
                                 return false;
 
-                        memory_copy(into + address_to used, text_line, length);
+                        memory_copy(into + address_to used, marker_line, length);
                         address_to used += length;
                         marker = false;
                 }
@@ -2689,6 +2696,16 @@ static b32 build_spark(string_address source, string_address output,
                 words[count++] = hook;
         }
 
+        //      The configuration header the image build wrote, then what
+        //      the caller's environment adds: SPARK_CPPFLAGS=-DBENCH_...
+        //      ./build spark is how the benchmarks in test/checks.c are
+        //      built.
+        {
+                string_address config = build_setting_get("spark_config");
+
+                if (config && *config && count + 1 < BUILD_ARGUMENT_ROOM)
+                        words[count++] = config;
+        }
         count = build_add_split((string_address address_to)words, count,
                                 BUILD_ARGUMENT_ROOM,
                                 string_get_environment(environ,
@@ -3669,6 +3686,86 @@ static bool build_tools_read()
 }
 
 /*
+        The builtins as the shell's own table spells them: every
+        SHELL_BUILTIN(KEY, "name", function) row of shell_commands[] in
+        src/sh/builtin.c is a switch, and every SHELL_BUILTIN_CORE row is
+        counted and has none.
+*/
+typedef struct build_builtin_entry
+{
+        string_address key;
+        string_address name;
+} build_builtin_entry;
+
+#define BUILD_BUILTIN_ROOM 256
+
+static build_builtin_entry build_builtin_table[BUILD_BUILTIN_ROOM];
+static positive build_builtin_count;
+static positive build_builtin_core;
+static bool build_builtins_ready;
+
+static bool build_builtins_read()
+{
+        build_lines walk;
+        p8 address_to store;
+
+        if (build_builtins_ready)
+                return true;
+
+        if (file_slurp(build_setting_get("builtin_registry"), build_file_two,
+                        BUILD_FILE_ROOM) < 0)
+                return false;
+
+        store = build_text_take(BUILD_WORD_ROOM);
+        build_lines_open(address_of walk, (string_address)build_file_two);
+
+        while (build_lines_next(address_of walk) &&
+               build_builtin_count < BUILD_BUILTIN_ROOM)
+        {
+                string_address words[BUILD_ARGUMENT_ROOM];
+                positive parts;
+                positive length = walk.length;
+                p8 address_to flat = build_text_take(length + 1);
+
+                //      Only rows as the table writes them, four spaces in;
+                //      the macro definitions above it start at the margin.
+                if (length < 17 || memory_compare(walk.line, "    SHELL_BUILTIN", 17))
+                        continue;
+
+                for (positive which = 0; which < length; which++)
+                {
+                        p8 byte = walk.line[which];
+
+                        flat[which] = (byte == '(' || byte == ')' || byte == ',' ||
+                                       byte == '"')
+                                              ? ' '
+                                              : byte;
+                }
+
+                flat[length] = end;
+                parts = build_words_of((string_address)flat, length,
+                                       (string_address address_to)words,
+                                       BUILD_ARGUMENT_ROOM, store,
+                                       BUILD_WORD_ROOM);
+
+                if (parts == 3 && word_is(words[0], "SHELL_BUILTIN_CORE"))
+                        build_builtin_core++;
+                else if (parts == 4 && word_is(words[0], "SHELL_BUILTIN"))
+                {
+                        build_builtin_table[build_builtin_count].key =
+                                build_join(words[1], null);
+                        build_builtin_table[build_builtin_count].name =
+                                build_join(words[2], null);
+                        build_builtin_count++;
+                }
+        }
+
+        build_builtins_ready = build_builtin_count > 0;
+
+        return build_builtins_ready;
+}
+
+/*
         The build.
 
         Everything below is build.sh's local path, step for step and label for
@@ -3684,6 +3781,60 @@ static bool build_moon_shell_monitor;
 //      switches share rather than through it.
 static positive build_moon_strict;
 
+/*
+        The per-tool and per-builtin switches the .config named, as the part
+        after CONFIG_MOONWATER_ -- TOOL_CAT, BUILTIN_ECHO -- and their value.
+        A switch the file does not name takes MOONWATER_TOOLS_ALL or
+        MOONWATER_BUILTINS_ALL, which is its Kconfig default: that is what
+        lets a profile fragment on its own, read by config-header, mean
+        what it means once composed.
+*/
+#define BUILD_SWITCH_ROOM 1024
+
+static string_address build_switch_name[BUILD_SWITCH_ROOM];
+static bool build_switch_value[BUILD_SWITCH_ROOM];
+static positive build_switch_count;
+static bool build_moon_tools_all;
+static bool build_moon_builtins_all;
+
+static string_address build_upper(string_address name)
+{
+        positive length = string_length(name);
+        p8 address_to into = build_text_take(length + 1);
+
+        for (positive at = 0; at < length; at++)
+                into[at] = (p8)byte_to_upper((p8)name[at]);
+
+        into[length] = end;
+
+        return (string_address)into;
+}
+
+//      kind is "TOOL_" or "BUILTIN_", key the upper-case name.
+static bool build_switch_on(string_address kind, string_address key)
+{
+        string_address want = build_join(kind, key, null);
+
+        for (positive at = build_switch_count; at > 0; at--)
+                if (word_is(build_switch_name[at - 1], want))
+                        return build_switch_value[at - 1];
+
+        return word_is(kind, "TOOL_") ? build_moon_tools_all
+                                      : build_moon_builtins_all;
+}
+
+/*
+        The SYSTEM tools the kernel and init reach by absolute path: /init
+        is what the kernel execs, /term is SPARK_TERMINAL_PROGRAM, and
+        /moonwater is the settle program system.c runs at every boot. Each
+        is a boot that stops if it is missing, so none has a switch.
+*/
+static bool build_tool_fixed(string_address name)
+{
+        return word_is(name, "init") || word_is(name, "term") ||
+               word_is(name, "moonwater");
+}
+
 //      An existing build tree has no lines for newly added symbols until
 //      olddefconfig next runs; their Kconfig defaults are y, while the core
 //      must be explicitly built in for the initial filesystem to use it.
@@ -3697,6 +3848,9 @@ static fn build_components(string_address config)
         build_moon_util_linux = true;
         build_moon_shell_monitor = true;
         build_moon_strict = STRICT_SAFE;
+        build_moon_tools_all = true;
+        build_moon_builtins_all = true;
+        build_switch_count = 0;
 
         if (file_slurp(config, build_file_two, BUILD_FILE_ROOM) < 0)
                 return;
@@ -3738,12 +3892,15 @@ static fn build_components(string_address config)
                         continue;
                 }
 
-                //      =y is on and "is not set" is off; any other value, =m
-                //      included, leaves the default alone.
-                if (pair.value && !memory_is_word(pair.value, pair.value_length, "y"))
-                        continue;
+                //      =y is on, and "is not set" and =n are off: a composed
+                //      .config says the first, a profile may say the second.
+                //      Any other value, =m included, leaves the default
+                //      alone.
+                on = pair.value && memory_is_word(pair.value, pair.value_length, "y");
 
-                on = pair.value != null;
+                if (pair.value && !on &&
+                    !memory_is_word(pair.value, pair.value_length, "n"))
+                        continue;
 
                 if (memory_is_word(name, length, "CORE"))
                         build_moon_core = on;
@@ -3755,26 +3912,490 @@ static fn build_components(string_address config)
                         build_moon_util_linux = on;
                 else if (memory_is_word(name, length, "SHELL_MONITOR"))
                         build_moon_shell_monitor = on;
+                else if (memory_is_word(name, length, "TOOLS_ALL"))
+                        build_moon_tools_all = on;
+                else if (memory_is_word(name, length, "BUILTINS_ALL"))
+                        build_moon_builtins_all = on;
+                else if ((string_has_prefix(name, "TOOL_") ||
+                          string_has_prefix(name, "BUILTIN_")) &&
+                         build_switch_count < BUILD_SWITCH_ROOM)
+                {
+                        build_switch_name[build_switch_count] =
+                                build_text_keep(name, length);
+                        build_switch_value[build_switch_count++] = on;
+                }
         }
 }
 
-static bool build_category_installed(string_address category)
-{
-        if (word_is(category, "GENERAL"))
-                return true;
+/*
+        What the programs are told about this configuration: one header,
+        artifacts/moonwater_config.h, which src/lib.util.c includes when the
+        compile names it through MOONWATER_CONFIG.
 
-        if (word_is(category, "MONITOR"))
-                return build_moon_shell_monitor;
+        The component switches used to travel as -D flags in a setting that
+        build_spark never read -- the C port of the build read an
+        environment variable instead -- so UTILITIES=n, UTIL_LINUX=n,
+        SHELL_MONITOR=n and every STRICT level but the default removed
+        symlinks and left the applets running from the shell. The header
+        carries what the table has to hold, as counts the tool table is
+        asserted against, and a record whose bytes are searched for in the
+        built image, so a header that stops reaching the compiler stops the
+        build instead of shipping the default.
+*/
+static bool build_utility_program;
+
+static bool build_category_on(string_address category)
+{
+        bool utilities = build_moon_utilities;
+
+        if (word_is(category, "SYSTEM"))
+                return !build_utility_program;
+
+        if (word_is(category, "GENERAL"))
+                return utilities;
 
         if (word_is(category, "UTIL_BIN") || word_is(category, "UTIL_SBIN"))
-                return build_moon_util_linux;
+                return utilities && build_moon_util_linux;
+
+        if (word_is(category, "MONITOR"))
+                return utilities && build_moon_shell_monitor &&
+                       !build_utility_program;
 
         return false;
+}
+
+//      Whether a tools.inc row is in the program being built.
+static bool build_tool_on(build_tool_entry address_to one)
+{
+        if (!build_category_on(one->category))
+                return false;
+
+        return build_tool_fixed(one->name) ||
+               build_switch_on("TOOL_", build_upper(one->name));
+}
+
+static string_address build_config_header(string_address from,
+                                          string_address address_to record)
+{
+        string_address text = build_join("/* Generated by build from ", from,
+                                         ". Do not edit. */\n", null);
+        positive tools = 0;
+        positive system = 0;
+
+        if (!build_moon_utilities)
+                text = build_join(text, "#define SHELL_NO_UTILITIES 1\n", null);
+        if (!build_moon_utilities || !build_moon_util_linux)
+                text = build_join(text, "#define SHELL_NO_UTIL_LINUX 1\n", null);
+        if (!build_category_on("MONITOR"))
+                text = build_join(text, "#define SHELL_NO_MONITOR 1\n", null);
+
+        text = build_join(text, "#define MOONWATER_STRICT ",
+                          build_number(build_moon_strict), "\n", null);
+
+        //      SYSTEM rows are counted apart: the utility-only program
+        //      drops them itself, so the one header serves either program.
+        //      A tool switched off is named for the gate in builtin.c by its
+        //      own spelling, which is the token tools.inc hands the macro.
+        for (positive at = 0; at < build_tool_count; at++)
+        {
+                build_tool_entry address_to one = address_of build_tool_table[at];
+                bool system_row = word_is(one->category, "SYSTEM");
+                bool on;
+
+                if (!system_row && !build_category_on(one->category))
+                        continue;
+
+                on = build_tool_fixed(one->name) ||
+                     build_switch_on("TOOL_", build_upper(one->name));
+
+                if (!on)
+                        text = build_join(text, "#define MOONWATER_TOOL_OFF_",
+                                          one->name, " 1\n", null);
+                else if (system_row)
+                        system++;
+                else
+                        tools++;
+        }
+
+        {
+                positive builtins = build_builtin_core;
+
+                for (positive at = 0; at < build_builtin_count; at++)
+                {
+                        build_builtin_entry address_to one =
+                                address_of build_builtin_table[at];
+
+                        if (build_switch_on("BUILTIN_", one->key))
+                                builtins++;
+                        else
+                                text = build_join(text,
+                                                  "#define MOONWATER_BUILTIN_OFF_",
+                                                  one->key, " 1\n", null);
+                }
+
+                text = build_join(text, "#define MOONWATER_CONFIG_BUILTINS ",
+                                  build_number(builtins), "\n", null);
+        }
+
+        text = build_join(text, "#define MOONWATER_CONFIG_TOOLS ",
+                          build_number(tools), "\n",
+                          "#define MOONWATER_CONFIG_SYSTEM_TOOLS ",
+                          build_number(system), "\n", null);
+
+        address_to record = build_join("moonwater-config ",
+                                       build_hex(memory_hash_33(text,
+                                                                string_length(text))),
+                                       null);
+
+        return build_join(text, "#define MOONWATER_CONFIG_RECORD \"",
+                          address_to record, "\"\n", null);
+}
+
+/*
+        Write the header for the configuration now held and point the next
+        spark build at it. The path is absolute because a quoted include is
+        looked up beside the file that asks for it, not where the compiler
+        runs.
+*/
+static b32 build_config_header_install(string_address from,
+                                       string_address address_to record)
+{
+        string_address path = build_in("artifacts", "moonwater_config.h");
+        string_address text = build_config_header(from, record);
+
+        if (!build_write_file(path, text, string_length(text)))
+                return build_die(build_join("cannot write ", path, null));
+
+        if (path[0] != '/')
+                path = build_join(build_working_directory(), "/", path, null);
+
+        //      One word, not a list to split: the path may hold a blank.
+        build_setting_set("spark_config",
+                          build_join("-DMOONWATER_CONFIG=\"", path, "\"", null));
+
+        return 0;
+}
+
+//      The built image must carry the record the header asked for, or the
+//      header never reached the compile.
+static b32 build_config_record_check(string_address image,
+                                     string_address record)
+{
+        if (build_tool("grep", "-q", "-a", "-F", record, image, null))
+                return build_die(build_join(image, " was not built from "
+                                            "artifacts/moonwater_config.h "
+                                            "(no '", record, "' in it)", null));
+
+        return 0;
+}
+
+//      build config-header <config> <header> [utility]: the header an
+//      image build would write for that configuration, for a lane to build
+//      a program against without a kernel tree. Any symbol the file does
+//      not name keeps its Kconfig default, so a profile fragment on its
+//      own reads as that profile over the defaults.
+static b32 build_config_header_write(string_address config, string_address output,
+                                     string_address kind)
+{
+        string_address record;
+        string_address text;
+
+        if (!build_is_file(config))
+                return string_report(log_error, 1, "config-header: no such file: %s\n",
+                                     config);
+
+        if (kind && !word_is(kind, "utility"))
+                return string_report(log_error, 1,
+                                     "config-header: '%s' is not utility\n", kind);
+
+        build_components(config);
+
+        if (!build_tools_read() || !build_builtins_read())
+                return build_die("cannot read the tool or builtin registry");
+
+        build_utility_program = kind != null;
+        text = build_config_header(config, address_of record);
+
+        if (!build_write_file(output, text, string_length(text)))
+                return build_die(build_join("cannot write ", output, null));
+
+        return 0;
 }
 
 static b32 build_link(string_address target, string_address path)
 {
         return build_tool("ln", "-sf", target, path, null);
+}
+
+/*
+        Every name a tool is installed under, linked to applet, or with dry
+        printed one path to a line under the image root instead: that is
+        build surface, which is how a lane sees what an image would link
+        without building one. The SYSTEM names are the shell's, at the top
+        level; every other enabled tool is linked at the top level and under
+        the /bin or /sbin its category conventionally lives in, for absolute
+        commands and /usr/bin/env shebangs. A tool whose switch is off is
+        linked nowhere.
+*/
+static b32 build_tool_link(string_address image, string_address target,
+                           string_address path, bool dry)
+{
+        if (dry)
+        {
+                string_format(log, "%s\n", path);
+                return 0;
+        }
+
+        if (build_link(target, build_join(image, "/", path, null)))
+                return build_die(build_join("linking /", path, null));
+
+        return 0;
+}
+
+static b32 build_tool_links(string_address image, string_address applet, bool dry)
+{
+        for (positive at = 0; at < build_tool_count; at++)
+        {
+                build_tool_entry address_to one = address_of build_tool_table[at];
+
+                if (word_is(one->category, "SYSTEM") && build_tool_on(one) &&
+                    build_tool_link(image, applet, one->name, dry))
+                        return 1;
+        }
+
+        if (!build_moon_core || !build_moon_utilities)
+                return 0;
+
+        for (positive at = 0; at < build_tool_count; at++)
+        {
+                build_tool_entry address_to one = address_of build_tool_table[at];
+
+                if (!word_is(one->category, "SYSTEM") && build_tool_on(one) &&
+                    build_tool_link(image, applet, one->name, dry))
+                        return 1;
+        }
+
+        for (positive at = 0; at < build_tool_count; at++)
+        {
+                build_tool_entry address_to one = address_of build_tool_table[at];
+                string_address directory = null;
+
+                if (!build_tool_on(one))
+                        continue;
+
+                if (word_is(one->category, "GENERAL") ||
+                    word_is(one->category, "UTIL_BIN"))
+                        directory = "bin";
+                else if (word_is(one->category, "UTIL_SBIN"))
+                        directory = "sbin";
+
+                if (directory &&
+                    build_tool_link(image, build_join("../", applet, null),
+                                    build_join(directory, "/", one->name, null),
+                                    dry))
+                        return 1;
+        }
+
+        return 0;
+}
+
+/*
+        The Kconfig switches, written from the sources they switch.
+
+        One bool per tools.inc row, CONFIG_MOONWATER_TOOL_<NAME>, in a menu
+        per category that depends on the category's own switch, each
+        defaulting to MOONWATER_TOOLS_ALL: a profile that wants an allow
+        list turns that off and names what it keeps. The file is checked in
+        so menuconfig and a profile author can read it; `build switches`
+        rewrites it and `build switches check` is the kit lane's gate that
+        it still says what the sources say.
+*/
+static string_address build_switch_menu(string_address title,
+                                        string_address depends,
+                                        string_address address_to names,
+                                        positive count, string_address kind,
+                                        string_address all)
+{
+        string_address text = build_join("\nmenu \"", title, "\"\n",
+                                         "    depends on ", depends, "\n", null);
+
+        //      By name, which is how a reader looks for one.
+        for (positive at = 1; at < count; at++)
+                for (positive back = at; back > 0 &&
+                     string_compare(names[back - 1], names[back]) > 0; back--)
+                {
+                        string_address held = names[back];
+
+                        names[back] = names[back - 1];
+                        names[back - 1] = held;
+                }
+
+        for (positive at = 0; at < count; at++)
+                text = build_join(text, "\nconfig MOONWATER_", kind,
+                                  build_upper(names[at]), "\n",
+                                  "    bool \"", names[at], "\"\n",
+                                  "    default ", all, "\n", null);
+
+        return build_join(text, "\nendmenu\n", null);
+}
+
+static string_address build_switches_text()
+{
+        static const struct
+        {
+                string_address title;
+                string_address depends;
+                string_address first;
+                string_address second;
+        } menus[] = {
+            {"Tools: general utilities", "MOONWATER_UTILITIES", "GENERAL", null},
+            {"Tools: util-linux utilities", "MOONWATER_UTIL_LINUX", "UTIL_BIN",
+             "UTIL_SBIN"},
+            {"Tools: the resource monitor", "MOONWATER_SHELL_MONITOR", "MONITOR",
+             null},
+            {"Tools: the shell's own programs", "MOONWATER_SHELL", "SYSTEM", null},
+        };
+        string_address text =
+            "# Generated by `build switches` from src/sh/tools.inc and the\n"
+            "# shell_commands[] table in src/sh/builtin.c. Do not edit: the kit\n"
+            "# lane fails when this file and its sources disagree.\n"
+            "\n"
+            "config MOONWATER_TOOLS_ALL\n"
+            "    bool \"Build every tool unless it is switched off below\"\n"
+            "    depends on MOONWATER_CORE=y\n"
+            "    default y\n"
+            "    help\n"
+            "      The default of every MOONWATER_TOOL_ switch. Leave it on and\n"
+            "      switch single tools off; turn it off and switch on the ones\n"
+            "      to keep, which is how kernel/profile/sec_locked is an allow\n"
+            "      list. A tool switched off is compiled out of the shell's\n"
+            "      table and linked nowhere, so its name is not found.\n"
+            "\n"
+            "      /init, /term and /moonwater have no switch: the kernel and\n"
+            "      init run them by path, and an image without one does not\n"
+            "      boot.\n";
+
+        for (positive menu = 0; menu < array_count(menus); menu++)
+        {
+                string_address names[BUILD_TOOL_ROOM];
+                positive count = 0;
+
+                for (positive at = 0; at < build_tool_count; at++)
+                {
+                        build_tool_entry address_to one = address_of build_tool_table[at];
+
+                        if (build_tool_fixed(one->name))
+                                continue;
+
+                        if (word_is(one->category, menus[menu].first) ||
+                            (menus[menu].second &&
+                             word_is(one->category, menus[menu].second)))
+                                names[count++] = one->name;
+                }
+
+                text = build_join(text,
+                                  build_switch_menu(menus[menu].title,
+                                                    menus[menu].depends,
+                                                    (string_address address_to)names,
+                                                    count, "TOOL_",
+                                                    "MOONWATER_TOOLS_ALL"),
+                                  null);
+        }
+
+        text = build_join(text,
+            "\nconfig MOONWATER_BUILTINS_ALL\n"
+            "    bool \"Build every builtin unless it is switched off below\"\n"
+            "    depends on MOONWATER_SHELL\n"
+            "    default y\n"
+            "    help\n"
+            "      The default of every MOONWATER_BUILTIN_ switch, as\n"
+            "      MOONWATER_TOOLS_ALL is for the tools. A builtin switched off\n"
+            "      is compiled out of the shell's table and its name is not\n"
+            "      found, unless a tool of that name is still built: blkid,\n"
+            "      findfs, findmnt, kill, mount, mountpoint and umount are\n"
+            "      in both tables, and each has its own switch.\n"
+            "\n"
+            "      The core has no switch: POSIX's special builtins (. : break\n"
+            "      continue eval exec exit export readonly return set shift\n"
+            "      times trap unset), which are the language rather than\n"
+            "      commands it runs, with cd, true and false. The comment over\n"
+            "      shell_commands[] in src/sh/builtin.c says why.\n"
+            "\nmenu \"Shell builtins\"\n"
+            "    depends on MOONWATER_SHELL\n", null);
+
+        for (positive at = 0; at < build_builtin_count; at++)
+                text = build_join(text, "\nconfig MOONWATER_BUILTIN_",
+                                  build_builtin_table[at].key, "\n",
+                                  "    bool \"", build_builtin_table[at].name, "\"\n",
+                                  "    default MOONWATER_BUILTINS_ALL\n", null);
+
+        return build_join(text, "\nendmenu\n", null);
+}
+
+//      build switches [check]
+static b32 build_switches(string_address mode)
+{
+        string_address path = build_setting_get("switches_kconfig");
+        string_address text;
+        bipolar got;
+
+        if (mode && !word_is(mode, "check"))
+                return string_report(log_error, 1, "switches: '%s' is not check\n",
+                                     mode);
+
+        if (!build_tools_read() || !build_builtins_read())
+                return build_die("cannot read the tool or builtin registry");
+
+        text = build_switches_text();
+
+        if (!mode)
+        {
+                if (!build_write_file(path, text, string_length(text)))
+                        return build_die(build_join("cannot write ", path, null));
+
+                return 0;
+        }
+
+        got = file_slurp(path, build_file_one, BUILD_FILE_ROOM);
+
+        if (got < 0 || (positive)got != string_length(text) ||
+            memory_compare(build_file_one, text, (positive)got))
+                return string_report(log_error, 1,
+                                     "switches: %s does not match its sources; "
+                                     "run ./build switches\n", path);
+
+        return 0;
+}
+
+//      build surface <config> [utility]: the names an image built from that
+//      configuration links, one path a line, relative to the image root.
+static b32 build_surface(string_address config, string_address kind)
+{
+        if (!build_is_file(config))
+                return string_report(log_error, 1, "surface: no such file: %s\n",
+                                     config);
+
+        if (kind && !word_is(kind, "utility"))
+                return string_report(log_error, 1,
+                                     "surface: '%s' is not utility\n", kind);
+
+        build_components(config);
+
+        if (!build_tools_read())
+                return build_die("cannot read the tool registry");
+
+        //      What build_userspace would build: the utility-only program
+        //      when asked, or when the shell is off.
+        build_utility_program = kind != null || !build_moon_shell;
+
+        if (!build_moon_core || (build_utility_program && !build_moon_utilities))
+                return 0;
+
+        if (build_tool_links(".", "shell", true))
+                return 1;
+
+        log_flush();
+        return 0;
 }
 
 static b32 build_kernel_source()
@@ -3941,8 +4562,9 @@ static b32 build_userspace()
         string_address image = build_setting_get("image_root");
         string_address applet = null;
         string_address shell_mode = null;
-        //      Appended to below, one -D per component that is off.
-        string_address flags = "";
+        string_address config = build_join(build_setting_get("kernel_tree"),
+                                           "/.config", null);
+        string_address record = null;
 
         /*
                 What was here last time, gone.
@@ -3996,11 +4618,10 @@ static b32 build_userspace()
         if (build_run("sh", build_setting_get("firmware_script"), null))
                 return build_die("firmware");
 
-        build_components(build_join(build_setting_get("kernel_tree"), "/.config",
-                                    null));
+        build_components(config);
 
-        if (!build_tools_read())
-                return build_die("cannot read the tool registry");
+        if (!build_tools_read() || !build_builtins_read())
+                return build_die("cannot read the tool or builtin registry");
 
         //      kernel/profile/coverage: /shell built to record which of its
         //      blocks the guest reached, for `sh test/run coverage`. Any
@@ -4020,26 +4641,18 @@ static b32 build_userspace()
                 //      Every program in the default image is spark, including
                 //      the one the kernel execs as /init, so no ELF is loaded
                 //      on its boot path.
-                if (!build_moon_utilities)
-                        flags = build_join(flags, " -DSHELL_NO_UTILITIES", null);
+                build_utility_program = false;
 
-                if (!build_moon_util_linux)
-                        flags = build_join(flags, " -DSHELL_NO_UTIL_LINUX", null);
-
-                if (!build_moon_shell_monitor)
-                        flags = build_join(flags, " -DSHELL_NO_MONITOR", null);
-
-                //      Only when it differs from the compiled-in default, so
-                //      an ordinary build's command line stays as it was.
-                if (build_moon_strict != STRICT_SAFE)
-                        flags = build_join(flags, " -DMOONWATER_STRICT=",
-                                           build_number(build_moon_strict), null);
-
-                build_setting_set("spark_cppflags", flags);
+                if (build_config_header_install(config, address_of record))
+                        return 1;
 
                 if (build_spark(build_setting_get("shell_source"),
                                 build_join(image, "/shell", null), shell_mode))
                         return build_die("building the shell");
+
+                if (build_config_record_check(build_join(image, "/shell", null),
+                                              record))
+                        return 1;
 
                 applet = "shell";
 
@@ -4080,14 +4693,6 @@ static b32 build_userspace()
                 if (build_link("../sbin", build_join(image, "/usr/sbin", null)))
                         return build_die("linking /usr/sbin");
 
-                for (positive at = 0; at < build_tool_count; at++)
-                        if (word_is(build_tool_table[at].category, "SYSTEM") &&
-                            build_link("shell",
-                                       build_join(image, "/",
-                                                  build_tool_table[at].name, null)))
-                                return build_die(build_join("linking ",
-                                                            build_tool_table[at].name,
-                                                            null));
 
                 if (build_moon_shell_monitor && build_moon_utilities)
                 {
@@ -4114,16 +4719,18 @@ static b32 build_userspace()
         }
         else if (build_moon_core && build_moon_utilities)
         {
-                flags = build_join(flags, " -DSHELL_NO_MONITOR", null);
+                build_utility_program = true;
 
-                if (!build_moon_util_linux)
-                        flags = build_join(flags, " -DSHELL_NO_UTIL_LINUX", null);
-
-                build_setting_set("spark_cppflags", flags);
+                if (build_config_header_install(config, address_of record))
+                        return 1;
 
                 if (build_spark(build_setting_get("utilities_source"),
                                 build_join(image, "/shell", null), shell_mode))
                         return build_die("building the utilities");
+
+                if (build_config_record_check(build_join(image, "/shell", null),
+                                              record))
+                        return 1;
 
                 //      The kernel's SPAWN_TOOL ABI accelerates through this
                 //      fixed path. This binary has no shell fallback.
@@ -4142,48 +4749,8 @@ static b32 build_userspace()
                 With the shell present they share its binary. A utility-only
                 image has the same dispatch table but no shell fallback.
         */
-        if (build_moon_core && build_moon_utilities)
-        {
-                for (positive at = 0; at < build_tool_count; at++)
-                {
-                        build_tool_entry address_to one = address_of build_tool_table[at];
-
-                        if (!build_category_installed(one->category))
-                                continue;
-
-                        if (build_link(applet,
-                                       build_join(image, "/", one->name, null)))
-                                return build_die(build_join("linking ", one->name,
-                                                            null));
-                }
-
-                //      Conventional paths for absolute commands and
-                //      /usr/bin/env shebangs. The registry selects enabled
-                //      categories; every alias shares the same binary.
-                for (positive at = 0; at < build_tool_count; at++)
-                {
-                        build_tool_entry address_to one = address_of build_tool_table[at];
-                        string_address directory = null;
-
-                        if (word_is(one->category, "GENERAL"))
-                                directory = "bin";
-                        else if (build_moon_util_linux &&
-                                 word_is(one->category, "UTIL_BIN"))
-                                directory = "bin";
-                        else if (build_moon_util_linux &&
-                                 word_is(one->category, "UTIL_SBIN"))
-                                directory = "sbin";
-
-                        if (!directory)
-                                continue;
-
-                        if (build_link(build_join("../", applet, null),
-                                       build_join(image, "/", directory, "/",
-                                                  one->name, null)))
-                                return build_die(build_join("linking /", directory,
-                                                            "/", one->name, null));
-                }
-        }
+        if (applet && build_tool_links(image, applet, false))
+                return 1;
 
         return 0;
 }
@@ -5595,6 +6162,10 @@ static fn build_usage()
                       "    build freestanding [-v] [--run] [--watch] [source] [output]\n"
                       "    build floor [arch]                      verify the ISA floor\n"
                       "    build key <name>                        a value from artifacts/.config\n"
+                      "    build switches [check]                  write or check the Kconfig switches\n"
+                      "    build surface <config> [utility]        the names that .config installs\n"
+                      "    build config-header <config> <header> [utility]\n"
+                      "                                            the header a .config gives the programs\n"
                       "\n"
                       "--set name=value overrides one setting, anywhere on the line.\n"
                       "    build key-one <name>                    the same, refusing two\n"
@@ -5615,6 +6186,12 @@ static fn build_usage()
     X(KEY, "key", 3, 0, true, true, null) \
     X(KEY_ONE, "key-one", 3, 0, true, true, null) \
     X(SIZE, "size", 3, 0, false, false, null) \
+    X(SWITCHES, "switches", 2, 3, true, false, \
+      "switches: usage: build switches [check]\n") \
+    X(SURFACE, "surface", 3, 4, true, false, \
+      "surface: usage: build surface <config> [utility]\n") \
+    X(CONFIG_HEADER, "config-header", 4, 5, true, false, \
+      "config-header: usage: build config-header <config> <header> [utility]\n") \
     X(FREESTANDING, "freestanding", 2, 0, false, true, null) \
     X(FLOOR, "floor", 2, 0, true, false, null) \
     X(HELP, "--help", 2, 0, false, false, null) \
@@ -5743,6 +6320,13 @@ b32 main()
                 case BUILD_SIZE:
                         build_size(arguments[2]);
                         return 0;
+                case BUILD_SWITCHES:
+                        return build_switches(count > 2 ? arguments[2] : null);
+                case BUILD_SURFACE:
+                        return build_surface(arguments[2], count > 3 ? arguments[3] : null);
+                case BUILD_CONFIG_HEADER:
+                        return build_config_header_write(arguments[2], arguments[3],
+                                                         count > 4 ? arguments[4] : null);
                 case BUILD_FREESTANDING:
                         return build_freestanding(arguments + 2, count - 2);
                 case BUILD_FLOOR:

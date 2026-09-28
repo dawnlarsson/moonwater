@@ -932,6 +932,132 @@ static bool parse_hold(string_address line, b32 unfinished)
         return true;
 }
 
+/*
+        A backslash before a newline that a joined word still holds.
+
+        The reader drops a line-ending backslash when it joins the next line
+        on, but only where the line was complete but for it: at the top of a
+        word and inside double quotes. Inside ${ } and $(( )) the line is open
+        instead, so the next one is joined with its newline and the backslash
+        stays -- and `echo "${v-a \<newline>b}"` printed the backslash where
+        bash and dash print `a b`, while $((1 + \<newline>2)) was an error.
+        Continuation is the tokenizer's business everywhere but inside real
+        single quotes; a $( ) or backquote body keeps its bytes for its own
+        reader. Contexts: 0 unquoted, 1 double quotes, 2 ${ } unquoted,
+        3 ${ } inside double quotes, 4 $(( )).
+*/
+#define PARSE_STRIP_DEPTH 64
+
+static bool parse_joined_line;
+
+static COLD positive parse_strip_continuations(p8 address_to text,
+                                               positive length, p8 kind)
+{
+        p8 context[PARSE_STRIP_DEPTH];
+        positive parens[PARSE_STRIP_DEPTH];
+        positive depth = 0;
+        positive at = 0;
+        positive out = 0;
+
+        context[0] = kind;
+        parens[0] = 0;
+        while (at < length)
+        {
+                p8 value = text[at];
+                p8 now = context[depth];
+                bool literal_quotes = now == 1 || now == 3 || now == 4;
+
+                if (value == '\\' && at + 1 < length)
+                {
+                        if (text[at + 1] == '\n')
+                        {
+                                at += 2;
+                                continue;
+                        }
+                        text[out++] = text[at++];
+                        text[out++] = text[at++];
+                        continue;
+                }
+                if (value == '\'' && !literal_quotes)
+                {
+                        string_address shut = memory_first_of(
+                            text + at + 1, '\'', length - at - 1);
+                        positive stop = shut ? (positive)(shut - text) + 1
+                                             : length;
+
+                        memory_copy(text + out, text + at, stop - at);
+                        out += stop - at;
+                        at = stop;
+                        continue;
+                }
+                if (value == '`' ||
+                    (value == '$' && at + 1 < length && text[at + 1] == '(' &&
+                     !(at + 2 < length && text[at + 2] == '(')) ||
+                    (value == '$' && at + 1 < length && text[at + 1] == '\'' &&
+                     !literal_quotes))
+                {
+                        string_address from = text + at + (value == '$');
+                        string_address stop =
+                            value == '$' && text[at + 1] == '\''
+                                ? lex_dollar_quote_end(from + 1)
+                                : lex_nesting(from);
+                        positive until;
+
+                        if (stop == from || !stop)
+                                until = length;
+                        else
+                        {
+                                until = (positive)(stop - text);
+                                if (value == '$' && text[at + 1] == '\'')
+                                        until++;
+                        }
+                        if (until > length)
+                                until = length;
+                        memory_copy(text + out, text + at, until - at);
+                        out += until - at;
+                        at = until;
+                        continue;
+                }
+                if (depth + 1 < PARSE_STRIP_DEPTH && value == '$' &&
+                    at + 1 < length &&
+                    (text[at + 1] == '{' || text[at + 1] == '('))
+                {
+                        bool arith = text[at + 1] == '(';
+
+                        context[++depth] = arith ? 4 : now == 0 || now == 2 ? 2 : 3;
+                        parens[depth] = 0;
+                        text[out++] = text[at++];
+                        text[out++] = text[at++];
+                        if (arith)
+                                text[out++] = text[at++];
+                        continue;
+                }
+                if (value == '"' && (now == 0 || now == 2 || now == 3) &&
+                    depth + 1 < PARSE_STRIP_DEPTH)
+                        context[++depth] = 1, parens[depth] = 0;
+                else if (value == '"' && now == 1 && depth)
+                        depth--;
+                else if (value == '}' && (now == 2 || now == 3) && depth)
+                        depth--;
+                else if (now == 4 && value == '(')
+                        parens[depth]++;
+                else if (now == 4 && value == ')')
+                {
+                        if (parens[depth])
+                                parens[depth]--;
+                        else if (at + 1 < length && text[at + 1] == ')' &&
+                                 depth)
+                        {
+                                text[out++] = text[at++];
+                                depth--;
+                        }
+                }
+                text[out++] = text[at++];
+        }
+        text[out] = 0;
+        return out;
+}
+
 // Lexer's storage is reused on its next call. Copy one token into parser
 // storage, keeping every piece of text in the stable arena.
 static bool parse_copy_lex(parse_token address_to into,
@@ -989,6 +1115,11 @@ static bool parse_copy_lex(parse_token address_to into,
 
         into->text = shell_store_copy(address_of parse_store, source->text,
                                       source->length);
+        if (into->text && parse_joined_line &&
+            memory_first_of(into->text, '\n', into->length))
+                into->length = parse_strip_continuations(
+                    (p8 address_to)into->text, into->length,
+                    into->kind == PT_ARITHMETIC ? 4 : 0);
         return into->text != null;
 }
 
@@ -1078,6 +1209,8 @@ bool parse_feed(string_address line)
         //      The line the text being lexed starts on: this one, or the one
         //      an open quote or a trailing backslash started on.
         positive first_line = shell_line_number ? shell_line_number : 1;
+
+        parse_joined_line = parse_pending_used != 0;
 
         // Joining first is what lets the unfinished thing be recognised at
         // all: the quote that closes is on this line and the one that opened
@@ -1719,12 +1852,19 @@ static PURE b32 parse_redirect_prefix(b32 at)
             !parse_redirect_operator(next->op))
                 return -1;
 
-        // Classify digits before checking their range in parse_take_redirect,
-        // so overflowing bash prefixes fail before opening a redirection.
-        // Dash recognizes only a single descriptor digit.
-        if (string_digits_exact(token->text, null) &&
-            (shell_bash_compat || token->length == 1))
-                return 1;
+        // Digits that fit a descriptor are one; bash reads a number past
+        // INT_MAX in front of > as an ordinary word, so `echo a
+        // 2147483648>f` writes "a 2147483648" to f. Dash recognizes only a
+        // single descriptor digit.
+        {
+                positive parsed;
+
+                if (string_digits_checked_exact(token->text, 10,
+                                                address_of parsed) &&
+                    parsed <= 0x7fffffff &&
+                    (shell_bash_compat || token->length == 1))
+                        return 1;
+        }
 
         return parse_redirect_brace(token->text, token->length) ? 1 : -1;
 }
@@ -2281,6 +2421,23 @@ static b32 parse_do_body(b32 index)
         return index;
 }
 
+/* bash takes a brace group for a for or select body, `for i in a b; {
+   echo $i; }` and `for ((i = 0; i < 2; i++)) { ...; }`, where do ... done
+   stands in POSIX; while and until have no such form. */
+static b32 parse_enclosed(b32 kind);
+
+static b32 parse_for_body(b32 index)
+{
+        if (shell_bash_compat && parse_word_is(0, "{"))
+        {
+                parse_nodes[index].right = parse_enclosed(NODE_GROUP);
+
+                return parse_state ? 0 : index;
+        }
+
+        return parse_do_body(index);
+}
+
 static b32 parse_loop(b32 kind)
 {
         b32 index = parse_node_new(kind);
@@ -2322,7 +2479,7 @@ static b32 parse_for(b32 kind)
 
                 parse_skip_newlines();
 
-                return parse_do_body(index);
+                return parse_for_body(index);
         }
 
         if (!parse_want_word(index))
@@ -2356,7 +2513,7 @@ static b32 parse_for(b32 kind)
 
         parse_skip_separators();
 
-        return parse_do_body(index);
+        return parse_for_body(index);
 }
 
 static b32 parse_case()

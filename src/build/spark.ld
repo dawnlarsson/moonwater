@@ -42,6 +42,10 @@ SECTIONS
                 *(.text .text.exit .text.exit.*)
 
                 *(.moonwater.span_byte)
+                /* The configuration record, which nothing reads at run time
+                   and the build looks for in the image: named before
+                   .rodata.* so garbage collection cannot take it. */
+                KEEP(*(.rodata.moonwater_config))
                 *(.rodata .rodata.*)
                 /* riscv64 puts read only globals of a few bytes here. */
                 *(.srodata .srodata.*)

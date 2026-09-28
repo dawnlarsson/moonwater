@@ -422,6 +422,13 @@ static bool shell_exit_was_previous HOT_STATE;
 static bool shell_exit_is_current HOT_STATE;
 static fn exec_command_reader_finish();
 static fn exec_input_finish();
+static fn exec_wait_background(bipolar child);
+/* The name this shell was started under, less any directory and a login
+   dash, which a prompt's \s says. */
+string_address shell_invocation_name;
+/* Whether FUNCNEST was ever given a value: a function call asks for it
+   only then, rather than looking the name up on every call. */
+bool shell_funcnest_seen;
 static positive shell_command_reader_depth;
 static bool env_attribute_target_span(const_string name, positive length,
                                       const_string address_to target,
@@ -1208,6 +1215,8 @@ static bool exec_control_integer(string_address word, bipolar address_to answer)
 bool test_facts(string_address path, file_facts address_to out, bool follow);
 bool word_is(string_address word, string_address text);
 fn hash_forget();
+fn exec_frames_source_enter(string_address path);
+fn exec_frames_source_leave();
 bool shell_here(p8 address_to into, positive room);
 
 /*
@@ -2483,6 +2492,8 @@ static PURE bool env_function_assignment(string_address entry)
                at[-1] == '%' && at[-2] == '%';
 }
 
+bool shell_directory_holds();
+
 fn shell_env_init(string_address address_to process_environment)
 {
         positive inherited = 0;
@@ -2561,10 +2572,11 @@ fn shell_env_init(string_address address_to process_environment)
         // read it, save it and put it back, and under set -u one that is
         // absent rather than defaulted is an error where every other shell
         // hands over the three bytes. XDG_RUNTIME_DIR is the directory
-        // Weston, GTK, Qt and PipeWire refuse to start without.
+        // Weston, GTK, Qt and PipeWire refuse to start without. HOME is not
+        // made up: a cron job or a unit without one got /root, exported,
+        // whoever it ran as; everything Moonwater starts hands one over.
         string_address defaults[] = {"PATH=" BOWL_DEFAULT_PATH,
                                      "SHELL=/bin/sh",
-                                     "HOME=/root",
                                      "LANG=C.UTF-8",
                                      "IFS= \t\n",
                                      "OPTIND=1",
@@ -2640,13 +2652,25 @@ fn shell_env_init(string_address address_to process_environment)
                         string_copy_max_end(shell_directory,
                                             inherited_directory,
                                             SHELL_DIRECTORY_MAX - 1);
-                else
+                //      An inherited PWD is believed only while it names the
+                //      directory the shell started in, as bash and dash
+                //      check: a parent that changed directory without
+                //      telling the environment left $PWD a lie here.
+                if (!inherited_directory || !shell_directory_holds())
                 {
                         memory_copy(shell_directory - 4, "PWD=", 4);
                         shell_here(shell_directory, SHELL_DIRECTORY_MAX);
-                        env_borrow_assignment(shell_directory - 4, false);
+                        env_borrow_assignment(shell_directory - 4,
+                                              inherited_directory != null);
                 }
         }
+
+        //      bash starts with OLDPWD declared for export and no value, so
+        //      the first cd hands it to children; dash exports it from cd.
+        if (shell_bash_compat && !env_get("OLDPWD"))
+                env_export_mark("OLDPWD");
+        if (shell_bash_compat && env_get("FUNCNEST"))
+                shell_funcnest_seen = true;
 }
 
 /*
@@ -3042,6 +3066,8 @@ static bool env_write_noted(const_string name, positive length, bool written)
                 shell_posix_changed(true);
         else if (memory_is_word((address_any)name, length, "OPTIND"))
                 shell_getopts_index_changed();
+        else if (memory_is_word((address_any)name, length, "FUNCNEST"))
+                shell_funcnest_seen = true;
         return written;
 }
 
@@ -5299,6 +5325,7 @@ bool shell_directory_moved(string_address logical)
            dash retains its historical short circuit. The directory has
            already changed in either case. */
         if ((env_assign("OLDPWD", shell_directory_was)
+            && (shell_bash_compat || env_export_mark("OLDPWD"))
             || string_report(log_error, false, env_readonly("OLDPWD")
                 ? "cd: %s: is read only\n"
                 : "cd: cannot assign %s\n", "OLDPWD")))
@@ -6704,6 +6731,17 @@ COLD fn shell_pwd(writer write, string_address input)
 
         if (!shell_here(out_buffer, sizeof(out_buffer)))
         {
+                //      The directory is gone from under the shell. Both
+                //      references still answer with the one they last
+                //      knew, as long as the logical form was asked for
+                //      and bash is not in posix mode, where it refuses.
+                if (!physical && string_is(shell_directory, '/') &&
+                    !shell_posix_on())
+                {
+                        string_format(write, "%s\n", shell_directory);
+                        return shell_answer(0);
+                }
+
                 log_error("pwd: cannot determine current directory\n", 0);
 
                 if (shell_bash_compat)
@@ -6783,6 +6821,11 @@ COLD fn shell_exit(writer write, string_address input)
                                        ? "%s: %s: numeric argument required\n"
                                        : "%s: Illegal number: %s\n",
                                    shell_argv[0], shell_argv[first]);
+                        //      Outside posix mode bash's exit answers 2 for
+                        //      a word that is no number and stays; under
+                        //      posix it is a special builtin's error.
+                        if (shell_bash_compat && !shell_posix_on())
+                                return shell_answer(2);
                         exec_special_error_note();
                         if (shell_bash_compat)
                         {
@@ -6795,7 +6838,7 @@ COLD fn shell_exit(writer write, string_address input)
                 if (shell_bash_compat && shell_argc > first + 1)
                 {
                         shell_told("%s: too many arguments\n", shell_argv[0]);
-                        expand_fatal_status(1);
+                        expand_discard_whole(2);
                         return;
                 }
         }
@@ -8270,6 +8313,8 @@ COLD fn shell_set(writer write, string_address input)
         {
                 string_address word = shell_argv[look];
 
+                if (word_is(word, "+"))
+                        continue;
                 if (word_is(word, "--") || word_is(word, "-") ||
                     !(string_is(word, '-') || string_is(word, '+')) ||
                     !string_not(word + 1, end))
@@ -8318,6 +8363,16 @@ COLD fn shell_set(writer write, string_address input)
                         if (index < shell_argc)
                                 operands = true;
                         break;
+                }
+
+                //      A lone + is an option word with no letters in it:
+                //      both references pass over it and read on, so
+                //      `set -x + -v x y` sets -v and leaves x y, and
+                //      `set +` changes nothing.
+                if (word_is(word, "+"))
+                {
+                        index++;
+                        continue;
                 }
 
                 if ((string_is(word, '-') || string_is(word, '+')) &&
@@ -8442,7 +8497,7 @@ fn shell_shift(writer write, string_address input)
         {
                 shell_diagnostic_where();
                 log_error("shift: too many arguments\n", 0);
-                expand_fatal_status(1);
+                expand_discard_whole(2);
                 return;
         }
 
@@ -8719,6 +8774,11 @@ COLD fn shell_unset(writer write, string_address input)
                                 string_format(log_error,
                                               "unset: %s: cannot unset: readonly function\n",
                                               word);
+                                //      Under posix it is a special
+                                //      builtin's error and the script
+                                //      ends there.
+                                if (shell_posix_on())
+                                        exec_special_error_note();
                                 shell_answer(1);
                                 return;
                         }
@@ -8732,6 +8792,28 @@ COLD fn shell_unset(writer write, string_address input)
                         {
                                 shell_answer(1);
                                 return;
+                        }
+
+                        //      Neither -f nor -v, and no variable of the
+                        //      name: bash unsets the function instead.
+                        if (shell_bash_compat && !variables &&
+                            !resolved.element &&
+                            resolved.index >= shell_var_count &&
+                            exec_function_here_hashed(
+                                word, string_hash_33_length(word)))
+                        {
+                                if (exec_function_unset(word) < 0)
+                                {
+                                        string_format(log_error,
+                                                      "unset: %s: cannot unset: readonly function\n",
+                                                      word);
+                                        if (shell_posix_on())
+                                                exec_special_error_note();
+                                        shell_answer(1);
+                                        return;
+                                }
+                                index++;
+                                continue;
                         }
 
                         if (!resolved.element &&
@@ -9402,6 +9484,10 @@ static COLD fn shell_declare_listed(writer write, string_address name,
 // value with the same scalar/compound/append machinery once that policy has
 // accepted the name.
 static bool exec_declaration_compound(string_address word);
+bool shell_compound_prepare(string_address name, positive name_length,
+                            string_address body, positive body_length,
+                            bool keyed);
+fn shell_compound_prepare_drop();
 static b32 shell_declare_value(string_address name, positive length,
                                string_address mark, bool append,
                                bool bind_reference, bool declare_empty,
@@ -9602,6 +9688,23 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                         }
                         failed = true;
                         goto next;
+                }
+
+                //      A list read before the name is made local, so
+                //      that it reads the caller's variable of the name.
+                //      An associative list keeps its old order: its keys
+                //      are read against the local it makes.
+                if (scoped && mark && !append && shell_bash_compat &&
+                    !subscript && exec_declaration_compound(word) &&
+                    string_is(mark + 1, '(') &&
+                    !(state->attributes_set & SHELL_ARRAY_ASSOCIATIVE))
+                {
+                        positive body = string_length(mark + 1);
+
+                        if (!shell_compound_prepare(word, length, mark + 2,
+                                                    body > 2 ? body - 2 : 0,
+                                                    false))
+                                shell_compound_prepare_drop();
                 }
 
                 if (scoped)
@@ -9890,6 +9993,7 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                 else
                         stored = shell_declare_value(word, length, mark, append,
                             (state->attributes_set & SHELL_ARRAY_NAMEREF) != 0, !local_mode, global_scope);
+                shell_compound_prepare_drop();
                 if (stored <= 0)
                 {
                         if (saved_scalar)
@@ -10217,10 +10321,97 @@ static fn shell_marked_written(writer write, string_address name,
         write("\n", 1);
 }
 
+static fn shell_declare(writer write, string_address input);
+static PURE shell_local_entry address_to local_find(string_address name,
+                                                    positive begin);
+
+/*
+        readonly -a, readonly -A and readonly name=(...), which bash takes
+        and this refused or made a scalar of. Each operand is handed to
+        declare as declare -r with the array letter, and -g unless the name
+        is a local of the running function: readonly reaches the variable in
+        scope rather than making a new local.
+*/
+static COLD bool shell_readonly_arrays(writer write)
+{
+        p8 letters[4] = {'-', 'r', 0, 0};
+        positive index = 1;
+        b32 answer = 0;
+
+        for (; index < shell_argc; index++)
+        {
+                string_address word = shell_argv[index];
+
+                if (word_is(word, "--"))
+                {
+                        index++;
+                        break;
+                }
+                if (!string_is(word, '-') || !string_get(word + 1))
+                        break;
+                for (string_address at = word + 1; string_get(at); at++)
+                        if (string_get(at) == 'a' || string_get(at) == 'A')
+                                letters[2] = string_get(at);
+                        else if (string_get(at) != 'p' || string_get(at + 1))
+                                return false;
+        }
+        if (!letters[2])
+        {
+                bool compound = false;
+
+                for (positive at = index; at < shell_argc; at++)
+                        compound |= exec_declaration_compound(shell_argv[at]);
+                if (!compound)
+                        return false;
+        }
+        if (index >= shell_argc)
+                return false;
+
+        string_address address_to held = shell_argv;
+        positive held_count = shell_argc;
+
+        for (positive at = index; at < held_count; at++)
+        {
+                string_address word = held[at];
+                string_address equal = string_first_of(word, '=');
+                p8 name[256];
+                positive length = equal ? (positive)(equal - word)
+                                        : string_length(word);
+                bool in_scope;
+                string_address words[4];
+
+                if (length && word[length - 1] == '+')
+                        length--;
+                if (length >= sizeof(name))
+                        length = sizeof(name) - 1;
+                memory_copy_end(name, word, length);
+                in_scope = local_depth &&
+                           local_find(name, local_from[local_depth - 1]);
+                words[0] = (string_address) "declare";
+                words[1] = letters;
+                words[2] = in_scope ? word : (string_address) "-g";
+                words[3] = word;
+                shell_argv = words;
+                shell_argc = in_scope ? 3 : 4;
+                shell_declare(write, null);
+                if (shell_status)
+                        answer = shell_status;
+        }
+        shell_argv = held;
+        shell_argc = held_count;
+        shell_answer(answer);
+        return true;
+}
+
 static COLD fn shell_marked(writer write, p8 mark)
 {
         string_address command = mark == DECLARE_EXPORT ? "export"
                                                         : "readonly";
+
+        if (mark == DECLARE_READONLY && shell_bash_compat &&
+            shell_readonly_arrays(write))
+                return;
+
         bool listed = shell_argc < 2;
         bool functions = false;
         bool unmark = false;
@@ -10323,7 +10514,16 @@ static COLD fn shell_marked(writer write, p8 mark)
                 string_address value = string_first_of(word, '=');
                 positive length = value ? (positive)(value - word)
                                         : string_length(word);
+                /* export PATH+=:dir and readonly v+=x append, as the
+                   assignment they spell does; bash takes them and this
+                   refused the name. */
+                bool append = shell_bash_compat && value && length > 1 &&
+                              value[-1] == '+';
+                string_address cut = append ? value - 1 : value;
                 bool kept;
+
+                if (append)
+                        length--;
 
                 if (!shell_valid_name(word, length))
                 {
@@ -10355,13 +10555,19 @@ static COLD fn shell_marked(writer write, p8 mark)
                 // The name on its own while it is looked up and marked; the
                 // word is argv's and goes back the way it was.
                 if (value)
-                        address_to value = end;
+                        address_to cut = end;
 
                 shell_pipe_status_wanted(word, length);
 
                 if (value && env_readonly(word))
                 {
-                        address_to value = '=';
+                        /* bash refuses the value and still marks the name:
+                           readonly v=ro; export v=x leaves v in the
+                           environment. */
+                        if (shell_bash_compat && !shell_posix_on() &&
+                            mark == DECLARE_EXPORT && !unmark)
+                                env_export_mark(word);
+                        address_to cut = append ? '+' : '=';
                         shell_readonly_refused(null, command, word, length);
                         exec_special_error_note();
                         shell_answer(shell_bash_compat ? 1 : 2);
@@ -10371,20 +10577,42 @@ static COLD fn shell_marked(writer write, p8 mark)
                 // A name on its own is already marked here: every value
                 // assigned to it later inherits the attribute. `export -n`
                 // deliberately does not create a missing variable.
+                string_address assigned = value ? value + 1 : null;
+
+                if (append)
+                {
+                        string_address old = env_get(word);
+                        positive before = old ? string_length(old) : 0;
+                        positive after = string_length(value + 1);
+                        p8 address_to joined = shell_store_take(
+                            address_of expand_store, before + after + 1);
+
+                        if (!joined)
+                        {
+                                address_to cut = '+';
+                                return shell_answered(2, "%s: no room\n",
+                                                      command);
+                        }
+                        if (before)
+                                memory_copy(joined, old, before);
+                        memory_copy_end(joined + before, value + 1, after);
+                        assigned = joined;
+                }
+
                 if (mark == DECLARE_EXPORT && unmark)
                 {
-                        kept = !value || env_assign(word, value + 1);
+                        kept = !value || env_assign(word, assigned);
                         if (kept)
                                 kept = env_export_unmark(word);
                 }
                 else
-                        kept = (!value || env_assign(word, value + 1)) &&
+                        kept = (!value || env_assign(word, assigned)) &&
                                (mark == DECLARE_EXPORT
                                     ? env_export_mark(word)
                                     : readonly_add_mode(word, length, false));
 
                 if (value)
-                        address_to value = '=';
+                        address_to cut = append ? '+' : '=';
 
                 if (!kept)
                         return shell_answered(2, "%s: no room\n", command);
@@ -10563,6 +10791,85 @@ bool test_unary(p8 op, string_address value)
 // The three fields test wants out of statx.
 #define test_modified(facts) ((facts)->modified.seconds)
 #define test_modified_fraction(facts) ((facts)->modified.nanoseconds)
+
+/*
+        The four unary operators bash's test has beyond POSIX: -v NAME is set
+        (an element too, a[1]), -a FILE is the old spelling of -e, -o OPTION
+        is on, and -R NAME is a nameref. [[ ]] had them and test did not, so
+        `[ -v x ]` and `test -a /tmp` were "too many arguments", status 2.
+        dash has none of them.
+*/
+static bool test_bash_unary(string_address word)
+{
+        return shell_bash_compat && word && string_is(word, '-') &&
+               (string_is(word + 1, 'v') || string_is(word + 1, 'a') ||
+                string_is(word + 1, 'o') || string_is(word + 1, 'R')) &&
+               !string_get(word + 2);
+}
+
+bool test_variable_set(string_address name)
+{
+        positive length = string_length(name);
+        positive value_length;
+
+        string_address open = string_first_of(name, '[');
+
+        if (open && open > name && length > 3 && name[length - 1] == ']')
+        {
+                positive base = (positive)(open - name);
+                positive key_length;
+                string_address key;
+
+                if (!shell_valid_name(name, base))
+                        return false;
+                //      a[@] and a[*] ask whether anything is set at all,
+                //      an element of an indexed array or a scalar's value;
+                //      an associative array looks up the key @ itself.
+                if (length - base == 3 &&
+                    (open[1] == '@' || open[1] == '*') &&
+                    !(shell_array_attributes(name, base) &
+                      SHELL_ARRAY_ASSOCIATIVE))
+                {
+                        if (shell_array_attributes(name, base) &
+                            SHELL_ARRAY_EITHER)
+                                return shell_array_length(name, base) != 0;
+                        p8 plain[256];
+
+                        if (base >= sizeof(plain))
+                                return false;
+                        memory_copy_end(plain, name, base);
+                        return env_get(plain) != null;
+                }
+                key = shell_expand_subscript(name, base, open + 1,
+                                             length - base - 2,
+                                             address_of key_length);
+                return key && shell_array_get(name, base, key, key_length,
+                                              address_of value_length) != null;
+        }
+
+        return env_get(name) != null;
+}
+
+static bool test_bash_unary_value(p8 letter, string_address operand)
+{
+        if (letter == 'a')
+                return test_unary('e', operand);
+
+        if (letter == 'v')
+                return test_variable_set(operand);
+
+        if (letter == 'R')
+                return string_get(operand) &&
+                       (shell_variable_attributes(operand,
+                                                  string_length(operand)) &
+                        SHELL_ARRAY_NAMEREF) != 0;
+
+        positive option = string_table_find(operand, shell_option_names,
+                                            sizeof(shell_option_names[0]),
+                                            SHELL_OPTION_NAMES);
+
+        return option < SHELL_OPTION_NAMES && shell_option_on(option);
+}
 
 PURE bool test_is_unary(string_address word)
 {
@@ -11102,6 +11409,15 @@ bool test_primary()
                 return value;
         }
 
+        if (test_at + 1 < test_stop && test_bash_unary(word))
+        {
+                bool value = test_bash_unary_value(string_get(word + 1),
+                                                   shell_argv[test_at + 1]);
+
+                test_at += 2;
+                return value;
+        }
+
         test_at++;
 
         return word && string_not(word, end);
@@ -11172,6 +11488,11 @@ HOT bool test_short(positive from, positive to, bool address_to handled)
                         return test_unary(string_get(shell_argv[from] + 1),
                                           shell_argv[from + 1]);
 
+                if (test_bash_unary(shell_argv[from]))
+                        return test_bash_unary_value(
+                            string_get(shell_argv[from] + 1),
+                            shell_argv[from + 1]);
+
                 address_to handled = false;
                 return false;
         }
@@ -11182,6 +11503,21 @@ HOT bool test_short(positive from, positive to, bool address_to handled)
 
                 if (kind)
                         return test_compare(kind, shell_argv[from], shell_argv[from + 2]);
+
+                /* -a and -o are binary primaries too, and three words with
+                   one in the middle are that test: `[ ! -a / ]` is "!" and
+                   "/", both not empty. */
+                if (shell_bash_compat &&
+                    (word_is(shell_argv[from + 1], "-a") ||
+                     word_is(shell_argv[from + 1], "-o")))
+                {
+                        bool left = string_get(shell_argv[from]) != end;
+                        bool right = string_get(shell_argv[from + 2]) != end;
+
+                        return word_is(shell_argv[from + 1], "-a")
+                                   ? left && right
+                                   : left || right;
+                }
         }
 
         if (count == 3 || count == 4)
@@ -12554,8 +12890,10 @@ static bipolar read_waited(b32 descriptor, timespec address_to deadline)
 
 static PURE b32 read_result(bool failed, bool ended, bool timed_out)
 {
+        //      A read the system refused -- a directory, say -- is a
+        //      failure of 1 to both shells, as the end of input is.
         if (failed)
-                return shell_bash_compat ? 1 : 2;
+                return 1;
         if (timed_out)
                 return shell_bash_compat ? READ_TIMEOUT_STATUS : 1;
         return ended ? 1 : 0;
@@ -12620,17 +12958,29 @@ static string_address read_field(string_address ifs, positive address_to cursor,
                 positive stop = read_length;
                 while (stop > begin && read_blank(ifs, stop - 1))
                         stop--;
-                if (stop > begin && read_separates(ifs, stop - 1) &&
-                    !read_blank(ifs, stop - 1))
+
+                /*
+                        bash reads one more word out of the rest: when that
+                        word and the delimiter after it -- blanks, one other
+                        IFS byte, blanks -- are the whole of it, the word is
+                        the value, so "b :" under IFS=": " is b. Anything
+                        more and the rest stands whole: "a b :" and "y::".
+                */
+                positive word_end = begin;
+                while (word_end < stop && !read_separates(ifs, word_end))
+                        word_end++;
+                positive after = word_end;
+                while (after < stop && read_blank(ifs, after))
+                        after++;
+                if (after < stop && read_separates(ifs, after) &&
+                    !read_blank(ifs, after))
                 {
-                        positive separator = begin;
-                        while (separator + 1 < stop &&
-                               (!read_separates(ifs, separator) ||
-                                read_blank(ifs, separator)))
-                                separator++;
-                        if (separator + 1 == stop)
-                                stop--;
+                        after++;
+                        while (after < stop && read_blank(ifs, after))
+                                after++;
                 }
+                if (word_end < stop && after == stop)
+                        stop = word_end;
                 read_line[stop] = end;
         }
         else
@@ -12897,6 +13247,11 @@ COLD fn shell_read(writer write, string_address input)
 
                 if (!escaped && !exact && value == stop_at)
                         break;
+                /* A NUL that does not end the line cannot be part of a
+                   value, and both references drop it and keep reading: it
+                   cut `a\0b` to a. */
+                if (!value)
+                        continue;
                 if (!raw && !escaped && value == '\\')
                 {
                         escaped = true;
@@ -14612,6 +14967,14 @@ COLD fn shell_trap(writer write, string_address input)
 
                 action = null;
         }
+        /* POSIX: a first operand that is an unsigned decimal integer makes
+           every operand a condition to reset. `trap 0 2` put the command 0
+           on INT and kept the exit trap. Both references still take a
+           number that names no condition, 99, for the action. */
+        else if (string_digits_checked_exact(shell_argv[index], 10, null) &&
+                 trap_number(shell_argv[index]) >= 0 &&
+                 trap_number(shell_argv[index]) <= TRAP_CONDITION_MAX)
+                action = null;
         else
                 action = shell_argv[index++];
 
@@ -14689,8 +15052,16 @@ COLD fn shell_trap(writer write, string_address input)
                 {
                         if (!action)
                                 shell_default((b32)number);
+                        /* The shell itself never ignores SIGCHLD: the kernel
+                           would reap its children before it could wait for
+                           them, and (trap '' CHLD; cmd) ran cmd and then
+                           failed with 125. The trap is still recorded and
+                           listed, as bash and dash have it. */
                         else if (!string_get(action))
-                                shell_ignore((b32)number);
+                        {
+                                if (number != 17)
+                                        shell_ignore((b32)number);
+                        }
                         else
                                 shell_catch((b32)number);
                 }
@@ -15314,6 +15685,29 @@ __asm__(
 #endif
 
 /*
+        Which single tools this build keeps.
+
+        The configuration header defines MOONWATER_TOOL_OFF_<name> as 1 for
+        each tool its .config switched off, and a macro cannot ask #ifdef of
+        a name it was handed. So the gate asks the way the kernel's
+        IS_ENABLED does: pasted onto a prefix, a name defined as 1 becomes a
+        placeholder holding a comma, which moves which of two words comes
+        second. Every other name pastes into a word that means nothing and
+        the keeper comes second. The count the header asserts below is what
+        catches a gate that ever stops choosing.
+*/
+#define SHELL_GATE_PROBE_1 ~,
+#define SHELL_GATE_SECOND(ignored, chosen, ...) chosen
+#define SHELL_GATE_CHOOSE(probe, off, on) SHELL_GATE_SECOND(probe off, on, ~)
+#define SHELL_GATE_PASTE(value, off, on) \
+        SHELL_GATE_CHOOSE(SHELL_GATE_PROBE_##value, off, on)
+#define SHELL_GATE(flag, off, on) SHELL_GATE_PASTE(flag, off, on)
+#define SHELL_TOOL_DROP(name, function)
+#define SHELL_TOOL_GATE(name, function) \
+        SHELL_GATE(MOONWATER_TOOL_OFF_##name, SHELL_TOOL_DROP, \
+                   SHELL_TOOL_KEEP)(name, function)
+
+/*
         Which categories this build keeps, decided once.
 
         The table below and the key array beside it both expand through
@@ -15328,24 +15722,24 @@ __asm__(
 #define SHELL_TOOL_UTIL_SBIN(name, function)
 #define SHELL_TOOL_MONITOR(name, function)
 #else
-#define SHELL_TOOL_GENERAL(name, function) SHELL_TOOL_KEEP(name, function)
+#define SHELL_TOOL_GENERAL(name, function) SHELL_TOOL_GATE(name, function)
 #ifdef SHELL_NO_UTIL_LINUX
 #define SHELL_TOOL_UTIL_BIN(name, function)
 #define SHELL_TOOL_UTIL_SBIN(name, function)
 #else
-#define SHELL_TOOL_UTIL_BIN(name, function) SHELL_TOOL_KEEP(name, function)
-#define SHELL_TOOL_UTIL_SBIN(name, function) SHELL_TOOL_KEEP(name, function)
+#define SHELL_TOOL_UTIL_BIN(name, function) SHELL_TOOL_GATE(name, function)
+#define SHELL_TOOL_UTIL_SBIN(name, function) SHELL_TOOL_GATE(name, function)
 #endif
 #ifdef SHELL_NO_MONITOR
 #define SHELL_TOOL_MONITOR(name, function)
 #else
-#define SHELL_TOOL_MONITOR(name, function) SHELL_TOOL_KEEP(name, function)
+#define SHELL_TOOL_MONITOR(name, function) SHELL_TOOL_GATE(name, function)
 #endif
 #endif
 #ifdef SHELL_UTILITY_PROGRAM
 #define SHELL_TOOL_SYSTEM(name, function)
 #else
-#define SHELL_TOOL_SYSTEM(name, function) SHELL_TOOL_KEEP(name, function)
+#define SHELL_TOOL_SYSTEM(name, function) SHELL_TOOL_GATE(name, function)
 #endif
 #define SHELL_TOOL(category, name, function) \
         SHELL_TOOL_##category(name, function)
@@ -15410,6 +15804,28 @@ static const positive shell_tool_hash[] = {
 _Static_assert(array_count(shell_tool_key) == SHELL_TOOLS &&
                array_count(shell_tool_hash) == SHELL_TOOLS,
                "the key and hash arrays and the tool table describe the same tools");
+
+/*
+        What the build's configuration header says this table holds, counted
+        by the build tool from tools.inc and the .config. A switch that
+        stops reaching the table -- a category macro renamed, a gate that
+        expands to the wrong thing -- is a build that stops here, and the
+        record is what the build tool looks for in the finished image to
+        know the header reached the compile at all.
+*/
+#ifdef MOONWATER_CONFIG_TOOLS
+#ifdef SHELL_UTILITY_PROGRAM
+_Static_assert(SHELL_TOOLS == MOONWATER_CONFIG_TOOLS,
+               "the tool table holds what the configuration header counted");
+#else
+_Static_assert(SHELL_TOOLS == MOONWATER_CONFIG_TOOLS + MOONWATER_CONFIG_SYSTEM_TOOLS,
+               "the tool table holds what the configuration header counted");
+#endif
+#endif
+#ifdef MOONWATER_CONFIG_RECORD
+static const char moonwater_config_record[] KEEP
+    __attribute__((section(".rodata.moonwater_config"))) = MOONWATER_CONFIG_RECORD;
+#endif
 /*
         Room for every name with slots to spare, because the index is open:
         a full one has nowhere to put the next name and nowhere to stop
@@ -17485,6 +17901,41 @@ static bool floodlight_external_final(
         So the answer is opt-in. A caller that says nothing gets no filter, and
         the callers that say yes are the three that exit immediately after.
 */
+/*
+        --help and --version for every tool that does not answer them itself:
+        tools_meta in tools.c finds them where GNU's getopt would and answers
+        with a short usage or "<tool> from moonwater", the form gzip, xz, tar
+        and the util-linux set already print. The tools below answer with
+        their own synopsis and are left to it, as are moonwater, init and
+        bowl, which are not command-line tools of that kind.
+*/
+static const string_address shell_tool_own_meta[] = {
+    "tar", "gzip", "gunzip", "zcat", "xz", "unxz", "xzcat", "unzstd", "zstd",
+    "zstdcat", "addpart", "blockdev", "cal", "choom", "chrt", "copyfilerange",
+    "coresched", "ctrlaltdel", "delpart", "exch", "fadvise", "fallocate",
+    "fincore", "flock", "getino", "getopt", "hardlink", "ipcmk", "ipcrm",
+    "ipcs", "isosize", "wget", "ionice", "lsblk", "lsclocks", "lscpu", "lsfd",
+    "lsipc", "lslocks", "lsmem", "lsns", "mesg", "mkswap", "namei", "nsenter",
+    "pipesz", "pivot_root", "prlimit", "renice", "rename", "resizepart",
+    "rfkill", "scriptreplay", "setpgid", "setpriv", "setsid", "swaplabel",
+    "taskset", "uclampset", "unshare", "utmpdump", "waitpid", "wall",
+    "whereis", "wipefs", "write", "moonwater", "init", "bowl", null};
+
+static b32 shell_tool_meta(positive which, string_address address_to arguments,
+                           positive count)
+{
+        string_address name = shell_tools[which].name;
+
+        if (!tools_meta_asked(arguments, count))
+                return 256;
+
+        for (positive at = 0; shell_tool_own_meta[at]; at++)
+                if (word_is(name, shell_tool_own_meta[at]))
+                        return 256;
+
+        return tools_meta(name, arguments, count);
+}
+
 static b32 shell_tool_call_in(positive which, bool own_process)
 {
         string_address address_to arguments = program_argument_list();
@@ -17499,14 +17950,21 @@ static b32 shell_tool_call_in(positive which, bool own_process)
             FLOODLIGHT_LAUNCH_ALLOW)
                 return 126;
 
+        /* After the launch decision: a tool that policy refuses is refused
+           for --version as for anything else. */
+        b32 meta = shell_tool_meta(which, arguments, count);
+        if (meta != 256)
+                return meta;
+
         log_failure_reset();
+        writer_stderr_failed = 0;
         answered = shell_tools[which].function() & 0xff;
         log_flush();
 
         if (log_failed() && !answered)
                 answered = 1;
 
-        return answered;
+        return tools_stderr_status(shell_tools[which].name, answered);
 }
 
 /* The ordinary way in: this process goes on to do other things. */
@@ -17756,6 +18214,7 @@ static bool shell_tool_run_hashed(string_address name, positive2 named)
                 return true;
         }
 
+        exec_wait_background(child);
         system_wait4_retry(child, address_of status, 0, null);
         shell_answer(wait_status_code(status));
 
@@ -17895,6 +18354,13 @@ static bipolar shell_source_direct(string_address name)
         return handle;
 }
 
+/*
+        bash 5.3's `source -p PATH name` looks along PATH, the operand, and
+        nowhere else: not the current directory unless PATH names it, as an
+        empty one does, and whatever sourcepath says.
+*/
+static string_address shell_source_search;
+
 static bipolar shell_source_open(string_address name,
                                   p8 address_to address_to found,
                                   positive address_to found_room,
@@ -17902,6 +18368,7 @@ static bipolar shell_source_open(string_address name,
 {
         string_address value;
         path_walk walk;
+        string_address search = shell_source_search;
 
         if (!name || !string_get(name))
                 return -1;
@@ -17911,10 +18378,11 @@ static bipolar shell_source_open(string_address name,
 
         //      sourcepath off is cwd under bash, and nothing under posix:
         //      `. p` is not found even when p is in this directory.
-        if (shell_bash_compat && !shell_shopt_on(SOURCEPATH))
+        if (!search && shell_bash_compat && !shell_shopt_on(SOURCEPATH))
                 return shell_posix_on() ? -1 : shell_source_direct(name);
 
-        value = env_get("PATH");
+        value = search ? (string_get(search) ? search : (string_address) ".")
+                       : env_get("PATH");
 
         if (!value)
                 value = "/bin:/usr/bin:/";
@@ -17942,6 +18410,17 @@ static bipolar shell_source_open(string_address name,
                                     walk.length, name, ""))
                         continue;
 
+                //      A directory of the name is passed over, as a PATH
+                //      search for a command passes over one: the next
+                //      segment may hold the file.
+                {
+                        file_facts facts;
+
+                        if (test_facts(*found, address_of facts, true) &&
+                            (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                                continue;
+                }
+
                 handle = shell_source_direct(*found);
 
                 if (handle >= 0)
@@ -17951,7 +18430,7 @@ static bipolar shell_source_open(string_address name,
         /* Bash's ordinary source policy falls back to the current directory.
            POSIX mode removes that fallback; dash only visits it when PATH
            explicitly contains a current-directory field. */
-        return shell_bash_compat && !shell_posix_on()
+        return shell_bash_compat && !shell_posix_on() && !search
                    ? shell_source_direct(name)
                    : -1;
 }
@@ -18065,6 +18544,13 @@ COLD fn shell_dot(writer write, string_address input)
         bipolar handle;
         positive first = 1;
 
+        shell_source_search = null;
+        if (shell_bash_compat && first + 1 < shell_argc &&
+            word_is(shell_argv[first], "-p"))
+        {
+                shell_source_search = shell_argv[first + 1];
+                first += 2;
+        }
         if (first < shell_argc && word_is(shell_argv[first], "--"))
                 first++;
         //      A word that looks like an option is one, and neither shell
@@ -18111,6 +18597,9 @@ COLD fn shell_dot(writer write, string_address input)
 
         handle = shell_source_open(path, address_of found, address_of found_room,
                                    address_of no_room);
+        bool searched_given = shell_source_search != null;
+
+        shell_source_search = null;
 
         if (handle >= 0)
                 got = shell_source_read(handle, address_of source_text,
@@ -18165,7 +18654,8 @@ COLD fn shell_dot(writer write, string_address input)
                                     code == ERROR_NO_ENTRY
                                         ? (string_address) "No such file"
                                         : why);
-                        else if (shell_posix_on() && searched)
+                        else if ((shell_posix_on() || searched_given) &&
+                                 searched)
                                 string_format(log_error,
                                     "%s: %s: file not found\n",
                                     shell_argv[0], path);
@@ -18251,7 +18741,9 @@ COLD fn shell_dot(writer write, string_address input)
                         shell_syntax_command = named;
 
                 shell_dot_depth++;
+                exec_frames_source_enter(named);
                 syntax = shell_source_execute(source_text, filled, false);
+                exec_frames_source_leave();
                 shell_dot_depth--;
 
                 shell_syntax_file = saved_file;
@@ -18781,85 +19273,119 @@ static COLD fn shell_bind(writer write, string_address input)
         shell_answer(0);
 }
 
+/*
+        The builtins, each with a switch of its own but the core.
+
+        SHELL_BUILTIN rows are CONFIG_MOONWATER_BUILTIN_<KEY>: switched off,
+        the row is compiled out through the same gate as the tools, and the
+        name is not found -- unless a tool of that name is still built, since
+        blkid, findfs, findmnt, kill, mount, mountpoint and umount are in
+        both tables and each table has its own switch.
+
+        SHELL_BUILTIN_CORE rows have no switch. They are POSIX's special
+        builtins -- . : break continue eval exec exit export readonly return
+        set shift times trap unset -- with cd, true and false. A special
+        builtin is part of the language rather than a command it runs: the
+        executor answers break, continue and return itself and finds `:`,
+        true and false before any table (here and in programs/shell.c), so
+        taking their rows away would not even make them "not found". And a
+        script that met "exit: not found" or "trap: not found" would carry on
+        past the point it meant to stop or clean up at, which is the opposite
+        of what switching things off is for. cd is the one ordinary builtin
+        that cannot be a program at all, since a child cannot move its
+        parent. The key is the upper-case name, BRACKET for [.
+*/
+#define SHELL_BUILTIN_KEEP(name, function) {name, function},
+#define SHELL_BUILTIN_DROP(name, function)
+#define SHELL_BUILTIN(key, name, function) \
+        SHELL_GATE(MOONWATER_BUILTIN_OFF_##key, SHELL_BUILTIN_DROP, \
+                   SHELL_BUILTIN_KEEP)(name, function)
+#define SHELL_BUILTIN_CORE(name, function) {name, function},
+
 shell_command shell_commands[] = {
     //      Byte order, because `enable` writes this list as it
     //      stands and the reference writes a sorted one: '.' is
     //      0x2e and ':' is 0x3a, so the two of them led it wrong.
-    {".", shell_dot},
-    {":", shell_true},
-    {"[", shell_test},
-    {"alias", shell_alias},
-    {"bg", shell_bg},
-    {"bind", shell_bind},
-    {"blkid", shell_blkid},
-    {"break", shell_break},
-    {"builtin", shell_builtin_run},
-    {"caller", shell_caller},
-    {"cd", shell_cd},
-    {"clear", shell_clear},
-    {"command", shell_command_builtin},
-    {"compgen", shell_compgen},
-    {"complete", shell_complete},
-    {"compopt", shell_compopt},
-    {"continue", shell_break},
-    {"declare", shell_declare},
-    {"dirs", shell_dirs},
-    {"disown", shell_disown},
-    {"echo", shell_echo},
-    {"enable", shell_enable},
-    {"eval", shell_eval},
-    {"exec", shell_exec},
-    {"exit", shell_exit},
-    {"export", shell_export},
-    {"false", shell_false},
-    {"fc", shell_fc},
-    {"fg", shell_fg},
-    {"findfs", shell_findfs},
-    {"findmnt", shell_findmnt},
-    {"getopts", shell_getopts},
-    {"hash", shell_hash},
-    {"help", shell_help},
-    {"history", shell_history},
-    {"jobs", shell_jobs},
-    {"kill", shell_kill},
-    {"let", shell_let},
-    {"local", shell_local},
-    {"logout", shell_logout},
-    {"mapfile", shell_mapfile},
-    {"mount", shell_mount},
-    {"mountpoint", shell_mountpoint},
-    {"popd", shell_popd},
-    {"poweroff", shell_poweroff},
-    {"printf", shell_printf},
-    {"pushd", shell_pushd},
-    {"pwd", shell_pwd},
-    {"read", shell_read},
-    {"readarray", shell_mapfile},
-    {"readonly", shell_readonly},
-    {"reboot", shell_reboot},
-    {"return", shell_break},
-    {"set", shell_set},
-    {"shift", shell_shift},
-    {"shopt", shell_shopt},
-    {"source", shell_dot},
-    {"suspend", shell_suspend},
-    {"test", shell_test},
-    {"times", shell_times},
-    {"trap", shell_trap},
-    {"true", shell_true},
-    {"type", shell_type},
-    {"typeset", shell_declare},
-    {"ulimit", shell_ulimit},
-    {"umask", shell_umask},
-    {"umount", shell_umount},
-    {"unalias", shell_unalias},
-    {"unset", shell_unset},
-    {"wait", job_wait},
-    {"which", shell_which},
+    SHELL_BUILTIN_CORE(".", shell_dot)
+    SHELL_BUILTIN_CORE(":", shell_true)
+    SHELL_BUILTIN(BRACKET, "[", shell_test)
+    SHELL_BUILTIN(ALIAS, "alias", shell_alias)
+    SHELL_BUILTIN(BG, "bg", shell_bg)
+    SHELL_BUILTIN(BIND, "bind", shell_bind)
+    SHELL_BUILTIN(BLKID, "blkid", shell_blkid)
+    SHELL_BUILTIN_CORE("break", shell_break)
+    SHELL_BUILTIN(BUILTIN, "builtin", shell_builtin_run)
+    SHELL_BUILTIN(CALLER, "caller", shell_caller)
+    SHELL_BUILTIN_CORE("cd", shell_cd)
+    SHELL_BUILTIN(CLEAR, "clear", shell_clear)
+    SHELL_BUILTIN(COMMAND, "command", shell_command_builtin)
+    SHELL_BUILTIN(COMPGEN, "compgen", shell_compgen)
+    SHELL_BUILTIN(COMPLETE, "complete", shell_complete)
+    SHELL_BUILTIN(COMPOPT, "compopt", shell_compopt)
+    SHELL_BUILTIN_CORE("continue", shell_break)
+    SHELL_BUILTIN(DECLARE, "declare", shell_declare)
+    SHELL_BUILTIN(DIRS, "dirs", shell_dirs)
+    SHELL_BUILTIN(DISOWN, "disown", shell_disown)
+    SHELL_BUILTIN(ECHO, "echo", shell_echo)
+    SHELL_BUILTIN(ENABLE, "enable", shell_enable)
+    SHELL_BUILTIN_CORE("eval", shell_eval)
+    SHELL_BUILTIN_CORE("exec", shell_exec)
+    SHELL_BUILTIN_CORE("exit", shell_exit)
+    SHELL_BUILTIN_CORE("export", shell_export)
+    SHELL_BUILTIN_CORE("false", shell_false)
+    SHELL_BUILTIN(FC, "fc", shell_fc)
+    SHELL_BUILTIN(FG, "fg", shell_fg)
+    SHELL_BUILTIN(FINDFS, "findfs", shell_findfs)
+    SHELL_BUILTIN(FINDMNT, "findmnt", shell_findmnt)
+    SHELL_BUILTIN(GETOPTS, "getopts", shell_getopts)
+    SHELL_BUILTIN(HASH, "hash", shell_hash)
+    SHELL_BUILTIN(HELP, "help", shell_help)
+    SHELL_BUILTIN(HISTORY, "history", shell_history)
+    SHELL_BUILTIN(JOBS, "jobs", shell_jobs)
+    SHELL_BUILTIN(KILL, "kill", shell_kill)
+    SHELL_BUILTIN(LET, "let", shell_let)
+    SHELL_BUILTIN(LOCAL, "local", shell_local)
+    SHELL_BUILTIN(LOGOUT, "logout", shell_logout)
+    SHELL_BUILTIN(MAPFILE, "mapfile", shell_mapfile)
+    SHELL_BUILTIN(MOUNT, "mount", shell_mount)
+    SHELL_BUILTIN(MOUNTPOINT, "mountpoint", shell_mountpoint)
+    SHELL_BUILTIN(POPD, "popd", shell_popd)
+    SHELL_BUILTIN(POWEROFF, "poweroff", shell_poweroff)
+    SHELL_BUILTIN(PRINTF, "printf", shell_printf)
+    SHELL_BUILTIN(PUSHD, "pushd", shell_pushd)
+    SHELL_BUILTIN(PWD, "pwd", shell_pwd)
+    SHELL_BUILTIN(READ, "read", shell_read)
+    SHELL_BUILTIN(READARRAY, "readarray", shell_mapfile)
+    SHELL_BUILTIN_CORE("readonly", shell_readonly)
+    SHELL_BUILTIN(REBOOT, "reboot", shell_reboot)
+    SHELL_BUILTIN_CORE("return", shell_break)
+    SHELL_BUILTIN_CORE("set", shell_set)
+    SHELL_BUILTIN_CORE("shift", shell_shift)
+    SHELL_BUILTIN(SHOPT, "shopt", shell_shopt)
+    SHELL_BUILTIN(SOURCE, "source", shell_dot)
+    SHELL_BUILTIN(SUSPEND, "suspend", shell_suspend)
+    SHELL_BUILTIN(TEST, "test", shell_test)
+    SHELL_BUILTIN_CORE("times", shell_times)
+    SHELL_BUILTIN_CORE("trap", shell_trap)
+    SHELL_BUILTIN_CORE("true", shell_true)
+    SHELL_BUILTIN(TYPE, "type", shell_type)
+    SHELL_BUILTIN(TYPESET, "typeset", shell_declare)
+    SHELL_BUILTIN(ULIMIT, "ulimit", shell_ulimit)
+    SHELL_BUILTIN(UMASK, "umask", shell_umask)
+    SHELL_BUILTIN(UMOUNT, "umount", shell_umount)
+    SHELL_BUILTIN(UNALIAS, "unalias", shell_unalias)
+    SHELL_BUILTIN_CORE("unset", shell_unset)
+    SHELL_BUILTIN(WAIT, "wait", job_wait)
+    SHELL_BUILTIN(WHICH, "which", shell_which)
     {null, null},
 };
 
 #define SHELL_COMMAND_COUNT ((array_count(shell_commands)) - 1)
+
+#ifdef MOONWATER_CONFIG_BUILTINS
+_Static_assert(SHELL_COMMAND_COUNT == MOONWATER_CONFIG_BUILTINS,
+               "the builtin table holds what the configuration header counted");
+#endif
 #define SHELL_COMMAND_INDEX_ROOM 256
 
 static shell_name_slot shell_command_index[SHELL_COMMAND_INDEX_ROOM];
@@ -19186,6 +19712,8 @@ fn shell_hash(writer write, string_address input)
         run anything typed without a slash -- and had no way to ask, so every
         program had to be named by its full path.
 */
+static bool shell_find_directories;
+
 static b32 shell_find_in_path_mode(string_address name, p8 address_to into,
                                    positive room, positive access,
                                    bool use_hash, string_address value)
@@ -19213,6 +19741,12 @@ static b32 shell_find_in_path_mode(string_address name, p8 address_to into,
                 string_address known = use_hash && shell_hashall_on()
                                            ? hash_find(name) : null;
 
+                /* bash --posix looks again when the remembered file has
+                   gone; bash itself and dash try the stale path. */
+                if (known && shell_bash_compat && shell_posix_on() &&
+                    system_access_at(AT_FDCWD, known, access))
+                        known = null;
+
                 if (known)
                 {
                         positive known_length = string_length(known);
@@ -19238,6 +19772,19 @@ static b32 shell_find_in_path_mode(string_address name, p8 address_to into,
 
                 if (system_access_at(AT_FDCWD, into, access))
                         continue;
+
+                /* A directory is never a command, though it passes an
+                   execute test: both references search on past d/hello to
+                   the program in the next directory of PATH. When nothing
+                   else is found, dash still names the directory's refusal. */
+                if (!shell_find_directories)
+                {
+                        file_facts facts;
+
+                        if (test_facts(into, address_of facts, true) &&
+                            (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                                continue;
+                }
 
                 // Remembered only as the executor's answer: a query asks
                 // with access 0 and may name a file nobody could run.
@@ -19324,13 +19871,53 @@ static bipolar shell_find_in_path_alloc_mode(string_address name,
                 and a name remembered from a query put a file nobody could
                 run in front of the one that would have.
         */
-        if (shell_find_in_path_mode(name, *into, *room, query ? 0 : access,
-                                    !fixed_path, fixed_path))
+        /*
+                A query names what could run. dash reports an executable
+                file and nothing else; bash does too for a name with a slash,
+                and along PATH falls back to the first file of the name when
+                none can run -- unless a directory of the name stood first.
+        */
+        if (query)
+        {
+                file_facts facts;
+
+                if (shell_find_in_path_mode(name, *into, *room, ACCESS_EXECUTE,
+                                            !fixed_path, fixed_path) &&
+                    !(string_first_of(name, '/') &&
+                      test_facts(*into, address_of facts, true) &&
+                      (facts.mode & MODE_FORMAT) == MODE_DIRECTORY))
+                        return 1;
+
+                if (shell_bash_compat && !shell_posix_on() &&
+                    !string_first_of(name, '/'))
+                {
+                        bool found;
+
+                        shell_find_directories = true;
+                        found = shell_find_in_path_mode(name, *into, *room, 0,
+                                                        false, fixed_path);
+                        shell_find_directories = false;
+                        if (found &&
+                            !(test_facts(*into, address_of facts, true) &&
+                              (facts.mode & MODE_FORMAT) == MODE_DIRECTORY))
+                                return 1;
+                }
+        }
+        else if (shell_find_in_path_mode(name, *into, *room, access,
+                                         !fixed_path, fixed_path))
                 return 1;
 
-        if (!query && shell_find_in_path_mode(name, *into, *room, 0, false,
-                                              fixed_path))
-                return 2;
+        if (!query)
+        {
+                bool found;
+
+                shell_find_directories = !shell_bash_compat;
+                found = shell_find_in_path_mode(name, *into, *room, 0, false,
+                                                fixed_path);
+                shell_find_directories = false;
+                if (found)
+                        return 2;
+        }
 
         if (!fixed_path && !string_first_of(name, '/') &&
             bowl_fill_command(name, *into, *room))
@@ -19474,7 +20061,12 @@ static COLD fn shell_command_kind_written(writer write, string_address name,
                 //      "f is a shell function", so the word "shell" is the
                 //      personality's and not the kind's.
                 if (shell_bash_compat && word_is(kind, "function"))
+                {
+                        //      bash follows the line with the definition,
+                        //      the way declare -f writes it.
                         string_format(write, "%s is a function\n", name);
+                        exec_function_write(write, name, 0);
+                }
                 else
                         string_format(write, "%s is a shell %s\n", name, kind);
         }
@@ -20435,10 +21027,11 @@ fn shell_ulimit(writer write, string_address input)
                         bool good;
                         bipolar asked = shell_signed(shell_argv[index], address_of good);
 
-                        if (!good ||
+                        //      A negative limit is no number to either
+                        //      shell; dash reads only digits there.
+                        if (!good || asked < 0 ||
                             (shell_bash_compat &&
-                             (asked < 0 ||
-                              (positive)asked >
+                             ((positive)asked >
                                   (UL_LIMIT_INFINITE - 1) /
                                       shell_limit_step(chosen))))
                         {
@@ -20564,6 +21157,7 @@ fn shell_enable(writer write, string_address input)
         p8 which;
         bool off = false;
         bool every = false;
+        bool special = false;
         b32 bad = 0;
 
         while (shell_option_letter(address_of walk, address_of which))
@@ -20574,7 +21168,9 @@ fn shell_enable(writer write, string_address input)
                         continue;
                 else if (which == 'a')
                         every = true;
-                else if (which == 'f' || which == 'd' || which == 's')
+                else if (which == 's')
+                        special = true;
+                else if (which == 'f' || which == 'd')
                 {
                         // Dynamic builtin loading is not supported.
                         return shell_answered(2, "enable: not supported\n");
@@ -20585,6 +21181,32 @@ fn shell_enable(writer write, string_address input)
         }
 
         positive index = walk.index;
+
+        /*
+                -s: the POSIX special builtins, in bash's own order, which is
+                how enable -s and enable -ps list them.
+        */
+        if (special && index >= shell_argc)
+        {
+                static const string_address specials[] = {
+                    ".", ":", "break", "continue", "eval", "exec", "exit",
+                    "export", "readonly", "return", "set", "shift", "source",
+                    "times", "trap", "unset"};
+
+                for (positive at = 0; at < array_count(specials); at++)
+                {
+                        positive found = shell_command_index_hashed(
+                            specials[at], string_hash_33_length(specials[at]));
+                        bool here = found >= SHELL_COMMAND_COUNT ||
+                                    !shell_disabled[found];
+
+                        if (here == !off || every)
+                                string_format(write, "enable %s%s\n",
+                                              here ? "" : "-n ", specials[at]);
+                }
+                return shell_answer(0);
+        }
+
         if (index >= shell_argc)
         {
                 shell_command address_to command = shell_commands;
@@ -20960,8 +21582,63 @@ static COLD fn shell_prompt_directory(writer write, bool whole)
         write(path, length);
 }
 
+/*
+        What a prompt escape answers is quoted for the double-quoted expansion
+        that follows it under bash's promptvars, so \w naming a directory
+        called $foo stays $foo while a $foo written in the prompt expands.
+*/
+static bool prompt_quote;
+static writer prompt_writer;
+static byte_store address_to prompt_store;
+
+static fn prompt_store_write(address_any data, positive length)
+{
+        string_address bytes = (string_address)data;
+
+        if (!length)
+                length = string_length(bytes);
+        if (byte_store_reserve(prompt_store, prompt_store->used + length + 1,
+                               64))
+        {
+                memory_copy(prompt_store->bytes + prompt_store->used, bytes,
+                            length);
+                prompt_store->used += length;
+        }
+}
+
+static fn prompt_quoted(address_any data, positive length)
+{
+        string_address bytes = (string_address)data;
+
+        if (!length)
+                length = string_length(bytes);
+        for (positive at = 0; at < length; at++)
+        {
+                p8 value = bytes[at];
+
+                if (value == '\\' || value == '$' || value == '`' ||
+                    value == '"')
+                        prompt_writer("\\", 1);
+                prompt_writer(address_of value, 1);
+        }
+}
+
+positive shell_job_count();
+positive shell_history_next();
+
 COLD fn shell_prompt_written(writer write, string_address text)
 {
+        writer raw = write;
+        //      bash quotes only what a user can set: names, the directory,
+        //      the time. The rest go in as they are.
+        writer quoted = write;
+
+        if (prompt_quote)
+        {
+                prompt_writer = raw;
+                quoted = prompt_quoted;
+        }
+
         while (string_get(text))
         {
                 p8 value = string_get(text++);
@@ -20969,7 +21646,7 @@ COLD fn shell_prompt_written(writer write, string_address text)
 
                 if (value != '\\')
                 {
-                        write(address_of value, 1);
+                        raw(address_of value, 1);
                         continue;
                 }
 
@@ -20993,7 +21670,7 @@ COLD fn shell_prompt_written(writer write, string_address text)
 
                         if (file_user_name(id, name, sizeof(name)) &&
                             string_get(name))
-                                write(name, string_length(name));
+                                quoted(name, string_length(name));
                         else
                         {
                                 p8 written[24];
@@ -21013,45 +21690,140 @@ COLD fn shell_prompt_written(writer write, string_address text)
                                                 ? string_first_of(named, '.')
                                                 : null;
 
-                        write(named, stop ? (positive)(stop - named)
-                                          : string_length(named));
+                        quoted(named, stop ? (positive)(stop - named)
+                                           : string_length(named));
                         break;
                 }
 
-                case 'w': shell_prompt_directory(write, true); break;
-                case 'W': shell_prompt_directory(write, false); break;
+                case 'w': shell_prompt_directory(quoted, true); break;
+                case 'W': shell_prompt_directory(quoted, false); break;
 
+                //      Under promptvars bash writes \$ for a user, so that
+                //      the expansion after gives the dollar back.
                 case '$':
-                        write(system_call_1(syscall(geteuid), 0) ? "$" : "#",
-                              1);
+                        if (system_call_1(syscall(geteuid), 0))
+                                write(prompt_quote ? "\\$" : "$",
+                                      prompt_quote ? 2 : 1);
+                        else
+                                write("#", 1);
                         break;
 
                 case 'd':
-                        date_shape(write,
+                        date_shape(quoted,
                                    shell_clock_seconds(SHELL_CLOCK_REALTIME,
                                                        null),
                                    0, (string_address) "%a %b %d");
                         break;
 
                 case 't':
-                        date_shape(write,
+                        date_shape(quoted,
                                    shell_clock_seconds(SHELL_CLOCK_REALTIME,
                                                        null),
                                    0, (string_address) "%H:%M:%S");
                         break;
 
                 case 'A':
-                        date_shape(write,
+                        date_shape(quoted,
                                    shell_clock_seconds(SHELL_CLOCK_REALTIME,
                                                        null),
                                    0, (string_address) "%H:%M");
                         break;
 
+                case 'T':
+                case '@':
+                        date_shape(quoted,
+                                   shell_clock_seconds(SHELL_CLOCK_REALTIME,
+                                                       null),
+                                   0, letter == 'T'
+                                          ? (string_address) "%I:%M:%S"
+                                          : (string_address) "%I:%M %p");
+                        break;
+
+                //      \D{format}: strftime, the locale's time when empty.
+                case 'D':
+                        if (string_is(text, '{'))
+                        {
+                                string_address shut = string_first_of(text, '}');
+                                p8 format[128];
+                                positive length = shut ? (positive)(shut - text - 1)
+                                                       : 0;
+
+                                if (shut && length < sizeof(format))
+                                {
+                                        memory_copy_end(format, text + 1, length);
+                                        date_shape(quoted,
+                                                   shell_clock_seconds(
+                                                       SHELL_CLOCK_REALTIME, null),
+                                                   0, length ? format
+                                                             : (p8 address_to)"%X");
+                                        text = shut + 1;
+                                        break;
+                                }
+                        }
+                        write("\\D", 2);
+                        break;
+
+                case 'j':
+                {
+                        p8 written[24];
+
+                        write(written, positive_into_string(written,
+                                                            shell_job_count()));
+                        break;
+                }
+
+                case '!':
+                case '#':
+                {
+                        p8 written[24];
+
+                        write(written, positive_into_string(
+                                           written, shell_is_interactive
+                                                        ? shell_history_next()
+                                                        : 1));
+                        break;
+                }
+
+                //      The terminal's name without its directories, or tty
+                //      when standard input is none.
+                case 'l':
+                {
+                        p8 name[256];
+                        p8 settings[64];
+                        bipolar got = system_control(0, PTY_TCGETS, settings) == 0
+                                          ? system_read_link_at(AT_FDCWD,
+                                                                "/proc/self/fd/0",
+                                                                name,
+                                                                sizeof(name) - 1)
+                                          : -1;
+
+                        if (got > 0)
+                        {
+                                name[got] = end;
+                                string_address last = string_last_of(name, '/');
+                                string_address base = last ? last + 1 : name;
+                                write(base, string_length(base));
+                        }
+                        else
+                                write("tty", 3);
+                        break;
+                }
+
                 case 'n': write("\n", 1); break;
                 case 'r': write("\r", 1); break;
                 case 'a': write("\a", 1); break;
                 case 'e': write("\033", 1); break;
-                case 's': write("sh", 2); break;
+                case 's':
+                {
+                        string_address named = shell_invocation_name
+                                                   ? shell_invocation_name
+                                                   : shell_script_name;
+                        string_address last = string_last_of(named, '/');
+                        string_address base = last ? last + 1 : named;
+
+                        quoted(base, string_length(base));
+                        break;
+                }
                 case 'v': write("5.3", 3); break;
                 case 'V': write("5.3.15", 6); break;
                 case '\\': write("\\", 1); break;
@@ -21063,11 +21835,55 @@ COLD fn shell_prompt_written(writer write, string_address text)
                 case ']': break;
 
                 default:
-                        write("\\", 1);
-                        write(address_of letter, 1);
+                        //      \nnn: up to three octal digits, the low
+                        //      byte of what they spell.
+                        if (letter >= '0' && letter <= '7')
+                        {
+                                positive number = (positive)(letter - '0');
+                                positive digits = 1;
+                                p8 byte;
+
+                                while (digits < 3 && string_get(text) >= '0' &&
+                                       string_get(text) <= '7')
+                                {
+                                        number = number * 8 +
+                                                 (positive)(string_get(text++) - '0');
+                                        digits++;
+                                }
+                                byte = (p8)number;
+                                write(address_of byte, 1);
+                                break;
+                        }
+                        raw("\\", 1);
+                        raw(address_of letter, 1);
                         break;
                 }
         }
+}
+
+/*
+        A prompt as bash makes one: the backslash escapes decoded, each
+        answer quoted, and then -- promptvars is on unless a script turned it
+        off -- the whole expanded as a double-quoted word, so PS1='$x$y' reads
+        x and y and \w naming a directory called $foo stays $foo.
+*/
+string_address expand_capture_prompt(string_address text, bool nested);
+
+COLD string_address shell_prompt_expand(string_address text, bool nested)
+{
+        static byte_store decoded;
+        bool expand = shell_shopt_on(PROMPTVARS) || shell_posix_on();
+
+        decoded.used = 0;
+        prompt_quote = expand;
+        prompt_store = address_of decoded;
+        shell_prompt_written(prompt_store_write, text);
+        prompt_quote = false;
+        if (!byte_store_reserve(address_of decoded, decoded.used + 1, 64))
+                return text;
+        decoded.bytes[decoded.used] = end;
+        return expand ? expand_capture_prompt(decoded.bytes, nested)
+                      : decoded.bytes;
 }
 
 /*

@@ -88,7 +88,7 @@ export TEST_TALLY
 #       does not have: wifi wants an image built with kernel/profile/hwsim.
 asked_lanes="wifi"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine sensors cli differential_oracle text files misc util_linux shell builtins awk term edit kit boot install canvas"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine sensors cli differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas"
 
 describe()
 {
@@ -159,6 +159,7 @@ describe()
         term)     echo "the emulator driven a byte and a read at a time, and the line being edited" ;;
         edit)     echo "the full-screen editor, its key protocol, buffer, undo and redraws" ;;
         kit)      echo "build, source-inventory, remote-host and firmware tooling" ;;
+        switches) echo "a .config reaching the programs: what a switch turns off is not built, not linked and not found" ;;
         boot)     echo "the image boots, init starts, and the shell answers" ;;
         install)  echo "Moonwater installed to a disk, started from it, asked about and updated from a stick" ;;
         canvas)   echo "what is actually on the screen, read back a pixel at a time" ;;
@@ -5061,9 +5062,11 @@ lane_misc()
         #       stdbuf, read from inside the program it starts. The misc
         #       grammar compares the variables stdbuf publishes; this reads
         #       glibc's own stream state once libstdbuf has run, which is the
-        #       change those variables only promise. GNU runs a static target
-        #       its preload cannot reach; ours refuses one rather than claim a
-        #       mode it never applied.
+        #       change those variables only promise. A static target its
+        #       preload cannot reach is run all the same, as GNU runs it, with
+        #       the variables and no preload (this shell's own programs, all
+        #       static, read _STDBUF_O themselves), so the static probe
+        #       reports what GNU's run of it reports.
         if $compiler -O2 -o "$work/stdio-buffer" -DCHECK_stdio_buffer \
                 test/checks.c > "$work/stdio-buffer.err" 2>&1 &&
                 $compiler -O2 -static -o "$work/stdio-buffer-static" \
@@ -5081,15 +5084,60 @@ lane_misc()
                         misc_failed=1
                 fi
 
+                stdbuf -o0 "$work/stdio-buffer-static" \
+                        > "$work/stdbuf.static.want" 2>&1
                 "$farm/stdbuf" -o0 "$work/stdio-buffer-static" \
-                        > "$work/stdbuf.static" 2> "$work/stdbuf.static.err"
+                        > "$work/stdbuf.static" 2>&1
                 static_status=$?
-                if [ "$static_status" = 125 ] && [ ! -s "$work/stdbuf.static" ] &&
-                        grep -q 'statically linked' "$work/stdbuf.static.err"; then
-                        tally stdbuf-static-refused 1 1
+                if [ "$static_status" = 0 ] &&
+                        cmp -s "$work/stdbuf.static.want" "$work/stdbuf.static"; then
+                        tally stdbuf-static-runs 1 1
                 else
-                        tally stdbuf-static-refused 0 1
-                        note "stdbuf did not refuse a static target: status $static_status"
+                        tally stdbuf-static-runs 0 1
+                        note "stdbuf on a static target: status $static_status, $(cat "$work/stdbuf.static"), GNU $(cat "$work/stdbuf.static.want")"
+                        misc_failed=1
+                fi
+
+                #       upstream misc/responsive: under stdbuf -oL a line
+                #       into a pipe comes out while the writer still holds
+                #       the pipe open (it used to wait for the end, or for
+                #       stdbuf to refuse the static program outright).
+                for prompt_reader in "cut -b1" "date -u -f - +%H"; do
+                        rm -f "$work/prompt.in" "$work/prompt.out"
+                        mkfifo "$work/prompt.in"
+                        # shellcheck disable=SC2086
+                        "$farm/stdbuf" -oL $farm/$prompt_reader < "$work/prompt.in" \
+                                > "$work/prompt.out" 2>&1 &
+                        prompt_pid=$!
+                        { printf '1\n'; sleep 3; } > "$work/prompt.in" &
+                        prompt_writer=$!
+                        sleep 1
+                        case $(cat "$work/prompt.out") in
+                        1|01)   tally stdbuf-line-prompt 1 1 ;;
+                        *)      tally stdbuf-line-prompt 0 1
+                                note "stdbuf -oL $prompt_reader wrote nothing while its pipe stayed open"
+                                misc_failed=1 ;;
+                        esac
+                        wait "$prompt_writer" "$prompt_pid"
+                done
+
+                #       upstream timeout/timeout-group: a timeout killed
+                #       outright still has its signal sent to the command,
+                #       by the kernel (PR_SET_PDEATHSIG).
+                rm -f "$work/pdeath.got"
+                "$farm/timeout" -sUSR1 30 sh -c 'trap "echo got > \"\$0\"; exit" USR1
+                        i=0; while [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done' \
+                        "$work/pdeath.got" &
+                pdeath_timeout=$!
+                sleep 1
+                kill -KILL "$pdeath_timeout"
+                wait "$pdeath_timeout" 2>/dev/null
+                sleep 1
+                if [ "$(cat "$work/pdeath.got" 2>/dev/null)" = got ]; then
+                        tally timeout-death-signal 1 1
+                else
+                        tally timeout-death-signal 0 1
+                        note "a timeout killed by SIGKILL left its command without the USR1 it was to send"
                         misc_failed=1
                 fi
         else
@@ -9884,6 +9932,228 @@ fi
 #       with `|| exit 1` once kept twelve of them dark, the seal among them.
 #       objtool_shape stands in for the objtool pass of the kernel build,
 #       which no lane runs.
+#       The build's configuration reaching the programs. An image build
+#       writes artifacts/moonwater_config.h from the kernel's .config and the
+#       programs include it; `build config-header` writes the same header
+#       from any fragment, over the Kconfig defaults, so a shell is built
+#       here exactly as the image would build it. Every other lane builds
+#       with no header, which is the default configuration -- that is how
+#       the component switches went unread for as long as they did.
+switch_header()
+{
+        build_tool config-header "$1" "$2" > "$2.log" 2>&1 ||
+                { sed 's/^/    /' "$2.log"; return 1; }
+}
+
+switch_shell()
+{
+        freestanding programs/shell.c "$2" "$host_arch" \
+                "-DMOONWATER_CONFIG=\"$1\""
+}
+
+#       What a command answers with no PATH to fall back on: its status.
+#       A name the shell does not know is also looked for in the bowls, so
+#       where this machine has a /bowls it is hidden under an empty tmpfs in
+#       a mount namespace of the run's own, or an Arch bowl's lsblk would
+#       answer for the one switched off.
+switch_status()
+{
+        if [ -d /bowls ]; then
+                unshare -rm sh -c 'mount -t tmpfs none /bowls &&
+                        PATH="$1" exec "$2" -c "$3"' sh \
+                        "$switch_empty" "$1" "$2" < /dev/null > /dev/null 2>&1
+        else
+                PATH="$switch_empty" "$1" -c "$2" < /dev/null > /dev/null 2>&1
+        fi
+        echo $?
+}
+
+#       Whether the shell itself answers to a name: command -v prints a
+#       builtin or tool as the bare name, and anything else as a path or
+#       not at all.
+switch_own()
+{
+        if [ "$(PATH="$switch_empty" "$1" -c "command -v $2" < /dev/null \
+                2> /dev/null)" = "$2" ]; then
+                echo yes
+        else
+                echo no
+        fi
+}
+
+lane_switches()
+(
+counting switches 12 28
+switch_empty=$work/switch-empty
+mkdir -p "$switch_empty" || exit 1
+
+group handoff
+printf '%s\n' 'CONFIG_MOONWATER_CORE=y' \
+        '# CONFIG_MOONWATER_UTIL_LINUX is not set' \
+        'CONFIG_MOONWATER_SHELL_MONITOR=n' \
+        'CONFIG_MOONWATER_STRICT=2' > "$work/switch-components.config"
+if switch_header "$work/switch-components.config" "$work/switch-components.h" &&
+        switch_shell "$work/switch-components.h" "$work/switch-components"; then
+        won
+        switch_bin=$work/switch-components
+        switch_record=$(sed -n 's/^#define MOONWATER_CONFIG_RECORD "\(.*\)"$/\1/p' \
+                "$work/switch-components.h")
+        if [ -n "$switch_record" ] &&
+                grep -q -a -F "$switch_record" "$switch_bin"; then
+                won
+        else
+                lost 'record in the image' "no [$switch_record] in the shell"
+        fi
+        same 'strict level' 'MOONWATER_STRICT 2' \
+                "$(grep -o 'MOONWATER_STRICT [0-9]*' "$work/switch-components.h")"
+        same 'util-linux off' 127 "$(switch_status "$switch_bin" lsblk)"
+        same 'util-linux not its own' no "$(switch_own "$switch_bin" lsblk)"
+        same 'monitor not its own' no "$(switch_own "$switch_bin" monitor)"
+        same 'utilities still on' 0 "$(switch_status "$switch_bin" 'cat /dev/null')"
+else
+        lost 'components build' 'the header or the shell did not build'
+fi
+
+#       One tool off, and its neighbours in tools.inc still there: gone from
+#       the table, from every name the image links, and from the shell.
+group tool
+printf '%s\n' 'CONFIG_MOONWATER_CORE=y' \
+        '# CONFIG_MOONWATER_TOOL_TAC is not set' \
+        '# CONFIG_MOONWATER_BUILTIN_ULIMIT is not set' \
+        '# CONFIG_MOONWATER_TOOL_MOUNTPOINT is not set' \
+        '# CONFIG_MOONWATER_BUILTIN_MOUNTPOINT is not set' \
+        '# CONFIG_MOONWATER_BUILTIN_KILL is not set' \
+        '# CONFIG_MOONWATER_BUILTIN_EXIT is not set' > "$work/switch-single.config"
+if switch_header "$work/switch-single.config" "$work/switch-single.h" &&
+        switch_shell "$work/switch-single.h" "$work/switch-single"; then
+        won
+        switch_bin=$work/switch-single
+        same 'tac not found' 127 "$(switch_status "$switch_bin" 'tac /dev/null')"
+        same 'tac not its own' no "$(switch_own "$switch_bin" tac)"
+        same 'tail its own' yes "$(switch_own "$switch_bin" tail)"
+        same 'sum still on' 0 "$(switch_status "$switch_bin" 'sum /dev/null')"
+        same 'tail still on' 0 "$(switch_status "$switch_bin" 'tail /dev/null')"
+        same 'ulimit not found' 127 "$(switch_status "$switch_bin" 'ulimit -n')"
+        same 'ulimit not its own' no "$(switch_own "$switch_bin" ulimit)"
+        same 'umask still its own' yes "$(switch_own "$switch_bin" umask)"
+        same 'mountpoint gone from both' no \
+                "$(switch_own "$switch_bin" mountpoint)"
+        same 'mountpoint not found' 127 \
+                "$(switch_status "$switch_bin" 'mountpoint /')"
+        same 'kill kept by its tool' yes "$(switch_own "$switch_bin" kill)"
+        same 'exit has no switch' 3 "$(switch_status "$switch_bin" 'exit 3')"
+        same 'enable lists no ulimit' '' \
+                "$(PATH="$switch_empty" "$switch_bin" -c 'enable' < /dev/null |
+                        grep -x 'enable ulimit')"
+        if build_tool surface "$work/switch-single.config" \
+                > "$work/switch-single.surface" 2>&1; then
+                same 'tac not linked' '' \
+                        "$(grep -x -e tac -e bin/tac "$work/switch-single.surface")"
+                same 'tail linked' 'tail bin/tail' \
+                        "$(grep -x -e tail -e bin/tail "$work/switch-single.surface" |
+                                tr '\n' ' ' | sed 's/ $//')"
+                same 'init always linked' init \
+                        "$(grep -x init "$work/switch-single.surface")"
+        else
+                lost 'surface' "$(head -3 "$work/switch-single.surface")"
+        fi
+else
+        lost 'single build' 'the header or the shell did not build'
+fi
+
+#       sec_reference is the only tier that compiles the STRICT_REFERENCE
+#       branches, and a utility-only image is the only build of
+#       programs/utilities.c against a header: each is built once here so
+#       neither can rot unseen. The utility program drops the monitor and
+#       every SYSTEM name, and has no shell to fall back to.
+group reference
+{ echo CONFIG_MOONWATER_CORE=y; cat kernel/profile/sec_reference; } \
+        > "$work/switch-reference.config"
+if switch_header "$work/switch-reference.config" "$work/switch-reference.h" &&
+        switch_shell "$work/switch-reference.h" "$work/switch-reference"; then
+        won
+        same 'strict level' 'MOONWATER_STRICT 0' \
+                "$(grep -o 'MOONWATER_STRICT [0-9]*' "$work/switch-reference.h")"
+        same 'cat runs' 0 "$(switch_status "$work/switch-reference" 'cat /dev/null')"
+else
+        lost 'reference build' 'the header or the shell did not build'
+fi
+
+group utility
+printf '%s\n' 'CONFIG_MOONWATER_CORE=y' '# CONFIG_MOONWATER_SHELL is not set' \
+        '# CONFIG_MOONWATER_TOOL_TAC is not set' > "$work/switch-utility.config"
+if build_tool config-header "$work/switch-utility.config" \
+                "$work/switch-utility.h" utility > "$work/switch-utility.log" 2>&1 &&
+        freestanding programs/utilities.c "$work/switch-utility" "$host_arch" \
+                "-DMOONWATER_CONFIG=\"$work/switch-utility.h\""; then
+        won
+        mkdir -p "$work/switch-utility-bin"
+        for switch_name in tac tail monitor init; do
+                ln -sf "$work/switch-utility" "$work/switch-utility-bin/$switch_name"
+        done
+        for switch_name in tac monitor init; do
+                "$work/switch-utility-bin/$switch_name" < /dev/null > /dev/null 2>&1
+                same "$switch_name not a utility" 127 "$?"
+        done
+        "$work/switch-utility-bin/tail" < /dev/null > /dev/null 2>&1
+        same 'tail a utility' 0 "$?"
+        same 'utility surface' tail \
+                "$(build_tool surface "$work/switch-utility.config" |
+                        grep -x -e tac -e tail -e monitor -e init)"
+else
+        lost 'utility build' "$(head -3 "$work/switch-utility.log")"
+fi
+
+#       kernel/profile/sec_locked as the build composes it over the
+#       defaults, after profile/any turns the core on: its allow list in,
+#       everything else out, the core kept.
+group locked
+{ echo CONFIG_MOONWATER_CORE=y; cat kernel/profile/sec_locked; } \
+        > "$work/switch-locked.config"
+if switch_header "$work/switch-locked.config" "$work/switch-locked.h" &&
+        switch_shell "$work/switch-locked.h" "$work/switch-locked"; then
+        won
+        switch_bin=$work/switch-locked
+        same 'strict level' 'MOONWATER_STRICT 2' \
+                "$(grep -o 'MOONWATER_STRICT [0-9]*' "$work/switch-locked.h")"
+        for switch_name in cat ls sed grep ip mount blkid echo printf test \
+                read poweroff cd exit trap eval; do
+                same "$switch_name kept" yes "$(switch_own "$switch_bin" "$switch_name")"
+        done
+        for switch_name in awk wget host tar gzip chroot nsenter unshare dd \
+                monitor edit bowl history alias source declare enable \
+                pushd jobs; do
+                same "$switch_name gone" no "$(switch_own "$switch_bin" "$switch_name")"
+        done
+        same 'wget not found' 127 \
+                "$(switch_status "$switch_bin" 'wget http://localhost/')"
+        same 'history not found' 127 "$(switch_status "$switch_bin" 'history')"
+        same 'a script still runs' 7 \
+                "$(switch_status "$switch_bin" 'f() { return 7; }; trap : EXIT; f; exit $?')"
+        if build_tool surface "$work/switch-locked.config" \
+                > "$work/switch-locked.surface" 2>&1; then
+                same 'linked in locked' 'bin/cat bin/ls cat init ls moonwater term' \
+                        "$(grep -x -e cat -e bin/cat -e ls -e bin/ls -e init \
+                                -e term -e moonwater "$work/switch-locked.surface" |
+                                sort | tr '\n' ' ' | sed 's/ $//')"
+                same 'not linked in locked' '' \
+                        "$(grep -x -e awk -e bin/awk -e wget -e bin/wget \
+                                -e edit -e bowl -e monitor -e sbin/wipefs \
+                                "$work/switch-locked.surface")"
+                same 'links in locked' "$(grep -c '^CONFIG_MOONWATER_TOOL_.*=y$' \
+                                kernel/profile/sec_locked)" \
+                        "$(grep -c -v / "$work/switch-locked.surface" |
+                                awk '{ print $1 - 3 }')"
+        else
+                lost 'locked surface' "$(head -3 "$work/switch-locked.surface")"
+        fi
+else
+        lost 'locked build' 'the header or the shell did not build'
+fi
+
+counted
+)
+
 lane_kit()
 (
 kit_failed=0
@@ -9906,6 +10176,7 @@ if [ "$(uname -s)" = Darwin ]; then
         python3 test/differential.py --harness macos_read_retry || kit_failed=1
 fi
 python3 test/function_audit.py --check || kit_failed=1
+build_tool switches check || kit_failed=1
 python3 test/differential.py --harness floodlight || kit_failed=1
 python3 test/differential.py --harness surface_coreutils_gap || kit_failed=1
 python3 test/differential.py --harness image_nodes || kit_failed=1
@@ -11391,9 +11662,9 @@ says transcript 'the spark device'    'kraps/ved/'
 says transcript 'the shell on disk'   'llehs/'
 says transcript 'a file written'      'nettirw'
 says transcript 'and measured'        'bytes8'
-#       The shell defaults HOME to /root as it does PATH and LANG, and only
-#       when nothing gave it one; the kernel's HOME=/ and TERM=linux are what
-#       must not arrive.
+#       init hands what it starts HOME=/root, which the shell no longer
+#       makes up when nothing gave it one; the kernel's HOME=/ and TERM=linux
+#       are what must not arrive.
 says transcript 'empty init environment' 'bootenv-/root-unset'
 says transcript 'cached environment'   'cache-first'
 says transcript 'changed environment'  'cache-second'
