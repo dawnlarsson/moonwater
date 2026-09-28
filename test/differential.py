@@ -28146,27 +28146,27 @@ def harness_floodlight(argv):
     check(can_spawn == set(declared),
           'the array describes exactly the applets that can start a program')
 
-    #   Refusing the ones that turn data into execution is the whole reason
-    #   the array exists, and an edit that quietly allows them again should be
-    #   loud. What counts is where the *name of the program* comes from.
+    #   A machine nobody configured refuses nothing: every tool behaves as
+    #   its bash, dash or GNU counterpart does (the user's rule, 2026-09-28).
+    #   awk, script and setarch were refused here until then -- awk builds
+    #   the program it runs out of its program text, script and setarch end
+    #   at a shell -- and that broke awk in every pipeline and substitution
+    #   of a machine that had asked for nothing. Their refusal lives in the
+    #   configuration now (MOONWATER_FLOODLIGHT_AWK_SPAWN and _SHELL_ESCAPES,
+    #   both off in kernel/profile/sec_hardened), and an edit that quietly
+    #   refuses something by default again should be loud.
     #
-    #   awk builds it out of the program text, and program text arrives in
-    #   files and variables: system() and "cmd" | getline are the avenue.
-    #   script and setarch each end at a shell by design. Those stay shut.
-    #   bowl is named, like chroot: the line says which program runs.
-    #
-    #   find and xargs are not that shape and were denied here until it was
-    #   measured: they take the command on their own command line and put
-    #   data in its arguments, so whoever wrote the line already chose what
-    #   runs. Denying them removed -exec from find and left xargs reading its
-    #   input to no purpose -- five lanes of this suite went red saying so.
-    #   They keep their rows, because a machine that wants them shut should
-    #   still say it here, and the check below is what notices if a row goes
-    #   missing rather than changing value.
+    #   find and xargs keep their rows, as every spawning applet does,
+    #   because a machine that wants them shut should still say it here, and
+    #   the check below is what notices if a row goes missing rather than
+    #   changing value.
     for name in ('awk', 'script', 'setarch'):
-        check(declared.get(name) == '0',
-              '%s reaches a shell or builds a command out of what it reads, '
-              'and must be denied by default' % name)
+        check(declared.get(name) == '1',
+              '%s is allowed by default; refusing it is the configuration\'s '
+              'to say' % name)
+    check(set(declared.values()) == {'1'},
+          'the built-in array refuses nothing, so an unconfigured machine '
+          'behaves as bash, dash and GNU do')
 
     check(declared.get('bowl') == '1',
           'bowl runs the program the line named, like chroot, and must be '
@@ -30447,24 +30447,23 @@ int main(void)
         /* --- it answers at all --------------------------------------- */
         check(shows("awk") && shows("find") && shows("xargs"),
               "the report carries the built-in answers");
-        check(strstr(report(), "awk") && strstr(report(), "deny"),
-              "awk is denied out of the box");
+        check(!shows("deny"), "nothing is refused out of the box");
         check(!shows("changed"), "a machine nobody has touched shows no change");
 
         /* --- an ordinary change -------------------------------------- */
         mock_uid = 0; mock_now = 2000;
-        check(put("awk spawn allow\n") > 0, "root may change an answer");
+        check(put("awk spawn deny\n") > 0, "root may change an answer");
         check(shows("changed"), "the change is in the report");
-        check(strstr(mock_log, "allowed") && strstr(mock_log, "awk"),
+        check(strstr(mock_log, "denied") && strstr(mock_log, "awk"),
               "the change is said out loud");
 
         /* --- and undoing it gives the row back ------------------------ */
-        check(put("awk spawn deny\n") > 0, "an answer can be put back");
+        check(put("awk spawn allow\n") > 0, "an answer can be put back");
         check(!shows("changed"), "back to built in leaves no deviation behind");
 
         /* --- who may write -------------------------------------------- */
         mock_root = false;
-        check(put("awk spawn allow") == -EPERM, "a non-root write is refused");
+        check(put("awk spawn deny") == -EPERM, "a non-root write is refused");
         check(!shows("changed"), "and changes nothing");
         mock_root = true;
 
@@ -30527,17 +30526,17 @@ int main(void)
         reset(0x11223344);
         check(put("seal") > 0, "the register can be sealed");
         check(shows("(sealed)"), "and says so");
-        check(put("awk spawn allow") == -EPERM, "a sealed register refuses a change");
+        check(put("awk spawn deny") == -EPERM, "a sealed register refuses a change");
         check(put("seal") > 0, "sealing again is allowed");
         check(!strstr(mock_log, "sealed"), "but says nothing the second time");
 
         /* --- red team: tampering ------------------------------------------ */
         reset(0x11223344);
-        put("awk spawn allow");
-        changed[0].allowed = 0;                    /* a write that missed the seal */
+        put("awk spawn deny");
+        changed[0].allowed = 1;                    /* a write that missed the seal */
         check(!intact_public(), "a deviation altered in memory is caught");
         check(shows("TAMPERED"), "and the report stops answering");
-        check(put("awk spawn deny") == -EPERM, "and no further change is taken");
+        check(put("awk spawn allow") == -EPERM, "and no further change is taken");
 
         reset(0x11223344);
         {
@@ -30575,7 +30574,7 @@ int main(void)
         put("bbb network deny");
         put("ccc network deny");
         put("bbb network allow");      /* not built in, so this stays a row */
-        check(put("awk spawn allow") > 0, "a row can still be added");
+        check(put("awk spawn deny") > 0, "a row can still be added");
         {
                 /* Hand a row back by hand, the way restoring a built-in does,
                    and then look past the hole it leaves. */
@@ -38263,9 +38262,8 @@ def harness_guest_scenarios(argv):
         segments.append((index, 0, 0, frames))
     #   /dev/spark covered by an empty file, which sends the monitor to
     #   /proc; and /proc/stat covered by init's memory, whose first page
-    #   reads as EIO, so the fallback cannot read the processors. Covering
-    #   all of /dev or /proc takes floodlight's policy with it, and then it
-    #   refuses every launch.
+    #   reads as EIO, so the fallback cannot read the processors. One file
+    #   each, so the rest of /dev and /proc stay as the monitor finds them.
     lines.append(": > /tmp/scen-nospark")
     lines.append("unshare -m sh -c 'mount --bind /tmp/scen-nospark /dev/spark && exec monitor 0.05 2' > /tmp/m.out 2>&1; scen_status 'monitor from /proc exits 0' 0 $?")
     lines.append("scen_count 'monitor from /proc lists processes' 1 \"$(grep -q 'cpu%' /tmp/m.out && echo 1)\"")
@@ -41052,6 +41050,7 @@ PINNED = r"""
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"},"case":{"argv":["BEGIN { print PROCINFO[\"version\"] != \"\" }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","utility":"awk"},"domain":"awk","id":"415c50f36a82c08a","kind":"deliberate","list":"ledger","reason_id":"r7","utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["BEGIN { print gensub(/a/, \"b\", \"g\", \"aa\") }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","utility":"awk"},"domain":"awk","id":"41e1c3c75e063647","kind":"deliberate","list":"ledger","reason_id":"r0","utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"6218b42da88599cdf8f6206e3f0eaa62da18d61399be18591e120b1e89553afb"},"case":{"argv":["-v","x=\\xZ","BEGIN { printf \"<%s> %d\\n\", x, length(x) }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","utility":"awk"},"domain":"awk","id":"43a61abc721480ff","kind":"deliberate","list":"ledger","reason_id":"r2","utility":"awk"},
+{"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"bde1b687f534f84cd7e6e5f8845f9e5a5cb3c111596f1f31c41c750bb3fe49e0"},"case":{"argv":["--version"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","tier":"extra","utility":"awk"},"domain":"awk","id":"45b58635d1279ece","kind":"deliberate","list":"ledger","reason_id":"r26","reference":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"23e9e85a12a47502bdfe87b507330eb45ed6ffa65b5d7a90e9ee0ced1c2a0bdd"},"utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"7d060d4406ef28d7d287de74210fa4a36223ce66f422bc7decad4d62d89559a8"},"case":{"argv":["BEGIN { print \"\\101\\x41\\t|\\/\\\"|\\q\" }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","utility":"awk"},"domain":"awk","id":"45fae75796c46c09","kind":"deliberate","list":"ledger","reason_id":"r2","utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"e6c06876672c538907f5f4ea6295ea22667344d2d50a0c397078e2ba312dfa68"},"case":{"argv":["BEGIN { CONVFMT = \"%G\"; OFMT = \"%.2f\"; x = -1e300*1e300; print x; print x \"\"; a[x] = 1; for (k in a) print k; print (x \"\" == x) }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","tier":"extra","utility":"awk"},"domain":"awk","id":"46a5aa539afca372","kind":"bug","list":"ledger","reason":"a fractional power differs from glibc in the last place. Rendering is not the difference -- 0.1, 1/3, 1e-4 and an integer past a double all print byte for byte to thirty digits -- and an integer exponent is exact, because it is done by repeated multiplication. What is left is power() against glibc pow(): 2**0.5 gives the double below the correctly rounded one where glibc gives the one above. It shows only where the program sets CONVFMT or OFMT to ask for more digits than a double carries, and closing it means matching glibc ulp for ulp, which is a numerical library of its own","reference":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"5742735e9f15a04891606a87dd459552545a40ab84d1dfbafb3ba79943c21f2d"},"utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"6218b42da88599cdf8f6206e3f0eaa62da18d61399be18591e120b1e89553afb"},"case":{"argv":["END { printf \"<%s> %d\\n\", x, length(x) }","x=\\xZ"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","utility":"awk"},"domain":"awk","id":"496e8262060ca663","kind":"deliberate","list":"ledger","reason_id":"r2","utility":"awk"},
@@ -41116,6 +41115,7 @@ PINNED = r"""
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["@include \"p_lib.awk\"\nBEGIN { print twice(2) }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","utility":"awk"},"domain":"awk","id":"e95c773ecaee736a","kind":"deliberate","list":"ledger","reason_id":"r4","utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"e6c06876672c538907f5f4ea6295ea22667344d2d50a0c397078e2ba312dfa68"},"case":{"argv":["BEGIN { CONVFMT = \"%.0f\"; OFMT = \"%g\"; x = -1e300*1e300; print x; print x \"\"; a[x] = 1; for (k in a) print k; print (x \"\" == x) }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","tier":"extra","utility":"awk"},"domain":"awk","id":"e99afa716eecd65f","kind":"bug","list":"ledger","reason":"a fractional power differs from glibc in the last place. Rendering is not the difference -- 0.1, 1/3, 1e-4 and an integer past a double all print byte for byte to thirty digits -- and an integer exponent is exact, because it is done by repeated multiplication. What is left is power() against glibc pow(): 2**0.5 gives the double below the correctly rounded one where glibc gives the one above. It shows only where the program sets CONVFMT or OFMT to ask for more digits than a double carries, and closing it means matching glibc ulp for ulp, which is a numerical library of its own","reference":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"5742735e9f15a04891606a87dd459552545a40ab84d1dfbafb3ba79943c21f2d"},"utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"e6c06876672c538907f5f4ea6295ea22667344d2d50a0c397078e2ba312dfa68"},"case":{"argv":["BEGIN { CONVFMT = \"%#.3e\"; OFMT = \"%.0f\"; x = -1e300*1e300; print x; print x \"\"; a[x] = 1; for (k in a) print k; print (x \"\" == x) }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","tier":"extra","utility":"awk"},"domain":"awk","id":"f10b84adf7e5fb7b","kind":"bug","list":"ledger","reason":"a fractional power differs from glibc in the last place. Rendering is not the difference -- 0.1, 1/3, 1e-4 and an integer past a double all print byte for byte to thirty digits -- and an integer exponent is exact, because it is done by repeated multiplication. What is left is power() against glibc pow(): 2**0.5 gives the double below the correctly rounded one where glibc gives the one above. It shows only where the program sets CONVFMT or OFMT to ask for more digits than a double carries, and closing it means matching glibc ulp for ulp, which is a numerical library of its own","reference":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"5742735e9f15a04891606a87dd459552545a40ab84d1dfbafb3ba79943c21f2d"},"utility":"awk"},
+{"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"857fd0feac87fe868af401430373648ffe410d3271cd055148ecc84c1033e12c"},"case":{"argv":["--help"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","tier":"extra","utility":"awk"},"domain":"awk","id":"f286b45cd5127cc5","kind":"deliberate","list":"ledger","reason_id":"r25","reference":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"9b382a0b69e8fd0c7c96b1cdfa4923976359a5c1a1d14fb7c07637b09cf4b1cb"},"utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"acda87158697443a633768a7c49464d62b23ab29313bd9f7ffae7842256c9f11"},"case":{"argv":["-v","RS=(a|bc)*","{ print NR \"[\" $0 \"]\" }","csv"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","tier":"extra","utility":"awk"},"domain":"awk","id":"f9c14b0a0c54006d","kind":"bug","list":"ledger","reason":"a fractional power differs from glibc in the last place. Rendering is not the difference -- 0.1, 1/3, 1e-4 and an integer past a double all print byte for byte to thirty digits -- and an integer exponent is exact, because it is done by repeated multiplication. What is left is power() against glibc pow(): 2**0.5 gives the double below the correctly rounded one where glibc gives the one above. It shows only where the program sets CONVFMT or OFMT to ask for more digits than a double carries, and closing it means matching glibc ulp for ulp, which is a numerical library of its own","reference":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"e167304886c4a654eca56ba8f949ea52514bb842b75449faceade9d830b1ff53"},"utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"e6c06876672c538907f5f4ea6295ea22667344d2d50a0c397078e2ba312dfa68"},"case":{"argv":["BEGIN { CONVFMT = \"%#.3e\"; OFMT = \"%e\"; x = -1e300*1e300; print x; print x \"\"; a[x] = 1; for (k in a) print k; print (x \"\" == x) }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","utility":"awk"},"domain":"awk","id":"ffd3a35405ddb335","kind":"deliberate","list":"ledger","reason_id":"r19","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--assign","reason_id":"r20","utility":"awk"},
@@ -41129,7 +41129,6 @@ PINNED = r"""
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--field-separator","reason_id":"r23","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--file","reason_id":"r24","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--gen-pot","reason_id":"r21","utility":"awk"},
-{"domain":"awk","kind":"deliberate","list":"ledger","option":"--help","reason_id":"r25","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--include","reason_id":"r21","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--lint","reason_id":"r21","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--lint-old","reason_id":"r21","utility":"awk"},
@@ -41146,7 +41145,6 @@ PINNED = r"""
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--trace","reason_id":"r21","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--traditional","reason_id":"r21","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--use-lc-numeric","reason_id":"r21","utility":"awk"},
-{"domain":"awk","kind":"deliberate","list":"ledger","option":"--version","reason_id":"r26","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"-C","reason_id":"r27","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"-D","reason_id":"r28","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"-E","reason_id":"r29","utility":"awk"},

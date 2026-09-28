@@ -11,7 +11,7 @@
  *
  * and writing one line to it changes one answer, until it is sealed:
  *
- *     echo 'awk spawn allow'  > /dev/floodlight
+ *     echo 'awk spawn deny'   > /dev/floodlight
  *     echo 'curl network deny' > /dev/floodlight
  *     echo seal               > /dev/floodlight
  *
@@ -97,10 +97,16 @@ static const char *const setting_name[SETTINGS] = {
  * disagree, in either direction.
  *
  * NAMED programs run what was written on their own command line -- a hand
- * typed it -- so they are allowed. DERIVED programs build a command out of
- * data they read, and SHELL programs start a shell, so whatever reaches them
- * is a language rather than a command. Those two are the living-off-the-land
- * surface and they are refused.
+ * typed it. DERIVED programs build a command out of data they read, and SHELL
+ * programs start a shell, so whatever reaches them is a language rather than
+ * a command. Those two are the living-off-the-land surface.
+ *
+ * Every row allows, all the same. A machine nobody configured behaves as any
+ * other Linux does -- awk runs system() the way gawk does, script starts its
+ * shell -- because a policy that breaks ordinary work out of the box is one
+ * people turn off everywhere. Refusing is the configuration's to say (the
+ * rows and switches below, and kernel/profile/sec_hardened), and whatever it
+ * says is enforced in full: what then breaks is the policy working.
  */
 struct rule {
 	const char *subject;
@@ -110,30 +116,25 @@ struct rule {
 
 static const struct rule baseline[] = {
 	/*
-	 * awk alone among the three, because it is the only one where the
-	 * name of the program to run comes out of the data.
+	 * awk is the sharpest of these, because it is the only one where the
+	 * name of the program to run comes out of the data: find and xargs
+	 * take the command on their own command line, while awk's system()
+	 * and "cmd" | getline build it from program text that arrives in
+	 * files and variables. It was refused here until 2026-09-28, and so
+	 * were script and setarch; that refusal broke awk in every pipeline
+	 * and substitution of a machine that had asked for nothing, and now
+	 * lives in MOONWATER_FLOODLIGHT_AWK_SPAWN and _SHELL_ESCAPES.
 	 *
-	 * find and xargs take the command on their own command line and put
-	 * data in its arguments; whoever wrote the line had already chosen
-	 * what runs. awk's system() and "cmd" | getline build the name from
-	 * the program text, and awk program text arrives in files and in
-	 * variables. That is the avenue worth closing, and closing the other
-	 * two as well did not narrow anything -- it removed -exec from find,
-	 * which is what find is for, and left xargs a program that reads its
-	 * input and does nothing with it. A tool that cannot do the thing it
-	 * exists to do is not running at a basic level; it is broken, and a
-	 * policy people have to turn off to get work done is one they turn
-	 * off everywhere.
-	 *
-	 * They keep their rows, so a machine that wants them shut can say so
-	 * in one line and this file is still where that is written down.
+	 * Every applet that can spawn keeps its row, so a machine that wants
+	 * one shut can say so in one line and this file is still where that
+	 * is written down.
 	 */
-	{ "awk", SPAWN, 0 },       /* DERIVED: system(), "cmd" | getline */
+	{ "awk", SPAWN, 1 },       /* DERIVED: system(), "cmd" | getline */
 	{ "find", SPAWN, 1 },      /* NAMED: -exec runs what the line named */
 	{ "xargs", SPAWN, 1 },     /* NAMED: likewise, with data in the args */
 	{ "bowl", SPAWN, 1 },      /* NAMED: runs the program the line named */
-	{ "script", SPAWN, 0 },    /* SHELL: the session it records is a shell */
-	{ "setarch", SPAWN, 0 },   /* SHELL: falls back to /bin/sh given no command */
+	{ "script", SPAWN, 1 },    /* SHELL: the session it records is a shell */
+	{ "setarch", SPAWN, 1 },   /* SHELL: falls back to /bin/sh given no command */
 	{ "init", SPAWN, 1 },      /* SHELL: PID 1 starts everything; refusing it
 				      would refuse the machine */
 	{ "term", SPAWN, 1 },      /* SHELL: the window's own shell, likewise */

@@ -16134,18 +16134,14 @@ static string_address shell_tool_name(string_address path)
 #define FLOODLIGHT_DEVICE_MINOR 249
 
 /*
-        What is refused when the register cannot be read.
-
-        Not "everything", which would refuse the machine, and not "nothing",
-        which would mean removing the device is a way of removing the policy.
-        These are the three floodlight.c is built refusing -- awk, which
-        builds a command from what it reads, and script and setarch, which
-        start a shell -- so the absence of the register leaves the built-in
-        answers standing and only the deviations unavailable. The floodlight
-        harness fails the build if this list and floodlight.c's disagree.
+        What floodlight.c's array refuses, for when the register cannot be
+        read: nothing. A machine nobody configured refuses nothing, register
+        or not, and what a configuration refuses arrives as the configured
+        text below. The list stays so the two copies of the array stay one
+        fact -- the floodlight harness fails the build if this and
+        floodlight.c's refusing rows ever disagree.
 */
-static string_address const floodlight_denied[] = {
-    "awk", "script", "setarch", null};
+static string_address const floodlight_denied[] = {null};
 
 /*
         The register, read once and reduced to what it changes.
