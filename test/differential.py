@@ -14640,6 +14640,18 @@ def shell_lang_legacy_arithmetic(rng):
         ("command", "stdin", "file"))
 
 
+#       ${v~} and ${v~~}: the first character, or every one, turned to the
+#       other case, with a pattern choosing which. They were bad
+#       substitutions here.
+def shell_lang_case_toggle(rng):
+    value = rng.choice(("aBc", "ABC", "abc", "", "h\u00e9LLo", "1a-B"))
+    op = rng.choice(("~", "~~", "~[ab]", "~~[aB]"))
+    line = rng.choice(('echo "${v%s}"', 'echo "${@%s}"', 'echo "${arr[@]%s}"', 'echo ${v%s}')) % op
+    return ("case-toggle", shell_BASH, shell_program(
+        "v=" + shell_quote(value) + "; set -- xY Zw; arr=(aB Cd)", line + " 2>&1 | sed 's/^[^:]*: line [0-9]*: //'",
+        'echo "end=$?"'), ("command", "stdin", "file"))
+
+
 #       Digits in front of > are a descriptor only while they fit one: bash
 #       reads a number past INT_MAX there as an ordinary word, so `echo a
 #       2147483648>f` writes "a 2147483648" to f. This called it a syntax
@@ -17506,6 +17518,7 @@ SHELL_FAMILIES = (
     shell_lang_case_substitution_lines,
     shell_lang_readonly_arrays,
     shell_lang_legacy_arithmetic,
+    shell_lang_case_toggle,
     shell_lang_set_lone_plus,
     shell_lang_directory_state,
     shell_lang_builtin_refusals,

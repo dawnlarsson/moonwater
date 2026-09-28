@@ -6021,6 +6021,9 @@ static CONST p32 expand_unicode_case(p32 value, bool upper)
         return value;
 }
 
+/* ${x~} and ${x~~}: each matched character goes to the other case. */
+static bool expand_case_toggle;
+
 static fn expand_case_span(positive start, bool upper, bool every,
                            string_address pattern, bool default_pattern)
 {
@@ -6037,7 +6040,8 @@ static fn expand_case_span(positive start, bool upper, bool every,
         {
                 positive count = every ? length : 1;
 
-                if (default_pattern && every && count >= 32)
+                if (default_pattern && every && count >= 32 &&
+                    !expand_case_toggle)
                 {
                         if (upper)
                                 memory_to_upper_ascii(expand_text + start, count);
@@ -6056,6 +6060,8 @@ static fn expand_case_span(positive start, bool upper, bool every,
                         if (!shell_match(pattern, one))
                                 continue;
 
+                        if (expand_case_toggle)
+                                upper = byte_to_upper(value) != value;
                         expand_text[start + at] =
                             upper ? byte_to_upper(value) : byte_to_lower(value);
                 }
@@ -6087,7 +6093,12 @@ static fn expand_case_span(positive start, bool upper, bool every,
 
                 if (matched && scalar < 0x110000)
                 {
-                        p32 mapped = expand_unicode_case(scalar, upper);
+                        p32 mapped;
+
+                        if (expand_case_toggle)
+                                upper = expand_unicode_case(scalar, true) !=
+                                        scalar;
+                        mapped = expand_unicode_case(scalar, upper);
 
                         if (mapped != scalar)
                         {
@@ -7459,8 +7470,10 @@ static COLD fn expand_positional_each(p8 form, p8 operation,
                 else
                 {
                         expand_push_string(shell_parameter[at], mark);
+                        expand_case_toggle = operation == '~';
                         expand_case_span(start, operation == '^', doubled,
                                          pattern, default_pattern);
+                        expand_case_toggle = false;
                 }
         }
 }
@@ -7549,13 +7562,17 @@ static fn expand_modifier(expand_reference reference, p8 operation, bool doubled
         }
         else if (operation == ':')
                 expand_substring(reference, word, quoted, parameter_mode);
-        else if ((operation == '^' || operation == ',') &&
+        else if ((operation == '^' || operation == ',' || operation == '~') &&
                  expand_positional_list(reference) && shell_bash_compat)
                 expand_positional_each(string_get(reference.name), operation,
                                        word, null, doubled, quoted);
-        else if (operation == '^' || operation == ',')
+        else if (operation == '^' || operation == ',' || operation == '~')
+        {
+                expand_case_toggle = operation == '~';
                 expand_case_change(reference, word, quoted, operation == '^',
                                    doubled, parameter_mode);
+                expand_case_toggle = false;
+        }
         else
                 expand_transform(reference, word, quoted, parameter_mode);
 }
@@ -7879,6 +7896,7 @@ static COLD fn expand_array_form(string_address name, positive length,
 
         if (operation == ':' || operation == '#' || operation == '%' ||
             operation == '/' || operation == '^' || operation == ',' ||
+            operation == '~' ||
             operation == '@')
                 expand_array_sequence(name, length, form, operation, doubled,
                                       word, quoted, keys);
@@ -8138,6 +8156,7 @@ static string_address expand_braced_body(string_address step,
 
                 if (next != ':' && next != '-' && next != '+' && next != '=' &&
                     next != '%' && next != '/' && next != '^' && next != ',' &&
+                    next != '~' &&
                     !(shell_posix_on() && (next == '#' || next == '?')))
                 {
                         parameter_mode = EXPAND_PARAMETER_INDIRECT;
@@ -8272,7 +8291,8 @@ static string_address expand_braced_body(string_address step,
                         step++;
                 }
         }
-        else if (!colon && (seen == '^' || seen == ',') && shell_bash_compat)
+        else if (!colon && (seen == '^' || seen == ',' || seen == '~') &&
+                 shell_bash_compat)
         {
                 operation = seen;
                 step++;
@@ -8526,6 +8546,7 @@ static string_address expand_braced_body(string_address step,
 
         if (operation == '#' || operation == '%' || operation == '/' ||
             operation == ':' || operation == '^' || operation == ',' ||
+            operation == '~' ||
             operation == '@')
         {
                 expand_modifier(reference, operation, doubled, word, quoted,
