@@ -6348,53 +6348,36 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                                      positive address_to group)
 {
         positive at;
-        positive ext_end;
-        positive session;
         bool seen_share = false;
         bool seen_version = false;
 
-        if (length < 44 || hello[0] != TLS_HS_SERVER_HELLO)
-                return TLS_FAIL;
-        {
-                positive hs = tls_load_24(hello + 1);
-                if (hs + 4 != length)
-                        return TLS_FAIL;
-        }
-        if (hello[4] != 0x03 || hello[5] != 0x03)
+        if (length < 44 || hello[0] != TLS_HS_SERVER_HELLO ||
+            tls_load_24(hello + 1) != length - 4 || hello[4] != 0x03 ||
+            hello[5] != 0x03)
                 return TLS_FAIL;
 
         at = 4 + 2 + 32;
-        session = hello[at++];
         /* The client sent an empty legacy_session_id, so the echo is empty. */
-        if (session)
-                return TLS_FAIL;
-        at += session;
-        if (at + 3 > length)
+        if (hello[at++])
                 return TLS_FAIL;
         if (hello[at] != 0x13 || hello[at + 1] != 0x01)
                 return TLS_FAIL;
         at += 2;
         if (hello[at++] != 0)
                 return TLS_FAIL;
-        if (at + 2 > length)
+        if (length - at < 2 || network_load_16(hello + at) != length - at - 2)
                 return TLS_FAIL;
-        {
-                positive ext_length = network_load_16(hello + at);
-                at += 2;
-                ext_end = at + ext_length;
-                if (ext_end != length)
-                        return TLS_FAIL;
-        }
+        at += 2;
 
-        while (at < ext_end)
+        while (at < length)
         {
-                if (at + 4 > ext_end)
+                if (length - at < 4)
                         return TLS_FAIL;
 
                 positive id = network_load_16(hello + at);
                 positive elen = network_load_16(hello + at + 2);
                 at += 4;
-                if (at + elen > ext_end)
+                if (elen > length - at)
                         return TLS_FAIL;
 
                 if (id == 0x002b)
@@ -6413,7 +6396,7 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                                 return TLS_FAIL;
                         named = network_load_16(hello + at);
                         klen = network_load_16(hello + at + 2);
-                        if (4 + klen != elen)
+                        if (klen != elen - 4)
                                 return TLS_FAIL;
                         if (!((named == 0x001d && klen == 32) ||
                               (named == 0x0017 && klen == 65) ||
@@ -6590,7 +6573,7 @@ static COLD bipolar tls_check_cert_verify(tls_conn address_to tls, p8 address_to
         at += 2;
         sig_length = network_load_16(msg + at);
         at += 2;
-        if (at + sig_length != length)
+        if (sig_length != length - at)
                 return TLS_FAIL;
 
         memory_fill(signed_bytes, 0x20, 64);
@@ -6808,17 +6791,17 @@ static COLD bipolar tls_encrypted_flight_append(
 {
         positive msg_at = 0;
 
-        if (*hs_used + length > room)
+        if (*hs_used > room || length > room - *hs_used)
                 return TLS_FAIL;
         memory_copy(hs + *hs_used, fragment, length);
         *hs_used += length;
 
-        while (msg_at + 4 <= *hs_used)
+        while (*hs_used - msg_at >= 4)
         {
                 p8 hs_type = hs[msg_at];
                 positive hs_len = tls_load_24(hs + msg_at + 1);
 
-                if (msg_at + 4 + hs_len > *hs_used)
+                if (hs_len > *hs_used - msg_at - 4)
                         break;
 
                 if (!tls_server_flight_step(flight, hs_type))
