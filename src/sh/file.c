@@ -23315,13 +23315,135 @@ typedef struct
         bool verbose;
         bool elide;
         bool protect_input;
+        //      The name is already chosen (the r/N outputs are named up
+        //      front), the handle is a plain append descriptor rather than a
+        //      staged one, and the filter reading this output has gone.
+        bool named;
+        bool plain;
+        bool dead;
+        //      An open refused for want of descriptors is left unsaid, for
+        //      the r/N scheduler to close another output and try again.
+        bool quiet_shortage;
+        bipolar refused;
         positive mode;
         file_facts input;
         string_address input_name;
+        //      --filter: the command each output is piped to, and the one
+        //      reading the output now open.
+        string_address filter;
+        bipolar pid;
         file_staged_name stage;
         p8 suffix[SPLIT_SUFFIX_MAX];
         p8 name[FILE_PATH_MAX];
 } split_output;
+
+/*
+        A number as gnulib's xstrtoumax reads it for xnumtoumax: blanks and
+        a plus sign may lead, a minus may not, C's base prefixes when asked
+        (010 is eight, 0x10 sixteen), then one of SUFFIXES -- c is one, b
+        512, B 1024, w 2, and k, K and the rest of the size letters powers
+        of 1024, each of those with an optional B or D (powers of 1000) or
+        iB. A suffix with no digits before it counts one of itself. 0 is a
+        good answer, 1 a word that is not a number, 2 one past CEILING.
+        shred's -s and -n and split's ---io-blksize read through it.
+*/
+static b32 file_umax_read(string_address text, bool prefixes,
+                          string_address suffixes, p64 ceiling,
+                          p64 address_to out)
+{
+        string_address at = text;
+        p64 value = 0;
+        positive base = 10;
+        bool over = false;
+
+        while (string_get(at) == ' ' || (string_get(at) >= '\t' && string_get(at) <= '\r'))
+                at++;
+        if (string_is(at, '-'))
+                return 1;
+        if (string_is(at, '+'))
+                at++;
+
+        if (prefixes && string_is(at, '0'))
+        {
+                base = 8;
+                if ((at[1] == 'x' || at[1] == 'X') && digit_known(at[2], 16) < 16)
+                {
+                        base = 16;
+                        at += 2;
+                }
+        }
+
+        string_address digits = at;
+
+        for (positive digit; (digit = digit_known(string_get(at), base)) < base; at++)
+        {
+                if (value > (~(p64)0 - digit) / base)
+                        over = true;
+                value = value * base + digit;
+        }
+
+        if (at == digits)
+        {
+                if (!suffixes || !string_get(at) || !string_first_of(suffixes, string_get(at)))
+                        return 1;
+                value = 1;
+        }
+
+        p8 suffix = string_get(at);
+
+        if (suffix)
+        {
+                if (!suffixes || !string_first_of(suffixes, suffix))
+                        return 1;
+
+                positive power = 0;
+                p64 scale = 1024;
+
+                switch (suffix)
+                {
+                case 'c':
+                        scale = 1;
+                        power = 1;
+                        break;
+                case 'b':
+                        scale = 512;
+                        power = 1;
+                        break;
+                case 'B':
+                        power = 1;
+                        break;
+                case 'w':
+                        scale = 2;
+                        power = 1;
+                        break;
+                default:
+                        power = size_suffix_power(suffix, true);
+                        if (at[1] == 'i' && at[2] == 'B')
+                                at += 2;
+                        else if (at[1] == 'B' || at[1] == 'D')
+                        {
+                                scale = 1000;
+                                at++;
+                        }
+                        break;
+                }
+                at++;
+                while (power--)
+                {
+                        if (value > ~(p64)0 / scale)
+                                over = true;
+                        value *= scale;
+                }
+                if (string_get(at))
+                        return 1;
+        }
+
+        if (over || value > ceiling)
+                return 2;
+
+        address_to out = value;
+        return 0;
+}
 
 static const argument_option split_options[] = {
     {"additional-suffix", 'S', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
@@ -23335,6 +23457,12 @@ static const argument_option split_options[] = {
     {"suffix-length", 'a', ARGUMENT_REQUIRED},
     {"elide-empty-files", 'e'},
     {"verbose", 'v', ARGUMENT_LONG_ONLY},
+    {"filter", 'F', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
+    {"unbuffered", 'u'},
+    //      GNU's undocumented ---io-blksize, the size of its read buffer.
+    //      The answers do not depend on it here: it is checked as GNU
+    //      checks it and otherwise taken.
+    {"-io-blksize", 'I', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {null},
 };
 
@@ -23344,8 +23472,8 @@ static const argument_option split_options[] = {
         and split's parse_n_units lets that through, so --lines past 2^64,
         -C 1E, or an obsolete -99999999999999999991 all mean "no end", where
         they were said to be invalid numbers here. The digits and a suffix's
-        scaling both stop at SPLIT_COUNT_MAX. shred and mcookie read their
-        sizes through here too and still refuse what does not fit.
+        scaling both stop at SPLIT_COUNT_MAX. mcookie reads its
+        size through here too and still refuses what does not fit.
 */
 static bool split_overflowed;
 
@@ -23590,12 +23718,171 @@ static bool file_same_as_input(bool protect, string_address name,
         return file_same_identity(address_of existing, input);
 }
 
+static fn env_signal_name(positive number, p8 address_to into);
+
+//      Where split's exit status is decided by a filter that failed: GNU
+//      exits with the command's own status, or 128 and its signal.
+static b32 split_status;
+static bool split_pipe_default;
+
+/*
+        --filter: each output is a pipe to $SHELL -c COMMAND (/bin/sh when
+        SHELL is unset) with FILE set to the output's name. The write end is
+        close-on-exec, so no filter holds another's pipe open, and SIGPIPE
+        goes back to its default in the command if split found it there.
+*/
+static bool split_filter_spawn(split_output address_to output)
+{
+        b32 ends[2];
+        bipolar made = system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC);
+
+        if (made < 0)
+                return string_report(log_error, false, "split: failed to create pipe: %s\n",
+                                     file_reason(made));
+
+        string_address shell = file_environment((string_address) "SHELL");
+
+        if (!shell)
+                shell = (string_address) "/bin/sh";
+
+        //      What -v has said stays in split's buffer, as it stays in
+        //      GNU's stdio, so it follows what the commands write; the child
+        //      execs or exits without writing the copy it inherits.
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                string_address address_to environment = file_environment_all();
+                positive count = 0;
+                positive room = 2;
+
+                while (environment && environment[count])
+                        count++;
+                room += count;
+
+                string_address address_to words = (string_address address_to)shell_map(
+                    (room + 4) * sizeof(string_address));
+                positive length = string_length(output->name);
+                p8 address_to entry = (p8 address_to)shell_map(length + 8);
+
+                if (!words || !entry)
+                        exit(1);
+                memory_copy(entry, "FILE=", 5);
+                memory_copy_end(entry + 5, output->name, length);
+
+                positive have = 0;
+
+                for (positive i = 0; i < count; i++)
+                {
+                        string_address e = environment[i];
+
+                        if (!(e[0] == 'F' && e[1] == 'I' && e[2] == 'L' && e[3] == 'E' &&
+                              e[4] == '='))
+                                words[have++] = environment[i];
+                }
+                words[have++] = entry;
+                words[have] = null;
+
+                string_address address_to argv = words + have + 1;
+                string_address base = shell;
+
+                for (string_address at = shell; string_get(at); at++)
+                        if (string_is(at, '/') && string_get(at + 1))
+                                base = at + 1;
+                argv[0] = base;
+                argv[1] = (string_address) "-c";
+                argv[2] = output->filter;
+                argv[3] = null;
+
+                if (split_pipe_default)
+                        system_signal_install(13, 0, 0, 0, null);
+                system_close(ends[1]);
+                if (system_descriptor_move(ends[0], 0) < 0)
+                        exit(1);
+
+                bipolar failed = shell_exec_file(shell, argv, 3, words);
+                string_address parts[] = {"split: failed to run command: \"", shell, " -c ",
+                                          output->filter, "\": ", file_reason(failed), "\n"};
+
+                for (positive i = 0; i < array_count(parts); i++)
+                        system_write_all(2, parts[i], string_length(parts[i]));
+                system_call_1(syscall(exit_group), 1);
+        }
+
+        system_close(ends[0]);
+        if (child < 0)
+        {
+                system_close(ends[1]);
+                return string_report(log_error, false,
+                                     "split: failed to run command: \"%s -c %s\": %s\n",
+                                     shell, output->filter, file_reason(child));
+        }
+
+        output->pid = child;
+        output->stage.handle = ends[1];
+        output->dead = false;
+        return true;
+}
+
+//      A filter's end: its status is split's status when it failed, and a
+//      command that stopped reading (SIGPIPE) did not fail.
+static bool split_filter_reap(split_output address_to output)
+{
+        positive status = 0;
+        bipolar pid = output->pid;
+
+        output->pid = 0;
+        if (pid <= 0)
+                return true;
+        if (system_wait4_retry(pid, address_of status, 0, null) < 0)
+                return string_report(log_error, false, "split: waiting for child process\n");
+
+        if (status & 0x7f)
+        {
+                positive signal = status & 0x7f;
+                p8 name[16];
+
+                if (signal == 13)
+                        return true;
+                env_signal_name(signal, name);
+                file_shell_name_message(log_error, (string_address)"split: with FILE=",
+                                        output->name, (string_address)"");
+                string_format(log_error, ", signal %s from command: %s\n",
+                              (string_address)name, output->filter);
+                split_status = (b32)(signal + 128);
+                return false;
+        }
+
+        positive code = (status >> 8) & 0xff;
+
+        if (!code)
+                return true;
+        file_shell_name_message(log_error, (string_address)"split: with FILE=",
+                                output->name, (string_address)"");
+        string_format(log_error, ", exit %p from command: %s\n", code, output->filter);
+        split_status = (b32)code;
+        return false;
+}
+
 static bool split_output_open(split_output address_to output)
 {
         if (output->stage.handle >= 0)
                 return true;
-        if (!split_output_name(output))
+        if (!output->named && !split_output_name(output))
                 return false;
+
+        if (output->filter)
+        {
+                if (output->verbose)
+                        file_shell_name_message(log, (string_address)"executing with FILE=",
+                                                output->name, (string_address)"\n");
+                return split_filter_spawn(output);
+        }
+
+        //      Said before the name is opened, as GNU's create says it.
+        if (output->verbose)
+                string_format(log, "creating file %w\n", writer_shell_quoted_name,
+                              output->name);
 
         bipolar opened = file_staged_name_open_at(
             address_of output->stage, AT_FDCWD, output->name, output->mode,
@@ -23604,6 +23891,9 @@ static bool split_output_open(split_output address_to output)
 
         if (opened < 0)
         {
+                output->refused = opened;
+                if (output->quiet_shortage && (opened == -24 || opened == -23))
+                        return false;
                 if (output->protect_input && opened == -ERROR_INVALID)
                         return string_report(log_error, false, "split: %w would overwrite input; aborting\n",
                                       writer_shell_quoted_name, output->name);
@@ -23611,10 +23901,6 @@ static bool split_output_open(split_output address_to output)
                 return string_report(log_error, false, "split: %w: %s\n",
                               writer_terminal_name, output->name, file_reason(opened));
         }
-
-        if (output->verbose)
-                string_format(log, "creating file %w\n", writer_shell_quoted_name,
-                              output->name);
 
         return true;
 }
@@ -23626,6 +23912,26 @@ static bool split_output_write(split_output address_to output,
                 return true;
         if (!split_output_open(output))
                 return false;
+        //      A filter that has stopped reading is not an error: what was
+        //      meant for it is passed over, as GNU's EPIPE is.
+        if (output->dead)
+                return true;
+        if (output->filter)
+        {
+                system_write_result wrote = system_write_all_checked(
+                    (positive)output->stage.handle, bytes, length);
+
+                if (wrote.bytes == length)
+                        return true;
+                if (wrote.error == -32)
+                {
+                        output->dead = true;
+                        return true;
+                }
+                file_shell_name_reason(log_error, (string_address)"split: ", output->name,
+                                       (string_address)": ", wrote.error ? wrote.error : -5);
+                return false;
+        }
         if (system_write_all((positive)output->stage.handle, bytes, length) !=
             length)
         {
@@ -23639,6 +23945,24 @@ static bool split_output_close(split_output address_to output)
 {
         if (output->stage.handle < 0)
                 return true;
+
+        if (output->filter || output->plain)
+        {
+                bipolar closed = system_close(output->stage.handle);
+
+                output->stage.handle = -1;
+                output->need_advance = true;
+                output->plain = false;
+                if (output->filter)
+                        return split_filter_reap(output);
+                if (closed < 0)
+                {
+                        file_shell_name_reason(log_error, (string_address)"split: ", output->name,
+                                               (string_address)": ", closed);
+                        return false;
+                }
+                return true;
+        }
 
         bipolar closed = file_staged_name_finish(
             address_of output->stage, true, 0);
@@ -23654,8 +23978,14 @@ static bool split_output_close(split_output address_to output)
 
 static fn split_output_abort(split_output address_to output)
 {
-        if (output->stage.handle >= 0)
-                file_staged_name_abort(address_of output->stage);
+        if (output->stage.handle < 0)
+                return;
+        if (output->filter || output->plain)
+        {
+                (void)split_output_close(output);
+                return;
+        }
+        file_staged_name_abort(address_of output->stage);
 }
 
 static bool split_fixed(bipolar in, p64 length, positive measure,
@@ -23673,12 +24003,50 @@ static bool split_fixed(bipolar in, p64 length, positive measure,
         {
                 positive here = (positive)min(length, ordinary + (i < extra));
 
+                //      -e: the empty pieces are the last ones, and are not made.
+                if (!here && output->elide)
+                        break;
+
                 // A name that could not be made, suffixes run out among
                 // them, has been said already; only a copy that failed is
                 // said here.
                 if (!split_output_open(output))
                         return false;
-                if (here && !(bytes ? split_output_write(output, bytes, here)
+
+                //      A filter is fed through a pipe; once it stops reading,
+                //      the rest of its piece is stepped over rather than read.
+                if (here && !bytes && output->filter)
+                {
+                        positive left = here;
+
+                        while (left && !output->dead)
+                        {
+                                bipolar taken = system_read_retry(
+                                    (positive)in, file_transfer,
+                                    min(left, sizeof(file_transfer)));
+
+                                if (taken <= 0)
+                                {
+                                        log_error("split: read or write error\n", 0);
+                                        return false;
+                                }
+                                if (!split_output_write(output, file_transfer, (positive)taken))
+                                        return false;
+                                left -= (positive)taken;
+                        }
+                        if (left && system_seek(in, left, 1) < 0)
+                                while (left)
+                                {
+                                        bipolar taken = system_read_retry(
+                                            (positive)in, file_transfer,
+                                            min(left, sizeof(file_transfer)));
+
+                                        if (taken <= 0)
+                                                break;
+                                        left -= (positive)taken;
+                                }
+                }
+                else if (here && !(bytes ? split_output_write(output, bytes, here)
                               : file_copy_stream(in, output->stage.handle,
                                                  here, true,
                                                  address_of range_copy,
@@ -23779,7 +24147,15 @@ static bool split_line_bytes_memory(p8 address_to input, positive length,
                 positive stop = found ? (positive)(found - input) + 1 : length;
                 positive record = stop - at;
 
-                if (used && record > piece - used)
+                /*
+                        GNU fills a piece to its size and holds what follows
+                        the last separator in it, so a last record with no
+                        separator that would exactly fill the piece goes to
+                        the next one: split -C10 over "1\n2222\n3\n4" makes
+                        9 and 1, where 11 makes one file of 10.
+                */
+                if (used && (record > piece - used ||
+                             (!found && record == piece - used)))
                 {
                         if (!split_output_close(output))
                                 return false;
@@ -24078,65 +24454,318 @@ static bool split_lines_chunk(p8 address_to input, positive length,
         return true;
 }
 
-static bool split_round_robin(p8 address_to input, positive length,
-                              split_chunk chunk, p8 separator,
+/*
+        -n r/N and r/K/N, read as a stream the way GNU's lines_rr reads it,
+        so a pipe that never ends is still split (and stops being read once
+        every filter has stopped reading). Line after line goes to output 1,
+        2 ... N and round again; the N names are made first, each output is
+        opened when its first line comes, and one never reached is still
+        made at the end unless -e. When the descriptors run out, the output
+        before the one wanted is closed and later reopened to append, as
+        GNU's ofile_open does.
+*/
+#define SPLIT_RR_NEW 0
+#define SPLIT_RR_OPEN 1
+#define SPLIT_RR_APPEND 2
+
+typedef struct
+{
+        positive name;
+        b32 slot;
+        p8 state;
+} split_rr_file;
+
+static split_rr_file address_to split_rr_files;
+static positive split_rr_files_room;
+static p8 address_to split_rr_names;
+static positive split_rr_names_room;
+static split_output address_to split_rr_slots;
+static positive split_rr_slots_room;
+static b32 address_to split_rr_free;
+static positive split_rr_free_room;
+
+#define SPLIT_RR_SLOTS 256
+#define SPLIT_RR_BUFFER 8192
+
+//      Each open output gathers its lines, as GNU's stdio does, unless -u.
+static p8 address_to split_rr_buffers;
+static positive split_rr_buffers_room;
+static positive split_rr_used[SPLIT_RR_SLOTS];
+static bool split_rr_unbuffered;
+
+static bool split_rr_flush(b32 slot)
+{
+        positive used = split_rr_used[slot];
+
+        split_rr_used[slot] = 0;
+        return !used || split_output_write(split_rr_slots + slot,
+                                           split_rr_buffers + (positive)slot * SPLIT_RR_BUFFER,
+                                           used);
+}
+
+static bool split_rr_write(b32 slot, p8 address_to bytes, positive length)
+{
+        if (split_rr_unbuffered)
+                return split_output_write(split_rr_slots + slot, bytes, length);
+        if (length > SPLIT_RR_BUFFER - split_rr_used[slot] && !split_rr_flush(slot))
+                return false;
+        if (length >= SPLIT_RR_BUFFER)
+                return split_output_write(split_rr_slots + slot, bytes, length);
+        memory_copy(split_rr_buffers + (positive)slot * SPLIT_RR_BUFFER + split_rr_used[slot],
+                    bytes, length);
+        split_rr_used[slot] += length;
+        return true;
+}
+
+static bool split_rr_close(positive which)
+{
+        split_rr_file address_to file = split_rr_files + which;
+        split_output address_to slot = split_rr_slots + file->slot;
+        bool good = split_rr_flush(file->slot);
+
+        good = split_output_close(slot) && good;
+
+        file->state = SPLIT_RR_APPEND;
+        split_rr_free[split_rr_free[SPLIT_RR_SLOTS]++] = file->slot;
+        return good;
+}
+
+static bool split_rr_open(positive which, positive n, split_output address_to model,
+                          bool address_to limit)
+{
+        split_rr_file address_to file = split_rr_files + which;
+
+        if (file->state == SPLIT_RR_OPEN)
+                return true;
+
+        positive back = which ? which - 1 : n - 1;
+
+        for (;;)
+        {
+                if (split_rr_free[SPLIT_RR_SLOTS])
+                {
+                        b32 slot = split_rr_free[--split_rr_free[SPLIT_RR_SLOTS]];
+                        split_output address_to out = split_rr_slots + slot;
+
+                        memory_copy(out, model, sizeof(*out));
+                        out->named = true;
+                        out->quiet_shortage = true;
+                        out->refused = 0;
+                        out->dead = false;
+                        out->pid = 0;
+                        out->stage.handle = -1;
+                        out->stage.directory = -1;
+                        string_copy_bounded(out->name, split_rr_names + file->name,
+                                            sizeof(out->name));
+
+                        split_rr_used[slot] = 0;
+                        if (file->state == SPLIT_RR_NEW)
+                        {
+                                if (split_output_open(out))
+                                {
+                                        file->slot = slot;
+                                        file->state = SPLIT_RR_OPEN;
+                                        return true;
+                                }
+                                split_rr_free[split_rr_free[SPLIT_RR_SLOTS]++] = slot;
+                                //      Anything but a shortage of
+                                //      descriptors has been said.
+                                if (out->refused != -24 && out->refused != -23)
+                                        return false;
+                                goto split_rr_shortage;
+                        }
+
+                        bipolar handle = system_open_at(
+                            AT_FDCWD, out->name,
+                            O_WRONLY | O_APPEND | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+
+                        if (handle >= 0)
+                        {
+                                out->stage.handle = handle;
+                                out->plain = true;
+                                file->slot = slot;
+                                file->state = SPLIT_RR_OPEN;
+                                return true;
+                        }
+                        split_rr_free[split_rr_free[SPLIT_RR_SLOTS]++] = slot;
+                        if (handle != -24 && handle != -23)
+                        {
+                                file_shell_name_reason(log_error, (string_address)"split: ",
+                                                       out->name, (string_address)": ", handle);
+                                return false;
+                        }
+                }
+
+                //      Out of slots or descriptors: close the open output
+                //      nearest before this one, and from here on close each
+                //      output after it is written.
+split_rr_shortage:
+                address_to limit = true;
+                while (split_rr_files[back].state != SPLIT_RR_OPEN)
+                {
+                        back = back ? back - 1 : n - 1;
+                        if (back == which)
+                        {
+                                file_shell_name_reason(log_error, (string_address)"split: ",
+                                                       split_rr_names + file->name,
+                                                       (string_address)": ", -24);
+                                return false;
+                        }
+                }
+                if (!split_rr_close(back))
+                        return false;
+        }
+}
+
+static bool split_round_robin(bipolar in, split_chunk chunk, p8 separator,
                               split_output address_to output)
 {
         positive n = chunk.n;
         positive k = chunk.k;
+        positive line = 1;
+        positive at_file = 0;
+        bool wrapped = false;
+        bool wrote = false;
+        bool limit = false;
+        bool good = true;
 
-        if (k)
+        if (!k)
         {
-                positive at = 0;
-                positive line = 0;
+                if (!shell_array_room(split_rr_files, split_rr_files_room, n) ||
+                    !shell_array_room(split_rr_slots, split_rr_slots_room, SPLIT_RR_SLOTS) ||
+                    !shell_array_room(split_rr_buffers, split_rr_buffers_room,
+                                      SPLIT_RR_SLOTS * SPLIT_RR_BUFFER) ||
+                    !shell_array_room(split_rr_free, split_rr_free_room, SPLIT_RR_SLOTS + 1))
+                        return string_report(log_error, false, "split: memory exhausted\n");
 
-                while (at < length)
+                positive used = 0;
+
+                for (positive i = 0; i < n; i++)
                 {
-                        p8 address_to found = memory_first_of(
-                            input + at, separator, length - at);
-                        positive stop = found ? (positive)(found - input) + 1
-                                              : length;
-
-                        line++;
-                        if ((line - 1) % n + 1 == k &&
-                            !split_stdout_write(input + at, stop - at))
+                        if (!split_output_name(output))
                                 return false;
-                        at = stop;
+                        output->need_advance = true;
+
+                        positive length = string_length(output->name) + 1;
+
+                        if (!shell_array_room(split_rr_names, split_rr_names_room, used + length))
+                                return string_report(log_error, false, "split: memory exhausted\n");
+                        memory_copy(split_rr_names + used, output->name, length);
+                        split_rr_files[i].name = used;
+                        split_rr_files[i].state = SPLIT_RR_NEW;
+                        split_rr_files[i].slot = -1;
+                        used += length;
                 }
-                return true;
+                for (b32 i = 0; i < SPLIT_RR_SLOTS; i++)
+                        split_rr_free[i] = SPLIT_RR_SLOTS - 1 - i;
+                split_rr_free[SPLIT_RR_SLOTS] = SPLIT_RR_SLOTS;
         }
 
-        for (positive which = 1; which <= n; which++)
+        for (;;)
         {
-                positive at = 0;
-                positive line = 0;
-                bool any = false;
+                bipolar taken = system_read_retry((positive)in, file_transfer,
+                                                  sizeof(file_transfer));
 
-                while (at < length)
+                if (taken < 0)
                 {
-                        p8 address_to found = memory_first_of(
-                            input + at, separator, length - at);
-                        positive stop = found ? (positive)(found - input) + 1
-                                              : length;
+                        file_shell_name_reason(log_error, (string_address)"split: ",
+                                               output->input_name, (string_address)": ", taken);
+                        good = false;
+                        break;
+                }
+                if (!taken)
+                        break;
 
-                        line++;
-                        if ((line - 1) % n + 1 == which)
+                p8 address_to at = file_transfer;
+                p8 address_to finish = file_transfer + taken;
+
+                while (at < finish)
+                {
+                        p8 address_to found = memory_first_of(at, separator,
+                                                              (positive)(finish - at));
+                        p8 address_to stop = found ? found + 1 : finish;
+                        positive length = (positive)(stop - at);
+
+                        if (k)
                         {
-                                if (!split_output_write(output, input + at,
-                                                        stop - at))
-                                        return false;
-                                any = true;
+                                if (line == k && split_rr_unbuffered &&
+                                    !split_stdout_write(at, length))
+                                        return string_report(log_error, false, "split: write error\n");
+                                if (line == k && !split_rr_unbuffered)
+                                        log(at, length);
+                                if (found)
+                                        line = line == n ? 1 : line + 1;
+                                at = stop;
+                                continue;
+                        }
+
+                        if (!split_rr_open(at_file, n, output, address_of limit))
+                        {
+                                good = false;
+                                goto split_rr_done;
+                        }
+
+                        split_output address_to out = split_rr_slots + split_rr_files[at_file].slot;
+
+                        if (!split_rr_write(split_rr_files[at_file].slot, at, length))
+                        {
+                                good = false;
+                                goto split_rr_done;
+                        }
+                        if (!out->dead)
+                                wrote = true;
+                        if (limit && !split_rr_close(at_file))
+                        {
+                                good = false;
+                                goto split_rr_done;
+                        }
+                        if (found && ++at_file == n)
+                        {
+                                wrapped = true;
+                                //      No filter is reading any more.
+                                if (!wrote)
+                                        goto split_rr_done;
+                                wrote = false;
+                                at_file = 0;
                         }
                         at = stop;
                 }
-
-                if (!any && !output->elide && !split_output_open(output))
-                        return false;
-                if (!split_output_close(output))
-                        return false;
         }
 
-        return true;
+split_rr_done:
+        if (k)
+        {
+                log_flush();
+                if (log_failed())
+                        return string_report(log_error, false, "split: write error\n");
+                return good;
+        }
+
+        positive ceiling = wrapped ? n : at_file;
+
+        for (positive i = 0; i < n; i++)
+        {
+                if (good && i >= ceiling && !output->elide &&
+                    split_rr_files[i].state == SPLIT_RR_NEW &&
+                    !split_rr_open(i, n, output, address_of limit))
+                        good = false;
+                if (split_rr_files[i].state == SPLIT_RR_OPEN)
+                {
+                        if (good)
+                        {
+                                if (!split_rr_close(i))
+                                        good = false;
+                        }
+                        else
+                        {
+                                split_rr_used[split_rr_files[i].slot] = 0;
+                                split_output_abort(split_rr_slots + split_rr_files[i].slot);
+                                split_rr_files[i].state = SPLIT_RR_APPEND;
+                        }
+                }
+        }
+
+        return good;
 }
 
 static bool split_bytes_extract(p8 address_to bytes, p64 length, positive k,
@@ -24154,8 +24783,6 @@ static bool split_chunk_buffer(p8 address_to input, positive length,
                                split_chunk chunk, p8 separator,
                                split_output address_to output)
 {
-        if (chunk.kind == SPLIT_CHUNK_RR)
-                return split_round_robin(input, length, chunk, separator, output);
         if (chunk.kind == SPLIT_CHUNK_LINES)
                 return split_lines_chunk(input, length, chunk, separator, output);
         if (chunk.k)
@@ -24254,6 +24881,23 @@ static bool split_option_seen(p8 letter, string_address value)
                 return true;
         }
 
+        if (letter == 'I')
+        {
+                p64 size;
+                b32 read = file_umax_read(value ? value : (string_address) "", false,
+                                          (string_address) "bEGKkMmPQRTYZ", 0x7ffff000 - 1,
+                                          address_of size);
+
+                if (read || !size)
+                        return string_report(log_error, false,
+                                             "split: invalid IO block size: '%w'%s\n",
+                                             writer_terminal_quoted_name, value,
+                                             read == 1 ? (string_address) ""
+                                             : read == 2 ? (string_address) ": Value too large for defined data type"
+                                                         : (string_address) ": Numerical result out of range");
+                return true;
+        }
+
         if (letter == 'S')
         {
                 if (value && string_first_of(value, '/'))
@@ -24310,6 +24954,18 @@ static b32 file_split()
 
         if (!file_take(address_of taking) || file_operand_failed)
                 return 1;
+
+        string_address filter = file_option_value(address_of taking, 'F');
+        split_chunk asked = {0};
+
+        if (filter && (taking.flags & FILE_FLAG('n')) &&
+            split_chunks(file_option_value(address_of taking, 'n'), address_of asked) &&
+            asked.k)
+        {
+                split_try_help((string_address)
+                               "split: --filter does not process a chunk extracted to standard output\n");
+                return 1;
+        }
 
         if (file_operand_count > 2)
         {
@@ -24442,8 +25098,22 @@ static b32 file_split()
             .elide = (taking.flags & FILE_FLAG('e')) != 0,
             .mode = 0666 & ~file_umask(),
             .input_name = input_name,
+            .filter = filter,
             .stage = {.directory = -1, .handle = -1},
         };
+
+        //      Writes to a filter that has gone are EPIPE, not a signal, and
+        //      the commands get SIGPIPE's disposition back if it was the
+        //      default.
+        split_status = 0;
+
+        positive pipe_before[4] = {0};
+
+        if (filter)
+        {
+                system_signal_install(13, 1, 0, 0, pipe_before);
+                split_pipe_default = pipe_before[0] == 0;
+        }
         memory_fill(output.suffix, output.radix ? '0' : 'a', suffix_length);
 
         string_address first_suffix = split_suffix_start;
@@ -24464,18 +25134,9 @@ static b32 file_split()
                         return 1;
                 }
 
-                if (!split_start_valid(first_suffix, output.radix))
-                {
-                        string_format(log_error,
-                                      "split: '%w': invalid start value for %s suffix\n",
-                                      writer_terminal_quoted_name, first_suffix,
-                                      output.radix == 16 ? (string_address) "hexadecimal"
-                                                         : (string_address) "numerical");
-                        split_try_help(null);
-                        if (in != 0)
-                                system_close(in);
-                        return 1;
-                }
+                //      The start was checked against the alphabet of the option
+                //      that gave it, as GNU checks it; a later -d or -x that
+                //      changes the alphabet leaves it as it was.
 
                 // The start stands at the right of the zeros, as it was
                 // spelled less its leading zeros: its letters are the name's.
@@ -24499,14 +25160,20 @@ static b32 file_split()
 
         if ((facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
         {
-                string_format(log_error, "split: %w: %s\n", writer_terminal_name,
-                              input_name, file_reason(-ERROR_IS_DIRECTORY));
+                //      -n reads first to learn the size, and says that is
+                //      what failed; r/N and the rest fail at the read.
+                string_format(log_error, "split: %w: %s%s\n", writer_terminal_name,
+                              input_name,
+                              mode == 'n' && chunk.kind != SPLIT_CHUNK_RR
+                                  ? (string_address) "cannot determine file size: "
+                                  : (string_address) "",
+                              file_reason(-ERROR_IS_DIRECTORY));
                 if (in != 0)
                         system_close(in);
                 return 1;
         }
 
-        if ((facts.mode & MODE_FORMAT) == MODE_FILE)
+        if ((facts.mode & MODE_FORMAT) == MODE_FILE && !filter)
         {
                 output.protect_input = true;
                 output.input = facts;
@@ -24534,7 +25201,19 @@ static b32 file_split()
         bool fancy = mode == 'n' &&
                      (chunk.k || chunk.kind != SPLIT_CHUNK_BYTES);
 
-        if (fancy)
+        /*
+                A small regular file is read whole for -n, since what it
+                holds is what counts: /proc and /sys files say 0 or 4096
+                bytes whatever they hold, and GNU's input_file_size reads
+                before it believes st_size.
+        */
+        if (regular && mode == 'n' && facts.size < ((p64)1 << 20))
+                regular = false;
+
+        split_rr_unbuffered = (taking.flags & FILE_FLAG('u')) != 0;
+        if (mode == 'n' && chunk.kind == SPLIT_CHUNK_RR)
+                complete = split_round_robin(in, chunk, separator, address_of output);
+        else if (fancy)
         {
                 p8 address_to input = null;
                 positive length = 0;
@@ -24542,7 +25221,7 @@ static b32 file_split()
 
                 complete = false;
 
-                if (regular && facts.size)
+                if (regular)
                 {
                         bipolar got = system_call_6(
                             syscall(mmap), 0, (positive)facts.size,
@@ -24599,8 +25278,11 @@ static b32 file_split()
                 split_output_abort(address_of output);
         if (in != 0)
                 system_close(in);
+        //      Whatever runs split in this process gets SIGPIPE back as it was.
+        if (filter)
+                system_signal_action(13, pipe_before, null, 8);
         log_flush();
-        return complete ? 0 : 1;
+        return complete ? 0 : split_status ? split_status : 1;
 }
 
 // csplit -----------------------------------------------------------
@@ -26957,107 +27639,6 @@ static const argument_option shred_options[] = {
     {null},
 };
 
-/*
-        -s and -n are read as GNU's xstrtoumax reads them: blanks and a plus
-        sign may lead, a minus may not, and -s takes C's base prefixes (010
-        is eight, 0x10 sixteen) and the suffixes c, b, B, k, K and M to Q,
-        each of the last with an optional B (powers of 1000) or iB. A suffix
-        with no digits before it counts one of itself. 0 is a good answer,
-        1 a word that is not a number, 2 one that is too large.
-*/
-static b32 shred_number(string_address text, bool size, p64 ceiling,
-                        p64 address_to out)
-{
-        string_address at = text;
-        p64 value = 0;
-        positive base = 10;
-        bool over = false;
-
-        while (string_get(at) == ' ' || (string_get(at) >= '\t' && string_get(at) <= '\r'))
-                at++;
-        if (string_is(at, '-'))
-                return 1;
-        if (string_is(at, '+'))
-                at++;
-
-        if (size && string_is(at, '0'))
-        {
-                base = 8;
-                if ((at[1] == 'x' || at[1] == 'X') && digit_known(at[2], 16) < 16)
-                {
-                        base = 16;
-                        at += 2;
-                }
-        }
-
-        string_address digits = at;
-
-        for (positive digit; (digit = digit_known(string_get(at), base)) < base; at++)
-        {
-                if (value > (~(p64)0 - digit) / base)
-                        over = true;
-                value = value * base + digit;
-        }
-
-        if (at == digits)
-        {
-                if (!size || !string_get(at) || !string_first_of("cbBkKMGTPEZYRQ", string_get(at)))
-                        return 1;
-                value = 1;
-        }
-
-        p8 suffix = string_get(at);
-
-        if (suffix)
-        {
-                if (!size || !string_first_of("cbBkKMGTPEZYRQ", suffix))
-                        return 1;
-
-                positive power = 0;
-                p64 scale = 1024;
-
-                switch (suffix)
-                {
-                case 'c':
-                        scale = 1;
-                        power = 1;
-                        break;
-                case 'b':
-                        scale = 512;
-                        power = 1;
-                        break;
-                case 'B':
-                        power = 1;
-                        break;
-                default:
-                        power = size_suffix_power(suffix, true);
-                        if (at[1] == 'i' && at[2] == 'B')
-                                at += 2;
-                        else if (at[1] == 'B' || at[1] == 'D')
-                        {
-                                scale = 1000;
-                                at++;
-                        }
-                        break;
-                }
-                at++;
-                while (power--)
-                {
-                        if (value > ~(p64)0 / scale)
-                                over = true;
-                        value *= scale;
-                }
-                if (string_get(at))
-                        return 1;
-        }
-
-        if (over || value > ceiling)
-                return 2;
-
-        address_to out = value;
-        return 0;
-}
-
 typedef struct
 {
         p64 words[4];
@@ -27943,7 +28524,7 @@ static bool shred_option_seen(p8 letter, string_address value)
 
         if (letter == 'n' && value)
         {
-                read = shred_number(value, false, ((p64)1 << 62) - 1, address_of number);
+                read = file_umax_read(value, false, null, ((p64)1 << 62) - 1, address_of number);
                 if (read)
                         return string_report(log_error, false,
                                              "shred: invalid number of passes: '%w'%s\n",
@@ -27955,7 +28536,7 @@ static bool shred_option_seen(p8 letter, string_address value)
 
         if (letter == 's' && value)
         {
-                read = shred_number(value, true, (p64)b64_max, address_of number);
+                read = file_umax_read(value, true, (string_address) "cbBkKMGTPEZYRQ", (p64)b64_max, address_of number);
                 if (read)
                         return string_report(log_error, false,
                                              "shred: invalid file size: '%w'%s\n",
