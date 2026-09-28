@@ -8149,7 +8149,34 @@ FILES_UTILITIES = (
                   # nstrftime's %F: a bare one signs a year past 9999, a flag
                   # or width goes to the year alone.
                   tuple(("-u", "-d", "@%d" % moment, "+%F|%+F|%+12F|%12F|%-12F|%012F|%_12F|%^F|%3F")
-                        for moment in (0, 253402300800, 327403900800, -62135596800))),
+                        for moment in (0, 253402300800, 327403900800, -62135596800)) +
+                  # parse_datetime's grammar where it shifts: a lone number,
+                  # DD.MM., comments, zone T after a time, a year in the way
+                  # of a time, decimals and ago; and --debug's trace of it.
+                  (("-u", "-d", "1970-01-01 00:00:00.1234567 UTC +961062237.987654321 sec", "+%F %T.%N"),
+                   ("-u", "-d", "10:30:15.5 pm 2001-09-09", "+%F %T.%N"), ("-u", "-d", "@-1.5", "+%s.%N"),
+                   ("-u", "-d", "2001-09-09 -4.5 sec", "+%F %T.%N")) +
+                  # (to the minute: the rest are read from now)
+                  tuple(("-u", "-d", when, "+%F %H:%M") for when in (
+                      "000909", "1.2. 3", "3 1.2.", "1.2.2003", "1970-01-01 00:00:00.1234567 UTC +961062237.987654321 sec",
+                      "09:00T", "09:00X", "1(ignore this comment", "2026(this is a comment)-01-05", "((nested)2026-01-05)",
+                      "2147485648-01-01", "2147483647-01-01", "17 jun 10:30", "jun 17 1992", "17-JUN-1992", "JUN-17-1992",
+                      "10:30 UTC-05", "12:00 +1 day", "2001-09-09 +1 day ago", "1 fortnight hence", "next thursday",
+                      "thurs", "2 wed", "noon", "3pm", "12am", "13pm", "10:30:15.5 pm", "9/11/01", "2001/09/11", "20130101",
+                      "20130101 -8 days", "2013-10-30 00:00:00 UTC -8 days", "@-1.5", "@ 5", "- 5 min", "tomorrow yesterday",
+                      "EST", "EDT", "CEST 12:00", "J", "Z", "1 2", "x", "2001-02-30", "", " ", "TZ=\"Asia/Tokyo\" 12:00",
+                      "TZ=\"America/New_York\" 2016-06-01 EDT + 6 months", "a.m.", "sept 3", "Sat,", "4.5 sec", "-4.5 sec")) +
+                  tuple(("--debug", "-u") + tail for tail in (
+                      ("-d", "2016-10-31 - 1 month"), ("-d", "TZ=\"Asia/Tokyo\" Sun, 90-12-11 + 3 days - 90 minutes", "+%F %T"),
+                      ("-d", "25:00"), ("-d", "foo bar"), ("-d", "discard", "-d", "Apr 11 22:59:00 2011", "+%T"),
+                      ("-d", "@1.5"), ("-d", "20130101"), ("-d", "2013-10-30 00:00:00 UTC -8 days", "+%F"),
+                      ("-d", "9/11/2001 +1 hour 5 minutes", "+%F %T"), ("-d", "1(unfinished"), ("-d", "1 2 3"),
+                      ("-d", "last fri", "+%F"), ("-d", "2001-02-29"), ("-d", "2001-09-09 12:00 +0130"))) +
+                  tuple({"argv": ("--debug", "-d", when, "+%F %T"), "env": (("TZ", zone),)}
+                        for zone, when in (("America/New_York", "2016-06-01 EDT + 6 months"),
+                                           ("Europe/Helsinki", "2011-12-11 EET"), ("Europe/Helsinki", "2011-06-11 EEST"),
+                                           ("America/Lima", "@1"), ("Europe/Berlin", "2021-03-28 02:30"),
+                                           ("Europe/Berlin", "2021-10-31 02:30"), ("Europe/Berlin", "2021-10-31 02:30 CEST")))),
 )
 
 #       Scenes a fixture cannot hold, made by the shell before the program
@@ -39442,8 +39469,6 @@ REASONS = {
  "r9": "positional printf arguments (%2$s) are a gawk extension; ours writes the directive as it stands, and gawk --posix refuses them",
  "r90": "the out-of-range and repetition diagnostics name the pattern rather than the line it stopped at, --suppress-matched with a regex offset is refused because the two describe different lines, and -b is a second suffix format language.",
  "r91": "-b is a second suffix format language; the names here are the prefix and a fixed count of digits.",
- "r92": "a twelve-hour suffix, a leap second, a year written in fewer than four digits and an epoch at the signed ceiling are not read; -f reads a file of dates.",
- "r93": "--debug annotates the parse on stderr rather than changing the printed time.",
  "r94": "-H and -B are a second size renderer and --output is a column chooser; this one prints the fixed table.",
  "r95": "--output is a column chooser; this one prints the fixed table.",
  "r96": "-m's comma layout measures a name before it is quoted, so a name needing quotes is placed a column early.",
@@ -41957,9 +41982,6 @@ PINNED = r"""
 {"candidate":{"effects":"056a912f4598e089a2d5c7905649e33cb3614fcf0c30b2dab4456e51d1c7ed72","status":0,"stdout":"7b90b6c82d45cab1f3b5f170e4b90c5545cd08cf90f6e6c28877b72e54da852b"},"case":{"argv":["-f","v","in","2"],"domain":"files","family":null,"fixture":"files_outlink","input_kind":"command","mode":null,"stdin":"text","tier":"pinned","utility":"csplit"},"domain":"files","id":"f6acfdce39fa1904","kind":"deliberate","list":"ledger","reason":"an output name that is already a symbolic link is replaced by the new piece, never written through: split and csplit publish every output through the staged no-follow transaction (ff58420d), so a link to a regular file, to a device such as /dev/full, or back to the input is swapped for the piece and what it reached is left as it was; GNU opens the name and writes into whatever the link reaches, failing on /dev/full and refusing a link to its own input. Upstream split/split-io-err.sh and csplit/csplit-io-err.sh fail here by design","reference":{"effects":"b0fbe26aa84630da9e351f96fc9db6f0daddcb838541cf82fb66be7459a19206","status":0,"stdout":"7b90b6c82d45cab1f3b5f170e4b90c5545cd08cf90f6e6c28877b72e54da852b"},"utility":"csplit"},
 {"domain":"files","kind":"bug","list":"ledger","option":"--suffix-format","reason_id":"r91","utility":"csplit"},
 {"domain":"files","kind":"bug","list":"ledger","option":"-b","reason_id":"r91","utility":"csplit"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"ac27f0a19c6dcc210687994bc217e7644bffa9158eb94d98885e00baa5d0aa1e"},"case":{"argv":["-d","2001-09-09 23:59:60","+%Y-%m-%d %H:%M:%S"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"a5d74ff50f7990a6","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
-{"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-d","@-9223372036854775808","+%Y-%m-%d %H:%M:%S"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_dates","utility":"date"},"domain":"files","id":"c6db97f2549f59a7","kind":"bug","list":"ledger","reason_id":"r92","utility":"date"},
-{"domain":"files","kind":"bug","list":"ledger","option":"--debug","reason_id":"r93","utility":"date"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"4f8a99ed0c16119c8fa1efa29781c2a0da32035321867c078573676dbc50ddaa"},"case":{"argv":["--file-type"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","tier":"singles","utility":"dir"},"domain":"files","id":"25dc8df95d82301b","kind":"bug","list":"ledger","reason_id":"r324","reference":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"e96d555d024146db7480d9cd2c593796efb676d7ac3fd0a5130aaac38c293b08"},"utility":"dir"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"4f8a99ed0c16119c8fa1efa29781c2a0da32035321867c078573676dbc50ddaa"},"case":{"argv":["--indicator-style=file-type"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"empty","tier":"singles","utility":"dir"},"domain":"files","id":"6a15ec37f13c6de7","kind":"bug","list":"ledger","reason_id":"r324","reference":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"e96d555d024146db7480d9cd2c593796efb676d7ac3fd0a5130aaac38c293b08"},"utility":"dir"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"d206a9d0465df2398be47195d2c705bf23814c5153f4b352f77c657d4e74e582"},"case":{"argv":[],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_colors","utility":"dircolors"},"domain":"files","id":"0069f186cef18a43","kind":"deliberate","list":"ledger","reason_id":"r97","utility":"dircolors"},

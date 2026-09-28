@@ -2461,86 +2461,6 @@ fn file_stamp_short(writer write, b64 seconds, b64 now)
         file_two(write, minute);
 }
 
-// Patterns --------------------------------------------------
-
-/*
-        A written date read into a number of seconds since the epoch.
-
-        What is understood is written out here and nothing else is guessed at,
-        because a date read as something near what it says is worse than one
-        that would not read at all:
-
-          @SECONDS                  on its own, and a - in front of the number
-          YYYY-MM-DD                midnight on that day, month and day
-                                    either width, a two digit year 69 to 99
-                                    in the nineteen hundreds and 00 to 68 in
-                                    the two thousands
-          HH:MM[:SS[.FRACTION]]     that time, on whatever day is in hand
-          a T or a space between the two
-          MONTH DAY[,] [YEAR]       and DAY MONTH [YEAR], the month by its
-          DAY MONTH [YEAR]          name or its first three letters, the year
-                                    this one when it is left out
-          WEEKDAY[,]                the next such day, today included, when no
-                                    date was given; passed over beside one
-          [+-]HH[MM]  [+-]HH:MM     after a clock time, the zone that time is
-                                    in, and it is turned back into UTC
-          now  today  yesterday  tomorrow
-          nothing at all           midnight on the day in hand
-          [+-]N UNIT               and next UNIT, last UNIT, a bare UNIT
-          ...UNIT... ago           turns every displacement in the string round
-          UTC  GMT  Z              passed over: everything here is UTC already
-
-        That is what the system's own date and stat print, so their output
-        can be given back to touch -d and date -d.
-
-        UNIT is sec, min, hour, day, week, fortnight, month or year, with or
-        without an s. A month and a year move the calendar rather than the
-        clock, so the 31st of January and a month is the 2nd of March, which
-        is what the system's own date answers.
-
-        A signed number after a clock time is a zone and not a displacement.
-        The system's date reads the + in "12:00 +1 day" as a zone of one hour
-        followed by a bare day, and so does this; a tool that read it as a
-        day alone would be an hour out with nothing to say so.
-*/
-/*
-        Days, weeks and fortnights are counted on the calendar and not in
-        seconds, as GNU counts them: a day across the change to summer time
-        is the same hour the next day, not twenty-four hours on.
-*/
-typedef struct
-{
-        string_address name;
-        b64 seconds;
-        b64 days;
-        b64 months;
-} file_unit;
-
-static const file_unit file_units[] = {
-    {(string_address) "sec", 1, 0, 0},
-    {(string_address) "secs", 1, 0, 0},
-    {(string_address) "second", 1, 0, 0},
-    {(string_address) "seconds", 1, 0, 0},
-    {(string_address) "min", 60, 0, 0},
-    {(string_address) "mins", 60, 0, 0},
-    {(string_address) "minute", 60, 0, 0},
-    {(string_address) "minutes", 60, 0, 0},
-    {(string_address) "hour", 3600, 0, 0},
-    {(string_address) "hours", 3600, 0, 0},
-    {(string_address) "day", 0, 1, 0},
-    {(string_address) "days", 0, 1, 0},
-    {(string_address) "week", 0, 7, 0},
-    {(string_address) "weeks", 0, 7, 0},
-    {(string_address) "fortnight", 0, 14, 0},
-    {(string_address) "fortnights", 0, 14, 0},
-    {(string_address) "month", 0, 0, 1},
-    {(string_address) "months", 0, 0, 1},
-    {(string_address) "year", 0, 0, 12},
-    {(string_address) "years", 0, 0, 12},
-    {null, 0, 0, 0},
-};
-
-
 // A day written down has to be a day the month has; a day arrived at by
 // adding months to another one does not, and rolls into the month after.
 static positive file_month_days(b64 year, b64 month)
@@ -2557,91 +2477,6 @@ static bool file_same_word(string_address text, positive length, string_address 
 {
         return string_length(word) == length &&
                !memory_compare_ascii_case(text, word, length);
-}
-
-/* GNU parse-datetime to_hour: 12am is 0, 12pm is 12, 1-11pm is +12. */
-static bool file_hour_meridian(positive hour, bool afternoon,
-                               positive address_to into)
-{
-        if (!hour || hour > 12)
-                return false;
-        if (hour == 12)
-                address_to into = afternoon ? 12 : 0;
-        else
-                address_to into = afternoon ? hour + 12 : hour;
-        return true;
-}
-
-static const file_unit address_to file_unit_of(string_address text, positive length)
-{
-        for (positive i = 0; file_units[i].name; i++)
-                if (file_same_word(text, length, file_units[i].name))
-                        return address_of file_units[i];
-
-        return null;
-}
-
-/* GNU's ordinal words: last, this and next, and first to twelfth but not
-   second, which is a unit. -2 when the word is none of them. */
-static b64 file_ordinal_of(string_address text, positive length)
-{
-        static const string_address ordinals[] = {
-            "last", "this", "next", "first", "", "third", "fourth", "fifth", "sixth",
-            "seventh", "eighth", "ninth", "tenth", "eleventh", "twelfth"};
-
-        for (positive i = 0; i < array_count(ordinals); i++)
-                if (string_get(ordinals[i]) && file_same_word(text, length, ordinals[i]))
-                        return i < 3 ? (b64)i - 1 : (b64)i - 2;
-        return -2;
-}
-
-/*
-        The zones GNU's parse-datetime knows by name, east of Greenwich in
-        seconds, the daylight ones an hour further on; and the military
-        letters, A to M east and N to Y west, J being the local time and T
-        the ISO separator rather than zones.
-*/
-static bool file_zone_named(string_address text, positive length,
-                            b64 address_to offset, bool address_to wall)
-{
-        static const struct { string_address name; b32 minutes; bool daylight; } zones[] = {
-            {"wet", 0, false}, {"west", 0, true}, {"bst", 0, true}, {"art", -180, false},
-            {"brt", -180, false}, {"brst", -180, true}, {"nst", -210, false}, {"ndt", -210, true},
-            {"ast", -240, false}, {"adt", -240, true}, {"clt", -240, false}, {"clst", -240, true},
-            {"est", -300, false}, {"edt", -300, true}, {"cst", -360, false}, {"cdt", -360, true},
-            {"mst", -420, false}, {"mdt", -420, true}, {"pst", -480, false}, {"pdt", -480, true},
-            {"akst", -540, false}, {"akdt", -540, true}, {"hst", -600, false}, {"hast", -600, false},
-            {"hadt", -600, true}, {"sst", -720, false}, {"wat", 60, false}, {"cet", 60, false},
-            {"cest", 60, true}, {"met", 60, false}, {"mez", 60, false}, {"mest", 60, true},
-            {"mesz", 60, true}, {"eet", 120, false}, {"eest", 120, true}, {"cat", 120, false},
-            {"sast", 120, false}, {"eat", 180, false}, {"msk", 180, false}, {"msd", 180, true},
-            {"ist", 330, false}, {"sgt", 480, false}, {"kst", 540, false}, {"jst", 540, false},
-            {"gst", 600, false}, {"nzst", 720, false}, {"nzdt", 720, true}};
-
-        address_to wall = false;
-        for (positive i = 0; i < array_count(zones); i++)
-                if (file_same_word(text, length, zones[i].name))
-                {
-                        address_to offset = (b64)zones[i].minutes * 60 + (zones[i].daylight ? 3600 : 0);
-                        return true;
-                }
-
-        if (length != 1)
-                return false;
-
-        p8 letter = byte_to_lower(string_get(text));
-
-        if (letter == 'j')
-        {
-                address_to wall = true;
-                return true;
-        }
-        if (letter < 'a' || letter > 'y' || letter == 't')
-                return false;
-        address_to offset = letter <= 'i' ? (b64)(letter - 'a' + 1) * 3600
-                          : letter <= 'm' ? (b64)(letter - 'k' + 10) * 3600
-                                          : -(b64)(letter - 'n' + 1) * 3600;
-        return true;
 }
 
 static positive file_read_number(string_address text, positive at, b64 address_to out,
@@ -2663,34 +2498,6 @@ static positive file_read_number(string_address text, positive at, b64 address_t
         return at + address_to digits;
 }
 
-// The fraction of a second after a clock time or an epoch, kept to the
-// nanosecond that the kernel's timestamps carry; digits past the ninth say
-// nothing a file can hold.
-static positive file_read_fraction(string_address text, positive at,
-                                   positive address_to nanoseconds)
-{
-        if ((!string_is(text + at, '.') && !string_is(text + at, ',')) ||
-            !byte_is_digit(string_get(text + at + 1)))
-                return at;
-
-        positive scale = 100000000;
-
-        at++;
-
-        while (byte_is_digit(string_get(text + at)))
-        {
-                address_to nanoseconds += (positive)(string_get(text + at) - '0') * scale;
-                scale /= 10;
-                at++;
-        }
-
-        return at;
-}
-
-static const string_address file_weekday_names[7] = {
-    "sunday",   "monday", "tuesday", "wednesday",
-    "thursday", "friday", "saturday"};
-
 static bipolar file_name_among(string_address text, positive length,
                                const string_address address_to names,
                                positive count)
@@ -2706,843 +2513,2214 @@ static bipolar file_name_among(string_address text, positive length,
         return -1;
 }
 
-static bool file_moment_read_local(string_address text, b64 now, positive fraction,
-                                    b64 address_to out,
-                                    positive address_to nanoseconds)
+/*
+        Reading a date the way GNU's parse_datetime reads one.
+
+        date -d, date -f, touch -d and find -newermt all take gnulib's
+        grammar, a yacc grammar whose 31 shift/reduce conflicts are all
+        resolved by shifting -- which is what decides, for instance, that
+        "17 jun 10:30" takes 10 as the year, that "2025-10-11T13:00" is one
+        date and time, and that "09:00T" is a time in zone T. This is that
+        grammar read by hand, one token of lookahead as yacc has, with the
+        same lexer (signs that stand apart from their digits, DD.MM.YYYY
+        told from a decimal, words by the three-letter rule, the local zone
+        names probed a quarter apart, comments in parentheses), the same
+        counts of what was seen, and the same last step: a broken-down time
+        made into seconds, a relative date added by fields, a zone applied,
+        and a relative time added in seconds. --debug writes GNU's trace of
+        all of it, line for line.
+
+        The one thing it cannot match is history: the zone rules here are
+        the ones in force now (see clock_zone_posix), so a date before a
+        zone's last change of rule is read with today's rule.
+*/
+enum
 {
-        positive at = 0;
+        PD_END = 0,
+        PD_ERROR = '?',
+        PD_UNUMBER = 256,
+        PD_SNUMBER,
+        PD_UNUMBER_DOTTED,
+        PD_UDECIMAL,
+        PD_SDECIMAL,
+        PD_AGO,
+        PD_DST,
+        PD_YEAR_UNIT,
+        PD_MONTH_UNIT,
+        PD_DAY_UNIT,
+        PD_HOUR_UNIT,
+        PD_MINUTE_UNIT,
+        PD_SEC_UNIT,
+        PD_DAY_SHIFT,
+        PD_DAY,
+        PD_DAYZONE,
+        PD_LOCAL_ZONE,
+        PD_MERIDIAN,
+        PD_MONTH,
+        PD_ORDINAL,
+        PD_ZONE,
+};
 
-        address_to nanoseconds = fraction;
+enum
+{
+        PD_AM,
+        PD_PM,
+        PD_24,
+};
 
-        at += string_span(text + at, string_set_blanks);
+typedef struct
+{
+        b32 type;
+        bool negative;
+        b64 value;
+        b64 digits;
+        b64 seconds;
+        b32 nanoseconds;
+} pd_token;
 
-        if (string_is(text + at, '@'))
-        {
-                address_to nanoseconds = 0;
-                bool below = string_is(text + at + 1, '-');
-                positive digits;
-                b64 value;
+typedef struct
+{
+        b64 year;
+        b64 month;
+        b64 day;
+        b64 hour;
+        b64 minutes;
+        b64 seconds;
+        b64 ns;
+} pd_relative;
 
-                at = file_read_number(text, at + 1 + (below ? 1 : 0), address_of value,
-                                      address_of digits);
+typedef struct
+{
+        string_address name;
+        b32 type;
+        b32 value;
+} pd_word;
 
-                if (!digits)
-                        return false;
+typedef struct
+{
+        string_address input;
+        pd_token ahead;
+        bool have_ahead;
 
-                at = file_read_fraction(text, at, nanoseconds);
-
-                at += string_span(text + at, string_set_blanks);
-
-                if (string_get(text + at))
-                        return false;
-
-                // The fraction counts forward from the second before, which
-                // is what makes @-1.5 the half second before the epoch's
-                // own second and not the one after it.
-                if (below && address_to nanoseconds)
-                {
-                        address_to out = -value - 1;
-                        address_to nanoseconds = 1000000000 - address_to nanoseconds;
-                }
-                else
-                        address_to out = below ? -value : value;
-
-                return true;
-        }
+        b64 day_ordinal;
+        b32 day_number;
+        b32 local_isdst;
+        b32 time_zone;
+        b32 meridian;
 
         b64 year;
-        positive month, day, hour, minute, second;
+        bool year_negative;
+        b64 year_digits;
+        b64 month;
+        b64 day;
+        b64 hour;
+        b64 minutes;
+        b64 seconds;
+        b64 ns;
 
-        file_split_moment(now + clock_local_east(now), address_of year,
-                          address_of month, address_of day,
-                          address_of hour, address_of minute, address_of second);
+        pd_relative rel;
 
-        bool dated = false;
-        bool timed = false;
-        bool anything = false;
-        b64 shift = 0;
-        b64 days_shift = 0;
-        b64 months = 0;
+        bool timespec_seen;
+        bool rels_seen;
+        b64 dates_seen;
+        b64 days_seen;
+        b64 j_zones_seen;
+        b64 local_zones_seen;
+        b64 dsts_seen;
+        b64 times_seen;
+        b64 zones_seen;
+        bool year_seen;
+        bool not_decimal;
 
-        // A date said by its month's name may leave the year for later, and
-        // a zone is read only once and only after the clock time it
-        // qualifies; a weekday counts only when no date pins the day.
-        bool year_wanted = false;
-        bool named_date = false;
-        bool universal = false; // UTC, GMT or Z said by name
-        bool zoned = false;
-        bipolar weekday = -1;
-        b64 weekday_ordinal = 0;
-        b64 zone = 0;
-        bool zone_named = false;
+        bool debug;
+        bool debug_dates_seen;
+        bool debug_days_seen;
+        bool debug_local_zones_seen;
+        bool debug_times_seen;
+        bool debug_zones_seen;
+        bool debug_year_seen;
+        bool debug_ordinal_day_seen;
 
-        // ago turns round the displacement it follows and not the ones before
-        // it: "3 hours 2 days ago" is three hours on and two days back, which
-        // is what the system's date makes of it.
-        b64 recent = 0;
-        bool relative_last = false;
-        b64 recent_days = 0;
-        b64 recent_months = 0;
+        pd_word zones_here[3];
+        p8 local_names[2][32];
+} pd_parser;
 
-        while (string_get(text + at))
+//      date --debug, set by date for the read it is about to make.
+static bool pd_debug;
+
+static fn pd_say(string_address text)
+{
+        log_error("date: ", 6);
+        log_error(text, 0);
+}
+
+static const pd_word pd_meridians[] = {
+    {"AM", PD_MERIDIAN, PD_AM}, {"A.M.", PD_MERIDIAN, PD_AM},
+    {"PM", PD_MERIDIAN, PD_PM}, {"P.M.", PD_MERIDIAN, PD_PM},
+    {null, 0, 0},
+};
+
+static const pd_word pd_months_days[] = {
+    {"JANUARY", PD_MONTH, 1},    {"FEBRUARY", PD_MONTH, 2}, {"MARCH", PD_MONTH, 3},
+    {"APRIL", PD_MONTH, 4},      {"MAY", PD_MONTH, 5},      {"JUNE", PD_MONTH, 6},
+    {"JULY", PD_MONTH, 7},       {"AUGUST", PD_MONTH, 8},   {"SEPTEMBER", PD_MONTH, 9},
+    {"SEPT", PD_MONTH, 9},       {"OCTOBER", PD_MONTH, 10}, {"NOVEMBER", PD_MONTH, 11},
+    {"DECEMBER", PD_MONTH, 12},  {"SUNDAY", PD_DAY, 0},     {"MONDAY", PD_DAY, 1},
+    {"TUESDAY", PD_DAY, 2},      {"TUES", PD_DAY, 2},       {"WEDNESDAY", PD_DAY, 3},
+    {"WEDNES", PD_DAY, 3},       {"THURSDAY", PD_DAY, 4},   {"THUR", PD_DAY, 4},
+    {"THURS", PD_DAY, 4},        {"FRIDAY", PD_DAY, 5},     {"SATURDAY", PD_DAY, 6},
+    {null, 0, 0},
+};
+
+static const pd_word pd_units[] = {
+    {"YEAR", PD_YEAR_UNIT, 1},    {"MONTH", PD_MONTH_UNIT, 1}, {"FORTNIGHT", PD_DAY_UNIT, 14},
+    {"WEEK", PD_DAY_UNIT, 7},     {"DAY", PD_DAY_UNIT, 1},     {"HOUR", PD_HOUR_UNIT, 1},
+    {"MINUTE", PD_MINUTE_UNIT, 1}, {"MIN", PD_MINUTE_UNIT, 1}, {"SECOND", PD_SEC_UNIT, 1},
+    {"SEC", PD_SEC_UNIT, 1},      {null, 0, 0},
+};
+
+static const pd_word pd_relatives[] = {
+    {"TOMORROW", PD_DAY_SHIFT, 1}, {"YESTERDAY", PD_DAY_SHIFT, -1}, {"TODAY", PD_DAY_SHIFT, 0},
+    {"NOW", PD_DAY_SHIFT, 0},      {"LAST", PD_ORDINAL, -1},        {"THIS", PD_ORDINAL, 0},
+    {"NEXT", PD_ORDINAL, 1},       {"FIRST", PD_ORDINAL, 1},        {"THIRD", PD_ORDINAL, 3},
+    {"FOURTH", PD_ORDINAL, 4},     {"FIFTH", PD_ORDINAL, 5},        {"SIXTH", PD_ORDINAL, 6},
+    {"SEVENTH", PD_ORDINAL, 7},    {"EIGHTH", PD_ORDINAL, 8},       {"NINTH", PD_ORDINAL, 9},
+    {"TENTH", PD_ORDINAL, 10},     {"ELEVENTH", PD_ORDINAL, 11},    {"TWELFTH", PD_ORDINAL, 12},
+    {"AGO", PD_AGO, -1},           {"HENCE", PD_AGO, 1},            {null, 0, 0},
+};
+
+#define PD_HOUR(x) ((x) * 3600)
+
+static const pd_word pd_universal_zones[] = {
+    {"GMT", PD_ZONE, 0}, {"UT", PD_ZONE, 0}, {"UTC", PD_ZONE, 0}, {null, 0, 0},
+};
+
+static const pd_word pd_zones[] = {
+    {"WET", PD_ZONE, PD_HOUR(0)},        {"WEST", PD_DAYZONE, PD_HOUR(0)},
+    {"BST", PD_DAYZONE, PD_HOUR(0)},     {"ART", PD_ZONE, -PD_HOUR(3)},
+    {"BRT", PD_ZONE, -PD_HOUR(3)},       {"BRST", PD_DAYZONE, -PD_HOUR(3)},
+    {"NST", PD_ZONE, -(PD_HOUR(3) + 1800)}, {"NDT", PD_DAYZONE, -(PD_HOUR(3) + 1800)},
+    {"AST", PD_ZONE, -PD_HOUR(4)},       {"ADT", PD_DAYZONE, -PD_HOUR(4)},
+    {"CLT", PD_ZONE, -PD_HOUR(4)},       {"CLST", PD_DAYZONE, -PD_HOUR(4)},
+    {"EST", PD_ZONE, -PD_HOUR(5)},       {"EDT", PD_DAYZONE, -PD_HOUR(5)},
+    {"CST", PD_ZONE, -PD_HOUR(6)},       {"CDT", PD_DAYZONE, -PD_HOUR(6)},
+    {"MST", PD_ZONE, -PD_HOUR(7)},       {"MDT", PD_DAYZONE, -PD_HOUR(7)},
+    {"PST", PD_ZONE, -PD_HOUR(8)},       {"PDT", PD_DAYZONE, -PD_HOUR(8)},
+    {"AKST", PD_ZONE, -PD_HOUR(9)},      {"AKDT", PD_DAYZONE, -PD_HOUR(9)},
+    {"HST", PD_ZONE, -PD_HOUR(10)},      {"HAST", PD_ZONE, -PD_HOUR(10)},
+    {"HADT", PD_DAYZONE, -PD_HOUR(10)},  {"SST", PD_ZONE, -PD_HOUR(12)},
+    {"WAT", PD_ZONE, PD_HOUR(1)},        {"CET", PD_ZONE, PD_HOUR(1)},
+    {"CEST", PD_DAYZONE, PD_HOUR(1)},    {"MET", PD_ZONE, PD_HOUR(1)},
+    {"MEZ", PD_ZONE, PD_HOUR(1)},        {"MEST", PD_DAYZONE, PD_HOUR(1)},
+    {"MESZ", PD_DAYZONE, PD_HOUR(1)},    {"EET", PD_ZONE, PD_HOUR(2)},
+    {"EEST", PD_DAYZONE, PD_HOUR(2)},    {"CAT", PD_ZONE, PD_HOUR(2)},
+    {"SAST", PD_ZONE, PD_HOUR(2)},       {"EAT", PD_ZONE, PD_HOUR(3)},
+    {"MSK", PD_ZONE, PD_HOUR(3)},        {"MSD", PD_DAYZONE, PD_HOUR(3)},
+    {"IST", PD_ZONE, PD_HOUR(5) + 1800}, {"SGT", PD_ZONE, PD_HOUR(8)},
+    {"KST", PD_ZONE, PD_HOUR(9)},        {"JST", PD_ZONE, PD_HOUR(9)},
+    {"GST", PD_ZONE, PD_HOUR(10)},       {"NZST", PD_ZONE, PD_HOUR(12)},
+    {"NZDT", PD_DAYZONE, PD_HOUR(12)},   {null, 0, 0},
+};
+
+//      The military letters, J the local zone and T the separator; A to Z
+//      skipping J, the letters east of UTC first.
+static b32 pd_military(p8 letter, b32 address_to value)
+{
+        if (letter == 'J' || letter == 'T')
+                return letter;
+        if (letter == 'Z')
+                address_to value = 0;
+        else if (letter <= 'I')
+                address_to value = PD_HOUR(letter - 'A' + 1);
+        else if (letter <= 'M')
+                address_to value = PD_HOUR(letter - 'K' + 10);
+        else
+                address_to value = -PD_HOUR(letter - 'N' + 1);
+        return PD_ZONE;
+}
+
+static const pd_word address_to pd_find(const pd_word address_to table, string_address word)
+{
+        for (; table->name; table++)
+                if (string_equals(word, table->name))
+                        return table;
+        return null;
+}
+
+static const pd_word address_to pd_zone(pd_parser address_to pc, string_address word)
+{
+        const pd_word address_to found = pd_find(pd_universal_zones, word);
+
+        if (!found)
+                found = pd_find(pc->zones_here, word);
+        if (!found)
+                found = pd_find(pd_zones, word);
+        return found;
+}
+
+static bool pd_word_of(pd_parser address_to pc, p8 address_to word, pd_token address_to token)
+{
+        positive length = 0;
+        const pd_word address_to found = null;
+
+        for (p8 address_to at = word; string_get(at); at++, length++)
+                address_to at = byte_to_upper(string_get(at));
+
+        found = pd_find(pd_meridians, word);
+
+        bool abbrev = length == 3 || (length == 4 && word[3] == '.');
+
+        for (const pd_word address_to row = pd_months_days; !found && row->name; row++)
+                if (abbrev ? !memory_compare(word, row->name, 3) : string_equals(word, row->name))
+                        found = row;
+        if (!found)
+                found = pd_zone(pc, word);
+        if (!found && string_equals(word, "DST"))
         {
-                at += string_span(text + at, string_set_blanks);
-
-                // A parenthesis opens a comment, nested ones included,
-                // which the lexer passes over wherever a word could start.
-                if (string_is(text + at, '('))
-                {
-                        positive depth = 0;
-
-                        do
-                        {
-                                depth += string_is(text + at, '(');
-                                depth -= string_is(text + at, ')');
-                                at++;
-                        } while (string_get(text + at) && depth);
-                        continue;
-                }
-
-                if (!string_get(text + at))
-                        break;
-
-                anything = true;
-
-                // ago and hence belong to the displacement just before them.
-                bool follows = relative_last;
-
-                relative_last = false;
-
-                b64 sign = 1;
-                bool marked = false;
-
-                if (string_is(text + at, '+') || string_is(text + at, '-'))
-                {
-                        marked = true;
-                        sign = string_is(text + at, '-') ? -1 : 1;
-                        at++;
-
-                        at += string_span(text + at, string_set_blanks);
-                }
-
-                if (byte_is_digit(string_get(text + at)))
-                {
-                        positive digits;
-                        b64 value;
-
-                        at = file_read_number(text, at, address_of value, address_of digits);
-
-                        if (!digits)
-                                return false;
-
-                        if (!marked && string_is(text + at, '-'))
-                        {
-                                positive wide;
-                                b64 rest;
-
-                                if (dated)
-                                        return false;
-
-                                at = file_read_number(text, at + 1, address_of rest,
-                                                      address_of wide);
-
-                                if (!wide || !string_is(text + at, '-'))
-                                        return false;
-
-                                b64 which;
-
-                                at = file_read_number(text, at + 1, address_of which,
-                                                      address_of wide);
-
-                                if (!wide || rest < 1 || rest > 12 || which < 1)
-                                        return false;
-
-                                year = digits <= 2 ? (value <= 68 ? 2000 + value : 1900 + value)
-                                                   : value;
-
-                                if (which > file_month_days(year, rest))
-                                        return false;
-
-                                month = (positive)rest;
-                                day = (positive)which;
-                                dated = true;
-
-                                // A clock time already read stands; the day
-                                // is midnight only when no time was said.
-                                if (!timed)
-                                {
-                                        hour = 0;
-                                        minute = 0;
-                                        second = 0;
-                                        address_to nanoseconds = 0;
-                                }
-
-                                if (string_is(text + at, 'T') || string_is(text + at, 't'))
-                                        at++;
-
-                                continue;
-                        }
-
-                        /* GNU 9.11: N/N/N. Four or more leading digits
-                           are YYYY/MM/DD; otherwise MM/DD/YY[YY]. */
-                        if (!marked && string_is(text + at, '/'))
-                        {
-                                positive wide;
-                                b64 rest;
-                                b64 which;
-
-                                if (dated)
-                                        return false;
-
-                                at = file_read_number(text, at + 1,
-                                                      address_of rest,
-                                                      address_of wide);
-
-                                if (!wide || !string_is(text + at, '/'))
-                                        return false;
-
-                                at = file_read_number(text, at + 1,
-                                                      address_of which,
-                                                      address_of wide);
-
-                                if (!wide)
-                                        return false;
-
-                                if (digits >= 4)
-                                {
-                                        year = value;
-                                        if (rest < 1 || rest > 12 ||
-                                            which < 1 ||
-                                            which > file_month_days(
-                                                        year, rest))
-                                                return false;
-                                        month = (positive)rest;
-                                        day = (positive)which;
-                                }
-                                else
-                                {
-                                        if (value < 1 || value > 12 ||
-                                            rest < 1)
-                                                return false;
-                                        year = wide <= 2
-                                                   ? (which <= 68
-                                                          ? 2000 + which
-                                                          : 1900 + which)
-                                                   : which;
-                                        if (rest > file_month_days(
-                                                       year, value))
-                                                return false;
-                                        month = (positive)value;
-                                        day = (positive)rest;
-                                }
-
-                                dated = true;
-                                if (!timed)
-                                {
-                                        hour = 0;
-                                        minute = 0;
-                                        second = 0;
-                                        address_to nanoseconds = 0;
-                                }
-                                continue;
-                        }
-
-                        /* GNU 9.11: dd.mm.yy / dd.mm.yyyy, the European
-                           dotted form. Two dots are required so a
-                           fractional 1.5 is not stolen as a date. */
-                        if (!marked && string_is(text + at, '.'))
-                        {
-                                positive wide;
-                                b64 rest;
-                                positive after = file_read_number(
-                                    text, at + 1, address_of rest,
-                                    address_of wide);
-
-                                if (wide && string_is(text + after, '.'))
-                                {
-                                        b64 which;
-                                        positive end_at;
-
-                                        if (dated)
-                                                return false;
-
-                                        end_at = file_read_number(
-                                            text, after + 1,
-                                            address_of which,
-                                            address_of wide);
-
-                                        if (value < 1 || value > 31 ||
-                                            rest < 1 || rest > 12)
-                                                return false;
-
-                                        // 24.01. is the day and the month
-                                        // of this year.
-                                        if (!wide)
-                                                end_at = after + 1;
-                                        else
-                                                year = wide <= 2
-                                                           ? (which <= 68
-                                                                  ? 2000 + which
-                                                                  : 1900 + which)
-                                                           : which;
-
-                                        if (value > file_month_days(
-                                                        year, rest))
-                                                return false;
-
-                                        day = (positive)value;
-                                        month = (positive)rest;
-                                        dated = true;
-                                        at = end_at;
-
-                                        if (!timed)
-                                        {
-                                                hour = 0;
-                                                minute = 0;
-                                                second = 0;
-                                                address_to nanoseconds =
-                                                    0;
-                                        }
-
-                                        continue;
-                                }
-                        }
-
-                        if (!marked && string_is(text + at, ':'))
-                        {
-                                positive wide;
-                                b64 rest;
-                                b64 last = 0;
-
-                                if (timed)
-                                        return false;
-
-                                address_to nanoseconds = 0;
-
-                                at = file_read_number(text, at + 1, address_of rest,
-                                                      address_of wide);
-
-                                if (!wide)
-                                        return false;
-
-                                if (string_is(text + at, ':'))
-                                {
-                                        at = file_read_number(text, at + 1, address_of last,
-                                                              address_of wide);
-
-                                        if (!wide)
-                                                return false;
-
-                                        at = file_read_fraction(text, at, nanoseconds);
-                                }
-
-                                if (value > 23 || rest > 59 || last > 60)
-                                        return false;
-
-                                hour = (positive)value;
-                                minute = (positive)rest;
-                                second = (positive)last;
-                                timed = true;
-
-                                continue;
-                        }
-
-                        at += string_span(text + at, string_set_blanks);
-
-                        positive length = 0;
-
-                        length += string_span(text + at + length,
-                                              string_set_alpha);
-
-                        const file_unit address_to unit = file_unit_of(text + at, length);
-
-                        // A signed number after a clock time is the zone that
-                        // time was said in: hours alone, hours and minutes
-                        // run together, or with a colon between them. The
-                        // system's date reads the + in "12:00 +1 day" that
-                        // way too, as a zone of one hour and then a bare
-                        // day, so the unit is left for the next word.
-                        if (marked && (timed || zone_named) && (!zoned || zone_named) &&
-                            !((universal || zone_named) && unit))
-                        {
-                                b64 hours = value;
-                                b64 minutes = 0;
-
-                                if (digits == 3 || digits == 4)
-                                {
-                                        hours = value / 100;
-                                        minutes = value % 100;
-                                }
-                                else if (digits > 4)
-                                        return false;
-                                else if (string_is(text + at, ':'))
-                                {
-                                        positive wide;
-
-                                        at = file_read_number(text, at + 1,
-                                                              address_of minutes,
-                                                              address_of wide);
-
-                                        if (wide != 2)
-                                                return false;
-                                }
-
-                                // GNU takes a whole day either way, and no more.
-                                if (hours > 24 || minutes > 59 || (hours == 24 && minutes))
-                                        return false;
-
-                                // After a zone's name, a number corrects it:
-                                // EST+1 is an hour east of EST.
-                                zone += sign * (hours * 3600 + minutes * 60);
-                                zoned = true;
-                                zone_named = false;
-
-                                continue;
-                        }
-
-                        if (!unit)
-                        {
-                                bool afternoon =
-                                    file_same_word(text + at, length,
-                                                   (string_address) "pm");
-                                bool morning =
-                                    file_same_word(text + at, length,
-                                                   (string_address) "am");
-
-                                /* Glued or following meridian: 12pm, 1 am. */
-                                if (!marked && (afternoon || morning))
-                                {
-                                        if (timed)
-                                        {
-                                                if (!file_hour_meridian(
-                                                        hour, afternoon,
-                                                        address_of hour))
-                                                        return false;
-                                        }
-                                        else if (!file_hour_meridian(
-                                                     (positive)value, afternoon,
-                                                     address_of hour))
-                                                return false;
-                                        else
-                                        {
-                                                minute = 0;
-                                                second = 0;
-                                                address_to nanoseconds = 0;
-                                                timed = true;
-                                        }
-                                        at += length;
-                                        continue;
-                                }
-
-                                /* GNU digits_to_date_time: more than four
-                                   digits with no separator is YYYYMMDD. */
-                                if (!marked && !dated && digits == 8)
-                                {
-                                        b64 y = value / 10000;
-                                        b64 m = (value / 100) % 100;
-                                        b64 d = value % 100;
-
-                                        if (m < 1 || m > 12 || d < 1 ||
-                                            d > file_month_days(y, m))
-                                                return false;
-                                        year = y;
-                                        month = (positive)m;
-                                        day = (positive)d;
-                                        dated = true;
-                                        if (!timed)
-                                        {
-                                                hour = 0;
-                                                minute = 0;
-                                                second = 0;
-                                                address_to nanoseconds = 0;
-                                        }
-                                        continue;
-                                }
-
-                                // The day before its month's name, "9 Sep".
-                                bipolar named = file_name_among(text + at, length,
-                                                                file_month_names, 12);
-
-                                if (!marked && named >= 0)
-                                {
-                                        if (dated || value < 1 || value > 31)
-                                                return false;
-
-                                        month = (positive)named + 1;
-                                        day = (positive)value;
-                                        dated = true;
-                                        named_date = true;
-                                        year_wanted = true;
-
-                                        if (!timed)
-                                        {
-                                                hour = 0;
-                                                minute = 0;
-                                                second = 0;
-                                                address_to nanoseconds = 0;
-                                        }
-
-                                        at += length;
-
-                                        if (string_is(text + at, ','))
-                                                at++;
-
-                                        continue;
-                                }
-
-                                // The year a named date left for later, once
-                                // a clock time or a third digit says the
-                                // number is not a time of day.
-                                if (!marked && year_wanted && (timed || digits > 2))
-                                {
-                                        year = value;
-                                        year_wanted = false;
-
-                                        continue;
-                                }
-
-                                return false;
-                        }
-
-                        at += length;
-                        recent = sign * value * unit->seconds;
-                        recent_days = sign * value * unit->days;
-                        recent_months = sign * value * unit->months;
-                        shift += recent;
-                        days_shift += recent_days;
-                        months += recent_months;
-                        anything = true;
-                        relative_last = true;
-
-                        continue;
-                }
-
-                if (marked || !byte_is_alpha(string_get(text + at)))
-                        return false;
-
-                positive length = 0;
-
-                length += string_span(text + at + length, string_set_alpha);
-
-                string_address word = text + at;
-
-                at += length;
-
-                if (file_same_word(word, length, (string_address) "ago"))
-                {
-                        if (!follows)
-                                return false;
-                        shift -= 2 * recent;
-                        days_shift -= 2 * recent_days;
-                        months -= 2 * recent_months;
-                        recent = -recent;
-                        recent_days = -recent_days;
-                        recent_months = -recent_months;
-                        continue;
-                }
-
-                if (file_same_word(word, length, (string_address) "hence"))
-                {
-                        if (!follows)
-                                return false;
-                        continue;
-                }
-
-                if (file_same_word(word, length, (string_address) "now") ||
-                    file_same_word(word, length, (string_address) "today"))
-                        continue;
-
-                {
-                        bool afternoon =
-                            file_same_word(word, length, (string_address) "pm");
-                        bool morning =
-                            file_same_word(word, length, (string_address) "am");
-
-                        if (afternoon || morning)
-                        {
-                                if (!timed ||
-                                    !file_hour_meridian(hour, afternoon,
-                                                        address_of hour))
-                                        return false;
-                                continue;
-                        }
-                }
-
-                // A zone by name after a zone by number is a second zone,
-                // which the system's date refuses too.
-                if (file_same_word(word, length, (string_address) "utc") ||
-                    file_same_word(word, length, (string_address) "gmt") ||
-                    file_same_word(word, length, (string_address) "z"))
-                {
-                        if (zoned)
-                                return false;
-
-                        universal = true;
-                        continue;
-                }
-
-                // A zone by its name, or a military letter.
-                {
-                        b64 offset = 0;
-                        bool wall = false;
-
-                        if (file_name_among(word, length, file_month_names, 12) < 0 &&
-                            file_name_among(word, length, file_weekday_names, 7) < 0 &&
-                            file_zone_named(word, length, address_of offset, address_of wall))
-                        {
-                                if (zoned || universal)
-                                        return false;
-                                if (!wall)
-                                {
-                                        zone = offset;
-                                        zoned = true;
-                                        zone_named = true;
-                                }
-                                continue;
-                        }
-                }
-
-                bipolar named = file_name_among(word, length, file_month_names, 12);
-
-                if (named >= 0)
-                {
-                        // The month's name before its day, "Sep 9" or
-                        // "Sep 9, 2001"; the year, when there is one, is
-                        // read by the number that comes to it.
-                        positive digits;
-                        b64 value;
-
-                        if (dated)
-                                return false;
-
-                        at += string_span(text + at, string_set_blanks);
-
-                        // May-23-2003: the day and the year each behind a
-                        // dash, which GNU reads as two signed numbers.
-                        bool dashed = string_is(text + at, '-') &&
-                                      byte_is_digit(string_get(text + at + 1));
-
-                        at = file_read_number(text, at + dashed, address_of value, address_of digits);
-
-                        if (!digits || value < 1 || value > 31)
-                                return false;
-
-                        month = (positive)named + 1;
-                        day = (positive)value;
-                        dated = true;
-                        named_date = true;
-                        year_wanted = true;
-
-                        if (dashed && string_is(text + at, '-') &&
-                            byte_is_digit(string_get(text + at + 1)))
-                        {
-                                b64 which;
-                                positive wide;
-
-                                at = file_read_number(text, at + 1, address_of which, address_of wide);
-                                year = wide == 2 ? (which < 69 ? 2000 + which : 1900 + which) : which;
-                                year_wanted = false;
-                        }
-
-                        if (!timed)
-                        {
-                                hour = 0;
-                                minute = 0;
-                                second = 0;
-                                address_to nanoseconds = 0;
-                        }
-
-                        if (string_is(text + at, ','))
-                                at++;
-
-                        continue;
-                }
-
-                named = file_name_among(word, length, file_weekday_names, 7);
-
-                if (named >= 0)
-                {
-                        weekday = named;
-                        weekday_ordinal = 0;
-
-                        if (string_is(text + at, ','))
-                                at++;
-
-                        continue;
-                }
-
-                if (file_same_word(word, length, (string_address) "yesterday") ||
-                    file_same_word(word, length, (string_address) "tomorrow"))
-                {
-                        recent = 0;
-                        recent_days = byte_to_lower(string_get(word)) == 'y' ? -1 : 1;
-                        recent_months = 0;
-                        days_shift += recent_days;
-
-                        continue;
-                }
-
-                /*
-                        An ordinal -- last, this, next, first, third to
-                        twelfth -- counts the unit after it (next week, this
-                        hour is none at all) or picks a weekday (next monday
-                        is the one after today's, last friday the one before).
-                */
-                b64 ordinal = file_ordinal_of(word, length);
-
-                if (ordinal != -2)
-                {
-                        at += string_span(text + at, string_set_blanks);
-
-                        positive wide = 0;
-
-                        wide += string_span(text + at + wide,
-                                            string_set_alpha);
-
-                        const file_unit address_to unit = file_unit_of(text + at, wide);
-                        bipolar day = file_name_among(text + at, wide, file_weekday_names, 7);
-
-                        if (!unit && day < 0)
-                                return false;
-
-                        at += wide;
-                        if (day >= 0)
-                        {
-                                weekday = day;
-                                weekday_ordinal = ordinal;
-                                if (string_is(text + at, ','))
-                                        at++;
-                                continue;
-                        }
-                        recent = ordinal * unit->seconds;
-                        recent_days = ordinal * unit->days;
-                        recent_months = ordinal * unit->months;
-                        shift += recent;
-                        days_shift += recent_days;
-                        months += recent_months;
-                        relative_last = true;
-
-                        continue;
-                }
-
-                const file_unit address_to unit = file_unit_of(word, length);
-
-                if (!unit)
-                        return false;
-
-                recent = unit->seconds;
-                recent_days = unit->days;
-                recent_months = unit->months;
-                shift += recent;
-                days_shift += recent_days;
-                months += recent_months;
-                relative_last = true;
+                token->type = PD_DST;
+                token->value = 0;
+                return true;
         }
+        if (!found)
+                found = pd_find(pd_units, word);
+        if (!found && length && word[length - 1] == 'S')
+        {
+                word[length - 1] = end;
+                found = pd_find(pd_units, word);
+                word[length - 1] = 'S';
+        }
+        if (!found)
+                found = pd_find(pd_relatives, word);
+        if (!found && length == 1)
+        {
+                b32 value = 0;
 
-        // A named date is checked once its year is known, because the day
-        // February has depends on it.
-        if (named_date && day > file_month_days(year, (b64)month))
+                token->type = pd_military(word[0], address_of value);
+                token->value = value;
+                return true;
+        }
+        if (!found)
+        {
+                p8 compact[24];
+                positive kept = 0;
+                bool period = false;
+
+                for (positive i = 0; i < length; i++)
+                        if (word[i] == '.')
+                                period = true;
+                        else
+                                compact[kept++] = word[i];
+                compact[kept] = end;
+                if (period)
+                        found = pd_zone(pc, compact);
+        }
+        if (!found)
                 return false;
-
-        // An empty date is the day and not the moment, which is what the
-        // system's date answers to one.
-        if (!anything && !dated && !timed)
-        {
-                hour = 0;
-                minute = 0;
-                second = 0;
-                address_to nanoseconds = 0;
-        }
-
-        b64 reach = year * 12 + (b64)month - 1 + months;
-        b64 landed = reach >= 0 ? reach / 12 : -((-reach + 11) / 12);
-        b64 days = clock_days_from_civil(landed, reach - landed * 12 + 1, day);
-
-        // A weekday on its own is the next such day, today included, at
-        // midnight unless a time was said; beside a date it is passed over,
-        // which is what the system's date does with the one its own output
-        // carries.
-        if (weekday >= 0 && !dated)
-        {
-                b64 today = ((days % 7) + 7 + 4) % 7;
-
-                days += (weekday - today + 7) % 7 +
-                        7 * (weekday_ordinal - (weekday_ordinal > 0 && today != weekday));
-
-                if (!timed)
-                {
-                        hour = 0;
-                        minute = 0;
-                        second = 0;
-                        address_to nanoseconds = 0;
-                }
-        }
-
-        //      A time with a zone of its own names its instant. One without
-        //      names a wall-clock time here, which the zone turns into an
-        //      instant; relative amounts are then added as elapsed seconds.
-        b64 civil = days * 86400 + (b64)hour * 3600 + (b64)minute * 60 +
-                    (b64)second;
-
-        if (!zoned && !universal && !clock_local_exists(civil))
-                return false;
-
-        civil += days_shift * 86400;
-        address_to out = (zoned || universal ? civil - zone
-                                             : clock_local_to_utc(civil)) +
-                         shift;
-
+        token->type = found->type;
+        token->value = found->value;
         return true;
 }
 
+static bool pd_space(p8 letter)
+{
+        return letter == ' ' || (letter >= '\t' && letter <= '\r');
+}
+
+static bool pd_digit(p8 letter)
+{
+        return letter >= '0' && letter <= '9';
+}
+
+static bool pd_alpha(p8 letter)
+{
+        letter |= 0x20;
+        return letter >= 'a' && letter <= 'z';
+}
+
+static pd_token pd_lex(pd_parser address_to pc)
+{
+        pd_token token = {0};
+
+        for (;;)
+        {
+                p8 c;
+
+                while (c = string_get(pc->input), pd_space(c))
+                        pc->input++;
+
+                if (pd_digit(c) || c == '-' || c == '+')
+                {
+                        string_address p = pc->input;
+                        b32 sign = 0;
+
+                        if (c == '-' || c == '+')
+                        {
+                                sign = c == '-' ? -1 : 1;
+                                while (c = string_get(pc->input = ++p), pd_space(c))
+                                        ;
+                                if (!pd_digit(c))
+                                        continue;
+                        }
+
+                        b64 value = 0;
+
+                        do
+                        {
+                                b64 digit = sign < 0 ? '0' - (b64)c : (b64)c - '0';
+
+                                if (__builtin_mul_overflow(value, (b64)10, address_of value) ||
+                                    __builtin_add_overflow(value, digit, address_of value))
+                                {
+                                        token.type = PD_ERROR;
+                                        return token;
+                                }
+                                c = string_get(++p);
+                        } while (pd_digit(c));
+
+                        if ((c == '.' || c == ',') && pd_digit(p[1]))
+                        {
+                                if (pc->not_decimal)
+                                {
+                                        pc->not_decimal = false;
+                                        token.type = PD_UNUMBER_DOTTED;
+                                        token.negative = sign < 0;
+                                        token.value = value;
+                                        token.digits = p - pc->input;
+                                        pc->input = p;
+                                        return token;
+                                }
+
+                                b64 s = value;
+                                string_address old = p;
+                                b32 ns;
+
+                                p++;
+                                ns = *p++ - '0';
+                                for (b32 digits = 2; digits <= 9; digits++)
+                                {
+                                        ns *= 10;
+                                        if (*p == '.')
+                                        {
+                                                p = old;
+                                                pc->not_decimal = true;
+                                                goto pd_normal;
+                                        }
+                                        if (pd_digit(*p))
+                                                ns += *p++ - '0';
+                                }
+                                if (sign < 0)
+                                        for (; pd_digit(*p); p++)
+                                                if (*p != '0')
+                                                {
+                                                        ns++;
+                                                        break;
+                                                }
+                                while (pd_digit(*p))
+                                        p++;
+                                if (sign < 0 && ns)
+                                {
+                                        if (__builtin_sub_overflow(s, (b64)1, address_of s))
+                                        {
+                                                token.type = PD_ERROR;
+                                                return token;
+                                        }
+                                        ns = 1000000000 - ns;
+                                }
+                                token.type = sign ? PD_SDECIMAL : PD_UDECIMAL;
+                                token.seconds = s;
+                                token.nanoseconds = ns;
+                                pc->input = p;
+                                return token;
+                        }
+                        pc->not_decimal = false;
+pd_normal:
+                        token.type = sign ? PD_SNUMBER : PD_UNUMBER;
+                        token.negative = sign < 0;
+                        token.value = value;
+                        token.digits = p - pc->input;
+                        pc->input = p;
+                        return token;
+                }
+
+                if (pd_alpha(c))
+                {
+                        p8 word[20];
+                        positive kept = 0;
+
+                        do
+                        {
+                                if (kept < sizeof(word) - 1)
+                                        word[kept++] = c;
+                                c = string_get(++pc->input);
+                        } while (pd_alpha(c) || c == '.');
+                        word[kept] = end;
+
+                        if (!pd_word_of(pc, word, address_of token))
+                        {
+                                if (pc->debug)
+                                        string_format(log_error, "date: error: unknown word '%s'\n",
+                                                      (string_address)word);
+                                token.type = PD_ERROR;
+                        }
+                        return token;
+                }
+
+                if (c != '(')
+                {
+                        token.type = c;
+                        pc->input++;
+                        return token;
+                }
+
+                b64 depth = 0;
+
+                do
+                {
+                        c = string_get(pc->input++);
+                        if (!c)
+                        {
+                                token.type = PD_END;
+                                return token;
+                        }
+                        if (c == '(')
+                                depth++;
+                        else if (c == ')')
+                                depth--;
+                } while (depth);
+        }
+}
+
+static pd_token pd_peek(pd_parser address_to pc)
+{
+        if (!pc->have_ahead)
+        {
+                pc->ahead = pd_lex(pc);
+                pc->have_ahead = true;
+        }
+        return pc->ahead;
+}
+
+static pd_token pd_take(pd_parser address_to pc)
+{
+        pd_token token = pd_peek(pc);
+
+        pc->have_ahead = false;
+        return token;
+}
+
+static bool pd_unit(b32 type)
+{
+        return type >= PD_YEAR_UNIT && type <= PD_SEC_UNIT;
+}
+
+// ---- The trace -----------------------------------------------------------
+
+static fn pd_zone_text(b32 zone, p8 address_to into)
+{
+        b32 hour = zone / 3600;
+        b32 rest = zone % 3600;
+        positive at = 0;
+
+        into[at++] = zone < 0 ? '-' : '+';
+        if (hour < 0)
+                hour = -hour;
+        if (rest < 0)
+                rest = -rest;
+        if (hour >= 100)
+                into[at++] = (p8)('0' + hour / 100);
+        into[at++] = (p8)('0' + hour / 10 % 10);
+        into[at++] = (p8)('0' + hour % 10);
+        if (rest)
+        {
+                into[at++] = ':';
+                into[at++] = (p8)('0' + rest / 60 / 10);
+                into[at++] = (p8)('0' + rest / 60 % 10);
+                if (rest % 60)
+                {
+                        into[at++] = ':';
+                        into[at++] = (p8)('0' + rest % 60 / 10);
+                        into[at++] = (p8)('0' + rest % 60 % 10);
+                }
+        }
+        into[at] = end;
+}
+
+//      printf's %0Nd: a sign, then the digits padded to make N in all.
+static fn pd_padded(writer write, b64 value, positive width)
+{
+        p8 digits[32];
+        positive length = 0;
+        p64 magnitude = value < 0 ? (p64)0 - (p64)value : (p64)value;
+
+        do
+                digits[length++] = (p8)('0' + magnitude % 10);
+        while (magnitude /= 10);
+        if (value < 0)
+                write("-", 1);
+        for (positive i = length + (value < 0); i < width; i++)
+                write("0", 1);
+        while (length)
+                write(address_of digits[--length], 1);
+}
+
+static fn pd_signed(writer write, b64 value)
+{
+        write(value < 0 ? "-" : "+", 1);
+        pd_padded(write, value < 0 ? -value : value, 1);
+}
+
+static fn pd_days_text(pd_parser address_to pc, writer write)
+{
+        static const string_address ordinals[] = {
+            "last", "this", "next/first", "(SECOND)", "third", "fourth", "fifth",
+            "sixth", "seventh", "eight", "ninth", "tenth", "eleventh", "twelfth"};
+        static const string_address days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+        bool any = false;
+
+        if (pc->debug_ordinal_day_seen)
+        {
+                if (pc->day_ordinal >= -1 && pc->day_ordinal <= 12)
+                        write(ordinals[pc->day_ordinal + 1], 0);
+                else
+                        pd_padded(write, pc->day_ordinal, 1);
+                any = true;
+        }
+        if (pc->day_number >= 0 && pc->day_number <= 6)
+        {
+                if (any)
+                        write(" ", 1);
+                write(days[pc->day_number], 3);
+        }
+}
+
+static fn pd_trace_now(pd_parser address_to pc, string_address item)
+{
+        bool space = false;
+
+        if (!pc->debug)
+                return;
+        string_format(log_error, "date: parsed %s part: ", item);
+
+        if (pc->dates_seen && !pc->debug_dates_seen)
+        {
+                log_error("(Y-M-D) ", 8);
+                pd_padded(log_error, pc->year, 4);
+                log_error("-", 1);
+                pd_padded(log_error, pc->month, 2);
+                log_error("-", 1);
+                pd_padded(log_error, pc->day, 2);
+                pc->debug_dates_seen = true;
+                space = true;
+        }
+        if (pc->year_seen != pc->debug_year_seen)
+        {
+                if (space)
+                        log_error(" ", 1);
+                log_error("year: ", 6);
+                pd_padded(log_error, pc->year, 4);
+                pc->debug_year_seen = pc->year_seen;
+                space = true;
+        }
+        if (pc->times_seen && !pc->debug_times_seen)
+        {
+                if (space)
+                        log_error(" ", 1);
+                pd_padded(log_error, pc->hour, 2);
+                log_error(":", 1);
+                pd_padded(log_error, pc->minutes, 2);
+                log_error(":", 1);
+                pd_padded(log_error, pc->seconds, 2);
+                if (pc->ns)
+                {
+                        log_error(".", 1);
+                        pd_padded(log_error, pc->ns, 9);
+                }
+                if (pc->meridian == PD_PM)
+                        log_error("pm", 2);
+                pc->debug_times_seen = true;
+                space = true;
+        }
+        if (pc->days_seen && !pc->debug_days_seen)
+        {
+                if (space)
+                        log_error(" ", 1);
+                pd_days_text(pc, log_error);
+                log_error(" (day ordinal=", 0);
+                pd_padded(log_error, pc->day_ordinal, 1);
+                log_error(" number=", 0);
+                pd_padded(log_error, pc->day_number, 1);
+                log_error(")", 1);
+                pc->debug_days_seen = true;
+                space = true;
+        }
+        if (pc->local_zones_seen && !pc->debug_local_zones_seen)
+        {
+                if (space)
+                        log_error(" ", 1);
+                log_error("isdst=", 6);
+                pd_padded(log_error, pc->local_isdst, 1);
+                if (pc->dsts_seen)
+                        log_error(" DST", 4);
+                pc->debug_local_zones_seen = true;
+                space = true;
+        }
+        if (pc->zones_seen && !pc->debug_zones_seen)
+        {
+                p8 zone[24];
+
+                pd_zone_text(pc->time_zone, zone);
+                if (space)
+                        log_error(" ", 1);
+                string_format(log_error, "UTC%s", (string_address)zone);
+                pc->debug_zones_seen = true;
+                space = true;
+        }
+        if (pc->timespec_seen)
+        {
+                if (space)
+                        log_error(" ", 1);
+                log_error("number of seconds: ", 0);
+                pd_padded(log_error, pc->seconds, 1);
+        }
+        log_error("\n", 1);
+}
+
+static bool pd_trace_part(bool space, b64 value, string_address name)
+{
+        if (!value)
+                return space;
+        if (space)
+                log_error(" ", 1);
+        pd_signed(log_error, value);
+        string_format(log_error, " %s", name);
+        return true;
+}
+
+static fn pd_trace_relative(pd_parser address_to pc, string_address item)
+{
+        bool space = false;
+
+        if (!pc->debug)
+                return;
+        string_format(log_error, "date: parsed %s part: ", item);
+        if (!(pc->rel.year | pc->rel.month | pc->rel.day | pc->rel.hour | pc->rel.minutes |
+              pc->rel.seconds | pc->rel.ns))
+        {
+                log_error("today/this/now\n", 0);
+                return;
+        }
+        space = pd_trace_part(space, pc->rel.year, "year(s)");
+        space = pd_trace_part(space, pc->rel.month, "month(s)");
+        space = pd_trace_part(space, pc->rel.day, "day(s)");
+        space = pd_trace_part(space, pc->rel.hour, "hour(s)");
+        space = pd_trace_part(space, pc->rel.minutes, "minutes");
+        space = pd_trace_part(space, pc->rel.seconds, "seconds");
+        pd_trace_part(space, pc->rel.ns, "nanoseconds");
+        log_error("\n", 1);
+}
+
+// ---- The grammar ---------------------------------------------------------
+
+#define PD_FAIL false
+
+static bool pd_apply(pd_parser address_to pc, pd_relative rel, b64 factor)
+{
+        bool over;
+
+        if (factor < 0)
+                over = __builtin_sub_overflow(pc->rel.ns, rel.ns, address_of pc->rel.ns) |
+                       __builtin_sub_overflow(pc->rel.seconds, rel.seconds, address_of pc->rel.seconds) |
+                       __builtin_sub_overflow(pc->rel.minutes, rel.minutes, address_of pc->rel.minutes) |
+                       __builtin_sub_overflow(pc->rel.hour, rel.hour, address_of pc->rel.hour) |
+                       __builtin_sub_overflow(pc->rel.day, rel.day, address_of pc->rel.day) |
+                       __builtin_sub_overflow(pc->rel.month, rel.month, address_of pc->rel.month) |
+                       __builtin_sub_overflow(pc->rel.year, rel.year, address_of pc->rel.year);
+        else
+                over = __builtin_add_overflow(pc->rel.ns, rel.ns, address_of pc->rel.ns) |
+                       __builtin_add_overflow(pc->rel.seconds, rel.seconds, address_of pc->rel.seconds) |
+                       __builtin_add_overflow(pc->rel.minutes, rel.minutes, address_of pc->rel.minutes) |
+                       __builtin_add_overflow(pc->rel.hour, rel.hour, address_of pc->rel.hour) |
+                       __builtin_add_overflow(pc->rel.day, rel.day, address_of pc->rel.day) |
+                       __builtin_add_overflow(pc->rel.month, rel.month, address_of pc->rel.month) |
+                       __builtin_add_overflow(pc->rel.year, rel.year, address_of pc->rel.year);
+        //      ns is an int in GNU's relative_time.
+        if (over || pc->rel.ns > 2147483647 || pc->rel.ns < -2147483647 - 1)
+                return false;
+        pc->rels_seen = true;
+        return true;
+}
+
+static fn pd_hhmmss(pd_parser address_to pc, b64 hour, b64 minutes, b64 seconds, b64 ns)
+{
+        pc->hour = hour;
+        pc->minutes = minutes;
+        pc->seconds = seconds;
+        pc->ns = ns;
+}
+
+static fn pd_digits_to_date_time(pd_parser address_to pc, pd_token n)
+{
+        if (pc->dates_seen && !pc->year_digits && !pc->rels_seen &&
+            (pc->times_seen || 2 < n.digits))
+        {
+                pc->year_seen = true;
+                pc->year = n.value;
+                pc->year_negative = n.negative;
+                pc->year_digits = n.digits;
+        }
+        else if (4 < n.digits)
+        {
+                pc->dates_seen++;
+                pc->day = n.value % 100;
+                pc->month = (n.value / 100) % 100;
+                pc->year = n.value / 10000;
+                pc->year_digits = n.digits - 4;
+        }
+        else
+        {
+                pc->times_seen++;
+                if (n.digits <= 2)
+                {
+                        pc->hour = n.value;
+                        pc->minutes = 0;
+                }
+                else
+                {
+                        pc->hour = n.value / 100;
+                        pc->minutes = n.value % 100;
+                }
+                pc->seconds = 0;
+                pc->ns = 0;
+                pc->meridian = PD_24;
+        }
+}
+
+static bool pd_zone_hhmm(pd_parser address_to pc, pd_token s, b64 mm)
+{
+        b64 minutes;
+
+        if (s.digits <= 2 && mm < 0)
+        {
+                if (__builtin_mul_overflow(s.value, (b64)100, address_of s.value))
+                        return false;
+        }
+        if (mm < 0)
+                minutes = (s.value / 100) * 60 + s.value % 100;
+        else if (__builtin_mul_overflow(s.value, (b64)60, address_of minutes) ||
+                 (s.negative ? __builtin_sub_overflow(minutes, mm, address_of minutes)
+                             : __builtin_add_overflow(minutes, mm, address_of minutes)))
+                return false;
+        if (minutes < -24 * 60 || minutes > 24 * 60)
+                return false;
+        pc->time_zone = (b32)(minutes * 60);
+        return true;
+}
+
+//      A unit word after a count: the relative time it makes.
+static bool pd_relunit(pd_token count, pd_token unit, pd_relative address_to rel)
+{
+        memory_fill(rel, 0, sizeof(*rel));
+        switch (unit.type)
+        {
+        case PD_YEAR_UNIT:
+                rel->year = count.value;
+                return true;
+        case PD_MONTH_UNIT:
+                rel->month = count.value;
+                return true;
+        case PD_DAY_UNIT:
+                return !__builtin_mul_overflow(count.value, unit.value, address_of rel->day);
+        case PD_HOUR_UNIT:
+                rel->hour = count.value;
+                return true;
+        case PD_MINUTE_UNIT:
+                rel->minutes = count.value;
+                return true;
+        default:
+                rel->seconds = count.value;
+                return true;
+        }
+}
+
+//      o_zone_offset and zone_offset: a signed number, and ':' minutes.
+static bool pd_zone_offset(pd_parser address_to pc)
+{
+        pd_token s = pd_take(pc);
+        b64 mm = -1;
+
+        if (pd_peek(pc).type == ':')
+        {
+                pd_take(pc);
+                pd_token minutes = pd_take(pc);
+
+                if (minutes.type != PD_UNUMBER)
+                        return false;
+                mm = minutes.value;
+        }
+        pc->zones_seen++;
+        return pd_zone_hhmm(pc, s, mm);
+}
+
 /*
-        A date may name its own zone first -- TZ="Asia/Tokyo" 2001-09-09 12:00
-        -- as GNU date reads it: what follows is read in that zone, and the
-        answer is shown in the caller's. It was refused as an invalid date.
+        The rest of iso_8601_time after its hour and ':': minutes, then ':'
+        and seconds, then an optional offset -- or, where MERIDIAN_OK, the
+        am/pm that makes it the plain time rule instead.
 */
+static bool pd_clock(pd_parser address_to pc, pd_token hour, bool meridian_ok, bool offset_needed)
+{
+        pd_token minutes = pd_take(pc);
+        pd_token next;
+
+        if (minutes.type != PD_UNUMBER)
+                return false;
+        next = pd_peek(pc);
+        if (meridian_ok && next.type == PD_MERIDIAN)
+        {
+                pd_take(pc);
+                pd_hhmmss(pc, hour.value, minutes.value, 0, 0);
+                pc->meridian = (b32)next.value;
+                return true;
+        }
+        if (next.type == ':')
+        {
+                pd_take(pc);
+
+                pd_token seconds = pd_take(pc);
+
+                if (seconds.type == PD_UNUMBER)
+                {
+                        seconds.seconds = seconds.value;
+                        seconds.nanoseconds = 0;
+                }
+                else if (seconds.type != PD_UDECIMAL)
+                        return false;
+                next = pd_peek(pc);
+                if (meridian_ok && next.type == PD_MERIDIAN)
+                {
+                        pd_take(pc);
+                        pd_hhmmss(pc, hour.value, minutes.value, seconds.seconds,
+                                  seconds.nanoseconds);
+                        pc->meridian = (b32)next.value;
+                        return true;
+                }
+                pd_hhmmss(pc, hour.value, minutes.value, seconds.seconds, seconds.nanoseconds);
+        }
+        else
+                pd_hhmmss(pc, hour.value, minutes.value, 0, 0);
+        pc->meridian = PD_24;
+        (void)offset_needed;
+        if (pd_peek(pc).type == PD_SNUMBER)
+                return pd_zone_offset(pc);
+        return true;
+}
+
+//      After a relunit, an optional ago or hence.
+static bool pd_rel(pd_parser address_to pc, pd_relative rel)
+{
+        b64 factor = 1;
+
+        if (pd_peek(pc).type == PD_AGO)
+                factor = pd_take(pc).value;
+        if (!pd_apply(pc, rel, factor))
+                return false;
+        pd_trace_relative(pc, "relative");
+        return true;
+}
+
+static fn pd_date_done(pd_parser address_to pc)
+{
+        pc->dates_seen++;
+        pd_trace_now(pc, "date");
+}
+
+static fn pd_time_done(pd_parser address_to pc)
+{
+        pc->times_seen++;
+        pd_trace_now(pc, "time");
+}
+
+static fn pd_zone_done(pd_parser address_to pc)
+{
+        pc->zones_seen++;
+        pd_trace_now(pc, "zone");
+}
+
+static fn pd_day_done(pd_parser address_to pc)
+{
+        pc->days_seen++;
+        pd_trace_now(pc, "day");
+}
+
+//      One item; false for a syntax error or an overflow, which GNU both
+//      treat as the parse failing.
+static bool pd_item(pd_parser address_to pc)
+{
+        pd_token first = pd_take(pc);
+        pd_token next;
+        pd_relative rel;
+
+        switch (first.type)
+        {
+        case PD_UNUMBER:
+                next = pd_peek(pc);
+                if (next.type == PD_MERIDIAN)
+                {
+                        pd_take(pc);
+                        pd_hhmmss(pc, first.value, 0, 0, 0);
+                        pc->meridian = (b32)next.value;
+                        pd_time_done(pc);
+                        return true;
+                }
+                if (next.type == ':')
+                {
+                        pd_take(pc);
+                        if (!pd_clock(pc, first, true, false))
+                                return false;
+                        pd_time_done(pc);
+                        return true;
+                }
+                if (next.type == PD_SNUMBER)
+                {
+                        pd_token second = pd_take(pc);
+
+                        next = pd_peek(pc);
+                        if (next.type == PD_SNUMBER)
+                        {
+                                pd_token third = pd_take(pc);
+
+                                pc->year = first.value;
+                                pc->year_negative = first.negative;
+                                pc->year_digits = first.digits;
+                                if (__builtin_sub_overflow((b64)0, second.value, address_of pc->month) ||
+                                    __builtin_sub_overflow((b64)0, third.value, address_of pc->day))
+                                        return false;
+                                if (pd_peek(pc).type != 'T')
+                                {
+                                        pd_date_done(pc);
+                                        return true;
+                                }
+                                pd_take(pc);
+
+                                pd_token hour = pd_take(pc);
+
+                                if (hour.type != PD_UNUMBER)
+                                        return false;
+                                if (pd_peek(pc).type == ':')
+                                {
+                                        pd_take(pc);
+                                        if (!pd_clock(pc, hour, false, false))
+                                                return false;
+                                }
+                                else
+                                {
+                                        if (pd_peek(pc).type != PD_SNUMBER || !pd_zone_offset(pc))
+                                                return false;
+                                        pd_hhmmss(pc, hour.value, 0, 0, 0);
+                                        pc->meridian = PD_24;
+                                }
+                                pc->times_seen++;
+                                pc->dates_seen++;
+                                pd_trace_now(pc, "datetime");
+                                return true;
+                        }
+                        if (pd_unit(next.type))
+                        {
+                                if (!pd_relunit(second, pd_take(pc), address_of rel))
+                                        return false;
+                                pd_digits_to_date_time(pc, first);
+                                if (!pd_apply(pc, rel, 1))
+                                        return false;
+                                pd_trace_relative(pc, "hybrid");
+                                return true;
+                        }
+
+                        b64 mm = -1;
+
+                        if (next.type == ':')
+                        {
+                                pd_take(pc);
+
+                                pd_token minutes = pd_take(pc);
+
+                                if (minutes.type != PD_UNUMBER)
+                                        return false;
+                                mm = minutes.value;
+                        }
+                        pc->zones_seen++;
+                        if (!pd_zone_hhmm(pc, second, mm))
+                                return false;
+                        pd_hhmmss(pc, first.value, 0, 0, 0);
+                        pc->meridian = PD_24;
+                        pd_time_done(pc);
+                        return true;
+                }
+                if (next.type == PD_MONTH)
+                {
+                        pd_take(pc);
+                        pc->day = first.value;
+                        pc->month = next.value;
+                        next = pd_peek(pc);
+                        if (next.type == PD_UNUMBER)
+                        {
+                                pd_take(pc);
+                                pc->year = next.value;
+                                pc->year_negative = next.negative;
+                                pc->year_digits = next.digits;
+                        }
+                        else if (next.type == PD_SNUMBER)
+                        {
+                                pd_take(pc);
+                                if (__builtin_sub_overflow((b64)0, next.value, address_of pc->year))
+                                        return false;
+                                pc->year_negative = false;
+                                pc->year_digits = next.digits;
+                        }
+                        pd_date_done(pc);
+                        return true;
+                }
+                if (next.type == PD_DAY)
+                {
+                        pd_take(pc);
+                        pc->day_ordinal = first.value;
+                        pc->day_number = (b32)next.value;
+                        pc->debug_ordinal_day_seen = true;
+                        pd_day_done(pc);
+                        return true;
+                }
+                if (pd_unit(next.type))
+                {
+                        if (!pd_relunit(first, pd_take(pc), address_of rel))
+                                return false;
+                        return pd_rel(pc, rel);
+                }
+                if (next.type == '/')
+                {
+                        pd_take(pc);
+
+                        pd_token second = pd_take(pc);
+
+                        if (second.type != PD_UNUMBER)
+                                return false;
+                        if (pd_peek(pc).type != '/')
+                        {
+                                pc->month = first.value;
+                                pc->day = second.value;
+                                pd_date_done(pc);
+                                return true;
+                        }
+                        pd_take(pc);
+
+                        pd_token third = pd_take(pc);
+
+                        if (third.type != PD_UNUMBER)
+                                return false;
+                        if (4 <= first.digits)
+                        {
+                                if (pc->debug)
+                                {
+                                        log_error("date: warning: value ", 0);
+                                        pd_padded(log_error, first.value, 1);
+                                        log_error(" has ", 5);
+                                        pd_padded(log_error, first.digits, 1);
+                                        log_error(" digits. Assuming YYYY/MM/DD\n", 0);
+                                }
+                                pc->year = first.value;
+                                pc->year_negative = first.negative;
+                                pc->year_digits = first.digits;
+                                pc->month = second.value;
+                                pc->day = third.value;
+                        }
+                        else
+                        {
+                                if (pc->debug)
+                                {
+                                        log_error("date: warning: value ", 0);
+                                        pd_padded(log_error, first.value, 1);
+                                        log_error(" has less than 4 digits. Assuming MM/DD/YY[YY]\n", 0);
+                                }
+                                pc->month = first.value;
+                                pc->day = second.value;
+                                pc->year = third.value;
+                                pc->year_negative = third.negative;
+                                pc->year_digits = third.digits;
+                        }
+                        pd_date_done(pc);
+                        return true;
+                }
+                if (next.type == '.')
+                {
+                        pd_take(pc);
+
+                        pd_token second = pd_take(pc);
+
+                        if (second.type == PD_UNUMBER)
+                        {
+                                if (pd_take(pc).type != '.')
+                                        return false;
+                                pc->day = first.value;
+                                pc->month = second.value;
+                                pd_date_done(pc);
+                                return true;
+                        }
+                        if (second.type != PD_UNUMBER_DOTTED || pd_take(pc).type != '.')
+                                return false;
+
+                        pd_token third = pd_take(pc);
+
+                        if (third.type != PD_UNUMBER)
+                                return false;
+                        pc->day = first.value;
+                        pc->month = second.value;
+                        pc->year = third.value;
+                        pc->year_negative = third.negative;
+                        pc->year_digits = third.digits;
+                        pd_date_done(pc);
+                        return true;
+                }
+                pd_digits_to_date_time(pc, first);
+                pd_trace_now(pc, "number");
+                return true;
+
+        case PD_UDECIMAL:
+        case PD_SDECIMAL:
+                if (pd_peek(pc).type != PD_SEC_UNIT)
+                        return false;
+                pd_take(pc);
+                memory_fill(address_of rel, 0, sizeof(rel));
+                rel.seconds = first.seconds;
+                rel.ns = first.nanoseconds;
+                return pd_rel(pc, rel);
+
+        case PD_SNUMBER:
+                if (!pd_unit(pd_peek(pc).type) || !pd_relunit(first, pd_take(pc), address_of rel))
+                        return false;
+                return pd_rel(pc, rel);
+
+        case PD_ORDINAL:
+                next = pd_peek(pc);
+                if (next.type == PD_DAY)
+                {
+                        pd_take(pc);
+                        pc->day_ordinal = first.value;
+                        pc->day_number = (b32)next.value;
+                        pc->debug_ordinal_day_seen = true;
+                        pd_day_done(pc);
+                        return true;
+                }
+                if (!pd_unit(next.type) || !pd_relunit(first, pd_take(pc), address_of rel))
+                        return false;
+                return pd_rel(pc, rel);
+
+        case PD_YEAR_UNIT:
+        case PD_MONTH_UNIT:
+        case PD_DAY_UNIT:
+        case PD_HOUR_UNIT:
+        case PD_MINUTE_UNIT:
+        case PD_SEC_UNIT:
+        {
+                pd_token one = {.type = PD_UNUMBER, .value = 1};
+
+                if (first.type == PD_DAY_UNIT)
+                {
+                        memory_fill(address_of rel, 0, sizeof(rel));
+                        rel.day = first.value;
+                }
+                else
+                        pd_relunit(one, first, address_of rel);
+                return pd_rel(pc, rel);
+        }
+
+        case PD_DAY_SHIFT:
+                memory_fill(address_of rel, 0, sizeof(rel));
+                rel.day = first.value;
+                if (!pd_apply(pc, rel, 1))
+                        return false;
+                pd_trace_relative(pc, "relative");
+                return true;
+
+        case PD_DAY:
+                if (pd_peek(pc).type == ',')
+                        pd_take(pc);
+                pc->day_ordinal = 0;
+                pc->day_number = (b32)first.value;
+                pd_day_done(pc);
+                return true;
+
+        case PD_MONTH:
+                next = pd_peek(pc);
+                if (next.type == PD_UNUMBER)
+                {
+                        pd_take(pc);
+                        pc->month = first.value;
+                        pc->day = next.value;
+                        if (pd_peek(pc).type == ',')
+                        {
+                                pd_take(pc);
+
+                                pd_token year = pd_take(pc);
+
+                                if (year.type != PD_UNUMBER)
+                                        return false;
+                                pc->year = year.value;
+                                pc->year_negative = year.negative;
+                                pc->year_digits = year.digits;
+                        }
+                        pd_date_done(pc);
+                        return true;
+                }
+                if (next.type == PD_SNUMBER)
+                {
+                        pd_take(pc);
+
+                        pd_token year = pd_take(pc);
+
+                        if (year.type != PD_SNUMBER)
+                                return false;
+                        pc->month = first.value;
+                        if (__builtin_sub_overflow((b64)0, next.value, address_of pc->day) ||
+                            __builtin_sub_overflow((b64)0, year.value, address_of pc->year))
+                                return false;
+                        pc->year_negative = false;
+                        pc->year_digits = year.digits;
+                        pd_date_done(pc);
+                        return true;
+                }
+                return false;
+
+        case PD_ZONE:
+        case 'T':
+        {
+                b32 zone = first.type == 'T' ? -PD_HOUR(7) : (b32)first.value;
+
+                next = pd_peek(pc);
+                if (next.type == PD_SNUMBER)
+                {
+                        pd_token s = pd_take(pc);
+
+                        next = pd_peek(pc);
+                        if (pd_unit(next.type))
+                        {
+                                if (!pd_relunit(s, pd_take(pc), address_of rel))
+                                        return false;
+                                pc->time_zone = zone;
+                                if (!pd_apply(pc, rel, 1))
+                                        return false;
+                                pd_trace_relative(pc, "relative");
+                                pd_zone_done(pc);
+                                return true;
+                        }
+                        if (first.type == 'T')
+                                return false;
+
+                        b64 mm = -1;
+
+                        if (next.type == ':')
+                        {
+                                pd_take(pc);
+
+                                pd_token minutes = pd_take(pc);
+
+                                if (minutes.type != PD_UNUMBER)
+                                        return false;
+                                mm = minutes.value;
+                        }
+                        if (!pd_zone_hhmm(pc, s, mm) ||
+                            __builtin_add_overflow(pc->time_zone, zone, address_of pc->time_zone))
+                                return false;
+                        pd_zone_done(pc);
+                        return true;
+                }
+                if (first.type == PD_ZONE && next.type == PD_DST)
+                {
+                        pd_take(pc);
+                        pc->time_zone = zone + 3600;
+                        pd_zone_done(pc);
+                        return true;
+                }
+                pc->time_zone = zone;
+                pd_zone_done(pc);
+                return true;
+        }
+
+        case PD_DAYZONE:
+                pc->time_zone = (b32)first.value + 3600;
+                pd_zone_done(pc);
+                return true;
+
+        case PD_LOCAL_ZONE:
+                if (pd_peek(pc).type == PD_DST)
+                {
+                        pd_take(pc);
+                        pc->local_isdst = 1;
+                        pc->dsts_seen++;
+                }
+                else
+                        pc->local_isdst = (b32)first.value;
+                pc->local_zones_seen++;
+                pd_trace_now(pc, "local_zone");
+                return true;
+
+        case 'J':
+                pc->j_zones_seen++;
+                pd_trace_now(pc, "J");
+                return true;
+
+        default:
+                return false;
+        }
+}
+
+// ---- Making it a moment --------------------------------------------------
+
+typedef struct
+{
+        b64 sec;
+        b64 min;
+        b64 hour;
+        b64 mday;
+        b64 mon;
+        b64 year;
+        b32 isdst;
+        b32 wday;
+        b32 yday;
+        b64 gmtoff;
+} pd_tm;
+
+static bool pd_local(b64 seconds, pd_tm address_to out)
+{
+        time_t stamp = (time_t)seconds;
+        tm broken;
+
+        if (!localtime_r(address_of stamp, address_of broken))
+                return false;
+        out->sec = broken.tm_sec;
+        out->min = broken.tm_min;
+        out->hour = broken.tm_hour;
+        out->mday = broken.tm_mday;
+        out->mon = broken.tm_mon;
+        out->year = broken.tm_year;
+        out->isdst = broken.tm_isdst;
+        out->wday = broken.tm_wday;
+        out->yday = broken.tm_yday;
+        out->gmtoff = broken.tm_gmtoff;
+        return true;
+}
+
+static b64 pd_floor_div(b64 value, b64 by)
+{
+        return value / by - (value % by < 0);
+}
+
+/*
+        mktime: the fields (any of them out of range) as a wall-clock time,
+        read in the zone in force. With tm_isdst below zero the zone decides
+        (clock_local_to_utc, which is glibc's answer), otherwise the offset
+        of that kind is used, looked for a week at a time up to seventeen
+        years away when it is not the one in force then, as glibc looks. On
+        success the fields are the normalized ones and wday is set; on
+        failure wday is -1.
+*/
+static b64 pd_mktime(pd_tm address_to t)
+{
+        b64 months = t->year + 1900;
+
+        t->wday = -1;
+        if (__builtin_mul_overflow(months, (b64)12, address_of months) ||
+            __builtin_add_overflow(months, t->mon, address_of months))
+                return -1;
+
+        b64 year = pd_floor_div(months, 12);
+        b64 month = months - year * 12;
+
+        if (year > ((b64)1 << 40) || year < -((b64)1 << 40))
+                return -1;
+
+        b64 days = clock_days_from_civil(year, month + 1, 1) + t->mday - 1;
+        b64 civil;
+
+        if (__builtin_mul_overflow(days, (b64)86400, address_of civil) ||
+            __builtin_add_overflow(civil, t->hour * 3600 + t->min * 60 + t->sec, address_of civil))
+                return -1;
+
+        b64 utc;
+
+        if (t->isdst < 0)
+                utc = clock_local_to_utc(civil);
+        else
+        {
+                pd_tm probe;
+
+                utc = clock_local_to_utc(civil);
+                if (pd_local(utc, address_of probe) && (probe.isdst != 0) != (t->isdst != 0))
+                {
+                        for (b64 delta = 601200; delta < 536454000; delta += 601200)
+                        {
+                                bool found = false;
+
+                                for (b64 way = -1; way <= 1; way += 2)
+                                        if (pd_local(utc + way * delta, address_of probe) &&
+                                            (probe.isdst != 0) == (t->isdst != 0))
+                                        {
+                                                utc = civil - probe.gmtoff;
+                                                found = true;
+                                                break;
+                                        }
+                                if (found)
+                                        break;
+                        }
+                }
+        }
+
+        pd_tm made;
+
+        if (!pd_local(utc, address_of made) || made.year > 2147483647 || made.year < -2147483647 - 1)
+                return -1;
+        address_to t = made;
+        return utc;
+}
+
+static bool pd_mktime_ok(pd_tm address_to was, pd_tm address_to now)
+{
+        return now->wday >= 0 && was->sec == now->sec && was->min == now->min &&
+               was->hour == now->hour && was->mday == now->mday && was->mon == now->mon &&
+               was->year == now->year;
+}
+
+//      strftime's "(Y-M-D) %Y-%m-%d %H:%M:%S", and the zone when one was read.
+static fn pd_trace_moment(writer write, pd_tm address_to t, pd_parser address_to pc)
+{
+        write("(Y-M-D) ", 8);
+        pd_padded(write, t->year + 1900, 4);
+        write("-", 1);
+        pd_padded(write, t->mon + 1, 2);
+        write("-", 1);
+        pd_padded(write, t->mday, 2);
+        write(" ", 1);
+        pd_padded(write, t->hour, 2);
+        write(":", 1);
+        pd_padded(write, t->min, 2);
+        write(":", 1);
+        pd_padded(write, t->sec, 2);
+        if (pc && pc->zones_seen)
+        {
+                p8 zone[24];
+
+                pd_zone_text(pc->time_zone, zone);
+                string_format(write, " TZ=%s", (string_address)zone);
+        }
+}
+
+static fn pd_year_text(writer write, b64 tm_year)
+{
+        b64 century = tm_year / 100 + 19;
+        b64 rest = tm_year % 100;
+
+        if (tm_year < -1900)
+                write("-", 1);
+        pd_padded(write, century < 0 ? -century : century, 2);
+        pd_padded(write, rest < 0 ? -rest : rest, 2);
+}
+
+static fn pd_trace_clock(writer write, pd_tm address_to t)
+{
+        pd_padded(write, t->hour, 2);
+        write(":", 1);
+        pd_padded(write, t->min, 2);
+        write(":", 1);
+        pd_padded(write, t->sec, 2);
+}
+
+static b32 pd_to_hour(b64 hours, b32 meridian)
+{
+        if (meridian == PD_AM)
+                return 0 < hours && hours < 12 ? (b32)hours : hours == 12 ? 0 : -1;
+        if (meridian == PD_PM)
+                return 0 < hours && hours < 12 ? (b32)hours + 12 : hours == 12 ? 12 : -1;
+        return 0 <= hours && hours < 24 ? (b32)hours : -1;
+}
+
+static fn pd_local_table_add(pd_parser address_to pc, b64 at)
+{
+        time_t stamp = (time_t)at;
+        tm broken;
+
+        if (!localtime_r(address_of stamp, address_of broken))
+                return;
+
+        positive slot = pc->zones_here[0].name ? 1 : 0;
+
+        pc->zones_here[slot].type = PD_LOCAL_ZONE;
+        pc->zones_here[slot].value = broken.tm_isdst;
+        string_copy_bounded(pc->local_names[slot],
+                            broken.tm_zone ? broken.tm_zone : "", sizeof(pc->local_names[slot]));
+        pc->zones_here[slot].name = pc->local_names[slot][0] ? pc->local_names[slot] : null;
+        pc->zones_here[slot + 1].name = null;
+}
+
+/*
+        The body of parse_datetime: TEXT read from NOW (seconds and
+        nanoseconds) in the zone of TZ, or of TZ="..." in front of it.
+*/
+static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
+                     b64 address_to out, positive address_to out_ns)
+{
+        string_address p = text;
+        string_address tzstring = getenv((string_address) "TZ");
+        bool own_zone = false;
+        p8 zone[256];
+        p8 saved[256];
+        bool had_tz = tzstring != null;
+        bool ok = false;
+
+        if (had_tz && string_length(tzstring) >= sizeof(saved))
+                return false;
+        if (had_tz)
+                string_copy(saved, tzstring);
+
+        while (pd_space(string_get(p)))
+                p++;
+
+        if (!string_compare_max(p, (string_address) "TZ=\"", 4))
+        {
+                string_address s = p + 4;
+                positive used = 0;
+
+                for (; string_get(s); s++)
+                        if (string_is(s, '\\'))
+                        {
+                                s++;
+                                if (!(string_is(s, '\\') || string_is(s, '"')))
+                                        break;
+                                if (used + 1 >= sizeof(zone))
+                                        return false;
+                                zone[used++] = *s;
+                        }
+                        else if (string_is(s, '"'))
+                        {
+                                zone[used] = end;
+                                setenv((string_address) "TZ", zone, 1);
+                                tzset();
+                                own_zone = true;
+                                tzstring = zone;
+                                p = s + 1;
+                                while (pd_space(string_get(p)))
+                                        p++;
+                                break;
+                        }
+                        else
+                        {
+                                if (used + 1 >= sizeof(zone))
+                                        return false;
+                                zone[used++] = *s;
+                        }
+        }
+
+        pd_parser parser;
+        pd_parser address_to pc = address_of parser;
+        pd_tm start;
+        pd_tm t;
+        pd_tm t0;
+        b64 moment;
+        p8 zone_text[24];
+
+        memory_fill(pc, 0, sizeof(*pc));
+        pc->debug = debug;
+
+        if (!pd_local(now, address_of start))
+                goto pd_done;
+        if (!string_get(p))
+                p = (string_address) "0";
+
+        pc->input = p;
+        pc->year = start.year + 1900;
+        pc->month = start.mon + 1;
+        pc->day = start.mday;
+        pc->hour = start.hour;
+        pc->minutes = start.min;
+        pc->seconds = start.sec;
+        pc->ns = (b64)now_ns;
+        pc->meridian = PD_24;
+        t.isdst = start.isdst;
+
+        pd_local_table_add(pc, now);
+        for (b64 quarter = 1; quarter <= 3; quarter++)
+        {
+                pd_tm probe;
+
+                if (pd_local(now + quarter * 90 * 86400, address_of probe) &&
+                    (!pc->zones_here[0].name || probe.isdst != pc->zones_here[0].value))
+                {
+                        pd_local_table_add(pc, now + quarter * 90 * 86400);
+                        if (pc->zones_here[1].name)
+                        {
+                                if (string_equals(pc->zones_here[0].name, pc->zones_here[1].name))
+                                {
+                                        pc->zones_here[0].value = -1;
+                                        pc->zones_here[1].name = null;
+                                }
+                                break;
+                        }
+                }
+        }
+
+        //      spec: '@' seconds, or items.
+        bool parsed = true;
+
+        if (pd_peek(pc).type == '@')
+        {
+                pd_take(pc);
+
+                pd_token seconds = pd_take(pc);
+
+                if (seconds.type == PD_UNUMBER || seconds.type == PD_SNUMBER)
+                {
+                        pc->seconds = seconds.value;
+                        pc->ns = 0;
+                }
+                else if (seconds.type == PD_UDECIMAL || seconds.type == PD_SDECIMAL)
+                {
+                        pc->seconds = seconds.seconds;
+                        pc->ns = seconds.nanoseconds;
+                }
+                else
+                        parsed = false;
+                if (parsed && pd_take(pc).type != PD_END)
+                        parsed = false;
+                if (parsed)
+                {
+                        pc->timespec_seen = true;
+                        pd_trace_now(pc, "number of seconds");
+                }
+        }
+        else
+                while (pd_peek(pc).type != PD_END)
+                        if (!pd_item(pc))
+                        {
+                                parsed = false;
+                                break;
+                        }
+
+        if (!parsed)
+        {
+                if (debug)
+                {
+                        if (pc->input < text + string_length(text))
+                                string_format(log_error, "date: error: parsing failed, stopped at '%s'\n",
+                                              pc->input);
+                        else
+                                pd_say("error: parsing failed\n");
+                }
+                goto pd_done;
+        }
+
+        if (debug)
+        {
+                pd_say("input timezone: ");
+                if (pc->timespec_seen)
+                        log_error("'@timespec' - always UTC", 0);
+                else if (pc->zones_seen)
+                        log_error("parsed date/time string", 0);
+                else if (tzstring)
+                {
+                        if (own_zone)
+                                string_format(log_error, "TZ=\"%s\" in date string", tzstring);
+                        else if (string_equals(tzstring, "UTC0"))
+                                log_error("TZ=\"UTC0\" environment value or -u", 0);
+                        else
+                                string_format(log_error, "TZ=\"%s\" environment value", tzstring);
+                }
+                else
+                        log_error("system default", 0);
+                if (pc->local_zones_seen && !pc->zones_seen && 0 < pc->local_isdst)
+                        log_error(", dst", 5);
+                if (pc->zones_seen)
+                {
+                        pd_zone_text(pc->time_zone, zone_text);
+                        string_format(log_error, " (%s)", (string_address)zone_text);
+                }
+                log_error("\n", 1);
+        }
+
+        if (pc->timespec_seen)
+        {
+                address_to out = pc->seconds;
+                address_to out_ns = (positive)pc->ns;
+        }
+        else
+        {
+                if (1 < (pc->times_seen | pc->dates_seen | pc->days_seen | pc->dsts_seen |
+                         (pc->j_zones_seen + pc->local_zones_seen + pc->zones_seen)))
+                {
+                        if (debug)
+                        {
+                                if (pc->times_seen > 1)
+                                        pd_say("error: seen multiple time parts\n");
+                                if (pc->dates_seen > 1)
+                                        pd_say("error: seen multiple date parts\n");
+                                if (pc->days_seen > 1)
+                                        pd_say("error: seen multiple days parts\n");
+                                if (pc->dsts_seen > 1)
+                                        pd_say("error: seen multiple daylight-saving parts\n");
+                                if ((pc->j_zones_seen + pc->local_zones_seen + pc->zones_seen) > 1)
+                                        pd_say("error: seen multiple time-zone parts\n");
+                        }
+                        goto pd_done;
+                }
+
+                //      to_tm_year: 00-68 are 2000-2068 and 69-99 1969-1999,
+                //      and the year must still fit an int less 1900.
+                b64 year = pc->year;
+
+                if (0 <= year && pc->year_digits == 2)
+                {
+                        year += year < 69 ? 2000 : 1900;
+                        if (debug)
+                        {
+                                pd_say("warning: adjusting year value ");
+                                pd_padded(log_error, pc->year, 1);
+                                log_error(" to ", 4);
+                                pd_padded(log_error, year, 1);
+                                log_error("\n", 1);
+                        }
+                }
+
+                b64 tm_year = year < 0 ? -1900 - year : year - 1900;
+
+                if (tm_year > 2147483647 || tm_year < -2147483647 - 1)
+                {
+                        if (debug)
+                        {
+                                pd_say("error: out-of-range year ");
+                                pd_padded(log_error, year, 1);
+                                log_error("\n", 1);
+                        }
+                        goto pd_done;
+                }
+                if (pc->month - 1 > 2147483647 || pc->month - 1 < -2147483647 - 1 ||
+                    pc->day > 2147483647 || pc->day < -2147483647 - 1)
+                {
+                        if (debug)
+                                pd_say("error: year, month, or day overflow\n");
+                        goto pd_done;
+                }
+                t.year = tm_year;
+                t.mon = pc->month - 1;
+                t.mday = pc->day;
+
+                if (pc->times_seen || (pc->rels_seen && !pc->dates_seen && !pc->days_seen))
+                {
+                        b32 hour = pd_to_hour(pc->hour, pc->meridian);
+
+                        if (hour < 0)
+                        {
+                                if (debug)
+                                {
+                                        pd_say("error: invalid hour ");
+                                        pd_padded(log_error, pc->hour, 1);
+                                        log_error(pc->meridian == PD_AM   ? "am\n"
+                                                  : pc->meridian == PD_PM ? "pm\n"
+                                                                          : "\n",
+                                                  0);
+                                }
+                                goto pd_done;
+                        }
+                        t.hour = hour;
+                        t.min = pc->minutes;
+                        t.sec = pc->seconds;
+                        if (debug)
+                        {
+                                pd_say(pc->times_seen ? "using specified time as starting value: '"
+                                                      : "using current time as starting value: '");
+                                pd_trace_clock(log_error, address_of t);
+                                log_error("'\n", 2);
+                        }
+                }
+                else
+                {
+                        t.hour = t.min = t.sec = 0;
+                        pc->ns = 0;
+                        if (debug)
+                                pd_say("warning: using midnight as starting time: 00:00:00\n");
+                }
+
+                if (pc->dates_seen | pc->days_seen | pc->times_seen)
+                        t.isdst = -1;
+                if (pc->local_zones_seen)
+                        t.isdst = pc->local_isdst;
+
+                t0 = t;
+                moment = pd_mktime(address_of t);
+
+                if (!pd_mktime_ok(address_of t0, address_of t))
+                {
+                        bool repaired = false;
+
+                        if (pc->zones_seen)
+                        {
+                                //      A time near the ends of time_t read in
+                                //      another zone: tried again in that zone.
+                                p8 fixed[40] = "XXX";
+                                p8 held[256];
+                                string_address was = getenv((string_address) "TZ");
+                                bool had = was != null && string_length(was) < sizeof(held);
+
+                                if (had)
+                                        string_copy(held, was);
+                                pd_zone_text(pc->time_zone, fixed + 3);
+                                setenv((string_address) "TZ", fixed, 1);
+                                tzset();
+                                t = t0;
+                                moment = pd_mktime(address_of t);
+                                repaired = pd_mktime_ok(address_of t0, address_of t);
+                                if (had)
+                                        setenv((string_address) "TZ", held, 1);
+                                else
+                                        unsetenv((string_address) "TZ");
+                                tzset();
+                        }
+                        if (!repaired)
+                        {
+                                if (debug)
+                                {
+                                        pd_say("error: invalid date/time value:\n");
+                                        pd_say("    user provided time: '");
+                                        pd_trace_moment(log_error, address_of t0, pc);
+                                        log_error("'\n", 2);
+                                        if (t.wday < 0)
+                                                pd_say("    time could not be normalized\n");
+                                        else
+                                        {
+                                                p8 marks[64];
+                                                positive at = 0;
+
+                                                pd_say("       normalized time: '");
+                                                pd_trace_moment(log_error, address_of t, pc);
+                                                log_error("'\n", 2);
+                                                memory_fill(marks, ' ', 37);
+                                                at = 37;
+                                                string_address parts[6] = {
+                                                    t0.year == t.year ? "" : "----",
+                                                    t0.mon == t.mon ? "" : "--",
+                                                    t0.mday == t.mday ? "" : "--",
+                                                    t0.hour == t.hour ? "" : "--",
+                                                    t0.min == t.min ? "" : "--",
+                                                    t0.sec == t.sec ? "" : "--"};
+
+                                                for (positive i = 0; i < 6; i++)
+                                                {
+                                                        positive width = i ? 2 : 0;
+                                                        positive length = string_length(parts[i]);
+
+                                                        if (i)
+                                                                marks[at++] = ' ';
+                                                        //      "%37s %2s ...": the first
+                                                        //      right-aligned in 37.
+                                                        if (!i)
+                                                        {
+                                                                at = 37 - length;
+                                                                memory_copy(marks + at, parts[i], length);
+                                                                at = 37;
+                                                                continue;
+                                                        }
+                                                        for (positive pad = length; pad < width; pad++)
+                                                                marks[at++] = ' ';
+                                                        memory_copy(marks + at, parts[i], length);
+                                                        at += length;
+                                                }
+                                                while (at && marks[at - 1] == ' ')
+                                                        at--;
+                                                log_error("date: ", 6);
+                                                log_error(marks, at);
+                                                log_error("\n", 1);
+                                        }
+                                        pd_say("     possible reasons:\n");
+                                        pd_say("       nonexistent due to daylight-saving time;\n");
+                                        pd_say("       invalid day/month combination;\n");
+                                        if (t.wday < 0)
+                                                pd_say("       numeric values overflow;\n");
+                                        pd_say(pc->zones_seen ? "       incorrect timezone\n"
+                                                              : "       missing timezone\n");
+                                }
+                                goto pd_done;
+                        }
+                }
+
+                if (pc->days_seen && !pc->dates_seen)
+                {
+                        b64 ordinal = pc->day_ordinal -
+                                      (0 < pc->day_ordinal && t.wday != pc->day_number);
+                        b64 increment;
+                        bool made = false;
+
+                        if (!__builtin_mul_overflow(ordinal, (b64)7, address_of increment) &&
+                            !__builtin_add_overflow(increment, (b64)((pc->day_number - t.wday + 7) % 7),
+                                                    address_of increment) &&
+                            !__builtin_add_overflow(increment, t.mday, address_of t.mday) &&
+                            t.mday <= 2147483647 && t.mday >= -2147483647 - 1)
+                        {
+                                t.isdst = -1;
+                                moment = pd_mktime(address_of t);
+                                made = t.wday >= 0;
+                        }
+                        if (!made)
+                        {
+                                if (debug)
+                                {
+                                        pd_say("error: day '");
+                                        pd_days_text(pc, log_error);
+                                        log_error("' (day ordinal=", 0);
+                                        pd_padded(log_error, pc->day_ordinal, 1);
+                                        log_error(" number=", 0);
+                                        pd_padded(log_error, pc->day_number, 1);
+                                        log_error(") resulted in an invalid date: '", 0);
+                                        pd_trace_moment(log_error, address_of t, pc);
+                                        log_error("'\n", 2);
+                                }
+                                goto pd_done;
+                        }
+                        if (debug)
+                        {
+                                pd_say("new start date: '");
+                                pd_days_text(pc, log_error);
+                                log_error("' is '", 0);
+                                pd_trace_moment(log_error, address_of t, pc);
+                                log_error("'\n", 2);
+                        }
+                }
+
+                if (debug)
+                {
+                        if (!pc->dates_seen && !pc->days_seen)
+                        {
+                                pd_say("using current date as starting value: '(Y-M-D) ");
+                                pd_year_text(log_error, t.year);
+                                log_error("-", 1);
+                                pd_padded(log_error, t.mon + 1, 2);
+                                log_error("-", 1);
+                                pd_padded(log_error, t.mday, 2);
+                                log_error("'\n", 2);
+                        }
+                        if (pc->days_seen && pc->dates_seen)
+                        {
+                                pd_say("warning: day (");
+                                pd_days_text(pc, log_error);
+                                log_error(") ignored when explicit dates are given\n", 0);
+                        }
+                        pd_say("starting date/time: '");
+                        pd_trace_moment(log_error, address_of t, pc);
+                        log_error("'\n", 2);
+                }
+
+                if (pc->rel.year | pc->rel.month | pc->rel.day)
+                {
+                        if (debug)
+                        {
+                                if ((pc->rel.year || pc->rel.month) && t.mday != 15)
+                                        pd_say("warning: when adding relative months/years, "
+                                               "it is recommended to specify the 15th of the months\n");
+                                if (pc->rel.day && t.hour != 12)
+                                        pd_say("warning: when adding relative days, "
+                                               "it is recommended to specify noon\n");
+                        }
+
+                        b64 year_now = t.year + pc->rel.year;
+                        b64 month_now = t.mon + pc->rel.month;
+                        b64 day_now = t.mday + pc->rel.day;
+
+                        if (__builtin_add_overflow(t.year, pc->rel.year, address_of year_now) ||
+                            __builtin_add_overflow(t.mon, pc->rel.month, address_of month_now) ||
+                            __builtin_add_overflow(t.mday, pc->rel.day, address_of day_now) ||
+                            year_now > 2147483647 || year_now < -2147483647 - 1 ||
+                            month_now > 2147483647 || month_now < -2147483647 - 1 ||
+                            day_now > 2147483647 || day_now < -2147483647 - 1)
+                        {
+                                if (debug)
+                                        pd_say("error: parse-datetime.y:2179\n");
+                                goto pd_done;
+                        }
+                        t.year = year_now;
+                        t.mon = month_now;
+                        t.mday = day_now;
+                        t.hour = t0.hour;
+                        t.min = t0.min;
+                        t.sec = t0.sec;
+                        t.isdst = t0.isdst;
+                        moment = pd_mktime(address_of t);
+                        if (t.wday < 0)
+                        {
+                                if (debug)
+                                {
+                                        pd_say("error: adding relative date resulted in an invalid date: '");
+                                        pd_trace_moment(log_error, address_of t, pc);
+                                        log_error("'\n", 2);
+                                }
+                                goto pd_done;
+                        }
+                        if (debug)
+                        {
+                                pd_say("after date adjustment (");
+                                pd_signed(log_error, pc->rel.year);
+                                log_error(" years, ", 0);
+                                pd_signed(log_error, pc->rel.month);
+                                log_error(" months, ", 0);
+                                pd_signed(log_error, pc->rel.day);
+                                log_error(" days),\n", 0);
+                                pd_say("    new date/time = '");
+                                pd_trace_moment(log_error, address_of t, pc);
+                                log_error("'\n", 2);
+                                if (t0.isdst != -1 && t.isdst != t0.isdst)
+                                        pd_say("warning: daylight saving time changed after date adjustment\n");
+                                if (pc->rel.day == 0 &&
+                                    (t.mday != day_now || (pc->rel.month == 0 && t.mon != month_now)))
+                                {
+                                        pd_say("warning: month/year adjustment resulted in shifted dates:\n");
+                                        pd_say("     adjusted Y M D: ");
+                                        pd_year_text(log_error, year_now);
+                                        log_error(" ", 1);
+                                        pd_padded(log_error, month_now + 1, 2);
+                                        log_error(" ", 1);
+                                        pd_padded(log_error, day_now, 2);
+                                        log_error("\n", 1);
+                                        pd_say("   normalized Y M D: ");
+                                        pd_year_text(log_error, t.year);
+                                        log_error(" ", 1);
+                                        pd_padded(log_error, t.mon + 1, 2);
+                                        log_error(" ", 1);
+                                        pd_padded(log_error, t.mday, 2);
+                                        log_error("\n", 1);
+                                }
+                        }
+                }
+
+                if (pc->zones_seen)
+                {
+                        b64 delta = (b64)pc->time_zone - t.gmtoff;
+
+                        if (__builtin_sub_overflow(moment, delta, address_of moment))
+                        {
+                                if (debug)
+                                {
+                                        pd_say("error: timezone ");
+                                        pd_padded(log_error, pc->time_zone, 1);
+                                        log_error(" caused time_t overflow\n", 0);
+                                }
+                                goto pd_done;
+                        }
+                }
+
+                if (debug)
+                {
+                        pd_say("'");
+                        pd_trace_moment(log_error, address_of t, pc);
+                        log_error("' = ", 4);
+                        pd_padded(log_error, moment, 1);
+                        log_error(" epoch-seconds\n", 0);
+                }
+
+                b64 sum_ns = pc->ns + pc->rel.ns;
+                b64 normalized = (sum_ns % 1000000000 + 1000000000) % 1000000000;
+                b64 whole = (sum_ns - normalized) / 1000000000;
+                b64 d1;
+                b64 d2;
+                b64 total;
+
+                if (__builtin_mul_overflow(pc->rel.hour, (b64)3600, address_of d1) ||
+                    __builtin_add_overflow(moment, d1, address_of total) ||
+                    __builtin_mul_overflow(pc->rel.minutes, (b64)60, address_of d2) ||
+                    __builtin_add_overflow(total, d2, address_of total) ||
+                    __builtin_add_overflow(total, pc->rel.seconds, address_of total) ||
+                    __builtin_add_overflow(total, whole, address_of total))
+                {
+                        if (debug)
+                                pd_say("error: adding relative time caused an overflow\n");
+                        goto pd_done;
+                }
+                address_to out = total;
+                address_to out_ns = (positive)normalized;
+
+                if (debug && (pc->rel.hour | pc->rel.minutes | pc->rel.seconds | pc->rel.ns))
+                {
+                        pd_tm later;
+
+                        pd_say("after time adjustment (");
+                        pd_signed(log_error, pc->rel.hour);
+                        log_error(" hours, ", 0);
+                        pd_signed(log_error, pc->rel.minutes);
+                        log_error(" minutes, ", 0);
+                        pd_signed(log_error, pc->rel.seconds);
+                        log_error(" seconds, ", 0);
+                        pd_signed(log_error, pc->rel.ns);
+                        log_error(" ns),\n", 0);
+                        pd_say("    new time = ");
+                        pd_padded(log_error, total, 1);
+                        log_error(" epoch-seconds\n", 0);
+                        if (t.isdst != -1 && pd_local(total, address_of later) && t.isdst != later.isdst)
+                                pd_say("warning: daylight saving time changed after time adjustment\n");
+                }
+        }
+
+        if (debug)
+        {
+                pd_tm utc_parts;
+                pd_tm here;
+
+                if (!tzstring)
+                        pd_say("timezone: system default\n");
+                else if (string_equals(tzstring, "UTC0"))
+                        pd_say("timezone: Universal Time\n");
+                else
+                        string_format(log_error, "date: timezone: TZ=\"%s\" environment value\n", tzstring);
+
+                pd_say("final: ");
+                pd_padded(log_error, address_to out, 1);
+                log_error(".", 1);
+                pd_padded(log_error, (b64)address_to out_ns, 9);
+                log_error(" (epoch-seconds)\n", 0);
+
+                b64 days = pd_floor_div(address_to out, 86400);
+                b64 rest = address_to out - days * 86400;
+                bipolar y;
+                bipolar m;
+                bipolar d;
+
+                clock_civil_from_days(days, address_of y, address_of m, address_of d);
+                utc_parts.year = y - 1900;
+                utc_parts.mon = m - 1;
+                utc_parts.mday = d;
+                utc_parts.hour = rest / 3600;
+                utc_parts.min = rest / 60 % 60;
+                utc_parts.sec = rest % 60;
+                pd_say("final: ");
+                pd_trace_moment(log_error, address_of utc_parts, null);
+                log_error(" (UTC)\n", 0);
+                if (pd_local(address_to out, address_of here))
+                {
+                        pd_zone_text((b32)here.gmtoff, zone_text);
+                        pd_say("final: ");
+                        pd_trace_moment(log_error, address_of here, null);
+                        string_format(log_error, " (UTC%s)\n", (string_address)zone_text);
+                }
+        }
+
+        ok = true;
+
+pd_done:
+        if (own_zone)
+        {
+                if (had_tz)
+                        setenv((string_address) "TZ", saved, 1);
+                else
+                        unsetenv((string_address) "TZ");
+                tzset();
+        }
+        return ok;
+}
+
 static bool file_moment_read_from(string_address text, b64 now, positive fraction,
                                   b64 address_to out,
                                   positive address_to nanoseconds)
 {
-        positive at = string_span(text, string_set_blanks);
-        string_address from = text + at + 4;
-        string_address was;
-        p8 zone[128];
-        p8 saved[256];
-        positive length = 0;
-        bool read;
-
-        if (string_compare_max(text + at, (string_address) "TZ=\"", 4))
-                return file_moment_read_local(text, now, fraction, out, nanoseconds);
-
-        while (from[length] && from[length] != '"' && length + 1 < sizeof(zone))
-        {
-                zone[length] = from[length];
-                length++;
-        }
-
-        if (from[length] != '"')
-                return false;
-
-        zone[length] = end;
-        was = getenv((string_address) "TZ");
-
-        if (was && string_length(was) >= sizeof(saved))
-                return false;
-        if (was)
-                string_copy(saved, was);
-
-        setenv((string_address) "TZ", zone, 1);
-        tzset();
-        read = file_moment_read_local(from + length + 1, now, fraction, out, nanoseconds);
-
-        if (was)
-                setenv((string_address) "TZ", saved, 1);
-        else
-                unsetenv((string_address) "TZ");
-        tzset();
-
-        return read;
+        return pd_parse(text, now, fraction, false, out, nanoseconds);
 }
 
 bool file_moment_read_exact(string_address text, b64 now, b64 address_to out,
@@ -44859,10 +46037,30 @@ static fn date_operand(b32 index)
         date_operand_count++;
 }
 
+//      Now, to the nanosecond, which a date that names no time of day
+//      keeps (date -d '+1 hour' is now and an hour, fraction and all).
+static positive date_now_ns;
+
+static b64 date_now_seconds()
+{
+        p64 wall[2] = {0, 0};
+
+        system_call_2(syscall(clock_gettime), 0, (positive)wall);
+        date_now_ns = (positive)wall[1];
+        return (b64)wall[0];
+}
+
+//      The format as given, which --debug names before each date.
+static string_address date_given_format;
+
 static bool date_emit(string_address format, b64 when, positive nanoseconds)
 {
         time_t stamp = (time_t)when;
         tm broken;
+
+        if (pd_debug)
+                string_format(log_error, "date: output format: '%w'\n",
+                              writer_terminal_quoted_name, date_given_format);
 
         /* A moment no calendar year can hold is out of range, said with
            its seconds, after the empty line GNU's date still writes. */
@@ -44939,8 +46137,8 @@ static bool date_batch(string_address path, string_address format, b64 now)
                 p8 saved = input[at];
                 input[at] = end;
 
-                if (!file_moment_read_exact(input + start, now, address_of when,
-                                            address_of ns))
+                if (!pd_parse(input + start, now, date_now_ns, pd_debug, address_of when,
+                              address_of ns))
                 {
                         string_format(log_error, "date: invalid date '%w'\n",
                                       writer_terminal_quoted_name, input + start);
@@ -44974,8 +46172,10 @@ static b32 file_date()
         };
 
         date_operand_count = 0;
+        pd_debug = false;
         if (!file_take(address_of taking))
                 return 1;
+        pd_debug = (taking.flags & FILE_FLAG('D')) != 0;
         // Operands after -- are operands too, and come after the rest.
         for (positive at = taking.first; at < count; at++)
                 date_operand((b32)at);
@@ -45010,6 +46210,11 @@ static b32 file_date()
                     log_error, 1,
                     "date: the options to print and set the time may not be used together\n"
                     "Try 'date --help' for more information.\n");
+
+        if (pd_debug && (taking.repeated & FILE_FLAG('d')))
+                log_error("date: only using last of multiple -d options\n", 0);
+        if (pd_debug && (taking.repeated & FILE_FLAG('s')))
+                log_error("date: only using last of multiple -s options\n", 0);
 
         if (date_operand_count)
         {
@@ -45050,11 +46255,12 @@ static b32 file_date()
                 format = resolution           ? (string_address) "%s.%N"
                          : date_locale_en_us() ? (string_address) "%a %b %e %r %Z %Y"
                                                : (string_address) "%a %b %e %H:%M:%S %Z %Y";
+        date_given_format = format;
         format = date_localize(format);
 
         if (batch)
         {
-                status = date_batch(batch, format, file_now()) ? 0 : 1;
+                status = date_batch(batch, format, date_now_seconds()) ? 0 : 1;
                 return file_output_told((string_address) "date") ? status : 1;
         }
 
@@ -45084,8 +46290,10 @@ static b32 file_date()
         {
                 string_address text = set_text ? set_text : given;
 
-                if (!file_moment_read_exact(text, file_now(), address_of when,
-                                            address_of nanoseconds))
+                b64 now = date_now_seconds();
+
+                if (!pd_parse(text, now, date_now_ns, pd_debug,
+                              address_of when, address_of nanoseconds))
                         return string_report(log_error, 1,
                                              "date: invalid date '%w'\n", writer_terminal_quoted_name, text);
         }
