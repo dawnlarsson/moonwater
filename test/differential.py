@@ -14907,6 +14907,18 @@ def shell_lang_regex_refusals(rng):
         ("command", "stdin", "file"))
 
 
+#       Inside [[ ]] bash's reader splits words at < > && || ( and ) with
+#       or without blanks: [[ b<a ]] compares, and ]] closes after a ).
+#       These took b<a for one word and needed a blank before ]].
+def shell_lang_conditional_tight(rng):
+    line = rng.choice(("[[ b<a ]]", "[[ a<b ]]", "[[ b>a ]]", "[[ a>b&&b<c ]]", "[[ a<b||b<c ]]",
+                       "[[ ''||! (1 == 2)&&(2 == 2)]]", "[[ (a)]]", "[[ !(a)]]", "[[ a&&(b)]]",
+                       "[[ -n x&&-z '' ]]", "[[ (a==a) ]]", "[[ x == @(x|y) ]]", "[[ x != !(x) ]]",
+                       "[[ ( b<a ) ]]", "[[ $v<b ]]"))
+    return ("conditional-tight", shell_BASH, shell_program(
+        "v=a", line + "; echo \"st=$?\"", 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
 #       A readonly assignment outside posix mode drops the rest of the line
 #       the reader was on: eval answers 1 and a sourced file goes on at its
 #       next line, where a function's caller still loses its whole line.
@@ -17878,6 +17890,7 @@ SHELL_FAMILIES = (
     shell_lang_compound_order,
     shell_lang_local_listing,
     shell_lang_regex_refusals,
+    shell_lang_conditional_tight,
     shell_lang_readonly_discard_scope,
     shell_lang_readonly_subshell_status,
     shell_lang_prompt_expansion,

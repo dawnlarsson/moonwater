@@ -12388,8 +12388,12 @@ static bool conditional_tokenize(string_address text)
                         continue;
                 }
 
+                //      < and > are operators without blanks round them too,
+                //      as bash's reader splits [[ b<a ]] into three words.
                 if (!regex_operand &&
-                    (string_is(at, '(') || string_is(at, ')')))
+                    (string_is(at, '(') || string_is(at, ')') ||
+                     ((string_is(at, '<') || string_is(at, '>')) &&
+                      shell_bash_compat)))
                 {
                         if (!conditional_add(at, 1))
                                 return false;
@@ -12404,6 +12408,14 @@ static bool conditional_tokenize(string_address text)
                    inside them included: [[ $v =~ (one two) ]] has the
                    pattern "(one two)", as bash reads it. */
                 positive depth = 0;
+                //      bash reads an extended pattern as one word where it
+                //      reads a pattern, after == = and !=; elsewhere !(a)
+                //      is a negation and a group.
+                bool pattern_operand =
+                    conditional_word_count &&
+                    (word_is(conditional_word[conditional_word_count - 1], "==") ||
+                     word_is(conditional_word[conditional_word_count - 1], "=") ||
+                     word_is(conditional_word[conditional_word_count - 1], "!="));
 
                 while (string_get(at) &&
                        (depth || !lex_is_space(string_get(at))))
@@ -12429,7 +12441,8 @@ static bool conditional_tokenize(string_address text)
                                 option is on, because what is in here is
                                 matched when the command runs.
                         */
-                        if (string_is(at + 1, '(') && lex_extended_head(value))
+                        if (string_is(at + 1, '(') && lex_extended_head(value) &&
+                            (pattern_operand || !shell_bash_compat))
                         {
                                 string_address group = lex_nesting(at + 1);
 
@@ -12444,7 +12457,9 @@ static bool conditional_tokenize(string_address text)
                              ((value == '&' && string_is(at + 1, '&')) ||
                               (value == '|' && string_is(at + 1, '|')))) ||
                             (!regex_operand &&
-                             (value == '(' || value == ')')))
+                             (value == '(' || value == ')' ||
+                              ((value == '<' || value == '>') &&
+                               shell_bash_compat))))
                                 break;
 
                         b32 skipped = lex_skip_held(address_of at);

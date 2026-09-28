@@ -492,6 +492,10 @@ static KEEP string_address lex_arithmetic_end(string_address start)
 static KEEP string_address lex_conditional_end(string_address start)
 {
         string_address at = start + 2;
+        //      Whether a word may begin here: after a blank, or in bash
+        //      after one of the condition's own operators, so that
+        //      [[ (a == a)]] closes where bash closes it.
+        bool word_start = false;
 
         while (string_get(at))
         {
@@ -505,10 +509,12 @@ static KEEP string_address lex_conditional_end(string_address start)
                         return null;
 
                 if (skipped)
+                {
+                        word_start = false;
                         continue;
+                }
 
-                if (value == ']' && string_is(at + 1, ']') &&
-                    at > start + 2 && lex_is_space(string_get(at - 1)))
+                if (value == ']' && string_is(at + 1, ']') && word_start)
                 {
                         p8 after = string_get(at + 2);
 
@@ -516,6 +522,10 @@ static KEEP string_address lex_conditional_end(string_address start)
                                 return at + 2;
                 }
 
+                word_start = lex_is_space(value) ||
+                             (shell_bash_compat &&
+                              (value == ')' || value == '(' || value == '&' ||
+                               value == '|' || value == '<' || value == '>'));
                 at++;
         }
 
