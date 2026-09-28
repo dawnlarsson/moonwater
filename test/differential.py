@@ -16436,7 +16436,12 @@ shell_SUBSCRIPT_CONTEXTS = ("echo $(( a[$v] ))", "(( a[$v] )); echo $?", "(( a[$
                             "(( a[$v] = 7 )); echo $?", "(( a[$v] += 2 )); echo $?", "echo $(( a[$v] + a[i] ))",
                             "for (( j = a[$v]; j < 1; j++ )); do :; done; echo $?", "[[ a[$v] -eq 0 ]]; echo $?",
                             "[[ 1 -lt a[$v] ]]; echo $?", "s=abcdef; echo \"${s:a[$v]:2}\"",
-                            "echo \"${a[@]:a[$v]:1}\"", "echo $(( a[\"$v\"] ))")
+                            "echo \"${a[@]:a[$v]:1}\"", "echo $(( a[\"$v\"] ))",
+                            "[[ -v a[$v] ]]; echo $?", "[[ -v \"a[$v]\" ]]; echo $?", "echo $(( \"a[$v]\" ))",
+                            "(( \"a[$v]\" )); echo $?", "[[ \"a[$v]\" -eq 0 ]]; echo $?",
+                            "s=abcdef; echo \"${s:\"a[$v]\"}\"", "echo $(( ${x:-a[$v]} ))",
+                            "echo $(( \"${x:-a[$v]}\" ))", "echo $(( ${v:+a[$v]} ))", "let \"$v\"; echo $?",
+                            "let \"x=$v\"; echo $?", "let \"x=a[$v]+1\" 2>/dev/null; echo $? $x")
 
 
 def shell_lang_arithmetic_subscripts(rng):

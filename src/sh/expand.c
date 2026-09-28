@@ -4160,44 +4160,91 @@ static PURE string_address expand_bracket_end(string_address at, p8 open,
         carried through the body's expansion as text, its $, `, " and \
         escaped, and the evaluator expands it the one time.
 
-        Answers the body unchanged when it has no subscript to carry.
+        Bash holds a subscript by where it is written, not by how deep: one
+        inside double quotes or in the word of ${x:-...} and ${x:+...} is
+        the source's too, and runs nothing a value held; the word is text
+        the expression reads. A subscript a value or a substitution makes
+        is expanded by the evaluator, in bash as here.
 */
-static string_address arith_subscripts_held(string_address text)
+static p8 address_to arith_hold_span(p8 address_to out, string_address text,
+                                     string_address at, string_address stop,
+                                     bool quoted)
 {
-        p8 address_to made;
-        p8 address_to out;
-        string_address at = text;
-
-        if (!string_first_of(text, '['))
-                return text;
-
-        made = shell_store_take(address_of expand_store,
-                                string_length(text) * 2 + 1);
-        if (!made)
-                return text;
-        out = made;
-
-        while (string_get(at))
+        while (at < stop)
         {
                 p8 value = string_get(at);
-                string_address stop = null;
+                string_address run = null;
 
-                if (value == '\\' && string_get(at + 1))
-                        stop = at + 2;
-                else if (value == '\'' || value == '"')
-                        stop = expand_quoted_run(at, value);
+                if (value == '\\' && at + 1 < stop)
+                        run = at + 2;
+                else if (value == '"' && !quoted)
+                {
+                        string_address close = expand_quoted_run(at, '"');
+
+                        if (close <= stop && close > at + 1 &&
+                            string_is(close - 1, '"'))
+                        {
+                                *out++ = '"';
+                                out = arith_hold_span(out, text, at + 1,
+                                                      close - 1, true);
+                                *out++ = '"';
+                                at = close;
+                                continue;
+                        }
+                }
+                else if (value == '\'' && !quoted)
+                        run = expand_quoted_run(at, value);
                 else if (value == '`')
-                        stop = lex_nesting(at);
-                else if (value == '$' &&
-                         (string_is(at + 1, '(') || string_is(at + 1, '{')))
-                        stop = lex_nesting(at + 1);
+                        run = lex_nesting(at);
+                else if (value == '$' && string_is(at + 1, '('))
+                        run = lex_nesting(at + 1);
+                else if (value == '$' && string_is(at + 1, '{'))
+                {
+                        string_address close =
+                            expand_parameter_end(at + 2, quoted);
+                        string_address word = at + 2;
+
+                        if (close && close < stop)
+                        {
+                                if (string_is(word, '#') || string_is(word, '!'))
+                                        word++;
+                                if (expand_assignable_name(word))
+                                        word += string_span(word, string_set_name);
+                                else if (word < close)
+                                        word++;
+                                if (string_is(word, '['))
+                                {
+                                        string_address shut = expand_bracket_end(
+                                            word + 1, '[', ']');
+
+                                        word = shut && shut < close ? shut + 1
+                                                                    : close;
+                                }
+                                if (string_is(word, ':'))
+                                        word++;
+                                if (word < close && (string_is(word, '-') ||
+                                                     string_is(word, '+')))
+                                {
+                                        word++;
+                                        memory_copy_apart(out, at,
+                                                          (positive)(word - at));
+                                        out += word - at;
+                                        out = arith_hold_span(out, text, word,
+                                                              close, quoted);
+                                        *out++ = '}';
+                                        at = close + 1;
+                                        continue;
+                                }
+                                run = close + 1;
+                        }
+                }
                 else if (value == '[' && at > text &&
                          expand_name_character(string_get(at - 1)))
                 {
                         string_address close =
                             expand_bracket_end(at + 1, '[', ']');
 
-                        if (close)
+                        if (close && close < stop)
                         {
                                 *out++ = '[';
                                 for (at++; at < close; at++)
@@ -4213,13 +4260,30 @@ static string_address arith_subscripts_held(string_address text)
                         }
                 }
 
-                if (!stop || stop <= at)
-                        stop = at + 1;
-                while (at < stop)
+                if (!run || run <= at || run > stop)
+                        run = at + 1;
+                while (at < run)
                         *out++ = string_get(at++);
         }
 
-        *out = 0;
+        return out;
+}
+
+//      Answers the body unchanged when it has no subscript to carry.
+static string_address arith_subscripts_held(string_address text)
+{
+        positive length;
+        p8 address_to made;
+
+        if (!string_first_of(text, '['))
+                return text;
+
+        length = string_length(text);
+        made = shell_store_take(address_of expand_store, length * 2 + 1);
+        if (!made)
+                return text;
+
+        *arith_hold_span(made, text, text, text + length, false) = 0;
         return made;
 }
 

@@ -12162,19 +12162,11 @@ done:
         return status;
 }
 
-static bool exec_arithmetic_value(string_address text,
+static bool exec_arithmetic_ready(string_address ready,
                                   bipolar address_to value,
-                                  string_address command)
+                                  string_address command, shell_mark mark)
 {
-        shell_mark mark = shell_store_mark(address_of expand_store);
-        string_address ready = shell_expand_arithmetic_text(text);
         bool held = arith_bash_mode;
-
-        if (!ready || expand_failed)
-        {
-                shell_store_rewind(address_of expand_store, mark);
-                return false;
-        }
 
         arith_bash_mode = true;
         address_to value = arith_evaluate(ready);
@@ -12191,6 +12183,36 @@ static bool exec_arithmetic_value(string_address text,
                 shell_arith_report(log_error, command, ready);
         shell_store_rewind(address_of expand_store, mark);
         return false;
+}
+
+static bool exec_arithmetic_value(string_address text,
+                                  bipolar address_to value,
+                                  string_address command)
+{
+        shell_mark mark = shell_store_mark(address_of expand_store);
+        string_address ready = shell_expand_arithmetic_text(text);
+
+        if (!ready || expand_failed)
+        {
+                shell_store_rewind(address_of expand_store, mark);
+                return false;
+        }
+
+        return exec_arithmetic_ready(ready, value, command, mark);
+}
+
+/*
+        let's operands are words the command line has already expanded, so
+        the expression is read as it stands: expanding it again ran a
+        $(...) that a value held, where bash reports an operand it cannot
+        read. A subscript is still expanded once, as the evaluator reads it.
+*/
+static bool exec_let_value(string_address text, bipolar address_to value)
+{
+        shell_mark mark = shell_store_mark(address_of expand_store);
+
+        expand_begin();
+        return exec_arithmetic_ready(text, value, "let", mark);
 }
 
 /*
@@ -13252,7 +13274,11 @@ static bool conditional_primary(bool invert)
                 if (!conditional_active)
                         return false;
 
-                operand = conditional_expand(operand_raw, false);
+                //      -v reads a subscript as the evaluator does, once.
+                operand = conditional_expand(
+                    word_is(raw, "-v") ? arith_subscripts_held(operand_raw)
+                                       : operand_raw,
+                    false);
 
                 if (expand_failed)
                         return false;

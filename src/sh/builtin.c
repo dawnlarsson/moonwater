@@ -464,9 +464,7 @@ static bool floodlight_external_final(
     positive count, floodlight_executable address_to pinned);
 fn parse_nest_enter();
 fn parse_nest_leave();
-static bool exec_arithmetic_value(string_address text,
-                                  bipolar address_to value,
-                                  string_address command);
+static bool exec_let_value(string_address text, bipolar address_to value);
 // exec owns the lifetime of PIPESTATUS; the variable engine materializes its
 // deferred one-element value only when a reader actually names it.
 fn exec_pipe_status_wanted();
@@ -19755,8 +19753,7 @@ COLD fn shell_let(writer write, string_address input)
                 return shell_answer(1);
 
         for (; at < shell_argc; at++)
-                if (!exec_arithmetic_value(shell_argv[at], address_of value,
-                                           "let"))
+                if (!exec_let_value(shell_argv[at], address_of value))
                         return shell_answer(exec_line_aborted() ? 2 : 1);
 
         shell_answer(value ? 0 : 1);
