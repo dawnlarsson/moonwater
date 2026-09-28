@@ -39778,8 +39778,8 @@ def harness_x509_corpus(argv):
     same question. Fails if this tree accepts any chain openssl refuses;
     lists the hosts openssl accepts that this refuses, which is
     reachability, not security. Needs the network, so no lane runs it.
-    2026-09-28: 640 of 640 openssl-accepted hosts verify, 0 accepted
-    that openssl refused (12).
+    2026-09-28, live: 644 chains, 635 of the 635 openssl accepts verify,
+    and none of the 9 it refuses.
 
         python3 test/differential.py --harness x509_corpus --work DIR
     """
