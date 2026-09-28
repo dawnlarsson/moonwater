@@ -6066,10 +6066,11 @@ static b32 tools_numfmt()
 // factor ----------------------------------------------------
 
 /*
-        This is deliberately a native-word factorizer, not a miniature
-        bignum package.  The shared checked decimal floor accepts 0 through
-        18446744073709551615 on the 64-bit targets; a longer value is an
-        error, never a truncated factorization.  All visible numbers go back
+        One word at a time first: the shared checked decimal floor reads 0
+        through 18446744073709551615 on the 64-bit targets and those are
+        factored here, with no multi-limb arithmetic anywhere near them; a
+        longer value goes to the multi-limb road below and comes back here
+        for every part of it that fits a word. All visible numbers go back
         through the resident positive_to_string writer.
 
         Odd modular arithmetic uses Montgomery form.  Its reduction needs a
@@ -6343,10 +6344,1037 @@ static bool factor_collect(positive number, positive address_to factors,
                factor_collect(number / divisor, factors, count);
 }
 
+/*
+        Past one machine word. GNU factors any size (GMP past two words);
+        this carries a number in 64-bit limbs, least first, up to
+        FACTOR_LIMBS of them -- 8448 bits, 2543 digits, which is where it
+        says the number is too large rather than truncate it. The arithmetic
+        is what the native path does, widened: trial division by the small
+        odd numbers, Miller-Rabin over the first twenty-five primes in
+        Montgomery form (CIOS, a 64x64->128 multiply per limb pair and no
+        double-width division anywhere), and Brent's rho with a batched gcd.
+        A part that comes down to one word goes back to the native path,
+        whose speed is the floor it was measured at. Division by a word is
+        done in 32-bit halves and by a number bit by bit, so nothing here
+        needs the compiler's runtime.
+*/
+#define FACTOR_LIMBS 132
+#define FACTOR_DIGITS 2543
+#define FACTOR_POOL (FACTOR_LIMBS * 2 + 8704)
+#define FACTOR_MOST 8704
+
+typedef struct
+{
+        positive size;
+        p64 limb[FACTOR_LIMBS];
+} factor_big;
+
+static fn factor_big_trim(factor_big address_to value)
+{
+        while (value->size && !value->limb[value->size - 1])
+                value->size--;
+}
+
+static fn factor_big_word(factor_big address_to value, p64 word)
+{
+        value->limb[0] = word;
+        value->size = word != 0;
+}
+
+static b32 factor_big_order(const factor_big address_to left,
+                            const factor_big address_to right)
+{
+        if (left->size != right->size)
+                return left->size < right->size ? -1 : 1;
+        for (positive at = left->size; at-- > 0;)
+                if (left->limb[at] != right->limb[at])
+                        return left->limb[at] < right->limb[at] ? -1 : 1;
+        return 0;
+}
+
+// left -= right, where left is not the smaller.
+static fn factor_big_subtract(factor_big address_to left,
+                              const factor_big address_to right)
+{
+        p64 borrow = 0;
+
+        for (positive at = 0; at < left->size; at++)
+        {
+                p64 take = at < right->size ? right->limb[at] : 0;
+                p64 before = left->limb[at];
+                p64 after = before - take - borrow;
+
+                borrow = (before < take) | ((before - take) < borrow);
+                left->limb[at] = after;
+        }
+        factor_big_trim(left);
+}
+
+static fn factor_big_half(factor_big address_to value)
+{
+        for (positive at = 0; at < value->size; at++)
+                value->limb[at] = value->limb[at] >> 1 |
+                                  (at + 1 < value->size ? value->limb[at + 1] << 63 : 0);
+        factor_big_trim(value);
+}
+
+// value = value * 2 + bit; false when it would pass the limbs there are.
+static bool factor_big_double(factor_big address_to value, p64 bit)
+{
+        p64 carry = bit;
+
+        for (positive at = 0; at < value->size; at++)
+        {
+                p64 top = value->limb[at] >> 63;
+
+                value->limb[at] = value->limb[at] << 1 | carry;
+                carry = top;
+        }
+        if (carry)
+        {
+                if (value->size == FACTOR_LIMBS)
+                        return false;
+                value->limb[value->size++] = carry;
+        }
+        return true;
+}
+
+static bool factor_big_multiply_add(factor_big address_to value, p64 times, p64 add)
+{
+        p64 carry = add;
+
+        for (positive at = 0; at < value->size; at++)
+        {
+                p128 product = (p128)value->limb[at] * times + carry;
+
+                value->limb[at] = (p64)product;
+                carry = (p64)(product >> 64);
+        }
+        if (carry)
+        {
+                if (value->size == FACTOR_LIMBS)
+                        return false;
+                value->limb[value->size++] = carry;
+        }
+        return true;
+}
+
+// value /= divisor, answering the remainder; the divisor is under 2^32.
+static p64 factor_big_divide_word(factor_big address_to value, p64 divisor)
+{
+        p64 rest = 0;
+
+        for (positive at = value->size; at-- > 0;)
+        {
+                p64 high = rest << 32 | value->limb[at] >> 32;
+                p64 upper = high / divisor;
+
+                rest = high % divisor;
+
+                p64 low = rest << 32 | (value->limb[at] & 0xffffffff);
+                p64 lower = low / divisor;
+
+                rest = low % divisor;
+                value->limb[at] = upper << 32 | lower;
+        }
+        factor_big_trim(value);
+        return rest;
+}
+
+static p64 factor_big_remainder_word(const factor_big address_to value, p64 divisor)
+{
+        p64 rest = 0;
+
+        for (positive at = value->size; at-- > 0;)
+        {
+                rest = (rest << 32 | value->limb[at] >> 32) % divisor;
+                rest = (rest << 32 | (value->limb[at] & 0xffffffff)) % divisor;
+        }
+        return rest;
+}
+
+// quotient = value / divisor, bit by bit.
+static fn factor_big_divide(const factor_big address_to value,
+                            const factor_big address_to divisor,
+                            factor_big address_to quotient)
+{
+        static factor_big rest;
+
+        rest.size = 0;
+        quotient->size = value->size;
+        memory_fill(quotient->limb, 0, value->size * sizeof(p64));
+
+        for (positive bit = value->size * 64; bit-- > 0;)
+        {
+                factor_big_double(address_of rest, (value->limb[bit / 64] >> (bit % 64)) & 1);
+                if (factor_big_order(address_of rest, divisor) >= 0)
+                {
+                        factor_big_subtract(address_of rest, divisor);
+                        quotient->limb[bit / 64] |= (p64)1 << (bit % 64);
+                }
+        }
+        factor_big_trim(quotient);
+}
+
+static fn factor_big_put(const factor_big address_to value)
+{
+        static factor_big copy;
+        static p32 chunk[FACTOR_DIGITS / 9 + 2];
+        positive chunks = 0;
+
+        copy = address_to value;
+        while (copy.size)
+                chunk[chunks++] = (p32)factor_big_divide_word(address_of copy, 1000000000);
+
+        if (!chunks)
+        {
+                text_put_character('0');
+                return;
+        }
+
+        positive_to_string(text_put, chunk[chunks - 1]);
+        for (positive at = chunks - 1; at-- > 0;)
+        {
+                p8 digits[9];
+
+                positive_into_padded(digits, chunk[at], 9, '0');
+                text_put(digits, 9);
+        }
+}
+
+static fn factor_big_gcd(factor_big address_to left, factor_big address_to right)
+{
+        positive shift = 0;
+
+        if (!left->size)
+        {
+                address_to left = address_to right;
+                return;
+        }
+        if (!right->size)
+                return;
+
+        while (!(left->limb[0] & 1) && !(right->limb[0] & 1))
+        {
+                factor_big_half(left);
+                factor_big_half(right);
+                shift++;
+        }
+        while (!(left->limb[0] & 1))
+                factor_big_half(left);
+
+        while (right->size)
+        {
+                while (!(right->limb[0] & 1))
+                        factor_big_half(right);
+                if (factor_big_order(left, right) > 0)
+                {
+                        factor_big swap = address_to left;
+
+                        address_to left = address_to right;
+                        address_to right = swap;
+                }
+                factor_big_subtract(right, left);
+        }
+        while (shift--)
+                factor_big_double(left, 0);
+}
+
+/* Montgomery residues are k limbs wide, untrimmed. */
+typedef struct
+{
+        factor_big modulus;
+        positive width;
+        p64 inverse;
+        p64 one[FACTOR_LIMBS];
+        p64 square[FACTOR_LIMBS];
+} factor_ring;
+
+static fn factor_ring_multiply(const factor_ring address_to ring, const p64 address_to left,
+                               const p64 address_to right, p64 address_to out)
+{
+        positive width = ring->width;
+        p64 sum[FACTOR_LIMBS + 2];
+        const p64 address_to modulus = ring->modulus.limb;
+
+        memory_fill(sum, 0, (width + 2) * sizeof(p64));
+
+        for (positive i = 0; i < width; i++)
+        {
+                p64 carry = 0;
+                p128 step;
+
+                for (positive j = 0; j < width; j++)
+                {
+                        step = (p128)left[j] * right[i] + sum[j] + carry;
+                        sum[j] = (p64)step;
+                        carry = (p64)(step >> 64);
+                }
+                step = (p128)sum[width] + carry;
+                sum[width] = (p64)step;
+                sum[width + 1] = (p64)(step >> 64);
+
+                p64 factor = sum[0] * ring->inverse;
+
+                step = (p128)factor * modulus[0] + sum[0];
+                carry = (p64)(step >> 64);
+                for (positive j = 1; j < width; j++)
+                {
+                        step = (p128)factor * modulus[j] + sum[j] + carry;
+                        sum[j - 1] = (p64)step;
+                        carry = (p64)(step >> 64);
+                }
+                step = (p128)sum[width] + carry;
+                sum[width - 1] = (p64)step;
+                sum[width] = sum[width + 1] + (p64)(step >> 64);
+        }
+
+        bool subtract = sum[width] != 0;
+
+        if (!subtract)
+        {
+                subtract = true;
+                for (positive at = width; at-- > 0;)
+                        if (sum[at] != modulus[at])
+                        {
+                                subtract = sum[at] > modulus[at];
+                                break;
+                        }
+        }
+
+        if (subtract)
+        {
+                p64 borrow = 0;
+
+                for (positive at = 0; at < width; at++)
+                {
+                        p64 before = sum[at];
+
+                        sum[at] = before - modulus[at] - borrow;
+                        borrow = (before < modulus[at]) | ((before - modulus[at]) < borrow);
+                }
+        }
+
+        memory_copy(out, sum, width * sizeof(p64));
+}
+
+// (left + right) mod the modulus, both reduced.
+static fn factor_ring_add(const factor_ring address_to ring, p64 address_to left,
+                          const p64 address_to right)
+{
+        positive width = ring->width;
+        p64 carry = 0;
+
+        for (positive at = 0; at < width; at++)
+        {
+                p128 step = (p128)left[at] + right[at] + carry;
+
+                left[at] = (p64)step;
+                carry = (p64)(step >> 64);
+        }
+
+        bool subtract = carry != 0;
+
+        if (!subtract)
+        {
+                subtract = true;
+                for (positive at = width; at-- > 0;)
+                        if (left[at] != ring->modulus.limb[at])
+                        {
+                                subtract = left[at] > ring->modulus.limb[at];
+                                break;
+                        }
+        }
+        if (subtract)
+        {
+                p64 borrow = 0;
+
+                for (positive at = 0; at < width; at++)
+                {
+                        p64 before = left[at];
+                        p64 take = ring->modulus.limb[at];
+
+                        left[at] = before - take - borrow;
+                        borrow = (before < take) | ((before - take) < borrow);
+                }
+        }
+}
+
+static fn factor_ring_begin(factor_ring address_to ring, const factor_big address_to modulus)
+{
+        positive width = modulus->size;
+        p64 inverse = 1;
+
+        ring->modulus = address_to modulus;
+        ring->width = width;
+        for (positive at = 0; at < 6; at++)
+                inverse *= 2 - modulus->limb[0] * inverse;
+        ring->inverse = (p64)0 - inverse;
+
+        //      R and R squared modulo the modulus, by doubling.
+        static factor_big value;
+
+        factor_big_word(address_of value, 1);
+        for (positive at = 0; at < 2 * 64 * width; at++)
+        {
+                factor_big_double(address_of value, 0);
+                if (factor_big_order(address_of value, modulus) >= 0)
+                        factor_big_subtract(address_of value, modulus);
+                if (at + 1 == 64 * width)
+                {
+                        memory_fill(ring->one, 0, width * sizeof(p64));
+                        memory_copy(ring->one, value.limb, value.size * sizeof(p64));
+                }
+        }
+        memory_fill(ring->square, 0, width * sizeof(p64));
+        memory_copy(ring->square, value.limb, value.size * sizeof(p64));
+}
+
+static fn factor_ring_word(const factor_ring address_to ring, p64 word, p64 address_to out)
+{
+        p64 plain[FACTOR_LIMBS];
+
+        memory_fill(plain, 0, ring->width * sizeof(p64));
+        plain[0] = word;
+        factor_ring_multiply(ring, plain, ring->square, out);
+}
+
+static bool factor_ring_same(const factor_ring address_to ring, const p64 address_to left,
+                             const p64 address_to right)
+{
+        return !memory_compare(left, right, ring->width * sizeof(p64));
+}
+
+static bool factor_big_prime(const factor_big address_to number)
+{
+        static const p8 bases[] = {
+            2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41,
+            43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
+        };
+        static factor_ring ring;
+        static factor_big odd;
+        p64 minus_one[FACTOR_LIMBS], witness[FACTOR_LIMBS], base[FACTOR_LIMBS];
+        positive shifts = 0;
+
+        factor_ring_begin(address_of ring, number);
+        odd = address_to number;
+        odd.limb[0] &= ~(p64)1;
+        while (!(odd.limb[0] & 1))
+        {
+                factor_big_half(address_of odd);
+                shifts++;
+        }
+
+        //      Minus one is the modulus less R.
+        {
+                p64 borrow = 0;
+
+                for (positive at = 0; at < ring.width; at++)
+                {
+                        p64 before = number->limb[at];
+
+                        minus_one[at] = before - ring.one[at] - borrow;
+                        borrow = (before < ring.one[at]) | ((before - ring.one[at]) < borrow);
+                }
+        }
+
+        for (positive which = 0; which < sizeof(bases); which++)
+        {
+                factor_ring_word(address_of ring, bases[which], base);
+                memory_copy(witness, ring.one, ring.width * sizeof(p64));
+
+                for (positive bit = odd.size * 64; bit-- > 0;)
+                {
+                        factor_ring_multiply(address_of ring, witness, witness, witness);
+                        if ((odd.limb[bit / 64] >> (bit % 64)) & 1)
+                                factor_ring_multiply(address_of ring, witness, base, witness);
+                }
+
+                if (factor_ring_same(address_of ring, witness, ring.one) ||
+                    factor_ring_same(address_of ring, witness, minus_one))
+                        continue;
+
+                bool passed = false;
+
+                for (positive square = 1; square < shifts; square++)
+                {
+                        factor_ring_multiply(address_of ring, witness, witness, witness);
+                        if (factor_ring_same(address_of ring, witness, minus_one))
+                        {
+                                passed = true;
+                                break;
+                        }
+                        if (factor_ring_same(address_of ring, witness, ring.one))
+                                return false;
+                }
+                if (!passed)
+                        return false;
+        }
+        return true;
+}
+
+// A proper divisor of an odd composite, or false.
+static bool factor_big_rho(const factor_big address_to number, factor_big address_to divisor)
+{
+        static factor_ring ring;
+        static factor_big gathered, copy;
+        positive width = number->size;
+        p64 constant[FACTOR_LIMBS], x[FACTOR_LIMBS], y[FACTOR_LIMBS];
+        p64 saved[FACTOR_LIMBS], product[FACTOR_LIMBS], difference[FACTOR_LIMBS];
+
+        factor_ring_begin(address_of ring, number);
+
+        for (positive attempt = 0; attempt < 64; attempt++)
+        {
+                factor_ring_word(address_of ring, 1 + attempt * 2, constant);
+                factor_ring_word(address_of ring, 2 + attempt * 3, y);
+                memory_copy(x, y, width * sizeof(p64));
+                memory_copy(saved, y, width * sizeof(p64));
+
+                positive run = 1;
+                bool found = false;
+
+                gathered.size = 0;
+                while (!found && run <= ((positive)1 << 40))
+                {
+                        memory_copy(x, y, width * sizeof(p64));
+                        for (positive at = 0; at < run; at++)
+                        {
+                                factor_ring_multiply(address_of ring, y, y, y);
+                                factor_ring_add(address_of ring, y, constant);
+                        }
+
+                        for (positive done = 0; done < run && !found;)
+                        {
+                                positive block = min((positive)128, run - done);
+
+                                memory_copy(saved, y, width * sizeof(p64));
+                                memory_copy(product, ring.one, width * sizeof(p64));
+                                for (positive at = 0; at < block; at++)
+                                {
+                                        factor_ring_multiply(address_of ring, y, y, y);
+                                        factor_ring_add(address_of ring, y, constant);
+
+                                        factor_big a, b;
+
+                                        a.size = b.size = width;
+                                        memory_copy(a.limb, x, width * sizeof(p64));
+                                        memory_copy(b.limb, y, width * sizeof(p64));
+                                        factor_big_trim(address_of a);
+                                        factor_big_trim(address_of b);
+                                        if (factor_big_order(address_of a, address_of b) >= 0)
+                                                factor_big_subtract(address_of a, address_of b);
+                                        else
+                                        {
+                                                factor_big_subtract(address_of b, address_of a);
+                                                a = b;
+                                        }
+                                        memory_fill(difference, 0, width * sizeof(p64));
+                                        memory_copy(difference, a.limb, a.size * sizeof(p64));
+                                        factor_ring_multiply(address_of ring, product, difference, product);
+                                }
+                                done += block;
+
+                                gathered.size = width;
+                                memory_copy(gathered.limb, product, width * sizeof(p64));
+                                factor_big_trim(address_of gathered);
+                                copy = address_to number;
+                                factor_big_gcd(address_of gathered, address_of copy);
+                                if (!(gathered.size == 1 && gathered.limb[0] == 1))
+                                        found = true;
+                        }
+                        run <<= 1;
+                }
+
+                if (!found)
+                        continue;
+
+                //      The block ran past a factor into the whole: walk it
+                //      again one step at a time from where it began.
+                if (!factor_big_order(address_of gathered, number))
+                {
+                        memory_copy(y, saved, width * sizeof(p64));
+                        do
+                        {
+                                factor_ring_multiply(address_of ring, y, y, y);
+                                factor_ring_add(address_of ring, y, constant);
+
+                                factor_big a, b;
+
+                                a.size = b.size = width;
+                                memory_copy(a.limb, x, width * sizeof(p64));
+                                memory_copy(b.limb, y, width * sizeof(p64));
+                                factor_big_trim(address_of a);
+                                factor_big_trim(address_of b);
+                                if (factor_big_order(address_of a, address_of b) >= 0)
+                                        factor_big_subtract(address_of a, address_of b);
+                                else
+                                {
+                                        factor_big_subtract(address_of b, address_of a);
+                                        a = b;
+                                }
+                                gathered = a;
+                                copy = address_to number;
+                                factor_big_gcd(address_of gathered, address_of copy);
+                        } while (gathered.size == 1 && gathered.limb[0] == 1);
+                }
+
+                if (factor_big_order(address_of gathered, number) < 0)
+                {
+                        address_to divisor = gathered;
+                        return true;
+                }
+        }
+        return false;
+}
+
+/*
+        Two words, which is most of what the multi-limb road sees: the same
+        Montgomery arithmetic with R = 2^128, the product of two residues
+        formed from four 64x64 multiplies. Everything the general road does
+        per step in loops and copies is straight-line here.
+*/
+typedef struct
+{
+        p128 modulus;
+        p128 inverse;
+        p128 one;
+        p128 square;
+} factor_wide;
+
+static inline INLINE fn factor_wide_product(p128 left, p128 right,
+                                            p128 address_to high, p128 address_to low)
+{
+        p64 a0 = (p64)left, a1 = (p64)(left >> 64);
+        p64 b0 = (p64)right, b1 = (p64)(right >> 64);
+        p128 ll = (p128)a0 * b0, lh = (p128)a0 * b1;
+        p128 hl = (p128)a1 * b0, hh = (p128)a1 * b1;
+        p128 middle = (ll >> 64) + (p64)lh + (p64)hl;
+
+        address_to low = (middle << 64) | (p64)ll;
+        address_to high = hh + (lh >> 64) + (hl >> 64) + (middle >> 64);
+}
+
+static inline INLINE p128 factor_wide_multiply(const factor_wide address_to ring,
+                                               p128 left, p128 right)
+{
+        p128 high, low, m_high, m_low;
+
+        factor_wide_product(left, right, address_of high, address_of low);
+        p128 m = low * ring->inverse;
+        factor_wide_product(m, ring->modulus, address_of m_high, address_of m_low);
+
+        p128 carry = (p128)(low + m_low < low);
+        p128 first = high + m_high;
+        bool over = first < high;
+        p128 answer = first + carry;
+
+        over |= answer < first;
+        return over || answer >= ring->modulus ? answer - ring->modulus : answer;
+}
+
+static inline INLINE p128 factor_wide_add(const factor_wide address_to ring,
+                                          p128 left, p128 right)
+{
+        p128 sum = left + right;
+
+        return sum < left || sum >= ring->modulus ? sum - ring->modulus : sum;
+}
+
+static fn factor_wide_begin(factor_wide address_to ring, p128 modulus)
+{
+        p128 inverse = 1, value = 1;
+
+        for (positive at = 0; at < 7; at++)
+                inverse *= 2 - modulus * inverse;
+        ring->modulus = modulus;
+        ring->inverse = (p128)0 - inverse;
+
+        for (positive at = 0; at < 256; at++)
+        {
+                bool top = value >> 127;
+
+                value <<= 1;
+                if (top || value >= modulus)
+                        value -= modulus;
+                if (at == 127)
+                        ring->one = value;
+        }
+        ring->square = value;
+}
+
+static p128 factor_wide_word(const factor_wide address_to ring, p64 word)
+{
+        return factor_wide_multiply(ring, word, ring->square);
+}
+
+static bool factor_wide_prime(p128 number)
+{
+        static const p8 bases[] = {
+            2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41,
+            43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
+        };
+        factor_wide ring;
+        p128 odd = number - 1;
+        positive shifts = 0;
+
+        factor_wide_begin(address_of ring, number);
+        while (!(odd & 1))
+        {
+                odd >>= 1;
+                shifts++;
+        }
+
+        p128 minus_one = number - ring.one;
+
+        for (positive which = 0; which < sizeof(bases); which++)
+        {
+                p128 base = factor_wide_word(address_of ring, bases[which]);
+                p128 witness = ring.one;
+
+                for (positive bit = 128; bit-- > 0;)
+                {
+                        witness = factor_wide_multiply(address_of ring, witness, witness);
+                        if ((odd >> bit) & 1)
+                                witness = factor_wide_multiply(address_of ring, witness, base);
+                }
+                if (witness == ring.one || witness == minus_one)
+                        continue;
+
+                bool passed = false;
+
+                for (positive square = 1; square < shifts; square++)
+                {
+                        witness = factor_wide_multiply(address_of ring, witness, witness);
+                        if (witness == minus_one)
+                        {
+                                passed = true;
+                                break;
+                        }
+                        if (witness == ring.one)
+                                return false;
+                }
+                if (!passed)
+                        return false;
+        }
+        return true;
+}
+
+static p128 factor_wide_gcd(p128 left, p128 right)
+{
+        if (!left)
+                return right;
+        if (!right)
+                return left;
+
+        positive shift = 0;
+
+        while (!((left | right) & 1))
+        {
+                left >>= 1;
+                right >>= 1;
+                shift++;
+        }
+        while (!(left & 1))
+                left >>= 1;
+        while (right)
+        {
+                while (!(right & 1))
+                        right >>= 1;
+                if (left > right)
+                {
+                        p128 swap = left;
+
+                        left = right;
+                        right = swap;
+                }
+                right -= left;
+        }
+        return left << shift;
+}
+
+// A proper divisor of an odd composite of two words, or zero.
+static p128 factor_wide_rho(p128 number)
+{
+        factor_wide ring;
+
+        factor_wide_begin(address_of ring, number);
+        for (positive attempt = 0; attempt < 64; attempt++)
+        {
+                p128 constant = factor_wide_word(address_of ring, 1 + attempt * 2);
+                p128 y = factor_wide_word(address_of ring, 2 + attempt * 3);
+                p128 x = y, saved = y, divisor = 1;
+                positive run = 1;
+
+                while (divisor == 1 && run <= ((positive)1 << 40))
+                {
+                        x = y;
+                        for (positive at = 0; at < run; at++)
+                                y = factor_wide_add(address_of ring,
+                                                    factor_wide_multiply(address_of ring, y, y),
+                                                    constant);
+
+                        for (positive done = 0; done < run && divisor == 1;)
+                        {
+                                positive block = min((positive)128, run - done);
+                                p128 product = ring.one;
+
+                                saved = y;
+                                for (positive at = 0; at < block; at++)
+                                {
+                                        y = factor_wide_add(address_of ring,
+                                                            factor_wide_multiply(address_of ring, y, y),
+                                                            constant);
+                                        product = factor_wide_multiply(address_of ring, product,
+                                                                       x > y ? x - y : y - x);
+                                }
+                                done += block;
+                                divisor = factor_wide_gcd(product, number);
+                        }
+                        run <<= 1;
+                }
+
+                if (divisor == number)
+                {
+                        y = saved;
+                        do
+                        {
+                                y = factor_wide_add(address_of ring,
+                                                    factor_wide_multiply(address_of ring, y, y),
+                                                    constant);
+                                divisor = factor_wide_gcd(x > y ? x - y : y - x, number);
+                        } while (divisor == 1);
+                }
+
+                if (divisor > 1 && divisor < number)
+                        return divisor;
+        }
+        return 0;
+}
+
+// number / divisor, bit by bit, for two words.
+static p128 factor_wide_divide(p128 number, p128 divisor)
+{
+        p128 quotient = 0, rest = 0;
+
+        for (positive bit = 128; bit-- > 0;)
+        {
+                bool top = rest >> 127;
+
+                rest = rest << 1 | ((number >> bit) & 1);
+                if (top || rest >= divisor)
+                {
+                        rest -= divisor;
+                        quotient |= (p128)1 << bit;
+                }
+        }
+        return quotient;
+}
+
+/* The factors found, words and wider, in one pool. */
+static p64 factor_pool[FACTOR_POOL];
+static positive factor_pool_used;
+static struct { p32 at, size; } factor_found[FACTOR_MOST];
+static positive factor_found_count;
+
+static bool factor_found_add(const p64 address_to limb, positive size)
+{
+        if (factor_found_count == FACTOR_MOST || factor_pool_used + size > FACTOR_POOL)
+                return false;
+        memory_copy(factor_pool + factor_pool_used, limb, size * sizeof(p64));
+        factor_found[factor_found_count].at = (p32)factor_pool_used;
+        factor_found[factor_found_count++].size = (p32)size;
+        factor_pool_used += size;
+        return true;
+}
+
+static bool factor_collect(positive number, positive address_to factors,
+                           positive address_to count);
+
+static bool factor_big_collect(factor_big address_to number)
+{
+        if (number->size <= 1)
+        {
+                positive factors[positive_bits];
+                positive count = 0;
+
+                if (number->size && number->limb[0] > 1 &&
+                    !factor_collect(number->limb[0], factors, address_of count))
+                        return false;
+                for (positive at = 0; at < count; at++)
+                        if (!factor_found_add(address_of factors[at], 1))
+                                return false;
+                return true;
+        }
+
+        if (number->size == 2)
+        {
+                p128 value = (p128)number->limb[1] << 64 | number->limb[0];
+
+                if (factor_wide_prime(value))
+                        return factor_found_add(number->limb, 2);
+
+                p128 part = factor_wide_rho(value);
+
+                if (!part)
+                        return false;
+
+                factor_big one, other;
+                p128 rest = factor_wide_divide(value, part);
+
+                one.limb[0] = (p64)part;
+                one.limb[1] = (p64)(part >> 64);
+                one.size = 2;
+                factor_big_trim(address_of one);
+                other.limb[0] = (p64)rest;
+                other.limb[1] = (p64)(rest >> 64);
+                other.size = 2;
+                factor_big_trim(address_of other);
+                return factor_big_collect(address_of one) &&
+                       factor_big_collect(address_of other);
+        }
+
+        if (factor_big_prime(number))
+                return factor_found_add(number->limb, number->size);
+
+        factor_big divisor, quotient;
+
+        if (!factor_big_rho(number, address_of divisor))
+                return false;
+        factor_big_divide(number, address_of divisor, address_of quotient);
+        return factor_big_collect(address_of divisor) &&
+               factor_big_collect(address_of quotient);
+}
+
+static b32 factor_found_order(positive left, positive right)
+{
+        p32 ls = factor_found[left].size, rs = factor_found[right].size;
+
+        if (ls != rs)
+                return ls < rs ? -1 : 1;
+        for (positive at = ls; at-- > 0;)
+        {
+                p64 a = factor_pool[factor_found[left].at + at];
+                p64 b = factor_pool[factor_found[right].at + at];
+
+                if (a != b)
+                        return a < b ? -1 : 1;
+        }
+        return 0;
+}
+
+// A number past one word: its factors, sorted, after it.
+static bool factor_big_number(factor_big address_to number, bool exponents)
+{
+        factor_pool_used = 0;
+        factor_found_count = 0;
+
+        while (!(number->limb[0] & 1))
+        {
+                p64 two = 2;
+
+                if (!factor_found_add(address_of two, 1))
+                        return false;
+                factor_big_half(number);
+        }
+        for (p64 trial = 3; trial < 2000 && number->size > 1; trial += 2)
+                while (number->size > 1 && !factor_big_remainder_word(number, trial))
+                {
+                        if (!factor_found_add(address_of trial, 1))
+                                return false;
+                        factor_big_divide_word(number, trial);
+                }
+
+        if (!factor_big_collect(number))
+                return false;
+
+        for (positive at = 1; at < factor_found_count; at++)
+        {
+                positive before = at;
+
+                while (before && factor_found_order(before - 1, before) > 0)
+                {
+                        __typeof__(factor_found[0]) swap = factor_found[before];
+
+                        factor_found[before] = factor_found[before - 1];
+                        factor_found[before - 1] = swap;
+                        before--;
+                }
+        }
+
+        for (positive at = 0; at < factor_found_count;)
+        {
+                positive after = at + 1;
+
+                while (after < factor_found_count && !factor_found_order(after, at))
+                        after++;
+
+                text_put_character(' ');
+                if (factor_found[at].size == 1)
+                        positive_to_string(text_put, factor_pool[factor_found[at].at]);
+                else
+                {
+                        static factor_big shown;
+
+                        shown.size = factor_found[at].size;
+                        memory_copy(shown.limb, factor_pool + factor_found[at].at,
+                                    shown.size * sizeof(p64));
+                        factor_big_put(address_of shown);
+                }
+                if (exponents && after - at > 1)
+                {
+                        text_put_character('^');
+                        positive_to_string(text_put, after - at);
+                }
+                at = exponents ? after : at + 1;
+        }
+        return true;
+}
+
+/*
+        GNU's factor writes its lines in pieces of at most PIPE_BUF bytes that
+        end at a newline -- several factors sharing one pipe, as split
+        --filter=factor has them, then never cut into each other's lines --
+        and a line at a time to a terminal. After each line: once 4096 bytes
+        are held, what ends at the last newline within them goes out and the
+        rest waits.
+*/
+#define FACTOR_PIPE_BUF 4096
+static b32 factor_terminal;
+
+static fn factor_line_end()
+{
+        if (factor_terminal < 0)
+                factor_terminal = stream_is_terminal(1);
+
+        if (factor_terminal)
+        {
+                text_flush();
+                return;
+        }
+
+        if (text_out_used < FACTOR_PIPE_BUF)
+                return;
+
+        positive cut = FACTOR_PIPE_BUF;
+
+        while (cut && text_out_buffer[cut - 1] != '\n')
+                cut--;
+        if (!cut)
+                cut = FACTOR_PIPE_BUF;
+
+        positive rest = text_out_used - cut;
+
+        text_out_used = cut;
+        text_flush();
+        memory_copy(text_out_buffer, text_out_buffer + cut, rest);
+        text_out_used = rest;
+}
+
 static bool factor_number(p8 address_to bytes, positive length,
                           bool exponents)
 {
-        p8 decimal[32];
+        static p8 decimal[FACTOR_DIGITS + 1];
         /*      The reference walks off leading blanks -- spaces alone, not
                 tabs or newlines -- and then one plus sign, and nothing after
                 the sign. So ' 12' is twelve and '+ 12' is not a number. */
@@ -6370,7 +7398,43 @@ static bool factor_number(p8 address_to bytes, positive length,
         string_address after = decimal;
         if (!string_digits_checked(address_of after, 10, address_of value) ||
             string_get(after))
-                goto invalid;
+        {
+                //      All digits and past one word: the multi-limb road.
+                if (string_span_max(decimal, length - start, string_set_digits) !=
+                    length - start)
+                        goto invalid;
+
+                static factor_big wide;
+
+                wide.size = 0;
+                for (positive at = 0; at < length - start;)
+                {
+                        positive take = min((positive)9, length - start - at);
+                        p64 chunk = 0, scale = 1;
+
+                        for (positive digit = 0; digit < take; digit++)
+                        {
+                                chunk = chunk * 10 + (p64)(decimal[at + digit] - '0');
+                                scale *= 10;
+                        }
+                        if (!factor_big_multiply_add(address_of wide, scale, chunk))
+                                goto invalid;
+                        at += take;
+                }
+
+                factor_big_put(address_of wide);
+                text_put_character(':');
+                if (!factor_big_number(address_of wide, exponents))
+                {
+                        string_diagnostic(&text_diagnostic, 0, decimal, "factorization did not converge");
+                        text_put_character('\n');
+                        factor_line_end();
+                        return false;
+                }
+                text_put_character('\n');
+                factor_line_end();
+                return true;
+        }
 
         positive_to_string(text_put, value);
         text_put_character(':');
@@ -6421,6 +7485,7 @@ static bool factor_number(p8 address_to bytes, positive length,
                 {
                         string_diagnostic(&text_diagnostic, 0, decimal, "factorization did not converge");
                         text_put_character('\n');
+                        factor_line_end();
                         return false;
                 }
 
@@ -6459,48 +7524,47 @@ static bool factor_number(p8 address_to bytes, positive length,
         }
 
         text_put_character('\n');
+        factor_line_end();
         return true;
 
 invalid:
         {
-                p8 shown[256];
-                positive take = 0;
-
-                for (positive at = 0; at < length && take + 4 < sizeof(shown); at++)
-                {
-                        p8 byte = bytes[at];
-
-                        //      The reference quotes a C string, so what it
-                        //      shows ends where the first zero byte does.
-                        if (!byte)
-                                break;
-                        if (byte_is_printable(byte))
-                                shown[take++] = byte;
-                        else
-                        {
-                                shown[take++] = '\\';
-                                shown[take++] = (p8)('0' + (byte >> 6));
-                                shown[take++] = (p8)('0' + ((byte >> 3) & 7));
-                                shown[take++] = (p8)('0' + (byte & 7));
-                        }
-                }
-                shown[take] = end;
-
-                // Digits alone overflowed the native word, this factor's
-                // stated ceiling; anything else is GNU's own complaint.
+                // Digits alone past the most this carries, its ceiling;
+                // anything else is GNU's own complaint, naming the word
+                // whole, as far as its first zero byte.
                 positive digits = start + string_span_max(bytes + start,
                                                           length - start,
                                                           string_set_digits);
+                bool ceiling = digits == length && length > start;
 
                 text_flush();
-                if (digits == length && length > start)
-                        string_format(writer_stderr,
-                                      "factor: %s: not a valid positive native-word integer\n",
-                                      shown);
+                writer_stderr(ceiling ? "factor: " : "factor: '", 0);
+                for (positive at = 0; at < length && bytes[at];)
+                {
+                        p8 shown[256];
+                        positive take = 0;
+
+                        for (; at < length && bytes[at] && take + 4 < sizeof(shown); at++)
+                        {
+                                p8 byte = bytes[at];
+
+                                if (byte_is_printable(byte))
+                                        shown[take++] = byte;
+                                else
+                                {
+                                        shown[take++] = '\\';
+                                        shown[take++] = (p8)('0' + (byte >> 6));
+                                        shown[take++] = (p8)('0' + ((byte >> 3) & 7));
+                                        shown[take++] = (p8)('0' + (byte & 7));
+                                }
+                        }
+                        writer_stderr(shown, take);
+                }
+                if (ceiling)
+                        string_format(writer_stderr, ": too large; at most %p digits are factored\n",
+                                      (positive)FACTOR_DIGITS);
                 else
-                        string_format(writer_stderr,
-                                      "factor: '%s' is not a valid positive integer\n",
-                                      shown);
+                        writer_stderr("' is not a valid positive integer\n", 0);
         }
         return false;
 }
@@ -6521,6 +7585,8 @@ static b32 tools_factor()
         bool exponents = (taking.flags & FILE_FLAG('h')) != 0;
         bool failed = false;
 
+        factor_terminal = -1;
+
         if (file_operand_count)
         {
                 for (positive at = 0; at < file_operand_count && !text_out_failed; at++)
@@ -6537,9 +7603,17 @@ static b32 tools_factor()
                 if (!text_reader_open(address_of input, null))
                         return text_done(1);
 
-                p8 token[32];
+                //      A token is kept whole whatever its length, as GNU
+                //      keeps it, so a long word that is no number is named
+                //      in full; one of digits past the most factored is
+                //      the ceiling's own complaint.
+                static p8 address_to token;
+                static positive token_room;
                 positive length = 0;
                 bool excess = false;
+
+                if (!token && !array_store_reserve(token, token_room, 0, 4096, 4096))
+                        return text_done(1);
 
                 // A refused write ends the run, as GNU's does: a pipe that
                 // never ends would otherwise be factored for ever.
@@ -6556,14 +7630,15 @@ static b32 tools_factor()
                                                            exponents))
                                         {
                                                 if (excess)
-                                                        string_diagnostic(&text_diagnostic, 0, null, "integer exceeds native-word ceiling");
+                                                        string_diagnostic(&text_diagnostic, 0, null, "integer too large; at most 2543 digits are factored");
                                                 failed = true;
                                         }
                                         length = 0;
                                         excess = false;
                                 }
                         }
-                        else if (length < sizeof(token) - 1)
+                        else if (array_store_reserve(token, token_room, length,
+                                                     length + 2, 4096))
                                 token[length++] = byte;
                         else
                                 excess = true;
@@ -6574,7 +7649,7 @@ static b32 tools_factor()
                         if (excess || !factor_number(token, length, exponents))
                         {
                                 if (excess)
-                                        string_diagnostic(&text_diagnostic, 0, null, "integer exceeds native-word ceiling");
+                                        string_diagnostic(&text_diagnostic, 0, null, "integer too large; at most 2543 digits are factored");
                                 failed = true;
                         }
                 }
