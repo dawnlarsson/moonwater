@@ -10138,8 +10138,9 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                                       "  - [posix-]long-iso\n"
                                       "  - [posix-]iso\n"
                                       "  - [posix-]locale\n"
-                                      "  - +FORMAT (e.g., +%%H:%%M) for a 'date'-style format\n",
-                                      program, writer_terminal_quoted_name, style);
+                                      "  - +FORMAT (e.g., +%%H:%%M) for a 'date'-style format\n"
+                                      "Try '%s --help' for more information.\n",
+                                      program, writer_terminal_quoted_name, style, program);
                 }
         }
         if (ls_selected.stamp == 'M')

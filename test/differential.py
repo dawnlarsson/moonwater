@@ -7301,7 +7301,8 @@ FILES_UTILITIES = (
                    # -D turns off a --hyperlink read before it; one read
                    # after it drops --dired instead, and --zero with it.
                    ("--hyperlink", "-R", "--dired", "dir"), ("--dired", "--hyperlink", "dir"),
-                   ("-D", "--zero", "--hyperlink", "dir"), ("--hyperlink", "-D", "--zero", "dir"))),
+                   ("-D", "--zero", "--hyperlink", "dir"), ("--hyperlink", "-D", "--zero", "dir"),
+                   ("-l", "--time-style=XX"))),
     #       dir and vdir are ls with a different default format, so they
     #       answer for the same surface and are walked over it. A shorter
     #       list of their own left sixty-nine of ls's options untouched in
