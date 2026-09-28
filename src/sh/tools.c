@@ -10695,15 +10695,7 @@ static p8 dump_od_offset_read(string_address text, positive address_to value)
 
         for (;; at++)
         {
-                p8 byte = (p8)*at;
-                positive digit;
-
-                if (byte >= '0' && byte <= '9')
-                        digit = (positive)(byte - '0');
-                else if (base == 16 && (byte | 0x20) >= 'a' && (byte | 0x20) <= 'f')
-                        digit = (positive)((byte | 0x20) - 'a' + 10);
-                else
-                        break;
+                positive digit = digit_known((p8)*at, base);
 
                 if (digit >= base)
                         break;
@@ -10780,10 +10772,10 @@ static positive dump_od_width(p8 type, positive size)
         return size == 1 ? 4 : size == 2 ? 6 : size == 4 ? 11 : 20;
 }
 
-/* One -t word can hold several formats (`-t x1c`) and z decorates the
-   integer format immediately before it.  Floating point and the named C
-   sizes are intentionally refused instead of being interpreted nearly. */
 /*
+        One -t word can hold several formats (`-t x1c`), and z decorates the
+        format immediately before it.
+
         -t reads a whole string of specifications, and the reference has a
         separate sentence for each way one can be wrong: a byte that begins
         no specification at all, and a width no integral type on this
