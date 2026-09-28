@@ -64166,8 +64166,10 @@ static fn handshake(void)
         starting_kept = starting;
 
         /* Every individual bit is authenticated by mac1, including header,
-           ciphertext, tag and padding. This is exhaustive over both full
-           handshake datagrams rather than a sample of interesting offsets. */
+           ciphertext, tag and padding -- all but an initiation's mac2, which
+           the admission asks about, and only under load. This is exhaustive
+           over both full handshake datagrams rather than a sample of
+           interesting offsets. */
         {
                 p8 changed[WATERLINK_DATAGRAM];
                 positive first_refused = 0;
@@ -64187,8 +64189,9 @@ static fn handshake(void)
                                 !waterlink_gate_passes(address_of alice, changed,
                                                        sizeof changed);
                 }
-                check("sec: every one-bit initiation mutation fails its gate",
-                      first_refused == WATERLINK_DATAGRAM * 8);
+                check("sec: every one-bit initiation mutation fails its gate "
+                      "but in mac2",
+                      first_refused == (WATERLINK_DATAGRAM - 16) * 8);
                 check("sec: every one-bit answer mutation fails its gate",
                       second_refused == WATERLINK_DATAGRAM * 8);
         }
@@ -64269,7 +64272,7 @@ static fn handshake(void)
         {
                 static const positive where[] = {0, 5, 16, 16 + 40,
                                                  16 + WATERLINK_INITIATE_BYTES - 1,
-                                                 16 + WATERLINK_INITIATE_BYTES,
+                                                 16 + WATERLINK_INITIATE_BYTES + 16,
                                                  WATERLINK_DATAGRAM - 1};
                 positive refused = 0;
 
@@ -64348,17 +64351,21 @@ static fn handshake(void)
                       !waterlink_stamp_newer(now, last));
         }
 
+        static p8 unproven[WATERLINK_DATAGRAM];
+
         memory_zero(address_of admission, sizeof admission);
         for (positive at = 0; at < 50; at++)
-                admitted += waterlink_admit(address_of admission, source,
-                                            1000000 + at * 1000);
+                admitted += waterlink_admit(address_of admission, unproven,
+                                            source, 7, 1000000 + at * 1000) == 1;
         check("a flood from one source is held to its burst",
               admitted == WATERLINK_ADMIT_BURST);
         check("and it earns an initiation back in a fifth of a second",
-              waterlink_admit(address_of admission, source, 1000000 + 250000));
+              waterlink_admit(address_of admission, unproven, source, 7,
+                              1000000 + 250000) == 1);
         source[15] = 3;
         check("while another source is not held by it",
-              waterlink_admit(address_of admission, source, 1000000 + 50000));
+              waterlink_admit(address_of admission, unproven, source, 7,
+                              1000000 + 50000) == 1);
 
         memory_zero(address_of admission, sizeof admission);
         admitted = 0;
@@ -64367,13 +64374,18 @@ static fn handshake(void)
                 memory_zero(source, sizeof source);
                 source[14] = (p8)(at >> 8);
                 source[15] = (p8)at;
-                admitted += waterlink_admit(address_of admission, source,
-                                            2000000);
+                admitted += waterlink_admit(address_of admission, unproven,
+                                            source, 7, 2000000) == 1;
         }
-        check("sec: rotating source addresses are held to the global burst",
-              admitted == WATERLINK_ADMIT_GLOBAL_BURST);
-        check("sec: the global admission bucket refills",
-              waterlink_admit(address_of admission, source, 3000000));
+        check("sec: rotating source addresses reach the curve only up to the "
+              "load, past which they need mac2 and a secret to have it by",
+              admitted == WATERLINK_ADMIT_LOADED &&
+                      admission.all.tokens ==
+                              WATERLINK_ADMIT_GLOBAL_BURST -
+                                      WATERLINK_ADMIT_LOADED);
+        check("sec: the load passes as its bucket refills",
+              waterlink_admit(address_of admission, unproven, source, 7,
+                              3000000) == 1);
 
         check("a session is keyed again at two minutes",
               !waterlink_rekey_due(119999999, 5) &&
@@ -65486,6 +65498,208 @@ static fn responder(bipolar listener, p16 port)
         for (positive at = 0; at < LINK_SESSIONS; at++)
                 if (link_self.session[at].used)
                         link_session_close(link_self.session + at);
+}
+
+/*
+        Admission under a flood. A sender that knows this machine's key makes
+        good mac1s from addresses it makes up; past WATERLINK_ADMIT_LOADED a
+        second the listener asks for mac2, answers an initiation without it
+        with a cookie reply, and spends none of the curve's bucket on it --
+        so a paired client, told its cookie, still gets in. The cookie is
+        bound to the address and port it was handed to, and is good for two
+        minutes of the listener's secret.
+*/
+static fn wls_flood(positive count, p64 now)
+{
+        p8 datagram[WATERLINK_DATAGRAM];
+        p8 hello[WATERLINK_HELLO_BYTES];
+        p8 ephemeral[32];
+        p8 somewhere[16] = {0x20, 0x01, 0x0d, 0xb8};
+        struct waterlink_noise noise;
+
+        for (positive at = 0; at < count; at++)
+        {
+                memory_zero(hello, sizeof hello);
+                waterlink_stamp(hello, 7000 + at, 0);
+                wls_seeded(ephemeral, 32, (p8)(at + 7));
+                (void)waterlink_initiate(address_of noise, address_of wls_b,
+                                         wls_server.public, null, ephemeral,
+                                         hello, datagram);
+                somewhere[14] = (p8)(at >> 8);
+                somewhere[15] = (p8)at;
+                link_server_initiation(datagram, WATERLINK_DATAGRAM, somewhere,
+                                       (p16)(1000 + at), now);
+        }
+}
+
+static fn cookies(bipolar listener, p16 port)
+{
+        p8 datagram[WATERLINK_DATAGRAM];
+        p8 heard[WATERLINK_DATAGRAM + 16];
+        p8 mac1[16], cookie[16], again[16];
+        p64 now = 50000000;
+        p32 tokens;
+        p64 handed;
+        positive refused = 0;
+
+        link_self.me = wls_server;
+        wls_peers_with(wls_client.public, WATERLINK_MAY_DEFAULT);
+        memory_zero(address_of link_self.admission, sizeof link_self.admission);
+        link_self.stamps = 0;
+        wls_drain(listener);
+
+        wls_flood(WATERLINK_ADMIT_LOADED, now);
+        tokens = link_self.admission.all.tokens;
+        wls_flood(200, now);
+        check("sec: a flood of initiations past the load spends none of the "
+              "curve's bucket",
+              link_self.admission.all.tokens == tokens && tokens &&
+                      link_self.admission.cookies == 200);
+
+        wls_initiation(datagram, 21, 8000, 0x0badcafe);
+        memory_copy(mac1, datagram + 16 + WATERLINK_INITIATE_BYTES - 16, 16);
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now);
+        check("sec: under it a paired client's initiation is answered with a "
+              "cookie reply, not a session",
+              wls_heard(listener, heard) == WATERLINK_COOKIE_DATAGRAM &&
+                      heard[0] == WATERLINK_KIND_COOKIE &&
+                      wls_sessions_used() == 0);
+        check("and the client opens the cookie, sealed to its mac1",
+              waterlink_cookie_take(wls_server.public, mac1, heard,
+                                    WATERLINK_COOKIE_DATAGRAM, cookie));
+        mac1[3] ^= 1;
+        check("sec: but not as the answer to another initiation",
+              !waterlink_cookie_take(wls_server.public, mac1, heard,
+                                     WATERLINK_COOKIE_DATAGRAM, again));
+        mac1[3] ^= 1;
+        for (positive length = 0; length <= WATERLINK_DATAGRAM; length++)
+                refused += length != WATERLINK_COOKIE_DATAGRAM &&
+                           !waterlink_cookie_take(wls_server.public, mac1, heard,
+                                                  length, again);
+        check("sec: nor at any other length",
+              refused == WATERLINK_DATAGRAM);
+
+        //      From another port the cookie is not the one it was given.
+        wls_initiation(datagram, 22, 8001, 0x0badcaff);
+        waterlink_mac2(cookie, datagram);
+        handed = link_self.admission.cookies;
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback,
+                               (p16)(port + 1), now);
+        check("sec: a cookie from another port is asked for again",
+              link_self.admission.cookies == handed + 1 &&
+                      wls_sessions_used() == 0);
+
+        wls_initiation(datagram, 21, 8002, 0x0badcafe);
+        waterlink_mac2(cookie, datagram);
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now);
+        check("sec: the client asking again under its cookie is answered and "
+              "keyed, the flood notwithstanding",
+              wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
+                      heard[0] == WATERLINK_KIND_RESPOND &&
+                      wls_sessions_used() == 1);
+
+        //      Two minutes on, the secret is another, and so is the cookie.
+        now += (p64)WATERLINK_COOKIE_SECONDS * 1000000 + 1000000;
+        wls_flood(WATERLINK_ADMIT_LOADED + 8, now);
+        wls_drain(listener);
+        wls_initiation(datagram, 23, 8003, 0x0badcb00);
+        memory_copy(mac1, datagram + 16 + WATERLINK_INITIATE_BYTES - 16, 16);
+        waterlink_mac2(cookie, datagram);
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now);
+        check("sec: a cookie older than the secret's two minutes is asked for "
+              "again, and the new one differs",
+              wls_heard(listener, heard) == WATERLINK_COOKIE_DATAGRAM &&
+                      waterlink_cookie_take(wls_server.public, mac1, heard,
+                                            WATERLINK_COOKIE_DATAGRAM, again) &&
+                      memory_compare(again, cookie, 16) &&
+                      wls_sessions_used() == 1);
+
+        entropy_down = true;
+        now += (p64)WATERLINK_COOKIE_SECONDS * 1000000 + 1000000;
+        wls_flood(WATERLINK_ADMIT_LOADED + 8, now);
+        handed = link_self.admission.cookies;
+        wls_initiation(datagram, 24, 8004, 0x0badcb01);
+        waterlink_mac2(again, datagram);
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now);
+        entropy_down = false;
+        check("sec: a secret that cannot be made again is not stretched: "
+              "under load nothing is admitted or handed out",
+              link_self.admission.cookies == handed && wls_sessions_used() == 1);
+
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used)
+                        link_session_close(link_self.session + at);
+}
+
+/*
+        The client's half: a cookie reply to the initiation it has out is
+        kept and asked again under at once, and the next initiation carries
+        mac2 by it; a second reply, to an initiation that carried one, does
+        not make it ask again before its time.
+*/
+static fn client_cookie(bipolar listener, p16 port)
+{
+        struct link_session address_to s = link_self.session;
+        struct waterlink_admission table;
+        p8 heard[WATERLINK_DATAGRAM + 16];
+        p8 reply[WATERLINK_COOKIE_DATAGRAM];
+        p8 nonce[24];
+        p8 cookie[16];
+        p64 now = 90000000;
+
+        memory_zero(address_of table, sizeof table);
+        wls_seeded(table.secret, 32, 91);
+        table.secret_made = now;
+        wls_seeded(nonce, 24, 92);
+        link_self.me = wls_client;
+        link_self.server = false;
+        memory_zero(address_of link_client, sizeof link_client);
+        wls_drain(listener);
+        check("a client session opens for the cookie", link_session_open(s));
+        memory_copy(s->peer, wls_server.public, 32);
+        memory_copy(s->address, wls_loopback, 16);
+        s->port = port;
+
+        check("the client's first initiation goes out without mac2",
+              link_client_initiate(s, now) &&
+                      wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
+                      memory_span_byte(heard + 16 + WATERLINK_INITIATE_BYTES, 0,
+                                       16) == 16);
+        waterlink_cookie_reply(address_of wls_server, address_of table, heard,
+                               wls_loopback, port, nonce, reply);
+        link_datagram(reply, sizeof reply, wls_loopback, port, now + 10);
+        check("sec: a cookie reply to it is kept, and asks again at once",
+              link_client.cookie_at == now + 10 &&
+                      link_age(now + 10, link_client.initiated) > LINK_ATTEMPT);
+        check("and the next initiation carries mac2 by that cookie",
+              link_client_initiate(s, now + 20) &&
+                      wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
+                      link_client.cookied &&
+                      waterlink_cookie_take(wls_server.public,
+                                            link_client.mac1, reply, sizeof reply,
+                                            cookie) == false);
+        waterlink_cookie_of(address_of table, wls_loopback, port, cookie);
+        {
+                p8 copy[WATERLINK_DATAGRAM];
+
+                memory_copy(copy, heard, WATERLINK_DATAGRAM);
+                memory_zero(copy + 16 + WATERLINK_INITIATE_BYTES, 16);
+                waterlink_mac2(cookie, copy);
+                check("sec: which the listener's cookie for this place makes",
+                      !memory_compare(copy, heard, WATERLINK_DATAGRAM));
+        }
+        waterlink_cookie_reply(address_of wls_server, address_of table, heard,
+                               wls_loopback, port, nonce, reply);
+        link_datagram(reply, sizeof reply, wls_loopback, port, now + 30);
+        check("sec: a reply to an initiation that carried a cookie does not "
+              "hurry the next",
+              link_client.initiated == now + 20);
+        link_session_close(s);
+        crypto_forget(address_of link_client, sizeof link_client);
 }
 
 /*
@@ -66907,6 +67121,8 @@ b32 main(void)
         staging();
         publication();
         responder(listener, port);
+        cookies(listener, port);
+        client_cookie(listener, port);
         initiator_answer();
         carried_is_atomic();
         seen_once_a_second();

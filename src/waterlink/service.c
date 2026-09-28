@@ -2104,6 +2104,7 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         p64 conversation;
         p32 theirs;
         p32 ours;
+        bipolar admitted;
 
         //      To this machine's key, or a member's greeting to a group's.
         if (!waterlink_gate_passes(me, datagram, length))
@@ -2118,8 +2119,26 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
                 me = address_of link_nearby.keys[group].identity;
                 psk = link_nearby.keys[group].psk;
         }
-        if (!waterlink_admit(address_of link_self.admission, address, now))
-                return;
+        /*      The cookies' secret, made again once it is two minutes old;
+                under load an initiation without a good mac2 for where it
+                came from is answered with its cookie and goes no further. A
+                group's greeter asks nothing again, so under load greetings
+                wait for the load to pass. */
+        if (!waterlink_cookie_fresh(address_of link_self.admission, now) &&
+            system_random_fill(link_self.admission.secret, 32, 0) >= 0)
+                link_self.admission.secret_made = now ? now : 1;
+        admitted = waterlink_admit(address_of link_self.admission, datagram,
+                                   address, port, now);
+        if (admitted < 0 && system_random_fill(ephemeral, 24, 0) >= 0)
+        {
+                waterlink_cookie_reply(me, address_of link_self.admission,
+                                       datagram, address, port, ephemeral,
+                                       answer);
+                (void)link_send_to(answer, WATERLINK_COOKIE_DATAGRAM, address,
+                                   port);
+        }
+        if (admitted <= 0)
+                goto forget;
         if (!waterlink_accept(address_of noise, me, psk, datagram, who, hello))
                 goto forget;
         if (psk)
@@ -2606,6 +2625,7 @@ static positive link_sessions_watch(system_poll_descriptor address_to watch,
 }
 
 static fn link_client_answered(p8 address_to datagram, positive length);
+static fn link_client_cookie(p8 address_to datagram, positive length, p64 now);
 
 static fn link_datagram(p8 address_to datagram, positive length,
                         p8 address_to address, p16 port, p64 now)
@@ -2622,6 +2642,8 @@ static fn link_datagram(p8 address_to datagram, positive length,
         {
                 if (head.kind == WATERLINK_KIND_RESPOND)
                         link_client_answered(datagram, length);
+                else if (head.kind == WATERLINK_KIND_COOKIE)
+                        link_client_cookie(datagram, length, now);
         }
         else if (head.kind == WATERLINK_KIND_INITIATE)
                 link_server_initiation(datagram, length, address, port, now);
@@ -2748,6 +2770,10 @@ typedef struct
         p32 ours;      // an initiation waiting for its answer, or 0
         p64 initiated; // when it went
         positive attempts;
+        p8 mac1[16];   // its mac1, which a cookie reply to it is sealed to
+        bool cookied;  // it carried a cookie
+        p8 cookie[16]; // what the machine last handed out, under load
+        p64 cookie_at; // when; 0 for never
 } link_client_state;
 
 static link_client_state link_client;
@@ -2778,9 +2804,18 @@ static bool link_client_initiate(struct link_session address_to s, p64 now)
                system_random_fill(ephemeral, 32, 0) >= 0 &&
                waterlink_initiate(address_of link_client.noise,
                                   address_of link_self.me, s->peer, null,
-                                  ephemeral, hello, datagram) &&
-               link_send_to(datagram, WATERLINK_DATAGRAM, s->address,
-                            s->port) >= 0;
+                                  ephemeral, hello, datagram);
+        //      Under a cookie the machine handed out, while it is good.
+        link_client.cookied =
+                link_client.cookie_at &&
+                link_age(now, link_client.cookie_at) <
+                        (p64)(WATERLINK_COOKIE_SECONDS - 5) * 1000000;
+        if (sent && link_client.cookied)
+                waterlink_mac2(link_client.cookie, datagram);
+        memory_copy(link_client.mac1,
+                    datagram + 16 + WATERLINK_INITIATE_BYTES - 16, 16);
+        sent = sent && link_send_to(datagram, WATERLINK_DATAGRAM, s->address,
+                                    s->port) >= 0;
         crypto_forget(ephemeral, sizeof ephemeral);
         if (!sent)
         {
@@ -2835,6 +2870,22 @@ static fn link_client_answered(p8 address_to datagram, positive length)
             link_client_answer(link_self.session, address_of link_client.noise,
                                link_client.ours, datagram, length))
                 link_client.ours = 0;
+}
+
+/*      A cookie reply to the initiation out: kept, and asked again under it
+        at once if that initiation carried none -- only then, so a forged
+        reply cannot keep the client initiating; otherwise the next attempt
+        carries it. Either way it is an attempt. */
+static fn link_client_cookie(p8 address_to datagram, positive length, p64 now)
+{
+        if (!link_client.ours ||
+            !waterlink_cookie_take(link_self.session->peer, link_client.mac1,
+                                   datagram, length, link_client.cookie))
+                return;
+        link_client.cookie_at = now ? now : 1;
+        if (!link_client.cookied)
+                link_client.initiated = now > LINK_ATTEMPT ? now - LINK_ATTEMPT - 1
+                                                           : 0;
 }
 
 static p64 link_rekey_after(void)
