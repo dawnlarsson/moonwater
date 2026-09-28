@@ -45677,7 +45677,16 @@ static void state_drain(p64 now)
         reader_refuses = false;
         for (positive round = 0; round < 1024; round++)
         {
+                p64 due_a, due_b;
+
                 now += WATERLINK_RTO_MOST + 1000;
+                //      As the service's turn does: when to come back, which is
+                //      also when a held frame is asked about again.
+                due_a = waterlink_wake(&state_a, now);
+                due_b = waterlink_wake(&state_b, now);
+                if (due_a == ~0ull && due_b == ~0ull && waterlink_idle(&state_a) &&
+                    waterlink_idle(&state_b))
+                        break;
                 for (p8 key = 0; key < WATERLINK_KEYS; key++)
                         if (waterlink_paused(&state_b, key))
                                 waterlink_resume(&state_b, key, state_sink, &state_b_tag);
@@ -45699,8 +45708,6 @@ static void state_drain(p64 now)
                         if (!state_deliver(&state_a, network[1][0], used, now, &state_a_tag))
                                 abort();
                 }
-                if (waterlink_idle(&state_a) && waterlink_idle(&state_b))
-                        break;
         }
         state_check(3);
         for (p8 key = 0; key < WL_TRACKED; key++)

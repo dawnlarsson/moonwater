@@ -61973,8 +61973,8 @@ static fn full_frame_beside_owed_ack(void)
 
 /*
         The acknowledgement is the credit. A reader that will not take a
-        frame keeps it held, the sender hears it is held and does not send
-        it again however long it waits, and a key runs no further than its
+        frame keeps it held, the sender hears it is held and its loss timer
+        does not send it again however long it waits, and a key runs no further than its
         window past what was taken -- then, taken, everything flows.
 */
 static bool refusing;
@@ -62045,6 +62045,62 @@ static fn reader_credit(void)
         check("and the rest follows, with the link left idle",
               one.delivered == 101 && waterlink_idle(address_of one) &&
                       one.retransmitted == 0);
+}
+
+/*      Two ends, and the one acknowledgement that would free what the far
+        side held lost on the way: the reader refuses three frames, the
+        sender hears they are held, the reader comes back and takes them,
+        and the network loses the answer. Nothing of the key is in flight,
+        so no loss timer runs; waterlink_wake has to be the one that asks. */
+static struct waterlink_link held_sender, held_reader;
+
+static fn held_answer_lost(void)
+{
+        p8 body[WATERLINK_PAYLOAD];
+        bool alone = false;
+        positive used;
+        p64 now = 1000;
+        p64 wake;
+
+        waterlink_link_reset(address_of held_sender);
+        waterlink_link_reset(address_of held_reader);
+        heard = 0;
+        refusing = true;
+        for (positive at = 0; at < 3; at++)
+                (void)waterlink_post(address_of held_sender, 5,
+                                     WATERLINK_FRAME_DURABLE,
+                                     (p8 address_to) "abc" + at, 1, now);
+        used = waterlink_fill(address_of held_sender, body, now, address_of alone);
+        (void)waterlink_deliver(address_of held_reader, body, used, now,
+                                hear_or_refuse, null);
+        used = waterlink_fill(address_of held_reader, body, now + 1, address_of alone);
+        (void)waterlink_deliver(address_of held_sender, body, used, now + 2,
+                                null, null);
+        refusing = false;
+        waterlink_resume(address_of held_reader, 5, hear_or_refuse, null);
+        (void)waterlink_fill(address_of held_reader, body, now + 3, address_of alone);
+        check("sec: a held key whose freeing acknowledgement was lost is due "
+              "to be asked about",
+              heard == 3 && held_sender.flight_head == WATERLINK_NONE &&
+                      (wake = waterlink_wake(address_of held_sender, now + 3)) >
+                              now + 3 &&
+                      wake != ~0ull);
+        now += 3000000;
+        used = waterlink_wake(address_of held_sender, now) == now
+                       ? waterlink_fill(address_of held_sender, body, now,
+                                        address_of alone)
+                       : 0;
+        if (used)
+                (void)waterlink_deliver(address_of held_reader, body, used, now,
+                                        hear_or_refuse, null);
+        used = waterlink_fill(address_of held_reader, body, now + 1, address_of alone);
+        if (used)
+                (void)waterlink_deliver(address_of held_sender, body, used,
+                                        now + 2, null, null);
+        check("sec: and the copy it sends is answered, freeing the key",
+              heard == 3 && waterlink_idle(address_of held_sender) &&
+                      held_sender.free_count == WATERLINK_SLOTS &&
+                      held_sender.retransmitted == 1);
 }
 
 /*      The wire judge already refuses channel bytes above 63.  The application
@@ -63721,6 +63777,7 @@ b32 main(void)
         superseded_in_flight();
         full_frame_beside_owed_ack();
         reader_credit();
+        held_answer_lost();
         invalid_application_keys();
         network_generated();
         handshake();
