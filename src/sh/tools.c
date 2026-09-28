@@ -5548,29 +5548,26 @@ static fn numfmt_record(p8 address_to bytes, positive length)
 {
         if (numfmt.delimiter_given)
         {
-                positive start = 0;
-                positive field = 1;
+                for (positive start = 0, field = 1;; field++)
+                {
+                        p8 address_to mark = start < length
+                                                 ? memory_first_of(bytes + start,
+                                                                   numfmt.field_delimiter,
+                                                                   length - start)
+                                                 : null;
+                        positive at = mark ? (positive)(mark - bytes) : length;
 
-                for (positive at = 0; at <= length; at++)
-                        if (at == length || bytes[at] == numfmt.field_delimiter)
-                        {
-                                positive size = at - start;
+                        if (text_list_has(field))
+                                numfmt_convert(bytes + start, at - start, 0);
+                        else
+                                text_put(bytes + start, at - start);
 
-                                if (text_list_has(field))
-                                        numfmt_convert(bytes + start, size, 0);
-                                else
-                                        text_put(bytes + start, size);
+                        if (numfmt.stop || !mark)
+                                return;
 
-                                if (numfmt.stop)
-                                        return;
-
-                                if (at < length)
-                                        text_put_character(numfmt.field_delimiter);
-                                start = at + 1;
-                                field++;
-                        }
-
-                return;
+                        text_put_character(numfmt.field_delimiter);
+                        start = at + 1;
+                }
         }
 
         positive at = 0;
