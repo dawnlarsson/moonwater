@@ -9632,8 +9632,14 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                         Twelve quick tries covers three seconds of that, and
                         the backoff after it is for a network with no server
                         on it, which should not be broadcast at forever.
+
+                        The first waits only 50 ms. A link brought up a moment
+                        ago drops what is sent before its queue starts while
+                        the send reports success: on KVM half of all boots put
+                        the first DISCOVER nowhere (a capture of the wire had
+                        only the second) and took the lease 250 ms late.
                 */
-                wait = attempt < 12 ? 1 : (attempt - 11) * 8;
+                wait = !attempt ? 50 : attempt < 12 ? 250 : (attempt - 11) * 2000;
                 length = dhcp_build(packet, sizeof packet, DHCP_DISCOVER,
                                     transaction, hardware, 0, 0, 0, true);
 
@@ -9645,9 +9651,8 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                 (void)socket_send((b32)handle, packet, length, 0,
                                   address_of where, sizeof where);
 
-                if (!network_deadline_begin(
-                        address_of deadline, wait / 4,
-                        (wait % 4) * 250000000))
+                if (!network_deadline_begin(address_of deadline, wait / 1000,
+                                            wait % 1000 * 1000000))
                         continue;
 
                 while (dhcp_receive(handle, packet, sizeof packet, transaction,
@@ -9675,9 +9680,10 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                                    an answer that cannot exist. */
                                 break;
 
+                        //      An ACK is given at least the usual quarter.
                         if (!network_deadline_begin(
-                                address_of deadline, wait / 4,
-                                (wait % 4) * 250000000))
+                                address_of deadline, wait / 1000,
+                                (wait < 250 ? 250 : wait % 1000) * 1000000))
                                 break;
 
                         status = dhcp_complete(
