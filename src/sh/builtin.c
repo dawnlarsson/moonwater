@@ -22511,6 +22511,7 @@ COLD string_address shell_prompt_expand(string_address text, bool nested)
 {
         static byte_store decoded;
         bool expand = shell_shopt_on(PROMPTVARS) || shell_posix_on();
+        string_address own;
 
         decoded.used = 0;
         prompt_quote = expand;
@@ -22520,8 +22521,14 @@ COLD string_address shell_prompt_expand(string_address text, bool nested)
         if (!byte_store_reserve(address_of decoded, decoded.used + 1, 64))
                 return text;
         decoded.bytes[decoded.used] = end;
-        return expand ? expand_capture_prompt(decoded.bytes, nested)
-                      : decoded.bytes;
+        if (!expand)
+                return decoded.bytes;
+
+        //      A ${x@P} in the prompt comes back here and refills decoded
+        //      while the walk below still reads it, so the walk reads a copy.
+        own = shell_store_copy(address_of expand_store, decoded.bytes,
+                               decoded.used);
+        return own ? expand_capture_prompt(own, nested) : text;
 }
 
 /*

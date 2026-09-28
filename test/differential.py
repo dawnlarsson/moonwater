@@ -15034,9 +15034,13 @@ def shell_lang_globstar_exists(rng):
 def shell_lang_prompt_expansion(rng):
     prompt = rng.choice(("'$'", "'\\$'", "'\\\\$'", "'\\\\\\$'", "'\\\\\\\\$'", "'$x$y'", "'\\1004$'",
                          "'[\\045]'", "'\\555$'", "'[\\0455]'", "'\\s|\\v|\\j|\\l'", "'\\W $foo $(echo c) $((1+2))'",
-                         "'\\[x\\]y'", "'\\D{%Y}'", "'\\q\\z'", "'`echo b`\\n'", "'\\a\\e\\r' | od -c | head -1"))
+                         "'\\[x\\]y'", "'\\D{%Y}'", "'\\q\\z'", "'`echo b`\\n'", "'\\a\\e\\r' | od -c | head -1",
+                         "'<${n@P}>'", "'${w@P}|${n@P}|$w'"))
     use = rng.choice(("p", "p", "ps4", "nopromptvars"))
-    setup = "x='\\'; y=h; foo=fv; mkdir -p '$foo'; cd '$foo'"
+    #   n and w are prompts themselves: an expansion inside a prompt made
+    #   another and read the text the inner one wrote over.
+    setup = ("x='\\'; y=h; foo=fv; n='${foo@P}-tail'; w=$(printf %090d 0)'\\s'; mkdir -p '$foo'; "
+             "cd '$foo'")
     if use == "ps4":
         line = "PS4=" + prompt.split(" |")[0] + "; set -x; : traced; set +x"
         line = "{ " + line + "; } 2>&1"
