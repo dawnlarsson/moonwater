@@ -7827,12 +7827,49 @@ static bipolar file_make_directories_open(
 */
 static bool file_join_source_path;
 
+/* Which of a source's attributes a copy takes: cp says, by -p, -a,
+   --preserve and --no-preserve in the order given; mv takes them all. */
+#define FILE_KEEP_MODE 1
+#define FILE_KEEP_OWNER 2
+#define FILE_KEEP_TIMES 4
+#define FILE_KEEP_ALL (FILE_KEEP_MODE | FILE_KEEP_OWNER | FILE_KEEP_TIMES)
+static positive file_keeps = FILE_KEEP_ALL;
+// --no-preserve=mode, which GNU tells apart from not asking for the mode.
+static bool cp_no_mode;
+
+static bool cp_loud;
+static positive cp_umask;
+
+/* The directories --parents made or met on the way to one copy, as GNU's
+   attribute list holds them, given their source's attributes once the copy
+   is in: depth counts components below the target directory. */
+typedef struct
+{
+        positive depth;
+        file_facts source;
+        bool restore;
+        positive mode;
+} file_parent_record;
+static file_parent_record file_parent_records[64];
+static positive file_parent_record_count;
+static p8 file_parent_path[FILE_PATH_MAX];
+static p8 file_parent_top[FILE_PATH_MAX];
+
 /* GNU make_dir_parents_private: mkdir each dest component after the named
    target, with that source directory's mode, including in a world-writable
-   fixture. The owned-parent gate stays on mkdir/install. */
+   fixture. The owned-parent gate stays on mkdir/install.
+
+   A parent that is not there is made from the source directory it copies,
+   followed as GNU's stat follows it: with the umask, without the group and
+   other bits an owner or mode still to be given would open early, and with
+   the owner's search and write while the copy goes in. When any parent is
+   missing, every one on the way is recorded for file_parents_reprotect --
+   those already there too, when -p asks for attributes -- and a source
+   component that is not a directory is refused before anything is made. */
 static bipolar file_parents_ensure_open(string_address dest_dir,
                                         string_address source_parent,
-                                        p8 address_to failed)
+                                        p8 address_to failed,
+                                        bool address_to said)
 {
         static p8 work[FILE_PATH_MAX];
         static p8 src_prefix[FILE_PATH_MAX];
@@ -7841,6 +7878,8 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
         p8 component[SYSTEM_PATH_LEAF_ROOM];
         positive flags = O_PATH | O_DIRECTORY | O_CLOEXEC;
 
+        file_parent_record_count = 0;
+        address_to said = false;
         if (failed)
                 failed[0] = end;
         if (!file_name_without_trailing_slashes(work, source_parent))
@@ -7849,6 +7888,8 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                 return 0;
         if (!file_name_without_trailing_slashes(dest_prefix, dest_dir))
                 return -ERROR_NAME_TOO_LONG;
+        memory_copy_apart_end(file_parent_top, dest_prefix,
+                              string_length(dest_prefix));
 
         bipolar held = system_open_at(AT_FDCWD, dest_dir, flags);
         if (held < 0)
@@ -7859,6 +7900,18 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                 return held;
         }
 
+        //      All there already: GNU looks no further, and gives nothing
+        //      on the way any attribute.
+        bipolar whole = system_open_at(held, work[0] == '/' ? work + 1 : work,
+                                       flags);
+        if (whole >= 0)
+        {
+                system_close(held);
+                return whole;
+        }
+
+        positive keeps = file_keeps;
+        positive depth = 0;
         src_prefix[0] = end;
         positive length = string_length(work);
         positive at = 0;
@@ -7878,6 +7931,7 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                 }
                 memory_copy_apart(component, work + start, named);
                 component[named] = end;
+                depth++;
 
                 if (src_prefix[0])
                 {
@@ -7888,6 +7942,11 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                         }
                         memory_copy_apart_end(src_prefix, joined,
                                               string_length(joined));
+                }
+                else if (work[0] == '/')
+                {
+                        src_prefix[0] = '/';
+                        memory_copy_apart_end(src_prefix + 1, component, named);
                 }
                 else
                         memory_copy_apart_end(src_prefix, component, named);
@@ -7902,18 +7961,55 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                         memory_copy_apart_end(failed, dest_prefix,
                                               string_length(dest_prefix));
 
-                file_facts facts;
-                positive mode = 0777;
-                if (file_look(AT_FDCWD, src_prefix, AT_SYMLINK_NOFOLLOW,
-                              address_of facts) &&
-                    (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
-                        mode = facts.mode & 07777;
-
                 bipolar next = system_open_at(held, component, flags);
-                if (next < 0)
+                bool missing = next == -ERROR_NO_ENTRY;
+                file_facts source;
+
+                if (missing || (keeps && next >= 0))
                 {
-                        bipolar made = system_make_directory_exact_at(
-                            held, component, mode);
+                        bipolar looked = file_look_code(AT_FDCWD, src_prefix, 0,
+                                                        address_of source);
+
+                        if (looked >= 0 &&
+                            (source.mode & MODE_FORMAT) != MODE_DIRECTORY)
+                                looked = -ERROR_NOT_DIRECTORY;
+                        if (looked < 0)
+                        {
+                                if (next >= 0)
+                                        system_close(next);
+                                system_close(held);
+                                string_format(log_error,
+                                              "cp: failed to get attributes of %w: %s\n",
+                                              writer_shell_quoted_name, src_prefix,
+                                              file_reason(looked));
+                                address_to said = true;
+                                return looked;
+                        }
+                }
+
+                file_parent_record address_to record = null;
+
+                if ((missing || (keeps && next >= 0)) &&
+                    file_parent_record_count < array_count(file_parent_records))
+                {
+                        record = file_parent_records + file_parent_record_count++;
+                        record->depth = depth;
+                        record->source = source;
+                        record->restore = false;
+                        record->mode = 0;
+                }
+
+                if (missing)
+                {
+                        positive source_mode = source.mode & 07777;
+                        positive omitted = source_mode &
+                                           (keeps & FILE_KEEP_OWNER ? 0077
+                                            : keeps & FILE_KEEP_MODE ? 0022
+                                                                     : 0);
+                        positive wanted = (cp_no_mode ? 0777 : source_mode) &
+                                          07777 & ~omitted;
+                        bipolar made = system_make_directory_at(
+                            held, component, wanted);
                         if (made < 0 && made != -ERROR_EXISTS)
                         {
                                 system_close(held);
@@ -7925,11 +8021,141 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                                 system_close(held);
                                 return next;
                         }
+                        if (made >= 0 && cp_loud)
+                                string_format(log, "%s -> %s\n", src_prefix,
+                                              dest_prefix);
+
+                        file_facts now;
+                        if (made >= 0 &&
+                            file_look_code(next, (string_address)"",
+                                           AT_EMPTY_PATH, address_of now) >= 0)
+                        {
+                                positive mode = now.mode & 07777;
+
+                                if (!(keeps & FILE_KEEP_MODE) && record)
+                                {
+                                        if (omitted & ~mode)
+                                                omitted &= ~cp_umask;
+                                        if ((omitted & ~mode) ||
+                                            (mode & 0700) != 0700)
+                                        {
+                                                record->restore = true;
+                                                record->mode = mode | omitted;
+                                        }
+                                }
+                                if ((mode | 0700) != mode)
+                                        (void)file_change_mode_handle(
+                                            next, mode | 0700);
+                        }
+                }
+                else if (next == -ERROR_NOT_DIRECTORY ||
+                         next == -ERROR_LOOP)
+                {
+                        system_close(held);
+                        string_format(log_error,
+                                      "cp: %w exists but is not a directory\n",
+                                      writer_shell_quoted_name, dest_prefix);
+                        address_to said = true;
+                        return -ERROR_NOT_DIRECTORY;
+                }
+                else if (next < 0)
+                {
+                        system_close(held);
+                        return next;
                 }
                 system_close(held);
                 held = next;
         }
+        memory_copy_apart_end(file_parent_path, dest_prefix,
+                              string_length(dest_prefix));
         return held;
+}
+
+static bipolar file_change_owner_kept(bipolar destination, bipolar directory,
+                                      string_address name,
+                                      file_facts address_to facts,
+                                      bool address_to given);
+
+/* After the copy: each recorded parent, walked to again without following
+   a link, is given its source's times, owner and mode as -p asks, or the
+   mode it was made without while the copy went in. */
+static fn file_parents_reprotect(void)
+{
+        positive count = file_parent_record_count;
+        positive keeps = file_keeps;
+
+        file_parent_record_count = 0;
+        if (!count)
+                return;
+
+        bipolar held = system_open_at(AT_FDCWD, file_parent_top,
+                                      O_PATH | O_DIRECTORY | O_CLOEXEC);
+        positive length = string_length(file_parent_path);
+        positive at = string_length(file_parent_top);
+        positive depth = 0;
+
+        while (held >= 0 && at < length)
+        {
+                p8 component[SYSTEM_PATH_LEAF_ROOM];
+
+                at += memory_span_byte(file_parent_path + at, '/', length - at);
+                positive start = at;
+                at += memory_span_without_byte(file_parent_path + at, '/',
+                                               length - at);
+                positive named = at - start;
+                if (!named || named >= sizeof(component))
+                        break;
+                memory_copy_apart(component, file_parent_path + start, named);
+                component[named] = end;
+                depth++;
+
+                bipolar next = system_open_at(held, component,
+                                              O_PATH | O_DIRECTORY |
+                                                  O_NOFOLLOW | O_CLOEXEC);
+                system_close(held);
+                held = next;
+                if (held < 0)
+                        break;
+
+                for (positive i = 0; i < count; i++)
+                {
+                        file_parent_record address_to record =
+                            file_parent_records + i;
+
+                        if (record->depth != depth)
+                                continue;
+
+                        file_facts address_to source = address_of record->source;
+                        bool given = false;
+
+                        if (keeps & FILE_KEEP_TIMES)
+                        {
+                                p64 times[4];
+
+                                file_times_of(source, times);
+                                (void)system_update_times_at(
+                                    held, (string_address)"", times,
+                                    AT_EMPTY_PATH);
+                        }
+                        if (keeps & FILE_KEEP_OWNER)
+                                (void)file_change_owner_kept(
+                                    held, -1, null, source, address_of given);
+                        //      An owner asked for and not given takes the
+                        //      set-ID bits with it, as file_keep_handle has it.
+                        if (keeps & FILE_KEEP_MODE)
+                                (void)file_change_mode_handle(
+                                    held, source->mode & 07777 &
+                                              ((keeps & FILE_KEEP_OWNER) && !given
+                                                   ? ~(positive)(MODE_SET_USER |
+                                                                 MODE_SET_GROUP |
+                                                                 MODE_STICKY)
+                                                   : 07777));
+                        else if (record->restore)
+                                (void)file_change_mode_handle(held, record->mode);
+                }
+        }
+        if (held >= 0)
+                system_close(held);
 }
 
 static bool file_destination_in(string_address program, string_address directory,
@@ -7976,15 +8202,17 @@ static bool file_destination_in(string_address program, string_address directory
                 return true;
 
         path_head_copy(source_parent, FILE_PATH_MAX, piece);
+        bool said = false;
         bipolar made = file_parents_ensure_open(directory, source_parent,
-                                                failing);
+                                                failing, address_of said);
         if (made < 0)
         {
-                string_format(log_error,
-                              "%s: cannot create directory %w: %s\n", program,
-                              writer_shell_quoted_name,
-                              string_get(failing) ? failing : parent,
-                              file_reason(made));
+                if (!said)
+                        string_format(log_error,
+                                      "%s: cannot create directory %w: %s\n", program,
+                                      writer_shell_quoted_name,
+                                      string_get(failing) ? failing : parent,
+                                      file_reason(made));
                 return false;
         }
         if (made > 0)
@@ -8101,6 +8329,7 @@ static bool file_source_destination(string_address program, positive first,
                 }
 
                 pair(source, destination);
+                file_parents_reprotect();
         }
 
         log_flush();
@@ -31912,9 +32141,14 @@ static bipolar file_change_mode_handle(bipolar destination, positive mode)
 }
 
 /* A plain copy creates an object owned by the caller. Never carry the
-   source's set-ID authority onto that new object. */
+   source's set-ID authority onto that new object. Where the mode was
+   refused by name, the new object has the default one under the umask
+   rather than the source's, a directory's with search in it. */
 static positive file_copy_creation_mode(file_facts address_to facts)
 {
+        if (cp_no_mode)
+                return ((facts->mode & MODE_FORMAT) == MODE_DIRECTORY
+                            ? 0777 : 0666) & ~cp_umask;
         return facts->mode & 07777 & ~cp_umask &
                ~(MODE_SET_USER | MODE_SET_GROUP);
 }
@@ -31952,6 +32186,40 @@ static bipolar file_copy_directory_fresh(bipolar directory,
                                              O_NOFOLLOW | O_CLOEXEC);
 }
 
+/* The owner of a copy, as -p and a move keep it. A caller without the
+   privilege to give files away is refused that quietly, as GNU's
+   chown_failure_ok has it: the group alone is tried, and the copy stays
+   the caller's. Root is told. */
+static bipolar file_change_owner_kept(bipolar destination, bipolar directory,
+                                      string_address name,
+                                      file_facts address_to facts,
+                                      bool address_to given)
+{
+        bool named = directory >= 0 && name;
+        bool link = (facts->mode & MODE_FORMAT) == MODE_LINK;
+        bipolar owned = named
+                            ? system_change_owner_at(
+                                  directory, name, facts->owner, facts->group,
+                                  link ? AT_SYMLINK_NOFOLLOW : 0)
+                            : system_change_owner_at(
+                                  destination, (string_address)"",
+                                  facts->owner, facts->group, AT_EMPTY_PATH);
+
+        address_to given = owned >= 0;
+        if (owned >= 0 ||
+            (owned != -ERROR_NOT_PERMITTED && owned != -ERROR_INVALID &&
+             owned != -ERROR_ACCESS) ||
+            system_call(syscall(geteuid)) == 0)
+                return owned;
+        (void)(named ? system_change_owner_at(
+                           directory, name, -1, facts->group,
+                           link ? AT_SYMLINK_NOFOLLOW : 0)
+                     : system_change_owner_at(
+                           destination, (string_address)"", -1, facts->group,
+                           AT_EMPTY_PATH));
+        return 0;
+}
+
 /* Ownership and set-ID preservation are one invariant. If fchown cannot
    establish the requested owner, never make the caller-owned copy set-ID. */
 static bipolar file_preserve_owner_mode(
@@ -31959,40 +32227,71 @@ static bipolar file_preserve_owner_mode(
     file_facts address_to facts, positive mode)
 {
         bool named = directory >= 0 && name;
-        positive flags = (facts->mode & MODE_FORMAT) == MODE_LINK
-                             ? AT_SYMLINK_NOFOLLOW : 0;
-        bipolar owned = named
-                            ? system_change_owner_at(
-                                  directory, name, facts->owner, facts->group,
-                                  flags)
-                            : system_change_owner_at(
-                                  destination, (string_address)"",
-                                  facts->owner, facts->group, AT_EMPTY_PATH);
+        bool given = false;
+        bipolar owned = file_change_owner_kept(destination, directory, name,
+                                               facts, address_of given);
         if ((facts->mode & MODE_FORMAT) == MODE_LINK)
                 return owned;
 
-        if (owned < 0)
-                mode &= ~(MODE_SET_USER | MODE_SET_GROUP);
+        if (!given)
+                mode &= ~(MODE_SET_USER | MODE_SET_GROUP | MODE_STICKY);
         bipolar changed = named
                               ? system_change_mode_at(directory, name, mode)
                               : file_change_mode_handle(destination, mode);
         return owned < 0 ? owned : changed;
 }
 
+/* The attributes file_keeps names, given to what was copied. made says
+   the object is new here, so a mode not kept is the plain copy's; one that
+   was there keeps its own. */
 static bipolar file_keep_handle(
     bipolar destination, bipolar directory, string_address name,
-    file_facts address_to facts)
+    file_facts address_to facts, bool made)
 {
+        positive keeps = file_keeps;
+        bool named = directory >= 0 && name;
+        bool link = (facts->mode & MODE_FORMAT) == MODE_LINK;
+        bipolar kept = 0;
+
+        if ((keeps & (FILE_KEEP_MODE | FILE_KEEP_OWNER)) ==
+            (FILE_KEEP_MODE | FILE_KEEP_OWNER))
+                kept = file_preserve_owner_mode(
+                    destination, directory, name, facts, facts->mode & 07777);
+        else
+        {
+                bool given = false;
+
+                if (keeps & FILE_KEEP_OWNER)
+                        kept = file_change_owner_kept(destination, directory,
+                                                      name, facts,
+                                                      address_of given);
+                //      The mode without the owner is the source's on a file
+                //      the caller owns: its set-ID bits are not carried.
+                positive mode = keeps & FILE_KEEP_MODE
+                                    ? facts->mode & 07777 &
+                                          ~(MODE_SET_USER | MODE_SET_GROUP)
+                                    : file_copy_creation_mode(facts);
+                bipolar changed = link || (!(keeps & FILE_KEEP_MODE) && !made)
+                                      ? 0
+                                  : named
+                                      ? system_change_mode_at(directory, name,
+                                                              mode)
+                                      : file_change_mode_handle(destination,
+                                                                mode);
+                if (kept >= 0)
+                        kept = changed;
+        }
+
+        if (!(keeps & FILE_KEEP_TIMES))
+                return kept;
+
         p64 times[4];
 
         file_times_of(facts, times);
-        bipolar kept = file_preserve_owner_mode(
-            destination, directory, name, facts, facts->mode & 07777);
-        positive flags = (facts->mode & MODE_FORMAT) == MODE_LINK
-                             ? AT_SYMLINK_NOFOLLOW : 0;
-        bipolar timed = directory >= 0 && name
+        bipolar timed = named
                             ? system_update_times_at(
-                                  directory, name, times, flags)
+                                  directory, name, times,
+                                  link ? AT_SYMLINK_NOFOLLOW : 0)
                             : system_update_times_at(
                                   destination, (string_address)"", times,
                                   AT_EMPTY_PATH);
@@ -32575,7 +32874,7 @@ static fn cp_copy_job(address_any context, positive index)
         system_close(in);
 
         bipolar kept = copied && cp_preserve
-                           ? file_keep_handle(out, -1, null, facts) : 0;
+                           ? file_keep_handle(out, -1, null, facts, false) : 0;
         bipolar closed = system_close(out);
 
         if (!copied || kept < 0 || closed < 0)
@@ -32650,7 +32949,7 @@ static bool cp_batch_replay(walk_batch address_to batch, positive depth)
 
                         file_facts address_to facts = batch->facts + index;
                         bipolar attributed = cp_preserve
-                                                 ? file_keep_handle(item->target, -1, null, facts)
+                                                 ? file_keep_handle(item->target, -1, null, facts, true)
                                                  : file_change_mode_handle(
                                                        item->target,
                                                        file_copy_creation_mode(facts));
@@ -32845,7 +33144,7 @@ static bool cp_tree_file(bipolar source, bipolar copy, string_address name)
         system_close(in);
 
         bipolar kept = copied && cp_preserve
-                           ? file_keep_handle(out, -1, null, address_of facts) : 0;
+                           ? file_keep_handle(out, -1, null, address_of facts, false) : 0;
         bipolar closed = system_close(out);
 
         if (!copied || kept < 0 || closed < 0)
@@ -33023,7 +33322,7 @@ static fn cp_tree_leave(address_any context, address_any node_address,
         bipolar attributed = copy < 0
                                  ? copy
                                  : cp_preserve
-                                 ? file_keep_handle(copy, -1, null, address_of node->facts)
+                                 ? file_keep_handle(copy, -1, null, address_of node->facts, true)
                                  : file_change_mode_handle(copy,
                                                            file_copy_creation_mode(address_of node->facts));
 
@@ -33160,7 +33459,7 @@ static bool cp_tree_sink(address_any context, address_any node_address,
                         bipolar attributed = copy < 0
                                                  ? copy
                                                  : cp_preserve
-                                                 ? file_keep_handle(copy, -1, null, address_of facts)
+                                                 ? file_keep_handle(copy, -1, null, address_of facts, true)
                                                  : file_change_mode_handle(
                                                        copy, file_copy_creation_mode(address_of facts));
 
@@ -33957,7 +34256,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 if (moving || cp_preserve)
                         protected_result = file_keep_handle(
                             made, protected.directory,
-                            SYSTEM_PATH_STAGE_LEAF, address_of facts);
+                            SYSTEM_PATH_STAGE_LEAF, address_of facts, true);
                 else if (kind != MODE_LINK)
                         protected_result = system_change_mode_at(
                             protected.directory, SYSTEM_PATH_STAGE_LEAF,
@@ -34010,7 +34309,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                                staged
                                                    ? SYSTEM_PATH_STAGE_LEAF
                                                    : null,
-                                               address_of facts)
+                                               address_of facts, staged)
                                          : staged
                                                ? file_change_mode_handle(
                                                      made,
@@ -34072,9 +34371,22 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                    requested.  Missing names and replacements are prepared
                    privately and published only after a complete copy,
                    unless the directory they land in is a fresh one. */
-                bool staged = !fresh &&
+                /* A stream -- a fifo or a device read for its contents -- may
+                   never end, so its copy is made where it will stay, as
+                   GNU makes it, and not staged: one that is read while it
+                   is written is there to be seen. The name is claimed
+                   exclusively and without following a link, and it starts
+                   without the group and other bits an owner or a mode
+                   still to be given would open early. */
+                bool streamed = !moving && !fresh && kind != MODE_FILE &&
+                                !destination_exists && !cp_replace &&
+                                !destination_is_link;
+                bool staged = !fresh && !streamed &&
                               (moving || cp_replace || destination_is_link ||
                                !destination_exists);
+                positive omitted = file_keeps & FILE_KEEP_OWNER ? 0077
+                                   : file_keeps & FILE_KEEP_MODE ? 0022
+                                                                 : 0;
                 system_path_stage protected;
                 system_path_stage_reset(address_of protected);
                 bipolar out = staged
@@ -34083,7 +34395,8 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                           destination, 0600)
                     : file_copy_destination_open(
                           destination_directory, destination,
-                          file_copy_creation_mode(address_of facts),
+                          file_copy_creation_mode(address_of facts) &
+                              ~(streamed && cp_preserve ? omitted : 0),
                           destination_exists, address_of there, true);
 
                 if (out < 0 && cp_force && !moving)
@@ -34135,7 +34448,8 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                                staged
                                                    ? SYSTEM_PATH_STAGE_LEAF
                                                    : null,
-                                               address_of facts)
+                                               address_of facts,
+                                               staged || streamed)
                                          : staged
                                                ? file_change_mode_handle(
                                                      out,
@@ -34355,7 +34669,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                        destination_handle,
                                        staged ? protected.directory : -1,
                                        staged ? SYSTEM_PATH_STAGE_LEAF : null,
-                                       address_of facts)
+                                       address_of facts, staged || fresh)
                                  : staged || fresh
                                        ? file_change_mode_handle(
                                              destination_handle,
@@ -35008,6 +35322,48 @@ static bool file_into_option_seen(string_address program, p8 letter,
         return true;
 }
 
+/* --preserve and --no-preserve turn the attributes they name on and off in
+   the order given; a word the list does not know is refused by
+   cp_words_read. Naming the mode either way decides whether a mode not kept
+   is the source's under the umask or the default one. */
+static fn cp_keeps_read(string_address value, bool on)
+{
+        for (positive at = 0; value[at];)
+        {
+                positive start = at;
+
+                while (value[at] && value[at] != ',')
+                        at++;
+                positive length = at - start;
+                p8 letter = 0;
+
+                //      The list was read once already, so a word is a whole
+                //      name or the start of exactly one.
+                for (positive i = 0; i < array_count(cp_preserve_words); i++)
+                {
+                        string_address name = cp_preserve_words[i].word;
+
+                        if (string_length(name) >= length &&
+                            !memory_compare(name, value + start, length) &&
+                            (!letter || string_length(name) == length))
+                                letter = cp_preserve_words[i].answer;
+                }
+                positive bits = letter == 'm'   ? FILE_KEEP_MODE
+                                : letter == 'o' ? FILE_KEEP_OWNER
+                                : letter == 't' ? FILE_KEEP_TIMES
+                                : letter == 'a' ? FILE_KEEP_ALL
+                                                : 0;
+
+                file_keeps = on ? file_keeps | bits : file_keeps & ~bits;
+                if (letter == 'l' || letter == 'a')
+                        cp_keep_links = on;
+                if (bits & FILE_KEEP_MODE)
+                        cp_no_mode = !on;
+                if (value[at] == ',')
+                        at++;
+        }
+}
+
 static bool cp_option_seen(p8 letter, string_address value)
 {
         if (!file_backup_seen((string_address) "cp", letter, value))
@@ -35034,6 +35390,8 @@ static bool cp_option_seen(p8 letter, string_address value)
                            cp_preserve_words, array_count(cp_preserve_words),
                            null, 0))
                 return false;
+        if ((letter == 'p' || letter == 'N') && value)
+                cp_keeps_read(value, letter == 'p');
         if (letter == 'z' &&
             !cp_words_read((string_address) "--sparse", value, cp_sparse_words,
                            array_count(cp_sparse_words), null,
@@ -35143,6 +35501,8 @@ static b32 file_cp()
         cp_update_policy = 0;
         cp_wants_context = false;
         cp_keep_links = false;
+        file_keeps = 0;
+        cp_no_mode = false;
         file_into_seen = null;
         file_join_source_path = false;
         file_backup_control_named = null;
@@ -35215,7 +35575,7 @@ static b32 file_cp()
         positive first = taking.first;
 
         cp_recursive = (flags & (FILE_FLAG('r') | FILE_FLAG('R') | FILE_FLAG('a'))) != 0;
-        cp_preserve = (flags & (FILE_FLAG('p') | FILE_FLAG('a'))) != 0;
+        cp_preserve = file_keeps != 0;
         cp_force = (flags & FILE_FLAG('f')) != 0;
         cp_ask = cp_selected.collision == 'i' && cp_update_policy != 'n' &&
                  cp_update_policy != 'F';
@@ -36645,6 +37005,9 @@ static b32 file_mv()
         file_into_seen = null;
         file_join_source_path = false;
         file_backup_control_named = null;
+        //      A move across devices keeps everything it can.
+        file_keeps = FILE_KEEP_ALL;
+        cp_no_mode = false;
 
         file_operands_begin();
         if (!file_take(address_of taking))
