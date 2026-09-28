@@ -7907,6 +7907,49 @@ static COLD fn expand_array_whole_transform(string_address name, positive length
         path a scalar takes, and the buffer it needs was in that reader's
         frame for every ${x} in every script that has no array in it.
 */
+/*
+        Whether a list is null to :- :+ := and :?, which bash asks of the
+        list joined: with no element, or with only empty ones and nothing
+        between them -- one element, or quoted * with IFS empty. ("" "") is
+        not null as @, whose join is a blank, where this called any list of
+        empty elements null and a single "" set.
+*/
+static bool expand_list_null_direct = true;
+
+//      Whether a list of count elements can be null at all, before anyone
+//      looks at them: one element, or quoted * joined by nothing.
+static bool expand_list_join_empty(positive count, p8 form, bool quoted)
+{
+        return count == 1 || (quoted && form == '*' &&
+                              !string_get(expand_ifs()) &&
+                              env_get("IFS") != null);
+}
+
+static bool expand_list_null(positive count, bool every_empty, p8 form,
+                             bool quoted)
+{
+        return !count ||
+               (every_empty && expand_list_join_empty(count, form, quoted));
+}
+
+static COLD bool expand_array_every_empty(string_address name,
+                                          positive length, positive count)
+{
+        shell_mark held = shell_store_mark(address_of expand_store);
+        shell_array_item address_to items;
+        bool empty = true;
+
+        if (count > positive_max / sizeof(items[0]) ||
+            !(items = (shell_array_item address_to)shell_store_take(
+                  address_of expand_store, count * sizeof(items[0]))))
+                return false;
+        shell_array_items(name, length, items, count);
+        for (positive at = 0; at < count && empty; at++)
+                empty = !items[at].value_length;
+        shell_store_rewind(address_of expand_store, held);
+        return empty;
+}
+
 static COLD fn expand_array_form(string_address name, positive length,
                                  p8 form, bool want_length, p8 operation,
                                  bool doubled, string_address word,
@@ -7921,6 +7964,16 @@ static COLD fn expand_array_form(string_address name, positive length,
         shell_dynamic_wanted(name, length);
 
         held = shell_array_length(name, length);
+
+        //      With a colon an array of nothing but empty elements can be
+        //      null too; bash joins it and asks the join.
+        if (doubled && held && shell_bash_compat &&
+            (expand_list_null_direct || !quoted) &&
+            (operation == '-' || operation == '+' || operation == '=' ||
+             operation == '?') &&
+            expand_list_join_empty(held, form, quoted) &&
+            expand_array_every_empty(name, length, held))
+                held = 0;
 
         if (want_length)
         {
@@ -8446,9 +8499,14 @@ static string_address expand_braced_body(string_address step,
         */
         if (array_form)
         {
+                //      For the four set tests the flag says colon.
                 expand_array_form(plain_name, plain_length, array_form,
-                                  want_length, operation, doubled, word,
-                                  quoted, parameter_mode, mark);
+                                  want_length, operation,
+                                  operation == '-' || operation == '+' ||
+                                          operation == '=' || operation == '?'
+                                      ? colon
+                                      : doubled,
+                                  word, quoted, parameter_mode, mark);
 
                 return close + 1;
         }
@@ -8519,8 +8577,14 @@ static string_address expand_braced_body(string_address step,
                                     name_start + length, rest);
                         built[2 + target_length + rest] = '}';
                         built[3 + target_length + rest] = end;
+                        //      Reached this way and quoted, bash asks the
+                        //      list's own set test, not the join:
+                        //      "${!r:-x}" with r='a[@]' and a=("") stays
+                        //      empty, where unquoted it is x.
+                        expand_list_null_direct = false;
                         expand_braced_body(built, built + 2 + target_length + rest,
                                            quoted);
+                        expand_list_null_direct = true;
                         return close + 1;
                 }
                 else if (!expand_parameter_name(name, target_length))
@@ -8618,6 +8682,20 @@ static string_address expand_braced_body(string_address step,
                     (string_is(name, '@') || string_is(name, '*')))
                         present = false;
                 bool blank = present && value[0] == end;
+
+                //      "$@" and "$*" are null by their join, as arrays are.
+                if (colon && present && shell_bash_compat && length == 1 &&
+                    (string_is(name, '@') || string_is(name, '*')))
+                {
+                        bool every_empty = true;
+
+                        for (positive at = 0; at < shell_parameter_count &&
+                                              every_empty; at++)
+                                every_empty = !string_get(shell_parameter[at]);
+                        blank = expand_list_null(shell_parameter_count,
+                                                 every_empty,
+                                                 string_get(name), quoted);
+                }
                 bool missing = !present || (colon && blank);
 
                 if (operation == '-')

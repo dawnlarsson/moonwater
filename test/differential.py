@@ -14830,6 +14830,22 @@ def shell_lang_prompt_expansion(rng):
     return ("prompt-expansion", shell_BASH, shell_program(setup, line, 'echo "end=$?"'), ("command", "stdin", "file"))
 
 
+#       Whether a list is null to :- and :+: bash joins it and asks the join,
+#       so a=("") and set -- "" are null, ("" "") is not as @ (a blank joins
+#       them) but is as quoted * under IFS=. This called one "" set and any
+#       run of empty elements null. Reached through a quoted "${!r}" the
+#       array keeps its own set test; unquoted it is joined like the rest.
+def shell_lang_list_null_tests(rng):
+    values = rng.choice(("", "''", "'' ''", "'' x", "x", "'' '' ''"))
+    ifs = rng.choice(("", "IFS=", "IFS=:"))
+    form = rng.choice(('"${a[@]%s}"', '"${a[*]%s}"', '${a[@]%s}', '${a[*]%s}', '"${@%s}"', '"${*%s}"', '${@%s}', '${*%s}',
+                       '"${!r%s}"', '"${!s%s}"', '${!r%s}', '${!s%s}'))
+    op = rng.choice((":-X", ":+P", "-X", "+P"))
+    return ("list-null-tests", shell_BASH, shell_program(
+        "a=(" + values + "); set -- " + values + "; r='a[@]'; s='a[*]'", ifs, "printf '<%s>' " + form % op + "; echo",
+        'echo "end=$?"'))
+
+
 #       bash's $'\x{H...}': every hex digit up to the brace and the low byte
 #       of their value, the brace taken when it is there; no digits is a zero,
 #       which ends the string. This kept \x{ as it was written.
@@ -17705,6 +17721,7 @@ SHELL_FAMILIES = (
     shell_lang_fd_prefix_range,
     shell_lang_case_substitution_lines,
     shell_lang_dollar_hex_brace,
+    shell_lang_list_null_tests,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,
