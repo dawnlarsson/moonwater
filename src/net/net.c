@@ -4420,14 +4420,8 @@ typedef struct
 static const p8 tls_oid_ec[7] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01};
 static const p8 tls_oid_p256[8] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07};
 static const p8 tls_oid_p384[5] = {0x2b, 0x81, 0x04, 0x00, 0x22};
-static const p8 tls_oid_ecdsa_sha256[8] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04,
-                                           0x03, 0x02};
-static const p8 tls_oid_ecdsa_sha384[8] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04,
-                                           0x03, 0x03};
-static const p8 tls_oid_sha256_rsa[9] = {0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d,
-                                         0x01, 0x01, 0x0b};
-static const p8 tls_oid_sha384_rsa[9] = {0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d,
-                                         0x01, 0x01, 0x0c};
+static const p8 tls_oid_ecdsa_with[7] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03};
+static const p8 tls_oid_pkcs1[8] = {0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01};
 static const p8 tls_oid_rsa[9] = {0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01,
                                   0x01, 0x01};
 static const p8 tls_oid_san[3] = {0x55, 0x1d, 0x11};
@@ -4900,7 +4894,7 @@ static COLD bipolar tls_asn1_length(p8 address_to bytes, positive size,
 
         count = first & 0x7f;
         value = 0;
-        if (!count || count > 3 || i + count > size || !bytes[i])
+        if (!count || count > 3 || count > size - i || !bytes[i])
                 return TLS_FAIL;
         while (count)
         {
@@ -4924,9 +4918,8 @@ static COLD bipolar tls_asn1_enter(p8 address_to bytes, positive size, p8 tag,
                 return TLS_FAIL;
         i++;
         address_to at = i;
-        if (tls_asn1_length(bytes, size, at, address_of length))
-                return TLS_FAIL;
-        if (address_to at + length > size)
+        if (tls_asn1_length(bytes, size, at, address_of length) ||
+            length > size - address_to at)
                 return TLS_FAIL;
         address_to stop = address_to at + length;
         return TLS_OK;
@@ -4945,6 +4938,51 @@ static COLD bipolar tls_asn1_skip(p8 address_to bytes, positive size, positive a
 
         address_to at = stop;
         return TLS_OK;
+}
+
+/* One whole value of the given tag, header included, and past it. */
+static COLD bipolar tls_asn1_take(p8 address_to bytes, positive size, p8 tag,
+                                  positive address_to at,
+                                  p8 address_to address_to value,
+                                  positive address_to length)
+{
+        positive start = address_to at;
+        positive stop = 0;
+
+        if (tls_asn1_enter(bytes, size, tag, at, address_of stop))
+                return TLS_FAIL;
+        address_to value = bytes + start;
+        address_to length = stop - start;
+        address_to at = stop;
+        return TLS_OK;
+}
+
+/* A BOOLEAN DEFAULT FALSE: basicConstraints' cA, an Extension's critical.
+   DER omits a component carrying its default value, so one that is
+   encoded can only be canonical TRUE; accepting FALSE lets BER and DER
+   validators disagree over the same signed bytes. None of 1,900
+   certificates served by 652 public HTTPS hosts (2026-09-28) spells
+   either FALSE. */
+static COLD bipolar tls_asn1_true(p8 address_to bytes, positive stop,
+                                  positive address_to at, bool address_to value)
+{
+        positive boolean_stop = 0;
+
+        if (address_to at >= stop || bytes[address_to at] != 0x01)
+                return TLS_OK;
+        if (tls_asn1_enter(bytes, stop, 0x01, at, address_of boolean_stop) ||
+            address_to at + 1 != boolean_stop || bytes[address_to at] != 0xff)
+                return TLS_FAIL;
+        address_to value = true;
+        address_to at = boolean_stop;
+        return TLS_OK;
+}
+
+/* RSA AlgorithmIdentifier parameters: the historical NULL, or nothing. */
+static COLD bool tls_null_or_absent(p8 address_to der, positive at,
+                                    positive stop)
+{
+        return at == stop || (at + 2 == stop && der[at] == 0x05 && !der[at + 1]);
 }
 
 static COLD bool tls_oid_is(const p8 address_to bytes, positive length,
@@ -5034,8 +5072,28 @@ static COLD bool tls_positive_integer(p8 address_to bytes, positive at,
         return true;
 }
 
-/* The verifier implements these three certificate signature algorithms.
-   ECDSA parameters must be absent; RSA's historical NULL may be present or
+/* The certificate signature algorithms: ecdsa-with-SHA256/384/512
+   (1.2.840.10045.4.3.2-4) and sha256/384/512WithRSAEncryption
+   (1.2.840.113549.1.1.11-13).  The kind is 1-3 for ECDSA and 5-7 for
+   PKCS#1 v1.5, its low two bits naming SHA-256, -384 or -512; 0 is any
+   other algorithm.  SHA-512 is here because real chains use it: of 640
+   public HTTPS hosts openssl verified on 2026-09-28, nine served an
+   intermediate signed sha512WithRSAEncryption (Certum, D-Trust, Actalis,
+   ACCV, NetLock, e-Szigno). */
+static COLD p8 tls_signature_kind(const p8 address_to oid, positive length)
+{
+        p8 last = length ? oid[length - 1] : 0;
+
+        if (length == 8 && !memory_compare(oid, tls_oid_ecdsa_with, 7) &&
+            last >= 2 && last <= 4)
+                return (p8)(last - 1);
+        if (length == 9 && !memory_compare(oid, tls_oid_pkcs1, 8) &&
+            last >= 0x0b && last <= 0x0d)
+                return (p8)(last - 0x0b + 5);
+        return 0;
+}
+
+/* ECDSA parameters must be absent; RSA's historical NULL may be present or
    absent, but no other parameter or trailing value is accepted. */
 static COLD bool tls_signature_algorithm(p8 address_to der, positive size,
                                     positive address_to at,
@@ -5045,8 +5103,7 @@ static COLD bool tls_signature_algorithm(p8 address_to der, positive size,
         positive alg_stop = 0;
         positive oid_at;
         positive oid_stop = 0;
-        bool ecdsa;
-        bool rsa;
+        p8 kind;
 
         if (tls_asn1_enter(der, size, 0x30, at, address_of alg_stop))
                 return false;
@@ -5055,21 +5112,9 @@ static COLD bool tls_signature_algorithm(p8 address_to der, positive size,
                                address_of oid_stop))
                 return false;
 
-        ecdsa = tls_oid_is(der + oid_at, oid_stop - oid_at,
-                           tls_oid_ecdsa_sha256, sizeof tls_oid_ecdsa_sha256) ||
-                tls_oid_is(der + oid_at, oid_stop - oid_at,
-                           tls_oid_ecdsa_sha384, sizeof tls_oid_ecdsa_sha384);
-        rsa = tls_oid_is(der + oid_at, oid_stop - oid_at,
-                         tls_oid_sha256_rsa, sizeof tls_oid_sha256_rsa) ||
-              tls_oid_is(der + oid_at, oid_stop - oid_at,
-                         tls_oid_sha384_rsa, sizeof tls_oid_sha384_rsa);
-        if (!ecdsa && !rsa)
-                return false;
-        if (ecdsa && oid_stop != alg_stop)
-                return false;
-        if (rsa && oid_stop != alg_stop &&
-            (oid_stop + 2 != alg_stop || der[oid_stop] != 0x05 ||
-             der[oid_stop + 1] != 0))
+        kind = tls_signature_kind(der + oid_at, oid_stop - oid_at);
+        if (!kind || (oid_stop != alg_stop &&
+                      (!(kind & 4) || !tls_null_or_absent(der, oid_stop, alg_stop))))
                 return false;
 
         address_to oid = der + oid_at;
@@ -5103,8 +5148,10 @@ static COLD bool tls_host_match(string_address host, p8 address_to name,
                         return false;
         }
 
+        /* The star stands for one whole label, never an empty one: a host
+           ".example.com" is not a name "*.example.com" covers. */
         star = string_first_of(host, '.');
-        if (!star || !star[1])
+        if (!star || star == host || !star[1])
                 return false;
 
         return string_length(star) == name_length - 1 &&
@@ -5176,34 +5223,31 @@ static COLD bipolar tls_parse_ecdsa_sig(p8 address_to sig, positive length,
                                    p8 address_to r, positive address_to r_length,
                                    p8 address_to s, positive address_to s_length)
 {
+        p8 address_to into[2] = {r, s};
+        positive address_to into_length[2] = {r_length, s_length};
         positive at = 0;
         positive stop = 0;
-        positive r_stop = 0;
-        positive s_stop = 0;
-        positive value_at;
-        positive value_length;
 
         if (tls_asn1_enter(sig, length, 0x30, address_of at, address_of stop) ||
             stop != length)
                 return TLS_FAIL;
-        if (tls_asn1_enter(sig, stop, 0x02, address_of at, address_of r_stop))
-                return TLS_FAIL;
-        if (!tls_positive_integer(sig, at, r_stop, address_of value_at,
-                                  address_of value_length) ||
-            value_length > 48)
-                return TLS_FAIL;
-        address_to r_length = value_length;
-        memory_copy(r, sig + value_at, value_length);
-        at = r_stop;
-        if (tls_asn1_enter(sig, stop, 0x02, address_of at, address_of s_stop))
-                return TLS_FAIL;
-        if (!tls_positive_integer(sig, at, s_stop, address_of value_at,
-                                  address_of value_length) ||
-            value_length > 48)
-                return TLS_FAIL;
-        address_to s_length = value_length;
-        memory_copy(s, sig + value_at, value_length);
-        return s_stop == stop ? TLS_OK : TLS_FAIL;
+        for (positive k = 0; k < 2; k++)
+        {
+                positive value_stop = 0;
+                positive value_at;
+                positive value_length;
+
+                if (tls_asn1_enter(sig, stop, 0x02, address_of at,
+                                   address_of value_stop) ||
+                    !tls_positive_integer(sig, at, value_stop, address_of value_at,
+                                          address_of value_length) ||
+                    value_length > 48)
+                        return TLS_FAIL;
+                address_to into_length[k] = value_length;
+                memory_copy(into[k], sig + value_at, value_length);
+                at = value_stop;
+        }
+        return at == stop ? TLS_OK : TLS_FAIL;
 }
 
 typedef struct
@@ -5312,29 +5356,31 @@ static COLD bool tls_date_value(p8 tag, p8 address_to text, positive length,
 static COLD bipolar tls_parse_validity(p8 address_to der, positive size,
                                   positive address_to at, tls_cert address_to cert)
 {
+        p64 address_to times[2] = {address_of cert->not_before,
+                                   address_of cert->not_after};
         positive validity_stop = 0;
-        positive time_stop = 0;
-        p8 tag;
 
-        if (tls_asn1_enter(der, size, 0x30, at, address_of validity_stop) ||
-            address_to at >= validity_stop)
+        if (tls_asn1_enter(der, size, 0x30, at, address_of validity_stop))
                 return TLS_FAIL;
-        tag = der[address_to at];
-        if (tls_asn1_enter(der, validity_stop, tag, at, address_of time_stop) ||
-            !tls_date_value(tag, der + address_to at, time_stop - address_to at,
-                            address_of cert->not_before))
-                return TLS_FAIL;
-        address_to at = time_stop;
-        if (address_to at >= validity_stop)
-                return TLS_FAIL;
-        tag = der[address_to at];
-        if (tls_asn1_enter(der, validity_stop, tag, at, address_of time_stop) ||
-            !tls_date_value(tag, der + address_to at, time_stop - address_to at,
-                            address_of cert->not_after) ||
-            time_stop != validity_stop || cert->not_after < cert->not_before)
-                return TLS_FAIL;
-        address_to at = validity_stop;
-        return TLS_OK;
+        for (positive k = 0; k < 2; k++)
+        {
+                positive time_stop = 0;
+                p8 tag;
+
+                if (address_to at >= validity_stop)
+                        return TLS_FAIL;
+                tag = der[address_to at];
+                if (tls_asn1_enter(der, validity_stop, tag, at,
+                                   address_of time_stop) ||
+                    !tls_date_value(tag, der + address_to at,
+                                    time_stop - address_to at, times[k]))
+                        return TLS_FAIL;
+                address_to at = time_stop;
+        }
+        return address_to at == validity_stop &&
+                       cert->not_after >= cert->not_before
+                   ? TLS_OK
+                   : TLS_FAIL;
 }
 
 static COLD bipolar tls_parse_basic_constraints(p8 address_to value, positive length,
@@ -5344,22 +5390,9 @@ static COLD bipolar tls_parse_basic_constraints(p8 address_to value, positive le
         positive stop = 0;
 
         if (tls_asn1_enter(value, length, 0x30, address_of at, address_of stop) ||
-            stop != length)
+            stop != length ||
+            tls_asn1_true(value, stop, address_of at, address_of cert->ca))
                 return TLS_FAIL;
-        if (at < stop && value[at] == 0x01)
-        {
-                positive boolean_stop = 0;
-
-                if (tls_asn1_enter(value, stop, 0x01, address_of at,
-                                   address_of boolean_stop) ||
-                    at + 1 != boolean_stop ||
-                    value[at] != 0xff)
-                        return TLS_FAIL;
-                /* cA also has DEFAULT FALSE and must be omitted when false in
-                   DER. An encoded value is therefore canonical TRUE only. */
-                cert->ca = true;
-                at = boolean_stop;
-        }
         if (at < stop && value[at] == 0x02)
         {
                 positive integer_stop = 0;
@@ -5524,24 +5557,9 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                 seen_oid[seen_count] = der + oid_at;
                 seen_length[seen_count++] = oid_stop - oid_at;
                 at = oid_stop;
-                if (at < extension_stop && der[at] == 0x01)
-                {
-                        positive boolean_stop = 0;
-
-                        if (tls_asn1_enter(der, extension_stop, 0x01, address_of at,
-                                           address_of boolean_stop) ||
-                            at + 1 != boolean_stop ||
-                            der[at] != 0xff)
-                                return TLS_FAIL;
-                        /* critical has DEFAULT FALSE. DER omits a component
-                           carrying its default value, so an encoded BOOLEAN
-                           can only be canonical TRUE. Accepting explicit
-                           FALSE lets BER and DER validators disagree over the
-                           same signed extension envelope. */
-                        critical = true;
-                        at = boolean_stop;
-                }
-                if (tls_asn1_enter(der, extension_stop, 0x04, address_of at,
+                if (tls_asn1_true(der, extension_stop, address_of at,
+                                  address_of critical) ||
+                    tls_asn1_enter(der, extension_stop, 0x04, address_of at,
                                    address_of value_stop) ||
                     value_stop != extension_stop)
                         return TLS_FAIL;
@@ -5618,12 +5636,9 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
         if (tls_asn1_enter(der, length, 0x30, address_of at, address_of stop) ||
             stop != length)
                 return TLS_FAIL;
-        cert->tbs = der + at;
-        if (tls_asn1_enter(der, length, 0x30, address_of at, address_of tbs_stop))
+        if (tls_asn1_take(der, length, 0x30, address_of at, address_of cert->tbs,
+                          address_of cert->tbs_length))
                 return TLS_FAIL;
-        cert->tbs_length = (positive)((der + tbs_stop) - cert->tbs);
-
-        at = tbs_stop;
         if (!tls_signature_algorithm(der, stop, address_of at,
                                      address_of cert->sig_oid,
                                      address_of cert->sig_oid_length))
@@ -5666,31 +5681,11 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
                     memory_compare(tbs_oid, cert->sig_oid, tbs_oid_length))
                         return TLS_FAIL;
         }
-        {
-                positive name_at = at;
-                positive name_stop = 0;
-
-                if (tls_asn1_enter(der, tbs_stop, 0x30, address_of at,
-                                   address_of name_stop))
-                        return TLS_FAIL;
-                at = name_stop;
-                cert->issuer = der + name_at;
-                cert->issuer_length = at - name_at;
-        }
-        if (tls_parse_validity(der, tbs_stop, address_of at, cert))
-                return TLS_FAIL;
-        {
-                positive name_at = at;
-                positive name_stop = 0;
-
-                if (tls_asn1_enter(der, tbs_stop, 0x30, address_of at,
-                                   address_of name_stop))
-                        return TLS_FAIL;
-                at = name_stop;
-                cert->subject = der + name_at;
-                cert->subject_length = at - name_at;
-        }
-        if (!cert->issuer_length || !cert->subject_length)
+        if (tls_asn1_take(der, tbs_stop, 0x30, address_of at,
+                          address_of cert->issuer, address_of cert->issuer_length) ||
+            tls_parse_validity(der, tbs_stop, address_of at, cert) ||
+            tls_asn1_take(der, tbs_stop, 0x30, address_of at,
+                          address_of cert->subject, address_of cert->subject_length))
                 return TLS_FAIL;
 
         if (tls_asn1_enter(der, tbs_stop, 0x30, address_of at, address_of spki_stop))
@@ -5748,9 +5743,7 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
                 positive value_at;
                 positive value_length;
 
-                if (oid_stop != alg_stop &&
-                    (oid_stop + 2 != alg_stop || der[oid_stop] != 0x05 ||
-                     der[oid_stop + 1] != 0))
+                if (!tls_null_or_absent(der, oid_stop, alg_stop))
                         return TLS_FAIL;
 
                 cert->curve = 3;
@@ -5901,7 +5894,12 @@ static COLD bool tls_certificate_names_chain(const tls_cert address_to child,
 
 static COLD bool tls_verify_one(tls_cert address_to child, tls_cert address_to issuer)
 {
-        p8 hash[48];
+        static const p8 digests[3] = {DIGEST_SHA256, DIGEST_SHA384,
+                                      DIGEST_SHA512};
+        p8 kind = tls_signature_kind(child->sig_oid, child->sig_oid_length);
+        positive hash_length = 16 + 16 * (positive)(kind & 3);
+        digest_state digest;
+        p8 hash[64];
         p8 r[48];
         p8 s[48];
         positive r_length = 0;
@@ -5909,63 +5907,35 @@ static COLD bool tls_verify_one(tls_cert address_to child, tls_cert address_to i
         p8 address_to qx = issuer->qx + (issuer->curve == 1 ? 16 : 0);
         p8 address_to qy = issuer->qy + (issuer->curve == 1 ? 16 : 0);
 
-        if (tls_oid_is(child->sig_oid, child->sig_oid_length, tls_oid_ecdsa_sha384,
-                       8))
-        {
-                if (issuer->curve != 1 && issuer->curve != 2)
-                        return false;
-                crypto_sha384(child->tbs, child->tbs_length, hash);
-                if (tls_parse_ecdsa_sig(child->sig, child->sig_length, r,
-                                        address_of r_length, s, address_of s_length))
-                        return false;
-                if (issuer->curve == 2)
-                        return crypto_ecdsa_p384(hash, 48, r, r_length, s, s_length,
-                                                 qx, qy);
-                if (issuer->curve == 1)
-                        return crypto_ecdsa_p256(hash, 48, r, r_length, s, s_length,
-                                                 qx, qy);
+        if (!kind || (kind & 4 ? issuer->curve != 3
+                               : issuer->curve != 1 && issuer->curve != 2))
                 return false;
-        }
-
-        if (tls_oid_is(child->sig_oid, child->sig_oid_length, tls_oid_ecdsa_sha256,
-                       8))
+        digest_open(address_of digest, digests[(kind & 3) - 1], hash_length);
+        digest_write(address_of digest, child->tbs, child->tbs_length);
+        digest_close(address_of digest, hash);
+        if (kind & 4)
         {
-                if (issuer->curve != 1 && issuer->curve != 2)
-                        return false;
-                crypto_sha256_of(child->tbs, child->tbs_length, hash);
-                if (tls_parse_ecdsa_sig(child->sig, child->sig_length, r,
-                                        address_of r_length, s, address_of s_length))
-                        return false;
-                if (issuer->curve == 1)
-                        return crypto_ecdsa_p256(hash, 32, r, r_length, s, s_length,
-                                                 qx, qy);
-                if (issuer->curve == 2)
-                        return crypto_ecdsa_p384(hash, 32, r, r_length, s, s_length,
-                                                 qx, qy);
+                /* DigestInfo: the SEQUENCE of AlgorithmIdentifier
+                   {id-sha256/384/512 (2.16.840.1.101.3.4.2.1-3), NULL} and
+                   the OCTET STRING hash. */
+                const p8 info[19] = {
+                    0x30, (p8)(17 + hash_length), 0x30, 0x0d, 0x06, 0x09,
+                    0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+                    (p8)(kind & 3), 0x05, 0x00, 0x04, (p8)hash_length};
+
+                return crypto_rsa_pkcs1(issuer->modulus, issuer->modulus_length,
+                                        issuer->exponent, child->sig,
+                                        child->sig_length, info, sizeof info,
+                                        hash, hash_length);
+        }
+        if (tls_parse_ecdsa_sig(child->sig, child->sig_length, r,
+                                address_of r_length, s, address_of s_length))
                 return false;
-        }
-
-        if (tls_oid_is(child->sig_oid, child->sig_oid_length, tls_oid_sha256_rsa, 9))
-        {
-                if (issuer->curve != 3)
-                        return false;
-                crypto_sha256_of(child->tbs, child->tbs_length, hash);
-                return crypto_rsa_pkcs1_sha256(issuer->modulus, issuer->modulus_length,
-                                               issuer->exponent, child->sig,
-                                               child->sig_length, hash);
-        }
-
-        if (tls_oid_is(child->sig_oid, child->sig_oid_length, tls_oid_sha384_rsa, 9))
-        {
-                if (issuer->curve != 3)
-                        return false;
-                crypto_sha384(child->tbs, child->tbs_length, hash);
-                return crypto_rsa_pkcs1_sha384(issuer->modulus, issuer->modulus_length,
-                                               issuer->exponent, child->sig,
-                                               child->sig_length, hash);
-        }
-
-        return false;
+        return issuer->curve == 1
+                   ? crypto_ecdsa_p256(hash, hash_length, r, r_length, s,
+                                       s_length, qx, qy)
+                   : crypto_ecdsa_p384(hash, hash_length, r, r_length, s,
+                                       s_length, qx, qy);
 }
 
 /* The last certificate served names its issuer.  Each anchor with that
@@ -6100,6 +6070,20 @@ static COLD bool tls_certificate_body_open(p8 address_to body,
         return true;
 }
 
+/* The leaf comes first; the rest is a pool, as RFC 8446 section 4.4.2 asks
+   clients to treat it. Of 640 public HTTPS hosts openssl verified on
+   2026-09-28, 25 served intermediates out of order or an extra certificate
+   (a legacy root, a SHA-1 cross-certificate) that a served-order walk
+   refused. The path grows from the leaf: each step takes the first unused
+   served certificate whose subject names the step's issuer, that may issue
+   at this depth or carries an anchor key (which ends the path), and whose
+   key verifies the step; when none does, the anchors must sign for the
+   step. Asking the anchors first would accept nothing more -- a served
+   certificate the step verifies under has the signing key, so it carries
+   the anchor's key if an anchor signed -- and would cost the https_bench
+   anchor a failed P-384 verify per chain. A certificate that fails to
+   parse is never a candidate. A chain served in order costs what it did;
+   each entry is used once, at most 28 served signature checks. */
 static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                              string_address host, tls_conn address_to tls)
 {
@@ -6107,7 +6091,8 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         positive count = 0;
         positive at;
         positive list_end;
-        positive i;
+        positive unusable = 0;
+        positive child = 0;
         p64 now = 0;
 
         if (!tls_certificate_body_open(body, body_length,
@@ -6120,15 +6105,19 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                 positive ext_length;
 
                 at += 3;
-                if (at + cert_length + 2 > list_end)
+                if (cert_length + 2 > list_end - at)
                         return false;
                 if (tls_parse_cert(body + at, cert_length, certs + count,
                                    count ? null : host))
-                        return false;
+                {
+                        if (!count)
+                                return false;
+                        unusable |= (positive)1 << count;
+                }
                 at += cert_length;
                 ext_length = network_load_16(body + at);
                 at += 2;
-                if (at + ext_length > list_end)
+                if (ext_length > list_end - at)
                         return false;
                 at += ext_length;
                 count++;
@@ -6144,32 +6133,29 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         if (!tls->check_cert)
                 return true;
 
-        if (!tls_date_now(address_of now) || !tls_leaf_authorized(certs, now))
+        if (!tls_date_now(address_of now) || !tls_leaf_authorized(certs, now) ||
+            tls_spki_is_anchor(certs))
                 return false;
-        for (i = 1; i < count; i++)
+        for (positive depth = 0;; depth++)
         {
-                if (tls_spki_is_anchor(certs + i))
-                        break;
-                if (!tls_issuer_authorized(certs + i, i - 1, now))
-                        return false;
-        }
+                positive next;
+                bool anchor = false;
 
-        for (i = 0; i < count; i++)
-        {
-                if (tls_spki_is_anchor(certs + i))
-                        return i > 0;
-                if (i + 1 < count)
-                {
-                        if (!tls_certificate_names_chain(certs + i,
-                                                         certs + i + 1) ||
-                            !tls_verify_one(certs + i, certs + i + 1))
-                                return false;
-                }
-                else
-                        return tls_anchor_verifies(certs + i);
+                for (next = 1; next < count; next++)
+                        if (!(unusable >> next & 1) &&
+                            tls_certificate_names_chain(certs + child,
+                                                        certs + next) &&
+                            ((anchor = tls_spki_is_anchor(certs + next)) ||
+                             tls_issuer_authorized(certs + next, depth, now)) &&
+                            tls_verify_one(certs + child, certs + next))
+                                break;
+                if (next == count)
+                        return tls_anchor_verifies(certs + child);
+                if (anchor)
+                        return true;
+                unusable |= (positive)1 << next;
+                child = next;
         }
-
-        return false;
 }
 
 static COLD bool tls_hello_append(p8 address_to out, positive room,

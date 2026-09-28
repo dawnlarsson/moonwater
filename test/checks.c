@@ -54338,6 +54338,41 @@ static fn tls_certificate_identity_rules(void)
         memory_fill(address_of cert, 0, sizeof cert);
 
 
+        {
+                /* host, dNSName, whether it identifies the host */
+                static const struct
+                {
+                        string_address host;
+                        string_address name;
+                        bool match;
+                } names[] = {
+                    {"example.com", "example.com", true},
+                    {"Example.COM", "example.com", true},
+                    {"www.example.com", "*.example.com", true},
+                    {"WWW.Example.Com", "*.EXAMPLE.com", true},
+                    {"xn--bcher-kva.example.com", "*.example.com", true},
+                    {"example.com", "*.example.com", false},
+                    {".example.com", "*.example.com", false},
+                    {"a.b.example.com", "*.example.com", false},
+                    {"www.example.com.evil", "*.example.com", false},
+                    {"example.com", "*.com", false},
+                    {"www.example.com", "w*.example.com", false},
+                    {"www.example.com", "*.example.com.", false},
+                    {"a", "*", false},
+                    {"a.", "*.", false},
+                    {"example.co", "example.com", false},
+                };
+                positive wrong = 0;
+
+                for (positive i = 0; i < array_count(names); i++)
+                        wrong += tls_host_match(names[i].host,
+                                                (p8 address_to)names[i].name,
+                                                string_length(names[i].name)) !=
+                                 names[i].match;
+                check("dNSName matching: case, one-label wildcards, no empty "
+                      "label, no public-suffix star",
+                      wrong == 0);
+        }
         check("an exact dNSName identifies a named host",
               tls_general_name_match("example.com", 0x82, dns,
                                      sizeof dns - 1));
@@ -57383,7 +57418,9 @@ static fn crypto_rsa_served_sizes(void)
         serves WR2 and a GTS Root R1 cross-signed by GlobalSign Root CA; GTS
         Root R1's key is an anchor, so the chain ends there. www.sectigo.com's
         OV R36 is signed with sha384WithRSAEncryption by the RSA-4096 Root
-        R46. Each certificate is the served DER byte for byte.
+        R46. certum.pl serves Certum Trusted Root CA cross-signed with
+        sha512WithRSAEncryption by the anchor Certum Trusted Network CA. Each
+        certificate is the served DER byte for byte.
 */
 static fn tls_trust_anchor_chains(void)
 {
@@ -57564,6 +57601,56 @@ static fn tls_trust_anchor_chains(void)
             "ab5a7ca19140f8e05ccf71585a90c87b98f43562a5c3d857b13c8f63f1de6545"
             "79f5a92c9123924529837def302433d7e7cb81f7fee5b9dd06df1d29c5001c7d"
             "f3f46b229abcdc034f0e147c9df8704c";
+        static const char certum_hex[] =
+            "308205c4308204aca003020102021100d8e0744b5824919fbd08847df72020fa"
+            "300d06092a864886f70d01010d0500307e310b300906035504061302504c3122"
+            "3020060355040a1319556e697a65746f20546563686e6f6c6f6769657320532e"
+            "412e31273025060355040b131e43657274756d2043657274696669636174696f"
+            "6e20417574686f72697479312230200603550403131943657274756d20547275"
+            "73746564204e6574776f726b204341301e170d3233303931393130303030305a"
+            "170d3238303931393130303030305a307a310b300906035504061302504c3121"
+            "301f060355040a131841737365636f20446174612053797374656d7320532e41"
+            "2e31273025060355040b131e43657274756d2043657274696669636174696f6e"
+            "20417574686f72697479311f301d0603550403131643657274756d2054727573"
+            "74656420526f6f7420434130820222300d06092a864886f70d01010105000382"
+            "020f003082020a0282020100d12d8ebbb736ea6d37919f4e93a705e4290325ce"
+            "1c82f77c999f4106cdeda3bac0db092cc17cdf297e4b652f93a7d4016b032818"
+            "a3d89d05c12ad845f191dedf3bd080028ccf380feaa75c7811a4c1c8855c25d3"
+            "d3b2e725cf115497ab35c01e761cef00539f39dc14a52c2225b37272fc8db3e5"
+            "3e081e142a370b883ccab0f4c8c2a1aebcc1be296755e2fcad595cfebd572cb0"
+            "908dc2ed37b67c9988b5d5039a3d150d3d3aa8a845f0954e25591dcd9869bbd3"
+            "cc32c98def81fead7d89bbba6013ca659567a0f319f60356d46ad327e2a1ad83"
+            "f04a1222771c0573e2197142c0ec75469a9058e06a8e2ba54630048e19b217e3"
+            "bea9ba7f56f12403d7b22128760e36304c79d5419a9aa8b835ba0c3af2441b20"
+            "88f7c525d73dc6e33e43dd87fec4eaf5533e4c65ff3b4acb785a6b175f0dc7c3"
+            "4f4e9a2aa2ed574d22e2469a3f0f9134247d55e38c9537d31af0092b2cd2c98d"
+            "b40d00ab672928d801f51904b61dbe76fe725cc485cad28041df05a8a3d58490"
+            "4f0bf3e03f9b19d237893ff27b521c8cf6e1f73c07978c0ea259810cb2903dd3"
+            "e35946ed0fa9a7de806b5aaa07b619cbbc57f397217a0cb12b743eebdaa7672d"
+            "4cc4989e3609766666fc1a3fea48541cbe30bd8050bf7cb5ce00f60c61d9e724"
+            "03e0e301810ebdd8853488bdb236a87b5c08e544808c6ff82fd521ca1d1cd0fb"
+            "c4b587d13a4ec776b53548b50203010001a382013f3082013b300f0603551d13"
+            "0101ff040530030101ff301d0603551d0e041604148cfb1c75bc02d39f4e2e48"
+            "d9f96054aac4b34ffa301f0603551d230418301680140876cdcb07ff24f6c5cd"
+            "edbb90bce284374675f7300e0603551d0f0101ff040403020106302f0603551d"
+            "1f042830263024a022a020861e687474703a2f2f63726c2e63657274756d2e70"
+            "6c2f63746e63612e63726c306b06082b06010505070101045f305d302806082b"
+            "06010505073001861c687474703a2f2f73756263612e6f6373702d6365727475"
+            "6d2e636f6d303106082b060105050730028625687474703a2f2f7265706f7369"
+            "746f72792e63657274756d2e706c2f63746e63612e636572303a0603551d2004"
+            "333031302f0604551d20003027302506082b0601050507020116196874747073"
+            "3a2f2f7777772e63657274756d2e706c2f435053300d06092a864886f70d0101"
+            "0d0500038201010028fa5d8caa511aa6be788669c2775a172fa9e07d454f6c1f"
+            "f49389766ca34a4278c25529fb16cbeafec3ebfeb160ef0872fc96c91d6c76a7"
+            "9ff072b8f6660af630e393eca9abb20e87c47d55b852b92e8ac58dd7e65555ea"
+            "f99867a404e06f08b8af64b6f192552e2e35a6dffbfafe1aaf688b2b02c2c724"
+            "02c8f05db60dda0b0a016c57182d6f02a20e941ded25a2f6f54561da729d9747"
+            "83ec4b05c1b934be8fd4e6943f622f2e2496ff39288ad575d427b4bcc2651135"
+            "62b6848cc74a73fdc68b6399424c54c6fc2208fc8e7b5935cf54de536ecc6e91"
+            "176912477142827089f4079b18567011ced00d30aea211ba2e66fa0f70eda29b"
+            "ff2efab2a7102641";
+        static p8 certum[1480];
+        tls_cert certum_cert;
         static p8 atlas[1172];
         static p8 wr2[1295];
         static p8 gts_r1[1382];
@@ -57579,7 +57666,10 @@ static fn tls_trust_anchor_chains(void)
         memory_fill(address_of wr2_cert, 0, sizeof wr2_cert);
         memory_fill(address_of gts_cert, 0, sizeof gts_cert);
         memory_fill(address_of r36_cert, 0, sizeof r36_cert);
+        memory_fill(address_of certum_cert, 0, sizeof certum_cert);
         parsed =
+            crypto_hex_into(certum, sizeof certum, certum_hex) == sizeof certum &&
+            !tls_parse_cert(certum, sizeof certum, address_of certum_cert, null) &&
             crypto_hex_into(atlas, sizeof atlas, atlas_hex) == sizeof atlas &&
             crypto_hex_into(wr2, sizeof wr2, wr2_hex) == sizeof wr2 &&
             crypto_hex_into(gts_r1, sizeof gts_r1, gts_r1_hex) ==
@@ -57589,7 +57679,7 @@ static fn tls_trust_anchor_chains(void)
             !tls_parse_cert(wr2, sizeof wr2, address_of wr2_cert, null) &&
             !tls_parse_cert(gts_r1, sizeof gts_r1, address_of gts_cert, null) &&
             !tls_parse_cert(r36, sizeof r36, address_of r36_cert, null);
-        check("the captured kernel.org, Google and Sectigo certificates parse",
+        check("the captured kernel.org, Google, Sectigo and Certum certificates parse",
               parsed);
         if (!parsed)
                 return;
@@ -57609,6 +57699,11 @@ static fn tls_trust_anchor_chains(void)
         check("the SHA-384 PKCS#1 verify refuses one flipped signature bit",
               !tls_anchor_verifies(address_of r36_cert));
         r36_cert.sig[r36_cert.sig_length - 1] ^= 1;
+        check("Certum Trusted Root CA verifies under Certum Trusted Network CA with sha512WithRSAEncryption",
+              tls_anchor_verifies(address_of certum_cert));
+        certum_cert.sig[certum_cert.sig_length - 1] ^= 1;
+        check("the SHA-512 PKCS#1 verify refuses one flipped signature bit",
+              !tls_anchor_verifies(address_of certum_cert));
         atlas_cert.issuer[atlas_cert.issuer_length - 1] ^= 1;
         check("an issuer Name no anchor carries fails closed",
               !tls_anchor_verifies(address_of atlas_cert));
