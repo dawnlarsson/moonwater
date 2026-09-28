@@ -10692,6 +10692,13 @@ MISC_UTILITIES = (
                    #   old D; -w is plain decimal with no suffix at all.
                    {"argv": ("-S3",), "stdin": "misc_od_printable_run"},
                    {"argv": ("-S5", "-j69990"), "stdin": "misc_od_printable_run"},
+                   #   Strings against the scan: -N and -j landing inside a
+                   #   run, at its NUL and past it, over text, binary and a
+                   #   run longer than a read.
+                   *(("-S%d" % least,) + skip + limit + (name,)
+                     for least in (1, 4) for name in ("blob", "long", "binary", "edge_65537")
+                     for skip in ((), ("-j7",), ("-j65530",))
+                     for limit in ((), ("-N1",), ("-N13",), ("-N70000",))),
                    ("-j9223372036854775808", "a.txt"), ("-N8E", "a.txt"), ("-N1R", "a.txt"), ("-j0Q", "a.txt"),
                    ("-j1KD", "long"), ("-S9223372036854775807", "a.txt"), ("-w0x10", "a.txt"), ("-w4x", "a.txt"),
                    ("-w1k", "a.txt"), ("-w18446744073709551616", "a.txt"))),

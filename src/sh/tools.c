@@ -12612,6 +12612,12 @@ static b32 dump_strings(positive first, positive count, positive minimum)
                 while (!skip && !done && !text_out_failed && text_fill())
                 {
                         positive available = text_input.filled - text_input.position;
+                        /*      Where the bytes outside ' '..'~' are, found up
+                                to sixty four at a time from base; the bytes
+                                between two of them are a run of a string. */
+                        p32 marks[64];
+                        positive marked = 0, next = 0, scanned = 0;
+                        p8 address_to base = null;
 
                         while (available && !done)
                         {
@@ -12621,35 +12627,51 @@ static b32 dump_strings(positive first, positive count, positive minimum)
                                         break;
                                 }
 
-                                p8 byte = text_input.buffer[text_input.position++];
+                                p8 address_to at = text_input.buffer + text_input.position;
 
-                                available--;
-                                address++;
+                                if (!base || at == base + scanned)
+                                {
+                                        positive window = limited && left < available ? left : available;
+
+                                        base = at;
+                                        marked = memory_offsets_outside(marks, at, window, ' ', '~',
+                                                                        array_count(marks));
+                                        scanned = marked == array_count(marks) ? marks[marked - 1] + 1
+                                                                               : window;
+                                        next = 0;
+                                }
+
+                                bool ends = next < marked;
+                                positive run = (positive)(base + (ends ? marks[next] : scanned) - at);
+                                positive taken = run + ends;
+
+                                held.used = have;
+                                if (run && !byte_store_reserve(address_of held, have + run,
+                                                               DUMP_STRING_STEP))
+                                {
+                                        dump_close();
+                                        byte_store_release(address_of held);
+                                        string_diagnostic(&text_diagnostic, 0, null,
+                                                          "memory exhausted");
+                                        return text_done(1);
+                                }
+                                if (run)
+                                        memory_copy(held.bytes + have, at, run);
+                                have += run;
+
+                                text_input.position += taken;
+                                available -= taken;
+                                address += taken;
                                 if (limited)
-                                        left--;
+                                        left -= taken;
 
-                                if (byte >= ' ' && byte <= '~')
+                                if (ends)
                                 {
-                                        held.used = have;
-                                        if (have == held.room &&
-                                            !byte_store_reserve(address_of held, have + 1,
-                                                                DUMP_STRING_STEP))
-                                        {
-                                                dump_close();
-                                                byte_store_release(address_of held);
-                                                string_diagnostic(&text_diagnostic, 0, null,
-                                                                  "memory exhausted");
-                                                return text_done(1);
-                                        }
-                                        held.bytes[have++] = byte;
-                                }
-                                else if (!byte && have >= minimum)
-                                {
-                                        dump_string_line(address - have - 1, held.bytes, have);
+                                        next++;
+                                        if (!at[run] && have >= minimum)
+                                                dump_string_line(address - have - 1, held.bytes, have);
                                         have = 0;
                                 }
-                                else
-                                        have = 0;
 
                                 if (limited && !left)
                                 {
