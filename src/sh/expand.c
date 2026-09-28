@@ -9624,7 +9624,11 @@ static fn glob_walk(p8 address_to prefix, positive used, string_address pattern,
                 else
                         prefix[used] = end;
 
-                glob_add(prefix);
+                //      The directory was joined on without a look when its
+                //      component had nothing magic in it: c/a/** must not
+                //      answer c/a/ where there is no c/a.
+                if (glob_exists(prefix))
+                        glob_add(prefix);
         }
 
         if (!star && !glob_magic(component))

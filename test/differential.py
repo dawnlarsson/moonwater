@@ -14790,6 +14790,14 @@ def shell_lang_test_set_all(rng):
         "[ -v '" + v + "' ]; echo \"t=$?\"", "[[ -v " + v + " ]]; echo \"d=$?\"", "test -v '" + v + "'; echo \"x=$?\""))
 
 
+#       A globstar directory is listed only where it exists: c/a/** named
+#       c/a/, which is not there, because the literal a was joined on unseen.
+def shell_lang_globstar_exists(rng):
+    return ("globstar-exists", shell_BASH, shell_program(
+        "mkdir -p a/a/a b/a c; : > a/f; : > b/a/f", "shopt -s globstar",
+        "printf '<%s>' " + rng.choice(("c/a/**", "c/**", "a/**", "nope/**", "b/a/**", "a/a/a/a/**")) + "; echo"))
+
+
 #       Digits in front of > are a descriptor only while they fit one: bash
 #       reads a number past INT_MAX there as an ordinary word, so `echo a
 #       2147483648>f` writes "a 2147483648" to f. This called it a syntax
@@ -17657,6 +17665,7 @@ SHELL_FAMILIES = (
     shell_lang_source_path,
     shell_lang_enable_special,
     shell_lang_test_set_all,
+    shell_lang_globstar_exists,
     shell_lang_read_trailing_delimiter,
     shell_lang_debug_trap_places,
     shell_lang_globignore,
