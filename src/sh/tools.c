@@ -9383,13 +9383,15 @@ release:
 #define DUMP_BLOCK 256
 #define DUMP_CANONICAL_WIDTH 16
 #define DUMP_DEFAULT_WIDTH 16
-#define DUMP_LINE_MAX (DUMP_BLOCK * 6 + 64)
+#define DUMP_LINE_MAX (DUMP_BLOCK * 10 + 64)
 #define DUMP_FORMAT_MAX 16
 #define DUMP_INTEGER 0
 #define DUMP_CHARACTER 1
 #define DUMP_CANONICAL 2
 #define DUMP_NAMED 3
 #define DUMP_HEX_BYTES 4
+// od -t f: base holds which, H B F D or L.
+#define DUMP_FLOAT 5
 
 typedef struct
 {
@@ -9402,6 +9404,10 @@ typedef struct
         bool zero;
         bool printable;
         bool hexdump;
+        // od: the row's padding shared among the fields, set per run, and
+        // whether it is one blank a field, the case with no sharing to do.
+        bool even;
+        positive pad;
 } dump_format;
 
 typedef struct
@@ -9823,6 +9829,7 @@ static bool dump_od_type_failed;
 #define DUMP_OD_TYPE_SIZE 2
 #define DUMP_OD_TYPE_FLOAT 3
 #define DUMP_OD_TYPE_TOO_MANY 4
+#define DUMP_OD_TYPE_WHOLE 5
 
 static p8 dump_od_type_byte;
 static positive dump_od_type_size;
@@ -9862,11 +9869,66 @@ static p8 dump_od_types(string_address word)
                         continue;
                 }
 
-                /* The reference carries four floating widths this does not,
-                   and says so in its own sentence rather than pretending
-                   the letter is unknown. */
+                /*      The floating types: half and bfloat16 in two
+                        bytes, float, double, and the long double in
+                        sixteen, which is the x87's eighty bits on x86_64
+                        and binary128 elsewhere. A width in digits names
+                        the type of that size, two being half; no width
+                        is double. */
                 if (type == 'f')
-                        return DUMP_OD_TYPE_FLOAT;
+                {
+                        p8 which = 'D';
+                        positive size = 8;
+
+                        if (word[at] == 'B' || word[at] == 'H' || word[at] == 'F' ||
+                            word[at] == 'D' || word[at] == 'L')
+                        {
+                                which = word[at++];
+                                size = which == 'B' || which == 'H' ? 2
+                                       : which == 'F'               ? 4
+                                       : which == 'D'               ? 8
+                                                                    : 16;
+                        }
+                        else if (byte_is_digit(word[at]))
+                        {
+                                size = 0;
+                                while (byte_is_digit(word[at]))
+                                {
+                                        size = size * 10 + (positive)(word[at++] - '0');
+                                        if (size > 2147483647)
+                                                return DUMP_OD_TYPE_WHOLE;
+                                }
+                                if (size != 2 && size != 4 && size != 8 && size != 16)
+                                {
+                                        dump_od_type_size = size;
+                                        return DUMP_OD_TYPE_FLOAT;
+                                }
+                                which = size == 2 ? 'H' : size == 4 ? 'F'
+                                        : size == 8 ? 'D' : 'L';
+                        }
+
+                        dump_add((dump_format){
+                            .kind = DUMP_FLOAT,
+                            .base = which,
+                            .size = (p8)size,
+                            .width = size <= 4 ? 15 : size == 8 ? 24
+#if __LDBL_MANT_DIG__ == 64
+                                                                 : 29,
+#else
+                                                                 : 44,
+#endif
+                            .gap = 1,
+                        });
+                        if (dump_arguments.failed)
+                                return DUMP_OD_TYPE_TOO_MANY;
+                        if (word[at] == 'z')
+                        {
+                                dump_arguments.format[dump_arguments.count - 1]
+                                    .printable = true;
+                                at++;
+                        }
+                        continue;
+                }
 
                 if (type != 'd' && type != 'o' && type != 'u' && type != 'x')
                 {
@@ -9884,10 +9946,11 @@ static p8 dump_od_types(string_address word)
                         size = 0;
                         while (byte_is_digit(word[at]))
                         {
-                                if (size <= positive_max / 16)
-                                        size = size * 10 +
-                                               (positive)(word[at] - '0');
+                                size = size * 10 + (positive)(word[at] - '0');
                                 at++;
+                                //      Past an int is no width at all.
+                                if (size > 2147483647)
+                                        return DUMP_OD_TYPE_WHOLE;
                         }
                 }
                 else if (word[at] == 'C' || word[at] == 'S' ||
@@ -10009,7 +10072,16 @@ static bool dump_od_seen(p8 letter, string_address value)
                 {
                         text_flush();
                         string_format(writer_stderr,
-                            "od: floating point output is unsupported\n");
+                                      "od: invalid type string '%w';\n"
+                                      "this system doesn't provide a %p-byte floating point type\n",
+                                      writer_terminal_quoted_name, value, dump_od_type_size);
+                        dump_od_type_failed = true;
+                }
+                else if (kind == DUMP_OD_TYPE_WHOLE)
+                {
+                        text_flush();
+                        string_format(writer_stderr, "od: invalid type string '%w'\n",
+                                      writer_terminal_quoted_name, value);
                         dump_od_type_failed = true;
                 }
                 else if (kind == DUMP_OD_TYPE_SIZE)
@@ -10120,11 +10192,13 @@ static bool dump_od_seen(p8 letter, string_address value)
                 }
         }
 
+        //      The old letters for the floating types: -e and -F are
+        //      double, -f is float.
         if (letter == 'e' || letter == 'F' || letter == 'f')
         {
-                text_flush();
-                string_format(writer_stderr, "od: floating point output is unsupported\n");
-                dump_od_type_failed = true;
+                dump_od_types(letter == 'f' ? (string_address)"fF" : (string_address)"fD");
+                if (dump_arguments.failed)
+                        return string_diagnostic(&text_diagnostic, 0, null, "too many output formats");
                 return true;
         }
 
@@ -10353,8 +10427,9 @@ static fn dump_canonical_line(p8 address_to bytes, positive length,
         A row wider than DUMP_BLOCK, which GNU's od takes at any width: -w is
         a multiple of the widest type and nothing else. The common widths
         keep their buffers on the stack; a wider one gets its row, the row
-        before it, the formatted line (seven bytes a byte covers the widest
-        field, its gap and the z column) and the hex spelling here, once.
+        before it, the formatted line (ten bytes a byte covers the widest
+        field -- a half float's sixteen columns for two bytes -- its gap and
+        the z column) and the hex spelling here, once.
 */
 static byte_store dump_wide;
 static p8 address_to dump_wide_previous;
@@ -10367,7 +10442,7 @@ static bool dump_wide_ready(positive width)
                 return true;
 
         if (width > positive_max / 16 ||
-            !byte_store_reserve(address_of dump_wide, width * 11 + 64, 4096))
+            !byte_store_reserve(address_of dump_wide, width * 14 + 64, 4096))
         {
                 text_flush();
                 writer_stderr("od: memory exhausted\n", 0);
@@ -10378,6 +10453,475 @@ static bool dump_wide_ready(positive width)
         dump_wide_hex = dump_wide.bytes + width * 2;
         dump_wide_line = dump_wide.bytes + width * 4;
         return true;
+}
+
+/*
+        A floating field as coreutils' ftoastr writes one: %g at the type's
+        own digits first -- one digit for zero and a subnormal -- and one
+        more each time until the text reads back as the same value, or the
+        most digits the type could ever need are spent, which is where a
+        NaN stops. Half and bfloat16 are widened to float first and read
+        back as floats. The digits are seq's, which print a long double's
+        exact decimal expansion, and the reading back is the library's
+        correctly rounded strtof, strtod and strtold.
+*/
+static seq_wide dump_float_ieee(p64 bits, positive fraction_bits, positive exponent_bits,
+                                bool address_to tiny)
+{
+        positive top = (positive)1 << exponent_bits;
+        positive field = (positive)(bits >> fraction_bits) & (top - 1);
+        p64 fraction = bits & (((p64)1 << fraction_bits) - 1);
+        bool negative = (bits >> (fraction_bits + exponent_bits)) & 1;
+        bipolar bias = (bipolar)(top / 2 - 1);
+
+        address_to tiny = !field;
+        if (field == top - 1)
+                return (seq_wide){0, 0, fraction ? SEQ_WIDE_NAN : SEQ_WIDE_INFINITE, negative};
+        if (!field && !fraction)
+                return (seq_wide){0, 0, SEQ_WIDE_ZERO, negative};
+        if (field)
+                fraction |= (p64)1 << fraction_bits;
+        return seq_wide_round(fraction, (field ? (bipolar)field : 1) - bias -
+                                            (bipolar)fraction_bits, negative);
+}
+
+#if __LDBL_MANT_DIG__ == 64
+/*
+        An x87 value's leading digits, fast. The exact expansion seq makes
+        costs a big integer as long as the value's exponent, which at the far
+        ends of this format is five thousand digits a field; random data is
+        mostly those ends. So the value is scaled by a power of ten held to
+        128 bits -- products of 10 and 1/10 squared, each a few ulps out --
+        until its integer part has the digits wanted, and the rounding is
+        taken from the bits below. The error is far under a millionth of
+        the last digit, so where the fraction is that close to a half, or to
+        a whole where the integer part could be one out, this answers false
+        and the exact expansion decides instead.
+*/
+static p128 dump_ten_up[14];
+static p128 dump_ten_down[14];
+static bipolar dump_ten_up_exponent[14];
+static bipolar dump_ten_down_exponent[14];
+static bool dump_ten_ready;
+
+// The top 128 bits of a product of two normalized mantissas.
+static p128 dump_multiply_high(p128 left, p128 right, bipolar address_to exponent)
+{
+        p64 a1 = (p64)(left >> 64), a0 = (p64)left;
+        p64 b1 = (p64)(right >> 64), b0 = (p64)right;
+        p128 high = (p128)a1 * b1, cross1 = (p128)a1 * b0;
+        p128 cross0 = (p128)a0 * b1, low = (p128)a0 * b0;
+        p128 middle = (p128)(p64)cross1 + (p64)cross0 + (low >> 64);
+        p128 top = high + (cross1 >> 64) + (cross0 >> 64) + (middle >> 64);
+
+        if (top >> 127)
+        {
+                address_to exponent += 128;
+                return top;
+        }
+        address_to exponent += 127;
+        return top << 1 | (p64)middle >> 63;
+}
+
+static fn dump_ten_power(bipolar power, p128 address_to mantissa,
+                         bipolar address_to exponent)
+{
+        if (!dump_ten_ready)
+        {
+                dump_ten_up[0] = (p128)10 << 124;
+                dump_ten_up_exponent[0] = -124;
+                dump_ten_down[0] = ((p128)0xcccccccccccccccc << 64) | 0xcccccccccccccccd;
+                dump_ten_down_exponent[0] = -131;
+                for (positive at = 1; at < 14; at++)
+                {
+                        bipolar up = 2 * dump_ten_up_exponent[at - 1];
+                        bipolar down = 2 * dump_ten_down_exponent[at - 1];
+
+                        dump_ten_up[at] = dump_multiply_high(dump_ten_up[at - 1],
+                                                             dump_ten_up[at - 1], address_of up);
+                        dump_ten_down[at] = dump_multiply_high(dump_ten_down[at - 1],
+                                                               dump_ten_down[at - 1], address_of down);
+                        dump_ten_up_exponent[at] = up;
+                        dump_ten_down_exponent[at] = down;
+                }
+                dump_ten_ready = true;
+        }
+
+        p128 value = (p128)1 << 127;
+        bipolar scale = -127;
+        positive left = (positive)(power < 0 ? -power : power);
+
+        for (positive at = 0; left; at++, left >>= 1)
+                if (left & 1)
+                {
+                        bipolar sum = scale + (power < 0 ? dump_ten_down_exponent[at]
+                                                         : dump_ten_up_exponent[at]);
+
+                        value = dump_multiply_high(value, power < 0 ? dump_ten_down[at]
+                                                                    : dump_ten_up[at],
+                                                   address_of sum);
+                        scale = sum;
+                }
+
+        address_to mantissa = value;
+        address_to exponent = scale;
+}
+
+// Bits from..from+127 of a 192-bit number, zeros below its bottom.
+static p128 dump_bits_at(p64 address_to limb, bipolar from)
+{
+        p128 out = 0;
+
+        for (bipolar bit = 127; bit >= 0; bit--)
+        {
+                bipolar at = from + bit;
+
+                out <<= 1;
+                if (at >= 0 && at < 192)
+                        out |= (limb[at / 64] >> (at % 64)) & 1;
+        }
+        return out;
+}
+
+/*
+        And whether those digits read back as the value, from the same
+        numbers: the digits are |fraction| from the value in units of their
+        last place, and a reader returns the value when that is under half
+        the value's own spacing in the same units -- half the spacing below
+        a power of two, where the spacing halves. back is 1 for yes, 2 for
+        no, and 0 when the two are too close to call, for the library's
+        reader to settle.
+*/
+static bool dump_ld_digits(p64 mantissa, bipolar exponent, positive precision,
+                           p8 address_to digits, bipolar address_to decimal,
+                           p8 address_to back, bool narrower_below)
+{
+        address_to back = 0;
+        if (!mantissa || precision > 21)
+                return false;
+
+        p128 limit = 1;
+
+        for (positive at = 0; at < precision; at++)
+                limit *= 10;
+
+        bipolar bits = (bipolar)(64 - bits_leading_zeros(mantissa));
+        bipolar guess = ((exponent + bits - 1) * 315653) >> 20;
+        bipolar power = guess - (bipolar)precision + 1;
+
+        for (positive tries = 0; tries < 4; tries++)
+        {
+                p128 scale;
+                bipolar shift;
+
+                dump_ten_power(-power, address_of scale, address_of shift);
+
+                p128 low = (p128)mantissa * (p64)scale;
+                p128 high = (p128)mantissa * (p64)(scale >> 64);
+                p128 middle = (low >> 64) + (p64)high;
+                p64 limb[3] = {(p64)low, (p64)middle,
+                               (p64)((high >> 64) + (middle >> 64))};
+                bipolar point = -(exponent + shift);
+                p128 whole = dump_bits_at(limb, point);
+                p64 fraction = (p64)dump_bits_at(limb, point - 64);
+
+                if (point > 192 || whole >= limit)
+                {
+                        power++;
+                        continue;
+                }
+                if (whole < limit / 10)
+                {
+                        power--;
+                        continue;
+                }
+
+                p64 margin = (p64)1 << 32;
+                p64 half = (p64)1 << 63;
+
+                if (fraction < margin || fraction > ~margin ||
+                    (fraction > half - margin && fraction < half + margin))
+                        return false;
+
+                bool up = fraction > half;
+                p64 apart = up ? (p64)0 - fraction : fraction;
+                bipolar room = shift + exponent - 1 + 64 - ((!up && narrower_below) ? 1 : 0);
+
+                //      Half the spacing in 2^-64ths of the last digit: at
+                //      least a whole digit reads back whatever was cut.
+                if (room >= 0)
+                        address_to back = 1;
+                else if (room > -128)
+                {
+                        p128 spacing = scale >> (-room);
+
+                        if (spacing >> 64)
+                                address_to back = 1;
+                        else if ((p64)spacing > apart && (p64)spacing - apart > margin)
+                                address_to back = 1;
+                        else if ((p64)spacing < apart && apart - (p64)spacing > margin)
+                                address_to back = 2;
+                }
+                else
+                        address_to back = 2;
+
+                if (up)
+                        whole++;
+                if (whole == limit)
+                {
+                        whole /= 10;
+                        power++;
+                }
+
+                for (positive at = precision; at-- > 0;)
+                {
+                        digits[at] = (p8)('0' + (p8)(whole % 10));
+                        whole /= 10;
+                }
+                address_to decimal = power + (bipolar)precision - 1;
+                return true;
+        }
+        return false;
+}
+
+// %g over digits already rounded to the precision, without the # flag.
+static string_address dump_g_layout(bool negative, p8 address_to digits,
+                                    positive precision, bipolar decimal,
+                                    p8 address_to into)
+{
+        positive count = precision;
+        positive made = 0;
+
+        while (count > 1 && digits[count - 1] == '0')
+                count--;
+
+        if (negative)
+                into[made++] = '-';
+
+        if (decimal < -4 || decimal >= (bipolar)precision)
+        {
+                into[made++] = digits[0];
+                if (count > 1)
+                {
+                        into[made++] = '.';
+                        memory_copy_apart(into + made, digits + 1, count - 1);
+                        made += count - 1;
+                }
+                into[made++] = 'e';
+                into[made++] = decimal < 0 ? '-' : '+';
+                positive size = (positive)(decimal < 0 ? -decimal : decimal);
+                if (size < 10)
+                        into[made++] = '0';
+                made += positive_into(into + made, size);
+        }
+        else if (decimal < 0)
+        {
+                into[made++] = '0';
+                into[made++] = '.';
+                for (bipolar at = decimal + 1; at < 0; at++)
+                        into[made++] = '0';
+                memory_copy_apart(into + made, digits, count);
+                made += count;
+        }
+        else
+        {
+                positive whole = (positive)decimal + 1;
+
+                for (positive at = 0; at < whole; at++)
+                        into[made++] = at < count ? digits[at] : '0';
+                if (count > whole)
+                {
+                        into[made++] = '.';
+                        memory_copy_apart(into + made, digits + whole, count - whole);
+                        made += count - whole;
+                }
+        }
+        into[made] = end;
+        return into;
+}
+#endif
+
+static positive dump_float_field(p8 address_to into, p8 address_to bytes,
+                                 positive have, dump_format address_to format)
+{
+        p8 raw[16] = {0};
+        positive size = format->size;
+
+        for (positive at = 0; at < size && at < have; at++)
+                raw[dump_arguments.big_endian ? size - 1 - at : at] = bytes[at];
+
+        p128 bits = 0;
+
+        for (positive at = size; at-- > 0;)
+                bits = bits << 8 | raw[at];
+
+        seq_wide value;
+        bool tiny;
+        bool normal = false;
+        p8 which = format->base;
+        positive digits, bound;
+        p64 narrow = 0;
+
+        if (which == 'L')
+        {
+#if __LDBL_MANT_DIG__ == 64
+                bits &= ((p128)1 << 80) - 1;
+                normal = ((bits >> 64) & 0x7fff) && ((bits >> 64) & 0x7fff) != 0x7fff &&
+                         ((bits >> 63) & 1);
+                //      A pseudo-denormal is the smallest normal's value
+                //      spelled with the explicit bit set, and compares
+                //      equal to it; with that bit clear anywhere else the
+                //      eighty bits are no number, and glibc says nan.
+                if (!((bits >> 63) & 1) && ((bits >> 64) & 0x7fff))
+                {
+                        value = (seq_wide){0, 0, SEQ_WIDE_NAN, ((bits >> 79) & 1) != 0};
+                        tiny = false;
+                }
+                else
+                {
+                        tiny = !((bits >> 64) & 0x7fff) && !((bits >> 63) & 1);
+                        value = seq_wide_unpack(bits);
+                        //      glibc prints a pseudo-denormal with a
+                        //      fraction as the denormal its fraction alone
+                        //      would be -- which is not what it compares
+                        //      equal to, so it never reads back.
+                        if (!((bits >> 64) & 0x7fff) && ((bits >> 63) & 1) &&
+                            ((p64)bits << 1))
+                                value = seq_wide_round((p64)bits & ~((p64)1 << 63),
+                                                       -16445, ((bits >> 79) & 1) != 0);
+                }
+                if (!((bits >> 64) & 0x7fff) && ((bits >> 63) & 1))
+                        bits += (p128)1 << 64;
+                digits = 18;
+                bound = 21;
+#else
+                tiny = !((bits >> 112) & 0x7fff);
+                digits = 33;
+                bound = 36;
+                value = seq_wide_unpack(bits);
+#endif
+        }
+        else if (which == 'D')
+        {
+                value = dump_float_ieee((p64)bits, 52, 11, address_of tiny);
+                digits = 15;
+                bound = 17;
+        }
+        else
+        {
+                //      The float the value is, which is what it is read
+                //      back as; a half is always normal as a float.
+                if (which == 'H')
+                {
+                        p64 half = (p64)bits;
+                        positive field = (half >> 10) & 31;
+                        p64 fraction = half & 0x3ff;
+
+                        narrow = (half & 0x8000) << 16;
+                        if (field == 31)
+                                narrow |= 0x7f800000 | fraction << 13;
+                        else if (field)
+                                narrow |= (p64)(field + 112) << 23 | fraction << 13;
+                        else if (fraction)
+                        {
+                                positive shift = 0;
+
+                                while (!(fraction & 0x400))
+                                        fraction <<= 1, shift++;
+                                narrow |= (p64)(113 - shift) << 23 | (fraction & 0x3ff) << 13;
+                        }
+                }
+                else
+                        narrow = which == 'B' ? (p64)bits << 16 : (p64)bits;
+                value = dump_float_ieee(narrow, 23, 8, address_of tiny);
+                digits = 6;
+                bound = 9;
+        }
+
+        string_address text = null;
+
+        for (positive precision = tiny ? 1 : digits; ; precision++)
+        {
+                seq_format shape = {.conversion = 'g', .precise = true,
+                                    .precision = precision};
+
+                text = null;
+                p8 known = 0;
+#if __LDBL_MANT_DIG__ == 64
+                p8 digit[24];
+                static p8 laid[64];
+                bipolar place;
+                positive field = (positive)(bits >> 64) & 0x7fff;
+
+                //      The fast digits for the normal values, whose spacing
+                //      is two to the exponent; the rest are rare enough for
+                //      the exact road.
+                if (which == 'L' && value.kind == SEQ_WIDE_FINITE &&
+                    normal && !(value.significand >> 64) &&
+                    dump_ld_digits((p64)value.significand, value.exponent, precision,
+                                   digit, address_of place, address_of known,
+                                   (p64)bits == (p64)1 << 63 && field > 1))
+                        text = dump_g_layout(value.negative, digit, precision, place, laid);
+#endif
+                if (!text)
+                {
+                        known = 0;
+                        text = seq_wide_printed(address_of shape, value);
+                }
+                if (!text || precision >= bound)
+                        break;
+
+                bool same = false;
+
+                if (known)
+                        same = known == 1;
+                else if (value.kind == SEQ_WIDE_NAN)
+                        same = false;
+                else if (which == 'L')
+                {
+                        union { f128 value; p128 bits; } back = {.bits = 0};
+
+                        back.value = string_to_extended(text, null);
+#if __LDBL_MANT_DIG__ == 64
+                        back.bits &= ((p128)1 << 80) - 1;
+                        p128 sign = (p128)1 << 79;
+#else
+                        p128 sign = (p128)1 << 127;
+#endif
+                        same = back.bits == bits ||
+                               (!(back.bits & ~sign) && !(bits & ~sign));
+                }
+                else if (which == 'D')
+                {
+                        union { decimal value; p64 bits; } back;
+
+                        back.value = string_to_decimal(text, null);
+                        same = back.bits == (p64)bits ||
+                               !((back.bits | (p64)bits) << 1);
+                }
+                else
+                {
+                        union { f32 value; p32 bits; } back;
+
+                        back.value = string_to_narrow(text, null);
+                        same = back.bits == (p32)narrow ||
+                               !(p32)((back.bits | (p32)narrow) << 1);
+                }
+
+                if (same)
+                        break;
+        }
+
+        if (!text)
+                text = (string_address) "";
+        return dump_right(into, text, string_length(text), format->width, ' ');
+}
+
+/* coreutils' share of a row's padding that falls before field i of fields:
+   pad times i over fields, without the product. */
+static positive dump_pad_at(positive fields, positive at, positive pad)
+{
+        return pad / fields * at + pad % fields * at / fields;
 }
 
 static fn dump_regular_line(dump_format address_to format,
@@ -10392,34 +10936,12 @@ static fn dump_regular_line(dump_format address_to format,
         positive full_fields = dump_arguments.width / format->size;
         positive gap = format->gap;
 
-        /* With several od formats GNU aligns their value columns to the
-           widest selected row.  Derive the slot width from the formats
-           already parsed rather than storing a second set of padded format
-           descriptors. */
-        if (dump_arguments.od && dump_arguments.count > 1)
-        {
-                positive widest = 0;
-
-                for (positive at = 0; at < dump_arguments.count; at++)
-                {
-                        dump_format address_to other =
-                            dump_arguments.format + at;
-
-                        if (other->kind == DUMP_CANONICAL)
-                                continue;
-
-                        positive span = (other->gap + other->width) *
-                                        (dump_arguments.width / other->size);
-
-                        if (span > widest)
-                                widest = span;
-                }
-
-                positive slot = widest / full_fields;
-
-                if (slot > format->width)
-                        gap = slot - format->width;
-        }
+        /* od aligns its formats' rows to the widest of them, each a field
+           and a blank per value, and shares what a narrower row lacks among
+           its fields as coreutils does: field i of n is preceded by the
+           padding up to it, pad * i / n, less the padding before it. */
+        positive pad = format->pad;
+        bool shared = dump_arguments.od && !format->even;
 
         if (first || format->hexdump)
         {
@@ -10443,6 +10965,9 @@ static fn dump_regular_line(dump_format address_to format,
 
                 for (positive field = 0; field < fields; field++)
                 {
+                        if (shared)
+                                gap = dump_pad_at(full_fields, full_fields - field, pad) -
+                                      dump_pad_at(full_fields, full_fields - field - 1, pad);
                         made += dump_pad(line + made, gap, ' ');
                         line[made++] = hex[field * 2];
                         line[made++] = hex[field * 2 + 1];
@@ -10450,12 +10975,18 @@ static fn dump_regular_line(dump_format address_to format,
         }
         else for (positive field = 0; field < fields; field++)
         {
+                if (shared)
+                        gap = dump_pad_at(full_fields, full_fields - field, pad) -
+                              dump_pad_at(full_fields, full_fields - field - 1, pad);
                 made += dump_pad(line + made, gap, ' ');
 
                 if (format->kind == DUMP_CHARACTER)
                         made += dump_character_field(line + made, bytes[field]);
                 else if (format->kind == DUMP_NAMED)
                         made += dump_named_field(line + made, bytes[field]);
+                else if (format->kind == DUMP_FLOAT)
+                        made += dump_float_field(line + made, bytes + field * format->size,
+                                                 length - field * format->size, format);
                 else
                 {
                         positive left = length - field * format->size;
@@ -10476,7 +11007,15 @@ static fn dump_regular_line(dump_format address_to format,
         /* util-linux's stock formats are fixed-width records, including
            blanks for values absent from the final short row.  od does that
            only when its z suffix needs a stable printable column. */
-        if (format->hexdump || format->printable)
+        if (dump_arguments.od && format->printable)
+        {
+                if (fields < full_fields)
+                        made += dump_pad(line + made,
+                                         (full_fields - fields) * format->width +
+                                             dump_pad_at(full_fields, full_fields - fields, pad),
+                                         ' ');
+        }
+        else if (format->hexdump || format->printable)
                 made += dump_pad(line + made,
                                  (full_fields - fields) *
                                      (gap + format->width),
@@ -10555,6 +11094,24 @@ static positive dump_skip_input(positive wanted)
                 }
         }
 
+        /*      A device that seeks is skipped by seeking, however far: GNU's
+                od seeks whatever is not a regular file and counts the skip
+                taken when the seek succeeds, so `od -j1 /dev/null` is an
+                empty dump and not a skip past the end. A pipe or a
+                terminal refuses the seek and is read through below. */
+        if (wanted && dump_arguments.od &&
+            text_input.position == text_input.filled)
+        {
+                file_facts facts;
+
+                if (file_look(text_input.handle, (string_address)"",
+                              AT_EMPTY_PATH, address_of facts) &&
+                    (facts.mode & MODE_FORMAT) != MODE_FILE &&
+                    wanted <= (positive)bipolar_max &&
+                    system_seek(text_input.handle, wanted, FILE_SEEK_CUR) >= 0)
+                        return wanted;
+        }
+
         positive taken = 0;
 
         while (taken < wanted && text_fill_amount_od(wanted - taken))
@@ -10623,6 +11180,27 @@ static b32 dump_run(positive first, positive count)
                 return text_done(1);
 
         p8 address_to block = width > DUMP_BLOCK ? dump_wide.bytes : stack_block;
+
+        //      od's row padding, once for the run: each format's row is as
+        //      wide as the widest, a field and a blank per value.
+        positive widest = 0;
+
+        for (positive at = 0; at < dump_arguments.count; at++)
+        {
+                dump_format address_to other = dump_arguments.format + at;
+                positive span = (other->width + 1) * (width / other->size);
+
+                if (span > widest)
+                        widest = span;
+        }
+        for (positive at = 0; at < dump_arguments.count; at++)
+        {
+                dump_format address_to other = dump_arguments.format + at;
+                positive fields = width / other->size;
+
+                other->pad = widest - other->width * fields;
+                other->even = other->pad == fields;
+        }
         p8 address_to previous = width > DUMP_BLOCK ? dump_wide_previous
                                                     : stack_previous;
         positive held = 0;
@@ -10667,6 +11245,18 @@ static b32 dump_run(positive first, positive count)
                 //      far as it was asked to, says nothing about the width.
                 if (!skip)
                         dump_od_width_warning();
+                else if (dump_arguments.od)
+                {
+                        //      A directory seeks, so a skip into one is
+                        //      taken, and the width is said before the
+                        //      read that then fails.
+                        file_facts facts;
+
+                        if (file_look(text_input.handle, (string_address)"", AT_EMPTY_PATH,
+                                      address_of facts) &&
+                            (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                                dump_od_width_warning();
+                }
 
                 if (dump_input_is_directory(name))
                 {
