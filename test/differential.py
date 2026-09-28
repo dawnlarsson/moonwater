@@ -42550,6 +42550,7 @@ static fn fuzz_connection(const p8 *data, positive length)
         network_deadline deadline = {1, 1};
         p8 flags;
         bool closed = false;
+        bipolar status;
 
         if (length < 4)
                 return;
@@ -42564,10 +42565,14 @@ static fn fuzz_connection(const p8 *data, positive length)
         tls = (tls_conn address_to)malloc(sizeof *tls);
         if (!tls)
                 return;
-        if (tls_connect(tls, 3, flags & 1 ? "192.0.2.1" : "example.test",
-                        flags & 2))
+        status = tls_connect(tls, 3, flags & 1 ? "192.0.2.1" : "example.test",
+                             flags & 2);
+        if (status)
         {
-                if (tls->handle != -1)
+                /* Only a checked Certificate can be the reason. */
+                if (tls->handle != -1 ||
+                    (status != TLS_FAIL &&
+                     (status != TLS_UNTRUSTED || !(flags & 2))))
                         abort();
                 free(tls);
                 return;

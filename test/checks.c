@@ -56197,6 +56197,59 @@ static fn tls_client_hello_groups(void)
         positive host;
         positive at;
 
+        {
+                static const struct
+                {
+                        string_address host;
+                        string_address sni;
+                } names[] = {
+                    {"example.com", "example.com"},
+                    {"example.com.", "example.com"},
+                    {"123.example", "123.example"},
+                    {"xn--bcher-kva.example", "xn--bcher-kva.example"},
+                    {"127.0.0.1", null},
+                    {"127.0.0.1.", null},
+                    {"127.1", null},
+                    {"::1", null},
+                    {"[2001:db8::1]", null},
+                    {"fe80::1%eth0", null},
+                    {".", null},
+                };
+                bool all = true;
+
+                for (positive row = 0; row < array_count(names); row++)
+                {
+                        tls_conn named = {.host = names[row].host};
+                        p8 out[512];
+                        positive length = 0;
+                        positive at = 0;
+                        positive size = 0;
+                        bool has;
+
+                        if (tls_client_hello(address_of named, out, sizeof out,
+                                             address_of length, null, 0))
+                        {
+                                all = false;
+                                continue;
+                        }
+                        has = tls_hello_extension(out, length, 0, address_of at,
+                                                  address_of size);
+                        if (names[row].sni
+                                ? !has || !named.named ||
+                                      size != 5 + string_length(names[row].sni) ||
+                                      memory_compare(out + at + 5, names[row].sni,
+                                                     size - 5)
+                                : has || named.named)
+                        {
+                                all = false;
+                                string_format(log, "  SNI row: %s\n",
+                                              names[row].host);
+                        }
+                        crypto_forget(named.scalar, sizeof named.scalar);
+                }
+                check("server_name names DNS hosts only, without a trailing dot", all);
+        }
+
         for (host = 0; host < array_count(hosts); host++)
         {
                 positive used = 0;
@@ -60418,6 +60471,37 @@ static fn tls12_pieces(void)
                 check("a TLS 1.2 certificate longer than its list is refused",
                       !tls12_certificate(tls, body, sizeof body, scratch));
                 body[5]--;
+
+                /* A Certificate the checker refuses marks the connection
+                   untrusted, for tls_connect's TLS_UNTRUSTED; unchecked,
+                   the same leaf is only kept. The leaf names no SAN. */
+                {
+                        static p8 message[4 + sizeof body];
+
+                        message[0] = TLS_HS_CERTIFICATE;
+                        message[1] = 0;
+                        network_store_16(message + 2, (p16)sizeof body);
+                        memory_copy(message + 4, body, sizeof body);
+                        crypto_sha256_open(address_of tls->transcript);
+                        tls->check_cert = true;
+                        check("a refused Certificate marks the connection untrusted",
+                              tls_flight_message(tls, message, sizeof message,
+                                                 scratch) == TLS_FAIL &&
+                                  tls->untrusted);
+                        tls->check_cert = false;
+                        check("an unchecked Certificate is kept, not untrusted",
+                              tls_flight_message(tls, message, sizeof message,
+                                                 scratch) == TLS_OK &&
+                                  !tls->untrusted);
+                        tls->suite = 0xc02f;
+                        tls->check_cert = true;
+                        check("a TLS 1.2 leaf the suite cannot use is untrusted too",
+                              tls_flight_message(tls, message, sizeof message,
+                                                 scratch) == TLS_FAIL &&
+                                  tls->untrusted);
+                        tls->check_cert = false;
+                        tls->suite = 0xc02b;
+                }
 
                 crypto_hex_into(exchange, sizeof exchange, exchange_hex);
                 crypto_hex_into(exchange384, sizeof exchange384,
