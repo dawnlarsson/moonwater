@@ -50378,6 +50378,33 @@ static fn fetching(void)
                                        80, "/safe", false, '1', "",
                                        &used) == HTTP_OK);
         }
+        /* The peel stops at the terminator: a trailing '%' or half escape is
+           an ordinary byte, and a deep %25 chain is walked once, refused
+           only when its innermost pair decodes to LF. */
+        {
+                static p8 chain[3 * 600 + 4];
+                positive at = 0;
+
+                check("a target ending in a bare percent is not an escape",
+                      http_request_component_valid("/a%", HTTP_REQUEST_TARGET) &&
+                          http_request_component_valid("/a%2",
+                                                       HTTP_REQUEST_TARGET));
+                chain[at++] = '/';
+                for (positive depth = 0; depth < 600; depth++)
+                {
+                        memory_copy(chain + at, "%25", 3);
+                        at += 3;
+                }
+                memory_copy(chain + at, "0a", 3);
+                check("a 600-deep percent chain ending in LF is refused",
+                      !http_request_component_valid(chain,
+                                                    HTTP_REQUEST_TARGET));
+                chain[at] = 'x';
+                chain[at + 1] = 0;
+                check("a 600-deep percent chain ending in a plain byte is valid",
+                      http_request_component_valid(chain,
+                                                   HTTP_REQUEST_TARGET));
+        }
         check("a port is taken",
               http_split_into((string_address) "http://127.0.0.1:8080/x", name, sizeof name,
                          address_of port, address_of path, address_of tls) == HTTP_OK);

@@ -8419,6 +8419,8 @@ enum
 
 static bool http_request_component_valid(string_address text, p8 kind)
 {
+        string_address peeled = text;
+
         if (!text)
                 return false;
 
@@ -8434,51 +8436,48 @@ static bool http_request_component_valid(string_address text, p8 kind)
                     (kind == HTTP_REQUEST_TARGET &&
                      (byte == '\\' || byte > 0x7f)))
                         return false;
-                if (kind == HTTP_REQUEST_TARGET && byte == '%')
+                if (kind == HTTP_REQUEST_TARGET && byte == '%' &&
+                    text >= peeled)
                 {
                         /* One decode is not enough: %250d is a CR after two
                            URI decodes, and %25250a needs three. Peel %25
                            whether written as %25 or as a bare 25 hex pair
-                           left after a previous peel. */
+                           left after a previous peel.  Every '%' a walk
+                           passes starts one of its steps, so a walk from it
+                           would retrace this one's safe suffix: each byte
+                           is walked once, not once per '%' before it.  A
+                           digit is read only after the one before it was a
+                           digit, never past the terminator. */
                         string_address at = text;
                         bool percent_form = true;
 
                         for (;;)
                         {
+                                string_address pair = at;
                                 positive high;
                                 positive low;
                                 p8 decoded;
 
-                                if (percent_form || string_get(at) == '%')
-                                {
-                                        if (string_get(at) != '%')
-                                                break;
-                                        high = digit_known(string_get(at + 1),
-                                                           16);
-                                        low = digit_known(string_get(at + 2),
-                                                          16);
-                                        if (high >= 16 || low >= 16)
-                                                break;
-                                        decoded = (p8)((high << 4) | low);
-                                        at += 3;
-                                }
-                                else
-                                {
-                                        high = digit_known(string_get(at), 16);
-                                        low = digit_known(string_get(at + 1),
-                                                          16);
-                                        if (high >= 16 || low >= 16)
-                                                break;
-                                        decoded = (p8)((high << 4) | low);
-                                        at += 2;
-                                }
+                                if (string_get(at) == '%')
+                                        pair = at + 1;
+                                else if (percent_form)
+                                        break;
+                                high = digit_known(string_get(pair), 16);
+                                if (high >= 16)
+                                        break;
+                                low = digit_known(string_get(pair + 1), 16);
+                                if (low >= 16)
+                                        break;
+                                decoded = (p8)((high << 4) | low);
                                 if (decoded == 0 || decoded == '\r' ||
                                     decoded == '\n')
                                         return false;
+                                at = pair + 2;
                                 if (decoded != '%')
                                         break;
                                 percent_form = false;
                         }
+                        peeled = at;
                 }
                 if (kind == HTTP_REQUEST_HOST &&
                     !byte_is_alnum(byte) && byte != '-' && byte != '.' &&
