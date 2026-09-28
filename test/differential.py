@@ -9248,8 +9248,9 @@ def files_address_cap(farm):
     bss and died of a segmentation fault under ulimit -v 50000 before its
     first word, cat and rm among them. Each runs a small real job under a
     20 MB cap and must answer as the reference does under the same cap;
-    ls is left out, since its tables are still 36 MB mapped at its start,
-    and fmt, which takes a million-word table from the arena at once."""
+    fmt is left out, which takes a million-word table from the arena at
+    once. ls, dir and vdir were left out too while their tables were 36 MB
+    mapped at their start; they grow with the listing now."""
     import resource
     import subprocess
     import tempfile
@@ -9259,7 +9260,9 @@ def files_address_cap(farm):
             ("pr", "f"), ("dd", "if=f", "of=g", "status=none"), ("rm", "-f", "nothing"), ("cp", "f", "g"),
             ("mv", "f", "g"), ("ln", "-s", "f", "g"), ("chmod", "600", "f"), ("sed", "s/a/b/", "f"),
             ("head", "-n1", "f"), ("tail", "-n1", "f"), ("wc", "f"), ("sort", "f"), ("uniq", "f"), ("tr", "a", "b"),
-            ("grep", "a", "f"), ("csplit", "f", "2"), ("touch", "g"), ("mkdir", "d"), ("stat", "-c", "%s", "f"))
+            ("grep", "a", "f"), ("csplit", "f", "2"), ("touch", "g"), ("mkdir", "d"), ("stat", "-c", "%s", "f"),
+            ("ls", "-a"), ("ls", "-lR", "--time-style=+"), ("dir", "-a"), ("vdir", "--time-style=+"),
+            ("du", "-a", "--apparent-size"))
     passed = total = 0
     notes = []
 

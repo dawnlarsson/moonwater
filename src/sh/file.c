@@ -7004,6 +7004,28 @@ static p8 (address_to ls_operand_names_held)[LS_ARENA / 4];
 #define ls_operand_names (*ls_operand_names_held)
 static positive ls_used;
 
+/*
+        How many bytes each table holds so far. The tables keep their
+        ceilings as types -- LS_MAX_ENTRIES names, LS_ARENA bytes of them --
+        and the listing is refused at the same limits as before, but memory
+        is asked for only as the names arrive, in steps that double.
+*/
+static positive ls_entries_room;
+static positive ls_sorted_room;
+static positive ls_spare_room;
+static positive ls_widths_room;
+static positive ls_arena_room;
+static positive ls_below_room;
+static positive ls_order_room;
+static positive ls_names_room;
+static positive ls_dired_room;
+
+static bool ls_order_reserve(positive operands)
+{
+        return memory_resize_reserve(address_of ls_operand_order_held, address_of ls_order_room,
+                                     operands * sizeof(positive), 256);
+}
+
 // What was asked for, one letter per question.
 static p8 ls_format;      // l long, 1 one per line, C down columns, x across, m commas
 static p8 ls_sorting;     // n name, t time, S size, v version, X extension, w width, U none
@@ -7222,7 +7244,9 @@ static bool ls_keep(string_address name, positive address_to where)
 {
         positive length = string_length(name);
 
-        if (ls_used + length + 1 > LS_ARENA)
+        if (ls_used + length + 1 > LS_ARENA ||
+            !memory_resize_reserve(address_of ls_arena_held, address_of ls_arena_room,
+                                   ls_used + length + 1, 65536))
         {
                 ls_limit((string_address) "directory names too large");
                 return false;
@@ -8717,7 +8741,9 @@ static fn ls_dired_mark(positive begin, positive stop)
         if (!ls_dired)
                 return;
 
-        if (ls_dired_count + 2 > array_count(ls_dired_marks))
+        if (ls_dired_count + 2 > array_count(ls_dired_marks) ||
+            !memory_resize_reserve(address_of ls_dired_marks_held, address_of ls_dired_room,
+                                   (ls_dired_count + 2) * sizeof(positive), 4096))
         {
                 ls_limit((string_address) "too many names for --dired");
                 return;
@@ -9246,6 +9272,21 @@ static fn ls_print_long(string_address directory)
 static positive (address_to ls_column_widths_held)[LS_MAX_ENTRIES];
 #define ls_column_widths (*ls_column_widths_held)
 
+// Room in every table kept a slot per name for this many names.
+static bool ls_room_for(positive names)
+{
+        if (!names)
+                names = 1;
+        return memory_resize_reserve(address_of ls_entries_held, address_of ls_entries_room,
+                                     names * sizeof(ls_entry), 1024 * sizeof(ls_entry)) &&
+               memory_resize_reserve(address_of ls_sorted_held, address_of ls_sorted_room,
+                                     names * sizeof(positive), 1024 * sizeof(positive)) &&
+               memory_resize_reserve(address_of ls_sort_spare_held, address_of ls_spare_room,
+                                     names * sizeof(positive), 1024 * sizeof(positive)) &&
+               memory_resize_reserve(address_of ls_column_widths_held, address_of ls_widths_room,
+                                     names * sizeof(positive), 1024 * sizeof(positive));
+}
+
 static fn ls_print_commas(string_address directory);
 
 static fn ls_print_columns(string_address directory, bool across)
@@ -9404,8 +9445,15 @@ static fn ls_print_lines(string_address directory)
         }
 }
 
+static bool ls_room_for(positive names);
+
 static fn ls_print(string_address directory)
 {
+        //      The column search reads a width for one column even of an
+        //      empty listing.
+        if (!ls_room_for(ls_count))
+                return ls_limit((string_address) "directory has too many entries");
+
         ls_some_quoted = false;
         ls_inode_width = 1;
         ls_block_width = 1;
@@ -9517,7 +9565,7 @@ static fn ls_fill(ls_entry address_to entry, file_facts address_to facts)
 static bool ls_add(bipolar directory, string_address path, string_address shown,
                    p8 type, string_address under, file_facts address_to given)
 {
-        if (ls_count >= LS_MAX_ENTRIES)
+        if (ls_count >= LS_MAX_ENTRIES || !ls_room_for(ls_count + 1))
         {
                 ls_limit((string_address) "directory has too many entries");
                 return false;
@@ -9745,10 +9793,31 @@ static fn ls_below(string_address path, positive depth)
         //      The pointer stays good across the descent because the arena is
         //      static and deeper levels only ever take from above the mark.
         positive mark = ls_below_used;
-        p8 address_to keep = ls_below_names + mark;
         positive room = sizeof(ls_below_names) - mark;
         positive kept = 0;
         positive found = 0;
+        positive wanted = 0;
+
+        //      The names are measured first so the arena is grown once; it
+        //      may move while the levels below grow it, so the names are
+        //      found again by their offset after each one.
+        for (positive k = 0; k < ls_count; k++)
+        {
+                ls_entry address_to entry = address_of ls_entries[ls_sorted[k]];
+                string_address name = ls_arena + entry->name;
+
+                if ((entry->mode & MODE_FORMAT) == MODE_DIRECTORY && !file_is_dot(name))
+                        wanted += string_length(name) + 1;
+        }
+        if (wanted > room ||
+            !memory_resize_reserve(address_of ls_below_names_held, address_of ls_below_room,
+                                   mark + wanted, 4096))
+        {
+                ls_limit((string_address) "recursive directory list too large");
+                return;
+        }
+
+        p8 address_to keep = ls_below_names + mark;
 
         for (positive k = 0; k < ls_count; k++)
         {
@@ -9786,7 +9855,7 @@ static fn ls_below(string_address path, positive depth)
         for (positive i = 0; i < found; i++)
         {
                 p8 below[FILE_PATH_MAX];
-                string_address name = keep + at;
+                string_address name = ls_below_names + mark + at;
 
                 at += string_length(name) + 1;
 
@@ -10356,40 +10425,13 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
 {
         positive count = (positive)program_argument_count();
 
-        //      ls's tables in one mapping, cut in order: one mmap and one
-        //      madvise where nine of each cost a listing 17 us to start.
-        if (!ls_entries_held)
-        {
-                address_any address_to slots[] = {
-                    (address_any address_to)&ls_entries_held,
-                    (address_any address_to)&ls_sorted_held,
-                    (address_any address_to)&ls_sort_spare_held,
-                    (address_any address_to)&ls_arena_held,
-                    (address_any address_to)&ls_below_names_held,
-                    (address_any address_to)&ls_operand_order_held,
-                    (address_any address_to)&ls_operand_names_held,
-                    (address_any address_to)&ls_dired_marks_held,
-                    (address_any address_to)&ls_column_widths_held,
-                };
-                const positive sizes[] = {
-                    sizeof(ls_entries), sizeof(ls_sorted), sizeof(ls_sort_spare),
-                    sizeof(ls_arena), sizeof(ls_below_names), sizeof(ls_operand_order),
-                    sizeof(ls_operand_names), sizeof(ls_dired_marks),
-                    sizeof(ls_column_widths),
-                };
-                positive total = 0;
-                for (positive i = 0; i < array_count(sizes); i++)
-                        total += (sizes[i] + 63) & ~(positive)63;
-                address_any whole = null;
-                if (!utility_hold(address_of whole, total, program))
-                        return 2;
-                p8 address_to at = whole;
-                for (positive i = 0; i < array_count(sizes); i++)
-                {
-                        address_to slots[i] = at;
-                        at += (sizes[i] + 63) & ~(positive)63;
-                }
-        }
+        //      ls's tables start empty and grow to what the listing holds:
+        //      carved out of one mapping at their ceilings they were 36 MB of
+        //      address space before the first name, which a ulimit -v that
+        //      GNU's ls runs under refused outright. The operand order is
+        //      sized once here, for every operand there is.
+        if (!ls_order_reserve(count + 1))
+                return string_report(log_error, 2, "%s: memory exhausted\n", program);
 
         ls_program = program;
         ls_selected = (ls_selection){};
@@ -10884,13 +10926,16 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                 string_address name = ls_arena + ls_entries[order[i]].name;
                 positive length = string_length(name);
 
-                if (kept + length + 1 > sizeof(ls_operand_names))
+                if (kept + length + 1 > sizeof(ls_operand_names) ||
+                    !memory_resize_reserve(address_of ls_operand_names_held, address_of ls_names_room,
+                                           kept + length + 1, 4096))
                 {
                         ls_limit((string_address) "too many directory operands");
                         log_flush();
                         return ls_status;
                 }
 
+                names = ls_operand_names;
                 memory_copy_apart(names + kept, name, length + 1);
                 kept += length + 1;
         }
