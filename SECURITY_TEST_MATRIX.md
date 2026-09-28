@@ -17,8 +17,8 @@
 | Codec hostile lengths and guard pages | codec-specific and floor lanes | `sh test/run codec compression_floor` |
 | Waterlink replay, seal and lossy delivery (separate review scope) | pure transform and namespace integration | `sh test/run waterlink link` |
 | Whole available suite | all locally supported lanes | `sh test/run` |
-| TLS DER / handshake fuzz (lane smoke) | bounded libFuzzer ASan/UBSan; soft NOT RUN without clang fuzzer | `sh test/run net` (via `tls_der_fuzz` / `tls_hs_fuzz` / `dhcp_fuzz`, 20k/5s) |
-| TLS net fuzz continuous (local) | same harnesses plus `tls_verify_fuzz`; longer budget | `sh test/run fuzz` (`MOONWATER_FUZZ_*`) |
+| TLS DER / handshake, DNS and netlink fuzz (lane smoke) | bounded libFuzzer ASan/UBSan; soft NOT RUN without clang fuzzer | `sh test/run net` (via `tls_der_fuzz` / `tls_hs_fuzz` / `dns_fuzz` / `netlink_fuzz`, 20k/5s) |
+| Net fuzz continuous (local) | same harnesses plus `tls_verify_fuzz`; longer budget | `sh test/run fuzz` (`MOONWATER_FUZZ_*`) |
 | TLS net fuzz deeper campaign (local) | same harnesses; bounded deeper-than-smoke | `MOONWATER_FUZZ_SECONDS=120 MOONWATER_FUZZ_RUNS=200000 MOONWATER_FUZZ_REPORT=artifacts/fuzz-campaign-report.txt sh test/run fuzz` |
 | Release fuzz attach | machine-readable sanitizer + corpus inventory + run exits | `MOONWATER_FUZZ_REPORT=artifacts/fuzz-report.txt sh test/run fuzz` |
 | Security test hygiene (procedural) | harness registration and wiring; soft-skip lanes; seed tables and no seed files in the tree; verify-lift proves; framing matrix consistency | `python3 test/differential.py --harness security_hygiene` (also at start of `lane_net` / `lane_tar`) |
@@ -26,7 +26,8 @@
 ## Fuzz corpora and release publish
 
 Seed bytes come from `tls_fuzz_seeds` in `test/differential.py` (hex
-fixtures plus built shapes). Each run writes them into its own temporary
+fixtures plus built shapes; `dns_fuzz_seeds` and `netlink_fuzz_seeds` for
+the two net corpora). Each run writes them into its own temporary
 corpus directory; no seed file lives in the tree.
 
 | Corpus | Seeds | Harness | What it exercises |
@@ -35,6 +36,8 @@ corpus directory; no seed file lives in the tree.
 | DER verify + sig | `tls_der` (same) | `tls_verify_fuzz` | `tls_verify_chain` parse/policy/names walker plus production `tls_verify_one` (hosted C montgomery + SHA); WR2→GTS prove in `LLVMFuzzerInitialize`; **not** lane_net smoke (hand / `sh test/run fuzz`) |
 | Handshake fragmentation | `tls_hs` | `tls_hs_fuzz` | `tls_handshake_one_append` / `tls_encrypted_flight_append` |
 | DHCP replies and lease clock | `dhcp` | `dhcp_fuzz` | `dhcp_read` / `dhcp_walk` against an RFC 2131/2132/3396 reference, `dhcp_lease_timers` / `dhcp_lease_acknowledge`, and the watcher's `net_lease_*` clock at fuzzed start and now |
+| DNS resolver | `dns` | `dns_fuzz` | net.c's DNS section and wait.c whole over a socket shim serving the input: UDP junk discard, TC to TCP framing, resolv.conf, fault bits; each datagram also as its own question through `dns_reply_result` |
+| rtnetlink walk | `netlink` | `netlink_fuzz` | net.c's netlink section, wait.c, ip's name table and link/addr/route lines: dump walk sender/port/sequence, DONE/ERROR status, DUMP_INTR, discovery preferences, acks; each message also through every visitor |
 
 Seed counts are whatever `tls_fuzz_seeds` returns; the fuzz lane's report
 records them.
@@ -98,7 +101,8 @@ at the top of the `CHECK_net` section in `test/checks.c`.
 | --- | --- | --- | --- |
 | DNS | message length | `DNS_MAX_MESSAGE` | exact + one-over unit; TCP/UDP transport one-over |
 | DNS | label / name | 63 / 255 | exact + one-over |
-| DNS | CNAME hops | `answers + 1` | chain accept + cycle exhaust |
+| DNS | CNAME hops | `min(answers, DNS_CNAME_HOPS)` + 1, 16 links | chain accept + cycle exhaust; 16 links accept, 17 refuse |
+| DNS | resolv.conf servers | `DNS_SERVERS_MAX` (3, glibc MAXNS) | five lines ask three; a cut last line asks none |
 | TLS | record payload | `TLS_RECORD_MAX` | exact + one-over (+ empty) |
 | TLS | enc plaintext | `TLS_RECORD_MAX - 17` | one-over (+ wraparound) |
 | TLS | handshake hold | `TLS_HS_MAX` | exact + one-over |

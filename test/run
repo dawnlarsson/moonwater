@@ -3654,6 +3654,18 @@ lane_net()
         2) note "sntp_fuzz: skipped (soft) -- does not downgrade net" ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness dns_fuzz
+        case $? in
+        0) ;;
+        2) note "dns_fuzz: skipped (soft) -- does not downgrade net" ;;
+        *) net_outcome=1 ;;
+        esac
+        python3 test/differential.py --harness netlink_fuzz
+        case $? in
+        0) ;;
+        2) note "netlink_fuzz: skipped (soft) -- does not downgrade net" ;;
+        *) net_outcome=1 ;;
+        esac
         return "$net_outcome"
 }
 #       Every network fuzz target for longer than lane_net's smoke, an hour
@@ -3664,8 +3676,9 @@ lane_net()
 #       report of toolchain, seeds, budget and exits written there.
 lane_fuzz() { python3 test/differential.py --harness tls_fuzz; }
 #       MemorySanitizer over hosted lifts of the net wire parsers, pad and
-#       uninit proves, and short tls_der_fuzz / tls_hs_fuzz runs. Needs Linux
-#       clang's -fsanitize=memory; NOT RUN without it.
+#       uninit proves, and short tls_der_fuzz / tls_hs_fuzz / dns_fuzz /
+#       netlink_fuzz runs. Needs Linux clang's -fsanitize=memory; NOT RUN
+#       without it.
 lane_msan() { MOONWATER_MSAN=1 python3 test/differential.py --harness msan_net; }
 lane_bowl() { freestanding_checks_lane bowl bowl; }
 #       Freestanding CHECK_tar (paths, pax, magics), then a continuous

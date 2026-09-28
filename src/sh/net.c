@@ -382,7 +382,8 @@ static COLD bool net_link_line(netlink_header address_to header, address_any con
 //      whole link table being held.
 static COLD bool net_address_line(netlink_header address_to header, address_any context)
 {
-        netlink_address address_to body;
+        netlink_address address_to body =
+            netlink_message_body(header, sizeof(netlink_address));
         positive size = 0;
         positive label_size = 0;
         p8 address_to held;
@@ -390,11 +391,9 @@ static COLD bool net_address_line(netlink_header address_to header, address_any 
         p8 written[32];
         p32 host;
 
-        if (header->length < NETLINK_HEADER + sizeof(netlink_address))
+        if (!body)
                 return true;
 
-        body = (netlink_address address_to)((p8 address_to)header +
-                                             NETLINK_HEADER);
         held = (p8 address_to)netlink_find(header, sizeof(netlink_address),
                                            IFA_LOCAL, address_of size);
         label = (string_address)netlink_find(header, sizeof(netlink_address),
@@ -419,7 +418,8 @@ static COLD bool net_address_line(netlink_header address_to header, address_any 
 
 static COLD bool net_route_line(netlink_header address_to header, address_any context)
 {
-        netlink_route address_to body;
+        netlink_route address_to body =
+            netlink_message_body(header, sizeof(netlink_route));
         positive gateway_size = 0;
         positive destination_size = 0;
         positive out_size = 0;
@@ -429,11 +429,9 @@ static COLD bool net_route_line(netlink_header address_to header, address_any co
         p8 written[32];
         (void)context;
 
-        if (header->length < NETLINK_HEADER + sizeof(netlink_route))
+        if (!body)
                 return true;
 
-        body = (netlink_route address_to)((p8 address_to)header +
-                                           NETLINK_HEADER);
         gateway = (p8 address_to)netlink_find(
             header, sizeof(netlink_route), RTA_GATEWAY,
             address_of gateway_size);

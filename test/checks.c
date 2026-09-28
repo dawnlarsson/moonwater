@@ -48731,6 +48731,7 @@ static positive net_send_short_limit;
 static bool net_send_short_hit;
 static bool net_send_eintr_sticky;
 static positive net_send_arm_after;
+static positive net_send_calls;
 
 static bipolar net_recv_error;
 static bool net_recv_error_hit;
@@ -48818,6 +48819,7 @@ static bipolar http_net_call3(positive number, positive one, positive two,
 static bipolar net_test_socket_send(b32 handle, address_any data, positive size,
                                     b32 flags, address_any to, positive to_size)
 {
+        net_send_calls++;
         if (net_send_arm_after)
         {
                 net_send_arm_after--;
@@ -48954,9 +48956,11 @@ static bool net_as_emulated(void)
                              / "a DNS name of two hundred fifty-six octets is refused"
           decompress jumps   structural (ceiling lowers; no step counter)
             hit:             "a pointer loop is refused", forward/cycle sweeps
-          CNAME hop passes   answers + 1
+          CNAME hop passes   min(answers, DNS_CNAME_HOPS (16)) + 1
             exact path:      "DNS follows a case-insensitive CNAME chain by owner"
             hop exhaust:     "a DNS CNAME cycle exhausts the answer-section hop budget"
+            exact+one-over:  "a DNS CNAME chain of DNS_CNAME_HOPS links resolves"
+                             / "a DNS CNAME chain one link past DNS_CNAME_HOPS is refused"
 
         TLS
           record payload     TLS_RECORD_MAX (16640)
@@ -49947,6 +49951,57 @@ static fn resolving_edges(void)
                           !found);
         }
 
+        /* A chain of links CNAMEs from c0.chain, each record spelling its
+           owner, and the last name's A: DNS_CNAME_HOPS links resolve and one
+           more is refused, however many answers the reply declares. */
+        for (positive links = DNS_CNAME_HOPS; links <= DNS_CNAME_HOPS + 1; links++)
+        {
+                p8 reply[1024] = {0};
+                p8 name[16] = "c";
+                bipolar question;
+                positive at;
+                p32 found = 0;
+
+                memory_copy(name + 1 + positive_into(name + 1, 0), ".chain", 7);
+                question = dns_write_name(reply, sizeof reply, (string_address)name);
+                at = (positive)question;
+                for (positive link = 0; link <= links; link++)
+                {
+                        positive length;
+
+                        memory_copy(name + 1 + positive_into(name + 1, link),
+                                    ".chain", 7);
+                        at += (positive)dns_write_name(reply + at, sizeof reply - at,
+                                                       (string_address)name);
+                        network_store_16(reply + at, link < links ? DNS_TYPE_CNAME
+                                                                  : DNS_TYPE_A);
+                        network_store_16(reply + at + 2, DNS_CLASS_IN);
+                        memory_copy(name + 1 + positive_into(name + 1, link + 1),
+                                    ".chain", 7);
+                        length = link < links
+                            ? (positive)dns_write_name(reply + at + 10, 64,
+                                                       (string_address)name)
+                            : 4;
+                        if (link == links)
+                                network_store_32(reply + at + 10, 0xc000020a);
+                        network_store_16(reply + at + 8, (p16)length);
+                        at += 10 + length;
+                }
+                if (links == DNS_CNAME_HOPS)
+                        check("a DNS CNAME chain of DNS_CNAME_HOPS links resolves",
+                              dns_answer_address(reply, at, (positive)question,
+                                                 (p16)(links + 1), 0,
+                                                 address_of found) == DNS_OK &&
+                                  found == 0xc000020a);
+                else
+                        check("a DNS CNAME chain one link past DNS_CNAME_HOPS is refused",
+                              dns_answer_address(reply, at, (positive)question,
+                                                 (p16)(links + 1), 0,
+                                                 address_of found) ==
+                                      DNS_MALFORMED &&
+                                  !found);
+        }
+
         {
                 p8 request[96] = {0};
                 p8 reply[96] = {0};
@@ -50236,6 +50291,61 @@ static fn resolving_truncated(void)
               dns_tcp_loopback_case(DNS_TCP_DEADLINE, null,
                                      address_of elapsed) == DNS_NO_REPLY &&
                   elapsed < NETWORK_NANOSECONDS + NETWORK_NANOSECONDS / 2);
+}
+
+/*
+        resolv.conf read the way glibc and musl read it, with every send
+        refused so nothing leaves the machine: the count of attempts is the
+        count of servers asked. A file longer than the resolver's 4095-byte
+        read must not lend its cut last line an address it never named.
+*/
+static fn net_io_faults_clear(void);
+
+static positive dns_servers_asked(const char address_to text, positive length)
+{
+        p8 path[40];
+        p32 found = 0;
+        positive asked = positive_max;
+        bipolar file = (bipolar)system_call_2(syscall(memfd_create),
+                                              (positive)"resolv", 0);
+
+        if (file < 0)
+                return asked;
+        memory_copy(path, "/proc/self/fd/", 14);
+        path[14 + positive_into(path + 14, (positive)file)] = end;
+        if (system_write_all((positive)file, (address_any)text, length) == length)
+        {
+                net_io_faults_clear();
+                net_send_eintr_sticky = true;
+                net_send_calls = 0;
+                (void)dns_resolve_any((string_address)path,
+                                      (string_address)"servers.example",
+                                      address_of found, 1);
+                asked = net_send_calls;
+                net_io_faults_clear();
+        }
+        system_close((positive)file);
+        return asked;
+}
+
+static fn resolving_servers(void)
+{
+        static const char five[] =
+            "nameserver 127.0.0.2\nnameserver 127.0.0.3\n"
+            "nameserver 127.0.0.4\nnameserver 127.0.0.5\n"
+            "nameserver 127.0.0.6\n";
+        static const char cut_line[] = "nameserver 127.0.0.12\n";
+        p8 cut[4097];
+
+        check("resolv.conf asks at most the three nameservers glibc reads",
+              dns_servers_asked(five, sizeof five - 1) == 3);
+
+        memory_fill(cut, '#', sizeof cut);
+        memory_copy(cut, "nameserver 127.0.0.2\n", 21);
+        cut[4074] = '\n';
+        memory_copy(cut + 4075, cut_line, sizeof cut_line - 1);
+        check("a resolv.conf cut by the read does not name its cut address",
+              dns_servers_asked((const char address_to)cut, sizeof cut) == 1);
 }
 
 /* Modes match harness_http_response_framing CASES in differential.py. */
@@ -59286,6 +59396,7 @@ b32 main(void)
         resolving();
         resolving_edges();
         resolving_truncated();
+        resolving_servers();
         fetching();
         streaming_chunk_boundaries();
         http_bounded_store();

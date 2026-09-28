@@ -666,6 +666,16 @@ static COLD address_any netlink_find(netlink_header address_to header, positive 
                                  header->length - at, type, size);
 }
 
+/* The fixed body a family puts after the header. Visitors are also used
+   directly by tests and by callers parsing multicast frames, so none is
+   handed a body pointer until that body is present in full. */
+static COLD address_any netlink_message_body(netlink_header address_to header,
+                                             positive body)
+{
+        return header->length < NETLINK_HEADER + body
+                   ? null : (p8 address_to)header + NETLINK_HEADER;
+}
+
 /*
         What the four things actually are, on the wire.
 
@@ -727,16 +737,9 @@ static inline INLINE string_address netlink_link_name(
         positive length = 0;
         string_address name;
 
-        address_to link = null;
-
-        /* Visitors are also used directly by tests and by callers parsing
-           multicast frames.  Do not hand either one a body pointer until the
-           fixed family-specific body is present in full. */
-        if (header->length < NETLINK_HEADER + sizeof(netlink_link))
+        address_to link = netlink_message_body(header, sizeof(netlink_link));
+        if (!address_to link)
                 return null;
-
-        address_to link = (netlink_link address_to)((p8 address_to)header +
-                                                     NETLINK_HEADER);
         name = (string_address)netlink_find(
             header, sizeof(netlink_link), IFLA_IFNAME, address_of length);
         return name && length && memory_first_of(name, 0, length) ? name : null;
@@ -1085,6 +1088,7 @@ static bipolar netlink_dump(b32 handle, p16 type, positive body, p8 family,
 #define DNS_CODE_MASK 0x000f
 
 #define DNS_MAX_MESSAGE 4096
+#define DNS_CNAME_HOPS 16
 //      Everything the caller may want to tell apart.
 #define DNS_OK 0
 #define DNS_NO_SERVER (-1)
@@ -1236,8 +1240,12 @@ static COLD bipolar dns_answer_address(p8 address_to message, positive size,
                 return DNS_MALFORMED;
 
         /* A cycle needs no more links than there are answer records to show
-           itself.  The extra pass is the one that can find the terminal A. */
-        for (positive hop = 0; hop <= (positive)answers; hop++)
+           itself.  The extra pass is the one that can find the terminal A.
+           Every pass walks every record, so the passes are the quadratic a
+           hostile reply buys: no chain goes past DNS_CNAME_HOPS links, where
+           systemd-resolved stops and short of which recursors give up. */
+        for (positive hop = 0; hop <= (positive)answers &&
+                               hop <= DNS_CNAME_HOPS; hop++)
         {
                 positive at = records_at;
                 bool has_alias = false;
@@ -1523,9 +1531,12 @@ done:
         Only "nameserver A.B.C.D" lines: the keyword, blanks, and the address
         up to the next blank, so a tab or a trailing comment does not hide a
         server. The wanted-th of them is returned, so a caller walks 0, 1, 2
-        until this answers negatively and the number of servers a machine may
-        list has no ceiling. Options, search domains and IPv6 servers are read
-        past rather than understood.
+        until this answers negatively. Options, search domains and IPv6
+        servers are read past rather than understood.
+
+        A file longer than the buffer is cut mid-line, and a cut
+        "nameserver 10.0.0.12" reads as a complete "10.0.0.1": a server the
+        file never named. So the last line of a full buffer is not a line.
 */
 static COLD bipolar dns_server_at(string_address path, positive wanted)
 {
@@ -1550,6 +1561,8 @@ static COLD bipolar dns_server_at(string_address path, positive wanted)
 
                 at = stop + (stop < (positive)got);
 
+                if (stop == sizeof text - 1)
+                        break;
                 if (stop - line < 12 ||
                     memory_compare(text + line, "nameserver", 10) ||
                     !byte_is_blank(text[from]))
@@ -1716,12 +1729,16 @@ failed:
         asked anyway, and only an actual address stops the walk.
 
         The cost is one extra query for a name that genuinely exists nowhere.
+        The walk stops after three servers, which is all glibc and musl read
+        (MAXNS): a file listing more would otherwise hold a lookup for its
+        timeout once per line.
 
         With no resolv.conf at all there is still somewhere to ask. A machine
         that has not been configured yet should be able to resolve a name, if
         only to fetch the thing that will configure it.
 */
 #define DNS_FALLBACK 0x01010101u
+#define DNS_SERVERS_MAX 3
 
 static COLD bipolar dns_resolve_any(string_address path, string_address name,
                                p32 address_to found, positive seconds)
@@ -1732,7 +1749,8 @@ static COLD bipolar dns_resolve_any(string_address path, string_address name,
         positive index = 0;
         bool asked = false;
 
-        while ((server = dns_server_at(path, index++)) >= 0)
+        while (index < DNS_SERVERS_MAX &&
+               (server = dns_server_at(path, index++)) >= 0)
         {
                 asked = true;
                 status = dns_resolve_at((p32)server, DNS_PORT, name, found,
