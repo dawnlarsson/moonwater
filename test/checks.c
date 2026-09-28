@@ -65636,6 +65636,60 @@ static fn cookies(bipolar listener, p16 port)
 }
 
 /*
+        The replay markers across a restart: an initiation taken, the
+        listener stopped and started again, and the same datagram played
+        back holds no session and draws no answer; a newer one from the
+        same peer is answered.
+*/
+static fn stamps_outlive(bipolar listener, p16 port)
+{
+        p8 datagram[WATERLINK_DATAGRAM];
+        p8 newer[WATERLINK_DATAGRAM];
+        p8 heard[WATERLINK_DATAGRAM + 16];
+        p64 now = 400000000;
+
+        link_self.me = wls_server;
+        link_self.server = true;
+        wls_peers_with(wls_client.public, WATERLINK_MAY_DEFAULT);
+        memory_zero(address_of link_self.admission, sizeof link_self.admission);
+        link_self.stamps = 0;
+        (void)system_remove_at(AT_FDCWD, LINK_STAMPS_PATH, 0);
+        wls_drain(listener);
+
+        wls_initiation(datagram, 31, 9000, 0x31313131);
+        wls_initiation(newer, 32, 9001, 0x32323232);
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now);
+        link_stamps_save();
+        check("an initiation is answered, and its marker written",
+              wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
+                      wls_sessions_used() == 1 && !link_self.stamps_dirty);
+
+        //      A restart: nothing of the listener is left but its files.
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used)
+                        link_session_close(link_self.session + at);
+        crypto_forget(link_self.stamp, sizeof link_self.stamp);
+        link_self.stamps = 0;
+        link_stamps_load();
+
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now + 1000000);
+        check("sec: after a restart a recorded initiation played back holds "
+              "no session and draws no answer",
+              wls_heard(listener, heard) <= 0 && wls_sessions_used() == 0);
+        link_server_initiation(newer, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now + 2000000);
+        check("and a newer one from the same peer is answered",
+              wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
+                      wls_sessions_used() == 1);
+        link_stamps_save();
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used)
+                        link_session_close(link_self.session + at);
+}
+
+/*
         The client's half: a cookie reply to the initiation it has out is
         kept and asked again under at once, and the next initiation carries
         mac2 by it; a second reply, to an initiation that carried one, does
@@ -67122,6 +67176,7 @@ b32 main(void)
         publication();
         responder(listener, port);
         cookies(listener, port);
+        stamps_outlive(listener, port);
         client_cookie(listener, port);
         initiator_answer();
         carried_is_atomic();

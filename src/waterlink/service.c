@@ -61,6 +61,8 @@
 #define LINK_LOCK_PATH HOST_STATE "/link.lock"
 #define LINK_STATE_PATH HOST_STATE "/link.state"
 #define LINK_STATE_NEXT HOST_STATE "/link.state.next"
+#define LINK_STAMPS_PATH "/root/link.stamps"
+#define LINK_STAMPS_NEXT "/root/link.stamps.next"
 
 #define LINK_PEERS_MAX 64
 #define LINK_SESSIONS 16
@@ -797,6 +799,13 @@ typedef struct
         p64 seen; // seconds, this machine's clock
 } link_seen_entry;
 
+//      The newest initiation stamp taken from a key: older ones are replays.
+typedef struct
+{
+        p8 key[32];
+        p8 stamp[WATERLINK_STAMP_BYTES];
+} link_stamp_entry;
+
 typedef struct
 {
         p8 name[WATERLINK_NAME_MAX];
@@ -833,9 +842,9 @@ typedef struct
         struct waterlink_identity me;
         struct waterlink_admission admission;
         struct link_session session[LINK_SESSIONS];
-        p8 stamp_key[LINK_PEERS_MAX][32];
-        p8 stamp[LINK_PEERS_MAX][WATERLINK_STAMP_BYTES];
+        link_stamp_entry stamp[LINK_PEERS_MAX];
         positive stamps;
+        bool stamps_dirty; // changed since /root/link.stamps was written
         link_state state;
         p64 state_written;
         bool state_dirty;
@@ -2016,7 +2025,7 @@ static positive link_stamp_at(p8 address_to key)
         positive at;
 
         for (at = 0; at < link_self.stamps; at++)
-                if (crypto_same(link_self.stamp_key[at], key, 32))
+                if (crypto_same(link_self.stamp[at].key, key, 32))
                         break;
 
         return at;
@@ -2036,23 +2045,15 @@ static fn link_stamps_prune(void)
                 return;
         while (at < link_self.stamps)
         {
-                if (link_peer_keyed(address_of peers, link_self.stamp_key[at]))
+                if (link_peer_keyed(address_of peers, link_self.stamp[at].key))
                 {
                         at++;
                         continue;
                 }
-                link_self.stamps--;
-                if (at < link_self.stamps)
-                {
-                        memory_copy(link_self.stamp_key[at],
-                                    link_self.stamp_key[link_self.stamps], 32);
-                        memory_copy(link_self.stamp[at],
-                                    link_self.stamp[link_self.stamps],
-                                    WATERLINK_STAMP_BYTES);
-                }
-                crypto_forget(link_self.stamp_key[link_self.stamps], 32);
-                crypto_forget(link_self.stamp[link_self.stamps],
-                              WATERLINK_STAMP_BYTES);
+                link_self.stamp[at] = link_self.stamp[--link_self.stamps];
+                crypto_forget(link_self.stamp + link_self.stamps,
+                              sizeof(link_stamp_entry));
+                link_self.stamps_dirty = true;
         }
 }
 
@@ -2061,7 +2062,7 @@ static bool link_stamp_new(p8 address_to key, p8 address_to stamp)
         positive at = link_stamp_at(key);
 
         if (at < link_self.stamps)
-                return waterlink_stamp_newer(stamp, link_self.stamp[at]);
+                return waterlink_stamp_newer(stamp, link_self.stamp[at].stamp);
         if (link_self.stamps == LINK_PEERS_MAX)
                 link_stamps_prune();
         /* Every paired peer fits in this table. Once it is full, refusing an
@@ -2081,8 +2082,9 @@ static fn link_stamp_keep(p8 address_to key, p8 address_to stamp)
                         return;
                 link_self.stamps++;
         }
-        memory_copy(link_self.stamp_key[at], key, 32);
-        memory_copy(link_self.stamp[at], stamp, WATERLINK_STAMP_BYTES);
+        memory_copy(link_self.stamp[at].key, key, 32);
+        memory_copy(link_self.stamp[at].stamp, stamp, WATERLINK_STAMP_BYTES);
+        link_self.stamps_dirty = true;
 }
 
 static fn link_server_initiation(p8 address_to datagram, positive length,
@@ -2484,6 +2486,42 @@ static fn link_state_write(p64 now)
                                 sizeof(address_to state), false);
 }
 
+/*
+        The replay markers outlive the listener. In memory only, a restart
+        forgot every peer's newest stamp, and an initiation recorded off the
+        wire before it was new again: it held a session slot for LINK_DEAD
+        and drew an answer. So the table is kept in /root/link.stamps and
+        read back when the listener starts, written once a turn in which a
+        stamp moved -- after the turn's answers went, so an initiation's
+        answer does not wait on it. Without fsync: about ten microseconds a
+        write on the NVMe ext4 this was measured on, where rewriting the
+        peers file with its fsync, the other place a marker could live, took
+        600 to 720 and stalled every session with it; a stamp lost to a
+        power cut is the restart case again, for that one peer.
+*/
+static fn link_stamps_save(void)
+{
+        if (!link_self.stamps_dirty)
+                return;
+        link_self.stamps_dirty = false;
+        (void)link_file_replace(LINK_STAMPS_NEXT, LINK_STAMPS_PATH,
+                                link_self.stamp,
+                                link_self.stamps * sizeof(link_stamp_entry),
+                                false);
+}
+
+static fn link_stamps_load(void)
+{
+        positive got = 0;
+
+        (void)link_read_private_records(LINK_STAMPS_PATH,
+                                        (p8 address_to)link_self.stamp,
+                                        sizeof link_self.stamp,
+                                        sizeof(link_stamp_entry),
+                                        address_of got);
+        link_self.stamps = got / sizeof(link_stamp_entry);
+}
+
 
 // The listener ------------------------------------------------------------------
 
@@ -2711,6 +2749,7 @@ static b32 link_serve(void)
         //      sending one datagram at a time is measured.
         link_self.gso = !file_environment((string_address) "WATERLINK_NO_SEGMENTS");
         link_self.state_dirty = true;
+        link_stamps_load();
 
         signals = link_signals_open();
 
@@ -2740,6 +2779,7 @@ static b32 link_serve(void)
                 now = link_self.now = link_now();
                 link_receive_all(now);
                 link_nearby_receive(now);
+                link_stamps_save();
         }
 
         link_nearby_stop();
