@@ -18366,6 +18366,7 @@ INPUTS.update({
     "text_lines_two_long": b"d" * 1200000 + b"\n" + b"d" * 1200000 + b"\nx\n",
     "text_fmt_3000_words": b" ".join(b"%d" % n for n in range(1, 3001)) + b"\n",
     "text_fmt_yes": b"y\n" * 5000,
+    "text_sort_z_newlines": b"a\nz\0ab\0a\n\nb\0a b\0a\tc\0b\0",
     "text_fmt_tagged": (b"> aaa bbb ccc ddd eee fff ggg hhh iii jjj\n\n>   kkk lll\n"
                         b"> mmm nnn ooo ppp qqq rrr sss\n\n"
                         b"#  one two three four five six seven eight nine\n"),
@@ -20616,6 +20617,12 @@ TEXT_UTILITIES = (
                    ("-z", "-t", ":", "-k2,2n"), ("-t:", "-k2,2n"), ("-t:", "-k2,2nr", "-s"), ("-t:", "-k2,2n", "-u"),
                    ("-t:", "-k3,3", "-k2,2n"), ("-t:", "-k2.2,2.7n"), ("-k3n", "big"), ("-u", "big"), ("-n", "big"),
                    ("-g",), ("--random-source=a.txt", "-R"),
+                   #   Under -z a record holds newlines: -d keeps them as
+                   #   GNU's field_sep does, and a disorder -c reports ends
+                   #   the record the way it was read.
+                   *({"argv": argv, "stdin": "text_sort_z_newlines"}
+                     for argv in (("-zd",), ("-zdf",), ("-zdr",), ("-z", "-k1d"), ("-zc",), ("-zcd",),
+                                  ("-zcu",), ("-zC",))),
                    #   --debug underlines each key where it was read -- a
                    #   number or a month only as far as it went -- and the
                    #   whole line unless -s or -u stopped short of it.

@@ -29744,8 +29744,10 @@ static bool sort_looked_at(p8 character, positive how)
         // walk at their own pace rather than in step.
         // Alphanumeric, not a word character: sort -d keeps no underscore,
         // which is what separates it from every other definition here.
+        // Blank is GNU's field_sep, which a newline is too: under -z a
+        // record can hold one.
         if ((how & SORT_DICTIONARY) &&
-            !(byte_is_blank(character) || byte_is_alnum(character)))
+            !(sort_blanks[character] || byte_is_alnum(character)))
                 return false;
 
         if ((how & SORT_PRINTABLE) && (character < 0x20 || character >= 0x7f))
@@ -35751,7 +35753,7 @@ static b32 sort_check(bool quiet)
                                                       number);
                                         system_write_all(2, source.head.at,
                                                          source.head.length);
-                                        writer_stderr("\n", 0);
+                                        writer_stderr(address_of text_delimiter, 1);
                                 }
 
                                 code = 1;
