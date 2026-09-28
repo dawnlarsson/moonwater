@@ -7989,6 +7989,20 @@ static inline INLINE bool tail_input(positive count, bool by_bytes, bool marked)
         // the end, which a pipe only has once it has been read through.
         if (marked)
         {
+                /*
+                        Bytes from +N on anything that seeks -- a block
+                        device, which has no size to be regular by -- are
+                        reached by seeking, as GNU's tail_bytes does, not
+                        read through: tail -c +N of a two-terabyte disk's
+                        last kilobyte ran out its time reading from byte 0.
+                */
+                if (by_bytes && count > 1 && !head_tail_pipe_presumed &&
+                    text_input.position == text_input.filled &&
+                    system_seek(text_input.handle, count - 1, FILE_SEEK_CUR) >= 0)
+                {
+                        text_put_rest();
+                        return true;
+                }
                 text_stream_skip(count ? count - 1 : 0, by_bytes);
                 text_put_rest();
                 return true;

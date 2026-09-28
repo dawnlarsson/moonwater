@@ -19289,6 +19289,9 @@ _TEXT_STREAM_CASES = (
     ("tac", "pipe"), ("tac", "file"), ("tac", "offset"), ("tac", "big"), ("tac", "full"),
     ("tac", "pipe", "-b"), ("tac", "big", "-s", "0"), ("tac", "full", "-r", "-s", "[05]"),
     ("tac", "sharedpipe"),
+    #   tail -c +N seeks where the input seeks, from wherever it was left.
+    ("tail", "offset", "-c", "+5"), ("tail", "file", "-c", "+100000"), ("tail", "offset", "-c", "+1"),
+    ("tail", "shared", "-c", "+3"), ("tail", "big", "-c", "+6888890"),
     ("od", "shared", "-An", "-N3", "-c"), ("od", "shared", "-N4", "-tx1"),
     ("od", "shared", "-An", "-j2", "-N2", "-c"), ("od", "shared", "-An", "-N3", "-S1"),
     ("od", "sharedpipe", "-An", "-N3", "-c"), ("od", "offset", "-An", "-tx1"),
