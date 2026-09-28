@@ -19423,6 +19423,15 @@ def text_expr_operands():
         ("(", "1", "2"), ("(", "1", "+"), ("(", "("), ("x", ":"), ("length", "(", "1"), ("1", "2", "3"),
         ("0", "&", "abc", ":", "\\("), ("match", "x"),
     ]
+    #   regcomp's refusals -- a trailing backslash, a reference to a group
+    #   not yet closed, brackets left open or naming no class, an interval
+    #   with a second comma -- and the repeat an anchor leaves a character,
+    #   each after what can stand before it.
+    for lead in ("", "^", "a", "\\(", "\\(^"):
+        for piece in ("\\", "\\2", "\\1", "[", "[^", "[]", "[[:foo:]]", "[[:alpha:]", "[[:alpha",
+                      "[[:" + "x" * 31 + ":]]", "[[:" + "x" * 32 + ":]]", "\\{1,2,3", "\\{1,2,",
+                      "\\{1,2,3\\}", "\\+b", "\\?b", "*b", "\\{1\\}b"):
+            fixed.append(("+b", ":", lead + piece + ("\\)" if lead.startswith("\\(") else "")))
     operators = ["|", "&", "=", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%"]
     for left in operators:
         for right in operators:

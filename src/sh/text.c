@@ -1379,14 +1379,25 @@ static string_address text_literal_find(string_address text, positive length,
 
 // regcomp's reason for the last pattern that would not compile, in the
 // words glibc's regerror gives it, for the tools that report it.
+// regcomp's words for why the last compile refused its pattern.
 static string_address regex_failure_reason()
 {
-        return regex_failure == REGEX_FAILED_BRACE ? (string_address) "Unmatched \\{"
-               : regex_failure == REGEX_FAILED_CONTENT ? (string_address) "Invalid content of \\{\\}"
-               : regex_failure == REGEX_FAILED_SIZE ? (string_address) "Regular expression too big"
-               : regex_failure == REGEX_FAILED_OPEN ? (string_address) "Unmatched ( or \\("
-               : regex_failure == REGEX_FAILED_CLOSE ? (string_address) "Unmatched ) or \\)"
-                                                     : (string_address) "Invalid regular expression";
+        static const char address_to const reasons[] = {
+            [REGEX_FAILED_BRACE] = "Unmatched \\{",
+            [REGEX_FAILED_CONTENT] = "Invalid content of \\{\\}",
+            [REGEX_FAILED_SIZE] = "Regular expression too big",
+            [REGEX_FAILED_OPEN] = "Unmatched ( or \\(",
+            [REGEX_FAILED_CLOSE] = "Unmatched ) or \\)",
+            [REGEX_FAILED_ESCAPE] = "Trailing backslash",
+            [REGEX_FAILED_REFERENCE] = "Invalid back reference",
+            [REGEX_FAILED_BRACKET] = "Unmatched [, [^, [:, [., or [=",
+            [REGEX_FAILED_CLASS] = "Invalid character class name",
+        };
+
+        return (string_address)(regex_failure < sizeof(reasons) / sizeof(reasons[0]) &&
+                                        reasons[regex_failure]
+                                    ? reasons[regex_failure]
+                                    : "Invalid regular expression");
 }
 
 // What the kernel says about an open descriptor, through the one statx
@@ -36951,15 +36962,9 @@ static expr_value expr_matched(expr_value address_to subject,
 
         if (!regex_compile(rule, false, false, false, REGEX_POLICY_EXPR))
         {
-                //      regcomp's own reasons for a malformed interval, as
-                //      GNU's expr says them.
+                //      regcomp's own reasons, as GNU's expr says them.
                 if (!expr_dead)
-                        expr_stop(regex_failure == REGEX_FAILED_BRACE ? "Unmatched \\{"
-                                  : regex_failure == REGEX_FAILED_CONTENT ? "Invalid content of \\{\\}"
-                                  : regex_failure == REGEX_FAILED_SIZE ? "Regular expression too big"
-                                  : regex_failure == REGEX_FAILED_OPEN ? "Unmatched ( or \\("
-                                  : regex_failure == REGEX_FAILED_CLOSE ? "Unmatched ) or \\)"
-                                                                        : "invalid expression");
+                        expr_stop(regex_failure_reason());
 
                 return made;
         }

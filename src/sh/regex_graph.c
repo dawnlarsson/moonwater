@@ -35,15 +35,19 @@ enum { REGEX_DOT_NEWLINE = 1, REGEX_LINE_ANCHORS = 2, REGEX_BASIC_REPEATS = 4,
           backslash, and there are no intervals, so { is itself. tac -r is
           that program: `\._+` is a dot and one underscore or more. */
        REGEX_PLAIN_REPEATS = 16,
-       /* An interval is read as regcomp reads one in POSIX basic syntax:
-          \{ where nothing precedes it to repeat is a literal brace, and one
-          that is malformed is refused with regcomp's reason, which
-          regex_failure keeps -- expr says it in regcomp's words. */
+       /* A pattern is refused where regcomp refuses it in POSIX basic
+          syntax, with its reason, which regex_failure keeps -- expr and
+          csplit say it in regcomp's words: a malformed interval (\{ with
+          nothing before it to repeat is a literal brace), a trailing
+          backslash, a back reference to a group not yet closed, an
+          unclosed bracket and a class name there is no class of. */
        REGEX_STRICT_INTERVALS = 32,
        REGEX_POLICY_DEFAULT = 5, REGEX_POLICY_TAC = 2 | 16,
        REGEX_POLICY_EXPR = 5 | 32 };
 enum { REGEX_FAILED_OTHER = 1, REGEX_FAILED_BRACE, REGEX_FAILED_CONTENT,
-       REGEX_FAILED_SIZE, REGEX_FAILED_OPEN, REGEX_FAILED_CLOSE };
+       REGEX_FAILED_SIZE, REGEX_FAILED_OPEN, REGEX_FAILED_CLOSE,
+       REGEX_FAILED_ESCAPE, REGEX_FAILED_REFERENCE, REGEX_FAILED_BRACKET,
+       REGEX_FAILED_CLASS };
 enum { REGEX_BOUNDARY_NONE, REGEX_BOUNDARY_WORD, REGEX_BOUNDARY_LINE };
 enum { REGEX_EDGE_WORD, REGEX_EDGE_NOT_WORD, REGEX_EDGE_START, REGEX_EDGE_STOP };
 
@@ -109,7 +113,16 @@ typedef struct
         b32 wide_ascii, wide_two, wide_three, wide_four, wide_tail;
         bool extended, escapes, broken;
         p8 failure;
+        p16 closed; // the groups whose close has been read, by number
 } rx_compiler;
+
+// A refusal regcomp makes, kept when it is the first thing wrong.
+static fn rx_refuse(rx_compiler *c, p8 failure)
+{
+        if (!c->broken)
+                c->failure = failure;
+        c->broken = true;
+}
 
 static p8 rx_peek(rx_compiler *c, positive ahead)
 {
@@ -311,6 +324,21 @@ static b32 rx_parse_set(rx_compiler *c, rx_set_facts *facts)
                                 c->at += used;
                                 continue;
                         }
+
+                        //      regcomp reads a name of up to 31 bytes to
+                        //      its :] and has no class by it, or no :].
+                        if (c->program.policy & REGEX_STRICT_INTERVALS)
+                        {
+                                positive close = c->at + 2;
+
+                                while (close + 1 < c->length && close - c->at < 34 &&
+                                       !(c->pattern[close] == ':' && c->pattern[close + 1] == ']'))
+                                        close++;
+                                rx_refuse(c, close + 1 < c->length && close - c->at < 34
+                                                 ? REGEX_FAILED_CLASS
+                                                 : REGEX_FAILED_BRACKET);
+                                return set;
+                        }
                 }
                 if (c->escapes && byte == '\\' && rx_peek(c, 1))
                 {
@@ -369,6 +397,9 @@ static b32 rx_parse_set(rx_compiler *c, rx_set_facts *facts)
                 else
                         rx_set_add(c, set, byte);
         }
+        // Nothing after [ or [^ at all is regcomp's plain refusal.
+        if ((c->program.policy & REGEX_STRICT_INTERVALS) && !first)
+                rx_refuse(c, REGEX_FAILED_BRACKET);
         c->broken = true;
         return set;
 }
@@ -385,13 +416,12 @@ static rx_fragment rx_atom(rx_compiler *c)
                 c->at += c->extended ? 1 : 2;
                 child = rx_alternation(c);
                 if (!rx_operator(c, ')'))
-                {
-                        if (!c->broken)
-                                c->failure = REGEX_FAILED_OPEN;
-                        c->broken = true;
-                }
+                        rx_refuse(c, REGEX_FAILED_OPEN);
                 else
+                {
                         c->at += c->extended ? 1 : 2;
+                        c->closed |= (p16)(1u << byte);
+                }
                 if (!byte)
                         return child;
                 kind = RX_CAPTURE;
@@ -496,6 +526,9 @@ static rx_fragment rx_atom(rx_compiler *c)
                         {
                                 kind = RX_BACKREF;
                                 byte -= '0';
+                                if ((c->program.policy & REGEX_STRICT_INTERVALS) &&
+                                    !(c->closed & (1u << byte)))
+                                        rx_refuse(c, REGEX_FAILED_REFERENCE);
                         }
                         else if (byte == 'w' || byte == 'W' || byte == 's' || byte == 'S')
                         {
@@ -518,6 +551,8 @@ static rx_fragment rx_atom(rx_compiler *c)
                         else if (c->escapes)
                                 byte = byte == 'n' ? '\n' : byte == 't' ? '\t' : byte;
                 }
+                else if (byte == '\\' && (c->program.policy & REGEX_STRICT_INTERVALS))
+                        rx_refuse(c, REGEX_FAILED_ESCAPE);
                 if (kind == RX_BYTE && (c->program.flags & RX_IGNORE_CASE))
                         byte = (p8)byte_to_lower(byte);
         }
@@ -564,6 +599,15 @@ static bool rx_interval_strict(rx_compiler *c, b32 *low, b32 *high)
                         which = 1;
                         at++;
                         continue;
+                }
+
+                // The upper bound's reading stops at a second comma too,
+                // which is no close: bad content, not an unmatched brace.
+                if (byte == ',')
+                {
+                        c->broken = true;
+                        c->failure = REGEX_FAILED_CONTENT;
+                        return false;
                 }
 
                 if (byte == '\\' && at + 1 < c->length)
@@ -657,12 +701,28 @@ static rx_fragment rx_piece(rx_compiler *c)
         {
                 p8 byte = rx_peek(c, 0);
                 b32 low = 0, high = RX_UNBOUNDED;
-                if (byte == '*' && !c->extended && c->pool->nodes[body.first].kind == RX_BEGIN)
+                //      A basic anchor takes no repetition: what would repeat
+                //      it is the character itself, as regcomp reads ^* and
+                //      ^\+ (and tac's Emacs syntax ^+).
+                positive plain = 0;
+
+                if (!c->extended && c->pool->nodes[body.first].kind == RX_BEGIN)
+                        plain = byte == '*' ? 1
+                                : (c->program.policy & REGEX_BASIC_REPEATS) &&
+                                          (rx_operator(c, '+') || rx_operator(c, '?'))
+                                    ? 2
+                                : (c->program.policy & REGEX_PLAIN_REPEATS) &&
+                                          (byte == '+' || byte == '?')
+                                    ? 1
+                                    : 0;
+                if (plain)
                 {
-                        c->at++;
+                        p8 literal = rx_peek(c, plain - 1);
+
+                        c->at += plain;
                         prefix = rx_join(c, prefix, body);
                         body_start = c->cursor.nodes;
-                        p16 at = rx_emit(c, (rx_node){.kind = RX_BYTE, .argument = '*'});
+                        p16 at = rx_emit(c, (rx_node){.kind = RX_BYTE, .argument = literal});
                         body = (rx_fragment){at, at};
                         continue;
                 }
