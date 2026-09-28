@@ -38163,6 +38163,130 @@ def tls_seed_cert_list(*certs):
     return b"\0" + len(blob).to_bytes(3, "big") + blob
 
 
+def tls_seed_connection(control, *records):
+    """A tls_hs_fuzz connection seed: magic 0xf3, four control bytes (flags
+    and the PRNG seed), then the server's bytes."""
+    return b"\xf3" + control + b"".join(records)
+
+
+def tls_seed_record(kind, payload):
+    return bytes([kind, 3, 3]) + len(payload).to_bytes(2, "big") + payload
+
+
+def tls_seed_sealed(kind, content, padding=0, tag=0):
+    """A record under tls_hs_fuzz's identity AEAD: inner plaintext, then the
+    tag whose first byte opens it when zero."""
+    return tls_seed_record(23, content + bytes([kind]) + b"\0" * padding +
+                           bytes([tag]) + b"\0" * 15)
+
+
+def tls_seed_message(kind, body):
+    return bytes([kind]) + len(body).to_bytes(3, "big") + body
+
+
+def tls_seed_server_hello(group=0x1d, extra=b""):
+    size = {0x1d: 32, 0x17: 65, 0x18: 97}.get(group, 32)
+    share = group.to_bytes(2, "big") + size.to_bytes(2, "big") + b"\4" + b"\x09" * (size - 1)
+    extensions = (b"\0\x2b\0\2\3\4" + b"\0\x33" + len(share).to_bytes(2, "big") +
+                  share + extra)
+    return tls_seed_message(2, b"\3\3" + b"\x42" * 32 + b"\0\x13\1\0" +
+                            len(extensions).to_bytes(2, "big") + extensions)
+
+
+def tls_seed_flight(leaf=0, scheme=b"\4\3", signature=b"\x30\x06\1\1\1\1\1\1"):
+    """EncryptedExtensions, Certificate (its last byte picks the stubbed
+    leaf), CertificateVerify and a Finished of the stub MAC's zeros."""
+    return (tls_seed_message(8, b"\0\0") +
+            tls_seed_message(11, b"\0\0\0\0" + bytes([leaf])) +
+            tls_seed_message(15, scheme + len(signature).to_bytes(2, "big") + signature) +
+            tls_seed_message(20, b"\0" * 32))
+
+
+def tls_seed_ticket(ticket=b"t" * 16, extensions=b""):
+    return tls_seed_message(4, b"\0\0\x0e\x10" + b"\1\2\3\4" + b"\1\0" +
+                            len(ticket).to_bytes(2, "big") + ticket +
+                            len(extensions).to_bytes(2, "big") + extensions)
+
+
+def tls_seed_connections():
+    """Streams for tls_hs_fuzz's 0xf3 driver: a whole handshake per group and
+    leaf, then the post-handshake and record-layer shapes worth starting from."""
+    hello = tls_seed_record(22, tls_seed_server_hello())
+    ccs = tls_seed_record(20, b"\1")
+    flight = tls_seed_sealed(22, tls_seed_flight())
+    close = tls_seed_sealed(21, b"\1\0")
+    data = tls_seed_sealed(23, b"GET-response " * 40)
+    base = (hello, flight)
+    control = b"\0\0\0\1"
+    seeds = {
+        "conn_x25519.bin": (control, hello, ccs, flight, data, close),
+        "conn_p256.bin": (control, tls_seed_record(22, tls_seed_server_hello(0x17)),
+                          flight, data, close),
+        "conn_p384_leaf.bin": (b"\0\0\1\2", tls_seed_record(22, tls_seed_server_hello(0x18)),
+                               tls_seed_sealed(22, tls_seed_flight(1, b"\5\3")), data, close),
+        "conn_rsa_leaf.bin": (b"\2\0\1\3", hello,
+                              tls_seed_sealed(22, tls_seed_flight(2, b"\x08\4", b"\1" * 256)),
+                              data, close),
+        "conn_ip_host.bin": (b"\1\0\0\4",) + base + (data, close),
+        "conn_ccs_before_hello.bin": (control, ccs, hello, flight, close),
+        "conn_ccs_twice.bin": (control, hello, ccs, ccs, flight, close),
+        "conn_ccs_after_finished.bin": (control,) + base + (ccs, data, close),
+        "conn_hello_split.bin": (control, tls_seed_record(22, tls_seed_server_hello()[:30]),
+                                 tls_seed_record(22, tls_seed_server_hello()[30:]),
+                                 flight, close),
+        "conn_flight_per_message.bin": (control, hello) + tuple(
+            tls_seed_sealed(22, part) for part in (
+                tls_seed_message(8, b"\0\0"), tls_seed_message(11, b"\0\0\0\0\0"),
+                tls_seed_message(15, b"\4\3\0\2\1\1"), tls_seed_message(20, b"\0" * 32))) +
+            (data, close),
+        "conn_hrr_shape.bin": (control, tls_seed_record(22, tls_seed_message(
+            2, b"\3\3" + bytes.fromhex("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c") +
+            b"\0\x13\1\0\0\x0c\0\x2b\0\2\3\4\0\x33\0\2\0\x17"))),
+        "conn_ticket.bin": (control,) + base + (tls_seed_sealed(22, tls_seed_ticket()), data, close),
+        "conn_ticket_split.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_ticket()[:9]), tls_seed_sealed(22, tls_seed_ticket()[9:]),
+            data, close),
+        "conn_ticket_then_data_mid.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_ticket()[:9]), data, close),
+        "conn_two_tickets_one_record.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_ticket() + tls_seed_ticket(b"u" * 300)), close),
+        "conn_ticket_at_close.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_ticket()[:9]), close),
+        "conn_key_update.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\1")), data, close),
+        "conn_empty_app.bin": (control,) + base + (tls_seed_sealed(23, b""),) * 8 + (data, close),
+        "conn_empty_handshake_in_flight.bin": (control, hello, tls_seed_sealed(22, b""),
+                                               flight, close),
+        "conn_padded.bin": (control,) + base + (tls_seed_sealed(23, b"pad", 300), close),
+        "conn_all_padding.bin": (control,) + base + (tls_seed_record(23, b"\0" * 40),),
+        "conn_after_close.bin": (control,) + base + (close, data, data),
+        "conn_fatal_alert.bin": (control,) + base + (data, tls_seed_sealed(21, b"\2\x28")),
+        "conn_plain_alert.bin": (control,) + base + (tls_seed_record(21, b"\1\0"),),
+        "conn_bad_tag.bin": (control,) + base + (tls_seed_sealed(23, b"x", tag=1),),
+        "conn_eof_mid_record.bin": (control,) + base + (data[:40],),
+        "conn_inner_over_2_14.bin": (control,) + base + (
+            tls_seed_sealed(23, b"o" * 16385), close),
+        "conn_record_max.bin": (control,) + base + (
+            tls_seed_sealed(23, b"m" * 16384, 239), close),
+        "conn_many_records.bin": (b"\0\x10\0\7",) + base + tuple(
+            tls_seed_sealed(23, bytes([n]) * (n * 997 % 16000 + 1)) for n in range(6)) + (close,),
+        "conn_read_limit.bin": (b"\4\0\0\5",) + base + (data,) * 5 + (close,),
+        "conn_write_limit.bin": (b"\x08\0\0\6",) + base + (data, close),
+        "conn_send_fails.bin": (b"\x30\0\0\7",) + base + (close,),
+        "conn_app_before_finished.bin": (control, hello, data, flight, close),
+        "conn_cert_first.bin": (control, hello, tls_seed_sealed(22, tls_seed_flight()[6:]),
+                                close),
+        "conn_flight_trailing.bin": (control, hello,
+                                     tls_seed_sealed(22, tls_seed_flight() + b"\4"), close),
+        "conn_certificate_request.bin": (control, hello, tls_seed_sealed(22, (
+            tls_seed_message(8, b"\0\0") + tls_seed_message(13, b"\0\0\0") +
+            tls_seed_flight()[6:])), close),
+        "conn_ee_unrequested.bin": (control, hello, tls_seed_sealed(22, (
+            tls_seed_message(8, b"\0\4\0\x10\0\0") + tls_seed_flight()[6:])), close),
+    }
+    return {name: tls_seed_connection(parts[0], *parts[1:]) for name, parts in seeds.items()}
+
+
 def tls_fuzz_seeds(corpus):
     """Name to bytes for the tls_der or tls_hs corpus: the hex fixtures, and the
     hostile NC/EKU/SAN/ceiling/alg-id/BMPString/chain shapes built here. The
@@ -38175,6 +38299,7 @@ def tls_fuzz_seeds(corpus):
         fill = b"\x0b\x00\x40\x00" + b"\xcd" * 16380
         seeds["hs_max_fill.bin"] = fill
         seeds["hs_max_plus_chunks.bin"] = b"\x40\x00" + fill + b"\x00\x01\x00"
+        seeds.update(tls_seed_connections())
         return seeds
     minimal = seeds["minimal_cert.bin"]
     for count, name in ((1, "cert_list_1"), (7, "cert_list_7"), (8, "cert_list_8"),
@@ -39117,17 +39242,27 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
 
 def harness_tls_hs_fuzz(argv):
-    """Coverage-guided libFuzzer over handshake fragmentation / reassembly.
+    """Coverage-guided libFuzzer over the whole TLS 1.3 client protocol.
 
-    Lifts production tls_handshake_one_append, tls_server_flight_step, and
-    tls_encrypted_flight_append (tls=null framing mode) from src/net/net.c the
-    way tls_der_fuzz lifts DER parsers. Seeds from tls_fuzz_seeds("tls_hs")
-    mirror ServerHello fragment and encrypted-flight cases from checks.c.
-    Bounded fixed-seed run; return 2 (NOT RUN) when
-    clang/libFuzzer is unavailable. Expected TLS_FAIL is ignored; only
-    ASan/UBSan aborts fail the lane (or MSan when MOONWATER_MSAN=1). Override
-    MOONWATER_FUZZ_RUNS / MOONWATER_FUZZ_SECONDS for longer local runs (see
-    `sh test/run fuzz` and `sh test/run msan`).
+    Lifts src/net/net.c's record layer (tls_forget through the transcript)
+    and its handshake and application half (tls_hello_append through
+    tls_read) verbatim, with the crypto, the socket and the certificate
+    verdict stubbed in BoringSSL's fuzzer-mode shape: the AEAD is the
+    identity and opens when the tag's first byte is zero, the Finished MAC is
+    zeros, and a signature or certificate passes unless its marked byte is
+    0xff. A server byte stream after the magic 0xf3 then walks tls_connect
+    and a PRNG-chosen run of tls_read_until / tls_borrow / tls_lend /
+    tls_write, reads arriving in PRNG-sized pieces with interruptions. What
+    ASan cannot see inside the connection is asserted: the buffer offsets,
+    lent spans that must not move while tls_lend gathers more, and a closed
+    connection that must stay closed. Magics 0xf1 / 0xf2 keep the framing
+    walks over tls_encrypted_flight_append (tls=null) and
+    tls_handshake_one_append. Seeds from tls_fuzz_seeds("tls_hs"). Bounded
+    fixed-seed run; return 2 (NOT RUN) when clang/libFuzzer is unavailable.
+    Expected TLS_FAIL is ignored; only sanitizer reports and the asserts fail
+    the lane (or MSan when MOONWATER_MSAN=1). Override MOONWATER_FUZZ_RUNS /
+    MOONWATER_FUZZ_SECONDS for longer local runs (see `sh test/run fuzz` and
+    `sh test/run msan`).
 
         python3 test/differential.py --harness tls_hs_fuzz
     """
@@ -39135,37 +39270,19 @@ def harness_tls_hs_fuzz(argv):
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     sec = tls_fuzz_sec
 
+    defines = sec(net, "#define TLS_RECORD_MAX 16640",
+                  "/* One trust anchor from anchors.inc")
+    connection = sec(net, "typedef struct\n{\n        bipolar handle;\n"
+                     "        bool check_cert;", "static fn tls_forget(")
+    record = sec(net, "static fn tls_forget(",
+                 "static COLD bipolar tls_asn1_length(")
     load24 = sec(
         net,
         "// A TLS handshake length: three bytes, most significant first.\n"
         "static PURE positive tls_load_24",
         "static COLD bool tls_certificate_body_open")
-    one_append = sec(
-        net,
-        "#define TLS_HANDSHAKE_MORE 0\n"
-        "#define TLS_HANDSHAKE_COMPLETE 1\n\n"
-        "/* The handshake protocol is a byte stream layered over records.  ServerHello\n"
-        "   may therefore cross record boundaries, but it is the last plaintext\n"
-        "   handshake message: bytes after its declared end cannot legally share that\n"
-        "   plaintext stream. */\n"
-        "static COLD bipolar tls_handshake_one_append",
-        "static COLD bipolar tls_install_handshake_keys")
-    flight_step = sec(
-        net,
-        "#define TLS_SERVER_FLIGHT_EE 0\n"
-        "#define TLS_SERVER_FLIGHT_CERTIFICATE 1\n"
-        "#define TLS_SERVER_FLIGHT_CERT_VERIFY 2\n"
-        "#define TLS_SERVER_FLIGHT_FINISHED 3\n"
-        "#define TLS_SERVER_FLIGHT_COMPLETE 4\n\n"
-        "/* This client offers neither PSK nor client authentication, so the server\n"
-        "   flight has exactly one legal shape.",
-        "/* RFC 8446 forbids duplicate extensions.")
-    flight_append = sec(
-        net,
-        "/* Encrypted server flight: handshake bytes are a stream across records, so\n"
-        "   each plaintext fragment is appended to hs[] and every complete message is\n"
-        "   peeled from the front.",
-        "static COLD bipolar tls_handshake(")
+    protocol = sec(net, "static COLD bool tls_hello_append(",
+                   "#endif\n\n/*\n        Enough HTTP to fetch a file")
 
     shim = r"""
 #include <stdio.h>
@@ -39175,7 +39292,6 @@ def harness_tls_hs_fuzz(argv):
 #include <stddef.h>
 #include <stdbool.h>
 typedef uint8_t p8;
-typedef uint8_t b8;
 typedef uint16_t p16;
 typedef uint32_t p32;
 typedef uint64_t p64;
@@ -39184,82 +39300,512 @@ typedef long bipolar;
 typedef unsigned long positive;
 typedef void *address_any;
 typedef char *string_address;
-typedef const char *const_string;
 #define COLD
-#define CONST
 #define PURE
 #define fn void
 #define address_to *
 #define address_of &
 #define null NULL
-#define end ((p8)0)
 #define positive_max (~(positive)0)
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define memory_compare memcmp
-/* Production memory_copy is memmove; flight peel copies within hs[] overlap. */
+/* Production memory_copy is memmove; the peels copy within one buffer. */
 #define memory_copy memmove
 #define memory_fill(at, v, n) memset((at), (int)(v), (n))
-#define TLS_OK 0
-#define TLS_FAIL (-1)
-#define TLS_HS_MAX 16384
-#define TLS_HS_SERVER_HELLO 2
-#define TLS_HS_ENCRYPTED_EXTS 8
-#define TLS_HS_CERTIFICATE 11
-#define TLS_HS_CERT_VERIFY 15
-#define TLS_HS_FINISHED 20
+#define string_length(s) ((positive)strlen(s))
+#define MSG_DONTWAIT 0x40
+#define NETWORK_INTERRUPTED (-4)
+#define NETWORK_TRY_AGAIN (-11)
+/* Two whole records and a little: compaction and the refill edge happen
+   within inputs the fuzzer can reach. */
+#define TLS_RECEIVE_ROOM ((positive)(2 * (5 + 16640) + 509))
+typedef struct { positive began, budget; } network_deadline;
+typedef struct { p64 state; p64 length; } crypto_sha256;
+typedef struct { p8 round[16]; } crypto_aesgcm_key;
+static const p8 crypto_p256_n[32] = {0xff};
+static const p8 crypto_p384_n[48] = {0xff};
+
+/* Every stub initializes all it writes: MSan reports belong to the lift. */
+static fn crypto_forget(address_any at, positive length)
+{
+        memset(at, 0, length);
+        __asm__ __volatile__("" : : "r"(at) : "memory");
+}
 static p16 network_load_16(const p8 *bytes)
 {
         return (p16)(((p16)bytes[0] << 8) | (p16)bytes[1]);
 }
-/* tls_encrypted_flight_append only touches tls->host when tls is non-null;
-   the fuzzer always passes null (framing mode). A complete type is still
-   required so the lifted production body compiles. */
-typedef struct tls_conn
+static fn crypto_put_be64(p8 address_to bytes, p64 value)
 {
-        string_address host;
-} tls_conn;
-static fn tls_transcript_add(tls_conn address_to tls, p8 address_to msg,
-                             positive length)
-{
-        (void)tls;
-        (void)msg;
-        (void)length;
+        for (int i = 0; i < 8; i++)
+                bytes[i] = (p8)(value >> (56 - 8 * i));
 }
-static COLD bool tls_encrypted_extensions_valid(p8 address_to body,
-                                                positive length)
+static fn fuzz_mix(p8 address_to out, positive out_length, const p8 *in,
+                   positive in_length, p64 salt)
 {
-        (void)body;
-        (void)length;
-        return false;
+        p64 h = 0xcbf29ce484222325ull ^ salt;
+        for (positive i = 0; i < in_length; i++)
+                h = (h ^ in[i]) * 0x100000001b3ull;
+        for (positive i = 0; i < out_length; i++)
+        {
+                h = (h ^ i) * 0x100000001b3ull;
+                out[i] = (p8)(h >> 29);
+        }
 }
+static fn crypto_sha256_open(crypto_sha256 address_to hash)
+{
+        hash->state = 0x6a09e667;
+        hash->length = 0;
+}
+static fn crypto_sha256_write(crypto_sha256 address_to hash, p8 address_to data,
+                              positive length)
+{
+        for (positive i = 0; i < length; i++)
+                hash->state = (hash->state ^ data[i]) * 0x100000001b3ull;
+        hash->length += length;
+}
+static fn crypto_sha256_close(crypto_sha256 address_to hash, p8 address_to out)
+{
+        fuzz_mix(out, 32, (const p8 *)hash, sizeof *hash, 1);
+}
+static fn crypto_sha256_of(p8 address_to data, positive length, p8 address_to out)
+{
+        fuzz_mix(out, 32, data, length, 2);
+}
+static fn crypto_sha384(p8 address_to data, positive length, p8 address_to out)
+{
+        fuzz_mix(out, 48, data, length, 3);
+}
+static fn crypto_hkdf_extract(p8 address_to salt, positive salt_length,
+                              p8 address_to key, positive key_length,
+                              p8 address_to out)
+{
+        p8 both[32];
+        fuzz_mix(both, 32, salt, salt_length, 4);
+        fuzz_mix(out, 32, key, key_length, both[0]);
+}
+static fn crypto_hkdf_expand(p8 address_to prk, p8 address_to info,
+                             positive info_length, p8 address_to out,
+                             positive out_length)
+{
+        fuzz_mix(out, out_length, info, info_length, prk[0] | (p64)prk[31] << 8);
+}
+/* The Finished MAC every Finished must carry is 32 zero bytes. */
+static fn crypto_hmac_sha256(p8 address_to key, positive key_length,
+                             p8 address_to data, positive length,
+                             p8 address_to out)
+{
+        p8 sink[1];
+        fuzz_mix(sink, 1, key, key_length, 5);
+        fuzz_mix(sink, 1, data, length, sink[0]);
+        memset(out, 0, 32);
+}
+static bool crypto_same(const p8 address_to left, const p8 address_to right,
+                        positive length)
+{
+        p8 diff = 0;
+        for (positive at = 0; at < length; at++)
+                diff |= (p8)(left[at] ^ right[at]);
+        return !diff;
+}
+static bool crypto_x25519(p8 address_to out, p8 address_to scalar,
+                          p8 address_to u)
+{
+        fuzz_mix(out, 32, scalar, 32, u[0]);
+        return u[0] != 0xff;
+}
+static bool crypto_scalar_reduce_be(p8 address_to out, const p8 address_to bytes,
+                                    positive length, const p8 address_to n,
+                                    positive words)
+{
+        (void)n;
+        (void)words;
+        memcpy(out, bytes, length);
+        return true;
+}
+static bool crypto_ecdh_p256_public(p8 address_to out, p8 address_to scalar)
+{
+        out[0] = 4;
+        fuzz_mix(out + 1, 64, scalar, 32, 6);
+        return true;
+}
+static bool crypto_ecdh_p384_public(p8 address_to out, p8 address_to scalar)
+{
+        out[0] = 4;
+        fuzz_mix(out + 1, 96, scalar, 48, 7);
+        return true;
+}
+static bool crypto_ecdh_p256_shared(p8 address_to out, p8 address_to scalar,
+                                    p8 address_to peer)
+{
+        fuzz_mix(out, 32, peer, 65, scalar[0]);
+        return peer[0] == 4;
+}
+static bool crypto_ecdh_p384_shared(p8 address_to out, p8 address_to scalar,
+                                    p8 address_to peer)
+{
+        fuzz_mix(out, 48, peer, 97, scalar[0]);
+        return peer[0] == 4;
+}
+static bool crypto_ecdsa_p256(p8 address_to hash, positive hash_length,
+                              p8 address_to r, positive r_length,
+                              p8 address_to s, positive s_length,
+                              p8 address_to qx, p8 address_to qy)
+{
+        p8 sink[1];
+        fuzz_mix(sink, 1, hash, hash_length, qx[0] ^ qy[0]);
+        fuzz_mix(sink, 1, s, s_length, sink[0]);
+        return r_length && r[0] != 0xff;
+}
+static bool crypto_ecdsa_p384(p8 address_to hash, positive hash_length,
+                              p8 address_to r, positive r_length,
+                              p8 address_to s, positive s_length,
+                              p8 address_to qx, p8 address_to qy)
+{
+        return crypto_ecdsa_p256(hash, hash_length, r, r_length, s, s_length,
+                                 qx, qy);
+}
+static bool crypto_rsa_pss_sha256(p8 address_to n, positive n_length, p64 e,
+                                  p8 address_to signature,
+                                  positive signature_length,
+                                  p8 address_to message,
+                                  positive message_length)
+{
+        p8 sink[1];
+        fuzz_mix(sink, 1, n, n_length, e);
+        fuzz_mix(sink, 1, message, message_length, sink[0]);
+        return signature_length && signature[0] != 0xff;
+}
+static fn crypto_aesgcm_prepare(crypto_aesgcm_key address_to key,
+                                p8 address_to raw)
+{
+        memcpy(key->round, raw, 16);
+}
+/* The identity cipher: the tag carries the key's first byte, so a record is
+   open only under the key it was sealed with and when that byte is zero. */
+static fn crypto_aesgcm_seal(crypto_aesgcm_key address_to key,
+                             p8 address_to iv, p8 address_to aad,
+                             positive aad_length, p8 address_to text,
+                             positive text_length, p8 address_to tag)
+{
+        p8 sink[1];
+        fuzz_mix(sink, 1, iv, 12, key->round[0]);
+        fuzz_mix(sink, 1, aad, aad_length, sink[0]);
+        fuzz_mix(sink, 1, text, text_length, sink[0]);
+        memset(tag, 0, 16);
+}
+static bool crypto_aesgcm_open(crypto_aesgcm_key address_to key,
+                               p8 address_to iv, p8 address_to aad,
+                               positive aad_length, p8 address_to text,
+                               positive text_length, p8 address_to tag)
+{
+        p8 sink[1];
+        fuzz_mix(sink, 1, key->round, 16, 8);
+        fuzz_mix(sink, 1, iv, 12, sink[0]);
+        fuzz_mix(sink, 1, aad, aad_length, sink[0]);
+        fuzz_mix(sink, 1, text, text_length, sink[0]);
+        if (aad_length != 5 || aad[0] != 23 || aad[1] != 3 || aad[2] != 3 ||
+            network_load_16(aad + 3) != text_length + 16)
+                abort();
+        if (tag[0])
+        {
+                crypto_forget(text, text_length);
+                return false;
+        }
+        return true;
+}
+
+/* The server: fuzz_stream is what it sends, taken in PRNG-sized reads that
+   are sometimes interrupted or not ready yet. */
+static const p8 *fuzz_stream;
+static positive fuzz_stream_length;
+static positive fuzz_stream_at;
+static p64 fuzz_state;
+static bool fuzz_send_fails;
+
+static p64 fuzz_next(void)
+{
+        fuzz_state ^= fuzz_state << 13;
+        fuzz_state ^= fuzz_state >> 7;
+        fuzz_state ^= fuzz_state << 17;
+        return fuzz_state;
+}
+static bipolar fuzz_read(p8 address_to into, positive room)
+{
+        positive left = fuzz_stream_length - fuzz_stream_at;
+        p64 roll = fuzz_next();
+        positive take = room;
+
+        if (!room || room > TLS_RECEIVE_ROOM)
+                abort();
+        if (!left)
+                return 0;
+        if (!(roll & 3))
+                take = 1 + (positive)(roll >> 8) % 64;
+        take = min(take, min(room, left));
+        memcpy(into, fuzz_stream + fuzz_stream_at, take);
+        fuzz_stream_at += take;
+        return (bipolar)take;
+}
+static bipolar system_read_retry(positive handle, address_any into,
+                                 positive length)
+{
+        (void)handle;
+        return fuzz_read(into, length);
+}
+static bipolar socket_receive(b32 handle, address_any into, positive length,
+                              b32 flags, address_any from, positive from_length)
+{
+        p64 roll = fuzz_next() % 16;
+
+        (void)handle;
+        (void)from;
+        (void)from_length;
+        if (flags != MSG_DONTWAIT)
+                abort();
+        if (!roll)
+                return NETWORK_INTERRUPTED;
+        if (roll == 1)
+                return NETWORK_TRY_AGAIN;
+        return fuzz_read(into, length);
+}
+static bipolar network_stream_read_some_until(
+    bipolar handle, p8 address_to into, positive length,
+    const network_deadline address_to deadline)
+{
+        (void)handle;
+        if (!deadline)
+                abort();
+        return fuzz_read(into, length);
+}
+static bool network_deadline_begin(network_deadline address_to deadline,
+                                   positive seconds, positive nanoseconds)
+{
+        deadline->began = 1;
+        deadline->budget = seconds * 1000000000ul + nanoseconds;
+        return deadline->budget != 0;
+}
+/* Whatever the client sends has to be one well-formed record, every byte
+   written. */
+static bool network_stream_send_all(bipolar handle, p8 address_to data,
+                                    positive length)
+{
+        p8 sink[1];
+
+        (void)handle;
+        if (length < 5 || data[1] != 3 || data[2] != 3 ||
+            network_load_16(data + 3) != length - 5 ||
+            (data[0] != 22 && data[0] != 23) ||
+            (data[0] == 23 && length < 5 + 17) || length > 5 + 16640)
+                abort();
+        fuzz_mix(sink, 1, data, length, 9);
+        if (sink[0] == 0x5a && fuzz_state == 0)
+                abort();
+        return !fuzz_send_fails;
+}
+static bipolar system_random_fill(address_any into, positive length,
+                                  positive flags)
+{
+        (void)flags;
+        memset(into, 0x5c, length);
+        return 0;
+}
+static bipolar string_to_host(string_address host)
+{
+        return host[0] >= '0' && host[0] <= '9' ? 1 : -1;
+}
+"""
+
+    stubs = r"""
+/* The certificate verdict is another lift's: here the Certificate body's last
+   byte picks the leaf (0 P-256, 1 P-384, 2 RSA) and 0xff refuses it. */
 static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                                   string_address host, tls_conn address_to tls)
 {
-        (void)body;
-        (void)body_length;
-        (void)host;
-        (void)tls;
-        return false;
+        p8 kind;
+
+        if (!body_length || !host || body[body_length - 1] == 0xff)
+                return false;
+        kind = body[body_length - 1] % 3;
+        tls->leaf_curve = (p8)(1 + kind);
+        memset(tls->leaf_qx, 0x11, sizeof tls->leaf_qx);
+        memset(tls->leaf_qy, 0x22, sizeof tls->leaf_qy);
+        memset(tls->leaf_n, 0x33, sizeof tls->leaf_n);
+        tls->leaf_n_length = kind == 2 ? 256 : 0;
+        tls->leaf_e = 65537;
+        return true;
 }
-static COLD bipolar tls_check_cert_verify(tls_conn address_to tls,
-                                          p8 address_to msg, positive length)
+static COLD bipolar tls_parse_ecdsa_sig(p8 address_to sig, positive length,
+                                        p8 address_to r,
+                                        positive address_to r_length,
+                                        p8 address_to s,
+                                        positive address_to s_length)
 {
-        (void)tls;
-        (void)msg;
-        (void)length;
-        return TLS_FAIL;
-}
-static COLD bipolar tls_check_finished(tls_conn address_to tls,
-                                       p8 address_to verify, positive length)
-{
-        (void)tls;
-        (void)verify;
-        (void)length;
-        return TLS_FAIL;
+        positive half = length / 2;
+
+        if (!half || half > 48)
+                return TLS_FAIL;
+        memcpy(r, sig, half);
+        memcpy(s, sig + half, half);
+        *r_length = half;
+        *s_length = half;
+        return TLS_OK;
 }
 """
 
     driver = r"""
+static fn fuzz_offsets(tls_conn address_to tls)
+{
+        if (tls->receive_start > tls->receive_end ||
+            tls->receive_end > tls->receive_high ||
+            tls->receive_high > TLS_RECEIVE_ROOM ||
+            tls->post_handshake_used > TLS_HS_MAX ||
+            (tls->plain_used &&
+             (tls->plain_at > tls->receive_start ||
+              tls->plain_used > tls->receive_start - tls->plain_at)))
+                abort();
+}
+
+static p8 fuzz_shadow[16 * 16640];
+
+/* http_copy's gather: one borrow that may receive, then lends that never
+   do. Every span lent must still hold what it held when it was lent. */
+static bipolar fuzz_gather(tls_conn address_to tls, positive want,
+                           positive address_to got_total)
+{
+        p8 address_to spans[16];
+        positive lengths[16];
+        positive count = 0;
+        positive shadow = 0;
+        positive total = 0;
+        bipolar status;
+        p8 address_to span = null;
+        positive got = 0;
+
+        status = tls_borrow(tls, want, address_of span, address_of got, 1, 0);
+        fuzz_offsets(tls);
+        *got_total = got;
+        if (status || !got)
+                return status;
+        for (;;)
+        {
+                if (got > want - total || span < tls->receive ||
+                    span + got > tls->receive + TLS_RECEIVE_ROOM)
+                        abort();
+                spans[count] = span;
+                lengths[count] = got;
+                memcpy(fuzz_shadow + shadow, span, got);
+                shadow += got;
+                total += got;
+                count++;
+                if (count == 16 || total == want)
+                        break;
+                status = tls_lend(tls, want - total, address_of span,
+                                  address_of got);
+                fuzz_offsets(tls);
+                if (status == TLS_AGAIN || (!status && !got))
+                        break;
+                if (status)
+                        return status;
+        }
+        shadow = 0;
+        for (positive at = 0; at < count; at++)
+        {
+                if (memcmp(spans[at], fuzz_shadow + shadow, lengths[at]))
+                        abort();
+                shadow += lengths[at];
+        }
+        *got_total = total;
+        return TLS_OK;
+}
+
+static fn fuzz_connection(const p8 *data, positive length)
+{
+        static const positive rooms[] = {1, 2, 7, 100, 4096, 16384, 65536,
+                                         16623};
+        static p8 into[65536];
+        tls_conn address_to tls;
+        network_deadline deadline = {1, 1};
+        p8 flags;
+        bool closed = false;
+
+        if (length < 4)
+                return;
+        flags = data[0];
+        fuzz_state = ((p64)data[1] << 16 | (p64)data[2] << 8 | data[3]) + 1;
+        fuzz_stream = data + 4;
+        fuzz_stream_length = length - 4;
+        fuzz_stream_at = 0;
+        fuzz_send_fails = (flags & 0x30) == 0x30;
+
+        /* Uninitialized, as http_link_open leaves the buffers. */
+        tls = (tls_conn address_to)malloc(sizeof *tls);
+        if (!tls)
+                return;
+        if (tls_connect(tls, 3, flags & 1 ? "192.0.2.1" : "example.test",
+                        flags & 2))
+        {
+                if (tls->handle != -1)
+                        abort();
+                free(tls);
+                return;
+        }
+        fuzz_offsets(tls);
+        if (!tls->application || !tls->encrypted)
+                abort();
+        if (flags & 4)
+                tls->seq_read = TLS_AES_GCM_RECORD_LIMIT - 3;
+        if (flags & 8)
+                tls->seq_write = TLS_AES_GCM_RECORD_LIMIT - 1;
+
+        for (int turn = 0; turn < 48; turn++)
+        {
+                p64 roll = fuzz_next();
+                positive room = rooms[(roll >> 8) % 8];
+                positive got = 7;
+                bipolar status;
+
+                switch (roll % 4)
+                {
+                case 0:
+                        status = tls_read_until(tls, into, room, &got,
+                                                (roll & 16) ? &deadline : null);
+                        break;
+                case 1:
+                {
+                        p8 address_to span = null;
+                        status = tls_borrow(tls, room, &span, &got, 1, 0);
+                        if (!status && got)
+                                memcpy(into, span, got);
+                        break;
+                }
+                case 2:
+                        status = fuzz_gather(tls, room, &got);
+                        break;
+                default:
+                        memset(into, 0x61, 700);
+                        status = tls_write(tls, into, 1 + (positive)(roll >> 20) % 700);
+                        got = 0;
+                        break;
+                }
+                fuzz_offsets(tls);
+                if (status == TLS_FAIL)
+                        break;
+                if (status != TLS_OK || got > room)
+                        abort();
+                if (roll % 4 == 3)
+                        continue;
+                if (closed && got)
+                        abort();
+                closed |= !got;
+        }
+        tls_forget(tls);
+        for (positive at = sizeof tls->handle; at < TLS_CONN_HEAD; at++)
+                if (((p8 address_to)tls)[at])
+                        abort();
+        free(tls);
+}
+
 static void fuzz_flight_chunks(p8 *data, positive length)
 {
         p8 *hs;
@@ -39408,8 +39954,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         p8 *payload;
         positive payload_length;
 
-        if (size > 65536)
-                size = 65536;
+        if (size > 131072)
+                size = 131072;
         length = (positive)size;
         buf = (p8 *)malloc(length ? length : 1);
         if (!buf)
@@ -39417,21 +39963,19 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         if (length)
                 memcpy(buf, data, length);
 
-        payload = buf;
-        payload_length = length;
+        payload = buf + 1;
+        payload_length = length ? length - 1 : 0;
         /* Optional magic selects a focused path; remainder is the payload. */
-        if (length > 0 && buf[0] == 0xf1)
+        if (length > 0 && buf[0] == 0xf3)
+                fuzz_connection(payload, payload_length);
+        else if (length > 0 && buf[0] == 0xf1)
         {
-                payload = buf + 1;
-                payload_length = length - 1;
                 fuzz_flight_chunks(payload, payload_length);
                 fuzz_flight_whole(payload, payload_length);
                 fuzz_flight_splits(payload, payload_length);
         }
         else if (length > 0 && buf[0] == 0xf2)
         {
-                payload = buf + 1;
-                payload_length = length - 1;
                 fuzz_server_hello_chunks(payload, payload_length);
                 fuzz_server_hello_whole(payload, payload_length);
         }
@@ -39450,9 +39994,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 """
 
     return tls_fuzz_run("tls hs", "tls_hs",
-                        shim + "\n" + load24 + "\n" + one_append + "\n" +
-                        flight_step + "\n" + flight_append + "\n" + driver,
-                        20480)
+                        shim + defines + connection + stubs + record + "\n" +
+                        load24 + "\n" + protocol + "\n" + driver,
+                        81920)
 
 
 def harness_tls_verify_fuzz(argv):
