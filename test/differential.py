@@ -36937,9 +36937,16 @@ def harness_tls_chains(argv):
                     root + ".pem", "-days", "3650", "-sha384", "-subj", "/CN=tls chains root",
                     "-addext", "basicConstraints=critical,CA:TRUE",
                     "-addext", "keyUsage=critical,keyCertSign,cRLSign")
-        openssl("req", "-x509", *p384, "-nodes", "-keyout", "legacy.key", "-out",
-                "legacy.pem", "-days", "3650", "-sha1", "-subj", "/CN=tls chains legacy",
-                "-addext", "basicConstraints=critical,CA:TRUE")
+        # A crypto policy may refuse to sign with SHA-1; that loses one row,
+        # not the oracle.
+        try:
+            openssl("req", "-x509", *p384, "-nodes", "-keyout", "legacy.key", "-out",
+                    "legacy.pem", "-days", "3650", "-sha1", "-subj", "/CN=tls chains legacy",
+                    "-addext", "basicConstraints=critical,CA:TRUE")
+        except subprocess.CalledProcessError:
+            print("tls chains: a SHA-1 legacy root served too: NOT RUN -- "
+                  "openssl will not sign with SHA-1 here")
+            mutations = tuple(m for m in mutations if m[3].get("extra") != "legacy")
         spki = subprocess.run(["openssl", "pkey", "-in", str(work / "root.key"), "-pubout",
                                "-outform", "DER"], check=True, capture_output=True).stdout
         point = spki[-97:]
@@ -39899,7 +39906,8 @@ def harness_tls_verify_fuzz(argv):
     raw Certificate body; 0xC1 the body after one byte; 0xCA overwrite the
     good chain at an input-chosen offset; 0xCB serve the generated
     certificates in an input-chosen order, repeats and omissions included,
-    which is path building's whole input space. Not in lane_net's smoke;
+    which is path building's whole input space, and abort unless the
+    verdict is exactly the one that order must get. Not in lane_net's smoke;
     `sh test/run fuzz` runs it through tls_fuzz. Bounded fixed-seed; returns
     2 when clang/libFuzzer is unavailable.
 
@@ -40025,9 +40033,25 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         }
         if (length > 1 && buf[0] == 0xcb)
         {
-                positive body = fuzz_chain_body(buf + 1, min(length - 1, (positive)9));
+                /* The verdict is known exactly: every generated subject is
+                   distinct and key 3 is the anchor, so a path needs the
+                   leaf first, the first and second intermediates anywhere
+                   after it, and no more than eight entries. */
+                positive n = min(length - 1, (positive)9);
+                positive body = fuzz_chain_body(buf + 1, n);
+                bool served[FUZZ_ECDSA_CHAIN] = {false};
+                bool framed = n <= 8;
 
-                (void)fuzz_verify(fuzz_body, body, (string_address)"example.com");
+                for (positive i = 1; i < n; i++)
+                        served[buf[1 + i] % FUZZ_ECDSA_CHAIN] = true;
+                if (fuzz_verify(fuzz_body, body, (string_address)"example.com") !=
+                        (framed && buf[1] % FUZZ_ECDSA_CHAIN == 0 && served[1] &&
+                         served[2]) ||
+                    fuzz_verify(fuzz_body, body, null) != framed)
+                {
+                        fprintf(stderr, "tls_verify_fuzz: wrong verdict for a served order\n");
+                        abort();
+                }
         }
 
         free(buf);
