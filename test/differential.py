@@ -7985,7 +7985,9 @@ FILES_UTILITIES = (
                                Option("--tmpdir", ("dir", "missing", "a.txt", ""), True),
                                Option("--suffix", (".txt", "-XXX", "", "/bad", "X"), True)),
             operands=files_MKTEMP_TEMPLATES, stdin=("empty",), fixture="files", stderr="exact", valid=files_mktemp_valid,
-            normalize=files_normal(lambda data: re.sub(rb"(?<=(?:run|tmp)\.)[A-Za-z0-9]{3,}", b"#", data))),
+            # The Try line is kept: upstream's mktemp.pl compares it after
+            # "too many templates".
+            normalize=lambda channel, data: re.sub(rb"(?<=(?:run|tmp)\.)[A-Za-z0-9]{3,}", b"#", data)),
     Utility("sleep", operands=(("0",), ("0.1",), ("0.3",), ("1",), ("1s",), ("0.5s",), ("0.01m",), ("0.0003h",), ("0.00001d",),
                                ("1", "0.5"), ("nonsense",), ("",), (), ("-1",), ("1x",), ("1e-1",), ("nan",), ("0x1",), ("0.1", "x"),
                                ("1.5.2",), ("0s", "0m", "0h", "0d"), ("+1",), (".5",), ("1.",), ("1 s",), ("s",), ("1ss",), ("0", "-1"),

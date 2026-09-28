@@ -42546,7 +42546,8 @@ static b32 file_mktemp()
         positive marks = 0;
 
         if (mktemp_extra_template)
-                return string_report(log_error, 1, "mktemp: too many templates\n");
+                return string_report(log_error, 1, "mktemp: too many templates\n"
+                                                   "Try 'mktemp --help' for more information.\n");
 
         if (!template)
         {
