@@ -18905,6 +18905,37 @@ def _text_meta_script(argv, stdin_name):
     return ul_live(argv[0], body)
 
 
+#   Every option GNU's --help lists must appear in ours, as GNU's own
+#   getopt_vs_usage and usage_vs_refs read it: the option column up to the
+#   --version line, each spelling found in our text with a space before it.
+#   The system tool reads its own text on the reference side, so any
+#   spelling ours leaves out shows up as a "missing" line only on ours.
+_TEXT_HELP_TOOLS = tuple((tool,) for tool in (
+    "b2sum", "md5sum", "sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum",
+    "base32", "base64", "basenc", "cat", "cksum", "comm", "cut", "od", "expand", "expr",
+    "factor", "fmt", "fold", "head", "join", "nl", "paste", "pr", "ptx", "sort", "sum",
+    "tac", "tail", "tee", "tr", "unexpand", "uniq", "wc", "basename", "chgrp", "chmod",
+    "chown", "chroot", "cp", "csplit", "date", "df", "ls", "dir", "vdir", "dircolors",
+    "dirname", "du", "env", "groups", "hostid", "id", "link", "ln", "logname", "mkdir",
+    "mkfifo", "mknod", "mktemp", "mv", "nice", "nohup", "nproc", "numfmt", "pathchk",
+    "pinky", "printenv", "readlink", "realpath", "rm", "rmdir", "seq", "shred", "shuf",
+    "sleep", "split", "stat", "stdbuf", "stty", "sync", "timeout", "touch", "truncate",
+    "tsort", "tty", "uname", "unlink", "users", "who", "whoami", "yes", "install"))
+
+
+def _text_help_script(argv, stdin_name):
+    body = ("env %s --help 2>/dev/null | env sed -n -e '/^      --version/q' "
+            "-e 's/^ \\{2,6\\}-/-/; s/  .*//; s/[=[].*//; s/, /\\n/g; s/^-/-/p' > names\n"
+            "run --help > help 2>/dev/null\necho \"status $?\"\n"
+            "while read -r name; do env grep -qF -- \" $name\" help || echo \"missing $name\"; "
+            "done < names\nenv rm -f names help\nstatus=0\nexit $status\n") % argv[0]
+    return ul_live(argv[0], body)
+
+
+def _text_help_valid(argv):
+    return tuple(argv) in _TEXT_HELP_TOOLS
+
+
 # ----------------------------------------------------------------------------
 #       The programs.
 # ----------------------------------------------------------------------------
@@ -18912,6 +18943,8 @@ def _text_meta_script(argv, stdin_name):
 TEXT_UTILITIES = (
     Utility("meta_words", operands=_TEXT_META_CASES, stdin=("empty",), fixture="text",
             stderr="ignore", modes=BASH, script=_text_meta_script, valid=_text_meta_valid),
+    Utility("help_options", operands=_TEXT_HELP_TOOLS, stdin=("empty",), fixture="text",
+            stderr="ignore", modes=BASH, script=_text_help_script, valid=_text_help_valid),
     Utility("write_errors", operands=_TEXT_WRITE_CASES, stdin=("empty",), fixture="text",
             stderr="exact", modes=BASH, script=_text_write_script, valid=_text_write_valid),
     Utility("tail_follow", operands=_TEXT_FOLLOW_CASES, stdin=("empty",), fixture="text",
@@ -43532,7 +43565,7 @@ PINNED = r"""
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-1","-3","-13","--zero-terminated","--nocheck-order","-","-"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"nul","utility":"comm"},"domain":"text","id":"b106a21d560afc73","kind":"deliberate","list":"ledger","reason_id":"r242","utility":"comm"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-","-"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"nul","utility":"comm"},"domain":"text","id":"d05518882eb8db61","kind":"deliberate","list":"ledger","reason_id":"r242","utility":"comm"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-","-"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text_sorted_a","utility":"comm"},"domain":"text","id":"d65a1529df05c1f5","kind":"deliberate","list":"ledger","reason_id":"r242","utility":"comm"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"7e959bbea961b2baad4c30a4eb1f21a987468b1b742ecd53874270a3610151fd"},"case":{"argv":["--help"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","utility":"expr"},"domain":"text","id":"28bb09ffc6551513","kind":"deliberate","list":"ledger","reason_id":"r244","utility":"expr"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"0b68b5ed4e5c29ab13ea78e98fcbfb3140c40c089d00b9d8f1e48a1d9d7cf615"},"case":{"argv":["--help"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","utility":"expr"},"domain":"text","id":"28bb09ffc6551513","kind":"deliberate","list":"ledger","reason_id":"r244","utility":"expr"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"},"case":{"argv":["10",":","2","<=","9223372036854775807","%","10","+","9223372036854775807"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","utility":"expr"},"domain":"text","id":"3b28604118bfddfc","kind":"deliberate","list":"ledger","reason_id":"r250","utility":"expr"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"cc8b7743b080ca35802419d30656f3283be97dfc5b0258ca1e43459abed528e7"},"case":{"argv":["--version"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","utility":"expr"},"domain":"text","id":"4f57aecf84596888","kind":"deliberate","list":"ledger","reason_id":"r244","utility":"expr"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"896693668a15423cace61dfba4e5a4ae44ad2cb55db61bedd79076fb4d9bf239"},"case":{"argv":["99999999999999999999","+","0"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","utility":"expr"},"domain":"text","id":"8bac8f2a391b205d","kind":"deliberate","list":"ledger","reason_id":"r250","utility":"expr"},

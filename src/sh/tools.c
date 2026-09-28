@@ -30396,6 +30396,1618 @@ static bool tools_meta_asked(string_address address_to arguments, positive count
         return seen < count && arguments[seen] && arguments[seen][2];
 }
 
+/*
+        The --help texts of the coreutils programs, one per program or family.
+        The option column is the interface GNU's own --help shows -- the
+        spellings, the argument names, two spaces before each description --
+        because scripts and GNU's getopt_vs_usage and usage_vs_getopt tests
+        read it; the descriptions are Moonwater's own.  Byte 1 stands for the
+        name the program was run as, so dir and vdir share ls's text and the
+        sha*sum tools share md5sum's; byte 2 followed by a column width stands
+        for the --help and --version lines every text carries.  They are only
+        read when --help was asked for, and cost start-up nothing.
+*/
+static const p8 tools_help_b2sum[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Print or verify BLAKE2b checksums of each FILE, or of standard input.\n"
+    "\n"
+    "  -b, --binary       read the input in binary mode\n"
+    "  -c, --check        verify the sums listed in each FILE\n"
+    "  -l, --length=BITS  digest size in bits, a multiple of 8 up to 512\n"
+    "      --tag          write BSD-style lines naming the algorithm\n"
+    "  -t, --text         read the input in text mode (the default)\n"
+    "  -z, --zero         end output lines with NUL and leave names unescaped\n"
+    "With --check only:\n"
+    "      --ignore-missing\n"
+    "                     skip listed files that do not exist\n"
+    "      --quiet        say nothing for files that verify\n"
+    "      --status       print nothing; the exit status tells\n"
+    "      --strict       fail on any malformed checksum line\n"
+    "  -w, --warn         complain about malformed checksum lines\n"
+    "\002\025\n";
+static const p8 tools_help_md5sum[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Print or verify checksums of each FILE, or of standard input, with the\n"
+    "digest this program is named for.\n"
+    "\n"
+    "  -b, --binary   read the input in binary mode\n"
+    "  -c, --check    verify the sums listed in each FILE\n"
+    "      --tag      write BSD-style lines naming the algorithm\n"
+    "  -t, --text     read the input in text mode (the default)\n"
+    "  -z, --zero     end output lines with NUL and leave names unescaped\n"
+    "With --check only:\n"
+    "      --ignore-missing\n"
+    "                 skip listed files that do not exist\n"
+    "      --quiet    say nothing for files that verify\n"
+    "      --status   print nothing; the exit status tells\n"
+    "      --strict   fail on any malformed checksum line\n"
+    "  -w, --warn     complain about malformed checksum lines\n"
+    "\002\021\n";
+static const p8 tools_help_base32[] =
+    "Usage: \001 [OPTION]... [FILE]\n"
+    "Encode FILE, or standard input, as \001 text, or decode it back.\n"
+    "\n"
+    "  -d, --decode          decode instead of encoding\n"
+    "  -i, --ignore-garbage  when decoding, skip bytes outside the alphabet\n"
+    "  -w, --wrap=COLS       break encoded lines after COLS characters\n"
+    "                        (76 by default; 0 never breaks them)\n"
+    "\002\030\n";
+static const p8 tools_help_basenc[] =
+    "Usage: \001 [OPTION]... [FILE]\n"
+    "Encode FILE, or standard input, in the chosen encoding, or decode it.\n"
+    "\n"
+    "      --base64     the base64 alphabet of RFC 4648\n"
+    "      --base64url  base64 with the file-name and URL safe alphabet\n"
+    "      --base58     base58, without look-alike characters\n"
+    "      --base32     the base32 alphabet of RFC 4648\n"
+    "      --base32hex  base32 with the extended hex alphabet\n"
+    "      --base16     upper-case hexadecimal\n"
+    "      --base2msbf  bits, most significant first\n"
+    "      --base2lsbf  bits, least significant first\n"
+    "  -d, --decode     decode instead of encoding\n"
+    "  -i, --ignore-garbage\n"
+    "                   when decoding, skip bytes outside the alphabet\n"
+    "  -w, --wrap=COLS  break encoded lines after COLS characters\n"
+    "                   (76 by default; 0 never breaks them)\n"
+    "      --z85        ZeroMQ's Z85; input is whole 4-byte groups when\n"
+    "                   encoding and whole 5-character groups when decoding\n"
+    "\002\023\n";
+static const p8 tools_help_cat[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Write each FILE, or standard input, to standard output in turn.\n"
+    "\n"
+    "  -A, --show-all         the same as -vET\n"
+    "  -b, --number-nonblank  number the lines that are not empty (beats -n)\n"
+    "  -e                     the same as -vE\n"
+    "  -E, --show-ends        mark each line end with $\n"
+    "  -n, --number           number every output line\n"
+    "  -s, --squeeze-blank    print runs of empty lines as one\n"
+    "  -t                     the same as -vT\n"
+    "  -T, --show-tabs        show TAB as ^I\n"
+    "  -u                     accepted and ignored\n"
+    "  -v, --show-nonprinting\n"
+    "                         show control bytes as ^X and high bytes as M-\n"
+    "\002\031\n";
+static const p8 tools_help_cksum[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Print or verify checksums of each FILE, or of standard input.\n"
+    "Without -a the sum is the POSIX 32-bit CRC.\n"
+    "\n"
+    "  -a, --algorithm=TYPE\n"
+    "                     use digest TYPE, from the list below\n"
+    "      --base64       print digests in base64 rather than hex\n"
+    "  -c, --check        verify the sums listed in each FILE\n"
+    "  -l, --length=BITS  digest size in bits: for blake2b a multiple\n"
+    "                     of 8, for sha2 and sha3 one of 224, 256, 384, 512\n"
+    "      --raw          print the digest as raw bytes\n"
+    "      --tag          write BSD-style lines naming the algorithm (default)\n"
+    "      --untagged     write the digest before the name, without the type\n"
+    "  -z, --zero         end output lines with NUL and leave names unescaped\n"
+    "With --check only:\n"
+    "      --ignore-missing\n"
+    "                     skip listed files that do not exist\n"
+    "      --quiet        say nothing for files that verify\n"
+    "      --status       print nothing; the exit status tells\n"
+    "      --strict       fail on any malformed checksum line\n"
+    "  -w, --warn         complain about malformed checksum lines\n"
+    "      --debug        say which implementation computes the sum\n"
+    "\002\025\n"
+    "\n"
+    "TYPE is one of:\n"
+    "  sysv      the System V sum, as sum -s\n"
+    "  bsd       the BSD sum, as sum -r\n"
+    "  crc       the POSIX CRC, the default\n"
+    "  crc32b    the CRC-32 of zlib and ITU V.42\n"
+    "  md5       MD5, as md5sum\n"
+    "  sha1      SHA-1, as sha1sum\n"
+    "  sha2      SHA-2, as the sha224sum..sha512sum tools\n"
+    "  sha3      SHA-3\n"
+    "  blake2b   BLAKE2b, as b2sum\n"
+    "  sm3       SM3\n";
+static const p8 tools_help_comm[] =
+    "Usage: \001 [OPTION]... FILE1 FILE2\n"
+    "Compare two sorted files line by line: column one holds lines only in\n"
+    "FILE1, column two lines only in FILE2, column three lines in both.\n"
+    "A FILE of - is standard input.\n"
+    "\n"
+    "  -1                     leave out column one\n"
+    "  -2                     leave out column two\n"
+    "  -3                     leave out column three\n"
+    "      --check-order      fail if an input is not sorted\n"
+    "      --nocheck-order    do not check the input order\n"
+    "      --output-delimiter=STR\n"
+    "                         put STR between columns\n"
+    "      --total            end with a line of counts\n"
+    "  -z, --zero-terminated  lines end with NUL, not newline\n"
+    "\002\031\n";
+static const p8 tools_help_cut[] =
+    "Usage: \001 OPTION... [FILE]...\n"
+    "Print the selected parts of each line of each FILE, or of standard input.\n"
+    "\n"
+    "  -b, --bytes=LIST              keep these byte positions\n"
+    "  -c, --characters=LIST         keep these character positions\n"
+    "      --complement              keep everything but the selection\n"
+    "  -d, --delimiter=DELIM         fields are separated by DELIM, not TAB\n"
+    "  -f, --fields=LIST             keep these fields; lines without a delimiter\n"
+    "                                are printed whole unless -s is given\n"
+    "  -F LIST                       as -f with -w and -O ' '\n"
+    "  -n, --no-partial              with -b, never split a multibyte character\n"
+    "  -O, --output-delimiter=STRING\n"
+    "                                join the output with STRING\n"
+    "  -s, --only-delimited          drop lines that hold no delimiter\n"
+    "  -w, --whitespace-delimited[=trimmed]\n"
+    "                                fields are separated by runs of blanks;\n"
+    "                                'trimmed' also drops blanks at line ends\n"
+    "  -z, --zero-terminated         lines end with NUL, not newline\n"
+    "\002 \n"
+    "\n"
+    "LIST is N, N-, N-M or -M, or several of them joined by commas.\n";
+static const p8 tools_help_dd[] =
+    "Usage: \001 [OPERAND]...\n"
+    "  or:  \001 OPTION\n"
+    "Copy a file block by block, converting it as the operands say.\n"
+    "\n"
+    "  bs=BYTES      read and write BYTES at a time; sets ibs and obs\n"
+    "  cbs=BYTES     conversion record size for block and unblock\n"
+    "  conv=CONVS    apply the comma-separated conversions CONVS\n"
+    "  count=N       copy at most N input blocks\n"
+    "  ibs=BYTES     read BYTES at a time (512 by default)\n"
+    "  if=FILE       read FILE, not standard input\n"
+    "  iflag=FLAGS   open the input with the comma-separated FLAGS\n"
+    "  obs=BYTES     write BYTES at a time (512 by default)\n"
+    "  of=FILE       write FILE, not standard output\n"
+    "  oflag=FLAGS   open the output with the comma-separated FLAGS\n"
+    "  seek=N        skip N output blocks first (also oseek=N)\n"
+    "  skip=N        skip N input blocks first (also iseek=N)\n"
+    "  status=LEVEL  none, noxfer or progress: how much to report\n"
+    "\n"
+    "CONVS: ascii ebcdic ibm block unblock lcase ucase sparse swab sync excl\n"
+    "nocreat notrunc noerror fdatasync fsync.  FLAGS: append direct directory\n"
+    "dsync sync fullblock nonblock noatime nocache noctty nofollow count_bytes\n"
+    "skip_bytes seek_bytes.  N and BYTES take suffixes c w b kB K MB M GB G\n"
+    "and on; an N ending in B counts bytes.  SIGUSR1 prints the statistics.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_od[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "  or:  \001 [-abcdfilosx]... [FILE] [[+]OFFSET[.][b]]\n"
+    "  or:  \001 --traditional [OPTION]... [FILE] [[+]OFFSET[.][b] [+][LABEL][.][b]]\n"
+    "Dump FILEs, or standard input, in octal or the formats chosen below.\n"
+    "\n"
+    "  -A, --address-radix=RADIX   offsets in d, o, x or n (none)\n"
+    "      --endian={big|little}   read multibyte units in this byte order\n"
+    "  -j, --skip-bytes=BYTES      skip BYTES of input first\n"
+    "  -N, --read-bytes=BYTES      dump at most BYTES of input\n"
+    "  -S BYTES, --strings[=BYTES]\n"
+    "                              print only NUL-ended printable strings\n"
+    "                              of at least BYTES characters (3)\n"
+    "  -t, --format=TYPE           dump in format TYPE\n"
+    "  -v, --output-duplicates     print repeated lines rather than *\n"
+    "  -w[BYTES], --width[=BYTES]  dump BYTES per line (32 without a value)\n"
+    "      --traditional           take operands in the third form above\n"
+    "\002\036\n"
+    "\n"
+    "-a -b -c -d -f -i -l -o -s -x stand for -t a, o1, c, u2, fF, dI, dL, o2,\n"
+    "d2, x2.  TYPE is a, c, or d, f, o, u, x with an optional size (a number,\n"
+    "or C S I L; for f also B H F D L), and a z suffix adds the text column.\n";
+static const p8 tools_help_expand[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Turn tabs in each FILE, or in standard input, into spaces.\n"
+    "\n"
+    "  -i, --initial    only convert tabs before the first non-blank\n"
+    "  -t, --tabs=N     put tab stops every N columns, not 8\n"
+    "  -t, --tabs=LIST  put tab stops at these comma-separated columns;\n"
+    "                   a last entry of /N or +N sets stops every N after them\n"
+    "\002\023\n";
+static const p8 tools_help_expr[] =
+    "Usage: \001 EXPRESSION\n"
+    "  or:  \001 OPTION\n"
+    "\n"
+    "\002\021\n"
+    "\n"
+    "Print the value of EXPRESSION.  Operators, loosest first: |  &\n"
+    "< <= = != >= >  + -  * / %  and STRING : REGEXP; also match, substr,\n"
+    "index, length, + TOKEN and parentheses.  Exit status: 0 for a value that\n"
+    "is neither null nor 0, 1 for null or 0, 2 for bad syntax, 3 on error.\n";
+static const p8 tools_help_factor[] =
+    "Usage: \001 [OPTION] [NUMBER]...\n"
+    "Print the prime factors of each NUMBER, or of each number read from\n"
+    "standard input.\n"
+    "\n"
+    "  -h, --exponents  write repeated factors as p^e\n"
+    "\002\023\n";
+static const p8 tools_help_fmt[] =
+    "Usage: \001 [-WIDTH] [OPTION]... [FILE]...\n"
+    "Refill the paragraphs of each FILE, or of standard input.\n"
+    "\n"
+    "  -c, --crown-margin     keep the indents of the first two lines\n"
+    "  -p, --prefix=STRING    refill only lines starting with STRING\n"
+    "  -s, --split-only       break long lines but never join short ones\n"
+    "  -t, --tagged-paragraph\n"
+    "                         the first line is indented unlike the second\n"
+    "  -u, --uniform-spacing  one space between words, two after sentences\n"
+    "  -w, --width=WIDTH      lines at most WIDTH wide (75)\n"
+    "  -g, --goal=WIDTH       aim for lines WIDTH wide (93% of the width)\n"
+    "\002\031\n";
+static const p8 tools_help_fold[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Break the long lines of each FILE, or of standard input.\n"
+    "\n"
+    "  -b, --bytes        measure in bytes, not columns\n"
+    "  -c, --characters   measure in characters, not columns\n"
+    "  -s, --spaces       break after the last blank that fits\n"
+    "  -w, --width=WIDTH  lines at most WIDTH wide (80)\n"
+    "\002\025\n";
+static const p8 tools_help_head[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Print the first 10 lines of each FILE, or of standard input, with a\n"
+    "name header before each when there are several.\n"
+    "\n"
+    "  -c, --bytes=[-]NUM     print the first NUM bytes; -NUM prints all\n"
+    "                         but the last NUM\n"
+    "  -n, --lines=[-]NUM     print the first NUM lines; -NUM prints all\n"
+    "                         but the last NUM\n"
+    "  -q, --quiet, --silent  never print name headers\n"
+    "  -v, --verbose          always print name headers\n"
+    "  -z, --zero-terminated  lines end with NUL, not newline\n"
+    "\002\031\n"
+    "\n"
+    "NUM takes the suffixes b kB K MB M GB G and so on, and KiB MiB.\n";
+static const p8 tools_help_join[] =
+    "Usage: \001 [OPTION]... FILE1 FILE2\n"
+    "Join the lines of two files that share a join field, blank-separated\n"
+    "field 1 by default.  A FILE of - is standard input.\n"
+    "\n"
+    "  -a FILENUM           also print unpaired lines of file 1 or 2\n"
+    "  -e STRING            fill missing fields with STRING\n"
+    "  -i, --ignore-case    compare fields without regard to case\n"
+    "  -j FIELD             the same as -1 FIELD -2 FIELD\n"
+    "  -o FORMAT            print the fields FORMAT lists, as FILENUM.FIELD\n"
+    "                       or 0, or 'auto'\n"
+    "  -t CHAR              fields are separated by CHAR\n"
+    "  -v FILENUM           like -a but print no joined lines\n"
+    "  -1 FIELD             join on this field of file 1\n"
+    "  -2 FIELD             join on this field of file 2\n"
+    "      --check-order    fail if an input is not sorted\n"
+    "      --nocheck-order  do not check the input order\n"
+    "      --header         pair the first lines as headers\n"
+    "  -z, --zero-terminated\n"
+    "                       lines end with NUL, not newline\n"
+    "\002\027\n"
+    "\n"
+    "Both inputs must be sorted on the join field.\n";
+static const p8 tools_help_nl[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Write each FILE, or standard input, with line numbers.\n"
+    "\n"
+    "  -b, --body-numbering=STYLE    which body lines to number\n"
+    "  -d, --section-delimiter=CC    section markers use CC (\\:)\n"
+    "  -f, --footer-numbering=STYLE  which footer lines to number\n"
+    "  -h, --header-numbering=STYLE  which header lines to number\n"
+    "  -i, --line-increment=NUMBER   step between line numbers\n"
+    "  -l, --join-blank-lines=NUMBER\n"
+    "                                count NUMBER empty lines as one\n"
+    "  -n, --number-format=FORMAT    ln, rn or rz\n"
+    "  -p, --no-renumber             keep counting across sections\n"
+    "  -s, --number-separator=STRING\n"
+    "                                put STRING after the number\n"
+    "  -v, --starting-line-number=NUMBER\n"
+    "                                first number of each section\n"
+    "  -w, --number-width=NUMBER     numbers are NUMBER columns wide\n"
+    "\002 \n"
+    "\n"
+    "STYLE is a (all), t (non-empty, the body default), n (none, the header\n"
+    "and footer default) or pBRE (lines matching BRE).\n";
+static const p8 tools_help_paste[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Join the lines of each FILE side by side, separated by TABs.\n"
+    "\n"
+    "  -d, --delimiters=LIST  separate with the characters of LIST in turn\n"
+    "  -s, --serial           join the lines of each file into one line\n"
+    "  -z, --zero-terminated  lines end with NUL, not newline\n"
+    "\002\031\n";
+static const p8 tools_help_pr[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Lay out each FILE, or standard input, in pages for printing.\n"
+    "\n"
+    "  +FIRST_PAGE[:LAST_PAGE], --pages=FIRST_PAGE[:LAST_PAGE]\n"
+    "                                print only these pages\n"
+    "  -COLS, --columns=COLS         print COLS columns, filled down\n"
+    "  -a, --across                  fill columns across, with -COLS\n"
+    "  -c, --show-control-chars      show control bytes as ^X and octal\n"
+    "  -d, --double-space            leave an empty line after each line\n"
+    "  -D, --date-format=FORMAT      date format for the header\n"
+    "  -e[CHAR[WIDTH]], --expand-tabs[=CHAR[WIDTH]]\n"
+    "                                expand input CHARs (TAB) to WIDTH (8)\n"
+    "  -F, -f, --form-feed           end pages with a form feed\n"
+    "  -h, --header=HEADER           put HEADER in page headers, not the name\n"
+    "  -i[CHAR[WIDTH]], --output-tabs[=CHAR[WIDTH]]\n"
+    "                                turn spaces into CHARs (TAB) at WIDTH (8)\n"
+    "  -J, --join-lines              merge full lines, no truncation\n"
+    "  -l, --length=PAGE_LENGTH      pages of PAGE_LENGTH lines (66)\n"
+    "  -m, --merge                   print each file in its own column\n"
+    "  -n[SEP[DIGITS]], --number-lines[=SEP[DIGITS]]\n"
+    "                                number lines with DIGITS (5) and SEP (TAB)\n"
+    "  -N, --first-line-number=NUMBER\n"
+    "                                start numbering at NUMBER\n"
+    "  -o, --indent=MARGIN           indent every line by MARGIN spaces\n"
+    "  -r, --no-file-warnings        say nothing about files that cannot be opened\n"
+    "  -s[CHAR], --separator[=CHAR]  separate columns with one CHAR\n"
+    "  -S[STRING], --sep-string[=STRING]\n"
+    "                                separate columns with STRING\n"
+    "  -t, --omit-header             no page headers or trailers\n"
+    "  -T, --omit-pagination         no headers, trailers or input form feeds\n"
+    "  -v, --show-nonprinting        show control bytes in octal\n"
+    "  -w, --width=PAGE_WIDTH        page width for columns (72)\n"
+    "  -W, --page-width=PAGE_WIDTH   page width always, truncating lines\n"
+    "\002 \n";
+static const p8 tools_help_ptx[] =
+    "Usage: \001 [OPTION]... [INPUT]...   (without -G)\n"
+    "  or:  \001 -G [OPTION]... [INPUT [OUTPUT]]\n"
+    "Write a permuted index of the words of the inputs, with their context.\n"
+    "\n"
+    "  -A, --auto-reference      add FILE:LINE references\n"
+    "  -G, --traditional         behave like System V ptx\n"
+    "  -F, --flag-truncation=STRING\n"
+    "                            mark cut lines with STRING (/)\n"
+    "  -M, --macro-name=STRING   roff macro name, not xx\n"
+    "  -O, --format=roff         write roff directives\n"
+    "  -R, --right-side-refs     put references on the right\n"
+    "  -S, --sentence-regexp=REGEXP\n"
+    "                            REGEXP ends a line or sentence\n"
+    "  -T, --format=tex          write TeX directives\n"
+    "  -W, --word-regexp=REGEXP  REGEXP matches a keyword\n"
+    "  -b, --break-file=FILE     word break characters come from FILE\n"
+    "  -f, --ignore-case         sort without regard to case\n"
+    "  -g, --gap-size=NUMBER     columns between output fields\n"
+    "  -i, --ignore-file=FILE    never index the words in FILE\n"
+    "  -o, --only-file=FILE      index only the words in FILE\n"
+    "  -r, --references          each line starts with its reference\n"
+    "  -t, --typeset-mode        default width 100, not 72\n"
+    "  -w, --width=NUMBER        output width, references excluded\n"
+    "\002\034\n";
+static const p8 tools_help_sort[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "  or:  \001 [OPTION]... --files0-from=F\n"
+    "Write the lines of all FILEs, or of standard input, in sorted order.\n"
+    "\n"
+    "Ordering:\n"
+    "  -b, --ignore-leading-blanks  skip leading blanks of keys\n"
+    "  -d, --dictionary-order       compare only blanks and letters and digits\n"
+    "  -f, --ignore-case            compare lower case as upper case\n"
+    "  -g, --general-numeric-sort   compare as floating-point numbers\n"
+    "  -i, --ignore-nonprinting     compare only printable characters\n"
+    "  -M, --month-sort             compare month names, JAN < ... < DEC\n"
+    "  -h, --human-numeric-sort     compare sizes such as 2K and 1G\n"
+    "  -n, --numeric-sort           compare as decimal numbers\n"
+    "  -R, --random-sort            shuffle, keeping equal keys together\n"
+    "      --random-source=FILE     take random bytes from FILE\n"
+    "  -r, --reverse                reverse every comparison\n"
+    "      --sort=WORD              general-numeric, human-numeric, month,\n"
+    "                               numeric, random or version\n"
+    "  -V, --version-sort           compare numbers inside text as versions\n"
+    "Other:\n"
+    "      --batch-size=NMERGE      merge at most NMERGE inputs at once\n"
+    "  -c, --check, --check=diagnose-first\n"
+    "                               check that input is sorted\n"
+    "  -C, --check=quiet, --check=silent\n"
+    "                               check quietly\n"
+    "      --compress-program=PROG  pack temporary files with PROG\n"
+    "      --debug                  mark each key and warn about odd usage\n"
+    "      --files0-from=F          read NUL-separated input names from F\n"
+    "  -k, --key=KEYDEF             sort on the key KEYDEF\n"
+    "  -m, --merge                  merge inputs that are already sorted\n"
+    "  -o, --output=FILE            write to FILE, not standard output\n"
+    "  -s, --stable                 keep lines with equal keys in input order\n"
+    "  -S, --buffer-size=SIZE       use SIZE of memory (with % b K M G ...)\n"
+    "  -t, --field-separator=SEP    fields end at SEP, not at blanks\n"
+    "  -T, --temporary-directory=DIR\n"
+    "                               put temporary files in DIR\n"
+    "      --parallel=N             run up to N sorts at once\n"
+    "  -u, --unique                 print one line of each run of equal keys\n"
+    "  -z, --zero-terminated        lines end with NUL, not newline\n"
+    "\002\037\n"
+    "\n"
+    "KEYDEF is F[.C][OPTS][,F[.C][OPTS]]: a start and an end field F and\n"
+    "character C, counted from 1, with ordering letters from [bdfgiMhnRrV].\n";
+static const p8 tools_help_sum[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Print the 16-bit checksum and block count of each FILE, or standard input.\n"
+    "\n"
+    "  -r             the BSD sum over 1K blocks (the default)\n"
+    "  -s, --sysv     the System V sum over 512-byte blocks\n"
+    "\002\021\n";
+static const p8 tools_help_tac[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Write each FILE, or standard input, last line first.\n"
+    "\n"
+    "  -b, --before            the separator comes before each record\n"
+    "  -r, --regex             the separator is a regular expression\n"
+    "  -s, --separator=STRING  records end with STRING, not newline\n"
+    "\002\032\n";
+static const p8 tools_help_tail[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Print the last 10 lines of each FILE, or of standard input, with a\n"
+    "name header before each when there are several.\n"
+    "\n"
+    "  -c, --bytes=[+]NUM           the last NUM bytes; +NUM starts at byte NUM\n"
+    "      --debug                  say how --follow watches the files\n"
+    "  -f, --follow[={name|descriptor}]\n"
+    "                               keep printing what is appended\n"
+    "  -F                           the same as --follow=name --retry\n"
+    "  -n, --lines=[+]NUM           the last NUM lines; +NUM starts at line NUM\n"
+    "      --max-unchanged-stats=N  with --follow=name, reopen after N\n"
+    "                               unchanged checks (5)\n"
+    "      --pid=PID                with -f, stop once PID has exited\n"
+    "  -q, --quiet, --silent        never print name headers\n"
+    "      --retry                  keep trying files that cannot be opened\n"
+    "  -s, --sleep-interval=N       with -f, check every N seconds (1)\n"
+    "  -v, --verbose                always print name headers\n"
+    "  -z, --zero-terminated        lines end with NUL, not newline\n"
+    "\002\037\n"
+    "\n"
+    "NUM takes the suffixes b kB K MB M GB G and so on, and KiB MiB.\n";
+static const p8 tools_help_tee[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Copy standard input to standard output and to each FILE.\n"
+    "\n"
+    "  -a, --append               add to the FILEs rather than replacing them\n"
+    "  -i, --ignore-interrupts    ignore SIGINT\n"
+    "  -p                         the same as --output-error=warn-nopipe\n"
+    "      --output-error[=MODE]  on a write error: warn, warn-nopipe,\n"
+    "                             exit or exit-nopipe\n"
+    "\002\035\n";
+static const p8 tools_help_tr[] =
+    "Usage: \001 [OPTION]... STRING1 [STRING2]\n"
+    "Translate, squeeze or delete characters of standard input.\n"
+    "\n"
+    "  -c, -C, --complement   use every character not in STRING1\n"
+    "  -d, --delete           delete the characters of STRING1\n"
+    "  -s, --squeeze-repeats  squeeze runs of a character of the last\n"
+    "                         STRING into one\n"
+    "  -t, --truncate-set1    cut STRING1 to the length of STRING2\n"
+    "\002\031\n"
+    "\n"
+    "STRINGs take \\NNN \\\\ \\a \\b \\f \\n \\r \\t \\v, CHAR1-CHAR2, [CHAR*], [CHAR*N],\n"
+    "[:CLASS:] and [=CHAR=].\n";
+static const p8 tools_help_unexpand[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Turn runs of blanks in each FILE, or in standard input, into tabs.\n"
+    "\n"
+    "  -a, --all         convert all blanks, not only leading ones\n"
+    "      --first-only  convert only leading blanks (beats -a)\n"
+    "  -t, --tabs=N      put tab stops every N columns (implies -a)\n"
+    "  -t, --tabs=LIST   put tab stops at these comma-separated columns;\n"
+    "                    a last entry of /N or +N sets stops every N after them\n"
+    "\002\024\n";
+static const p8 tools_help_uniq[] =
+    "Usage: \001 [OPTION]... [INPUT [OUTPUT]]\n"
+    "Merge runs of equal adjacent lines of INPUT (or standard input) into\n"
+    "one, writing to OUTPUT (or standard output).\n"
+    "\n"
+    "  -c, --count            prefix each line with its run length\n"
+    "  -d, --repeated         print one line of each repeated run\n"
+    "  -D                     print every line of each repeated run\n"
+    "      --all-repeated[=METHOD]\n"
+    "                         like -D, with none, prepend or separate\n"
+    "                         empty lines between runs\n"
+    "  -f, --skip-fields=N    ignore the first N fields\n"
+    "      --group[=METHOD]   print every line, runs set apart by empty\n"
+    "                         lines: separate, prepend, append or both\n"
+    "  -i, --ignore-case      compare without regard to case\n"
+    "  -s, --skip-chars=N     ignore the first N characters\n"
+    "  -u, --unique           print only lines that are not repeated\n"
+    "  -z, --zero-terminated  lines end with NUL, not newline\n"
+    "  -w, --check-chars=N    compare at most N characters\n"
+    "\002\031\n";
+static const p8 tools_help_wc[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "  or:  \001 [OPTION]... --files0-from=F\n"
+    "Print newline, word and byte counts of each FILE, or of standard input,\n"
+    "and a total when there are several.  Counts print in the order lines,\n"
+    "words, characters, bytes, longest line.\n"
+    "\n"
+    "  -c, --bytes          print the byte count\n"
+    "  -m, --chars          print the character count\n"
+    "  -l, --lines          print the newline count\n"
+    "      --debug          say which counting path is used\n"
+    "      --files0-from=F  read NUL-separated input names from F\n"
+    "  -L, --max-line-length\n"
+    "                       print the widest line's width\n"
+    "  -w, --words          print the word count\n"
+    "      --total=WHEN     auto, always, only or never\n"
+    "\002\027\n";
+static const p8 tools_help_basename[] =
+    "Usage: \001 NAME [SUFFIX]\n"
+    "  or:  \001 OPTION... NAME...\n"
+    "Print NAME without its leading directories, and without SUFFIX if given.\n"
+    "\n"
+    "  -a, --multiple       take every operand as a NAME\n"
+    "  -s, --suffix=SUFFIX  remove SUFFIX too; implies -a\n"
+    "  -z, --zero           end each name with NUL, not newline\n"
+    "\002\027\n";
+static const p8 tools_help_chgrp[] =
+    "Usage: \001 [OPTION]... GROUP FILE...\n"
+    "  or:  \001 [OPTION]... --reference=RFILE FILE...\n"
+    "Set the group of each FILE to GROUP, or to RFILE's group.\n"
+    "\n"
+    "  -c, --changes           report only files that change\n"
+    "  -f, --silent, --quiet   leave out most error messages\n"
+    "  -v, --verbose           report every file\n"
+    "      --dereference       change what a symlink points to (the default)\n"
+    "  -h, --no-dereference    change symlinks themselves\n"
+    "      --from=CURRENT_OWNER:CURRENT_GROUP\n"
+    "                          only change files owned so\n"
+    "      --no-preserve-root  let -R reach / (the default)\n"
+    "      --preserve-root     refuse to recurse into /\n"
+    "      --reference=RFILE   copy RFILE's group\n"
+    "  -R, --recursive         descend into directories\n"
+    "With -R, the last of these decides which symlinks are followed:\n"
+    "  -H                      those named as arguments\n"
+    "  -L                      all of them\n"
+    "  -P                      none (the default)\n"
+    "\002\032\n";
+static const p8 tools_help_chmod[] =
+    "Usage: \001 [OPTION]... MODE[,MODE]... FILE...\n"
+    "  or:  \001 [OPTION]... OCTAL-MODE FILE...\n"
+    "  or:  \001 [OPTION]... --reference=RFILE FILE...\n"
+    "Set the mode of each FILE to MODE, or to RFILE's mode.\n"
+    "\n"
+    "  -c, --changes          report only files that change\n"
+    "  -f, --silent, --quiet  leave out most error messages\n"
+    "  -v, --verbose          report every file\n"
+    "      --dereference      change what a symlink points to\n"
+    "  -h, --no-dereference   change symlinks themselves\n"
+    "      --no-preserve-root\n"
+    "                         let -R reach / (the default)\n"
+    "      --preserve-root    refuse to recurse into /\n"
+    "      --reference=RFILE  copy RFILE's mode\n"
+    "  -R, --recursive        descend into directories\n"
+    "With -R, the last of these decides which symlinks are followed:\n"
+    "  -H                     those named as arguments (the default)\n"
+    "  -L                     all of them\n"
+    "  -P                     none\n"
+    "\002\031\n"
+    "\n"
+    "MODE is [ugoa]*([-+=]([rwxXst]*|[ugo]))+ or [-+=][0-7]+.\n";
+static const p8 tools_help_chown[] =
+    "Usage: \001 [OPTION]... [OWNER][:[GROUP]] FILE...\n"
+    "  or:  \001 [OPTION]... --reference=RFILE FILE...\n"
+    "Set the owner and/or group of each FILE, or copy them from RFILE.\n"
+    "\n"
+    "  -c, --changes           report only files that change\n"
+    "  -f, --silent, --quiet   leave out most error messages\n"
+    "  -v, --verbose           report every file\n"
+    "      --dereference       change what a symlink points to (the default)\n"
+    "  -h, --no-dereference    change symlinks themselves\n"
+    "      --from=CURRENT_OWNER:CURRENT_GROUP\n"
+    "                          only change files owned so\n"
+    "      --no-preserve-root  let -R reach / (the default)\n"
+    "      --preserve-root     refuse to recurse into /\n"
+    "      --reference=RFILE   copy RFILE's owner and group\n"
+    "  -R, --recursive         descend into directories\n"
+    "With -R, the last of these decides which symlinks are followed:\n"
+    "  -H                      those named as arguments\n"
+    "  -L                      all of them\n"
+    "  -P                      none (the default)\n"
+    "\002\032\n"
+    "\n"
+    "OWNER: alone keeps the group; OWNER: sets the login group of OWNER.\n";
+static const p8 tools_help_chroot[] =
+    "Usage: \001 [OPTION]... NEWROOT [COMMAND [ARG]...]\n"
+    "Run COMMAND, or \"$SHELL\" -i, with NEWROOT as the root directory.\n"
+    "\n"
+    "      --groups=G_LIST        supplementary groups, g1,g2,...\n"
+    "      --userspec=USER:GROUP  run as this user and group\n"
+    "      --skip-chdir           stay in the current directory\n"
+    "\002\035\n"
+    "\n"
+    "Exit status: 125 when chroot fails, 126 when COMMAND cannot run, 127 when\n"
+    "it is not found, otherwise COMMAND's status.\n";
+static const p8 tools_help_cp[] =
+    "Usage: \001 [OPTION]... [-T] SOURCE DEST\n"
+    "  or:  \001 [OPTION]... SOURCE... DIRECTORY\n"
+    "  or:  \001 [OPTION]... -t DIRECTORY SOURCE...\n"
+    "Copy SOURCE to DEST, or each SOURCE into DIRECTORY.\n"
+    "\n"
+    "  -a, --archive              the same as -dR --preserve=all\n"
+    "      --attributes-only      copy attributes but not data\n"
+    "      --backup[=CONTROL]     back up each destination that exists\n"
+    "  -b                         like --backup, without a value\n"
+    "      --copy-contents        read special files when recursive\n"
+    "  -d                         as --no-dereference --preserve=links\n"
+    "      --debug                explain each copy; implies -v\n"
+    "  -f, --force                remove an unopenable destination and retry\n"
+    "  -i, --interactive          ask before overwriting\n"
+    "  -H                         follow symlinks named as arguments\n"
+    "  -L, --dereference          always follow symlinks in SOURCE\n"
+    "  -P, --no-dereference       never follow symlinks in SOURCE\n"
+    "      --keep-directory-symlink\n"
+    "                             keep symlinks to directories that exist\n"
+    "  -l, --link                 make hard links instead of copies\n"
+    "  -n, --no-clobber           skip existing destinations (prefer --update)\n"
+    "  -p                         as --preserve=mode,ownership,timestamps\n"
+    "      --preserve[=ATTR_LIST]\n"
+    "                             keep these attributes\n"
+    "      --no-preserve=ATTR_LIST\n"
+    "                             do not keep these attributes\n"
+    "      --parents              recreate each SOURCE's path under DIRECTORY\n"
+    "  -R, -r, --recursive        copy directories and what they hold\n"
+    "      --reflink[=WHEN]       clone data blocks: auto, always or never\n"
+    "      --remove-destination   remove each destination before copying\n"
+    "      --sparse=WHEN          holes: auto, always or never\n"
+    "      --strip-trailing-slashes\n"
+    "                             drop trailing slashes from SOURCEs\n"
+    "  -s, --symbolic-link        make symbolic links instead of copies\n"
+    "  -S, --suffix=SUFFIX        backup suffix, not ~\n"
+    "  -t, --target-directory=DIRECTORY\n"
+    "                             copy into DIRECTORY\n"
+    "  -T, --no-target-directory  DEST is never a directory to copy into\n"
+    "      --update[=UPDATE]      replace existing files: all, none,\n"
+    "                             none-fail or older (the default)\n"
+    "  -u                         the same as --update=older\n"
+    "  -v, --verbose              say what is done\n"
+    "  -x, --one-file-system      stay on one file system\n"
+    "  -Z                         give copies the default SELinux context\n"
+    "      --context[=CTX]        like -Z, or set the context to CTX\n"
+    "\002\035\n"
+    "\n"
+    "ATTR_LIST is mode, ownership, timestamps, links, context, xattr or all.\n"
+    "CONTROL is none/off, numbered/t, existing/nil or simple/never, and\n"
+    "VERSION_CONTROL and SIMPLE_BACKUP_SUFFIX give the defaults.\n";
+static const p8 tools_help_csplit[] =
+    "Usage: \001 [OPTION]... FILE PATTERN...\n"
+    "Split FILE, or standard input for -, into files xx00, xx01, ... at each\n"
+    "PATTERN, printing the size of each piece.\n"
+    "\n"
+    "  -b, --suffix-format=FORMAT\n"
+    "                           name pieces with printf FORMAT, not %02d\n"
+    "  -f, --prefix=PREFIX      name pieces PREFIX..., not xx...\n"
+    "  -k, --keep-files         keep the pieces after an error\n"
+    "      --suppress-matched   leave out the lines that match\n"
+    "  -n, --digits=DIGITS      use DIGITS digits, not 2\n"
+    "  -s, --quiet, --silent    do not print the sizes\n"
+    "  -z, --elide-empty-files  do not write empty pieces\n"
+    "\002\033\n"
+    "\n"
+    "PATTERN is a line number, /REGEXP/[OFFSET], %REGEXP%[OFFSET] (skip),\n"
+    "{N} (repeat N times) or {*} (repeat while possible).\n";
+static const p8 tools_help_date[] =
+    "Usage: \001 [OPTION]... [+FORMAT]\n"
+    "  or:  \001 [OPTION]... MMDDhhmm[[CC]YY][.ss]\n"
+    "Print the date and time in FORMAT, or set them with -s or the second form.\n"
+    "\n"
+    "  -d, --date=STRING       show the time STRING describes, not now\n"
+    "      --debug             explain how the date was parsed\n"
+    "  -f, --file=DATEFILE     like --date for each line of DATEFILE\n"
+    "  -I[FMT], --iso-8601[=FMT]\n"
+    "                          ISO 8601 to date, hours, minutes,\n"
+    "                          seconds or ns precision\n"
+    "      --resolution        print the timestamp resolution\n"
+    "  -R, --rfc-email         RFC 5322 form\n"
+    "      --rfc-3339=FMT      RFC 3339 to date, seconds or ns precision\n"
+    "  -r, --reference=FILE    show FILE's modification time\n"
+    "  -s, --set=STRING        set the clock to STRING\n"
+    "  -u, --utc, --universal  use UTC\n"
+    "\002\032\n"
+    "\n"
+    "FORMAT holds strftime-style % sequences, such as %Y-%m-%d %H:%M:%S.\n";
+static const p8 tools_help_df[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Show space on the file system of each FILE, or on all file systems.\n"
+    "\n"
+    "  -a, --all              include pseudo, duplicate and unreachable ones\n"
+    "  -B, --block-size=SIZE  count in units of SIZE\n"
+    "  -h, --human-readable   sizes in powers of 1024, like 1023M\n"
+    "  -H, --si               sizes in powers of 1000, like 1.1G\n"
+    "  -i, --inodes           show inodes rather than blocks\n"
+    "  -k                     the same as --block-size=1K\n"
+    "  -l, --local            only local file systems\n"
+    "      --no-sync          do not sync first (the default)\n"
+    "      --output[=FIELD_LIST]\n"
+    "                         show these columns, or all of them\n"
+    "  -P, --portability      the POSIX format\n"
+    "      --sync             sync before reading the usage\n"
+    "      --total            add a total line\n"
+    "  -t, --type=TYPE        only file systems of TYPE\n"
+    "  -T, --print-type       show each file system's type\n"
+    "  -x, --exclude-type=TYPE\n"
+    "                         leave out file systems of TYPE\n"
+    "  -v                     accepted and ignored\n"
+    "\002\031\n"
+    "\n"
+    "FIELD_LIST: source fstype itotal iused iavail ipcent size used avail\n"
+    "pcent file target.  SIZE is a number with K M G T ... or KB MB ...\n";
+static const p8 tools_help_ls[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "List the FILEs, or the current directory, sorted by name by default.\n"
+    "\n"
+    "  -a, --all                 include names starting with .\n"
+    "  -A, --almost-all          the same, but leave out . and ..\n"
+    "      --author              with -l, show each file's author\n"
+    "  -b, --escape              show unprintable bytes as C escapes\n"
+    "      --block-size=SIZE     with -l, count sizes in units of SIZE\n"
+    "  -B, --ignore-backups      leave out names ending in ~\n"
+    "  -c                        use the status change time (see --time)\n"
+    "  -C                        list in columns\n"
+    "      --color[=WHEN]        colour names by type\n"
+    "  -d, --directory           list directories, not their contents\n"
+    "  -D, --dired               output for Emacs dired\n"
+    "  -f                        the same as -a -U\n"
+    "  -F, --classify[=WHEN]     append a type mark */=>@|\n"
+    "      --file-type           the same, without *\n"
+    "      --format=WORD         across, commas, horizontal, long,\n"
+    "                            single-column, verbose or vertical\n"
+    "      --full-time           the same as -l --time-style=full-iso\n"
+    "  -g                        like -l without the owner\n"
+    "      --group-directories-first\n"
+    "                            list directories before files\n"
+    "  -G, --no-group            leave out groups in long listings\n"
+    "  -h, --human-readable      with -l and -s, sizes like 1K 234M 2G\n"
+    "      --si                  the same in powers of 1000\n"
+    "  -H, --dereference-command-line\n"
+    "                            follow symlinks named as arguments\n"
+    "      --dereference-command-line-symlink-to-dir\n"
+    "                            follow argument symlinks to directories\n"
+    "      --hide=PATTERN        leave out names matching PATTERN (not with -a)\n"
+    "      --hyperlink[=WHEN]    make names hyperlinks\n"
+    "      --indicator-style=WORD\n"
+    "                            none, slash, file-type or classify\n"
+    "  -i, --inode               show inode numbers\n"
+    "  -I, --ignore=PATTERN      leave out names matching PATTERN\n"
+    "  -k, --kibibytes           count blocks in 1024 bytes\n"
+    "  -l                        long listing\n"
+    "  -L, --dereference         show what symlinks point to\n"
+    "  -m                        a comma-separated list\n"
+    "  -n, --numeric-uid-gid     like -l with numeric owners and groups\n"
+    "  -N, --literal             never quote names\n"
+    "  -o                        like -l without the group\n"
+    "  -p, --indicator-style=slash\n"
+    "                            append / to directories\n"
+    "  -q, --hide-control-chars  show unprintable bytes as ?\n"
+    "      --show-control-chars  show unprintable bytes as they are\n"
+    "  -Q, --quote-name          put names in double quotes\n"
+    "      --quoting-style=WORD  literal, locale, shell, shell-always,\n"
+    "                            shell-escape, shell-escape-always, c or escape\n"
+    "  -r, --reverse             reverse the order\n"
+    "  -R, --recursive           list subdirectories too\n"
+    "  -s, --size                show allocated blocks\n"
+    "  -S                        sort by size, largest first\n"
+    "      --sort=WORD           none, size, time, version, extension,\n"
+    "                            name or width\n"
+    "      --time=WORD           the time -l shows and -t sorts by: atime,\n"
+    "                            access, use, ctime, status, mtime, modification,\n"
+    "                            birth or creation\n"
+    "      --time-style=TIME_STYLE\n"
+    "                            full-iso, long-iso, iso, locale or +FORMAT\n"
+    "  -t                        sort by time, newest first\n"
+    "  -T, --tabsize=COLS        tab stops every COLS, not 8\n"
+    "  -u                        use the access time (see --time)\n"
+    "  -U                        do not sort\n"
+    "  -v                        sort numbers inside names as versions\n"
+    "  -w, --width=COLS          output is COLS wide; 0 means no limit\n"
+    "  -x                        list in rows\n"
+    "  -X                        sort by extension\n"
+    "  -Z, --context             show security contexts\n"
+    "      --zero                end each line with NUL\n"
+    "  -1                        one name per line\n"
+    "\002\034\n"
+    "\n"
+    "WHEN is always (without a value), auto or never.  SIZE is a number\n"
+    "with K M G T ... or KB MB ...  Exit status: 0, 1 for minor trouble,\n"
+    "2 for serious trouble.\n";
+static const p8 tools_help_dircolors[] =
+    "Usage: \001 [OPTION]... [FILE]\n"
+    "Print shell code setting LS_COLORS, from FILE or the built-in table.\n"
+    "\n"
+    "  -b, --sh, --bourne-shell  Bourne shell code\n"
+    "  -c, --csh, --c-shell      C shell code\n"
+    "  -p, --print-database      print the built-in table\n"
+    "      --print-ls-colors     print the colours, escaped for display\n"
+    "\002\034\n";
+static const p8 tools_help_dirname[] =
+    "Usage: \001 [OPTION] NAME...\n"
+    "Print each NAME without its last component; . for a name without a /.\n"
+    "\n"
+    "  -z, --zero     end each name with NUL, not newline\n"
+    "\002\021\n";
+static const p8 tools_help_du[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "  or:  \001 [OPTION]... --files0-from=F\n"
+    "Show the space each FILE uses, directories summed recursively.\n"
+    "\n"
+    "  -0, --null             end each line with NUL, not newline\n"
+    "  -a, --all              show files too, not only directories\n"
+    "  -A, --apparent-size    show sizes rather than space used\n"
+    "  -B, --block-size=SIZE  count in units of SIZE\n"
+    "  -b, --bytes            the same as --apparent-size --block-size=1\n"
+    "  -c, --total            add a total line\n"
+    "  -D, --dereference-args\n"
+    "                         follow symlinks named as arguments\n"
+    "  -d, --max-depth=N      show only N levels below each argument\n"
+    "      --files0-from=F    read NUL-separated names from F\n"
+    "  -H                     the same as -D\n"
+    "  -h, --human-readable   sizes like 1K 234M 2G\n"
+    "      --inodes           count inodes rather than blocks\n"
+    "  -k                     the same as --block-size=1K\n"
+    "  -L, --dereference      follow all symlinks\n"
+    "  -l, --count-links      count hard-linked files each time\n"
+    "  -m                     the same as --block-size=1M\n"
+    "  -P, --no-dereference   follow no symlinks (the default)\n"
+    "  -S, --separate-dirs    do not add subdirectories to their parents\n"
+    "      --si               like -h in powers of 1000\n"
+    "  -s, --summarize        show only a total for each argument\n"
+    "  -t, --threshold=SIZE   leave out entries under SIZE, or over -SIZE\n"
+    "      --time             show the newest modification time inside\n"
+    "      --time=WORD        show atime, access, use, ctime or status\n"
+    "      --time-style=STYLE\n"
+    "                         full-iso, long-iso, iso or +FORMAT\n"
+    "  -X, --exclude-from=FILE\n"
+    "                         skip names matching patterns in FILE\n"
+    "      --exclude=PATTERN  skip names matching PATTERN\n"
+    "  -x, --one-file-system  stay on one file system\n"
+    "\002\031\n"
+    "\n"
+    "SIZE is a number with K M G T ... or KB MB ...\n";
+static const p8 tools_help_env[] =
+    "Usage: \001 [OPTION]... [-] [NAME=VALUE]... [COMMAND [ARG]...]\n"
+    "Run COMMAND with each NAME set to VALUE, or print the environment.\n"
+    "\n"
+    "  -a, --argv0=ARG             give COMMAND ARG as its argument zero\n"
+    "  -i, --ignore-environment    start from an empty environment (also -)\n"
+    "  -0, --null                  end each printed variable with NUL\n"
+    "  -u, --unset=NAME            remove NAME from the environment\n"
+    "  -C, --chdir=DIR             change to DIR first\n"
+    "  -S, --split-string=S        split S into arguments, for #! lines\n"
+    "      --block-signal[=SIG]    block SIG in COMMAND\n"
+    "      --default-signal[=SIG]  give SIG its default action\n"
+    "      --ignore-signal[=SIG]   ignore SIG\n"
+    "      --list-signal-handling  list signals not at their default\n"
+    "  -v, --debug                 trace each step\n"
+    "\002\036\n"
+    "\n"
+    "SIG is a name or number list; none means every signal.  Exit status:\n"
+    "125 when env fails, 126 when COMMAND cannot run, 127 when it is not\n"
+    "found, otherwise COMMAND's status.\n";
+static const p8 tools_help_groups[] =
+    "Usage: \001 [OPTION]... [USERNAME]...\n"
+    "Print the groups of each USERNAME, or of this process.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_hostname[] =
+    "Usage: \001 [NAME]\n"
+    "  or:  \001 OPTION\n"
+    "Print the host name, or set it to NAME.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_hostid[] =
+    "Usage: \001 [OPTION]\n"
+    "Print this host's numeric identifier in hex.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_id[] =
+    "Usage: \001 [OPTION]... [USER]...\n"
+    "Print the user and group IDs of each USER, or of this process.\n"
+    "\n"
+    "  -a             accepted and ignored\n"
+    "  -Z, --context  print only the security context\n"
+    "  -g, --group    print only the effective group ID\n"
+    "  -G, --groups   print all group IDs\n"
+    "  -n, --name     print names, not numbers, with -u -g -G\n"
+    "  -r, --real     print real IDs, not effective ones, with -u -g -G\n"
+    "  -u, --user     print only the effective user ID\n"
+    "  -z, --zero     separate entries with NUL, not in the default form\n"
+    "\002\021\n";
+static const p8 tools_help_kill[] =
+    "Usage: \001 [-s SIGNAL | -SIGNAL] PID...\n"
+    "  or:  \001 -l [SIGNAL]...\n"
+    "  or:  \001 -t [SIGNAL]...\n"
+    "Send a signal to processes, or list signals.\n"
+    "\n"
+    "  -s, --signal=SIGNAL, -SIGNAL  the signal to send, by name or number\n"
+    "  -l, --list                    list signal names, or convert names and numbers\n"
+    "  -t, --table                   list signals with their details\n"
+    "\002 \n"
+    "\n"
+    "A negative PID names a process group.\n";
+static const p8 tools_help_link[] =
+    "Usage: \001 FILE1 FILE2\n"
+    "  or:  \001 OPTION\n"
+    "Make FILE2 a hard link to FILE1 with the link call.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_ln[] =
+    "Usage: \001 [OPTION]... [-T] TARGET LINK_NAME\n"
+    "  or:  \001 [OPTION]... TARGET\n"
+    "  or:  \001 [OPTION]... TARGET... DIRECTORY\n"
+    "  or:  \001 [OPTION]... -t DIRECTORY TARGET...\n"
+    "Make links to TARGET: named LINK_NAME, or in the current directory, or\n"
+    "in DIRECTORY.  Links are hard unless --symbolic is given.\n"
+    "\n"
+    "      --backup[=CONTROL]  back up each destination that exists\n"
+    "  -b                      like --backup, without a value\n"
+    "  -d, -F, --directory     let the superuser try hard links to directories\n"
+    "  -f, --force             remove destinations that exist\n"
+    "  -i, --interactive       ask before removing destinations\n"
+    "  -L, --logical           follow TARGETs that are symlinks\n"
+    "  -n, --no-dereference    a LINK_NAME symlink to a directory is a file\n"
+    "  -P, --physical          hard link symlinks themselves\n"
+    "  -r, --relative          with -s, make links relative to their place\n"
+    "  -s, --symbolic          make symbolic links\n"
+    "  -S, --suffix=SUFFIX     backup suffix, not ~\n"
+    "  -t, --target-directory=DIRECTORY\n"
+    "                          make the links in DIRECTORY\n"
+    "  -T, --no-target-directory\n"
+    "                          LINK_NAME is always a file\n"
+    "  -v, --verbose           print each link made\n"
+    "\002\032\n"
+    "\n"
+    "CONTROL is none/off, numbered/t, existing/nil or simple/never.\n";
+static const p8 tools_help_logname[] =
+    "Usage: \001 [OPTION]\n"
+    "Print the name the user logged in with.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_mkdir[] =
+    "Usage: \001 [OPTION]... DIRECTORY...\n"
+    "Make each DIRECTORY that does not exist yet.\n"
+    "\n"
+    "  -m, --mode=MODE      give new directories MODE, as chmod takes\n"
+    "  -p, --parents        make missing parents too; no error if it exists\n"
+    "  -v, --verbose        print each directory made\n"
+    "  -Z                   give new directories the default SELinux context\n"
+    "      --context[=CTX]  like -Z, or set the context to CTX\n"
+    "\002\027\n";
+static const p8 tools_help_mkfifo[] =
+    "Usage: \001 [OPTION]... NAME...\n"
+    "Make a named pipe (FIFO) at each NAME.\n"
+    "\n"
+    "  -m, --mode=MODE      give them MODE, not a=rw minus the umask\n"
+    "  -Z                   give them the default SELinux context\n"
+    "      --context[=CTX]  like -Z, or set the context to CTX\n"
+    "\002\027\n";
+static const p8 tools_help_mknod[] =
+    "Usage: \001 [OPTION]... NAME TYPE [MAJOR MINOR]\n"
+    "Make a special file NAME of TYPE: b (block), c or u (character) with\n"
+    "MAJOR and MINOR, or p (FIFO) without them.\n"
+    "\n"
+    "  -m, --mode=MODE      give it MODE, not a=rw minus the umask\n"
+    "  -Z                   give it the default SELinux context\n"
+    "      --context[=CTX]  like -Z, or set the context to CTX\n"
+    "\002\027\n";
+static const p8 tools_help_mktemp[] =
+    "Usage: \001 [OPTION]... [TEMPLATE]\n"
+    "Make a temporary file or directory safely and print its name.  TEMPLATE\n"
+    "ends in at least 3 X's (tmp.XXXXXXXXXX and --tmpdir by default).\n"
+    "\n"
+    "  -d, --directory         make a directory, not a file\n"
+    "  -u, --dry-run           only print a name (unsafe)\n"
+    "  -q, --quiet             say nothing when creation fails\n"
+    "      --suffix=SUFF       add SUFF after the X's\n"
+    "  -p DIR, --tmpdir[=DIR]  TEMPLATE is relative to DIR, else to\n"
+    "                          $TMPDIR, else to /tmp\n"
+    "  -t                      TEMPLATE is one name component (deprecated)\n"
+    "\002\032\n";
+static const p8 tools_help_mv[] =
+    "Usage: \001 [OPTION]... [-T] SOURCE DEST\n"
+    "  or:  \001 [OPTION]... SOURCE... DIRECTORY\n"
+    "  or:  \001 [OPTION]... -t DIRECTORY SOURCE...\n"
+    "Rename SOURCE to DEST, or move each SOURCE into DIRECTORY.\n"
+    "\n"
+    "      --backup[=CONTROL]     back up each destination that exists\n"
+    "  -b                         like --backup, without a value\n"
+    "      --debug                explain each copy; implies -v\n"
+    "      --exchange             swap each SOURCE and its destination\n"
+    "  -f, --force                never ask before overwriting\n"
+    "  -i, --interactive          ask before overwriting\n"
+    "  -n, --no-clobber           never overwrite (the last of -f -i -n wins)\n"
+    "      --no-copy              fail rather than copy when renaming cannot work\n"
+    "      --strip-trailing-slashes\n"
+    "                             drop trailing slashes from SOURCEs\n"
+    "  -S, --suffix=SUFFIX        backup suffix, not ~\n"
+    "  -t, --target-directory=DIRECTORY\n"
+    "                             move into DIRECTORY\n"
+    "  -T, --no-target-directory  DEST is never a directory to move into\n"
+    "      --update[=UPDATE]      replace existing files: all, none,\n"
+    "                             none-fail or older (the default)\n"
+    "  -u                         the same as --update=older\n"
+    "  -v, --verbose              say what is done\n"
+    "  -Z, --context              give moved files the default SELinux context\n"
+    "\002\035\n";
+static const p8 tools_help_nice[] =
+    "Usage: \001 [OPTION] [COMMAND [ARG]...]\n"
+    "Run COMMAND with a changed niceness, or print the niceness.\n"
+    "\n"
+    "  -n, --adjustment=N  add N to the niceness (10)\n"
+    "\002\026\n"
+    "\n"
+    "Exit status: 125 when nice fails, 126 when COMMAND cannot run, 127 when\n"
+    "it is not found, otherwise COMMAND's status.\n";
+static const p8 tools_help_nohup[] =
+    "Usage: \001 COMMAND [ARG]...\n"
+    "  or:  \001 OPTION\n"
+    "Run COMMAND immune to hangups, with output to nohup.out when standard\n"
+    "output is a terminal.\n"
+    "\n"
+    "\002\021\n"
+    "\n"
+    "Exit status: 125 when nohup fails, 126 when COMMAND cannot run, 127 when\n"
+    "it is not found, otherwise COMMAND's status.\n";
+static const p8 tools_help_nproc[] =
+    "Usage: \001 [OPTION]...\n"
+    "Print how many processors this process may use.\n"
+    "\n"
+    "      --all       print the number installed\n"
+    "      --ignore=N  leave out N, printing at least 1\n"
+    "\002\022\n";
+static const p8 tools_help_numfmt[] =
+    "Usage: \001 [OPTION]... [NUMBER]...\n"
+    "Reformat each NUMBER, or the numbers on standard input.\n"
+    "\n"
+    "      --debug          warn about input that cannot be read\n"
+    "  -d, --delimiter=X    fields are separated by X, not blanks\n"
+    "      --field=FIELDS   convert these fields (1), as cut takes them\n"
+    "      --format=FORMAT  printf-style FORMAT with one %f\n"
+    "      --from=UNIT      read suffixes as UNIT (none)\n"
+    "      --from-unit=N    input unit size (1)\n"
+    "      --grouping       group digits as the locale does\n"
+    "      --header[=N]     pass N header lines through (1)\n"
+    "      --invalid=MODE   abort, fail, warn or ignore\n"
+    "      --padding=N      pad to N columns, left-aligned if negative\n"
+    "      --round=METHOD   up, down, from-zero, towards-zero, nearest\n"
+    "      --suffix=SUFFIX  add SUFFIX to output, accept it on input\n"
+    "      --unit-separator=SEP\n"
+    "                       put SEP between number and unit\n"
+    "      --to=UNIT        write suffixes as UNIT\n"
+    "      --to-unit=N      output unit size (1)\n"
+    "  -z, --zero-terminated\n"
+    "                       lines end with NUL, not newline\n"
+    "\002\027\n"
+    "\n"
+    "UNIT is none, auto, si, iec or iec-i.\n";
+static const p8 tools_help_pathchk[] =
+    "Usage: \001 [OPTION]... NAME...\n"
+    "Report file names that are invalid or not portable.\n"
+    "\n"
+    "  -p                 check against POSIX's minimum limits and characters\n"
+    "  -P                 also refuse empty names and a leading -\n"
+    "      --portability  the same as -p -P\n"
+    "\002\025\n";
+static const p8 tools_help_pinky[] =
+    "Usage: \001 [OPTION]... [USER]...\n"
+    "Print what is known of each USER, or of everyone logged in.\n"
+    "\n"
+    "  -l             long form for the given USERs\n"
+    "  -b             long form without home and shell\n"
+    "  -h             long form without the project file\n"
+    "  -p             long form without the plan file\n"
+    "  -s             short form (the default)\n"
+    "  -f             short form without the heading\n"
+    "  -w             short form without the full name\n"
+    "  -i             short form without full name and host\n"
+    "  -q             short form without full name, host and idle time\n"
+    "      --lookup   look up host names in DNS\n"
+    "\002\021\n";
+static const p8 tools_help_printenv[] =
+    "Usage: \001 [OPTION] [VARIABLE]...\n"
+    "Print the value of each VARIABLE, or every NAME=VALUE pair.\n"
+    "\n"
+    "  -0, --null     end each value with NUL, not newline\n"
+    "\002\021\n";
+static const p8 tools_help_readlink[] =
+    "Usage: \001 [OPTION]... FILE...\n"
+    "Print where each symlink points, or each FILE's canonical name.\n"
+    "\n"
+    "  -f, --canonicalize          follow every link; all but the last part exists\n"
+    "  -e, --canonicalize-existing\n"
+    "                              follow every link; every part exists\n"
+    "  -m, --canonicalize-missing  follow every link; nothing need exist\n"
+    "  -n, --no-newline            print no final delimiter\n"
+    "  -q, --quiet\n"
+    "  -s, --silent                leave out most errors (unless POSIXLY_CORRECT)\n"
+    "  -v, --verbose               report errors\n"
+    "  -z, --zero                  end each name with NUL, not newline\n"
+    "\002\036\n";
+static const p8 tools_help_realpath[] =
+    "Usage: \001 [OPTION]... FILE...\n"
+    "Print the absolute, resolved name of each FILE.\n"
+    "\n"
+    "  -E, --canonicalize          all but the last part must exist (default)\n"
+    "  -e, --canonicalize-existing\n"
+    "                              every part must exist\n"
+    "  -m, --canonicalize-missing  nothing need exist\n"
+    "  -L, --logical               resolve .. before symlinks\n"
+    "  -P, --physical              resolve symlinks as met (default)\n"
+    "  -q, --quiet                 leave out most errors\n"
+    "      --relative-to=DIR       print names relative to DIR\n"
+    "      --relative-base=DIR     relative only for names under DIR\n"
+    "  -s, --strip, --no-symlinks  do not resolve symlinks\n"
+    "  -z, --zero                  end each name with NUL, not newline\n"
+    "\002\036\n";
+static const p8 tools_help_rm[] =
+    "Usage: \001 [OPTION]... [FILE]...\n"
+    "Remove each FILE.  Directories need -r or -d.\n"
+    "\n"
+    "  -f, --force               never ask; ignore names that do not exist\n"
+    "  -i                        ask before each removal\n"
+    "  -I                        ask once, for over three files or -r\n"
+    "      --interactive[=WHEN]  never, once (-I) or always (-i, the default)\n"
+    "      --one-file-system     when recursive, skip other file systems\n"
+    "      --no-preserve-root    let / be removed\n"
+    "      --preserve-root[=all]\n"
+    "                            refuse / (default); with all, also any\n"
+    "                            argument on another device than its parent\n"
+    "  -r, -R, --recursive       remove directories and all they hold\n"
+    "  -d, --dir                 remove empty directories\n"
+    "  -v, --verbose             say what is done\n"
+    "\002\034\n"
+    "\n"
+    "Remove a name like -foo as ./-foo or after --.\n";
+static const p8 tools_help_rmdir[] =
+    "Usage: \001 [OPTION]... DIRECTORY...\n"
+    "Remove each empty DIRECTORY.\n"
+    "\n"
+    "      --ignore-fail-on-non-empty\n"
+    "                                say nothing of directories that hold files\n"
+    "  -p, --parents                 remove the parents too, as rmdir a/b a\n"
+    "  -v, --verbose                 report every directory\n"
+    "\002 \n";
+static const p8 tools_help_seq[] =
+    "Usage: \001 [OPTION]... LAST\n"
+    "  or:  \001 [OPTION]... FIRST LAST\n"
+    "  or:  \001 [OPTION]... FIRST INCREMENT LAST\n"
+    "Print the numbers from FIRST (1) to LAST in steps of INCREMENT (1).\n"
+    "\n"
+    "  -f, --format=FORMAT     print each number with printf FORMAT\n"
+    "  -s, --separator=STRING  separate numbers with STRING (\\n)\n"
+    "  -w, --equal-width       pad with zeros to one width\n"
+    "\002\032\n";
+static const p8 tools_help_shred[] =
+    "Usage: \001 [OPTION]... FILE...\n"
+    "Overwrite each FILE, or standard output for -, several times so its data\n"
+    "is hard to recover.\n"
+    "\n"
+    "  -f, --force         change permissions to allow writing\n"
+    "  -n, --iterations=N  overwrite N times (3)\n"
+    "      --random-source=FILE\n"
+    "                      take random bytes from FILE\n"
+    "  -s, --size=N        shred N bytes (K, M, G accepted)\n"
+    "  -u                  remove the file afterwards\n"
+    "      --remove[=HOW]  the same, by unlink, wipe or wipesync (default)\n"
+    "  -v, --verbose       report progress\n"
+    "  -x, --exact         do not round sizes up to whole blocks\n"
+    "  -z, --zero          finish with a pass of zeros\n"
+    "\002\026\n";
+static const p8 tools_help_shuf[] =
+    "Usage: \001 [OPTION]... [FILE]\n"
+    "  or:  \001 -e [OPTION]... [ARG]...\n"
+    "  or:  \001 -i LO-HI [OPTION]...\n"
+    "Print the input lines in random order.\n"
+    "\n"
+    "  -e, --echo               take each ARG as a line\n"
+    "  -i, --input-range=LO-HI  take the numbers LO to HI as lines\n"
+    "  -n, --head-count=COUNT   print at most COUNT lines\n"
+    "  -o, --output=FILE        write to FILE, not standard output\n"
+    "      --random-source=FILE\n"
+    "                           take random bytes from FILE\n"
+    "  -r, --repeat             pick with replacement\n"
+    "  -z, --zero-terminated    lines end with NUL, not newline\n"
+    "\002\033\n";
+static const p8 tools_help_sleep[] =
+    "Usage: \001 NUMBER[SUFFIX]...\n"
+    "  or:  \001 OPTION\n"
+    "Wait for the sum of the NUMBERs, in s (default), m, h or d.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_split[] =
+    "Usage: \001 [OPTION]... [FILE [PREFIX]]\n"
+    "Split FILE, or standard input, into PREFIXaa, PREFIXab, ... (PREFIX x),\n"
+    "1000 lines each by default.\n"
+    "\n"
+    "  -a, --suffix-length=N      suffixes N long (2)\n"
+    "      --additional-suffix=SUFFIX\n"
+    "                             add SUFFIX to each name\n"
+    "  -b, --bytes=SIZE           SIZE bytes per file\n"
+    "  -C, --line-bytes=SIZE      at most SIZE bytes of whole lines per file\n"
+    "  -d                         numeric suffixes from 0\n"
+    "      --numeric-suffixes[=FROM]\n"
+    "                             numeric suffixes from FROM\n"
+    "  -x                         hex suffixes from 0\n"
+    "      --hex-suffixes[=FROM]  hex suffixes from FROM\n"
+    "  -e, --elide-empty-files    with -n, write no empty files\n"
+    "      --filter=COMMAND       pipe each piece to COMMAND, with $FILE set\n"
+    "  -l, --lines=NUMBER         NUMBER lines per file\n"
+    "  -n, --number=CHUNKS        N, K/N, l/N, l/K/N, r/N or r/K/N\n"
+    "  -t, --separator=SEP        records end with SEP ('\\0' for NUL)\n"
+    "  -u, --unbuffered           with -n r/..., copy input at once\n"
+    "      --verbose              report each file before it is opened\n"
+    "\002\035\n"
+    "\n"
+    "SIZE is a number with K M G T ... or KB MB ...\n";
+static const p8 tools_help_stat[] =
+    "Usage: \001 [OPTION]... FILE...\n"
+    "Show the status of each FILE or its file system.\n"
+    "\n"
+    "  -L, --dereference    follow symlinks\n"
+    "  -f, --file-system    show the file system instead\n"
+    "      --cached=MODE    always, never or default\n"
+    "  -c, --format=FORMAT  print FORMAT and a newline for each\n"
+    "      --printf=FORMAT  like --format with backslash escapes, no newline\n"
+    "  -t, --terse          print it tersely\n"
+    "\002\027\n";
+static const p8 tools_help_stdbuf[] =
+    "Usage: \001 OPTION... COMMAND\n"
+    "Run COMMAND with changed buffering of its standard streams.\n"
+    "\n"
+    "  -i, --input=MODE   standard input buffering\n"
+    "  -o, --output=MODE  standard output buffering\n"
+    "  -e, --error=MODE   standard error buffering\n"
+    "\002\025\n"
+    "\n"
+    "MODE is L (line), 0 (none) or a size with K M G ... (full).  Exit status:\n"
+    "125 when stdbuf fails, 126 when COMMAND cannot run, 127 when it is not\n"
+    "found, otherwise COMMAND's status.\n";
+static const p8 tools_help_stty[] =
+    "Usage: \001 [-F DEVICE | --file=DEVICE] [SETTING]...\n"
+    "  or:  \001 [-F DEVICE | --file=DEVICE] [-a|--all]\n"
+    "  or:  \001 [-F DEVICE | --file=DEVICE] [-g|--save]\n"
+    "Print or change the settings of the terminal on standard input.\n"
+    "\n"
+    "  -a, --all          print every setting readably\n"
+    "  -g, --save         print every setting in a form stty takes back\n"
+    "  -F, --file=DEVICE  use DEVICE, not standard input\n"
+    "\002\025\n"
+    "\n"
+    "A SETTING is a flag, [-]flag to clear it, a control character with its\n"
+    "CHAR (^c, 0x37, 0177, undef), a speed, rows N, cols N, size, speed, or a\n"
+    "combination such as sane, raw, cooked, cbreak, ek, evenp, oddp or nl.\n";
+static const p8 tools_help_sync[] =
+    "Usage: \001 [OPTION] [FILE]...\n"
+    "Write cached data to storage: all of it, or that of each FILE.\n"
+    "\n"
+    "  -d, --data         only file data, not metadata\n"
+    "  -f, --file-system  the file systems holding the FILEs\n"
+    "\002\025\n";
+static const p8 tools_help_timeout[] =
+    "Usage: \001 [OPTION]... DURATION COMMAND [ARG]...\n"
+    "Run COMMAND and signal it if it still runs after DURATION.\n"
+    "\n"
+    "  -f, --foreground           let COMMAND use the terminal; its children\n"
+    "                             are not timed\n"
+    "  -k, --kill-after=DURATION  send KILL this long after the first signal\n"
+    "  -p, --preserve-status      exit with COMMAND's status even on timeout\n"
+    "  -s, --signal=SIGNAL        send SIGNAL, not TERM\n"
+    "  -v, --verbose              report each signal sent\n"
+    "\002\035\n"
+    "\n"
+    "DURATION is a number with s (default), m, h or d; 0 means no limit.\n"
+    "Exit status: 124 on timeout, 125 when timeout fails, 126 when COMMAND\n"
+    "cannot run, 127 when it is not found, 137 after KILL, otherwise COMMAND's.\n";
+static const p8 tools_help_touch[] =
+    "Usage: \001 [OPTION]... FILE...\n"
+    "Set the access and modification times of each FILE to now, creating\n"
+    "empty files that do not exist.  A FILE of - is standard output.\n"
+    "\n"
+    "  -a                    change only the access time\n"
+    "  -c, --no-create       create no files\n"
+    "  -d, --date=STRING     use the time STRING describes\n"
+    "  -f                    accepted and ignored\n"
+    "  -h, --no-dereference  change symlinks themselves\n"
+    "  -m                    change only the modification time\n"
+    "  -r, --reference=FILE  use FILE's times\n"
+    "  -t [[CC]YY]MMDDhhmm[.ss]\n"
+    "                        use this time\n"
+    "      --time=WORD       change only access, atime, use, modify or mtime\n"
+    "\002\030\n";
+static const p8 tools_help_truncate[] =
+    "Usage: \001 OPTION... FILE...\n"
+    "Shrink or extend each FILE to a size, creating those that do not exist.\n"
+    "\n"
+    "  -c, --no-create        create no files\n"
+    "  -o, --io-blocks        SIZE counts I/O blocks, not bytes\n"
+    "  -r, --reference=RFILE  start from RFILE's size\n"
+    "  -s, --size=SIZE        set or change the size by SIZE\n"
+    "\002\031\n"
+    "\n"
+    "SIZE is a number with K M G T ... or KB MB ..., prefixed by + (extend),\n"
+    "- (reduce), < (at most), > (at least), / or % (round down or up).\n";
+static const p8 tools_help_tsort[] =
+    "Usage: \001 [OPTION] [FILE]\n"
+    "Print a total order consistent with the pairs in FILE, or standard input.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_tty[] =
+    "Usage: \001 [OPTION]...\n"
+    "Print the name of the terminal on standard input.\n"
+    "\n"
+    "  -s, --silent, --quiet  print nothing; the exit status tells\n"
+    "\002\031\n";
+static const p8 tools_help_uname[] =
+    "Usage: \001 [OPTION]...\n"
+    "Print system information; without options, as -s.\n"
+    "\n"
+    "  -a, --all               print everything, leaving out unknown -p and -i\n"
+    "  -s, --kernel-name       the kernel name\n"
+    "  -n, --nodename          the network node name\n"
+    "  -r, --kernel-release    the kernel release\n"
+    "  -v, --kernel-version    the kernel version\n"
+    "  -m, --machine           the machine hardware name\n"
+    "  -p, --processor         the processor type\n"
+    "  -i, --hardware-platform\n"
+    "                          the hardware platform\n"
+    "  -o, --operating-system  the operating system\n"
+    "\002\032\n";
+static const p8 tools_help_unlink[] =
+    "Usage: \001 FILE\n"
+    "  or:  \001 OPTION\n"
+    "Remove FILE with the unlink call.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_uptime[] =
+    "Usage: \001 [OPTION]... [FILE]\n"
+    "Print how long the system has run, the users and the load averages.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_users[] =
+    "Usage: \001 [OPTION]... [FILE]\n"
+    "Print the users logged in, from FILE or /var/run/utmp.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_who[] =
+    "Usage: \001 [OPTION]... [ FILE | ARG1 ARG2 ]\n"
+    "Print who is logged in, from FILE or /var/run/utmp.\n"
+    "\n"
+    "  -a, --all       the same as -b -d --login -p -r -t -T -u\n"
+    "  -b, --boot      time of the last boot\n"
+    "  -d, --dead      dead processes\n"
+    "  -H, --heading   a line of column headings\n"
+    "  -l, --login     login processes\n"
+    "      --lookup    look up host names in DNS\n"
+    "  -m              only the user on standard input (as ARG1 ARG2)\n"
+    "  -p, --process   active processes started by init\n"
+    "  -q, --count     login names and a count\n"
+    "  -r, --runlevel  the current runlevel\n"
+    "  -s, --short     name, line and time (default)\n"
+    "  -t, --time      the last clock change\n"
+    "  -T, -w, --mesg  message status as +, - or ?\n"
+    "  -u, --users     users with idle time\n"
+    "      --message   the same as -T\n"
+    "      --writable  the same as -T\n"
+    "\002\022\n";
+static const p8 tools_help_whoami[] =
+    "Usage: \001 [OPTION]...\n"
+    "Print the effective user's name, as id -un.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_yes[] =
+    "Usage: \001 [STRING]...\n"
+    "  or:  \001 OPTION\n"
+    "Print the STRINGs, or y, on a line over and over.\n"
+    "\n"
+    "\002\021\n";
+static const p8 tools_help_install[] =
+    "Usage: \001 [OPTION]... [-T] SOURCE DEST\n"
+    "  or:  \001 [OPTION]... SOURCE... DIRECTORY\n"
+    "  or:  \001 [OPTION]... -t DIRECTORY SOURCE...\n"
+    "  or:  \001 [OPTION]... -d DIRECTORY...\n"
+    "Copy SOURCE to DEST or each SOURCE into DIRECTORY, setting mode and\n"
+    "owner; with -d, make each DIRECTORY and its parents.\n"
+    "\n"
+    "      --backup[=CONTROL]     back up each destination that exists\n"
+    "  -b                         like --backup, without a value\n"
+    "  -c                         accepted and ignored\n"
+    "  -C, --compare              leave destinations that already match alone\n"
+    "  -d, --directory            make the operands as directories\n"
+    "  -D                         first make DEST's parents or -t's directory\n"
+    "      --debug                explain each copy; implies -v\n"
+    "  -g, --group=GROUP          set the group\n"
+    "  -m, --mode=MODE            set the mode, not rwxr-xr-x\n"
+    "  -o, --owner=OWNER          set the owner (superuser only)\n"
+    "  -p, --preserve-timestamps  keep SOURCE's access and modification times\n"
+    "  -s, --strip                strip symbol tables\n"
+    "      --strip-program=PROGRAM\n"
+    "                             strip with PROGRAM\n"
+    "  -S, --suffix=SUFFIX        backup suffix, not ~\n"
+    "  -t, --target-directory=DIRECTORY\n"
+    "                             copy into DIRECTORY\n"
+    "  -T, --no-target-directory  DEST is always a file\n"
+    "  -v, --verbose              print each file or directory made\n"
+    "      --preserve-context     keep SELinux contexts\n"
+    "  -Z                         set the default SELinux context\n"
+    "      --context[=CTX]        like -Z, or set the context to CTX\n"
+    "\002\035\n";
+
+typedef struct
+{
+        string_address name;
+        const_string text;
+} tools_help_entry;
+
+static const tools_help_entry tools_help[] = {
+    {"b2sum", tools_help_b2sum},
+    {"base32", tools_help_base32},
+    {"base64", tools_help_base32},
+    {"basename", tools_help_basename},
+    {"basenc", tools_help_basenc},
+    {"cat", tools_help_cat},
+    {"chgrp", tools_help_chgrp},
+    {"chmod", tools_help_chmod},
+    {"chown", tools_help_chown},
+    {"chroot", tools_help_chroot},
+    {"cksum", tools_help_cksum},
+    {"comm", tools_help_comm},
+    {"cp", tools_help_cp},
+    {"csplit", tools_help_csplit},
+    {"cut", tools_help_cut},
+    {"date", tools_help_date},
+    {"dd", tools_help_dd},
+    {"df", tools_help_df},
+    {"dir", tools_help_ls},
+    {"dircolors", tools_help_dircolors},
+    {"dirname", tools_help_dirname},
+    {"du", tools_help_du},
+    {"env", tools_help_env},
+    {"expand", tools_help_expand},
+    {"expr", tools_help_expr},
+    {"factor", tools_help_factor},
+    {"fmt", tools_help_fmt},
+    {"fold", tools_help_fold},
+    {"groups", tools_help_groups},
+    {"head", tools_help_head},
+    {"hostid", tools_help_hostid},
+    {"hostname", tools_help_hostname},
+    {"id", tools_help_id},
+    {"install", tools_help_install},
+    {"join", tools_help_join},
+    {"kill", tools_help_kill},
+    {"link", tools_help_link},
+    {"ln", tools_help_ln},
+    {"logname", tools_help_logname},
+    {"ls", tools_help_ls},
+    {"md5sum", tools_help_md5sum},
+    {"mkdir", tools_help_mkdir},
+    {"mkfifo", tools_help_mkfifo},
+    {"mknod", tools_help_mknod},
+    {"mktemp", tools_help_mktemp},
+    {"mv", tools_help_mv},
+    {"nice", tools_help_nice},
+    {"nl", tools_help_nl},
+    {"nohup", tools_help_nohup},
+    {"nproc", tools_help_nproc},
+    {"numfmt", tools_help_numfmt},
+    {"od", tools_help_od},
+    {"paste", tools_help_paste},
+    {"pathchk", tools_help_pathchk},
+    {"pinky", tools_help_pinky},
+    {"pr", tools_help_pr},
+    {"printenv", tools_help_printenv},
+    {"ptx", tools_help_ptx},
+    {"readlink", tools_help_readlink},
+    {"realpath", tools_help_realpath},
+    {"rm", tools_help_rm},
+    {"rmdir", tools_help_rmdir},
+    {"seq", tools_help_seq},
+    {"sha1sum", tools_help_md5sum},
+    {"sha224sum", tools_help_md5sum},
+    {"sha256sum", tools_help_md5sum},
+    {"sha384sum", tools_help_md5sum},
+    {"sha512sum", tools_help_md5sum},
+    {"shred", tools_help_shred},
+    {"shuf", tools_help_shuf},
+    {"sleep", tools_help_sleep},
+    {"sort", tools_help_sort},
+    {"split", tools_help_split},
+    {"stat", tools_help_stat},
+    {"stdbuf", tools_help_stdbuf},
+    {"stty", tools_help_stty},
+    {"sum", tools_help_sum},
+    {"sync", tools_help_sync},
+    {"tac", tools_help_tac},
+    {"tail", tools_help_tail},
+    {"tee", tools_help_tee},
+    {"timeout", tools_help_timeout},
+    {"touch", tools_help_touch},
+    {"tr", tools_help_tr},
+    {"truncate", tools_help_truncate},
+    {"tsort", tools_help_tsort},
+    {"tty", tools_help_tty},
+    {"uname", tools_help_uname},
+    {"unexpand", tools_help_unexpand},
+    {"uniq", tools_help_uniq},
+    {"unlink", tools_help_unlink},
+    {"uptime", tools_help_uptime},
+    {"users", tools_help_users},
+    {"vdir", tools_help_ls},
+    {"wc", tools_help_wc},
+    {"who", tools_help_who},
+    {"whoami", tools_help_whoami},
+    {"yes", tools_help_yes},
+    {null},
+};
+
+// Help text leaves in one write when it fits the buffer, which every text
+// does; a longer one would go out in buffer-sized writes rather than be cut.
+typedef struct
+{
+        p8 bytes[8192];
+        positive length;
+        bipolar error;
+} tools_meta_output;
+
+static void tools_meta_flush(tools_meta_output address_to output)
+{
+        if (output->length && !output->error)
+        {
+                system_write_result wrote =
+                    system_write_all_checked(1, output->bytes, output->length);
+
+                if (wrote.bytes != output->length)
+                        output->error = wrote.error ? wrote.error : -5;
+        }
+        output->length = 0;
+}
+
+static void tools_meta_put(tools_meta_output address_to output, const_string text,
+                           positive length)
+{
+        for (positive at = 0; at < length; at++)
+        {
+                if (output->length == sizeof(output->bytes))
+                        tools_meta_flush(output);
+                output->bytes[output->length++] = text[at];
+        }
+}
+
+static void tools_meta_line(tools_meta_output address_to output, const_string option,
+                            positive width, const_string description)
+{
+        positive length = string_length(option);
+
+        tools_meta_put(output, option, length);
+        for (; length < width; length++)
+                tools_meta_put(output, (const_string) " ", 1);
+        tools_meta_put(output, description, string_length(description));
+}
+
+static void tools_meta_help(tools_meta_output address_to output, string_address name,
+                            const_string text)
+{
+        for (; *text; text++)
+                if (*text == 1)
+                        tools_meta_put(output, name, string_length(name));
+                else if (*text == 2 && text[1])
+                {
+                        positive width = *++text;
+
+                        tools_meta_line(output, (const_string) "      --help", width,
+                                        (const_string) "show this help and exit\n");
+                        tools_meta_line(output, (const_string) "      --version", width,
+                                        (const_string) "show the version and exit\n");
+                }
+                else
+                        tools_meta_put(output, text, 1);
+}
+
 static b32 tools_meta(string_address name, string_address address_to arguments,
                       positive count)
 {
@@ -30465,22 +32077,35 @@ static b32 tools_meta(string_address name, string_address address_to arguments,
 
         // One write, as stdio's one buffer gives GNU: a reader that leaves
         // after the first bytes cannot cut the text in two.
-        string_address pieces[] = {help ? (string_address) "Usage: " : name,
-                                   help ? name : (string_address) " from moonwater\n",
-                                   help ? (string_address) " [OPTION]... [ARGUMENT]...\n" : (string_address) ""};
-        p8 text[256];
-        positive length = 0;
+        const_string text = null;
+        tools_meta_output output;
 
-        for (positive at = 0; at < 3; at++)
-                for (string_address byte = pieces[at]; *byte && length < sizeof(text); byte++)
-                        text[length++] = *byte;
+        output.length = 0;
+        output.error = 0;
+        if (help)
+                for (const tools_help_entry address_to entry = tools_help; entry->name; entry++)
+                        if (string_equals(name, entry->name))
+                        {
+                                text = entry->text;
+                                break;
+                        }
+        if (text)
+                tools_meta_help(&output, name, text);
+        else
+        {
+                string_address pieces[] = {help ? (string_address) "Usage: " : name,
+                                           help ? name : (string_address) " from moonwater\n",
+                                           help ? (string_address) " [OPTION]... [ARGUMENT]...\n"
+                                                : (string_address) ""};
 
-        system_write_result wrote = system_write_all_checked(1, text, length);
-
-        if (wrote.bytes != length)
+                for (positive at = 0; at < 3; at++)
+                        tools_meta_put(&output, pieces[at], string_length(pieces[at]));
+        }
+        tools_meta_flush(&output);
+        if (output.error)
         {
                 string_format(log_error, "%s: write error: %s\n", name,
-                              file_reason(wrote.error ? wrote.error : -5));
+                              file_reason(output.error));
                 log_flush();
                 return failure;
         }
