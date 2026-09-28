@@ -165,7 +165,7 @@ describe()
         install)  echo "Moonwater installed to a disk, started from it, asked about and updated from a stick" ;;
         canvas)   echo "what is actually on the screen, read back a pixel at a time" ;;
         wifi)     echo "networks in the air of a machine with simulated radios, joined and listed" ;;
-        fuzz)     echo "the TLS DER, handshake and verify fuzz targets for an hour each, or a release report" ;;
+        fuzz)     echo "the TLS DER, handshake, verify, DNS and netlink fuzz targets for an hour each, or a release report" ;;
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
         esac
 }
@@ -3594,9 +3594,9 @@ lane_socket() { freestanding_checks_lane socket socket; }
 #       http_response_framing holds the response parser to a written
 #       accept/refuse matrix (and names deliberate disagreements with
 #       Python's http.client).
-#       tls_der_fuzz / tls_hs_fuzz are bounded libFuzzer ASan/UBSan runs
-#       over seeds differential.py writes into each run's temporary
-#       directory. NOT RUN (2) when clang/libFuzzer is absent.
+#       tls_der_fuzz / tls_hs_fuzz / dns_fuzz / netlink_fuzz are bounded
+#       libFuzzer ASan/UBSan runs over seeds differential.py writes into each
+#       run's temporary directory. NOT RUN (2) when clang/libFuzzer is absent.
 #       Longer fuzzing is lane_fuzz and MSan is lane_msan, both run only when
 #       named; neither is part of lane_net or a CI push job.
 #       Fuzz exit 2 is soft: missing clang must not turn a green freestanding+
@@ -3640,18 +3640,32 @@ lane_net()
         2) note "tls_hs_fuzz: skipped (soft) -- does not downgrade net" ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness dns_fuzz
+        case $? in
+        0) ;;
+        2) note "dns_fuzz: skipped (soft) -- does not downgrade net" ;;
+        *) net_outcome=1 ;;
+        esac
+        python3 test/differential.py --harness netlink_fuzz
+        case $? in
+        0) ;;
+        2) note "netlink_fuzz: skipped (soft) -- does not downgrade net" ;;
+        *) net_outcome=1 ;;
+        esac
         return "$net_outcome"
 }
-#       The TLS fuzz targets for longer than lane_net's smoke: tls_der_fuzz,
-#       tls_hs_fuzz and tls_verify_fuzz, an hour each with no run cap unless
-#       MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise.
+#       The net fuzz targets for longer than lane_net's smoke: tls_der_fuzz,
+#       tls_hs_fuzz, tls_verify_fuzz, dns_fuzz and netlink_fuzz, an hour each
+#       with no run cap unless MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS
+#       say otherwise.
 #       MOONWATER_FUZZ_REPORT=artifacts/fuzz-report.txt makes it the release
 #       attach instead: lane_net's budget unless the knobs are set, and a JSON
 #       report of toolchain, seeds, budget and exits written there.
 lane_fuzz() { python3 test/differential.py --harness tls_fuzz; }
 #       MemorySanitizer over hosted lifts of the net wire parsers, pad and
-#       uninit proves, and short tls_der_fuzz / tls_hs_fuzz runs. Needs Linux
-#       clang's -fsanitize=memory; NOT RUN without it.
+#       uninit proves, and short tls_der_fuzz / tls_hs_fuzz / dns_fuzz /
+#       netlink_fuzz runs. Needs Linux clang's -fsanitize=memory; NOT RUN
+#       without it.
 lane_msan() { MOONWATER_MSAN=1 python3 test/differential.py --harness msan_net; }
 lane_bowl() { freestanding_checks_lane bowl bowl; }
 #       Freestanding CHECK_tar (paths, pax, magics), then a continuous

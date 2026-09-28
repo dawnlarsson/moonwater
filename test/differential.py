@@ -38169,6 +38169,8 @@ def tls_fuzz_seeds(corpus):
     tls_der magic first bytes pick a lane: C1 list body, C2 EKU value, C3 SAN,
     C4 basicConstraints, C5 keyUsage, C6 cert+host, C7 extensions+host, C8
     ECDSA signature DER, C9 AlgorithmIdentifier."""
+    if corpus in ("dns", "netlink"):
+        return dns_fuzz_seeds() if corpus == "dns" else netlink_fuzz_seeds()
     seeds = {name + ".bin": bytes.fromhex(hx)
              for name, hx in TLS_FUZZ_SEED_HEX[corpus].items()}
     if corpus == "tls_hs":
@@ -39593,8 +39595,839 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     return tls_fuzz_run("tls verify", "tls_der", source, 4096)
 
 
+#       The hosted floor dns_fuzz and netlink_fuzz share: lib.c's names over
+#       libc, and sockets, clock, poll, randomness and file reads that serve
+#       the fuzz input instead of a kernel. Every DNS reply, TCP chunk and
+#       netlink datagram is a frame of the input; nothing is mocked above the
+#       syscall layer, so the resolver's and the dump walk's own loops, retries
+#       and deadlines run as shipped.
+NET_ZONE_FUZZ_SHIM = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdarg.h>
+typedef uint8_t p8; typedef uint16_t p16; typedef uint32_t p32; typedef uint64_t p64;
+typedef int16_t b16; typedef int32_t b32; typedef int64_t b64; typedef uint8_t b8;
+typedef long bipolar; typedef unsigned long positive;
+typedef void *address_any; typedef char *string_address; typedef const char *const_string;
+typedef void (*writer)(address_any data, positive length);
+#define COLD
+#define PURE
+#define CONST
+#define INLINE
+#define fn void
+#define address_to *
+#define address_of &
+#define null NULL
+#define end ((p8)0)
+#define positive_max (~(positive)0)
+#define array_count(a) (sizeof(a) / sizeof((a)[0]))
+#define memory_compare memcmp
+#define memory_copy memcpy
+#define memory_copy_apart memcpy
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define memory_first_of(block, byte, size) memchr((block), (byte), (size))
+#define memory_load_unaligned(type, at) \
+        ({ type loaded_; memcpy(&loaded_, (at), sizeof loaded_); loaded_; })
+#define string_get(s) (*(p8 *)(s))
+#define string_is(s, v) (*(s) == (v))
+#define string_length(s) strlen((const char *)(s))
+#define string_equals(a, b) (strcmp((const char *)(a), (const char *)(b)) == 0)
+#define string_has_prefix(s, p) \
+        (strncmp((const char *)(s), (p), strlen(p)) == 0)
+#define byte_is_blank(b) ((b) == ' ' || (b) == '\t')
+#define network_order_16(v) ((p16)__builtin_bswap16((p16)(v)))
+#define network_order_32(v) ((p32)__builtin_bswap32((p32)(v)))
+#define AF_UNSPEC 0
+#define AF_INET 2
+#define AF_NETLINK 16
+#define SOCK_STREAM 1
+#define SOCK_DGRAM 2
+#define SOCK_NONBLOCK 04000
+#define SOCK_CLOEXEC 02000000
+#define MSG_PEEK 2
+#define MSG_TRUNC 0x20
+#define MSG_DONTWAIT 0x40
+#define MSG_NOSIGNAL 0x4000
+#define EALREADY 114
+#define EINPROGRESS 115
+#define ERROR_NO_MEMORY 12
+#define SOL_SOCKET 1
+#define SO_ERROR 4
+#define SO_RCVTIMEO 20
+#define SO_SNDTIMEO 21
+#define SOL_NETLINK 270
+#define NETLINK_EXT_ACK 11
+#define NETLINK_ROUTE 0
+#define SYSTEM_POLL_READ 0x001
+#define SYSTEM_POLL_WRITE 0x004
+#define SYSTEM_POLL_INVALID 0x020
+typedef struct { b64 tv_sec; b64 tv_nsec; } timespec;
+typedef struct { b64 tv_sec; b64 tv_usec; } timeval;
+typedef struct { b32 descriptor; b16 events; b16 returned; } system_poll_descriptor;
+typedef struct { p16 family; p16 port; p32 host; p8 padding[8]; } socket_address_internet;
+typedef struct { p16 family; p16 padding; p32 port; p32 groups; } socket_address_netlink;
+static const b8 string_set_blanks[256] = {[' '] = 1, ['\t'] = 1};
+
+static p16 network_load_16(const p8 *at) { return (p16)(at[0] << 8 | at[1]); }
+static p32 network_load_32(const p8 *at)
+{
+        return (p32)at[0] << 24 | (p32)at[1] << 16 | (p32)at[2] << 8 | at[3];
+}
+static void network_store_16(p8 *at, p16 value)
+{
+        at[0] = (p8)(value >> 8);
+        at[1] = (p8)value;
+}
+static b32 memory_compare_ascii_case(const void *one, const void *two,
+                                     positive size)
+{
+        const p8 *a = one, *b = two;
+        for (positive i = 0; i < size; i++)
+        {
+                p8 x = (p8)(a[i] - 'A') < 26 ? a[i] | 0x20 : a[i];
+                p8 y = (p8)(b[i] - 'A') < 26 ? b[i] | 0x20 : b[i];
+                if (x != y)
+                        return (b32)(x - y);
+        }
+        return 0;
+}
+static positive memory_span_without_byte(const void *block, p8 byte,
+                                         positive size)
+{
+        const p8 *at = memchr(block, byte, size);
+        return at ? (positive)(at - (const p8 *)block) : size;
+}
+static positive string_span_max(const_string source, positive bound,
+                                const b8 *set)
+{
+        positive at = 0;
+        while (at < bound && set[(p8)source[at]])
+                at++;
+        return at;
+}
+static string_address string_first_of_or_end(string_address at, int byte)
+{
+        while (*at && *at != (char)byte)
+                at++;
+        return at;
+}
+static p8 *string_copy_max_end(void *into, const void *source, positive bound)
+{
+        positive length = strnlen((const char *)source, bound);
+        memcpy(into, source, length);
+        ((p8 *)into)[length] = 0;
+        return (p8 *)into + length;
+}
+/* lib.c's grammar: four octets of one to three digits, single dots, nothing
+   after the last one. */
+static bipolar string_to_host(const_string text)
+{
+        p32 host = 0;
+        for (int octet = 0; octet < 4; octet++)
+        {
+                positive value = 0, digits = 0;
+                while (text[digits] >= '0' && text[digits] <= '9' && digits < 4)
+                        value = value * 10 + (positive)(text[digits++] - '0');
+                if (!digits || digits > 3 || value > 255)
+                        return -1;
+                text += digits;
+                if (octet < 3 && *text++ != '.')
+                        return -1;
+                host = host << 8 | (p32)value;
+        }
+        return *text ? -1 : (bipolar)host;
+}
+static bool fuzz_reserve(void **held, positive *have, positive want,
+                         positive unit)
+{
+        void *grown;
+
+        if (want <= *have)
+                return true;
+        if (want > ((positive)1 << 25) / unit)
+                return false;
+        grown = realloc(*held, want * unit);
+        if (!grown)
+                return false;
+        *held = grown;
+        *have = want;
+        return true;
+}
+#define array_store_reserve(array, room, used, wanted, step) \
+        fuzz_reserve((void **)&(array), &(room), (wanted), sizeof((array)[0]))
+#define array_store_release(array, room, used) \
+        (free(array), (array) = NULL, (room) = 0, (used) = 0)
+static positive host_into(p8 *into, p32 host)
+{
+        return (positive)sprintf((char *)into, "%u.%u.%u.%u", host >> 24,
+                                 host >> 16 & 255, host >> 8 & 255, host & 255);
+}
+
+/* The input's frames. Each is served whole to whichever fake socket asks
+   for its kind next. */
+enum { FUZZ_UDP = 3, FUZZ_TCP = 4, FUZZ_NETLINK = 5, FUZZ_FRAMES = 96 };
+typedef struct { const p8 *bytes; positive length; p8 tag; } fuzz_frame;
+static fuzz_frame fuzz_frames[FUZZ_FRAMES];
+static positive fuzz_frame_count;
+static positive fuzz_next[6];
+static positive fuzz_tcp_taken;
+static positive fuzz_clock;
+static p8 fuzz_faults;
+static const p8 *fuzz_file;
+static positive fuzz_file_length;
+enum { FAULT_SOCKET = 2, FAULT_CONNECTING = 4, FAULT_SO_ERROR = 8,
+       FAULT_POLL_INVALID = 16, FAULT_SEND = 32, FAULT_INTERRUPT = 64 };
+
+static bool fuzz_frame_is(positive at, b32 handle)
+{
+        p8 tag = fuzz_frames[at].tag;
+        return handle == FUZZ_NETLINK || (handle == FUZZ_TCP) == (tag & 1);
+}
+static fuzz_frame *fuzz_frame_next(b32 handle)
+{
+        positive at = fuzz_next[handle];
+        while (at < fuzz_frame_count && !fuzz_frame_is(at, handle))
+                at++;
+        fuzz_next[handle] = at;
+        return at < fuzz_frame_count ? &fuzz_frames[at] : null;
+}
+static const p8 *fuzz_frames_load(const p8 *at, positive left)
+{
+        fuzz_frame_count = fuzz_tcp_taken = fuzz_clock = 0;
+        memset(fuzz_next, 0, sizeof fuzz_next);
+        while (left >= 3 && fuzz_frame_count < FUZZ_FRAMES)
+        {
+                positive length = (positive)at[1] << 8 | at[2];
+                if (length > left - 3)
+                        length = left - 3;
+                fuzz_frames[fuzz_frame_count++] =
+                    (fuzz_frame){at + 3, length, at[0]};
+                at += 3 + length;
+                left -= 3 + length;
+        }
+        return at;
+}
+
+static positive clock_monotonic_nanoseconds(void)
+{
+        return fuzz_clock += 1000000;
+}
+static bipolar system_random_fill(address_any into, positive width, b32 flags)
+{
+        (void)flags;
+        memset(into, 0xa5, width);
+        return 0;
+}
+static bipolar system_poll_wait(system_poll_descriptor *waited, positive count,
+                                timespec *limit, positive *mask)
+{
+        (void)count, (void)limit, (void)mask;
+        waited->returned = 0;
+        if (fuzz_faults & FAULT_POLL_INVALID)
+                return waited->returned = SYSTEM_POLL_INVALID, 1;
+        if ((waited->events & SYSTEM_POLL_WRITE) ||
+            waited->descriptor == FUZZ_TCP ||
+            fuzz_frame_next(waited->descriptor))
+                return waited->returned = waited->events, 1;
+        return 0;
+}
+static bipolar system_read_retry(positive handle, address_any data,
+                                 positive length)
+{
+        (void)handle, (void)data, (void)length;
+        return 0;
+}
+static bipolar socket_new(b32 family, b32 kind, b32 protocol)
+{
+        (void)protocol;
+        if (fuzz_faults & FAULT_SOCKET)
+                return -24;
+        return family == AF_NETLINK ? FUZZ_NETLINK
+               : (kind & 15) == SOCK_STREAM ? FUZZ_TCP : FUZZ_UDP;
+}
+static bipolar socket_bind(b32 handle, address_any at, positive size)
+{
+        (void)handle, (void)at, (void)size;
+        return 0;
+}
+static bipolar socket_connect(b32 handle, address_any at, positive size)
+{
+        (void)at, (void)size;
+        return handle == FUZZ_TCP && (fuzz_faults & FAULT_CONNECTING)
+                   ? -EINPROGRESS : 0;
+}
+static bipolar socket_close(b32 handle)
+{
+        (void)handle;
+        return 0;
+}
+static bipolar socket_name(b32 handle, address_any at, address_any size)
+{
+        socket_address_netlink self = {.family = AF_NETLINK, .port = 0x1234};
+        (void)handle;
+        memcpy(at, &self, sizeof self);
+        *(p32 *)size = sizeof self;
+        return 0;
+}
+static bipolar socket_option_set(b32 handle, b32 level, b32 name,
+                                 address_any value, positive size)
+{
+        (void)handle, (void)level, (void)name, (void)value, (void)size;
+        return 0;
+}
+static bipolar socket_option_get(b32 handle, b32 level, b32 name,
+                                 address_any value, address_any size)
+{
+        (void)handle, (void)level, (void)name;
+        *(b32 *)value = (fuzz_faults & FAULT_SO_ERROR) ? 111 : 0;
+        *(p32 *)size = sizeof(b32);
+        return 0;
+}
+static bipolar socket_send(b32 handle, address_any data, positive size,
+                           b32 flags, address_any to, positive to_size)
+{
+        volatile p8 touched = 0;
+        (void)handle, (void)flags, (void)to, (void)to_size;
+        for (positive at = 0; at < size; at++)
+                touched ^= ((const p8 *)data)[at];
+        return (fuzz_faults & FAULT_SEND) ? -28 : (bipolar)size;
+}
+static bipolar socket_receive(b32 handle, address_any data, positive size,
+                              b32 flags, address_any from, address_any from_size)
+{
+        fuzz_frame *frame;
+        positive copied;
+
+        if (fuzz_faults & FAULT_INTERRUPT)
+        {
+                fuzz_faults &= (p8)~FAULT_INTERRUPT;
+                return -4;
+        }
+        frame = fuzz_frame_next(handle);
+        if (!frame)
+                return handle == FUZZ_TCP ? 0 : -11;
+        if (handle == FUZZ_TCP)
+        {
+                copied = frame->length - fuzz_tcp_taken;
+                copied = copied < size ? copied : size;
+                memcpy(data, frame->bytes + fuzz_tcp_taken, copied);
+                fuzz_tcp_taken += copied;
+                if (fuzz_tcp_taken == frame->length)
+                        fuzz_next[handle]++, fuzz_tcp_taken = 0;
+                return (bipolar)copied;
+        }
+        if (from && from_size)
+        {
+                /* An even tag is the kernel's port zero; odd is a process. */
+                socket_address_netlink source = {
+                    .family = AF_NETLINK, .port = frame->tag & 1 ? 77 : 0};
+                positive room = *(p32 *)from_size;
+                memcpy(from, &source, room < sizeof source ? room : sizeof source);
+                *(p32 *)from_size = sizeof source;
+        }
+        copied = frame->length < size ? frame->length : size;
+        if (copied)
+                memcpy(data, frame->bytes, copied);
+        if (!(flags & MSG_PEEK))
+                fuzz_next[handle]++;
+        return (bipolar)((flags & MSG_TRUNC) ? frame->length : copied);
+}
+static bipolar file_slurp(string_address path, p8 *into, positive capacity)
+{
+        positive length = fuzz_file_length;
+        (void)path;
+        if (!fuzz_file || !capacity)
+                return -2;
+        if (length > capacity - 1)
+                length = capacity - 1;
+        memcpy(into, fuzz_file, length);
+        into[length] = 0;
+        return (bipolar)length;
+}
+"""
+
+
+def net_zone_fuzz_slice(text, first, following):
+    """text from first up to following, or ValueError naming the anchor."""
+    at = text.find(first)
+    stop = text.find(following, at + 1) if at >= 0 else -1
+    if at < 0 or stop < 0:
+        raise ValueError("anchor moved: %r .. %r" % (first[:40], following[:40]))
+    return text[at:stop]
+
+
+def net_zone_fuzz_wait():
+    """wait.c's deadlines, stream helpers and transaction ids, whole."""
+    wait = (HARNESS_ROOT / "src/net/wait.c").read_text()
+    return net_zone_fuzz_slice(wait, "#define NETWORK_INTERRUPTED", "\n#endif")
+
+
+def dns_fuzz_seed_name(name):
+    return b"".join(bytes([len(label)]) + label for label in
+                    name.encode("latin-1").split(b".") if label) + b"\0"
+
+
+def dns_fuzz_seed_record(owner, kind, data, cls=1):
+    return owner + struct.pack(">HHIH", kind, cls, 300, len(data)) + data
+
+
+def dns_fuzz_seed_reply(name, answers=(), authority=(), additional=(),
+                        flags=0x8180, ident=0xa5a5, tail=b""):
+    """A reply to the fuzz resolver's question: id 0xa5a5 (the shim's
+    randomness), the asked name spelled at offset 12 for c00c to name."""
+    return (struct.pack(">HHHHHH", ident, flags, 1, len(answers),
+                        len(authority), len(additional)) +
+            dns_fuzz_seed_name(name) + b"\0\1\0\1" +
+            b"".join(answers) + b"".join(authority) + b"".join(additional) +
+            tail)
+
+
+def net_zone_fuzz_frame(tag, data):
+    return bytes([tag]) + struct.pack(">H", len(data)) + data
+
+
+def dns_fuzz_seeds():
+    """The resolver's inputs: [faults|resolv.conf bit][name length][name]
+    [resolv.conf length 16 + text when bit 0][frames: tag, length 16, bytes;
+    odd tags are TCP chunks, even ones UDP datagrams]."""
+    a = lambda owner, host: dns_fuzz_seed_record(owner, 1, bytes(host))
+    cname = lambda owner, target: dns_fuzz_seed_record(owner, 5, target)
+    at12 = b"\xc0\x0c"
+
+    def seed(name, *frames, mode=0, conf=None):
+        raw = name.encode("latin-1")
+        head = bytes([mode | (1 if conf is not None else 0), len(raw)]) + raw
+        if conf is not None:
+            head += struct.pack(">H", len(conf)) + conf
+        return head + b"".join(frames)
+
+    udp = lambda data: net_zone_fuzz_frame(0, data)
+    tcp = lambda data: net_zone_fuzz_frame(1, data)
+    plain = dns_fuzz_seed_reply("example.com", [a(at12, [192, 0, 2, 1])])
+    truncated = dns_fuzz_seed_reply("example.com", flags=0x8380)
+    framed = struct.pack(">H", len(plain)) + plain
+    chain = dns_fuzz_seed_reply("www.example.com", [
+        cname(at12, dns_fuzz_seed_name("edge.example.net")),
+        a(dns_fuzz_seed_name("EDGE.example.NET"), [198, 51, 100, 7])])
+    a_first = dns_fuzz_seed_reply("www.example.com", [
+        a(dns_fuzz_seed_name("edge.example.com"), [203, 0, 113, 9]),
+        cname(at12, b"\x04edge\xc0\x10")])
+    cycle = dns_fuzz_seed_reply("a.test", [
+        cname(at12, dns_fuzz_seed_name("b.test")),
+        cname(b"\xc0\x24", at12)])
+    soa = dns_fuzz_seed_record(b"\xc0\x14", 6, b"\0\0" + b"\0" * 20)
+    #   A run of pointers, each to the one before it and the first to the
+    #   question, owned by records whose names point at its far end.
+    run = b"".join(struct.pack(">H", 0xc000 | (12 if i == 0 else 39 + 2 * i))
+                   for i in range(400))
+    deep = dns_fuzz_seed_reply(
+        "example.com",
+        [dns_fuzz_seed_record(at12, 16, run)] +
+        [dns_fuzz_seed_record(struct.pack(">H", 0xc000 | (41 + 2 * 399)), 16, b"")
+         for _ in range(60)])
+    long_label = "a" * 63 + ".b"
+    longest = ".".join(["a" * 63] * 3 + ["b" * 61])
+    conf = (b"# written by hand\nsearch example.com\noptions ndots:2 timeout:1\n"
+            b"nameserver\t10.0.0.1 # first\r\nnameserver ::1\n"
+            b"nameserver 192.0.2.53\nnameserver 10.0.0.300\nnameserver")
+    return {
+        "a_plain.bin": seed("example.com", udp(plain)),
+        "junk_then_answer.bin": seed(
+            "example.com",
+            udp(dns_fuzz_seed_reply("example.com", ident=0x1234)),
+            udp(dns_fuzz_seed_reply("other.com")), udp(plain)),
+        "cname_chain.bin": seed("www.example.com", udp(chain)),
+        "a_before_cname.bin": seed("www.example.com", udp(a_first)),
+        "cname_cycle.bin": seed("a.test", udp(cycle)),
+        "nxdomain_soa.bin": seed("example.com", udp(dns_fuzz_seed_reply(
+            "example.com", authority=[soa], flags=0x8183))),
+        "no_address.bin": seed("example.com", udp(dns_fuzz_seed_reply("example.com"))),
+        "servfail.bin": seed("example.com", udp(dns_fuzz_seed_reply(
+            "example.com", flags=0x8182))),
+        "trailing_bytes.bin": seed("example.com", udp(dns_fuzz_seed_reply(
+            "example.com", [a(at12, [1, 2, 3, 4])], tail=b"\0"))),
+        "tc_then_tcp_split.bin": seed(
+            "example.com", udp(truncated),
+            tcp(framed[:1]), tcp(framed[1:9]), tcp(framed[9:]), mode=4),
+        "tc_then_tcp_oversize.bin": seed(
+            "example.com", udp(truncated), tcp(b"\xff\xff" + plain)),
+        "tc_then_tcp_wrong_id.bin": seed(
+            "example.com", udp(truncated),
+            tcp(struct.pack(">H", len(plain)) + b"\x12\x34" + plain[2:])),
+        "tc_then_tcp_eof.bin": seed("example.com", udp(truncated), tcp(framed[:20])),
+        "udp_oversize.bin": seed("example.com", udp(plain + b"\0" * 4096)),
+        "udp_oversize_tc.bin": seed("example.com",
+                                    udp(truncated + b"\0" * 4096), tcp(framed)),
+        "pointer_loop.bin": seed("example.com", udp(dns_fuzz_seed_reply(
+            "example.com", [a(b"\xc0\x1d", [1, 1, 1, 1])]))),
+        "pointer_forward.bin": seed("example.com", udp(dns_fuzz_seed_reply(
+            "example.com", [a(b"\xc0\x40", [1, 1, 1, 1])]))),
+        "pointer_run.bin": seed("example.com", udp(deep)),
+        "label_63.bin": seed(long_label, udp(dns_fuzz_seed_reply(
+            long_label, [a(at12, [10, 0, 0, 1])]))),
+        "name_255.bin": seed(longest, udp(dns_fuzz_seed_reply(
+            longest, [a(at12, [10, 0, 0, 2])]))),
+        "name_odd_bytes.bin": seed("\x7f\xff.x\x01", udp(dns_fuzz_seed_reply(
+            "\x7f\xff.x\x01", [a(at12, [10, 0, 0, 3])]))),
+        "name_empty_label.bin": seed("a..b", udp(plain)),
+        "name_trailing_dot.bin": seed("example.com.", udp(plain)),
+        "resolv_conf.bin": seed("example.com",
+                                udp(dns_fuzz_seed_reply("example.com", flags=0x8183)),
+                                udp(plain), conf=conf),
+        "resolv_conf_empty.bin": seed("example.com", udp(plain), conf=b""),
+        "faults_socket.bin": seed("example.com", udp(plain), mode=2),
+        "faults_so_error.bin": seed("example.com", udp(truncated), tcp(framed),
+                                    mode=4 | 8),
+        "faults_poll_invalid.bin": seed("example.com", udp(plain), mode=16),
+        "faults_send.bin": seed("example.com", udp(plain), mode=32),
+        "faults_interrupt.bin": seed("example.com", udp(plain), mode=64),
+    }
+
+
+def harness_dns_fuzz(argv):
+    """Coverage-guided libFuzzer over the DNS resolver, socket to answer.
+
+    Lifts src/net/net.c's whole DNS section and all of src/net/wait.c over
+    NET_ZONE_FUZZ_SHIM, whose sockets serve the input's frames: UDP
+    datagrams in order (junk, truncated and oversized ones too), TCP chunks
+    for the fallback's framing, a resolv.conf for dns_resolve_any, and fault
+    bits for socket, connect, SO_ERROR, poll, send and EINTR. Each UDP frame
+    is also parsed as a reply to its own question, so the record walks see
+    bytes without having to win the id and question first. Seeds come from
+    dns_fuzz_seeds(). Exit 2 (NOT RUN) without clang/libFuzzer.
+
+        python3 test/differential.py --harness dns_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    try:
+        dns = net_zone_fuzz_slice(net, "#define DNS_PORT 53",
+                                  "#endif // STANDARD_MODERN_C_NET_DNS")
+        wait = net_zone_fuzz_wait()
+    except ValueError as error:
+        print("  FAIL dns fuzz lift: " + str(error))
+        write_tally("dns-fuzz", 0, 1)
+        return 1
+    driver = r"""
+static void fuzz_own_question(fuzz_frame *frame)
+{
+        p8 *copy = malloc(frame->length ? frame->length : 1);
+        p32 found = 0;
+        bipolar question;
+
+        memcpy(copy, frame->bytes, frame->length);
+        question = dns_skip_name(copy, frame->length, DNS_HEADER);
+        if (frame->length >= DNS_HEADER && question > 0 &&
+            (positive)question + 4 <= frame->length)
+                (void)dns_reply_result(copy, frame->length,
+                                       network_load_16(copy), copy,
+                                       (positive)question + 4 - DNS_HEADER,
+                                       address_of found);
+        free(copy);
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        char name[256];
+        positive length;
+        const p8 *at;
+        positive left;
+        p32 found = 0;
+
+        if (size < 2 || data[1] > size - 2)
+                return 0;
+        length = data[1];
+        memcpy(name, data + 2, length);
+        name[length] = 0;
+        at = data + 2 + length;
+        left = size - 2 - length;
+        fuzz_file = null;
+        if (data[0] & 1)
+        {
+                if (left < 2)
+                        return 0;
+                fuzz_file_length = (positive)at[0] << 8 | at[1];
+                if (fuzz_file_length > left - 2)
+                        fuzz_file_length = left - 2;
+                fuzz_file = at + 2;
+                at += 2 + fuzz_file_length;
+                left -= 2 + fuzz_file_length;
+        }
+        fuzz_frames_load(at, left);
+        fuzz_faults = data[0];
+        if (fuzz_file)
+                (void)dns_resolve_any("/etc/resolv.conf", name, &found, 3);
+        else
+                (void)dns_resolve_at(0x7f000001, DNS_PORT, name, &found, 3);
+        fuzz_faults = 0;
+        for (positive frame = 0; frame < fuzz_frame_count; frame++)
+                fuzz_own_question(&fuzz_frames[frame]);
+        return 0;
+}
+"""
+    return tls_fuzz_run("dns", "dns", NET_ZONE_FUZZ_SHIM + wait + dns + driver, 8192)
+
+
+def netlink_fuzz_seeds():
+    """The dump walk's inputs: [mode][frames: tag, length 16, datagram;
+    an even tag is the kernel's port zero, odd a process]. Requests are
+    sequence 1 (the routes after the names, 2) and the socket's port 0x1234.
+    mode & 7: 0 discovery (preference mode >> 4), 1 a named link, 2 routes,
+    3 links, 4 addresses, 5-7 the link-up, address and route acks."""
+    port = 0x1234
+
+    def pad(data):
+        return data + b"\0" * (-len(data) % 4)
+
+    def message(kind, body=b"", flags=2, sequence=1, owner=port):
+        return pad(struct.pack("<IHHII", 16 + len(body), kind, flags, sequence,
+                               owner) + body)
+
+    def rta(kind, data):
+        return pad(struct.pack("<HH", 4 + len(data), kind) + data)
+
+    def link(index, flags, name, *more):
+        return message(16, struct.pack("<BBHiII", 0, 0, 1, index, flags, 0) +
+                       rta(3, name + b"\0") + b"".join(more))
+
+    def done(status=0, sequence=1):
+        return message(3, struct.pack("<i", status), sequence=sequence)
+
+    def error(status, sequence=1):
+        return message(2, struct.pack("<i", status) +
+                       struct.pack("<IHHII", 32, 16, 5, sequence, 0),
+                       sequence=sequence)
+
+    kernel = lambda *messages: net_zone_fuzz_frame(0, b"".join(messages))
+    process = lambda *messages: net_zone_fuzz_frame(1, b"".join(messages))
+    hardware = rta(1, bytes([2, 0, 0, 0, 0, 1]))
+    lo = link(1, 1 | 8 | 64, b"lo")
+    eth = link(2, 1 | 2 | 64, b"eth0", hardware)
+    wifi = link(3, 1 | 2 | 64, b"wlan0", hardware,
+                rta(18, rta(1, b"wlan")), rta(11, b"\0" * 4))
+    down = link(4, 2, b"eth1", rta(1, b"\1\2\3"))
+    address = message(20, struct.pack("<BBBBI", 2, 24, 0, 0, 2) +
+                      rta(2, bytes([10, 0, 0, 5])) + rta(3, b"eth0\0"),
+                      sequence=1)
+    route = message(24, struct.pack("<BBBBBBBBI", 2, 0, 0, 0, 254, 3, 0, 1, 0) +
+                    rta(5, bytes([10, 0, 0, 1])) + rta(4, struct.pack("<I", 2)),
+                    sequence=2)
+    subnet = message(24, struct.pack("<BBBBBBBBI", 2, 24, 0, 0, 254, 3, 253, 1, 0) +
+                     rta(1, bytes([10, 0, 0, 0])) + rta(4, struct.pack("<I", 9)),
+                     sequence=2)
+    odd_route = message(24, struct.pack("<BBBBBBBBI", 2, 0, 0, 0, 254, 3, 0, 1, 0) +
+                        rta(5, bytes([10, 0, 0])), sequence=2)
+    return {
+        "discover.bin": b"\0" + kernel(lo, eth, down) + kernel(done()),
+        "discover_wifi.bin": b"\x20" + kernel(lo, eth, wifi, done()),
+        "discover_wired.bin": b"\x10" + kernel(lo, wifi, eth, done()),
+        "named.bin": b"\1" + kernel(lo, eth, wifi, done()),
+        "link_show.bin": b"\3" + kernel(lo, eth, wifi, down, done()),
+        "addr_show.bin": b"\4" + kernel(address, message(
+            20, struct.pack("<BBBBI", 2, 8, 0, 0, 3) + rta(2, b"\1\2\3\4") +
+            rta(3, b"unterminated")), done()),
+        "route_show.bin": b"\2" + kernel(lo, eth, done()) +
+                          kernel(route, subnet, odd_route, done(sequence=2)),
+        "userspace_first.bin": b"\0" + process(lo, eth, done()) +
+                               kernel(lo, eth, done()),
+        "notification_between.bin": b"\0" + kernel(
+            message(16, b"\0" * 16, sequence=0, owner=0), lo,
+            message(16, b"\0" * 16, sequence=7), eth, done()),
+        "interrupted.bin": b"\0" + kernel(message(16, b"\0" * 16, flags=0x12), done()),
+        "error_busy.bin": b"\0" + kernel(error(-16)),
+        "error_positive.bin": b"\0" + kernel(error(5)),
+        "error_short.bin": b"\0" + kernel(message(2, b"\0\0")),
+        "done_bare.bin": b"\0" + kernel(message(3)),
+        "ack_link_up.bin": b"\5" + kernel(error(0)),
+        "ack_address.bin": b"\6" + kernel(error(-17)),
+        "ack_route.bin": b"\7" + kernel(error(0)),
+        "header_short.bin": b"\0" + kernel(struct.pack("<IHHII", 8, 16, 2, 1, port)),
+        "header_long.bin": b"\0" + kernel(struct.pack("<IHHII", 4096, 16, 2, 1, port)),
+        "attribute_short.bin": b"\0" + kernel(message(
+            16, struct.pack("<BBHiII", 0, 0, 1, 2, 64, 0) +
+            struct.pack("<HH", 2, 3)), done()),
+        "attribute_past_end.bin": b"\0" + kernel(message(
+            16, struct.pack("<BBHiII", 0, 0, 1, 2, 64, 0) +
+            struct.pack("<HH", 200, 3) + b"eth0"), done()),
+        "empty_datagram.bin": b"\0" + kernel() + kernel(done()),
+        "empty.bin": b"",
+    }
+
+
+def harness_netlink_fuzz(argv):
+    """Coverage-guided libFuzzer over the rtnetlink walk and ip's printers.
+
+    Lifts src/net/net.c's whole netlink section, all of src/net/wait.c and
+    src/sh/net.c's name table and link/address/route lines over
+    NET_ZONE_FUZZ_SHIM, whose socket serves the input's datagrams with a
+    kernel or a process as their sender. The mode byte picks discovery (any
+    preference), a named link, ip link/addr/route show, or the link-up,
+    address and route acknowledgements; every datagram is then also walked
+    the way a multicast listener walks one. Seeds come from
+    netlink_fuzz_seeds(). Exit 2 (NOT RUN) without clang/libFuzzer.
+
+        python3 test/differential.py --harness netlink_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    shell = (HARNESS_ROOT / "src/sh/net.c").read_text()
+    try:
+        netlink = net_zone_fuzz_slice(net, "#define NETLINK_HEADER 16",
+                                      "#endif // STANDARD_MODERN_C_NET_NETLINK")
+        wait = net_zone_fuzz_wait()
+        printers = (net_zone_fuzz_slice(shell, "static COLD string_address net_host_text(",
+                                        "/*\n        A.B.C.D/N split") +
+                    net_zone_fuzz_slice(shell, "// The flags of a link, in the shape",
+                                        "//      The index of the link the user named."))
+    except ValueError as error:
+        print("  FAIL netlink fuzz lift: " + str(error))
+        write_tally("netlink-fuzz", 0, 1)
+        return 1
+    driver = r"""
+/* string_format and string_report, reading every argument the way the real
+   writers do: %s and %w's names to their terminator. */
+static void fuzz_sink(address_any data, positive length)
+{
+        volatile p8 touched = 0;
+        for (positive at = 0; at < length; at++)
+                touched ^= ((const p8 *)data)[at];
+}
+static writer net_out = fuzz_sink;
+static void writer_terminal_name(writer output, string_address value)
+{
+        output(value, strlen(value));
+}
+static void fuzz_format(writer output, const char *format, va_list list)
+{
+        for (; *format; format++)
+        {
+                if (*format != '%')
+                        continue;
+                switch (*++format)
+                {
+                case 's':
+                {
+                        string_address text = va_arg(list, string_address);
+                        output(text, strlen(text));
+                        break;
+                }
+                case 'w':
+                {
+                        void (*quoted)(writer, string_address) =
+                            va_arg(list, void (*)(writer, string_address));
+                        quoted(output, va_arg(list, string_address));
+                        break;
+                }
+                default:
+                        (void)va_arg(list, positive);
+                }
+        }
+}
+static void string_format(writer output, const char *format, ...)
+{
+        va_list list;
+        va_start(list, format);
+        fuzz_format(output, format, list);
+        va_end(list);
+}
+static bool string_report(writer output, bool result, const char *format, ...)
+{
+        va_list list;
+        va_start(list, format);
+        fuzz_format(output, format, list);
+        va_end(list);
+        return result;
+}
+""" + printers + r"""
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        netlink_search search;
+        p8 mode;
+
+        if (!size)
+                return 0;
+        mode = data[0];
+        fuzz_frames_load(data + 1, size - 1);
+        netlink_sequence_next = 1;
+        memset(&search, 0, sizeof search);
+        switch (mode & 7)
+        {
+        case 0:
+                search.skip_loopback = true;
+                search.prefer = (p8)(mode >> 4) % 3;
+                (void)netlink_link_find(FUZZ_NETLINK, &search);
+                break;
+        case 1:
+                search.wanted = "eth0";
+                (void)netlink_link_find(FUZZ_NETLINK, &search);
+                break;
+        case 2:
+                if (net_names_gather(FUZZ_NETLINK) >= 0)
+                        (void)netlink_dump(FUZZ_NETLINK, RTM_GETROUTE,
+                                           sizeof(netlink_route), AF_INET,
+                                           net_route_line, null);
+                netlink_forget(&net_names);
+                break;
+        case 3:
+                (void)netlink_dump(FUZZ_NETLINK, RTM_GETLINK, sizeof(netlink_link),
+                                   AF_UNSPEC, net_link_line, null);
+                break;
+        case 4:
+                (void)netlink_dump(FUZZ_NETLINK, RTM_GETADDR,
+                                   sizeof(netlink_address), AF_INET,
+                                   net_address_line, null);
+                break;
+        case 5:
+                (void)netlink_link_up(FUZZ_NETLINK, 2);
+                break;
+        case 6:
+                (void)netlink_address_add(FUZZ_NETLINK, 2, 0x0a000005, 24);
+                break;
+        default:
+                (void)netlink_route_add(FUZZ_NETLINK, 0, 0, 0x0a000001, 2);
+        }
+
+        /* A multicast listener's walk: whole messages inside the datagram,
+           each handed to every visitor. */
+        for (positive frame = 0; frame < fuzz_frame_count; frame++)
+        {
+                positive length = fuzz_frames[frame].length;
+                p8 *copy = malloc(length ? length : 1);
+                positive at = 0;
+
+                memcpy(copy, fuzz_frames[frame].bytes, length);
+                while (at <= length && length - at >= NETLINK_HEADER)
+                {
+                        netlink_header *header = (netlink_header *)(copy + at);
+
+                        if (header->length < NETLINK_HEADER ||
+                            header->length > length - at)
+                                break;
+                        memset(&search, 0, sizeof search);
+                        search.skip_loopback = frame & 1;
+                        search.wanted = "eth0";
+                        (void)netlink_link_seen(header, &search);
+                        (void)net_link_line(header, null);
+                        (void)net_address_line(header, null);
+                        (void)net_route_line(header, null);
+                        (void)netlink_status(header, frame & 1);
+                        at += netlink_align(header->length);
+                }
+                free(copy);
+        }
+        return 0;
+}
+"""
+    return tls_fuzz_run("netlink", "netlink",
+                        NET_ZONE_FUZZ_SHIM + wait + netlink + driver, 16384)
+
+
 def harness_tls_fuzz(argv):
-    """tls_der_fuzz, tls_hs_fuzz and tls_verify_fuzz in turn: `sh test/run fuzz`.
+    """tls_der_fuzz, tls_hs_fuzz, tls_verify_fuzz, dns_fuzz and netlink_fuzz in
+    turn: `sh test/run fuzz`.
 
     Continuous by default, an hour a target with no run cap, unless
     MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise. With
@@ -39612,12 +40445,16 @@ def harness_tls_fuzz(argv):
     os.environ.setdefault("MOONWATER_FUZZ_RUNS", "20000" if report else "-1")
     os.environ.setdefault("MOONWATER_FUZZ_SECONDS", "5" if report else "3600")
     runs, seconds, _ = tls_fuzz_budget()
-    print("tls fuzz: der then hs then verify (runs=%d seconds=%d)" % (runs, seconds))
-    seeds = {corpus: len(tls_fuzz_seeds(corpus)) for corpus in ("tls_der", "tls_hs")}
+    print("tls fuzz: der, hs, verify, dns then netlink (runs=%d seconds=%d)" %
+          (runs, seconds))
+    seeds = {corpus: len(tls_fuzz_seeds(corpus))
+             for corpus in ("tls_der", "tls_hs", "dns", "netlink")}
     targets = []
     for name, corpus, harness in (("tls_der_fuzz", "tls_der", harness_tls_der_fuzz),
                                   ("tls_hs_fuzz", "tls_hs", harness_tls_hs_fuzz),
-                                  ("tls_verify_fuzz", "tls_der", harness_tls_verify_fuzz)):
+                                  ("tls_verify_fuzz", "tls_der", harness_tls_verify_fuzz),
+                                  ("dns_fuzz", "dns", harness_dns_fuzz),
+                                  ("netlink_fuzz", "netlink", harness_netlink_fuzz)):
         began = time.time()
         try:
             code = harness([])
@@ -39689,7 +40526,8 @@ def harness_msan_net(argv):
          (same lift pieces as tls_der_fuzz)
       4. thin CHECK_net-equivalent probes (align/sizeof + parser shape checks);
          not a full freestanding CHECK_net under MSan
-      5. short tls_der_fuzz / tls_hs_fuzz seed smokes with MOONWATER_MSAN=1
+      5. short tls_der_fuzz / tls_hs_fuzz / dns_fuzz / netlink_fuzz seed
+         smokes with MOONWATER_MSAN=1
     Returns 2 (NOT RUN) when MSan is unavailable (Apple clang, many qemu
     images).
 
@@ -40769,18 +41607,22 @@ int main(void)
     try:
         der = harness_tls_der_fuzz([])
         hs = harness_tls_hs_fuzz([])
+        dns = harness_dns_fuzz([])
+        netlink = harness_netlink_fuzz([])
     finally:
         if prior is None:
             os.environ.pop("MOONWATER_MSAN", None)
         else:
             os.environ["MOONWATER_MSAN"] = prior
 
-    if der == 2 or hs == 2:
-        print("msan net: NOT RUN -- tls fuzz under MSan unavailable "
-              "(der=%s hs=%s)" % (der, hs))
+    if 2 in (der, hs, dns, netlink):
+        print("msan net: NOT RUN -- fuzz under MSan unavailable "
+              "(der=%s hs=%s dns=%s netlink=%s)" % (der, hs, dns, netlink))
         return 2
     checks(der == 0, "tls_der_fuzz clean under MSan")
     checks(hs == 0, "tls_hs_fuzz clean under MSan")
+    checks(dns == 0, "dns_fuzz clean under MSan")
+    checks(netlink == 0, "netlink_fuzz clean under MSan")
     return checks.verdict("msan net", "msan-net")
 
 
@@ -40807,7 +41649,8 @@ def harness_security_hygiene(argv):
     source = Path(__file__).resolve().read_text()
 
     security = ("tls_chains", "https_downgrade", "http_response_framing", "tls_der_fuzz",
-                "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race")
+                "tls_hs_fuzz", "dns_fuzz", "netlink_fuzz", "tls_fuzz", "msan_net",
+                "pathname_race")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -40817,11 +41660,12 @@ def harness_security_hygiene(argv):
     checks(not twice, "differential.py: registered twice: " + ", ".join(twice))
     for name in security:
         checks("--harness " + name in run, "test/run: no lane asks for --harness " + name)
-    for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race"):
+    for name in ("tls_der_fuzz", "tls_hs_fuzz", "dns_fuzz", "netlink_fuzz",
+                 "pathname_race"):
         checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
 
     names = set()
-    for corpus in ("tls_der", "tls_hs"):
+    for corpus in ("tls_der", "tls_hs", "dns", "netlink"):
         seeds = tls_fuzz_seeds(corpus)
         names.update(seeds)
         checks(bool(seeds), "tls_fuzz_seeds(%r) is empty" % corpus)
@@ -45362,6 +46206,8 @@ HARNESS_CHECKS = {
     "tls_der_fuzz": harness_tls_der_fuzz,
     "tls_hs_fuzz": harness_tls_hs_fuzz,
     "tls_verify_fuzz": harness_tls_verify_fuzz,
+    "dns_fuzz": harness_dns_fuzz,
+    "netlink_fuzz": harness_netlink_fuzz,
     "tls_fuzz": harness_tls_fuzz,
     "msan_net": harness_msan_net,
     "security_hygiene": harness_security_hygiene,
