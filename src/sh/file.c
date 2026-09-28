@@ -6924,8 +6924,8 @@ typedef struct
         positive name;
         positive mode;
         positive links;
-        positive owner;
-        positive group;
+        p32 owner;
+        p32 group;
         p64 size;
         b64 modified;
         b64 accessed;
@@ -6939,11 +6939,16 @@ typedef struct
         p32 created_fraction;
         p32 rdev_major;
         p32 rdev_minor;
+        //      What a link leads to, when that was asked: GNU's linkok and
+        //      linkmode, which colour and the marks after a target read.
+        p32 link_mode;
         bool known;
         bool created_known;
         bool points_at_directory;
         bool quoted;
         bool acl;
+        bool link_ok;
+        bool capability;
 } ls_entry;
 
 _Static_assert(sizeof(ls_entry) == 128, "an ls entry packs to 128 bytes");
@@ -7050,9 +7055,7 @@ static positive ls_hide_count;
 
 static bool ls_some_quoted;
 static bool ls_coloring;
-static bool ls_color_started;
 static bool ls_terminal;
-static string_address ls_colors;
 
 static b32 ls_status;
 static bool ls_written;
@@ -7188,6 +7191,17 @@ static positive ls_counted;
 static fn ls_count_bytes(address_any text, positive length)
 {
         ls_counted += length ? length : string_length((string_address)text);
+}
+
+// A quoted name into a buffer ls_count_bytes has already measured.
+static p8 address_to ls_quoted_into;
+
+static fn ls_quote_into(address_any text, positive length)
+{
+        if (!length)
+                length = string_length((string_address)text);
+        memory_copy_apart(ls_quoted_into + ls_counted, text, length);
+        ls_counted += length;
 }
 
 static fn ls_limit(string_address why)
@@ -8095,52 +8109,73 @@ static p8 ls_mark(positive mode)
 }
 
 /*
-        LS_COLORS read once per listing rather than once per entry. The keys
-        a kind or a mode can ask for are looked up by index; the suffix
-        entries are gathered in the order they were written, because the
-        last one that matches a name is the one that colours it. A table
-        with more suffixes than the gathering holds is read the slow way,
-        entry by entry as before, so nothing about the answer changes.
+        Colour, GNU's way. LS_COLORS is read into a table of twenty-four
+        indicators and a list of extensions, with its escapes decoded -- \e,
+        \x1b, \033, ^[ and the rest, and \: for a colon -- and an indicator
+        can be unset, which colours nothing, or set to nothing, which is still
+        written as an empty sequence. What is written around a name is
+        GNU's too: the left and right codes around each sequence, a reset or
+        the end code after a coloured name, the normal colour before every
+        name when it is set, and the reset once before the first sequence of
+        the run.
 */
 enum
 {
-        LS_COLOR_FI,
-        LS_COLOR_DI,
-        LS_COLOR_TW,
-        LS_COLOR_OW,
-        LS_COLOR_ST,
-        LS_COLOR_LN,
-        LS_COLOR_OR,
-        LS_COLOR_PI,
-        LS_COLOR_CD,
-        LS_COLOR_BD,
-        LS_COLOR_SO,
-        LS_COLOR_SU,
-        LS_COLOR_SG,
-        LS_COLOR_EX,
-        LS_COLOR_RS,
-        LS_COLOR_KEYS
+        LS_LC,
+        LS_RC,
+        LS_EC,
+        LS_RS,
+        LS_NO,
+        LS_FI,
+        LS_DI,
+        LS_LN,
+        LS_PI,
+        LS_SO,
+        LS_BD,
+        LS_CD,
+        LS_MI,
+        LS_OR,
+        LS_EX,
+        LS_DO,
+        LS_SU,
+        LS_SG,
+        LS_ST,
+        LS_OW,
+        LS_TW,
+        LS_CA,
+        LS_MH,
+        LS_CL,
+        LS_INDICATORS
 };
 
-#define LS_COLOR_SUFFIXES 2048
+static const p8 ls_indicator_names[2 * LS_INDICATORS + 1] =
+    "lcrcecrsnofidilnpisobdcdmiorexdosusgstowtwcamhcl";
 
-static const string_address ls_color_keys[LS_COLOR_KEYS] = {
-    "fi", "di", "tw", "ow", "st", "ln", "or", "pi",
-    "cd", "bd", "so", "su", "sg", "ex", "rs"};
-static file_color_span ls_color_table[LS_COLOR_KEYS];
-static bool ls_color_set[LS_COLOR_KEYS];
-static file_color_entry ls_color_suffixes[LS_COLOR_SUFFIXES];
-static positive ls_color_suffix_count;
-static bool ls_color_suffix_overflow;
+static const string_address ls_indicator_defaults[LS_INDICATORS] = {
+    [LS_LC] = "\033[",   [LS_RC] = "m",       [LS_RS] = "0",       [LS_DI] = "01;34",
+    [LS_LN] = "01;36",   [LS_PI] = "33",      [LS_SO] = "01;35",   [LS_BD] = "01;33",
+    [LS_CD] = "01;33",   [LS_EX] = "01;32",   [LS_DO] = "01;35",   [LS_SU] = "37;41",
+    [LS_SG] = "30;43",   [LS_ST] = "37;44",   [LS_OW] = "34;42",   [LS_TW] = "30;42",
+    [LS_CL] = "\033[K",
+};
 
-static positive ls_color_index(string_address key)
+static file_color_span ls_indicators[LS_INDICATORS];
+
+typedef struct
 {
-        for (positive i = 0; i < LS_COLOR_KEYS; i++)
-                if (!string_compare(ls_color_keys[i], key))
-                        return i;
+        file_color_span suffix;
+        file_color_span sequence;
+        bool exact;
+        bool ignored;
+} ls_suffix_color;
 
-        return LS_COLOR_FI;
-}
+static ls_suffix_color address_to ls_extensions;
+static positive ls_extension_room;
+static positive ls_extension_count;
+static p8 address_to ls_color_text;
+static bool ls_color_referent;
+static bool ls_color_used;
+static bool ls_check_link_mode;
 
 static const string_address dircolors_database;
 
@@ -8174,88 +8209,432 @@ static bool ls_term_colors()
         return false;
 }
 
-static fn ls_color_parse()
+// GNU's is_colored: set to something other than nothing, 0 or 00.
+static bool ls_colored(positive which)
 {
-        string_address at = ls_colors;
-        file_color_entry entry;
+        file_color_span span = ls_indicators[which];
 
-        memory_fill(ls_color_set, 0, sizeof(ls_color_set));
-        ls_color_suffix_count = 0;
-        ls_color_suffix_overflow = false;
+        if (!span.text || !span.length)
+                return false;
+        if (span.length > 2)
+                return true;
+        return span.text[0] != '0' || span.text[span.length - 1] != '0';
+}
 
-        if (!at)
-                return;
+/*
+        One key or value out of LS_COLORS, decoded into the buffer: \ and ^
+        escapes as GNU's get_funky_string reads them, ending at a colon, at
+        the end, and for a *.ext key at the equals sign too. False for an
+        escape that runs off the end or a ^ before a byte it cannot name.
+*/
+static bool ls_color_funky(string_address address_to from, p8 address_to address_to into,
+                           bool equals_ends, positive address_to length)
+{
+        string_address at = address_to from;
+        p8 address_to out = address_to into;
+        p8 address_to start = out;
 
-        while (file_color_next(address_of at, address_of entry))
+        for (;;)
         {
-                if (!entry.assigned)
-                        continue;
+                p8 byte = string_get(at);
 
-                if (string_is(entry.key.text, '*'))
+                if (!byte || byte == ':' || (byte == '=' && equals_ends))
+                        break;
+                at++;
+                if (byte == '^')
                 {
-                        if (ls_color_suffix_count < LS_COLOR_SUFFIXES)
-                                ls_color_suffixes[ls_color_suffix_count++] = entry;
-                        else
-                                ls_color_suffix_overflow = true;
+                        p8 next = string_get(at);
 
+                        if (next >= '@' && next <= '~')
+                                *out++ = next & 037;
+                        else if (next == '?')
+                                *out++ = 127;
+                        else
+                                return false;
+                        at++;
+                        continue;
+                }
+                if (byte != '\\')
+                {
+                        *out++ = byte;
                         continue;
                 }
 
-                if (entry.key.length != 2)
+                p8 escaped = string_get(at);
+
+                if (!escaped)
+                        return false;
+                at++;
+                if (escaped >= '0' && escaped <= '7')
+                {
+                        p8 number = (p8)(escaped - '0');
+
+                        while (string_get(at) >= '0' && string_get(at) <= '7')
+                                number = (p8)((number << 3) + (string_get(at++) - '0'));
+                        *out++ = number;
                         continue;
+                }
+                if (escaped == 'x' || escaped == 'X')
+                {
+                        p8 number = 0;
 
-                for (positive i = 0; i < LS_COLOR_KEYS; i++)
-                        if (!string_compare_max(entry.key.text, ls_color_keys[i], 2))
+                        while (byte_is_hexadecimal(string_get(at)))
                         {
-                                ls_color_table[i] = entry.value;
-                                ls_color_set[i] = true;
-                                break;
+                                p8 digit = string_get(at++);
+
+                                number = (p8)((number << 4) +
+                                              (byte_is_digit(digit) ? digit - '0'
+                                                                    : (digit | 0x20) - 'a' + 10));
                         }
+                        *out++ = number;
+                        continue;
+                }
+                *out++ = escaped == 'a'   ? 7
+                         : escaped == 'b' ? 8
+                         : escaped == 'e' ? 27
+                         : escaped == 'f' ? 12
+                         : escaped == 'n' ? 10
+                         : escaped == 'r' ? 13
+                         : escaped == 't' ? 9
+                         : escaped == 'v' ? 11
+                         : escaped == '?' ? 127
+                         : escaped == '_' ? ' '
+                                          : escaped;
         }
+
+        address_to length = (positive)(out - start);
+        address_to into = out;
+        address_to from = at;
+        return true;
 }
 
-// The colour a key was given, or the one it has when the table says nothing.
-static file_color_span ls_color_of(positive key, string_address fallback)
+static bool ls_extension_add(file_color_span suffix)
 {
-        if (ls_color_set[key])
-                return ls_color_table[key];
-
-        return (file_color_span){fallback, fallback ? string_length(fallback) : 0};
+        if (!array_store_reserve(ls_extensions, ls_extension_room, ls_extension_count,
+                                 ls_extension_count + 1, 64))
+                return false;
+        ls_extensions[ls_extension_count++] = (ls_suffix_color){suffix, {null, 0}, false, false};
+        return true;
 }
 
-static bool ls_suffix_match(file_color_entry address_to entry, string_address name,
-                            positive name_length)
+/*
+        LS_COLORS into the table. Unset or empty, the built-in table stands,
+        and colour is on only where COLORTERM says anything or TERM is one
+        the database names. A key ls does not know is named, and it or any
+        other fault leaves no colour at all, as GNU leaves it.
+*/
+static bool ls_color_parse()
 {
-        positive suffix = entry->key.length - 1;
+        string_address at = file_environment((string_address) "LS_COLORS");
 
-        return suffix <= name_length &&
-               !string_compare_max(entry->key.text + 1, name + name_length - suffix,
-                                   suffix);
-}
-
-static file_color_span ls_suffix_color(string_address name)
-{
-        file_color_span answer = {null, 0};
-        positive name_length = string_length(name);
-
-        if (ls_color_suffix_overflow)
+        for (positive i = 0; i < LS_INDICATORS; i++)
         {
-                string_address at = ls_colors;
-                file_color_entry entry;
+                string_address text = ls_indicator_defaults[i];
 
-                while (file_color_next(address_of at, address_of entry))
-                        if (entry.assigned && string_is(entry.key.text, '*') &&
-                            ls_suffix_match(address_of entry, name, name_length))
-                                answer = entry.value;
+                ls_indicators[i] = (file_color_span){text, text ? string_length(text) : 0};
+        }
+        ls_extension_count = 0;
+        ls_color_referent = false;
 
-                return answer;
+        if (!at || !string_get(at))
+                return ls_term_colors();
+
+        if (ls_color_text)
+                memory_give(ls_color_text);
+        ls_color_text = (p8 address_to)memory_take(string_length(at) + 1);
+        if (!ls_color_text)
+                return false;
+
+        p8 address_to out = ls_color_text;
+        bool failed = false;
+
+        while (!failed && string_get(at))
+        {
+                p8 byte = string_get(at);
+                positive length;
+
+                if (byte == ':')
+                {
+                        at++;
+                        continue;
+                }
+                if (byte == '*')
+                {
+                        at++;
+
+                        p8 address_to suffix = out;
+
+                        failed = !ls_color_funky(address_of at, address_of out, true, address_of length) ||
+                                 !ls_extension_add((file_color_span){suffix, length}) ||
+                                 !string_is(at, '=');
+                        if (failed)
+                                break;
+                        at++;
+
+                        p8 address_to sequence = out;
+
+                        failed = !ls_color_funky(address_of at, address_of out, false, address_of length);
+                        ls_extensions[ls_extension_count - 1].sequence = (file_color_span){sequence, length};
+                        continue;
+                }
+
+                p8 label[3] = {byte, string_get(at + 1), end};
+
+                if (!label[1] || at[2] != '=')
+                {
+                        failed = true;
+                        break;
+                }
+                at += 3;
+
+                positive which = 0;
+
+                while (which < LS_INDICATORS &&
+                       (ls_indicator_names[2 * which] != label[0] ||
+                        ls_indicator_names[2 * which + 1] != label[1]))
+                        which++;
+                if (which == LS_INDICATORS)
+                {
+                        string_format(log_error, "%s: unrecognized prefix: '%w'\n", ls_program,
+                                      writer_terminal_quoted_name, (string_address)label);
+                        failed = true;
+                        break;
+                }
+
+                p8 address_to sequence = out;
+
+                failed = !ls_color_funky(address_of at, address_of out, false, address_of length);
+                ls_indicators[which] = (file_color_span){sequence, length};
         }
 
-        for (positive i = 0; i < ls_color_suffix_count; i++)
-                if (ls_suffix_match(address_of ls_color_suffixes[i], name, name_length))
-                        answer = ls_color_suffixes[i].value;
+        if (failed)
+        {
+                string_format(log_error, "%s: unparsable value for LS_COLORS environment variable\n",
+                              ls_program);
+                return false;
+        }
 
-        return answer;
+        /*
+                The last spelling of an extension wins; one spelled again in
+                the same case is dropped. Two spellings that differ only in
+                case with different colours are each matched exactly, and
+                with the same colour one stands for both, case aside.
+        */
+        for (positive left = ls_extension_count; left--;)
+        {
+                ls_suffix_color address_to newer = ls_extensions + left;
+                bool case_ignored = false;
+
+                if (newer->ignored)
+                        continue;
+                for (positive right = left; right--;)
+                {
+                        ls_suffix_color address_to older = ls_extensions + right;
+
+                        if (older->ignored || older->suffix.length != newer->suffix.length)
+                                continue;
+                        if (!memory_compare(older->suffix.text, newer->suffix.text,
+                                            newer->suffix.length))
+                                older->ignored = true;
+                        else if (!memory_compare_ascii_case(older->suffix.text, newer->suffix.text,
+                                                            newer->suffix.length))
+                        {
+                                if (case_ignored)
+                                        older->ignored = true;
+                                else if (older->sequence.length == newer->sequence.length &&
+                                         !memory_compare(older->sequence.text, newer->sequence.text,
+                                                         newer->sequence.length))
+                                {
+                                        older->ignored = true;
+                                        case_ignored = true;
+                                }
+                                else
+                                        older->exact = newer->exact = true;
+                        }
+                }
+        }
+
+        ls_color_referent = file_color_span_is(ls_indicators[LS_LN], (string_address) "target");
+        return true;
+}
+
+// The first extension, newest first, that ends a name.
+static ls_suffix_color address_to ls_extension_of(string_address name)
+{
+        positive length = string_length(name);
+
+        for (positive at = ls_extension_count; at--;)
+        {
+                ls_suffix_color address_to each = ls_extensions + at;
+                positive size = each->suffix.length;
+
+                if (each->ignored || size > length)
+                        continue;
+                if (each->exact ? !memory_compare(name + length - size, each->suffix.text, size)
+                                : !memory_compare_ascii_case(name + length - size, each->suffix.text,
+                                                             size))
+                        return each;
+        }
+        return null;
+}
+
+/*
+        The sequence a name is written in, GNU's get_color_indicator: an
+        entry the kernel was not asked about goes by the kind its directory
+        gave, a regular file by its set-id, capability, execute and link
+        count in that order where each is coloured, a directory by its
+        sticky and other-writable bits, and only a plain file by its
+        extension. A link whose target is not there is an orphan where
+        orphans are coloured or ln=target asks, and a link's target that is
+        missing is the missing colour where that is set. Null is no colour.
+*/
+static bool ls_full_path(p8 address_to full, string_address directory, string_address name);
+
+static file_color_span address_to ls_color_for(ls_entry address_to entry, string_address name,
+                                               bool target)
+{
+        positive mode;
+        bipolar link_ok;
+        positive which;
+
+        if (target)
+        {
+                mode = entry->link_mode;
+                link_ok = entry->link_ok ? 0 : -1;
+        }
+        else
+        {
+                mode = ls_color_referent && entry->link_ok ? entry->link_mode : entry->mode;
+                link_ok = entry->link_ok;
+        }
+
+        positive kind = mode & MODE_FORMAT;
+
+        if (link_ok == -1 && ls_colored(LS_MI))
+                which = LS_MI;
+        else if (!entry->known && !target)
+        {
+                positive given = entry->mode & MODE_FORMAT;
+
+                which = given == MODE_FILE        ? LS_FI
+                        : given == MODE_DIRECTORY ? LS_DI
+                        : given == MODE_LINK      ? LS_LN
+                        : given == MODE_PIPE      ? LS_PI
+                        : given == MODE_SOCKET    ? LS_SO
+                        : given == MODE_BLOCK     ? LS_BD
+                        : given == MODE_CHARACTER ? LS_CD
+                                                  : LS_OR;
+        }
+        else if (kind == MODE_FILE)
+        {
+                which = LS_FI;
+                if ((mode & 04000) && ls_colored(LS_SU))
+                        which = LS_SU;
+                else if ((mode & 02000) && ls_colored(LS_SG))
+                        which = LS_SG;
+                else if (entry->capability && !target)
+                        which = LS_CA;
+                else if ((mode & 0111) && ls_colored(LS_EX))
+                        which = LS_EX;
+                else if (entry->links > 1 && ls_colored(LS_MH))
+                        which = LS_MH;
+        }
+        else if (kind == MODE_DIRECTORY)
+        {
+                which = LS_DI;
+                if ((mode & 01000) && (mode & 0002) && ls_colored(LS_TW))
+                        which = LS_TW;
+                else if ((mode & 0002) && ls_colored(LS_OW))
+                        which = LS_OW;
+                else if ((mode & 01000) && ls_colored(LS_ST))
+                        which = LS_ST;
+        }
+        else
+                which = kind == MODE_LINK        ? LS_LN
+                        : kind == MODE_PIPE      ? LS_PI
+                        : kind == MODE_SOCKET    ? LS_SO
+                        : kind == MODE_BLOCK     ? LS_BD
+                        : kind == MODE_CHARACTER ? LS_CD
+                                                 : LS_OR;
+
+        ls_suffix_color address_to extension = which == LS_FI ? ls_extension_of(name) : null;
+
+        if (which == LS_LN && !link_ok && (ls_color_referent || ls_colored(LS_OR)))
+                which = LS_OR;
+
+        file_color_span address_to answer = extension ? address_of extension->sequence
+                                                      : address_of ls_indicators[which];
+
+        return answer->text ? answer : null;
+}
+
+// A sequence or a code, and before the first of the run the reset GNU
+// writes so what came before cannot bleed into it. None of it is counted
+// as output --dired has to place.
+static fn ls_prep_plain();
+
+static fn ls_put(file_color_span span)
+{
+        if (!ls_color_used)
+        {
+                ls_color_used = true;
+                ls_prep_plain();
+        }
+        if (span.length)
+                log(span.text, span.length);
+}
+
+// Back to plain text after a coloured name: the end code, or left, reset,
+// right.
+static fn ls_prep_plain()
+{
+        if (ls_indicators[LS_EC].text)
+                ls_put(ls_indicators[LS_EC]);
+        else
+        {
+                ls_put(ls_indicators[LS_LC]);
+                ls_put(ls_indicators[LS_RS]);
+                ls_put(ls_indicators[LS_RC]);
+        }
+}
+
+// The normal colour, before everything a name's line or column holds.
+static fn ls_normal_color()
+{
+        if (ls_coloring && ls_colored(LS_NO))
+        {
+                ls_put(ls_indicators[LS_LC]);
+                ls_put(ls_indicators[LS_NO]);
+                ls_put(ls_indicators[LS_RC]);
+        }
+}
+
+static fn ls_color_open(file_color_span address_to color)
+{
+        if (ls_colored(LS_NO))
+        {
+                ls_put(ls_indicators[LS_LC]);
+                ls_put(ls_indicators[LS_RC]);
+        }
+        ls_put(ls_indicators[LS_LC]);
+        ls_put(address_to color);
+        ls_put(ls_indicators[LS_RC]);
+}
+
+// At the end of a coloured run, the terminal's own colours back, unless
+// left and right are the plain ESC [ and m that already leave them.
+static fn ls_color_finish()
+{
+        file_color_span left = ls_indicators[LS_LC];
+        file_color_span right = ls_indicators[LS_RC];
+
+        if (!ls_coloring || !ls_color_used)
+                return;
+        if (file_color_span_is(left, (string_address) "\033[") &&
+            file_color_span_is(right, (string_address) "m"))
+                return;
+        ls_put(left);
+        ls_put(right);
 }
 
 static bool ls_full_path(p8 address_to full, string_address directory, string_address name)
@@ -8265,89 +8644,6 @@ static bool ls_full_path(p8 address_to full, string_address directory, string_ad
 
         string_copy_max_end(full, name, FILE_PATH_MAX - 1);
         return true;
-}
-
-static file_color_span ls_name_color(string_address directory,
-                                     ls_entry address_to entry,
-                                     string_address name)
-{
-        positive mode = entry->mode;
-        positive kind = mode & MODE_FORMAT;
-        positive key = LS_COLOR_FI;
-        string_address fallback = null;
-
-        if (kind == MODE_DIRECTORY)
-        {
-                key = (mode & 01000) && (mode & 0002) ? LS_COLOR_TW
-                      : (mode & 0002)                  ? LS_COLOR_OW
-                      : (mode & 01000)                 ? LS_COLOR_ST
-                                                       : LS_COLOR_DI;
-                fallback = (string_address) ((mode & 01000) && (mode & 0002)
-                                                 ? "30;42"
-                                             : (mode & 0002) ? "34;42"
-                                             : (mode & 01000) ? "37;44"
-                                                               : "01;34");
-        }
-        else if (kind == MODE_LINK)
-        {
-                key = LS_COLOR_LN;
-                fallback = (string_address) "01;36";
-
-                p8 full[FILE_PATH_MAX];
-                file_facts through;
-
-                // A link whose path would not fit whole cannot be followed,
-                // and is coloured as the orphan it might as well be.
-                if (!ls_full_path(full, directory, name) || !file_look_at(full, address_of through))
-                {
-                        file_color_span orphan = ls_color_of(LS_COLOR_OR, null);
-
-                        return orphan.text ? orphan
-                                           : ls_color_of(LS_COLOR_LN, fallback);
-                }
-
-                file_color_span link_color = ls_color_of(LS_COLOR_LN, fallback);
-
-                if (file_color_span_is(link_color, (string_address) "target"))
-                {
-                        ls_entry target = *entry;
-
-                        target.mode = through.mode;
-                        return ls_name_color(directory, address_of target, name);
-                }
-
-                return link_color;
-        }
-        else if (file_kind_of(mode)->colour_key)
-        {
-                key = ls_color_index(file_kind_of(mode)->colour_key);
-                fallback = file_kind_of(mode)->colour_fallback;
-        }
-        else if (mode & 04000)
-        {
-                key = LS_COLOR_SU;
-                fallback = (string_address) "37;41";
-        }
-        else if (mode & 02000)
-        {
-                key = LS_COLOR_SG;
-                fallback = (string_address) "30;43";
-        }
-        else
-        {
-                file_color_span suffix = ls_suffix_color(name);
-
-                if (suffix.text)
-                        return suffix;
-
-                if (mode & 0111)
-                {
-                        key = LS_COLOR_EX;
-                        fallback = (string_address) "01;32";
-                }
-        }
-
-        return ls_color_of(key, fallback);
 }
 
 // ---- Hyperlinks ----------------------------------------------------------
@@ -8360,7 +8656,7 @@ static fn ls_url_bytes(string_address text)
 
                 if (byte_is_alnum(byte) || string_first_of((string_address) "-._~/", byte))
                 {
-                        ls_out(text + at, 1);
+                        log(text + at, 1);
                         continue;
                 }
 
@@ -8369,7 +8665,7 @@ static fn ls_url_bytes(string_address text)
                 p8 escaped[3] = {'%'};
 
                 memory_into_hex(escaped + 1, address_of byte, 1);
-                ls_out(escaped, sizeof(escaped));
+                log(escaped, sizeof(escaped));
         }
 }
 
@@ -8379,8 +8675,8 @@ static fn ls_hyperlink_open(string_address directory, string_address name)
 {
         p8 full[FILE_PATH_MAX];
 
-        ls_out("\033]8;;file://", 0);
-        ls_out(ls_host, 0);
+        log("\033]8;;file://", 0);
+        log(ls_host, 0);
 
         if (!ls_full_path(full, directory, name))
                 string_copy_max_end(full, name, FILE_PATH_MAX - 1);
@@ -8394,7 +8690,7 @@ static fn ls_hyperlink_open(string_address directory, string_address name)
         if (file_resolve_as(full, real, true, FILE_RESOLVE_UNRESOLVED))
         {
                 ls_url_bytes(real);
-                ls_out("\033\\", 2);
+                log("\033\\", 2);
                 return;
         }
 
@@ -8402,16 +8698,16 @@ static fn ls_hyperlink_open(string_address directory, string_address name)
         {
                 ls_url_bytes(ls_cwd);
                 if (!(string_is(ls_cwd, '/') && !string_get(ls_cwd + 1)))
-                        ls_out("/", 1);
+                        log("/", 1);
         }
 
         ls_url_bytes(full);
-        ls_out("\033\\", 2);
+        log("\033\\", 2);
 }
 
 static fn ls_hyperlink_close()
 {
-        ls_out("\033]8;;\033\\", 0);
+        log("\033]8;;\033\\", 0);
 }
 
 // ---- Writing a name ------------------------------------------------------
@@ -8437,57 +8733,89 @@ static fn ls_dired_mark(positive begin, positive stop)
         line is followed by the terminal's erase-to-end, as the reference
         writes it, so a background colour does not bleed into the wrap.
 */
-static fn ls_name_say(string_address directory, ls_entry address_to entry,
-                      string_address name, positive start_column)
+static fn ls_name_emit(string_address directory, ls_entry address_to entry,
+                       string_address name, string_address linked, positive start_column,
+                       bool target)
 {
-        file_color_span color = {null, 0};
-        file_color_span reset = {null, 0};
+        file_color_span address_to color = ls_coloring ? ls_color_for(entry, name, target) : null;
+        bool colored = ls_coloring && (color || ls_colored(LS_NO));
+        bool pad = !target && ls_aligns_quotes() && ls_some_quoted && !entry->quoted;
 
-        if (ls_aligns_quotes() && ls_some_quoted && !entry->quoted)
+        if (pad)
                 ls_out(" ", 1);
-
-        if (ls_coloring)
-        {
-                color = ls_name_color(directory, entry, name);
-
-                if (color.text && !color.length)
-                        color.text = null;
-        }
-
-        if (color.text)
-        {
-                reset = ls_color_of(LS_COLOR_RS, (string_address) "0");
-
-                if (!ls_color_started)
-                {
-                        file_color_sgr(ls_out, reset);
-                        ls_color_started = true;
-                }
-
-                file_color_sgr(ls_out, color);
-        }
-
-        if (ls_hyperlink)
-                ls_hyperlink_open(directory, name);
+        if (color)
+                ls_color_open(color);
 
         positive begin = ls_out_bytes;
 
-        ls_quote(ls_out, name);
-        ls_dired_mark(begin, ls_out_bytes);
-
         if (ls_hyperlink)
-                ls_hyperlink_close();
-
-        if (color.text)
         {
-                file_color_sgr(ls_out, reset);
+                /*
+                        A quoted name among names lined up for quotes keeps
+                        its quotes outside the link, so the links line up
+                        too; the link is to where the entry itself leads,
+                        for a link's target as for the link.
+                */
+                ls_counted = 0;
+                ls_quote(ls_count_bytes, name);
 
-                positive width = ls_out_bytes - begin;
+                bool outside = ls_aligns_quotes() && ls_some_quoted && !pad && !target &&
+                               entry->quoted && ls_counted >= 2;
+                p8 small[FILE_PATH_MAX + 8];
+                p8 address_to quoted = ls_counted < sizeof(small) ? small : null;
+
+                if (outside && quoted)
+                {
+                        ls_counted = 0;
+                        ls_quoted_into = quoted;
+                        ls_quote(ls_quote_into, name);
+                        ls_out(quoted, 1);
+                        begin = ls_out_bytes;
+                        ls_hyperlink_open(directory, linked);
+                        ls_out(quoted + 1, ls_counted - 2);
+                        ls_dired_mark(begin, ls_out_bytes);
+                        ls_hyperlink_close();
+                        ls_out(quoted + ls_counted - 1, 1);
+                }
+                else
+                {
+                        ls_hyperlink_open(directory, linked);
+                        begin = ls_out_bytes;
+                        ls_quote(ls_out, name);
+                        if (!target)
+                                ls_dired_mark(begin, ls_out_bytes);
+                        ls_hyperlink_close();
+                }
+        }
+        else
+        {
+                ls_quote(ls_out, name);
+                if (!target)
+                        ls_dired_mark(begin, ls_out_bytes);
+        }
+
+        if (colored)
+        {
+                ls_prep_plain();
+
+                //      A name that may run past the end of the line clears
+                //      to its end, so a background colour does not bleed
+                //      into the wrap; it goes by bytes, as GNU's does.
+                ls_counted = 0;
+                ls_quote(ls_count_bytes, name);
+
+                positive width = ls_counted + pad;
 
                 if (ls_width && width &&
                     start_column / ls_width != (start_column + width - 1) / ls_width)
-                        ls_out("\033[K", 3);
+                        ls_put(ls_indicators[LS_CL]);
         }
+}
+
+static fn ls_name_say(string_address directory, ls_entry address_to entry,
+                      string_address name, positive start_column)
+{
+        ls_name_emit(directory, entry, name, name, start_column, false);
 }
 
 // ---- Times ---------------------------------------------------------------
@@ -8591,6 +8919,10 @@ static positive ls_frilled_width(ls_entry address_to entry)
 
 static fn ls_frills_before(ls_entry address_to entry)
 {
+        //      A long line takes the normal colour once, before all of it.
+        if (ls_format != 'l')
+                ls_normal_color();
+
         if (ls_inode)
         {
                 if (entry->known)
@@ -8625,96 +8957,52 @@ static fn ls_frills_before(ls_entry address_to entry)
                 ls_out("? ", 2);
 }
 
-static fn ls_mark_after(string_address directory, ls_entry address_to entry, string_address name)
+/*
+        What follows a name: in the long form a link's arrow and target,
+        coloured and marked for what the target is -- as far as the listing
+        asked about it, which without -F or colour that needs it is not at
+        all -- and otherwise the mark for what the entry itself is.
+*/
+static fn ls_mark_after(string_address directory, ls_entry address_to entry, string_address name,
+                        positive target_column)
 {
         bool link = entry->known && (entry->mode & MODE_FORMAT) == MODE_LINK;
-        p8 mark = ls_indicator && (entry->known || (entry->mode & MODE_FORMAT))
-                      ? ls_mark(entry->mode)
-                      : 0;
 
-        // In the long form the arrow is written and the mark goes on what the
-        // link points at; on a line of its own the link is the only thing
-        // there is to mark.
-        if (mark && !(ls_format == 'l' && link))
-                ls_out(address_of mark, 1);
-
-        if (ls_format == 'l' && link)
+        if (!(ls_format == 'l' && link))
         {
-                p8 where[FILE_PATH_MAX];
-                p8 full[FILE_PATH_MAX];
+                p8 mark = ls_indicator && (entry->known || (entry->mode & MODE_FORMAT))
+                              ? ls_mark(entry->mode)
+                              : 0;
 
-                if (!ls_full_path(full, directory, name))
-                {
-                        string_format(log_error, "%s: cannot read symbolic link '%w/%w': %s\n",
-                                      ls_program, writer_terminal_quoted_name, directory,
-                                      writer_terminal_quoted_name, name,
-                                      file_reason(-ERROR_NAME_TOO_LONG));
-                        ls_status = 1;
-                }
-                else if (file_link_text(full, where, FILE_PATH_MAX) >= 0)
-                {
-                        file_facts through;
-                        bool reached = file_look_at(full, address_of through);
-                        file_color_span target = {0};
-                        file_color_span target_reset = {0};
+                if (mark)
+                        ls_out(address_of mark, 1);
+                return;
+        }
 
-                        ls_out(" -> ", 4);
+        p8 where[FILE_PATH_MAX];
+        p8 full[FILE_PATH_MAX];
 
-                        /*
-                                The target is coloured for what it is, not for
-                                the link that names it: a link to a directory
-                                points at something blue, and one pointing at
-                                nothing is the orphan colour. The name goes in
-                                as well as the mode, so a suffix rule reads
-                                the target's own name.
-                        */
-                        if (ls_coloring)
-                        {
-                                if (!reached)
-                                {
-                                        target = ls_color_of(LS_COLOR_OR, null);
-                                }
-                                else
-                                {
-                                        ls_entry aimed = *entry;
+        if (!ls_full_path(full, directory, name))
+        {
+                string_format(log_error, "%s: cannot read symbolic link '%w/%w': %s\n",
+                              ls_program, writer_terminal_quoted_name, directory,
+                              writer_terminal_quoted_name, name,
+                              file_reason(-ERROR_NAME_TOO_LONG));
+                ls_status = 1;
+                return;
+        }
+        if (file_link_text(full, where, FILE_PATH_MAX) < 0)
+                return;
 
-                                        aimed.mode = through.mode;
-                                        target = ls_name_color(
-                                            directory, address_of aimed,
-                                            (string_address)where);
-                                }
+        ls_out(" -> ", 4);
+        ls_name_emit(directory, entry, (string_address)where, name, target_column, true);
 
-                                if (target.text && !target.length)
-                                        target.text = null;
-                        }
+        if (ls_indicator && entry->link_mode)
+        {
+                p8 there = ls_mark(entry->link_mode);
 
-                        if (target.text)
-                        {
-                                target_reset = ls_color_of(LS_COLOR_RS,
-                                                           (string_address) "0");
-
-                                if (!ls_color_started)
-                                {
-                                        file_color_sgr(ls_out, target_reset);
-                                        ls_color_started = true;
-                                }
-
-                                file_color_sgr(ls_out, target);
-                        }
-
-                        ls_quote(ls_out, (string_address)where);
-
-                        if (target.text)
-                                file_color_sgr(ls_out, target_reset);
-
-                        if (ls_indicator && ls_indicator != '/' && reached)
-                        {
-                                p8 there = ls_mark(through.mode);
-
-                                if (there)
-                                        ls_out(address_of there, 1);
-                        }
-                }
+                if (there)
+                        ls_out(address_of there, 1);
         }
 }
 
@@ -8802,6 +9090,9 @@ static fn ls_print_long(string_address directory)
         {
                 ls_entry address_to entry = address_of ls_entries[ls_sorted[k]];
                 string_address name = ls_arena + entry->name;
+
+                ls_normal_color();
+
                 positive line_start = ls_out_bytes;
                 /*
                         Where the reference counts the column a name begins
@@ -8936,8 +9227,11 @@ static fn ls_print_long(string_address directory)
                         ls_out(" ", 1);
                 }
 
-                ls_name_say(directory, entry, name, ls_out_bytes - column_base);
-                ls_mark_after(directory, entry, name);
+                positive name_column = ls_out_bytes - column_base;
+
+                ls_name_say(directory, entry, name, name_column);
+                ls_mark_after(directory, entry, name,
+                              name_column + ls_quoted_width(entry) + 4);
                 ls_out(address_of ls_eol, 1);
         }
 }
@@ -9027,7 +9321,7 @@ static fn ls_print_columns(string_address directory, bool across)
 
                         ls_frills_before(entry);
                         ls_name_say(directory, entry, ls_arena + entry->name, position);
-                        ls_mark_after(directory, entry, ls_arena + entry->name);
+                        ls_mark_after(directory, entry, ls_arena + entry->name, 0);
 
                         if (index + 1 < ls_count && column + 1 < columns)
                                 position = ls_indent(position + ls_sort_spare[index],
@@ -9050,7 +9344,7 @@ static fn ls_print_columns(string_address directory, bool across)
 
                         ls_frills_before(entry);
                         ls_name_say(directory, entry, ls_arena + entry->name, position);
-                        ls_mark_after(directory, entry, ls_arena + entry->name);
+                        ls_mark_after(directory, entry, ls_arena + entry->name, 0);
 
                         if (index + rows < ls_count)
                                 position = ls_indent(position + ls_sort_spare[index],
@@ -9090,7 +9384,7 @@ static fn ls_print_commas(string_address directory)
 
                 ls_frills_before(entry);
                 ls_name_say(directory, entry, ls_arena + entry->name, position);
-                ls_mark_after(directory, entry, ls_arena + entry->name);
+                ls_mark_after(directory, entry, ls_arena + entry->name, 0);
                 position += width;
         }
 
@@ -9105,7 +9399,7 @@ static fn ls_print_lines(string_address directory)
 
                 ls_frills_before(entry);
                 ls_name_say(directory, entry, ls_arena + entry->name, 0);
-                ls_mark_after(directory, entry, ls_arena + entry->name);
+                ls_mark_after(directory, entry, ls_arena + entry->name, 0);
                 ls_out(address_of ls_eol, 1);
         }
 }
@@ -9223,24 +9517,31 @@ static bool ls_add(bipolar directory, string_address path, string_address shown,
 
         /*
                 The reference ls asks the kernel about an entry the directory
-                has already described only when a column, an order or a mark
-                wants more than its kind -- the same test the failure below
-                reports under, widened by what needs a link's own facts or a
-                kind the directory would not give. A plain listing, and ls -R,
-                is getdents and nothing else: the look per name was 101,060
-                of ls -R's 132,580 system calls over a Linux tree.
+                has already described only when a column, an order, a mark or
+                a colour wants more than its kind -- GNU's check_stat, term
+                for term -- and it is exactly then that a failure to look is
+                reported. A plain listing, and ls -R, is getdents and nothing
+                else: the look per name was 101,060 of ls -R's 132,580 system
+                calls over a Linux tree. -i looks too, for the inode a
+                directory entry here does not carry, but says nothing more
+                than the reference would.
         */
         positive given_kind = file_mode_from_type(type) & MODE_FORMAT;
-        bool wanted = given || !under || ls_format == 'l' || ls_inode ||
-                      ls_blocks || ls_sorting == 't' || ls_sorting == 'S' ||
-                      ls_dereference == 'L' ||
-                      ((ls_indicator || ls_coloring || ls_recursive ||
-                        ls_group_directories) && !given_kind) ||
-                      (ls_indicator == 'F' && given_kind == MODE_FILE) ||
-                      (ls_coloring && (given_kind == MODE_FILE ||
-                                       given_kind == MODE_DIRECTORY)) ||
-                      ((ls_indicator || ls_coloring || ls_group_directories) &&
-                       given_kind == MODE_LINK);
+        bool unknown = !given_kind;
+        bool needs_stat = ls_sorting == 't' || ls_sorting == 'S' || ls_format == 'l' ||
+                          ls_blocks || ls_hyperlink || ls_context;
+        bool needs_type = !needs_stat && (ls_recursive || ls_coloring || ls_context ||
+                                          ls_group_directories || ls_indicator);
+        bool report = given || !under || needs_stat || (needs_type && unknown) ||
+                      ((given_kind == MODE_DIRECTORY || unknown) && ls_coloring &&
+                       (ls_colored(LS_OW) || ls_colored(LS_ST) || ls_colored(LS_TW))) ||
+                      ((ls_inode || needs_type) && (given_kind == MODE_LINK || unknown) &&
+                       (ls_dereference == 'L' || ls_color_referent || ls_check_link_mode)) ||
+                      ((given_kind == MODE_FILE || unknown) &&
+                       (ls_indicator == 'F' ||
+                        (ls_coloring && (ls_colored(LS_EX) || ls_colored(LS_SU) ||
+                                         ls_colored(LS_SG)))));
+        bool wanted = report || ls_inode;
 
         if (given)
                 facts = *given;
@@ -9281,17 +9582,39 @@ static bool ls_add(bipolar directory, string_address path, string_address shown,
                                                      (positive) "system.posix_acl_default", 0, 0) > 0));
                 }
 
-                // A link's target decides which group it sorts with and what
-                // mark or colour it gets, when any of those was asked for.
+                /*
+                        A link's target is looked at when something will read
+                        it -- the long form's mark after the arrow under -F or
+                        --file-type, a colour that depends on it, or the
+                        grouping of directories first -- and not otherwise,
+                        so a plain ls -l colours no target at all, as GNU's
+                        does not.
+                */
                 if ((facts.mode & MODE_FORMAT) == MODE_LINK &&
-                    (ls_group_directories || ls_indicator || ls_coloring || ls_format == 'l'))
+                    (ls_format == 'l' || ls_check_link_mode) &&
+                    (ls_indicator == 'f' || ls_indicator == 'F' || ls_check_link_mode))
                 {
                         file_facts through;
                         p8 full[FILE_PATH_MAX];
 
                         if (ls_full_path(full, under, path) && file_look_at(full, address_of through))
+                        {
+                                entry->link_ok = true;
+                                entry->link_mode = (p32)through.mode;
                                 entry->points_at_directory =
                                     (through.mode & MODE_FORMAT) == MODE_DIRECTORY;
+                        }
+                }
+
+                //      A capability colours a regular file only when ca= is set.
+                if (ls_coloring && ls_colored(LS_CA) && (facts.mode & MODE_FORMAT) == MODE_FILE)
+                {
+                        p8 full[FILE_PATH_MAX];
+
+                        entry->capability =
+                            ls_full_path(full, under, path) &&
+                            system_call_4(ls_dereference == 'L' ? syscall(getxattr) : syscall(lgetxattr),
+                                          (positive)full, (positive) "security.capability", 0, 0) > 0;
                 }
         }
         else
@@ -9303,13 +9626,7 @@ static bool ls_add(bipolar directory, string_address path, string_address shown,
                 // kind: -F must see a regular file's execute bits, colour
                 // must see a directory's sticky and writable bits, and
                 // both must see whatever the directory declined to describe.
-                positive format = entry->mode & MODE_FORMAT;
-
-                if (ls_format == 'l' || ls_inode || ls_blocks || ls_sorting == 't' ||
-                    ls_sorting == 'S' || ls_dereference == 'L' ||
-                    ((ls_indicator || ls_coloring) && !format) ||
-                    (ls_indicator == 'F' && format == MODE_FILE) ||
-                    (ls_coloring && (format == MODE_FILE || format == MODE_DIRECTORY)))
+                if (report)
                 {
                         p8 full[FILE_PATH_MAX];
 
@@ -10082,7 +10399,6 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
         ls_dired_count = 0;
         ls_subdired_count = 0;
         file_identity_set_clear(address_of ls_listed);
-        ls_color_started = false;
 
         file_taking taking = {
             .program = program,
@@ -10406,40 +10722,26 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                                       ls_program, writer_terminal_quoted_name, given);
         }
 
-        // Colour.
-        ls_coloring = false;
-        ls_colors = file_environment((string_address) "LS_COLORS");
-
-        if (ls_colors && string_get(ls_colors) &&
-            !file_color_table_valid(ls_colors, false))
-        {
-                string_format(log_error,
-                              "%s: unparsable value for LS_COLORS environment variable\n",
-                              program);
-                ls_colors = null;
-        }
-
         /*
-                With no LS_COLORS, GNU colours with its built-in table --
-                the fallbacks each key has here -- when COLORTERM says
-                anything or TERM is one the dircolors database names.
+                Colour: asked for and wanted here, and then LS_COLORS read --
+                or with no LS_COLORS the built-in table, but only when
+                COLORTERM says anything or TERM is one the dircolors database
+                names. A run of names with nothing between them but a zero
+                byte is no place for colour, whichever order the two were
+                asked in. Some terminals mishandle tabs among colour
+                sequences, so a coloured listing indents with spaces whatever
+                -T said. Links are followed for their targets where a colour
+                or the grouping of directories first depends on them.
         */
-        if (flags & FILE_FLAG('K'))
-                ls_coloring = ls_when_active(ls_color_when) &&
-                              ((ls_colors && string_get(ls_colors)) || ls_term_colors());
-
-        //      A run of names with nothing between them but a zero byte is
-        //      not a place for colour, whichever order the two were asked in.
-        if (flags & FILE_FLAG('6'))
-                ls_coloring = false;
-
-        //      Some terminals mishandle tabs among colour sequences, so a
-        //      coloured listing indents with spaces whatever -T said.
+        ls_coloring = (flags & FILE_FLAG('K')) && ls_when_active(ls_color_when) &&
+                      !(flags & FILE_FLAG('6')) && ls_color_parse();
+        ls_color_used = false;
         if (ls_coloring)
-        {
-                ls_color_parse();
                 ls_tabsize = 0;
-        }
+        ls_check_link_mode = ls_group_directories ||
+                             (ls_coloring && (ls_colored(LS_OR) ||
+                                              (ls_colored(LS_EX) && ls_color_referent) ||
+                                              (ls_colored(LS_MI) && ls_format == 'l')));
 
         if (flags & FILE_FLAG('y'))
         {
@@ -10481,6 +10783,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                         ls_directory((string_address) ".", ls_recursive,
                                      FILE_MAX_DEPTH, true);
 
+                ls_color_finish();
                 ls_dired_finish();
                 log_flush();
                 return ls_status;
@@ -10586,6 +10889,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                 ls_directory(name, headings, FILE_MAX_DEPTH, true);
         }
 
+        ls_color_finish();
         ls_dired_finish();
         log_flush();
 
