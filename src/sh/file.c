@@ -9752,6 +9752,14 @@ static bool ls_option_seen(p8 letter, string_address value)
                 return true;
         }
 
+        //      --dired is read as a long listing without hyperlinks, so a
+        //      --hyperlink before it is undone and one after it stands.
+        if (letter == 'D')
+        {
+                ls_hyperlink_when = 0;
+                return true;
+        }
+
         if (!ls_option_word(letter, value))
         {
                 //      A word among a fixed set is refused the way argmatch
@@ -10014,7 +10022,10 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
         //      beside any other format it is dropped, and asked for beside
         //      --zero, which the long listing survives, the two cannot both
         //      be answered.
-        ls_dired = (flags & FILE_FLAG('D')) != 0 && ls_format == 'l';
+        //      And a --hyperlink still standing drops it too -- only one
+        //      written after it, since -D turns hyperlinks off as it is read.
+        ls_dired = (flags & FILE_FLAG('D')) != 0 && ls_format == 'l' &&
+                   !((flags & FILE_FLAG('y')) && ls_when_active(ls_hyperlink_when));
 
         if (ls_dired && (flags & FILE_FLAG('6')))
                 return string_report(log_error, 2, "%s: --dired and --zero are incompatible\n",
@@ -10308,10 +10319,6 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
         if (flags & FILE_FLAG('y'))
         {
                 ls_hyperlink = ls_when_active(ls_hyperlink_when);
-                // A hyperlinked name's offsets would count the escapes, and
-                // GNU drops --dired rather than write them.
-                if (ls_hyperlink)
-                        ls_dired = false;
 
                 if (ls_hyperlink)
                 {
