@@ -4073,7 +4073,8 @@ static bool join_number(string_address value, positive address_to number)
         if (!text_unsigned_option(value, true, address_of made) || !made)
                 return false;
 
-        address_to number = made - 1;
+        // ... held, as GNU holds it, in a ptrdiff_t.
+        address_to number = min(made, (positive)bipolar_max) - 1;
         return true;
 }
 
@@ -4085,10 +4086,12 @@ static bool join_key_said[2];
 // one after the walk is not said as well.
 static bool join_complained;
 
+// GNU quote()s the word, so an apostrophe or a control byte in it is
+// spelled as quote() spells it in the C locale.
 static bool join_complain(string_address format, string_address word)
 {
         text_flush();
-        string_format(writer_stderr, format, word);
+        string_format(writer_stderr, format, writer_terminal_quoted_name, word);
         join_complained = true;
         return false;
 }
@@ -4110,64 +4113,63 @@ static bool join_key_set(positive side, positive field)
         return true;
 }
 
+static bool join_complain(string_address format, string_address word);
+
+/*
+        -o as GNU's add_field_list reads it: auto alone, or a list whose
+        pieces are what lies between each comma, blank or tab -- an empty
+        one included -- and each piece 0, or 1. or 2. and a field number,
+        refused in decode_field_spec's words. auto and a list may both be
+        given; the list is what is written.
+*/
 static bool join_output_add(string_address word)
 {
-        positive at = 0;
-
         if (string_equals(word, "auto"))
         {
-                if (join_output_count)
-                        return false;
                 join_output_auto = true;
                 return true;
         }
 
-        if (join_output_auto)
-                return false;
-
-        while (word[at])
+        for (;;)
         {
-                at += string_span_of_set(word + at, ", \t");
-
-                if (!word[at])
-                        break;
-                if (join_output_count == JOIN_OUTPUT_MAX)
-                        return false;
-
+                string_address stop = string_first_of_set(word, ", \t");
+                positive length = stop ? (positive)(stop - word) : string_length(word);
+                p8 piece[64];
+                p8 address_to held = length < sizeof(piece)
+                                         ? piece
+                                         : (p8 address_to)memory_take(length + 1);
                 join_output output = {0, 0};
+                bool fine = true;
 
-                if (word[at] == '0' &&
-                    (!word[at + 1] || word[at + 1] == ',' ||
-                     byte_is_blank(word[at + 1])))
-                        at++;
-                else
+                if (!held)
+                        return join_complain("join: memory exhausted\n", null);
+                memory_copy_apart(held, word, length);
+                held[length] = 0;
+
+                if (held[0] == '0' || ((held[0] == '1' || held[0] == '2') && held[1] != '.'))
+                        fine = (held[0] == '0' && !held[1]) ||
+                               join_complain("join: invalid field specifier: '%w'\n", held);
+                else if (held[0] == '1' || held[0] == '2')
                 {
-                        if ((word[at] != '1' && word[at] != '2') ||
-                            word[at + 1] != '.')
-                                return false;
-
-                        output.file = word[at] - '0';
-                        at += 2;
-                        string_address digits = word + at;
-                        positive field = 0;
-
-                        if (!string_digits_checked(address_of digits, 10,
-                                                   address_of field) ||
-                            !field)
-                                return false;
-
-                        at = (positive)(digits - word);
-
-                        output.field = field - 1;
+                        output.file = held[0] - '0';
+                        fine = join_number(held + 2, address_of output.field) ||
+                               join_complain("join: invalid field number: '%w'\n", held + 2);
                 }
+                else
+                        fine = join_complain("join: invalid file number in field spec: '%w'\n", held);
 
-                if (word[at] && word[at] != ',' && !byte_is_blank(word[at]))
+                if (held != piece)
+                        memory_give(held);
+                if (!fine)
                         return false;
-
+                if (join_output_count == JOIN_OUTPUT_MAX)
+                        return join_complain("join: memory exhausted\n", null);
                 join_outputs[join_output_count++] = output;
+                // A separator that ends the list ends it: 1.1, is 1.1.
+                if (!stop || !stop[1])
+                        return true;
+                word = stop + 1;
         }
-
-        return join_output_count != 0;
 }
 
 static bool join_side(string_address value, positive address_to mask)
@@ -4206,7 +4208,7 @@ static bool join_option_read(p8 letter, string_address value)
                 bool zero = value[0] == '\\' && value[1] == '0' && !value[2];
 
                 if (value[0] && value[1] && !zero)
-                        return join_complain("join: multi-character tab '%s'\n", value);
+                        return join_complain("join: multi-character tab '%w'\n", value);
                 b32 separator = zero ? 0 : value[0] ? value[0] : '\n';
                 if (join_separator >= 0 && join_separator != separator)
                         return join_complain("join: incompatible tabs\n", null);
@@ -4219,7 +4221,7 @@ static bool join_option_read(p8 letter, string_address value)
                 positive field;
 
                 if (!join_number(value, address_of field))
-                        return join_complain("join: invalid field number: '%s'\n", value);
+                        return join_complain("join: invalid field number: '%w'\n", value);
                 if (!join_key_set((positive)(letter - '1'), field))
                         return false;
         }
@@ -4228,19 +4230,19 @@ static bool join_option_read(p8 letter, string_address value)
                 positive field;
 
                 if (!join_number(value, address_of field))
-                        return join_complain("join: invalid field number: '%s'\n", value);
+                        return join_complain("join: invalid field number: '%w'\n", value);
                 if (!join_key_set(0, field) || !join_key_set(1, field))
                         return false;
         }
         else if (letter == 'a')
         {
                 if (!join_side(value, address_of join_unpaired))
-                        return join_complain("join: invalid file number: '%s'\n", value);
+                        return join_complain("join: invalid file number: '%w'\n", value);
         }
         else if (letter == 'v')
         {
                 if (!join_side(value, address_of join_only))
-                        return join_complain("join: invalid file number: '%s'\n", value);
+                        return join_complain("join: invalid file number: '%w'\n", value);
         }
         else if (letter == 'o')
         {
@@ -20248,44 +20250,36 @@ static fn tr_printable(p8 address_to into, positive address_to made, p8 c)
         address_to made += 4;
 }
 
+/*
+        A set's piece as GNU names it: make_printable_str's spelling, and
+        under quoted, quote() of that in the C locale -- 'a\\nb' for the
+        backslash it spelled, 'a\\'b' for an apostrophe -- where the format
+        holds its quotes. The piece is whole however long it is.
+*/
 static bool tr_complain(string_address format, p8 address_to from,
                         positive length, bool quoted)
 {
-        p8 shown[256];
+        p8 small[256];
+        p8 address_to shown = length * 4 < sizeof(small)
+                                  ? small
+                                  : (p8 address_to)memory_take(length * 4 + 1);
         positive made = 0;
 
-        for (positive i = 0; i < length && made + 5 < sizeof(shown); i++)
+        text_flush();
+        text_status = 1;
+        if (!shown)
+                return string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+
+        for (positive i = 0; i < length; i++)
                 tr_printable(shown, address_of made, from[i]);
 
         shown[made] = '\0';
-        text_flush();
-
         if (quoted)
-        {
-                //      quote() in the C locale: single quotes, and an
-                //      apostrophe inside is closed, escaped and reopened.
-                p8 wrapped[sizeof(shown) * 4 + 3];
-                positive w = 0;
-
-                wrapped[w++] = '\'';
-                for (positive i = 0; i < made; i++)
-                {
-                        if (shown[i] == '\'')
-                        {
-                                memory_copy_apart(wrapped + w, "'\\''", 4);
-                                w += 4;
-                        }
-                        else
-                                wrapped[w++] = shown[i];
-                }
-                wrapped[w++] = '\'';
-                wrapped[w] = '\0';
-                string_format(writer_stderr, format, wrapped);
-        }
+                string_format(writer_stderr, format, writer_terminal_quoted_name, shown);
         else
                 string_format(writer_stderr, format, shown);
-
-        text_status = 1;
+        if (shown != small)
+                memory_give(shown);
         return false;
 }
 
@@ -20414,7 +20408,7 @@ static b32 tr_repeat(positive start, positive length, p8 address_to repeated,
 
                         if (!good)
                         {
-                                tr_complain("tr: invalid repeat count %s in [c*n] construct\n",
+                                tr_complain("tr: invalid repeat count '%w' in [c*n] construct\n",
                                             at, digits, true);
                                 return -2;
                         }
@@ -20508,7 +20502,7 @@ static bool tr_parse(string_address spec, tr_list address_to list)
                                                         taken = true;
                                                 }
                                                 else if (!tr_star_digits_close(i + 2, length))
-                                                        return tr_complain("tr: invalid character class %s\n",
+                                                        return tr_complain("tr: invalid character class '%w'\n",
                                                                            name, size, true);
                                         }
                                         else if (size == 1)
@@ -21497,16 +21491,17 @@ static b32 text_uniq()
         if (flags & FILE_FLAG('z'))
                 text_delimiter = '\0';
 
-        if (all_repeated && counting)
-                return text_done(text_operand_trouble("printing all duplicated lines and repeat counts is meaningless",
-                                                      null, null));
+        // In GNU's order: the operands, then --group, then -c with -D.
+        if (text_files_count > 2)
+                return text_done(text_operand_trouble("extra operand", program_argument(text_files[2]), null));
 
         if (grouping && (counting || repeated_only || unique_only || all_repeated))
                 return text_done(text_operand_trouble("--group is mutually exclusive with -c/-d/-D/-u",
                                                       null, null));
 
-        if (text_files_count > 2)
-                return text_done(text_operand_trouble("extra operand", program_argument(text_files[2]), null));
+        if (all_repeated && counting)
+                return text_done(text_operand_trouble("printing all duplicated lines and repeat counts is meaningless",
+                                                      null, null));
 
         if (!text_open(text_file_name(0)))
                 return text_done(1);
@@ -21523,7 +21518,13 @@ static b32 text_uniq()
                 target = text_open_handle(name, TEXT_WRITE, 0666);
 
                 if (target < 0)
-                        return text_done(string_diagnostic(&text_diagnostic, 1, name, "Cannot open file"));
+                {
+                        //      quotef's name and the system's reason.
+                        text_flush();
+                        string_format(writer_stderr, "%s: %w: %s\n", text_name,
+                                      writer_shell_name, name, file_reason(target));
+                        return text_done(1);
+                }
 
                 text_out_handle = (positive)target;
         }
