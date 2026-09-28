@@ -18053,6 +18053,41 @@ static fn clock_format_core(clock_format_state address_to state,
                 }
 
                 const char address_to composite = clock_composite_format(which);
+
+                /*
+                        %F as nstrftime has it: a bare one is %+4Y-%m-%d, so a
+                        year past 9999 says its sign (+12345-01-01 reads back
+                        as a date), and a flag and width on %F go to the year
+                        alone, the width less the six of "-MM-DD":
+                        %12F is %06Y-%m-%d, %+F is %+1Y-%m-%d.
+                */
+                p8 dated[24];
+
+                if (which == 'F' && state->extensions)
+                {
+                        positive at = 0;
+                        //      No width left for the year is no padding at
+                        //      all (%3F of the year 1 is 1-01-01), which a
+                        //      width of one says.
+                        b64 year_width = state->pad || state->width >= 0
+                                             ? (state->width > 7 ? state->width - 6 : 1)
+                                             : 4;
+
+                        dated[at++] = '%';
+                        dated[at++] = state->pad || state->width >= 0 ? state->pad : '+';
+                        if (!dated[at - 1])
+                                at--;
+                        if (year_width)
+                        {
+                                if (year_width >= 10)
+                                        dated[at++] = (p8)('0' + year_width / 10 % 10);
+                                dated[at++] = (p8)('0' + year_width % 10);
+                        }
+                        memory_copy(dated + at, "Y-%m-%d", 8);
+                        composite = (const char address_to)dated;
+                        state->width = -1;
+                        state->pad = 0;
+                }
                 if (composite)
                 {
                         clock_format_nested(state, composite, broken);

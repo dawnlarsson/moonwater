@@ -8145,7 +8145,11 @@ FILES_UTILITIES = (
                   tuple({"argv": argv, "env": (("LC_ALL", locale), ("TZ", "Europe/Berlin"))}
                         for locale in ("en_US.UTF-8", "en_US.utf8", "en_US", "C", "de_DE.UTF-8")
                         for argv in (("-d", "2025-10-11T13:00"), ("-d", "2025-10-11T01:00"),
-                                     ("-d", "@1000000000", "+%c|%x|%X|%r|%Ec|%EX|%%c|%p"), ("-u", "-d", "@0")))),
+                                     ("-d", "@1000000000", "+%c|%x|%X|%r|%Ec|%EX|%%c|%p"), ("-u", "-d", "@0"))) +
+                  # nstrftime's %F: a bare one signs a year past 9999, a flag
+                  # or width goes to the year alone.
+                  tuple(("-u", "-d", "@%d" % moment, "+%F|%+F|%+12F|%12F|%-12F|%012F|%_12F|%^F|%3F")
+                        for moment in (0, 253402300800, 327403900800, -62135596800))),
 )
 
 #       Scenes a fixture cannot hold, made by the shell before the program
