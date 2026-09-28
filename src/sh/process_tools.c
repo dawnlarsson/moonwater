@@ -2901,10 +2901,12 @@ static bool process_replay_payload(process_replay_reader address_to reader,
                 positive chunk = min(length, reader->from.have - reader->from.at);
                 if (emit)
                 {
-                        if (carriage)
-                                for (positive at = 0; at < chunk; at++)
-                                        if (reader->from.buf[reader->from.at + at] == '\r')
-                                                reader->from.buf[reader->from.at + at] = '\n';
+                        p8 address_to past = reader->from.buf + reader->from.at + chunk;
+
+                        for (p8 address_to cr = carriage ? memory_first_of(past - chunk, '\r', chunk)
+                                                         : null;
+                             cr; cr = memory_first_of(cr + 1, '\r', (positive)(past - cr - 1)))
+                                *cr = '\n';
                         if (system_write_all(1, reader->from.buf + reader->from.at,
                                              chunk) != chunk)
                                 return false;
