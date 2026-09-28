@@ -44686,6 +44686,94 @@ static bool date_shape(writer write, b64 when, positive nanoseconds,
 
 static string_address date_chosen_format;
 
+/*
+        The time conventions of LC_TIME (LC_ALL, then LC_TIME, then LANG),
+        for the two locales there are here: C (and POSIX, and any locale
+        that is not installed, which the C library turns into C) and
+        en_US in UTF-8, the one other the reference machine carries. en_US
+        writes the time of day in twelve hours: its default format is
+        '%a %b %e %r %Z %Y' (Sat Oct 11 01:00:00 PM CEST 2025), %c is
+        '%a %d %b %Y %r %Z', %x '%m/%d/%Y' and %X '%r'. The names of days,
+        months and AM/PM are the same English in both.
+*/
+static bool date_locale_en_us()
+{
+        string_address name = file_environment((string_address) "LC_ALL");
+
+        if (!name || !name[0])
+                name = file_environment((string_address) "LC_TIME");
+        if (!name || !name[0])
+                name = file_environment((string_address) "LANG");
+        if (!name || memory_compare(name, "en_US.", 6))
+                return false;
+        name += 6;
+
+        p8 set[8];
+        positive have = 0;
+
+        for (; string_get(name) && string_get(name) != '@' && have < sizeof(set) - 1; name++)
+                if (string_get(name) != '-')
+                        set[have++] = byte_to_lower(string_get(name));
+        set[have] = end;
+        return string_equals(set, "utf8") && !string_get(name);
+}
+
+static byte_store date_localized;
+
+static string_address date_localize(string_address format)
+{
+        if (!date_locale_en_us())
+                return format;
+
+        date_localized.used = 0;
+        for (string_address at = format; string_get(at); at++)
+        {
+                string_address with = null;
+                positive skip = 1;
+
+                if (string_is(at, '%'))
+                {
+                        p8 letter = at[1];
+
+                        if (letter == 'E' || letter == 'O')
+                        {
+                                letter = at[2];
+                                skip = 2;
+                        }
+                        with = letter == 'c'   ? (string_address) "%a %d %b %Y %r %Z"
+                               : letter == 'x' ? (string_address) "%m/%d/%Y"
+                               : letter == 'X' ? (string_address) "%r"
+                                               : null;
+                        if (!with && at[1])
+                        {
+                                //      Any other conversion, %% among them,
+                                //      goes over whole.
+                                if (!byte_store_reserve(address_of date_localized,
+                                                        date_localized.used + 2, 64))
+                                        return format;
+                                date_localized.bytes[date_localized.used++] = '%';
+                                date_localized.bytes[date_localized.used++] = at[1];
+                                at++;
+                                continue;
+                        }
+                }
+
+                positive length = with ? string_length(with) : 1;
+
+                if (!byte_store_reserve(address_of date_localized,
+                                        date_localized.used + length + 1, 64))
+                        return format;
+                memory_copy(date_localized.bytes + date_localized.used, with ? with : at, length);
+                date_localized.used += length;
+                if (with)
+                        at += skip;
+        }
+        if (!byte_store_reserve(address_of date_localized, date_localized.used + 1, 64))
+                return format;
+        date_localized.bytes[date_localized.used] = end;
+        return date_localized.bytes;
+}
+
 static const file_word date_iso_words[] = {
     {"hours", 3}, {"minutes", 4}, {"date", 0}, {"seconds", 1}, {"ns", 2},
 };
@@ -44959,8 +45047,10 @@ static b32 file_date()
         }
 
         if (!format)
-                format = resolution ? (string_address) "%s.%N"
-                                    : (string_address) "%a %b %e %H:%M:%S %Z %Y";
+                format = resolution           ? (string_address) "%s.%N"
+                         : date_locale_en_us() ? (string_address) "%a %b %e %r %Z %Y"
+                                               : (string_address) "%a %b %e %H:%M:%S %Z %Y";
+        format = date_localize(format);
 
         if (batch)
         {

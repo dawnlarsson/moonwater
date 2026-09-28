@@ -8138,7 +8138,14 @@ FILES_UTILITIES = (
                    ("-x",), ("-d",), ("-r",), ("-f",), ("-I", "-R", "-d", "@0"), ("-R", "-I", "-d", "@0"), ("-u", "-d", "2001-09-09 12:00 +0200", "+%H %Z"),
                    # Options after the format operand, which getopt reaches.
                    ("+%F", "-d", "@0"), ("+%s", "-u", "-d", "@5"), ("+%F", "-d", "@0", "+%T"),
-                   ("-d", "@0", "+%F", "-u"), ("+%F", "--", "-d"))),
+                   ("-d", "@0", "+%F", "-u"), ("+%F", "--", "-d")) +
+                  # LC_TIME's conventions: en_US in UTF-8 writes twelve
+                  # hours by default and in %c, %x and %X; anything not
+                  # installed is C.
+                  tuple({"argv": argv, "env": (("LC_ALL", locale), ("TZ", "Europe/Berlin"))}
+                        for locale in ("en_US.UTF-8", "en_US.utf8", "en_US", "C", "de_DE.UTF-8")
+                        for argv in (("-d", "2025-10-11T13:00"), ("-d", "2025-10-11T01:00"),
+                                     ("-d", "@1000000000", "+%c|%x|%X|%r|%Ec|%EX|%%c|%p"), ("-u", "-d", "@0")))),
 )
 
 #       Scenes a fixture cannot hold, made by the shell before the program
