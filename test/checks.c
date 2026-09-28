@@ -64269,13 +64269,70 @@ static p64 fill_change(struct waterlink_link address_to link, p64 state,
         return state;
 }
 
+/*      The normal band counted again by walking it: the tally the bounded
+        walks trust has to be what is there, whoever moved the band, and
+        every key with a frame there has its bit (a bit may outlive its
+        frames; a walk clears it). */
+static bool band_counts_hold(struct waterlink_link address_to link)
+{
+        p16 counted[WATERLINK_KEYS];
+        p64 keys = 0;
+
+        memory_zero(counted, sizeof counted);
+        for (p32 at = link->head[WATERLINK_BAND_NORMAL]; at != WATERLINK_NONE;
+             at = link->slot[at].next)
+        {
+                counted[link->slot[at].key]++;
+                keys |= 1ull << link->slot[at].key;
+        }
+        return !(keys & ~link->banded) &&
+               !memory_compare(counted, link->queued, sizeof counted);
+}
+
+/*      Two links the same from a place on, but for which keys' bits are
+        set in banded past their last frame: the reference fill never clears
+        one, and waterlink_fill clears those its walk comes across. */
+static bool fill_links_apart(struct waterlink_link address_to one,
+                             struct waterlink_link address_to two,
+                             positive from)
+{
+        positive mark = __builtin_offsetof(struct waterlink_link, banded);
+
+        return memory_compare((p8 address_to)one + from,
+                              (p8 address_to)two + from, mark - from) ||
+               memory_compare(one->queued, two->queued, sizeof one->queued) ||
+               !band_counts_hold(one) || !band_counts_hold(two);
+}
+
+//      The walk wake did before it could end early: any frame the window lets by.
+static bool sendable_walk(struct waterlink_link address_to link)
+{
+        for (p32 at = link->head[WATERLINK_BAND_NORMAL]; at != WATERLINK_NONE;
+             at = link->slot[at].next)
+                if (!waterlink_key_blocked(link, link->slot + at))
+                        return true;
+        return false;
+}
+
+//      Whether a walk now ends early: a stream blocked with more behind it.
+static bool band_walk_bounded(struct waterlink_link address_to link)
+{
+        for (p32 at = link->head[WATERLINK_BAND_NORMAL]; at != WATERLINK_NONE;
+             at = link->slot[at].next)
+                if ((link->slot[at].flags & WATERLINK_FRAME_DURABLE) &&
+                    waterlink_key_blocked(link, link->slot + at) &&
+                    link->queued[link->slot[at].key] > 1)
+                        return true;
+        return false;
+}
+
 static fn fill_procedural(void)
 {
         static p8 body_one[WATERLINK_PAYLOAD + 64];
         static p8 body_two[WATERLINK_PAYLOAD + 64];
         p64 state = 0x243f6a8885a308d3ull;
         positive runs = 0, calls = 0, written = 0, wrong = 0, apart = 0;
-        positive missed = 0;
+        positive missed = 0, bounded = 0, miscounted = 0;
 
         memory_zero(fill_seen, sizeof fill_seen);
         for (positive run = 0; run < 300; run++)
@@ -64302,6 +64359,9 @@ static fn fill_procedural(void)
                                 for (positive byte = 0; byte < sizeof body_one; byte++)
                                         body_one[byte] = body_two[byte] =
                                                 (p8)(byte * 13 + step + fill);
+                                bounded += band_walk_bounded(address_of fill_two);
+                                miscounted += waterlink_sendable(address_of fill_two) !=
+                                              sendable_walk(address_of fill_two);
                                 used_one = fill_walk(address_of fill_one, body_one,
                                                      at, address_of alone_one);
                                 used_two = waterlink_fill(address_of fill_two,
@@ -64309,17 +64369,17 @@ static fn fill_procedural(void)
                                                           address_of alone_two);
                                 calls++;
                                 written += used_one;
+                                miscounted += !band_counts_hold(address_of fill_one) ||
+                                              !band_counts_hold(address_of fill_two);
                                 wrong += used_one != used_two ||
                                          alone_one != alone_two ||
                                          memory_compare(body_one, body_two,
                                                         sizeof body_one) != 0;
-                                apart += memory_compare(
-                                                 address_of fill_one.sending,
-                                                 address_of fill_two.sending,
-                                                 sizeof fill_one -
-                                                         __builtin_offsetof(
-                                                                 struct waterlink_link,
-                                                                 sending)) != 0;
+                                apart += fill_links_apart(address_of fill_one,
+                                                          address_of fill_two,
+                                                          __builtin_offsetof(
+                                                                  struct waterlink_link,
+                                                                  sending));
                                 for (positive slot = 0; slot < WATERLINK_SLOTS; slot++)
                                         apart += memory_compare(
                                                          fill_one.slot + slot,
@@ -64331,16 +64391,17 @@ static fn fill_procedural(void)
                         now += fill_next(address_of state) % 8 ? fill_next(address_of state) % 3000
                                                                : fill_next(address_of state) % 300000;
                 }
-                apart += memory_compare(address_of fill_one, address_of fill_two,
-                                        sizeof fill_one) != 0;
+                apart += fill_links_apart(address_of fill_one,
+                                          address_of fill_two, 0);
                 runs++;
         }
 
         for (positive seen = 0; seen < FILL_SEEN; seen++)
                 missed += fill_seen[seen] < 20;
         string_format(log, "  fill: %p calls in %p runs wrote %p bytes; "
-                           "%p paths taken under twenty times\n",
-                      calls, runs, written, missed);
+                           "%p paths taken under twenty times; %p calls "
+                           "past a blocked stream\n",
+                      calls, runs, written, missed, bounded);
         for (positive seen = 0; seen < FILL_SEEN; seen++)
                 if (fill_seen[seen] < 20)
                         string_format(log, "    fill path %p taken %p times\n",
@@ -64350,6 +64411,10 @@ static fn fill_procedural(void)
               runs == 300 && calls > 50000 && wrong == 0 && apart == 0);
         check("and the generated links took every path of it",
               missed == 0);
+        check("and the normal band's tally by key is the band after every "
+              "fill, and wake's bounded walk finds what the whole walk "
+              "does, many of them past a blocked stream",
+              miscounted == 0 && bounded > 1000);
 }
 
 /*
@@ -64491,6 +64556,7 @@ static fn apply_procedural(void)
         static p8 body[WATERLINK_PAYLOAD];
         p64 state = 0x13198a2e03707344ull;
         positive runs = 0, calls = 0, apart = 0, heard = 0, missed = 0;
+        positive miscounted = 0;
 
         memory_zero(apply_seen, sizeof apply_seen);
         for (positive run = 0; run < 240; run++)
@@ -64544,6 +64610,7 @@ static fn apply_procedural(void)
                         waterlink_apply(address_of fill_two, body, parts, count, at,
                                         sink, (address_any)2);
                         calls++;
+                        miscounted += !band_counts_hold(address_of fill_two);
                         apart += memory_compare(address_of fill_one.sending,
                                                 address_of fill_two.sending,
                                                 sizeof fill_one -
@@ -64590,6 +64657,9 @@ static fn apply_procedural(void)
               runs == 240 && calls > 25000 && heard > 10000 && apart == 0);
         check("and the generated links and bodies took every path of it",
               missed == 0);
+        check("and the normal band's tally by key is the band after every "
+              "apply",
+              miscounted == 0);
 }
 
 static fn replay(void)
@@ -65475,6 +65545,104 @@ static fn held_answer_lost(void)
                       held_sender.retransmitted == 1);
 }
 
+/*      A register's value replaced where it stands at the front of the
+        normal band takes the newest sequence and can be past its key's
+        window, with an older frame of the same key behind it that is not:
+        a walk that took the first as the key blocked would stop there, and
+        the older frame would wait for the window with nothing to open it. */
+static struct waterlink_link register_link;
+
+static fn register_behind_its_newest(void)
+{
+        struct waterlink_link address_to l = address_of register_link;
+        p8 body[WATERLINK_PAYLOAD];
+        bool alone = false;
+        p8 value = 'v';
+        p32 slot[5];
+        p64 now = 1000;
+        p64 wake;
+
+        waterlink_link_reset(l);
+        //      Normal, urgent, normal, urgent, normal: five slots of key 3.
+        for (positive at = 0; at < 5; at++)
+        {
+                (void)waterlink_post(l, 3,
+                                     WATERLINK_FRAME_REPLACEABLE |
+                                             (at & 1 ? WATERLINK_FRAME_URGENT : 0),
+                                     address_of value, 1, now);
+                slot[at] = l->sending[3].last;
+                while (waterlink_fill(l, body, now, address_of alone))
+                        ;
+        }
+        //      The newest lost first, then the older normal one behind it.
+        waterlink_lose(l, slot[4]);
+        waterlink_lose(l, slot[2]);
+        for (positive at = 0; at < WATERLINK_KEY_WINDOW; at++)
+                (void)waterlink_post(l, 3, WATERLINK_FRAME_REPLACEABLE,
+                                     address_of value, 1, now);
+        check("a register replaced where it stands, past its window, stands "
+              "ahead of an older frame of its key",
+              l->head[WATERLINK_BAND_NORMAL] == slot[4] &&
+                      l->slot[slot[4]].next == slot[2] &&
+                      waterlink_key_blocked(l, l->slot + slot[4]) &&
+                      !waterlink_key_blocked(l, l->slot + slot[2]));
+        wake = waterlink_wake(l, now);
+        (void)waterlink_fill(l, body, now, address_of alone);
+        check("sec: the older frame is not taken for blocked with it: wake "
+              "answers now, and fill sends it",
+              wake == now && l->slot[slot[2]].state == WATERLINK_SLOT_FLIGHT &&
+                      l->slot[slot[4]].state == WATERLINK_SLOT_QUEUED);
+}
+
+/*      A frame the path lost several times before it arrived and was held:
+        its first question is one probe timer away, not one doubled for
+        every time it went out. */
+static fn held_after_losses(void)
+{
+        p8 body[WATERLINK_PAYLOAD];
+        bool alone = false;
+        positive used = 0;
+        p64 now = 1000;
+        p64 wake;
+        p32 at;
+
+        waterlink_link_reset(address_of held_sender);
+        waterlink_link_reset(address_of held_reader);
+        heard = 0;
+        refusing = true;
+        for (positive at = 0; at < 2; at++)
+                (void)waterlink_post(address_of held_sender, 5,
+                                     WATERLINK_FRAME_DURABLE,
+                                     (p8 address_to) "ab" + at, 1, now);
+        //      Sent, lost, and sent again at each expiry.
+        for (positive round = 0; round < 6; round++)
+        {
+                used = waterlink_fill(address_of held_sender, body, now,
+                                      address_of alone);
+                now += 3000000;
+        }
+        now -= 3000000 - 10;
+        at = held_sender.sending[5].first;
+        (void)waterlink_deliver(address_of held_reader, body, used, now,
+                                hear_or_refuse, null);
+        now += WATERLINK_ACK_DELAY;
+        used = waterlink_fill(address_of held_reader, body, now, address_of alone);
+        (void)waterlink_deliver(address_of held_sender, body, used, now, null,
+                                null);
+        check("frames lost again and again, then held, went out five times",
+              held_sender.slot[at].tries == 5 &&
+                      held_sender.slot[at].state == WATERLINK_SLOT_HELD);
+        wake = waterlink_wake(address_of held_sender, now);
+        check("sec: its first question is one probe timer after it was sent",
+              wake > now &&
+                      wake <= held_sender.slot[at].sent +
+                                      waterlink_timeout(address_of held_sender));
+        check("and at it the frame goes back to be sent, its question counted",
+              waterlink_wake(address_of held_sender, wake) == wake &&
+                      held_sender.slot[at].state == WATERLINK_SLOT_QUEUED &&
+                      held_sender.slot[at].probed == 1);
+}
+
 /*      The wire judge already refuses channel bytes above 63.  The application
         entry points are also called by the service, though, so their own
         boundary is a fuse: a bad channel cannot index past a table, and a
@@ -66329,8 +66497,10 @@ static fn handshake(void)
         starting_kept = starting;
 
         /* Every individual bit is authenticated by mac1, including header,
-           ciphertext, tag and padding. This is exhaustive over both full
-           handshake datagrams rather than a sample of interesting offsets. */
+           ciphertext, tag and padding -- all but an initiation's mac2, which
+           the admission asks about, and only under load. This is exhaustive
+           over both full handshake datagrams rather than a sample of
+           interesting offsets. */
         {
                 p8 changed[WATERLINK_DATAGRAM];
                 positive first_refused = 0;
@@ -66350,8 +66520,9 @@ static fn handshake(void)
                                 !waterlink_gate_passes(address_of alice, changed,
                                                        sizeof changed);
                 }
-                check("sec: every one-bit initiation mutation fails its gate",
-                      first_refused == WATERLINK_DATAGRAM * 8);
+                check("sec: every one-bit initiation mutation fails its gate "
+                      "but in mac2",
+                      first_refused == (WATERLINK_DATAGRAM - 16) * 8);
                 check("sec: every one-bit answer mutation fails its gate",
                       second_refused == WATERLINK_DATAGRAM * 8);
         }
@@ -66432,7 +66603,7 @@ static fn handshake(void)
         {
                 static const positive where[] = {0, 5, 16, 16 + 40,
                                                  16 + WATERLINK_INITIATE_BYTES - 1,
-                                                 16 + WATERLINK_INITIATE_BYTES,
+                                                 16 + WATERLINK_INITIATE_BYTES + 16,
                                                  WATERLINK_DATAGRAM - 1};
                 positive refused = 0;
 
@@ -66511,17 +66682,21 @@ static fn handshake(void)
                       !waterlink_stamp_newer(now, last));
         }
 
+        static p8 unproven[WATERLINK_DATAGRAM];
+
         memory_zero(address_of admission, sizeof admission);
         for (positive at = 0; at < 50; at++)
-                admitted += waterlink_admit(address_of admission, source,
-                                            1000000 + at * 1000);
+                admitted += waterlink_admit(address_of admission, unproven,
+                                            source, 7, 1000000 + at * 1000) == 1;
         check("a flood from one source is held to its burst",
               admitted == WATERLINK_ADMIT_BURST);
         check("and it earns an initiation back in a fifth of a second",
-              waterlink_admit(address_of admission, source, 1000000 + 250000));
+              waterlink_admit(address_of admission, unproven, source, 7,
+                              1000000 + 250000) == 1);
         source[15] = 3;
         check("while another source is not held by it",
-              waterlink_admit(address_of admission, source, 1000000 + 50000));
+              waterlink_admit(address_of admission, unproven, source, 7,
+                              1000000 + 50000) == 1);
 
         memory_zero(address_of admission, sizeof admission);
         admitted = 0;
@@ -66530,13 +66705,18 @@ static fn handshake(void)
                 memory_zero(source, sizeof source);
                 source[14] = (p8)(at >> 8);
                 source[15] = (p8)at;
-                admitted += waterlink_admit(address_of admission, source,
-                                            2000000);
+                admitted += waterlink_admit(address_of admission, unproven,
+                                            source, 7, 2000000) == 1;
         }
-        check("sec: rotating source addresses are held to the global burst",
-              admitted == WATERLINK_ADMIT_GLOBAL_BURST);
-        check("sec: the global admission bucket refills",
-              waterlink_admit(address_of admission, source, 3000000));
+        check("sec: rotating source addresses reach the curve only up to the "
+              "load, past which they need mac2 and a secret to have it by",
+              admitted == WATERLINK_ADMIT_LOADED &&
+                      admission.all.tokens ==
+                              WATERLINK_ADMIT_GLOBAL_BURST -
+                                      WATERLINK_ADMIT_LOADED);
+        check("sec: the load passes as its bucket refills",
+              waterlink_admit(address_of admission, unproven, source, 7,
+                              3000000) == 1);
 
         check("a session is keyed again at two minutes",
               !waterlink_rekey_due(119999999, 5) &&
@@ -67150,6 +67330,8 @@ b32 main(void)
         full_frame_beside_owed_ack();
         reader_credit();
         held_answer_lost();
+        held_after_losses();
+        register_behind_its_newest();
         invalid_application_keys();
         network_generated();
         handshake();
@@ -67647,6 +67829,262 @@ static fn responder(bipolar listener, p16 port)
         for (positive at = 0; at < LINK_SESSIONS; at++)
                 if (link_self.session[at].used)
                         link_session_close(link_self.session + at);
+}
+
+/*
+        Admission under a flood. A sender that knows this machine's key makes
+        good mac1s from addresses it makes up; past WATERLINK_ADMIT_LOADED a
+        second the listener asks for mac2, answers an initiation without it
+        with a cookie reply, and spends none of the curve's bucket on it --
+        so a paired client, told its cookie, still gets in. The cookie is
+        bound to the address and port it was handed to, and is good for two
+        minutes of the listener's secret.
+*/
+static fn wls_flood(positive count, p64 now)
+{
+        p8 datagram[WATERLINK_DATAGRAM];
+        p8 hello[WATERLINK_HELLO_BYTES];
+        p8 ephemeral[32];
+        p8 somewhere[16] = {0x20, 0x01, 0x0d, 0xb8};
+        struct waterlink_noise noise;
+
+        for (positive at = 0; at < count; at++)
+        {
+                memory_zero(hello, sizeof hello);
+                waterlink_stamp(hello, 7000 + at, 0);
+                wls_seeded(ephemeral, 32, (p8)(at + 7));
+                (void)waterlink_initiate(address_of noise, address_of wls_b,
+                                         wls_server.public, null, ephemeral,
+                                         hello, datagram);
+                somewhere[14] = (p8)(at >> 8);
+                somewhere[15] = (p8)at;
+                link_server_initiation(datagram, WATERLINK_DATAGRAM, somewhere,
+                                       (p16)(1000 + at), now);
+        }
+}
+
+static fn cookies(bipolar listener, p16 port)
+{
+        p8 datagram[WATERLINK_DATAGRAM];
+        p8 heard[WATERLINK_DATAGRAM + 16];
+        p8 mac1[16], cookie[16], again[16];
+        p64 now = 50000000;
+        p32 tokens;
+        p64 handed;
+        positive refused = 0;
+
+        link_self.me = wls_server;
+        wls_peers_with(wls_client.public, WATERLINK_MAY_DEFAULT);
+        memory_zero(address_of link_self.admission, sizeof link_self.admission);
+        link_self.stamps = 0;
+        wls_drain(listener);
+
+        wls_flood(WATERLINK_ADMIT_LOADED, now);
+        tokens = link_self.admission.all.tokens;
+        wls_flood(200, now);
+        check("sec: a flood of initiations past the load spends none of the "
+              "curve's bucket",
+              link_self.admission.all.tokens == tokens && tokens &&
+                      link_self.admission.cookies == 200);
+
+        wls_initiation(datagram, 21, 8000, 0x0badcafe);
+        memory_copy(mac1, datagram + 16 + WATERLINK_INITIATE_BYTES - 16, 16);
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now);
+        check("sec: under it a paired client's initiation is answered with a "
+              "cookie reply, not a session",
+              wls_heard(listener, heard) == WATERLINK_COOKIE_DATAGRAM &&
+                      heard[0] == WATERLINK_KIND_COOKIE &&
+                      wls_sessions_used() == 0);
+        check("and the client opens the cookie, sealed to its mac1",
+              waterlink_cookie_take(wls_server.public, mac1, heard,
+                                    WATERLINK_COOKIE_DATAGRAM, cookie));
+        mac1[3] ^= 1;
+        check("sec: but not as the answer to another initiation",
+              !waterlink_cookie_take(wls_server.public, mac1, heard,
+                                     WATERLINK_COOKIE_DATAGRAM, again));
+        mac1[3] ^= 1;
+        for (positive length = 0; length <= WATERLINK_DATAGRAM; length++)
+                refused += length != WATERLINK_COOKIE_DATAGRAM &&
+                           !waterlink_cookie_take(wls_server.public, mac1, heard,
+                                                  length, again);
+        check("sec: nor at any other length",
+              refused == WATERLINK_DATAGRAM);
+
+        //      From another port the cookie is not the one it was given.
+        wls_initiation(datagram, 22, 8001, 0x0badcaff);
+        waterlink_mac2(cookie, datagram);
+        handed = link_self.admission.cookies;
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback,
+                               (p16)(port + 1), now);
+        check("sec: a cookie from another port is asked for again",
+              link_self.admission.cookies == handed + 1 &&
+                      wls_sessions_used() == 0);
+
+        wls_initiation(datagram, 21, 8002, 0x0badcafe);
+        waterlink_mac2(cookie, datagram);
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now);
+        check("sec: the client asking again under its cookie is answered and "
+              "keyed, the flood notwithstanding",
+              wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
+                      heard[0] == WATERLINK_KIND_RESPOND &&
+                      wls_sessions_used() == 1);
+
+        //      Two minutes on, the secret is another, and so is the cookie.
+        now += (p64)WATERLINK_COOKIE_SECONDS * 1000000 + 1000000;
+        wls_flood(WATERLINK_ADMIT_LOADED + 8, now);
+        wls_drain(listener);
+        wls_initiation(datagram, 23, 8003, 0x0badcb00);
+        memory_copy(mac1, datagram + 16 + WATERLINK_INITIATE_BYTES - 16, 16);
+        waterlink_mac2(cookie, datagram);
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now);
+        check("sec: a cookie older than the secret's two minutes is asked for "
+              "again, and the new one differs",
+              wls_heard(listener, heard) == WATERLINK_COOKIE_DATAGRAM &&
+                      waterlink_cookie_take(wls_server.public, mac1, heard,
+                                            WATERLINK_COOKIE_DATAGRAM, again) &&
+                      memory_compare(again, cookie, 16) &&
+                      wls_sessions_used() == 1);
+
+        entropy_down = true;
+        now += (p64)WATERLINK_COOKIE_SECONDS * 1000000 + 1000000;
+        wls_flood(WATERLINK_ADMIT_LOADED + 8, now);
+        handed = link_self.admission.cookies;
+        wls_initiation(datagram, 24, 8004, 0x0badcb01);
+        waterlink_mac2(again, datagram);
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now);
+        entropy_down = false;
+        check("sec: a secret that cannot be made again is not stretched: "
+              "under load nothing is admitted or handed out",
+              link_self.admission.cookies == handed && wls_sessions_used() == 1);
+
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used)
+                        link_session_close(link_self.session + at);
+}
+
+/*
+        The replay markers across a restart: an initiation taken, the
+        listener stopped and started again, and the same datagram played
+        back holds no session and draws no answer; a newer one from the
+        same peer is answered.
+*/
+static fn stamps_outlive(bipolar listener, p16 port)
+{
+        p8 datagram[WATERLINK_DATAGRAM];
+        p8 newer[WATERLINK_DATAGRAM];
+        p8 heard[WATERLINK_DATAGRAM + 16];
+        p64 now = 400000000;
+
+        link_self.me = wls_server;
+        link_self.server = true;
+        wls_peers_with(wls_client.public, WATERLINK_MAY_DEFAULT);
+        memory_zero(address_of link_self.admission, sizeof link_self.admission);
+        link_self.stamps = 0;
+        (void)system_remove_at(AT_FDCWD, LINK_STAMPS_PATH, 0);
+        wls_drain(listener);
+
+        wls_initiation(datagram, 31, 9000, 0x31313131);
+        wls_initiation(newer, 32, 9001, 0x32323232);
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now);
+        link_stamps_save();
+        check("an initiation is answered, and its marker written",
+              wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
+                      wls_sessions_used() == 1 && !link_self.stamps_dirty);
+
+        //      A restart: nothing of the listener is left but its files.
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used)
+                        link_session_close(link_self.session + at);
+        crypto_forget(link_self.stamp, sizeof link_self.stamp);
+        link_self.stamps = 0;
+        link_stamps_load();
+
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now + 1000000);
+        check("sec: after a restart a recorded initiation played back holds "
+              "no session and draws no answer",
+              wls_heard(listener, heard) <= 0 && wls_sessions_used() == 0);
+        link_server_initiation(newer, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now + 2000000);
+        check("and a newer one from the same peer is answered",
+              wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
+                      wls_sessions_used() == 1);
+        link_stamps_save();
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used)
+                        link_session_close(link_self.session + at);
+}
+
+/*
+        The client's half: a cookie reply to the initiation it has out is
+        kept and asked again under at once, and the next initiation carries
+        mac2 by it; a second reply, to an initiation that carried one, does
+        not make it ask again before its time.
+*/
+static fn client_cookie(bipolar listener, p16 port)
+{
+        struct link_session address_to s = link_self.session;
+        struct waterlink_admission table;
+        p8 heard[WATERLINK_DATAGRAM + 16];
+        p8 reply[WATERLINK_COOKIE_DATAGRAM];
+        p8 nonce[24];
+        p8 cookie[16];
+        p64 now = 90000000;
+
+        memory_zero(address_of table, sizeof table);
+        wls_seeded(table.secret, 32, 91);
+        table.secret_made = now;
+        wls_seeded(nonce, 24, 92);
+        link_self.me = wls_client;
+        link_self.server = false;
+        memory_zero(address_of link_client, sizeof link_client);
+        wls_drain(listener);
+        check("a client session opens for the cookie", link_session_open(s));
+        memory_copy(s->peer, wls_server.public, 32);
+        memory_copy(s->address, wls_loopback, 16);
+        s->port = port;
+
+        check("the client's first initiation goes out without mac2",
+              link_client_initiate(s, now) &&
+                      wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
+                      memory_span_byte(heard + 16 + WATERLINK_INITIATE_BYTES, 0,
+                                       16) == 16);
+        waterlink_cookie_reply(address_of wls_server, address_of table, heard,
+                               wls_loopback, port, nonce, reply);
+        link_datagram(reply, sizeof reply, wls_loopback, port, now + 10);
+        check("sec: a cookie reply to it is kept, and asks again at once",
+              link_client.cookie_at == now + 10 &&
+                      link_age(now + 10, link_client.initiated) > LINK_ATTEMPT);
+        check("and the next initiation carries mac2 by that cookie",
+              link_client_initiate(s, now + 20) &&
+                      wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
+                      link_client.cookied &&
+                      waterlink_cookie_take(wls_server.public,
+                                            link_client.mac1, reply, sizeof reply,
+                                            cookie) == false);
+        waterlink_cookie_of(address_of table, wls_loopback, port, cookie);
+        {
+                p8 copy[WATERLINK_DATAGRAM];
+
+                memory_copy(copy, heard, WATERLINK_DATAGRAM);
+                memory_zero(copy + 16 + WATERLINK_INITIATE_BYTES, 16);
+                waterlink_mac2(cookie, copy);
+                check("sec: which the listener's cookie for this place makes",
+                      !memory_compare(copy, heard, WATERLINK_DATAGRAM));
+        }
+        waterlink_cookie_reply(address_of wls_server, address_of table, heard,
+                               wls_loopback, port, nonce, reply);
+        link_datagram(reply, sizeof reply, wls_loopback, port, now + 30);
+        check("sec: a reply to an initiation that carried a cookie does not "
+              "hurry the next",
+              link_client.initiated == now + 20);
+        link_session_close(s);
+        crypto_forget(address_of link_client, sizeof link_client);
 }
 
 /*
@@ -68763,6 +69201,105 @@ static fn places(void)
 }
 
 /*
+        The client's standard output, full: a pipe nobody reads, a socket
+        nobody reads. A write that waited there stopped the client's whole
+        loop -- keepalives, acknowledgements, the rekey -- until the machine
+        gave the link up. Each is filled and handed a frame in a child, which
+        must come back with the frame refused for now, not hang; a file is
+        written where it stands, its offset kept.
+*/
+static b32 wls_output_full(positive kind)
+{
+        struct link_session address_to s = link_self.session;
+        b32 ends[2];
+        p8 junk[4096];
+        p8 frame[] = "Dabc";
+        p8 file[8];
+
+        memory_zero(junk, sizeof junk);
+        if (kind == 2)
+        {
+                bipolar out = system_open_at_mode(AT_FDCWD, "/root/wls-out",
+                                                  FILE_WRITE | O_CLOEXEC, 0600);
+
+                if (out < 0 || system_write_all((positive)out, "xy", 2) != 2 ||
+                    system_descriptor_install((b32)out, 1) < 0)
+                        return 64;
+        }
+        else if ((kind ? system_call_4(syscall(socketpair), 1, 1, 0,
+                                       (positive)ends)
+                       : system_pipe(ends, 0)) < 0 ||
+                 system_descriptor_install(ends[1], 1) < 0)
+                return 64;
+        //      Filled through a description of its own: 1 stays blocking.
+        if (kind == 1)
+                while (socket_send(1, junk, sizeof junk, MSG_DONTWAIT, 0, 0) > 0)
+                        ;
+        else if (!kind)
+        {
+                bipolar filler = system_open_at(AT_FDCWD, "/proc/self/fd/1",
+                                                O_WRONLY | O_NONBLOCK);
+
+                while (filler >= 0 &&
+                       system_write_once(filler, junk, sizeof junk) > 0)
+                        ;
+        }
+        if (!link_session_open(s))
+                return 65;
+        link_stream_own(s->writes, 1, LINK_KEY_OUTPUT, 0, O_WRONLY);
+        if (kind == 2)
+                return link_stream_take(s, s->writes, frame, 4) &&
+                                       s->writes[0].fd == 1 &&
+                                       host_read_text("/root/wls-out", file,
+                                                      sizeof file) == 5 &&
+                                       !memory_compare(file, "xyabc", 5)
+                               ? 0
+                               : 1;
+        return !link_stream_take(s, s->writes, frame, 4) && s->writes[0].quiet
+                       ? 0
+                       : 1;
+}
+
+static fn client_never_waits(void)
+{
+        b32 code[3] = {255, 255, 255};
+
+        for (positive kind = 0; kind < 3; kind++)
+        {
+                bipolar child = system_fork();
+                positive status = 0;
+
+                if (!child)
+                        exit(wls_output_full(kind));
+                for (positive tick = 0; child > 0 && tick < 100; tick++)
+                {
+                        timespec pause = {0, 20000000};
+
+                        if (system_wait4_retry(child, address_of status, 1,
+                                               null) == child)
+                        {
+                                code[kind] = wait_status_code(status);
+                                break;
+                        }
+                        (void)system_call_2(syscall(nanosleep),
+                                            (positive)address_of pause, 0);
+                }
+                if (code[kind] == 255 && child > 0)
+                {
+                        (void)system_call_2(syscall(kill), (positive)child, 9);
+                        (void)system_wait4_retry(child, address_of status, 0,
+                                                 null);
+                }
+        }
+        check("sec: a full pipe as the client's standard output never holds "
+              "its loop",
+              code[0] == 0);
+        check("sec: nor does a full socket", code[1] == 0);
+        check("and a file is written where it stands, its offset kept",
+              code[2] == 0);
+}
+
+/*
         A machine with no IPv6 (the modern profile builds without it): the
         link's socket falls back to IPv4 and binds there, a datagram to an
         IPv4 peer goes out and comes back as that peer, and one to an IPv6
@@ -68969,6 +69506,9 @@ b32 main(void)
         staging();
         publication();
         responder(listener, port);
+        cookies(listener, port);
+        stamps_outlive(listener, port);
+        client_cookie(listener, port);
         initiator_answer();
         carried_is_atomic();
         seen_once_a_second();
@@ -68985,6 +69525,7 @@ b32 main(void)
         key_text();
         places();
         ipv4_only();
+        client_never_waits();
         indexes_and_commands();
         return test_report(null);
 }

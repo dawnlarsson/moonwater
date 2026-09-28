@@ -215,6 +215,7 @@ _Static_assert(sizeof(struct waterlink_datagram) == 16,
 #define WATERLINK_KIND_RESPOND 2u  // Noise_IK message two
 #define WATERLINK_KIND_CARRY 3u    // frames, once the session is up
 #define WATERLINK_KIND_CLOSE 4u
+#define WATERLINK_KIND_COOKIE 5u   // a listener under load: ask again with this
 
 /*      A frame, inside the box, so the code that parses attacker-shaped bytes
         only ever runs on bytes that were already authenticated.

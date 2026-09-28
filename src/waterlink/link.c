@@ -77,6 +77,7 @@ struct waterlink_slot {
         p8 state;
         p8 tries;
         p8 payload[WATERLINK_FRAME_MAX];
+        p8 probed; // times asked about since the far side began to hold it
 };
 
 /*
@@ -178,6 +179,13 @@ struct waterlink_link {
         p64 spilled; // frames dropped because the hold-back was full
 
         p64 looked;  // when held keys are next looked over
+
+        /*      The normal band's frames by key, and a bit for every key it
+                has any of (and perhaps for some it no longer has): a walk
+                past streams whose window is out stops once no other key
+                is left in the band. */
+        p64 banded;
+        p16 queued[WATERLINK_KEYS];
 };
 
 /*
@@ -291,6 +299,50 @@ static fn waterlink_flight_remove(struct waterlink_link address_to link,
         slot->prior = WATERLINK_NONE;
 }
 
+/*      A frame joins or leaves the normal band. Everything a stream key
+        has there past a frame its window holds back is held back as well --
+        what went out and came back was inside the window and still is, and
+        what follows it was posted later -- so a walk that finds a stream
+        blocked need not look at another of its frames. Not a register's: a
+        value replaced where it stands takes the newest sequence, and may
+        stand ahead of an older frame of its key that the window lets by.
+
+        A key's bit in banded stays set after its last frame leaves -- fill
+        would otherwise pay for clearing it on every frame it takes -- and
+        is cleared when a walk asks whether it can end. */
+static fn waterlink_band_joined(struct waterlink_link address_to link, p32 band,
+                                p8 key)
+{
+        if (band == WATERLINK_BAND_NORMAL)
+        {
+                link->queued[key]++;
+                link->banded |= 1ull << key;
+        }
+}
+
+static fn waterlink_band_left(struct waterlink_link address_to link, p32 band,
+                              p32 at)
+{
+        if (band == WATERLINK_BAND_NORMAL)
+                link->queued[link->slot[at].key]--;
+}
+
+//      Whether a walk that found these streams blocked is over: no other
+//      key has a frame left in the normal band.
+static bool waterlink_band_done(struct waterlink_link address_to link,
+                                p64 blocked)
+{
+        for (p64 left = link->banded & ~blocked; left; left &= left - 1)
+        {
+                p8 key = (p8)bits_trailing_zeros(left);
+
+                if (link->queued[key])
+                        return false;
+                link->banded &= ~(1ull << key);
+        }
+        return true;
+}
+
 static fn waterlink_band_append(struct waterlink_link address_to link, p32 at)
 {
         p32 band = waterlink_band_of(link->slot[at].flags);
@@ -302,6 +354,7 @@ static fn waterlink_band_append(struct waterlink_link address_to link, p32 at)
         else
                 link->slot[link->tail[band]].next = at;
         link->tail[band] = at;
+        waterlink_band_joined(link, band, link->slot[at].key);
 }
 
 // Unlink one slot from its band, given the slot before it or NONE.
@@ -319,6 +372,7 @@ static fn waterlink_band_unlink(struct waterlink_link address_to link,
         if (link->requeue[band] == at)
                 link->requeue[band] = prior;
         link->slot[at].next = WATERLINK_NONE;
+        waterlink_band_left(link, band, at);
 }
 
 static KEEP fn waterlink_band_remove(struct waterlink_link address_to link, p32 at)
@@ -367,6 +421,7 @@ static fn waterlink_band_requeue(struct waterlink_link address_to link, p32 at)
         p32 after = link->requeue[band];
 
         link->slot[at].state = WATERLINK_SLOT_QUEUED;
+        waterlink_band_joined(link, band, link->slot[at].key);
         if (link->sending[link->slot[at].key].first == at)
         {
                 link->slot[at].next = link->head[band];
@@ -505,12 +560,14 @@ bool waterlink_post(struct waterlink_link address_to link, p8 key, p8 flags,
         slot->serial = 0;
         slot->prior = WATERLINK_NONE;
         slot->tries = 0;
+        slot->probed = 0;
         slot->length = length;
         slot->flags = flags;
-        if (length)
-                memory_copy(slot->payload, payload, length);
+        //      Queued before the copy, while its key and flags are in hand.
         if (!queued)
                 waterlink_band_append(link, at);
+        if (length)
+                memory_copy(slot->payload, payload, length);
         if (flags & WATERLINK_FRAME_LAST)
                 live->closing = 1;
         return true;
@@ -711,7 +768,8 @@ _Static_assert(sizeof(struct waterlink_slot) == 1200 &&
                        __builtin_offsetof(struct waterlink_slot, flags) == 35 &&
                        __builtin_offsetof(struct waterlink_slot, state) == 36 &&
                        __builtin_offsetof(struct waterlink_slot, tries) == 37 &&
-                       __builtin_offsetof(struct waterlink_slot, payload) == 38,
+                       __builtin_offsetof(struct waterlink_slot, payload) == 38 &&
+                       __builtin_offsetof(struct waterlink_slot, probed) == 1197,
                "fill reads a slot at these places");
 _Static_assert(sizeof(struct waterlink_held) == 1172 &&
                        __builtin_offsetof(struct waterlink_held, next) == 8 &&
@@ -741,7 +799,9 @@ _Static_assert(__builtin_offsetof(struct waterlink_link, held) == 0x4b000 &&
                        __builtin_offsetof(struct waterlink_link, owed_now) == 0x702ac &&
                        __builtin_offsetof(struct waterlink_link, probes) == 0x702b4 &&
                        __builtin_offsetof(struct waterlink_link, sent) == 0x702e0 &&
-                       __builtin_offsetof(struct waterlink_link, retransmitted) == 0x702e8,
+                       __builtin_offsetof(struct waterlink_link, retransmitted) == 0x702e8 &&
+                       __builtin_offsetof(struct waterlink_link, banded) == 0x70320 &&
+                       __builtin_offsetof(struct waterlink_link, queued) == 0x70328,
                "fill reads the link at these places");
 _Static_assert(WATERLINK_PAYLOAD == 1168 && WATERLINK_ACK_MOST == 17 &&
                        WATERLINK_FRAME_MAX < 16384 && WATERLINK_BANDS == 2 &&
@@ -775,7 +835,7 @@ _Static_assert(WATERLINK_PAYLOAD == 1168 && WATERLINK_ACK_MOST == 17 &&
         ecx its bytes, r14 the head's bytes, r15 the frame's. Everything the
         slot says is read before the body is written.
 */
-#define WATERLINK_X64_FRAME(head, tail, requeue, full, again, carried)         \
+#define WATERLINK_X64_FRAME(head, tail, requeue, full, again, carried, taken)  \
     "mov 16(%rsi), %edx\n   movzwl 32(%rsi), %r8d\n"                           \
     "movzbl 34(%rsi), %r9d\n   movzbl 35(%rsi), %r10d\n"                       \
     "mov %edx, %edi\n   mov $1, %ecx\n   cmp $127, %edx\n   ja 50f\n"          \
@@ -802,7 +862,7 @@ _Static_assert(WATERLINK_PAYLOAD == 1168 && WATERLINK_ACK_MOST == 17 &&
     "cmp $-1, %ecx\n   je 65f\n"                                               \
     "imul $1200, %rcx, %rcx\n   mov %eax, 20(%rbx,%rcx)\n   jmp 66f\n"          \
     "65: mov %eax, 0x7023c(%rbx)\n"                                            \
-    "66: mov %eax, 0x70240(%rbx)\n   add %r15, 0x70268(%rbx)\n"                \
+    "66: mov %eax, 0x70240(%rbx)\n   add %r15, 0x70268(%rbx)\n" taken         \
     "shl $4, %r9d\n   incw 0x6fa0c(%rbx,%r9)\n   incq 0x702e0(%rbx)\n"         \
     /*  The payload, read in the pieces post wrote it in. */                   \
     "test %r8d, %r8d\n   jz 67f\n"                                             \
@@ -845,11 +905,15 @@ _Static_assert(WATERLINK_PAYLOAD == 1168 && WATERLINK_ACK_MOST == 17 &&
     "57: mov %r8d, %ecx\n   shr $7, %ecx\n   mov %cl, 8(%rdi)\n   jmp 58b\n"    \
     "63: incq 0x702e8(%rbx)\n   jmp 64b\n"
 
+//      A frame taken out of the normal band, r9 its key.
+#define WATERLINK_X64_TAKEN "decw 0x70328(%rbx,%r9,2)\n"
+
 /*
         rdi the link, rsi the body, rdx now, rcx where alone goes. With a
         frame to send: rbx the link, rbp the body, r12 now, r13 the bytes
         used, and on the stack the bytes the normal band carried, the room,
-        a band's prior across a copy, and alone's address. The
+        a band's prior across a copy, alone's address, and the keys the
+        normal band's walk has not found blocked. The
         acknowledgements are written with rdi, rsi and rdx as they came and
         r11 the bytes used.
 */
@@ -874,13 +938,17 @@ __asm__(
     //  The urgent band, from its head.
     "10: mov 0x70218(%rbx), %eax\n   cmp $-1, %eax\n   je 20f\n"
     "imul $1200, %rax, %rsi\n   add %rbx, %rsi\n   mov $-1, %r11d\n"
-    WATERLINK_X64_FRAME("0x70218", "0x70220", "0x70228", "19f", "10b", "")
+    WATERLINK_X64_FRAME("0x70218", "0x70220", "0x70228", "19f", "10b", "", "")
     "19: mov 24(%rsp), %rax\n   movb $1, (%rax)\n   jmp 40f\n"
     "20: test %r13, %r13\n   jz 21f\n   mov 24(%rsp), %rax\n   movb $1, (%rax)\n"
-    "21: mov $-1, %r11d\n"
+    "21: mov $-1, %r11d\n   cmpq $0, 0x70320(%rbx)\n   je 40f\n"
+    "movq $-1, 32(%rsp)\n"
     //  The normal band, while the window and the pacer allow, passing
     //  over a key with its window out; a frame taken leaves the ones
     //  passed over where they were, so the walk goes on from its prior.
+    //  A stream found blocked is a bit cleared on the stack, and the walk
+    //  ends when no other key has a frame left in the band: a key's bit
+    //  set in banded with none counted is cleared on the way.
     "30: cmpl $0, 0x702b4(%rbx)\n   jne 31f\n"
     "mov 0x70268(%rbx), %rax\n   cmp 0x70270(%rbx), %rax\n   jae 40f\n"
     "cmpq $0, 0x70280(%rbx)\n   je 31f\n   cmp 0x70290(%rbx), %r12\n   jb 40f\n"
@@ -893,10 +961,16 @@ __asm__(
     "cmp $-1, %ecx\n   je 34f\n"
     "imul $1200, %rcx, %rcx\n   mov 16(%rsi), %edx\n   sub 16(%rbx,%rcx), %edx\n"
     "cmp $63, %edx\n   jbe 34f\n"
-    "mov %eax, %r11d\n   mov 20(%rsi), %eax\n   jmp 33b\n"
+    "testb $2, 35(%rsi)\n   jz 36f\n"
+    "movzbl 34(%rsi), %ecx\n   mov 32(%rsp), %rdx\n   btr %rcx, %rdx\n"
+    "mov %rdx, 32(%rsp)\n   and 0x70320(%rbx), %rdx\n   jz 40f\n"
+    "35: bsf %rdx, %rcx\n   cmpw $0, 0x70328(%rbx,%rcx,2)\n   jne 36f\n"
+    "btr %rcx, %rdx\n   mov 0x70320(%rbx), %r8\n   btr %rcx, %r8\n"
+    "mov %r8, 0x70320(%rbx)\n   test %rdx, %rdx\n   jnz 35b\n   jmp 40f\n"
+    "36: mov %eax, %r11d\n   mov 20(%rsi), %eax\n   jmp 33b\n"
     "34:\n"
     WATERLINK_X64_FRAME("0x7021c", "0x70224", "0x7022c", "40f", "30b",
-                        "add %r15, (%rsp)\n")
+                        "add %r15, (%rsp)\n", WATERLINK_X64_TAKEN)
     //  A probe spends one expiry's worth; otherwise the pacer charges
     //  what the normal band carried.
     "40: mov 0x702b4(%rbx), %eax\n   mov (%rsp), %r15\n   test %eax, %eax\n"
@@ -978,7 +1052,7 @@ __asm__(
         frame's, w17 the head's. The slot's fields are read first, its
         bookkeeping written next, and the frame last.
 */
-#define WATERLINK_A64_FRAME(head, tail, requeue, full, again, carried)         \
+#define WATERLINK_A64_FRAME(head, tail, requeue, full, again, carried, taken)  \
     "ldr w12, [x11, #16]\n   ldrh w13, [x11, #32]\n"                           \
     "ldrb w14, [x11, #34]\n   ldrb w15, [x11, #35]\n"                          \
     "mov w16, #1\n   cmp w12, #127\n   b.hi 50f\n"                             \
@@ -1003,7 +1077,7 @@ __asm__(
     "cmn w12, #1\n   b.eq 65f\n"                                               \
     "mov w9, #1200\n   madd x9, x12, x9, x0\n   str w10, [x9, #20]\n   b 66f\n" \
     "65: str w10, [x4, #0xa3c]\n"                                              \
-    "66: str w10, [x4, #0xa40]\n"                                              \
+    "66: str w10, [x4, #0xa40]\n" taken                                        \
     "ldr x12, [x4, #0xa68]\n   add x12, x12, x16\n   str x12, [x4, #0xa68]\n"   \
     "add x14, x4, x14, lsl #4\n   ldrh w12, [x14, #0x20c]\n"                   \
     "add w12, w12, #1\n   strh w12, [x14, #0x20c]\n"                           \
@@ -1054,12 +1128,18 @@ __asm__(
     "63: ldr x12, [x4, #0xae8]\n   add x12, x12, #1\n   str x12, [x4, #0xae8]\n" \
     "b 64b\n"
 
+//      A frame taken out of the normal band, w14 its key. x9 and w12 go.
+#define WATERLINK_A64_TAKEN                                                    \
+    "add x9, x4, x14, lsl #1\n   ldrh w12, [x9, #0xb28]\n"                     \
+    "sub w12, w12, #1\n   strh w12, [x9, #0xb28]\n"
+
 /*
-        x0 the link, x1 the body, x2 now, x3 where alone goes, x4 the link
-        plus 0x6f800 so every field past the slots is an offset from it, x5
-        the bytes used, x6 the room, x7 the bytes the normal band carried,
-        w8 a band's prior. Nothing is kept on the stack but across the two
-        calls, the losses walk and a payload past thirty two bytes.
+        x0 the link, x1 the body, x2 now, x3 where alone goes and then, in
+        the normal band's walk, the keys not found blocked, x4 the link plus
+        0x6f800 so every field past the slots is an offset from it, x5 the
+        bytes used, x6 the room, x7 the bytes the normal band carried, w8 a
+        band's prior. Nothing is kept on the stack but across the two calls,
+        the losses walk and a payload past thirty two bytes.
 */
 __asm__(
     ASM_FUNC(waterlink_fill)
@@ -1082,12 +1162,15 @@ __asm__(
     //  The urgent band, from its head.
     "10: ldr w10, [x4, #0xa18]\n   cmn w10, #1\n   b.eq 20f\n"
     "mov w9, #1200\n   madd x11, x10, x9, x0\n   mov w8, #-1\n"
-    WATERLINK_A64_FRAME("0xa18", "0xa20", "0xa28", "19f", "10b", "")
+    WATERLINK_A64_FRAME("0xa18", "0xa20", "0xa28", "19f", "10b", "", "")
     "19: mov w10, #1\n   strb w10, [x3]\n   b 40f\n"
     "20: cbz x5, 21f\n   mov w10, #1\n   strb w10, [x3]\n"
-    "21: mov w8, #-1\n"
+    "21: mov w8, #-1\n   ldr x10, [x4, #0xb20]\n   cbz x10, 40f\n   mov x3, #-1\n"
     //  The normal band, while the window and the pacer allow, passing over
-    //  a key with its window out and going on from the prior.
+    //  a key with its window out and going on from the prior. A stream
+    //  found blocked is a bit cleared in x3, and the walk ends when no
+    //  other key has a frame left in the band: a key's bit set in banded
+    //  with none counted is cleared on the way.
     "30: ldr w10, [x4, #0xab4]\n   cbnz w10, 31f\n"
     "ldr x10, [x4, #0xa68]\n   ldr x11, [x4, #0xa70]\n   cmp x10, x11\n   b.hs 40f\n"
     "ldr x10, [x4, #0xa80]\n   cbz x10, 31f\n   ldr x10, [x4, #0xa90]\n"
@@ -1100,10 +1183,18 @@ __asm__(
     "cmn w12, #1\n   b.eq 34f\n"
     "madd x12, x12, x9, x0\n   ldr w13, [x11, #16]\n   ldr w12, [x12, #16]\n"
     "sub w13, w13, w12\n   cmp w13, #63\n   b.ls 34f\n"
-    "mov w8, w10\n   ldr w10, [x11, #20]\n   b 33b\n"
+    "ldrb w13, [x11, #35]\n   tbz w13, #1, 36f\n"
+    "ldrb w12, [x11, #34]\n   mov x13, #1\n   lsl x13, x13, x12\n   bic x3, x3, x13\n"
+    "ldr x12, [x4, #0xb20]\n   and x12, x12, x3\n   cbz x12, 40f\n"
+    "35: rbit x13, x12\n   clz x13, x13\n   add x14, x4, x13, lsl #1\n"
+    "ldrh w14, [x14, #0xb28]\n   cbnz w14, 36f\n"
+    "mov x14, #1\n   lsl x14, x14, x13\n   bic x12, x12, x14\n"
+    "ldr x15, [x4, #0xb20]\n   bic x15, x15, x14\n   str x15, [x4, #0xb20]\n"
+    "cbnz x12, 35b\n   b 40f\n"
+    "36: mov w8, w10\n   ldr w10, [x11, #20]\n   b 33b\n"
     "34:\n"
     WATERLINK_A64_FRAME("0xa1c", "0xa24", "0xa2c", "40f", "30b",
-                        "add x7, x7, x16\n")
+                        "add x7, x7, x16\n", WATERLINK_A64_TAKEN)
     //  A probe spends one expiry's worth; otherwise the pacer charges what
     //  the normal band carried.
     "40: ldr w10, [x4, #0xab4]\n   cbz w10, 41f\n   cbz x7, 42f\n"
@@ -1169,7 +1260,7 @@ __asm__(
         last, a byte at a time: a body's bytes are wherever the frames
         before put them, and baseline riscv64 asks for aligned words.
 */
-#define WATERLINK_RV_FRAME(head, tail, requeue, full, again, carried)          \
+#define WATERLINK_RV_FRAME(head, tail, requeue, full, again, carried, taken)   \
     "lwu t2, 16(t1)\n   lhu t3, 32(t1)\n   lbu t4, 34(t1)\n   lbu t5, 35(t1)\n" \
     "slli t4, t4, 8\n   or t4, t4, t5\n"                                       \
     "li s0, 128\n   addi t5, t3, 5\n   bgeu t3, s0, 51f\n   addi t5, t3, 4\n"   \
@@ -1193,6 +1284,7 @@ __asm__(
     "j 66f\n"                                                                  \
     "65: sw t0, 828(a4)\n"                                                     \
     "66: sw t0, 832(a4)\n   ld s0, 872(a4)\n   add s0, s0, t5\n   sd s0, 872(a4)\n" \
+    taken                                                                      \
     "srli s0, t4, 8\n   slli s0, s0, 4\n   add s0, a4, s0\n"                   \
     "lhu s1, -1268(s0)\n   addi s1, s1, 1\n   sh s1, -1268(s0)\n"              \
     "ld s0, 992(a4)\n   addi s0, s0, 1\n   sd s0, 992(a4)\n"                   \
@@ -1222,14 +1314,21 @@ __asm__(
     "li a6, 1168\n   j 55b\n"                                                  \
     "63: ld s0, 1000(a4)\n   addi s0, s0, 1\n   sd s0, 1000(a4)\n   j 64b\n"
 
+//      A frame taken out of the normal band, its key over t4's flags. s0
+//      and s1 go.
+#define WATERLINK_RV_TAKEN                                                     \
+    "srli s0, t4, 8\n   slli s0, s0, 1\n   add s0, a4, s0\n"                    \
+    "lhu s1, 1064(s0)\n   addi s1, s1, -1\n   sh s1, 1064(s0)\n"
+
 /*
         a0 the link, a1 the body, a2 now, a3 where alone goes, a4 the link
         plus 0x6ff00 so every field past the slots is an offset from it, a5
         the bytes used, a6 the room, a7 the bytes the normal band carried,
-        t6 a band's prior. With a frame to send, ra, s0, s1 and where alone
-        goes are kept on the stack, and the losses walk's arguments across
-        it. The key of an acknowledgement is its bit's place, which the
-        double its power of two converts to says in its exponent.
+        t6 a band's prior. With a frame to send, ra, s0, s1, where alone
+        goes and the keys the normal band's walk has not found blocked are
+        kept on the stack, and the losses walk's arguments across it. The key of an
+        acknowledgement is its bit's place, which the double its power of
+        two converts to says in its exponent.
 */
 __asm__(
     ASM_FUNC(waterlink_fill)
@@ -1253,12 +1352,16 @@ __asm__(
     //  The urgent band, from its head.
     "10: lw t0, 792(a4)\n   bltz t0, 20f\n"
     "li s0, 1200\n   mul t1, t0, s0\n   add t1, a0, t1\n   li t6, -1\n"
-    WATERLINK_RV_FRAME("792", "800", "808", "19f", "10b", "")
+    WATERLINK_RV_FRAME("792", "800", "808", "19f", "10b", "", "")
     "19: ld t0, 0(sp)\n   li t1, 1\n   sb t1, 0(t0)\n   j 40f\n"
     "20: beqz a5, 21f\n   ld t0, 0(sp)\n   li t1, 1\n   sb t1, 0(t0)\n"
-    "21: li t6, -1\n"
+    "21: li t6, -1\n   ld t0, 1056(a4)\n   beqz t0, 40f\n   li t0, -1\n"
+    "sd t0, 56(sp)\n"
     //  The normal band, while the window and the pacer allow, passing over
-    //  a key with its window out and going on from the prior.
+    //  a key with its window out and going on from the prior. A stream
+    //  found blocked is a bit cleared on the stack, and the walk ends when
+    //  no other key has a frame left in the band: a key's bit set in
+    //  banded with none counted is cleared on the way.
     "30: lw t0, 948(a4)\n   bnez t0, 31f\n"
     "ld t0, 872(a4)\n   ld t1, 880(a4)\n   bgeu t0, t1, 40f\n"
     "ld t0, 896(a4)\n   beqz t0, 31f\n   ld t0, 912(a4)\n   bltu a2, t0, 40f\n"
@@ -1270,9 +1373,19 @@ __asm__(
     "bltz t2, 34f\n"
     "mul t2, t2, s0\n   add t2, a0, t2\n   lwu t3, 16(t1)\n   lwu t2, 16(t2)\n"
     "subw t3, t3, t2\n   li t2, 64\n   bltu t3, t2, 34f\n"
-    "mv t6, t0\n   lw t0, 20(t1)\n   j 33b\n"
+    "lbu t2, 35(t1)\n   andi t2, t2, 2\n   beqz t2, 36f\n"
+    "lbu t2, 34(t1)\n   li t3, 1\n   sll t3, t3, t2\n   not t3, t3\n"
+    "ld t2, 56(sp)\n   and t2, t2, t3\n   sd t2, 56(sp)\n"
+    "ld t3, 1056(a4)\n   and t3, t3, t2\n   beqz t3, 40f\n"
+    "35: neg t4, t3\n   and t4, t3, t4\n   fcvt.d.lu ft0, t4\n   fmv.x.d t5, ft0\n"
+    "srli t5, t5, 52\n   addi t5, t5, -1023\n   slli t5, t5, 1\n   add t5, a4, t5\n"
+    "lhu t5, 1064(t5)\n   bnez t5, 36f\n   xor t3, t3, t4\n   not t4, t4\n"
+    "ld t5, 1056(a4)\n   and t5, t5, t4\n   sd t5, 1056(a4)\n   bnez t3, 35b\n"
+    "j 40f\n"
+    "36: mv t6, t0\n   lw t0, 20(t1)\n   j 33b\n"
     "34:\n"
-    WATERLINK_RV_FRAME("796", "804", "812", "40f", "30b", "add a7, a7, t5\n")
+    WATERLINK_RV_FRAME("796", "804", "812", "40f", "30b", "add a7, a7, t5\n",
+                       WATERLINK_RV_TAKEN)
     //  A probe spends one expiry's worth; otherwise the pacer charges what
     //  the normal band carried.
     "40: lw t0, 948(a4)\n   beqz t0, 41f\n   beqz a7, 42f\n"
@@ -1329,9 +1442,12 @@ __asm__(
         back -- may be the one the network lost, and then the key waits for
         ever, with everything queued behind it on its window. So its oldest
         held frame goes back to its band once the probe timer, doubled for
-        each time the frame went out and at most a minute, runs out, and the
-        far side answers the copy with what it has taken: a reader that is
-        only slow costs a copy now and then, as TCP's persist timer does.
+        each time it was asked about already and at most a minute, runs out,
+        and the far side answers the copy with what it has taken: a reader
+        that is only slow costs a copy now and then, as TCP's persist timer
+        does. Doubled per question and not per transmission: a frame sent
+        eight times on a lossy path before it was held would otherwise wait
+        the whole minute for its first.
         Looking over the keys is sixty four steps, so it is done when one of
         them is due, and at least every RTO_MOST while any slot is taken,
         never on every wake. Answers when to look next.
@@ -1356,11 +1472,12 @@ static p64 waterlink_held_probes(struct waterlink_link address_to link,
                         continue;
                 slot = link->slot + at;
                 wait = waterlink_timeout(link)
-                       << (slot->tries > 16 ? 15 : slot->tries ? slot->tries - 1 : 0);
+                       << (slot->probed < 15 ? slot->probed : 15);
                 if (wait > WATERLINK_HELD_MOST)
                         wait = WATERLINK_HELD_MOST;
                 if (now >= slot->sent && now - slot->sent >= wait)
                 {
+                        slot->probed += slot->probed < 255;
                         waterlink_band_requeue(link, at);
                         due = now;
                 }
@@ -1369,6 +1486,29 @@ static p64 waterlink_held_probes(struct waterlink_link address_to link,
         }
         link->looked = due;
         return due;
+}
+
+/*
+        Whether the normal band has a frame its key's window lets go. The
+        walk ends at the first, or when every key left in the band is a
+        stream it found blocked.
+*/
+static bool waterlink_sendable(struct waterlink_link address_to link)
+{
+        p64 blocked = 0;
+
+        for (p32 at = link->head[WATERLINK_BAND_NORMAL]; at != WATERLINK_NONE;
+             at = link->slot[at].next)
+        {
+                if (!waterlink_key_blocked(link, link->slot + at))
+                        return true;
+                if (!(link->slot[at].flags & WATERLINK_FRAME_DURABLE))
+                        continue;
+                blocked |= 1ull << link->slot[at].key;
+                if (waterlink_band_done(link, blocked))
+                        break;
+        }
+        return false;
 }
 
 /*
@@ -1381,7 +1521,6 @@ static p64 waterlink_held_probes(struct waterlink_link address_to link,
 p64 waterlink_wake(struct waterlink_link address_to link, p64 now)
 {
         p64 wake = waterlink_held_probes(link, now);
-        bool sendable = false;
 
         if (wake <= now || waterlink_ack_due(link, now) ||
             link->head[WATERLINK_BAND_URGENT] != WATERLINK_NONE)
@@ -1393,11 +1532,8 @@ p64 waterlink_wake(struct waterlink_link address_to link, p64 now)
         //      A frame waiting on its key's window is waiting for an
         //      acknowledgement or the timer, and both of those wake the
         //      caller already; answering now for it would spin.
-        for (p32 at = link->head[WATERLINK_BAND_NORMAL];
-             at != WATERLINK_NONE && !sendable; at = link->slot[at].next)
-                sendable = !waterlink_key_blocked(link, link->slot + at);
-
-        if (sendable && (link->probes || link->in_flight < link->window))
+        if ((link->probes || link->in_flight < link->window) &&
+            waterlink_sendable(link))
         {
                 if (link->probes || !link->smoothed || link->pace <= now)
                         return now;

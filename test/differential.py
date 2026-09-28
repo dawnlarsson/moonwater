@@ -50824,6 +50824,41 @@ static void crypto_aesgcm_prepare(crypto_aesgcm_key *key, const p8 *raw)
         memset(key, 0, sizeof *key);
         memcpy(key->round, raw, 16);
 }
+/*      The cookie box's AEAD, standing in: a keyed stream and a tag over the
+        key, nonce, associated data and cipher text. */
+static void wl_aead_tag(crypto_aesgcm_key *key, const p8 *iv, const p8 *ad,
+                        positive ads, const p8 *text, positive size, p8 *tag)
+{
+        crypto_sha256 hash;
+        p8 full[32];
+
+        crypto_sha256_open(&hash);
+        crypto_sha256_write(&hash, key->round, 16);
+        crypto_sha256_write(&hash, iv, 12);
+        crypto_sha256_write(&hash, ad, ads);
+        crypto_sha256_write(&hash, text, size);
+        crypto_sha256_close(&hash, full);
+        memcpy(tag, full, 16);
+}
+static void crypto_aesgcm_seal(crypto_aesgcm_key *key, const p8 *iv, const p8 *ad,
+                               positive ads, p8 *text, positive size, p8 *tag)
+{
+        for (positive at = 0; at < size; at++)
+                text[at] ^= key->round[at % 16] ^ iv[at % 12] ^ (p8)at;
+        wl_aead_tag(key, iv, ad, ads, text, size, tag);
+}
+static bool crypto_aesgcm_open(crypto_aesgcm_key *key, const p8 *iv, const p8 *ad,
+                               positive ads, p8 *text, positive size, const p8 *tag)
+{
+        p8 want[16];
+
+        wl_aead_tag(key, iv, ad, ads, text, size, want);
+        if (memcmp(want, tag, 16))
+                return false;
+        for (positive at = 0; at < size; at++)
+                text[at] ^= key->round[at % 16] ^ iv[at % 12] ^ (p8)at;
+        return true;
+}
 '''
     ASM_MACROS = r'''
 #define ASM_ENDBR ""
@@ -51474,7 +51509,9 @@ static bool ref_gate(struct waterlink_identity *me, const p8 *datagram, positive
                 body = WATERLINK_RESPOND_BYTES;
         else
                 return false;
-        for (positive at = 16 + body; at < length; at++)
+        //      An initiation's mac2 follows its mac1, and the padding it.
+        for (positive at = 16 + body + (kind == WATERLINK_KIND_INITIATE ? 16 : 0);
+             at < length; at++)
                 if (datagram[at])
                         return false;
         waterlink_mac1(me->gate, (p8 *)datagram, 16 + body - 16, mac);
@@ -51560,14 +51597,44 @@ int main(int argc, char **argv)
         struct waterlink_admission table;
         memset(&table, 0, sizeof table);
         unsigned long admit_bad = 0;
+        p8 *initiation = malloc(WATERLINK_DATAGRAM);
+        memset(initiation, 0, WATERLINK_DATAGRAM);
         {
                 p8 fresh[16];
                 for (int i = 0; i < 16; i++) fresh[i] = (p8)draw(256);
                 int ok = 0;
                 for (int i = 0; i < WATERLINK_ADMIT_BURST; i++)
-                        ok += waterlink_admit(&table, fresh, 1000);
+                        ok += waterlink_admit(&table, initiation, fresh, 7, 1000) == 1;
                 if (ok != WATERLINK_ADMIT_BURST) admit_bad++;
-                if (waterlink_admit(&table, fresh, 1000)) admit_bad++; // dry now
+                if (waterlink_admit(&table, initiation, fresh, 7, 1000)) admit_bad++; // dry now
+        }
+        /*      Under load: with no secret nothing, with one a cookie for an
+                initiation without mac2, and the curve's buckets untouched;
+                with its mac2, the buckets decide again. */
+        {
+                p8 place[16] = {1};
+                p8 cookie[16];
+                struct waterlink_bucket all;
+
+                memset(&table, 0, sizeof table);
+                for (int i = 0; i < WATERLINK_ADMIT_LOADED; i++)
+                {
+                        place[15] = (p8)i;
+                        (void)waterlink_admit(&table, initiation, place, 9, 5000);
+                }
+                all = table.all;
+                if (waterlink_admit(&table, initiation, place, 9, 5000) != 0) admit_bad++;
+                for (int i = 0; i < 32; i++) table.secret[i] = (p8)draw(256);
+                table.secret_made = 4000;
+                if (waterlink_admit(&table, initiation, place, 9, 5000) != -1) admit_bad++;
+                if (memcmp(&all, &table.all, sizeof all)) admit_bad++;
+                waterlink_cookie_of(&table, place, 9, cookie);
+                waterlink_mac2(cookie, initiation);
+                if (waterlink_admit(&table, initiation, place, 9, 5000) != 1) admit_bad++;
+                if (waterlink_admit(&table, initiation, place, 10, 5000) != -1) admit_bad++;
+                table.secret_made = 5000 - (p64)WATERLINK_COOKIE_SECONDS * 1000000;
+                if (waterlink_admit(&table, initiation, place, 9, 5000) != 0) admit_bad++;
+                memset(initiation, 0, WATERLINK_DATAGRAM);
         }
         for (long n = 0; n < 200000; n++)
         {
@@ -51576,8 +51643,14 @@ int main(int argc, char **argv)
 
                 for (int i = 0; i < 16; i++)
                         address[i] = draw(3) ? (p8)draw(4) : (p8)draw(256);
-                (void)waterlink_admit(&table, address, now);
+                if (!draw(64))
+                {
+                        table.secret_made = now ? now - draw(2) * 130000000ull : 0;
+                        initiation[16 + WATERLINK_INITIATE_BYTES + draw(16)] = (p8)draw(256);
+                }
+                (void)waterlink_admit(&table, initiation, address, (p16)draw(65536), now);
         }
+        free(initiation);
 
         printf("gate: %ld cases, %lu passed, %lu model failures; admit %lu failures\n",
                count, passed, model_bad, admit_bad);
@@ -52334,9 +52407,15 @@ static void crypto_sha256_write(crypto_sha256 *h, const void *data, positive siz
 }
 static void crypto_sha256_close(crypto_sha256 *h, p8 *out)
 {
+        //      Every word of the digest depends on every lane: a digest cut
+        //      to sixteen bytes, as the MACs and keys are, still sees every
+        //      byte written.
+        p64 all = wl_mix(h->lane[0] ^ wl_mix(h->lane[1] ^ wl_mix(h->lane[2] ^
+                                                                 wl_mix(h->lane[3]))));
+
         for (int i = 0; i < 4; i++)
         {
-                p64 word = wl_mix(h->lane[i] ^ h->lane[(i + 1) & 3] ^ h->length);
+                p64 word = wl_mix(h->lane[i] ^ all ^ h->length ^ (p64)i << 56);
 
                 memcpy(out + 8 * i, &word, 8);
         }
@@ -52395,10 +52474,12 @@ static void crypto_pbkdf2(positive algorithm, positive size, const p8 *secret,
         crypto_sha256_close(&h, block);
         memcpy(out, block, out_size < 32 ? out_size : 32);
 }
+static unsigned long wl_curves;
 static bool crypto_x25519(p8 *out, const p8 *scalar, const p8 *point)
 {
         p64 s, u, product;
 
+        wl_curves++;
         memcpy(&s, scalar, 8);
         memcpy(&u, point, 8);
         product = (s | 1) * u;
@@ -52651,7 +52732,10 @@ WATERLINK_PRE_DRIVER = r'''
           - greetings an mDNS packet provoked number at most LINK_GREETED in
             any LINK_GREET_AGAIN, and one-shot answers at most one in any
             LINK_ANSWER_AGAIN: nothing a spoofed packet says makes this an
-            amplifier.
+            amplifier;
+          - an initiation answered with a cookie reply spent no curve, and a
+            cookie reply is WATERLINK_COOKIE_DATAGRAM bytes, a sixteenth of
+            what provoked it.
 */
 static const p8 *wl_in;
 static positive wl_left;
@@ -52786,6 +52870,9 @@ static positive wl_answered_count;
 static p8 wl_last_respond[WATERLINK_DATAGRAM];
 static p8 wl_client_first[WATERLINK_DATAGRAM];
 static bool wl_have_respond;
+static p8 wl_last_cookie[WATERLINK_COOKIE_DATAGRAM];
+static bool wl_have_cookie;
+static void wl_check(bool good, const char *what);
 static bipolar socket_send(b32 socket, const void *bytes, positive size, b32 flags,
                            const void *to, positive to_size)
 {
@@ -52815,6 +52902,13 @@ static bipolar socket_send(b32 socket, const void *bytes, positive size, b32 fla
         {
                 memcpy(wl_last_respond, bytes, size);
                 wl_have_respond = true;
+        }
+        if (socket == 3 && kind == WATERLINK_KIND_COOKIE)
+        {
+                wl_check(size == WATERLINK_COOKIE_DATAGRAM,
+                         "a cookie reply of another size");
+                memcpy(wl_last_cookie, bytes, WATERLINK_COOKIE_DATAGRAM);
+                wl_have_cookie = true;
         }
         //      As the kernel: no datagram goes to port zero. What was made
         //      for it is counted above all the same.
@@ -52889,7 +52983,7 @@ static void wl_reset(bool server)
         wl_bad_names = 0;
         wl_greeted_count = wl_answered_count = 0;
         wl_run_count = wl_run_next = wl_mdns_count = wl_mdns_next = 0;
-        wl_have_respond = false;
+        wl_have_respond = wl_have_cookie = false;
         wl_clock = 1000000000ull;
         wl_random_state = 1;
         for (int i = 0; i < 3; i++)
@@ -52990,7 +53084,7 @@ static void wl_step(bool server)
         p16 port = take8() & 1 ? WATERLINK_MDNS_PORT : take16();
         p64 now = wl_clock / 1000;
 
-        switch (op % 9)
+        switch (op % 10)
         {
         case 0:
         {
@@ -53010,7 +53104,7 @@ static void wl_step(bool server)
                 //      group member, then perhaps spoiled; a good one is
                 //      answered, and the answer must key both ends alike.
                 int who = take8() % 3;
-                bool group = op % 9 == 2;
+                bool group = op % 10 == 2;
                 struct waterlink_noise noise;
                 p64 conversation = take8() & 3;
                 p32 index = take32();
@@ -53148,6 +53242,62 @@ static void wl_step(bool server)
                 wl_mdns_count = wl_mdns_next = 0;
                 break;
         }
+        case 9:
+        {
+                /*      A flood of good mac1s from made-up addresses, then one
+                        of the three from here, perhaps again under the cookie
+                        the listener handed back: no curve is spent on an
+                        initiation the listener answers with a cookie. */
+                positive count = take8() % 48;
+                int who = take8() % 3;
+                struct waterlink_noise noise;
+                p8 place[16];
+
+                if (!server)
+                        break;
+                for (positive at = 0; at <= count; at++)
+                {
+                        unsigned long curves;
+                        p64 cookies = link_self.admission.cookies;
+                        bool last = at == count;
+
+                        wl_initiation(datagram, last ? who : 2, false,
+                                      take16(), take8(), take32() | 1, &noise);
+                        curves = wl_curves;
+                        memcpy(place, wl_addresses[1], 16);
+                        place[13] = (p8)at;
+                        wl_have_cookie = false;
+                        link_datagram(datagram, WATERLINK_DATAGRAM,
+                                      last ? address : place,
+                                      last ? port : (p16)(2000 + at), now);
+                        wl_check(link_self.admission.cookies == cookies ||
+                                         wl_curves == curves,
+                                 "a curve spent on an initiation answered "
+                                 "with a cookie");
+                        crypto_forget(&noise, sizeof noise);
+                }
+                if (wl_have_cookie && take8() & 1)
+                {
+                        p8 cookie[16];
+
+                        if (waterlink_cookie_take(
+                                    link_self.me.public,
+                                    datagram + 16 + WATERLINK_INITIATE_BYTES - 16,
+                                    wl_last_cookie, WATERLINK_COOKIE_DATAGRAM,
+                                    cookie))
+                        {
+                                wl_initiation(datagram, who, false, take16(),
+                                              take8(), take32() | 1, &noise);
+                                waterlink_mac2(cookie, datagram);
+                                if (take8() & 1)
+                                        wl_spoil(datagram, &link_self.me, true);
+                                link_datagram(datagram, WATERLINK_DATAGRAM,
+                                              address, port, now);
+                                crypto_forget(&noise, sizeof noise);
+                        }
+                }
+                break;
+        }
         default:
         {
                 //      At the client: the answer to the initiation it has out,
@@ -53167,6 +53317,41 @@ static void wl_step(bool server)
                         break;
                 }
                 memcpy(datagram, wl_client_first, WATERLINK_DATAGRAM);
+                if (take8() & 1)
+                {
+                        /*      Under load the machine answers with a cookie;
+                                the next initiation must carry mac2 by it. */
+                        struct waterlink_admission table;
+                        p8 reply[WATERLINK_COOKIE_DATAGRAM];
+                        p8 nonce[24];
+                        p8 cookie[16];
+                        p8 copy[WATERLINK_DATAGRAM];
+
+                        memset(&table, 0, sizeof table);
+                        take_bytes(table.secret, 32);
+                        take_bytes(nonce, 24);
+                        table.secret_made = now ? now : 1;
+                        waterlink_cookie_reply(&wl_id[0], &table, datagram, address,
+                                               port, nonce, reply);
+                        if (take8() & 1)
+                                reply[take8() % sizeof reply] ^= take8() | 1;
+                        link_client.cookie_at = 0;
+                        link_datagram(reply, take8() & 1 ? sizeof reply
+                                                         : take8() % 128,
+                                      address, port, now);
+                        if (!link_client.cookie_at)
+                                break;
+                        waterlink_cookie_of(&table, address, port, cookie);
+                        wl_check(!memcmp(cookie, link_client.cookie, 16),
+                                 "the client kept a cookie it was not handed");
+                        (void)link_client_initiate(s, now);
+                        memcpy(copy, wl_client_first, WATERLINK_DATAGRAM);
+                        memset(copy + 16 + WATERLINK_INITIATE_BYTES, 0, 16);
+                        waterlink_mac2(cookie, copy);
+                        wl_check(!memcmp(copy, wl_client_first, WATERLINK_DATAGRAM),
+                                 "the initiation after a cookie lacks its mac2");
+                        break;
+                }
                 if (!waterlink_accept(&noise, &wl_id[0], null, datagram, who, hello))
                         break;
                 system_random_fill(ephemeral, 32, 0);
@@ -53271,6 +53456,12 @@ def waterlink_pre_seeds():
         "mdns_socket.bin": b"\x00" + socket_mdns,
         "client_answer.bin": b"\x01" + head(8) + head(8) + b"\x00\x00\x00\x07\x00",
         "raw.bin": b"\x00" + head(0) + (64).to_bytes(2, "big") + bytes(range(64)),
+        "flood_then_cookie.bin": b"\x00" + head(9) + bytes([40, 0]) + b"".join(
+            (i + 1).to_bytes(2, "big") + bytes([i & 3]) + (0x100 + i).to_bytes(4, "big")
+            for i in range(41)) + b"\x01" + (900).to_bytes(2, "big") + b"\x01" +
+        (0x5151).to_bytes(4, "big") + b"\x00",
+        "client_cookie.bin": b"\x01" + head(8) + head(8) + b"\x01" + bytes(range(56)) +
+        b"\x00\x01",
         "empty.bin": b"",
     }
 
