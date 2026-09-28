@@ -10609,6 +10609,45 @@ else
         lost 'utility build' "$(head -3 "$work/switch-utility.log")"
 fi
 
+#       A policy string the shell and floodlight.c cannot read refuses every
+#       program at boot, /init among them, so the header is not written for
+#       one: each row below is read as given, then misspelled one field at
+#       a time, and only the row as given builds.
+group floodlight-policy
+for switch_row in 'wget spawn deny' 'curl network allow' '/usr/bin/nc run deny' \
+        'find flag -exec deny' 'tar flag --to-command allow'; do
+        # shellcheck disable=SC2086
+        set -- $switch_row
+        switch_last=$(($# == 4 ? 4 : 3))
+        eval "switch_state=\${$switch_last}"
+        for switch_shape in given setting state extra short seal option; do
+                case $switch_shape in
+                given) switch_policy="$switch_row; $switch_row" ;;
+                setting) switch_policy="$1 ${2}s ${switch_row#"$1 $2 "}" ;;
+                state) switch_policy="${switch_row% *} ${switch_state}d" ;;
+                extra) switch_policy="$switch_row now" ;;
+                short) switch_policy="${switch_row% *}" ;;
+                seal) switch_policy="seal ${switch_row#* }" ;;
+                option)
+                        [ "$2" = flag ] || continue
+                        switch_policy="$1 flag ${3#"${3%%[!-]*}"} $4" ;;
+                esac
+                printf 'CONFIG_MOONWATER_FLOODLIGHT_POLICY="%s"\n' \
+                        "$switch_policy" > "$work/switch-policy.config"
+                build_tool config-header "$work/switch-policy.config" \
+                        "$work/switch-policy.h" > "$work/switch-policy.log" 2>&1
+                switch_built=$?
+                if [ "$switch_shape" = given ]; then
+                        same "$switch_policy" 0 "$switch_built"
+                elif [ "$switch_built" -ne 0 ] &&
+                        grep -q FLOODLIGHT_POLICY "$work/switch-policy.log"; then
+                        won
+                else
+                        lost "$switch_policy" "built ($switch_built)"
+                fi
+        done
+done
+
 #       kernel/profile/sec_locked as the build composes it over the
 #       defaults, after profile/any turns the core on: its allow list in,
 #       everything else out, the core kept.

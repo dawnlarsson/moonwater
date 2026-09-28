@@ -4114,6 +4114,57 @@ static string_address build_config_header(string_address from,
 }
 
 /*
+        The policy string, read here as the shell and floodlight.c will read
+        it at boot. A string neither can read refuses every program, /init
+        among them, so a typo in menuconfig made an image that could not
+        start; it stops the build instead, naming the string. A flag row
+        whose option does not begin with - can never match a word, so it is
+        refused too: it reads as a restriction and restricts nothing.
+*/
+static b32 build_floodlight_policy_check()
+{
+        static floodlight_row rows[FLOODLIGHT_CONFIGURED];
+        string_address quoted = build_floodlight_policy;
+        positive count = 0;
+        positive length;
+        positive used = 0;
+        p8 address_to text;
+
+        if (!build_moon_floodlight || !quoted)
+                return 0;
+
+        //      Kconfig writes the string as C does: quoted, and a backslash
+        //      in front of each backslash and quote inside.
+        length = string_length(quoted);
+        text = build_text_take(length);
+        for (positive at = 1; at + 1 < length; at++)
+        {
+                if (quoted[at] == '\\' && at + 2 < length)
+                        at++;
+                text[used++] = (p8)quoted[at];
+        }
+        text[used] = end;
+
+        if (!floodlight_policy_take((string_address)text, rows,
+                                    address_of count))
+                return build_die(build_join(
+                    "CONFIG_MOONWATER_FLOODLIGHT_POLICY does not read, and "
+                    "would refuse every program at boot: ", quoted, null));
+
+        for (positive at = 0; at < count; at++)
+                if (rows[at].setting == FLOODLIGHT_FLAG &&
+                    rows[at].detail[0] != '-')
+                        return build_die(build_join(
+                            "CONFIG_MOONWATER_FLOODLIGHT_POLICY: ",
+                            (string_address)rows[at].subject, " flag ",
+                            (string_address)rows[at].detail,
+                            " names no option; an option begins with -",
+                            null));
+
+        return 0;
+}
+
+/*
         Write the header for the configuration now held and point the next
         spark build at it. The path is absolute because a quoted include is
         looked up beside the file that asks for it, not where the compiler
@@ -4123,7 +4174,12 @@ static b32 build_config_header_install(string_address from,
                                        string_address address_to record)
 {
         string_address path = build_in("artifacts", "moonwater_config.h");
-        string_address text = build_config_header(from, record);
+        string_address text;
+
+        if (build_floodlight_policy_check())
+                return 1;
+
+        text = build_config_header(from, record);
 
         if (!build_write_file(path, text, string_length(text)))
                 return build_die(build_join("cannot write ", path, null));
@@ -4176,6 +4232,8 @@ static b32 build_config_header_write(string_address config, string_address outpu
                 return build_die("cannot read the tool or builtin registry");
 
         build_utility_program = kind != null;
+        if (build_floodlight_policy_check())
+                return 1;
         text = build_config_header(config, address_of record);
 
         if (!build_write_file(output, text, string_length(text)))
