@@ -940,19 +940,15 @@ typedef struct
         bool lost;
 } net_holding;
 
-#define NET_CLOCK_MONOTONIC 1
-
 static positive net_seconds(void)
 {
-        timespec now = {0, 0};
+        positive now = clock_monotonic_nanoseconds();
 
         //      A clock that will not answer leaves every lease looking
-        //      expired, so an address is never kept beyond an unknown deadline.
-        if (system_call_2(syscall(clock_gettime), NET_CLOCK_MONOTONIC,
-                          (positive)address_of now))
-                return 0;
-
-        return (positive)now.tv_sec;
+        //      expired, so an address is never kept beyond an unknown
+        //      deadline. Zero is that answer, and the monotonic clock's
+        //      first second is when a boot takes its lease, so it reads 1.
+        return now ? now / NETWORK_NANOSECONDS + 1 : 0;
 }
 
 /* Deleting state which the kernel already discarded is the same outcome as

@@ -71916,6 +71916,61 @@ static fn storage_test_link_state(void)
         netlink_forget(address_of net_states);
 }
 
+/* The lease clock's first second.  A boot takes its lease there, and zero is
+   what net_seconds says for a clock that failed -- which expires every lease
+   at once.  A time namespace whose monotonic clock starts about now puts a
+   grandchild in that second (NOT RUN without unprivileged user namespaces). */
+static fn storage_test_lease_clock_origin(void)
+{
+        b32 status = 0;
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                p8 offsets[48] = "monotonic -";
+                p8 digits[24];
+                positive at = 11;
+                positive count = 0;
+                positive now = clock_monotonic_nanoseconds();
+                timespec pause = {0, 250000000};
+                b32 inner = 0;
+
+                if (now % NETWORK_NANOSECONDS > 700000000)
+                {
+                        system_call_2(syscall(nanosleep), (positive)address_of pause, 0);
+                        now = clock_monotonic_nanoseconds();
+                }
+                if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWTIME) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                now /= NETWORK_NANOSECONDS;
+                do
+                        digits[count++] = (p8)('0' + now % 10);
+                while (now /= 10);
+                while (count)
+                        offsets[at++] = digits[--count];
+                memory_copy(offsets + at, " 0\n", 3);
+                at += 3;
+                bipolar handle = system_open_at(AT_FDCWD, "/proc/self/timens_offsets",
+                                                1 | O_CLOEXEC);
+                if (handle < 0 || system_write_all((positive)handle, offsets, at) != at)
+                        system_call_1(syscall(exit_group), 2);
+                bipolar grandchild = system_fork();
+                if (grandchild == 0)
+                        system_call_1(syscall(exit_group), net_seconds() == 1 ? 0 : 1);
+                system_call_4(syscall(wait4), (positive)grandchild,
+                              (positive)address_of inner, 0, 0);
+                system_call_1(syscall(exit_group), (inner >> 8) & 0xff);
+        }
+        if (child > 0)
+                system_call_4(syscall(wait4), (positive)child,
+                              (positive)address_of status, 0, 0);
+        if (child > 0 && (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 2)
+                log_direct(str("storage_io: lease clock origin NOT RUN -- no time namespace\n"));
+        else
+                check("a lease taken in the clock's first second is not a failed clock",
+                      child > 0 && status == 0);
+}
+
 static fn storage_test_netlink_output(void)
 {
         writer saved = net_out;
@@ -72559,6 +72614,7 @@ b32 main(void)
         storage_test_findmnt();
         storage_test_script_rollback();
         storage_test_link_state();
+        storage_test_lease_clock_origin();
         storage_test_netlink_output();
         storage_test_net_files();
         return test_report(null);

@@ -35980,9 +35980,8 @@ def harness_dhcp_fuzz(argv):
 #define ERROR_NO_ENTRY 2
 #define ERROR_NO_PROCESS 3
 #define ERROR_NO_DEVICE 19
-#define syscall(name) 0
-#define system_call_2(number, a, b) ((void)(a), (void)(b), -1L)
-typedef struct { long tv_sec, tv_nsec; } timespec;
+#define NETWORK_NANOSECONDS 1000000000
+static positive clock_monotonic_nanoseconds(void) { return 0; }
 """ + head + walk + clock + r"""
 static const p8 fuzz_hardware[6] = {2, 0, 0, 0, 0, 1};
 
