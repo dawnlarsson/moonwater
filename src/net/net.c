@@ -1523,9 +1523,12 @@ done:
         Only "nameserver A.B.C.D" lines: the keyword, blanks, and the address
         up to the next blank, so a tab or a trailing comment does not hide a
         server. The wanted-th of them is returned, so a caller walks 0, 1, 2
-        until this answers negatively and the number of servers a machine may
-        list has no ceiling. Options, search domains and IPv6 servers are read
-        past rather than understood.
+        until this answers negatively. Options, search domains and IPv6
+        servers are read past rather than understood.
+
+        A file longer than the buffer is cut mid-line, and a cut
+        "nameserver 10.0.0.12" reads as a complete "10.0.0.1": a server the
+        file never named. So the last line of a full buffer is not a line.
 */
 static COLD bipolar dns_server_at(string_address path, positive wanted)
 {
@@ -1550,6 +1553,8 @@ static COLD bipolar dns_server_at(string_address path, positive wanted)
 
                 at = stop + (stop < (positive)got);
 
+                if (stop == sizeof text - 1)
+                        break;
                 if (stop - line < 12 ||
                     memory_compare(text + line, "nameserver", 10) ||
                     !byte_is_blank(text[from]))
