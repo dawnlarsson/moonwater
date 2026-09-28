@@ -935,6 +935,7 @@ static fn file_made_record(string_address name, file_facts address_to facts)
    source's identity, and where it went -- so its other names become links
    to that copy rather than copies of their own. */
 static file_made_entry address_to address_to file_linked_buckets;
+static positive file_linked_count;
 // The directory a named copy is building, open, while it is built in its
 // stage: a name below it is reached through it until it is published.
 static bipolar file_linked_root = -1;
@@ -967,8 +968,57 @@ static bipolar file_linked_make(file_made_entry address_to earlier,
                               directory, name, 0);
 }
 
+/* The earlier copy linked in place of a name already there, as GNU's
+   create_hard_link with replace does it: linked beside it under a name
+   nobody could have, then renamed over it, so the name is never missing.
+   A name that is already that copy is left as it is. */
+static bipolar file_linked_replace(file_made_entry address_to earlier,
+                                   bipolar directory, string_address name)
+{
+        bipolar linked = file_linked_make(earlier, directory, name);
+
+        if (linked != -ERROR_EXISTS)
+                return linked;
+
+        file_facts there;
+        file_facts first;
+        bool looked_first =
+            earlier->root && earlier->root == file_linked_generation &&
+                    file_linked_root >= 0
+                ? file_look(file_linked_root,
+                            (string_address)earlier->name + earlier->skip,
+                            AT_SYMLINK_NOFOLLOW, address_of first)
+                : file_look(AT_FDCWD, (string_address)earlier->name,
+                            AT_SYMLINK_NOFOLLOW, address_of first);
+        if (looked_first &&
+            file_look(directory, name, AT_SYMLINK_NOFOLLOW, address_of there) &&
+            file_same_identity(address_of first, address_of there))
+                return 0;
+
+        p8 temporary[FILE_PATH_MAX];
+        positive nonce = system_nonce();
+
+        for (positive attempt = 0; attempt < 64 && linked == -ERROR_EXISTS;
+             attempt++)
+        {
+                if (!system_temporary_name(name, temporary, sizeof(temporary),
+                                           (string_address) ".cp-link-", 9,
+                                           nonce + attempt))
+                        return -ERROR_NAME_TOO_LONG;
+                linked = file_linked_make(earlier, directory, temporary);
+        }
+        if (linked < 0)
+                return linked;
+
+        bipolar moved = system_rename_at(directory, temporary, directory, name, 0);
+        if (moved < 0)
+                (void)system_remove_at(directory, temporary, 0);
+        return moved;
+}
+
 static fn file_linked_record(file_facts address_to facts, string_address to)
 {
+        file_linked_count++;
         if (!file_linked_buckets)
         {
                 file_linked_buckets = utility_arena_take(
@@ -31737,6 +31787,10 @@ static bool cp_destination_entry_existed;
 static file_facts cp_destination_facts;
 static file_facts cp_destination_entry_facts;
 static bool mv_across_said;
+/* Why a move's copy failed where it said nothing, which mv reports in
+   place of the rename's EXDEV: a destination directory it may not write
+   is refused as GNU refuses it. */
+static bipolar mv_copy_refused;
 static bool mv_ask;
 static bool mv_destination_decided;
 static bool mv_destination_existed;
@@ -31751,6 +31805,16 @@ static cp_selection cp_selected;
 // 0 copies a symbolic link as itself, 1 copies what it points at, 2 does
 // that only for the links named on the command line.
 static positive cp_dereference;
+
+/* Whether --preserve=links has to remember this file: one with other names,
+   and, where links are followed, any file, since two links reaching one
+   file are two names of it -- GNU's remember_copied condition. */
+static bool cp_links_tracked(file_facts address_to facts, bool named)
+{
+        return cp_keep_links &&
+               (facts->hard_links > 1 || cp_dereference == 1 ||
+                (named && cp_dereference == 2));
+}
 
 // The umask as it stood when cp began: what a new file gets is the source's
 // mode with the umask taken out, and the kernel applies it to the creation
@@ -32850,7 +32914,7 @@ static fn cp_copy_job(address_any context, positive index)
         /* A file with other names, where links are kept, is left to the
            ordinary copy in walk order, which links the names after the
            first to the first one's copy. */
-        if (looked >= 0 && cp_keep_links && facts->hard_links > 1)
+        if (looked >= 0 && cp_links_tracked(facts, false))
                 looked = -ERROR_AGAIN;
         if (looked < 0 || (facts->mode & MODE_FORMAT) != MODE_FILE)
         {
@@ -33124,7 +33188,7 @@ static bool cp_tree_file(bipolar source, bipolar copy, string_address name)
         //      A file with other names, where links are kept, goes the
         //      serial way, which links its later names to its first copy.
         if (looked < 0 || (facts.mode & MODE_FORMAT) != MODE_FILE ||
-            (cp_keep_links && facts.hard_links > 1))
+            cp_links_tracked(address_of facts, false))
         {
                 system_close(in);
                 return false;
@@ -33758,24 +33822,6 @@ added:
 static bool cp_copy_contents;
 static bool cp_keep_directory_link;
 
-static bool cp_words_name_links(string_address value)
-{
-        for (positive at = 0; value && value[at];)
-        {
-                positive start = at;
-
-                while (value[at] && value[at] != ',')
-                        at++;
-                positive length = at - start;
-                if ((length == 5 && !memory_compare(value + start, "links", 5)) ||
-                    (length == 3 && !memory_compare(value + start, "all", 3)))
-                        return true;
-                if (value[at] == ',')
-                        at++;
-        }
-        return false;
-}
-
 static bool cp_same_file_look(positive kind)
 {
         bool as_regular = !cp_recursive || cp_copy_contents;
@@ -34093,7 +34139,33 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                     cp_update_policy == 'F',
                                     cp_loud, address_of facts,
                                     address_of there, address_of cp_status))
+        {
+                /* -u left a destination that is not older, and GNU still
+                   remembers it as this file's copy, so the file's other
+                   names become links to it -- or links it to the copy an
+                   earlier name made. */
+                bool not_older =
+                    destination_exists && cp_update_policy == 'u' &&
+                    (facts.modified.seconds < there.modified.seconds ||
+                     (facts.modified.seconds == there.modified.seconds &&
+                      facts.modified.nanoseconds <=
+                          there.modified.nanoseconds));
+                if (not_older && !cp_hard && !cp_symbolic &&
+                    cp_keep_links && cp_links_tracked(address_of facts, named))
+                {
+                        file_made_entry address_to earlier =
+                            file_linked_find(address_of facts);
+
+                        if (!earlier)
+                                file_linked_record(address_of facts,
+                                                   destination_shown);
+                        else if (file_linked_replace(earlier,
+                                                     destination_directory,
+                                                     destination) < 0)
+                                return false;
+                }
                 return true;
+        }
 
         /* GNU looks at the destination before anything is said: a name it
            cannot look at for want of search permission, the name or the
@@ -34141,15 +34213,23 @@ static bool file_copy_one(bipolar source_directory, string_address source,
            to what it made of it the first time, when a move across devices
            or a copy keeping links is asked for: mv h /dev/shm/x of a
            directory holding a and b, one file, gave two files. */
-        if (kind != MODE_DIRECTORY && facts.hard_links > 1 &&
-            (moving || cp_keep_links) && !cp_hard && !cp_symbolic)
+        /* A move looks even a file with one name up: its other names may
+           have gone ahead of it and been removed, which left it the last,
+           as GNU's src_to_dest_lookup looks. */
+        if (kind != MODE_DIRECTORY &&
+            (moving || cp_links_tracked(address_of facts, named)) &&
+            !cp_hard && !cp_symbolic)
         {
                 file_made_entry address_to earlier =
                     file_linked_find(address_of facts);
 
-                if (earlier && !destination_entry_exists)
+                if (earlier &&
+                    (!destination_entry_exists ||
+                     (!moving &&
+                      (destination_entry.mode & MODE_FORMAT) !=
+                          MODE_DIRECTORY)))
                 {
-                        bipolar linked = file_linked_make(
+                        bipolar linked = file_linked_replace(
                             earlier, destination_directory, destination);
                         if (linked >= 0)
                                 goto copied_without_metadata;
@@ -34162,7 +34242,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                         mv_across_said |= moving;
                         return false;
                 }
-                if (!earlier)
+                if (!earlier && (!moving || facts.hard_links > 1))
                         file_linked_record(address_of facts, destination_shown);
         }
         if (moving && file_move_loud && kind != MODE_DIRECTORY)
@@ -34363,6 +34443,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                 string_format(log_error, "cp: cannot open %w for reading: %s\n",
                                               writer_shell_quoted_name, source_shown,
                                               file_reason(in));
+                        mv_copy_refused = in;
                         return false;
                 }
 
@@ -34415,6 +34496,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                 string_format(log_error, "cp: cannot create regular file %w: %s\n",
                                               writer_shell_quoted_name, destination_shown,
                                               file_reason(out));
+                        mv_copy_refused = out;
                         return false;
                 }
 
@@ -34572,6 +34654,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
            GNU copies. The listing is held on the arena, which gives it back
            when this directory is done. */
         positive listed_mark = utility_arena.used;
+        positive linked_before = file_linked_count;
         struct linux_dirent64 address_to address_to listed = null;
         positive listed_count = 0;
         positive listed_at = 0;
@@ -34642,7 +34725,11 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                         system_close(held);
         }
 
-        if (listed)
+        /* The names of files with other names that the walk remembered
+           were taken from the arena after the listing: it is given back
+           only when there are none, or a later name of such a file would
+           be looked up in memory handed out again. */
+        if (listed && file_linked_count == linked_before)
                 utility_arena.used = listed_mark;
         if (linked_root)
         {
@@ -35372,10 +35459,10 @@ static bool cp_option_seen(p8 letter, string_address value)
                 return false;
         if (letter == 'a' || letter == 'd')
                 cp_keep_links = true;
-        if (letter == 'p' && cp_words_name_links(value))
-                cp_keep_links = true;
-        if (letter == 'N' && cp_words_name_links(value))
-                cp_keep_links = false;
+        if (letter == 'a')
+                file_keeps = FILE_KEEP_ALL;
+        if (letter == 'p' && !value)
+                file_keeps |= FILE_KEEP_ALL;
         if (letter == 'p')
         {
                 cp_wants_context = false;
@@ -36878,6 +36965,7 @@ static fn mv_one(string_address source, string_address destination)
                 }
 
                 bool copied = false;
+                mv_copy_refused = 0;
                 if (copy_handle < 0)
                 {
                         string_format(log_error,
@@ -36922,6 +37010,8 @@ static fn mv_one(string_address source, string_address destination)
                         mv_status = 1;
                         goto finished;
                 }
+                if (mv_copy_refused < 0)
+                        done = mv_copy_refused;
         }
 
         if (done == -ERROR_INVALID)
