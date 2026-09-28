@@ -6368,6 +6368,56 @@ Cannot write to 'out' (File too large)."
         else
                 note "wget write failure against GNU wget: NOT RUN -- no GNU wget"
         fi
+        #       -O onto a device or a FIFO writes into the node, as GNU wget
+        #       and every other staged output here do. The node was replaced
+        #       by a regular file instead -- /dev/null itself, run as root --
+        #       or refused outright when its directory was not writable.
+        #       wget_stream_run WGET DIR [OPTION...]: the /dev/null status,
+        #       the FIFO status, the bytes a reader drew through the FIFO,
+        #       and whether the FIFO is still one.
+        wget_stream_run()
+        {
+                wget_program=$1
+                wget_dir=$2
+                shift 2
+                mkdir -p "$wget_dir"
+                timeout 10 "$wget_program" -q "$@" -O /dev/null "$wget_url"
+                printf '%s ' "$?"
+                rm -f "$wget_dir/fifo"
+                mkfifo "$wget_dir/fifo" || { echo no-fifo; return; }
+                timeout 10 sh -c 'exec wc -c < "$1"' sh "$wget_dir/fifo" \
+                        > "$wget_dir/count" 2>/dev/null &
+                wget_reader=$!
+                timeout 10 "$wget_program" -q "$@" -O "$wget_dir/fifo" "$wget_url"
+                printf '%s ' "$?"
+                wait "$wget_reader"
+                printf '%s ' "$(tr -d ' ' < "$wget_dir/count")"
+                if [ -p "$wget_dir/fifo" ]; then echo fifo; else echo replaced; fi
+        }
+        if [ -s "$wget_place/port" ]; then
+                wget_stream_ours=$(wget_stream_run "$farm/wget" "$wget_place/stream-ours")
+        else
+                wget_stream_ours=server-failed
+        fi
+        if [ "$wget_stream_ours" = "0 0 1048576 fifo" ]; then
+                tally wget-into-device-and-fifo 1 1
+        else
+                tally wget-into-device-and-fifo 0 1
+                note "wget -O /dev/null, -O fifo said [$wget_stream_ours], want [0 0 1048576 fifo]"
+                builtins_failed=1
+        fi
+        if [ -n "$wget_gnu" ] && [ -s "$wget_place/port" ] &&
+                "$wget_gnu" --version 2>/dev/null | head -n 1 | grep -q '^GNU Wget'; then
+                wget_stream_gnu=$(wget_stream_run "$wget_gnu" "$wget_place/stream-gnu" \
+                        --no-config --no-proxy --no-hsts)
+                if [ "$wget_stream_gnu" = "$wget_stream_ours" ]; then
+                        tally wget-into-device-and-fifo-matches-gnu 1 1
+                else
+                        tally wget-into-device-and-fifo-matches-gnu 0 1
+                        note "GNU wget said [$wget_stream_gnu] where ours said [$wget_stream_ours]"
+                        builtins_failed=1
+                fi
+        fi
         kill "$wget_server" 2>/dev/null || :
         wait "$wget_server" 2>/dev/null || :
 
