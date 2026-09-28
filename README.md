@@ -289,6 +289,15 @@ use menuconfig:
 
 ## Tests
 
+The shell and network threat model, review checklist, and executable evidence
+map live in [SECURITY.md](SECURITY.md),
+[SECURITY_CHECKLIST.md](SECURITY_CHECKLIST.md), and
+[SECURITY_TEST_MATRIX.md](SECURITY_TEST_MATRIX.md). The current, deliberately
+non-certifying assessment and prioritized gap register are in
+[SECURITY_REVIEW.md](SECURITY_REVIEW.md). An unchecked checklist
+item is visible work, not a silently skipped test or a claim that the risk
+does not apply.
+
 ```
 sh test/run                     every lane
 sh test/run shell text          named lanes only

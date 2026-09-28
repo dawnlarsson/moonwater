@@ -125,7 +125,7 @@ static bool link_script_names_secret(string_address script,
                         continue;
                 word = at + 10;
                 word += string_span_of_set(word, " ");
-                if (memory_compare(word, namespace, length) || word[length] != ' ')
+                if (!host_starts(word, namespace) || word[length] != ' ')
                         continue;
                 word += length;
                 word += string_span_of_set(word, " ");
@@ -315,6 +315,7 @@ static b32 link_status(void)
                               (string_address)place);
         }
 
+        crypto_forget(address_of groups, sizeof groups);
         string_format(log, "\n");
         link_usage_write(log);
         return 0;
@@ -647,9 +648,13 @@ static b32 link_join(string_address address_to words, positive count)
         if (!record)
         {
                 if (groups.count >= LINK_GROUPS_MAX)
+                {
+                        crypto_forget(made, sizeof made);
+                        crypto_forget(address_of groups, sizeof groups);
                         return host_refuse("this machine is in %s groups "
                                            "already\n",
                                            "8");
+                }
                 record = groups.record + groups.count++;
                 memory_zero(record, sizeof(address_to record));
                 string_copy(record->namespace, namespace);
@@ -678,7 +683,11 @@ static b32 link_join(string_address address_to words, positive count)
                 record->may = may;
 
         if (link_groups_save(address_of groups) < 0)
+        {
+                crypto_forget(made, sizeof made);
+                crypto_forget(address_of groups, sizeof groups);
                 return host_refuse("%s could not be written\n", LINK_GROUPS_PATH);
+        }
 
         link_grants_text(record->may, grants, sizeof grants);
         string_format(log, host_label "in %s; members may %s here\n", namespace,
@@ -706,6 +715,7 @@ static b32 link_leave(string_address namespace, bool forget)
         link_groups groups;
         struct waterlink_group_keys keys;
         bool found = false;
+        bool saved;
 
         link_groups_load(address_of groups);
         for (positive at = 0; at < groups.count; at++)
@@ -718,10 +728,15 @@ static b32 link_leave(string_address namespace, bool forget)
                         found = true;
                         break;
                 }
+        saved = found && link_groups_save(address_of groups) >= 0;
+        crypto_forget(address_of groups, sizeof groups);
         if (!found)
                 return host_refuse("this machine is not in %s\n", namespace);
-        if (link_groups_save(address_of groups) < 0)
+        if (!saved)
+        {
+                crypto_forget(address_of keys, sizeof keys);
                 return host_refuse("%s could not be written\n", LINK_GROUPS_PATH);
+        }
 
         if (forget)
         {

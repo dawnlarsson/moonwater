@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        354 routines (340 public, 14 local), 352 of them on all three and 2 local to one.
+        355 routines (341 public, 14 local), 353 of them on all three and 2 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -414,6 +414,7 @@
           writer_fill                    public  yes     yes     yes
           writer_stderr                  public  yes     yes     yes
           writer_stderr_once             public  yes     yes     yes
+          x25519                         public  yes     yes     yes
           zstd_bits_get                  public  yes     yes     yes
           zstd_bits_open                 public  yes     yes     yes
           zstd_bits_reload               public  yes     yes     yes
@@ -3843,6 +3844,290 @@ __asm__(
     "mov %rcx, %rbp\n add %rdx, %rbp\n sbb %rdx, %rdx\n neg %rdx\n"             \
     "sub %rcx, " w0 "\n sbb %rax, " w1 "\n sbb %rbp, " w2 "\n sbb %rdx, " w3 "\n sbb $0, " w4 "\n sbb $0, " w5 "\n sbb $0, " tp "\n"
 
+/*
+        X25519 on four 64-bit limbs. The x86_64 body of x25519 carries the
+        reasoning; these are its field operations and the ladder they make.
+
+        An element is any number below 2^256, not necessarily below p. An
+        operand is a slot: an offset and the register it is from, "160" and
+        "%rsp" or "0" and "%rsi", so the same text serves the ladder, which
+        works on its frame directly, and the subroutines the inversion
+        calls. Each multiply and square spends rax, rbx, rcx, rdx and
+        r8-r15, and its output may alias an input.
+*/
+#define X25519_X64_LOAD(a, ar)                                                 \
+    "mov " a "(" ar "), %r8\n   mov " a "+8(" ar "), %r9\n"                         \
+    "mov " a "+16(" ar "), %r10\n   mov " a "+24(" ar "), %r11\n"
+
+#define X25519_X64_STORE(d, dr)                                                \
+    "mov %r8, " d "(" dr ")\n   mov %r9, " d "+8(" dr ")\n"                         \
+    "mov %r10, " d "+16(" dr ")\n   mov %r11, " d "+24(" dr ")\n"
+
+/*
+        What is left in r8..r11 plus t times 2^256 folded back: 2^255 is 19
+        mod p, so 2t and bit 255 make one small multiple of 19 and bit 255
+        is cleared, after which adding it cannot carry out of r11. The
+        answer is below 2^255 + 2^11: a single fold, where folding by 38
+        needs a second for the carry the first can make. Uses rbx as zero.
+*/
+#define X25519_X64_FOLD(t)                                                     \
+    "shld $1, %r11, " t "\n   btr $63, %r11\n   imul $19, " t ", " t "\n"            \
+    "add " t ", %r8\n   adc %rbx, %r9\n   adc %rbx, %r10\n   adc %rbx, %r11\n"
+
+//      sum = a + b and difference = a - b, a loaded once.
+#define X25519_X64_ADD_SUB(sum, difference, a, b)                              \
+    X25519_X64_LOAD(a, "%rsp")                                                 \
+    "mov %r8, %r12\n   mov %r9, %r13\n   mov %r10, %r14\n   mov %r11, %r15\n"      \
+    "xor %ebx, %ebx\n   xor %eax, %eax\n"                                          \
+    "add " b "(%rsp), %r8\n   adc " b "+8(%rsp), %r9\n"                           \
+    "adc " b "+16(%rsp), %r10\n   adc " b "+24(%rsp), %r11\n   adc %rbx, %rax\n"   \
+    X25519_X64_FOLD("%rax")                                                    \
+    X25519_X64_STORE(sum, "%rsp")                                              \
+    "sub " b "(%rsp), %r12\n   sbb " b "+8(%rsp), %r13\n"                         \
+    "sbb " b "+16(%rsp), %r14\n   sbb " b "+24(%rsp), %r15\n"                     \
+    "sbb %rax, %rax\n   and $38, %eax\n"                                          \
+    "sub %rax, %r12\n   sbb %rbx, %r13\n   sbb %rbx, %r14\n   sbb %rbx, %r15\n"   \
+    "sbb %rax, %rax\n   and $38, %eax\n   sub %rax, %r12\n"                       \
+    "mov %r12, " difference "(%rsp)\n   mov %r13, " difference "+8(%rsp)\n"         \
+    "mov %r14, " difference "+16(%rsp)\n   mov %r15, " difference "+24(%rsp)\n"
+
+//      d = a - b: a borrow is -2^256, so 38 more comes off, twice at most.
+#define X25519_X64_SUB(d, a, b)                                                \
+    X25519_X64_LOAD(a, "%rsp")                                                 \
+    "sub " b "(%rsp), %r8\n   sbb " b "+8(%rsp), %r9\n"                           \
+    "sbb " b "+16(%rsp), %r10\n   sbb " b "+24(%rsp), %r11\n"                     \
+    "sbb %rax, %rax\n   and $38, %eax\n"                                          \
+    "sub %rax, %r8\n   sbb $0, %r9\n   sbb $0, %r10\n   sbb $0, %r11\n"           \
+    "sbb %rax, %rax\n   and $38, %eax\n   sub %rax, %r8\n"                        \
+    X25519_X64_STORE(d, "%rsp")
+
+//      d = 121665 e + a, RFC 7748's a24 step.
+#define X25519_X64_A24(d, e, a)                                                \
+    "mov $121665, %ecx\n   xor %ebx, %ebx\n"                                       \
+    "mov " e "(%rsp), %rax\n   mul %rcx\n   mov %rax, %r8\n   mov %rdx, %r9\n"    \
+    "mov " e "+8(%rsp), %rax\n   mul %rcx\n   add %rax, %r9\n   adc $0, %rdx\n"   \
+    "mov %rdx, %r10\n"                                                           \
+    "mov " e "+16(%rsp), %rax\n   mul %rcx\n   add %rax, %r10\n   adc $0, %rdx\n" \
+    "mov %rdx, %r11\n"                                                           \
+    "mov " e "+24(%rsp), %rax\n   mul %rcx\n   add %rax, %r11\n   adc $0, %rdx\n" \
+    "add " a "(%rsp), %r8\n   adc " a "+8(%rsp), %r9\n"                           \
+    "adc " a "+16(%rsp), %r10\n   adc " a "+24(%rsp), %r11\n   adc $0, %rdx\n"    \
+    X25519_X64_FOLD("%rdx")                                                    \
+    X25519_X64_STORE(d, "%rsp")
+
+//      x and y trade places where rbx is all ones and stay where it is zero.
+#define X25519_X64_CSWAP_LIMB(x, y)                                            \
+    "mov " x "(%rsp), %r8\n   mov " y "(%rsp), %r9\n   mov %r8, %rax\n"           \
+    "xor %r9, %rax\n   and %rbx, %rax\n   xor %rax, %r8\n   xor %rax, %r9\n"      \
+    "mov %r8, " x "(%rsp)\n   mov %r9, " y "(%rsp)\n"
+
+#define X25519_X64_CSWAP(x, y)                                                 \
+    X25519_X64_CSWAP_LIMB(x, y)                                                \
+    X25519_X64_CSWAP_LIMB(x "+8", y "+8")                                      \
+    X25519_X64_CSWAP_LIMB(x "+16", y "+16")                                    \
+    X25519_X64_CSWAP_LIMB(x "+24", y "+24")
+
+//      One row of a b by mulx: a[off] times b into t0..t4, t4 fresh, the
+//      low halves on the carry chain and the high halves on the overflow.
+#define X25519_X64_ROW_MULX(off, b, br, t0, t1, t2, t3, t4)                     \
+    "mulx " b "(" br "), %rax, %rcx\n   adcx %rax, " t0 "\n   adox %rcx, " t1 "\n"  \
+    "mulx " b "+8(" br "), %rax, %rcx\n   adcx %rax, " t1 "\n   adox %rcx, " t2 "\n" \
+    "mulx " b "+16(" br "), %rax, %rcx\n   adcx %rax, " t2 "\n   adox %rcx, " t3 "\n" \
+    "mulx " b "+24(" br "), %rax, " t4 "\n   adcx %rax, " t3 "\n"                    \
+    "adox %rbx, " t4 "\n   adcx %rbx, " t4 "\n"
+
+//      r8..r15 = W folded to four limbs by 38 and then by 19, and stored.
+//      rbx is zero and both flags clear.
+#define X25519_X64_REDUCE_MULX(d, dr)                                          \
+    "mov $38, %edx\n"                                                            \
+    "mulx %r12, %rax, %rcx\n   adcx %rax, %r8\n   adox %rcx, %r9\n"               \
+    "mulx %r13, %rax, %rcx\n   adcx %rax, %r9\n   adox %rcx, %r10\n"              \
+    "mulx %r14, %rax, %rcx\n   adcx %rax, %r10\n   adox %rcx, %r11\n"             \
+    "mulx %r15, %rax, %r12\n   adcx %rax, %r11\n"                                 \
+    "adox %rbx, %r12\n   adcx %rbx, %r12\n"                                       \
+    X25519_X64_FOLD("%r12")                                                    \
+    X25519_X64_STORE(d, dr)
+
+#define X25519_X64_MULTIPLY_MULX(d, dr, a, ar, b, br)                          \
+    "mov " a "(" ar "), %rdx\n   xor %ebx, %ebx\n"                                  \
+    "mulx " b "(" br "), %r8, %r9\n"                                               \
+    "mulx " b "+8(" br "), %rax, %r10\n   adcx %rax, %r9\n"                        \
+    "mulx " b "+16(" br "), %rax, %r11\n   adcx %rax, %r10\n"                      \
+    "mulx " b "+24(" br "), %rax, %r12\n   adcx %rax, %r11\n   adcx %rbx, %r12\n"  \
+    "mov " a "+8(" ar "), %rdx\n"                                                  \
+    X25519_X64_ROW_MULX("8", b, br, "%r9", "%r10", "%r11", "%r12", "%r13")     \
+    "mov " a "+16(" ar "), %rdx\n"                                                 \
+    X25519_X64_ROW_MULX("16", b, br, "%r10", "%r11", "%r12", "%r13", "%r14")   \
+    "mov " a "+24(" ar "), %rdx\n"                                                 \
+    X25519_X64_ROW_MULX("24", b, br, "%r11", "%r12", "%r13", "%r14", "%r15")   \
+    X25519_X64_REDUCE_MULX(d, dr)
+
+//      The six cross products once on the two chains, then doubled on the
+//      carry chain while the four squares go in on the overflow chain.
+#define X25519_X64_SQUARE_MULX(d, dr, a, ar)                                   \
+    "mov " a "(" ar "), %rdx\n   xor %ebx, %ebx\n"                                  \
+    "mulx " a "+8(" ar "), %r9, %r10\n"                                            \
+    "mulx " a "+16(" ar "), %rax, %r11\n   adcx %rax, %r10\n"                      \
+    "mulx " a "+24(" ar "), %rax, %r12\n   adcx %rax, %r11\n"                      \
+    "mov " a "+8(" ar "), %rdx\n"                                                  \
+    "mulx " a "+16(" ar "), %rax, %rcx\n   adox %rax, %r11\n   adcx %rcx, %r12\n"  \
+    "mulx " a "+24(" ar "), %rax, %r13\n   adox %rax, %r12\n   adcx %rbx, %r13\n"  \
+    "mov " a "+16(" ar "), %rdx\n"                                                 \
+    "mulx " a "+24(" ar "), %rax, %r14\n   adox %rax, %r13\n   adox %rbx, %r14\n"  \
+    "mov " a "(" ar "), %rdx\n"                                                    \
+    "mulx %rdx, %r8, %rax\n   adcx %r9, %r9\n   adox %rax, %r9\n"                 \
+    "mov " a "+8(" ar "), %rdx\n"                                                  \
+    "mulx %rdx, %rax, %rcx\n   adcx %r10, %r10\n   adox %rax, %r10\n"             \
+    "adcx %r11, %r11\n   adox %rcx, %r11\n"                                       \
+    "mov " a "+16(" ar "), %rdx\n"                                                 \
+    "mulx %rdx, %rax, %rcx\n   adcx %r12, %r12\n   adox %rax, %r12\n"             \
+    "adcx %r13, %r13\n   adox %rcx, %r13\n"                                       \
+    "mov " a "+24(" ar "), %rdx\n"                                                 \
+    "mulx %rdx, %rax, %r15\n   adcx %r14, %r14\n   adox %rax, %r14\n"             \
+    "adcx %rbx, %r15\n   adox %rbx, %r15\n"                                       \
+    X25519_X64_REDUCE_MULX(d, dr)
+
+//      r8..r15 = W folded by 38 with mulq and then by 19, and stored.
+#define X25519_X64_REDUCE_MULQ(d, dr)                                          \
+    "mov $38, %ecx\n"                                                            \
+    "mov %r12, %rax\n   mul %rcx\n   add %rax, %r8\n   adc $0, %rdx\n   mov %rdx, %rbx\n" \
+    "mov %r13, %rax\n   mul %rcx\n   add %rbx, %rax\n   adc $0, %rdx\n"          \
+    "add %rax, %r9\n   adc $0, %rdx\n   mov %rdx, %rbx\n"                          \
+    "mov %r14, %rax\n   mul %rcx\n   add %rbx, %rax\n   adc $0, %rdx\n"          \
+    "add %rax, %r10\n   adc $0, %rdx\n   mov %rdx, %rbx\n"                         \
+    "mov %r15, %rax\n   mul %rcx\n   add %rbx, %rax\n   adc $0, %rdx\n"          \
+    "add %rax, %r11\n   adc $0, %rdx\n   xor %ebx, %ebx\n"                         \
+    X25519_X64_FOLD("%rdx")                                                    \
+    X25519_X64_STORE(d, dr)
+
+//      One row of a b by mulq: b[off] times a into t0..t4, t4 fresh.
+#define X25519_X64_ROW_MULQ(off, a, ar, b, br, t0, t1, t2, t3, t4)              \
+    "mov " b "+" off "(" br "), %rcx\n"                                              \
+    "mov " a "(" ar "), %rax\n   mul %rcx\n   add %rax, " t0 "\n   adc $0, %rdx\n   mov %rdx, %rbx\n" \
+    "mov " a "+8(" ar "), %rax\n   mul %rcx\n   add %rbx, %rax\n   adc $0, %rdx\n"  \
+    "add %rax, " t1 "\n   adc $0, %rdx\n   mov %rdx, %rbx\n"                       \
+    "mov " a "+16(" ar "), %rax\n   mul %rcx\n   add %rbx, %rax\n   adc $0, %rdx\n" \
+    "add %rax, " t2 "\n   adc $0, %rdx\n   mov %rdx, %rbx\n"                       \
+    "mov " a "+24(" ar "), %rax\n   mul %rcx\n   add %rbx, %rax\n   adc $0, %rdx\n" \
+    "add %rax, " t3 "\n   adc $0, %rdx\n   mov %rdx, " t4 "\n"
+
+#define X25519_X64_MULTIPLY_MULQ(d, dr, a, ar, b, br)                          \
+    "mov " b "(" br "), %rcx\n"                                                     \
+    "mov " a "(" ar "), %rax\n   mul %rcx\n   mov %rax, %r8\n   mov %rdx, %r9\n"   \
+    "mov " a "+8(" ar "), %rax\n   mul %rcx\n   add %rax, %r9\n   adc $0, %rdx\n"  \
+    "mov %rdx, %r10\n"                                                           \
+    "mov " a "+16(" ar "), %rax\n   mul %rcx\n   add %rax, %r10\n   adc $0, %rdx\n" \
+    "mov %rdx, %r11\n"                                                           \
+    "mov " a "+24(" ar "), %rax\n   mul %rcx\n   add %rax, %r11\n   adc $0, %rdx\n" \
+    "mov %rdx, %r12\n"                                                           \
+    X25519_X64_ROW_MULQ("8", a, ar, b, br, "%r9", "%r10", "%r11", "%r12", "%r13")  \
+    X25519_X64_ROW_MULQ("16", a, ar, b, br, "%r10", "%r11", "%r12", "%r13", "%r14") \
+    X25519_X64_ROW_MULQ("24", a, ar, b, br, "%r11", "%r12", "%r13", "%r14", "%r15") \
+    X25519_X64_REDUCE_MULQ(d, dr)
+
+//      The six cross products once, doubled, and the four squares, by mulq.
+#define X25519_X64_SQUARE_MULQ(d, dr, a, ar)                                   \
+    "mov " a "(" ar "), %rcx\n"                                                    \
+    "mov " a "+8(" ar "), %rax\n   mul %rcx\n   mov %rax, %r9\n   mov %rdx, %r10\n" \
+    "mov " a "+16(" ar "), %rax\n   mul %rcx\n   add %rax, %r10\n   adc $0, %rdx\n" \
+    "mov %rdx, %r11\n"                                                           \
+    "mov " a "+24(" ar "), %rax\n   mul %rcx\n   add %rax, %r11\n   adc $0, %rdx\n" \
+    "mov %rdx, %r12\n"                                                           \
+    "mov " a "+8(" ar "), %rcx\n"                                                  \
+    "mov " a "+16(" ar "), %rax\n   mul %rcx\n   add %rax, %r11\n   adc $0, %rdx\n" \
+    "mov %rdx, %rbx\n"                                                           \
+    "mov " a "+24(" ar "), %rax\n   mul %rcx\n   add %rbx, %rax\n   adc $0, %rdx\n" \
+    "add %rax, %r12\n   adc $0, %rdx\n   mov %rdx, %r13\n"                         \
+    "mov " a "+16(" ar "), %rcx\n"                                                 \
+    "mov " a "+24(" ar "), %rax\n   mul %rcx\n   add %rax, %r13\n   adc $0, %rdx\n" \
+    "mov %rdx, %r14\n   xor %r15d, %r15d\n"                                        \
+    "add %r9, %r9\n   adc %r10, %r10\n   adc %r11, %r11\n   adc %r12, %r12\n"      \
+    "adc %r13, %r13\n   adc %r14, %r14\n   adc $0, %r15\n"                          \
+    "mov " a "(" ar "), %rax\n   mul %rax\n   mov %rax, %r8\n   mov %rdx, %rbx\n"     \
+    "mov " a "+8(" ar "), %rax\n   mul %rax\n   add %rbx, %r9\n   adc %rax, %r10\n"   \
+    "adc $0, %rdx\n   mov %rdx, %rbx\n"                                             \
+    "mov " a "+16(" ar "), %rax\n   mul %rax\n   add %rbx, %r11\n   adc %rax, %r12\n" \
+    "adc $0, %rdx\n   mov %rdx, %rbx\n"                                             \
+    "mov " a "+24(" ar "), %rax\n   mul %rax\n   add %rbx, %r13\n   adc %rax, %r14\n" \
+    "adc %rdx, %r15\n"                                                           \
+    X25519_X64_REDUCE_MULQ(d, dr)
+
+/*
+        The frame, from rsp: x1 0, x2 32, z2 64, x3 96, z3 128, then A 160,
+        B 192, C 224, D 256, DA 288, CB 320, AA 352, BB 384, E 416, T 448,
+        the clamped scalar 480, the output pointer 512, the bit index 520
+        and the last bit 528. RFC 7748's ladder, a bit a turn from 254 down,
+        written out in place; the swap is a mask off the xor of this bit and
+        the last, and the only branch is the count. Then z2^(p - 2) by the
+        chain every curve25519 implementation uses (A B C D as its a t0 b
+        c), through the two subroutines, and x2 times it.
+*/
+#define X25519_X64_CALL_MUL(s, d, a, b)                                        \
+    "lea " d "(%rsp), %rdi\n   lea " a "(%rsp), %rsi\n   lea " b "(%rsp), %rbp\n" \
+    "call .Lx25519_x64_multiply_" s "\n"
+
+#define X25519_X64_CALL_SQR(s, d, a)                                           \
+    "lea " d "(%rsp), %rdi\n   lea " a "(%rsp), %rsi\n"                           \
+    "call .Lx25519_x64_square_" s "\n"
+
+//      d = a^(2^n), n at least two; the count is public and in ebp.
+#define X25519_X64_CALL_SQR_N(s, d, a, n, id)                                  \
+    X25519_X64_CALL_SQR(s, d, a)                                               \
+    "mov $" n "-1, %ebp\n   mov %rdi, %rsi\n"                                     \
+    ".Lx25519_x64_" s "_squares_" id ":\n"                                       \
+    "call .Lx25519_x64_square_" s "\n"                                           \
+    "dec %ebp\n   jnz .Lx25519_x64_" s "_squares_" id "\n"
+
+#define X25519_X64_LADDER(s, MUL, SQR)                                         \
+    ".Lx25519_x64_" s "_step:\n"                                                 \
+    "mov 520(%rsp), %rcx\n   mov %ecx, %eax\n   shr $6, %eax\n"                   \
+    "mov 480(%rsp,%rax,8), %rax\n   shr %cl, %rax\n   and $1, %eax\n"             \
+    "mov 528(%rsp), %rbx\n   xor %rax, %rbx\n   mov %rax, 528(%rsp)\n"            \
+    "neg %rbx\n"                                                                 \
+    X25519_X64_CSWAP("32", "96")                                               \
+    X25519_X64_CSWAP("64", "128")                                              \
+    X25519_X64_ADD_SUB("160", "192", "32", "64")                               \
+    X25519_X64_ADD_SUB("224", "256", "96", "128")                              \
+    MUL("288", "%rsp", "256", "%rsp", "160", "%rsp")                           \
+    MUL("320", "%rsp", "224", "%rsp", "192", "%rsp")                           \
+    SQR("352", "%rsp", "160", "%rsp")                                          \
+    SQR("384", "%rsp", "192", "%rsp")                                          \
+    X25519_X64_ADD_SUB("96", "128", "288", "320")                              \
+    SQR("96", "%rsp", "96", "%rsp")                                            \
+    SQR("128", "%rsp", "128", "%rsp")                                          \
+    MUL("128", "%rsp", "0", "%rsp", "128", "%rsp")                             \
+    MUL("32", "%rsp", "352", "%rsp", "384", "%rsp")                            \
+    X25519_X64_SUB("416", "352", "384")                                        \
+    X25519_X64_A24("448", "416", "352")                                        \
+    MUL("64", "%rsp", "416", "%rsp", "448", "%rsp")                            \
+    "decq 520(%rsp)\n   jns .Lx25519_x64_" s "_step\n"                           \
+    "mov 528(%rsp), %rbx\n   neg %rbx\n"                                         \
+    X25519_X64_CSWAP("32", "96")                                               \
+    X25519_X64_CSWAP("64", "128")                                              \
+    X25519_X64_CALL_SQR(s, "160", "64")                                        \
+    X25519_X64_CALL_SQR_N(s, "192", "160", "2", "1")                           \
+    X25519_X64_CALL_MUL(s, "224", "192", "64")                                 \
+    X25519_X64_CALL_MUL(s, "160", "224", "160")                                \
+    X25519_X64_CALL_SQR(s, "192", "160")                                       \
+    X25519_X64_CALL_MUL(s, "224", "192", "224")                                \
+    X25519_X64_CALL_SQR_N(s, "192", "224", "5", "2")                           \
+    X25519_X64_CALL_MUL(s, "224", "192", "224")                                \
+    X25519_X64_CALL_SQR_N(s, "192", "224", "10", "3")                          \
+    X25519_X64_CALL_MUL(s, "256", "192", "224")                                \
+    X25519_X64_CALL_SQR_N(s, "192", "256", "20", "4")                          \
+    X25519_X64_CALL_MUL(s, "192", "192", "256")                                \
+    X25519_X64_CALL_SQR_N(s, "192", "192", "10", "5")                          \
+    X25519_X64_CALL_MUL(s, "224", "192", "224")                                \
+    X25519_X64_CALL_SQR_N(s, "192", "224", "50", "6")                          \
+    X25519_X64_CALL_MUL(s, "256", "192", "224")                                \
+    X25519_X64_CALL_SQR_N(s, "192", "256", "100", "7")                         \
+    X25519_X64_CALL_MUL(s, "192", "192", "256")                                \
+    X25519_X64_CALL_SQR_N(s, "192", "192", "50", "8")                          \
+    X25519_X64_CALL_MUL(s, "192", "192", "224")                                \
+    X25519_X64_CALL_SQR_N(s, "192", "192", "5", "9")                           \
+    X25519_X64_CALL_MUL(s, "192", "192", "160")                                \
+    X25519_X64_CALL_MUL(s, "32", "32", "192")
+
 #elif ARM64
 //      The four lanes of reg into the four stack slots from at. The masks
 //      are logical immediates. Uses x4 and x5.
@@ -4032,6 +4317,138 @@ __asm__(
     "stp " r0 ", " r1 ", [x0]\n" \
     "stp " r2 ", " r3 ", [x0, #16]\n" \
     "stp " r4 ", " r5 ", [x0, #32]\n"
+
+/*
+        X25519 on four 64-bit limbs, as on x86_64: see its x25519 body for
+        the reasoning. mul and umulh leave the flags alone, so a row's four
+        low products go in on one adds chain and its four high products on
+        the next. An operand is an offset and the register it is from, as
+        there. Each multiply and square spends x3-x17 and x22-x24.
+*/
+//      x11..x14 plus t times 2^256 folded back by 19 as on x86_64, and
+//      stored. Uses x3.
+#define X25519_ARM64_FOLD_STORE(t, d, dr)                                      \
+    "extr " t ", " t ", x14, #63\n   and x14, x14, #0x7fffffffffffffff\n"           \
+    "add x3, " t ", " t ", lsl #1\n   add " t ", x3, " t ", lsl #4\n"               \
+    "adds x11, x11, " t "\n   adcs x12, x12, xzr\n   adcs x13, x13, xzr\n"          \
+    "adc x14, x14, xzr\n"                                                        \
+    "stp x11, x12, [" dr ", #" d "]\n   stp x13, x14, [" dr ", #" d "+16]\n"
+
+//      sum = a + b and difference = a - b; x25 holds 38.
+#define X25519_ARM64_ADD_SUB(sum, difference, a, b)                            \
+    "ldp x3, x4, [sp, #" a "]\n   ldp x5, x6, [sp, #" a "+16]\n"                    \
+    "ldp x7, x8, [sp, #" b "]\n   ldp x9, x10, [sp, #" b "+16]\n"                   \
+    "adds x11, x3, x7\n   adcs x12, x4, x8\n   adcs x13, x5, x9\n"                 \
+    "adcs x14, x6, x10\n   adc x15, xzr, xzr\n"                                    \
+    "subs x3, x3, x7\n   sbcs x4, x4, x8\n   sbcs x5, x5, x9\n   sbcs x6, x6, x10\n" \
+    "csel x7, xzr, x25, cs\n"                                                    \
+    "subs x3, x3, x7\n   sbcs x4, x4, xzr\n   sbcs x5, x5, xzr\n   sbcs x6, x6, xzr\n" \
+    "csel x7, xzr, x25, cs\n   sub x3, x3, x7\n"                                   \
+    "stp x3, x4, [sp, #" difference "]\n   stp x5, x6, [sp, #" difference "+16]\n" \
+    X25519_ARM64_FOLD_STORE("x15", sum, "sp")
+
+//      d = a - b: a borrow is -2^256, so 38 more comes off, twice at most.
+#define X25519_ARM64_SUB(d, a, b)                                              \
+    "ldp x3, x4, [sp, #" a "]\n   ldp x5, x6, [sp, #" a "+16]\n"                    \
+    "ldp x7, x8, [sp, #" b "]\n   ldp x9, x10, [sp, #" b "+16]\n"                   \
+    "subs x3, x3, x7\n   sbcs x4, x4, x8\n   sbcs x5, x5, x9\n   sbcs x6, x6, x10\n" \
+    "csel x7, xzr, x25, cs\n"                                                    \
+    "subs x3, x3, x7\n   sbcs x4, x4, xzr\n   sbcs x5, x5, xzr\n   sbcs x6, x6, xzr\n" \
+    "csel x7, xzr, x25, cs\n   sub x3, x3, x7\n"                                   \
+    "stp x3, x4, [sp, #" d "]\n   stp x5, x6, [sp, #" d "+16]\n"
+
+//      d = 121665 e + a, RFC 7748's a24 step; x26 holds 121665.
+#define X25519_ARM64_A24(d, e, a)                                              \
+    "ldp x3, x4, [sp, #" e "]\n   ldp x5, x6, [sp, #" e "+16]\n"                    \
+    "ldp x7, x8, [sp, #" a "]\n   ldp x9, x10, [sp, #" a "+16]\n"                   \
+    "mul x11, x3, x26\n   mul x12, x4, x26\n   mul x13, x5, x26\n   mul x14, x6, x26\n" \
+    "umulh x3, x3, x26\n   umulh x4, x4, x26\n   umulh x5, x5, x26\n   umulh x15, x6, x26\n" \
+    "adds x12, x12, x3\n   adcs x13, x13, x4\n   adcs x14, x14, x5\n   adc x15, x15, xzr\n" \
+    "adds x11, x11, x7\n   adcs x12, x12, x8\n   adcs x13, x13, x9\n"                \
+    "adcs x14, x14, x10\n   adc x15, x15, xzr\n"                                   \
+    X25519_ARM64_FOLD_STORE("x15", d, "sp")
+
+//      x and y trade places where x21 is all ones and stay where it is zero.
+#define X25519_ARM64_CSWAP(x, y)                                               \
+    "ldp x3, x4, [sp, #" x "]\n   ldp x5, x6, [sp, #" x "+16]\n"                    \
+    "ldp x7, x8, [sp, #" y "]\n   ldp x9, x10, [sp, #" y "+16]\n"                   \
+    "eor x11, x3, x7\n   eor x12, x4, x8\n   eor x13, x5, x9\n   eor x14, x6, x10\n" \
+    "and x11, x11, x21\n   and x12, x12, x21\n   and x13, x13, x21\n   and x14, x14, x21\n" \
+    "eor x3, x3, x11\n   eor x4, x4, x12\n   eor x5, x5, x13\n   eor x6, x6, x14\n"  \
+    "eor x7, x7, x11\n   eor x8, x8, x12\n   eor x9, x9, x13\n   eor x10, x10, x14\n" \
+    "stp x3, x4, [sp, #" x "]\n   stp x5, x6, [sp, #" x "+16]\n"                    \
+    "stp x7, x8, [sp, #" y "]\n   stp x9, x10, [sp, #" y "+16]\n"
+
+//      x11..x17, x22 = W folded to four limbs by 38 and then by 19; x25
+//      holds 38.
+#define X25519_ARM64_REDUCE(d, dr)                                             \
+    "mul x3, x15, x25\n   umulh x4, x15, x25\n   mul x5, x16, x25\n   umulh x6, x16, x25\n" \
+    "mul x7, x17, x25\n   umulh x8, x17, x25\n   mul x9, x22, x25\n   umulh x10, x22, x25\n" \
+    "adds x11, x11, x3\n   adcs x12, x12, x5\n   adcs x13, x13, x7\n"              \
+    "adcs x14, x14, x9\n   adc x10, x10, xzr\n"                                    \
+    "adds x12, x12, x4\n   adcs x13, x13, x6\n   adcs x14, x14, x8\n   adc x10, x10, xzr\n" \
+    X25519_ARM64_FOLD_STORE("x10", d, dr)
+
+//      One row: a (x3..x6) times one limb of b into t0..t4, t4 fresh.
+#define X25519_ARM64_ROW(bi, t0, t1, t2, t3, t4)                               \
+    "mul x23, x3, " bi "\n   mul x24, x4, " bi "\n"                                 \
+    "adds " t0 ", " t0 ", x23\n   adcs " t1 ", " t1 ", x24\n"                       \
+    "mul x23, x5, " bi "\n   mul x24, x6, " bi "\n"                                 \
+    "adcs " t2 ", " t2 ", x23\n   adcs " t3 ", " t3 ", x24\n   adc " t4 ", xzr, xzr\n" \
+    "umulh x23, x3, " bi "\n   umulh x24, x4, " bi "\n"                             \
+    "adds " t1 ", " t1 ", x23\n   adcs " t2 ", " t2 ", x24\n"                       \
+    "umulh x23, x5, " bi "\n   umulh x24, x6, " bi "\n"                             \
+    "adcs " t3 ", " t3 ", x23\n   adc " t4 ", " t4 ", x24\n"
+
+#define X25519_ARM64_MULTIPLY(d, dr, a, ar, b, br)                             \
+    "ldp x3, x4, [" ar ", #" a "]\n   ldp x5, x6, [" ar ", #" a "+16]\n"                \
+    "ldp x7, x8, [" br ", #" b "]\n   ldp x9, x10, [" br ", #" b "+16]\n"                \
+    "mul x11, x3, x7\n   mul x12, x4, x7\n   mul x13, x5, x7\n   mul x14, x6, x7\n" \
+    "umulh x23, x3, x7\n   umulh x24, x4, x7\n   adds x12, x12, x23\n   adcs x13, x13, x24\n" \
+    "umulh x23, x5, x7\n   umulh x15, x6, x7\n   adcs x14, x14, x23\n   adc x15, x15, xzr\n" \
+    X25519_ARM64_ROW("x8", "x12", "x13", "x14", "x15", "x16")                  \
+    X25519_ARM64_ROW("x9", "x13", "x14", "x15", "x16", "x17")                  \
+    X25519_ARM64_ROW("x10", "x14", "x15", "x16", "x17", "x22")                 \
+    X25519_ARM64_REDUCE(d, dr)
+
+//      The six cross products once, doubled, and the four squares.
+#define X25519_ARM64_SQUARE(d, dr, a, ar)                                      \
+    "ldp x3, x4, [" ar ", #" a "]\n   ldp x5, x6, [" ar ", #" a "+16]\n"                \
+    "mul x12, x3, x4\n   mul x13, x3, x5\n   mul x14, x3, x6\n"                    \
+    "umulh x23, x3, x4\n   umulh x24, x3, x5\n   umulh x15, x3, x6\n"              \
+    "adds x13, x13, x23\n   adcs x14, x14, x24\n   adc x15, x15, xzr\n"            \
+    "mul x23, x4, x5\n   mul x24, x4, x6\n   umulh x7, x4, x5\n   umulh x16, x4, x6\n" \
+    "adds x24, x24, x7\n   adc x16, x16, xzr\n"                                    \
+    "adds x14, x14, x23\n   adcs x15, x15, x24\n   adc x16, x16, xzr\n"            \
+    "mul x23, x5, x6\n   umulh x17, x5, x6\n"                                      \
+    "adds x16, x16, x23\n   adc x17, x17, xzr\n"                                   \
+    "adds x12, x12, x12\n   adcs x13, x13, x13\n   adcs x14, x14, x14\n"           \
+    "adcs x15, x15, x15\n   adcs x16, x16, x16\n   adcs x17, x17, x17\n   adc x22, xzr, xzr\n" \
+    "mul x11, x3, x3\n   umulh x23, x3, x3\n   mul x24, x4, x4\n   umulh x7, x4, x4\n" \
+    "adds x12, x12, x23\n   adcs x13, x13, x24\n   adcs x14, x14, x7\n"            \
+    "mul x23, x5, x5\n   umulh x24, x5, x5\n   mul x7, x6, x6\n   umulh x8, x6, x6\n" \
+    "adcs x15, x15, x23\n   adcs x16, x16, x24\n   adcs x17, x17, x7\n   adc x22, x22, x8\n" \
+    X25519_ARM64_REDUCE(d, dr)
+
+/*
+        The frame, from sp: the slots of the x86_64 body at the same
+        offsets, 480 the clamped scalar, 512 bytes in all, with the saved
+        registers above it. x19 the output, x20 the bit index, x21 the swap
+        mask and x27 the last bit.
+*/
+#define X25519_ARM64_CALL_MUL(d, a, b)                                         \
+    "add x0, sp, #" d "\n   add x1, sp, #" a "\n   add x2, sp, #" b "\n"             \
+    "bl .Lx25519_arm64_multiply\n"
+
+#define X25519_ARM64_CALL_SQR(d, a)                                            \
+    "add x0, sp, #" d "\n   add x1, sp, #" a "\n   bl .Lx25519_arm64_square\n"
+
+//      d = a^(2^n), n at least two; the count is public and in x20.
+#define X25519_ARM64_CALL_SQR_N(d, a, n, id)                                   \
+    X25519_ARM64_CALL_SQR(d, a)                                                \
+    "mov x20, #(" n "-1)\n   mov x1, x0\n"                                          \
+    ".Lx25519_arm64_squares_" id ":\n   bl .Lx25519_arm64_square\n"                 \
+    "subs x20, x20, #1\n   b.ne .Lx25519_arm64_squares_" id "\n"
 
 #elif RISCV64
 //      Eight bytes, most significant first, from o0..o7(base) into dst.
@@ -4276,6 +4693,219 @@ __asm__(
     "ld s9, 72(sp)\n ld s10, 80(sp)\n ld s11, 88(sp)\n addi sp, sp, 96\n"                                        \
     ASM_RET
 
+
+/*
+        X25519 on five 51-bit limbs. Without flags a 64-bit carry chain is
+        three instructions a limb and a four-limb product's rows would pay
+        it everywhere, so riscv64 keeps the radix the C this replaced used
+        -- curve25519-donna's -- where a column is five products summed in
+        a 128-bit accumulator and one carry leaves it. Its bounds are the
+        C's and are what make that carry fit a word: a limb of a sum is
+        below 2^53, of a difference below 2^54.2 (8p is added, not 2p), of a
+        product or square 2^51 and a little, and the operand whose limbs
+        are taken nineteen times is always the one the C put there.
+
+        A slot is 40 bytes. s10 holds 19 and s11 the 51-bit mask throughout;
+        the multiply and square spend s1-s9, t0-t6, a1 and a3-a7.
+*/
+//      s5:s6 += x y. Uses s7-s9.
+#define X25519_RV_ACCUMULATE(x, y)                                             \
+    "mul s7, " x ", " y "\n   mulhu s8, " x ", " y "\n"                             \
+    "add s5, s5, s7\n   sltu s9, s5, s7\n   add s6, s6, s8\n   add s6, s6, s9\n"
+
+//      s5:s6 = x y + s9, the carry the column below left.
+#define X25519_RV_COLUMN(x, y)                                                 \
+    "mul s7, " x ", " y "\n   mulhu s6, " x ", " y "\n"                             \
+    "add s5, s7, s9\n   sltu s9, s5, s7\n   add s6, s6, s9\n"
+
+//      The column above its low 51 bits into s9, those bits into out.
+#define X25519_RV_CARRY(out)                                                   \
+    "srli s7, s5, 51\n   slli s8, s6, 13\n   or s9, s7, s8\n   and " out ", s5, s11\n"
+
+//      out = in + s9, and the part above 51 bits of it back into s9.
+#define X25519_RV_SPILL(out, in)                                               \
+    "add " out ", " in ", s9\n   srli s9, " out ", 51\n   and " out ", " out ", s11\n"
+
+//      The wrap: 19 times the carry out of the top into limb zero (t5), and
+//      on through limbs one (t6) and two (a1), then the five stored.
+#define X25519_RV_WRAP_STORE(d, dr)                                            \
+    "mul s9, s9, s10\n"                                                          \
+    X25519_RV_SPILL("t5", "t5")                                                \
+    X25519_RV_SPILL("t6", "t6")                                                \
+    "add a1, a1, s9\n"                                                           \
+    "sd t5, " d "(" dr ")\n   sd t6, " d "+8(" dr ")\n   sd a1, " d "+16(" dr ")\n"
+
+/*
+        d = s r, the C's crypto_x25519_mul(d, s, r): the products whose
+        weight passes 2^255 take r's limb nineteen times.
+*/
+#define X25519_RV_MULTIPLY(d, dr, s, sr, r, rr)                                \
+    "ld t0, " s "(" sr ")\n   ld t1, " s "+8(" sr ")\n   ld t2, " s "+16(" sr ")\n"   \
+    "ld t3, " s "+24(" sr ")\n   ld t4, " s "+32(" sr ")\n"                          \
+    "ld a3, " r "(" rr ")\n   ld a4, " r "+8(" rr ")\n   ld a5, " r "+16(" rr ")\n"   \
+    "ld a6, " r "+24(" rr ")\n   ld a7, " r "+32(" rr ")\n"                          \
+    "mul s1, a4, s10\n   mul s2, a5, s10\n   mul s3, a6, s10\n   mul s4, a7, s10\n" \
+    "mul s5, a3, t0\n   mulhu s6, a3, t0\n"                                        \
+    X25519_RV_ACCUMULATE("s4", "t1")                                           \
+    X25519_RV_ACCUMULATE("s1", "t4")                                           \
+    X25519_RV_ACCUMULATE("s2", "t3")                                           \
+    X25519_RV_ACCUMULATE("s3", "t2")                                           \
+    X25519_RV_CARRY("t5")                                                      \
+    X25519_RV_COLUMN("a3", "t1")                                               \
+    X25519_RV_ACCUMULATE("a4", "t0")                                           \
+    X25519_RV_ACCUMULATE("s4", "t2")                                           \
+    X25519_RV_ACCUMULATE("s2", "t4")                                           \
+    X25519_RV_ACCUMULATE("s3", "t3")                                           \
+    X25519_RV_CARRY("t6")                                                      \
+    X25519_RV_COLUMN("a3", "t2")                                               \
+    X25519_RV_ACCUMULATE("a5", "t0")                                           \
+    X25519_RV_ACCUMULATE("a4", "t1")                                           \
+    X25519_RV_ACCUMULATE("s4", "t3")                                           \
+    X25519_RV_ACCUMULATE("s3", "t4")                                           \
+    X25519_RV_CARRY("a1")                                                      \
+    X25519_RV_COLUMN("a3", "t3")                                               \
+    X25519_RV_ACCUMULATE("a6", "t0")                                           \
+    X25519_RV_ACCUMULATE("a4", "t2")                                           \
+    X25519_RV_ACCUMULATE("a5", "t1")                                           \
+    X25519_RV_ACCUMULATE("s4", "t4")                                           \
+    X25519_RV_CARRY("s7")                                                      \
+    "sd s7, " d "+24(" dr ")\n"                                                  \
+    X25519_RV_COLUMN("a3", "t4")                                               \
+    X25519_RV_ACCUMULATE("a7", "t0")                                           \
+    X25519_RV_ACCUMULATE("a6", "t1")                                           \
+    X25519_RV_ACCUMULATE("a4", "t3")                                           \
+    X25519_RV_ACCUMULATE("a5", "t2")                                           \
+    X25519_RV_CARRY("s7")                                                      \
+    "sd s7, " d "+32(" dr ")\n"                                                  \
+    X25519_RV_WRAP_STORE(d, dr)
+
+//      d = a a, the C's square: each cross product once from a doubled
+//      limb, fifteen products.
+#define X25519_RV_SQUARE(d, dr, a, ar)                                         \
+    "ld a3, " a "(" ar ")\n   ld a4, " a "+8(" ar ")\n   ld a5, " a "+16(" ar ")\n"   \
+    "ld a6, " a "+24(" ar ")\n   ld a7, " a "+32(" ar ")\n"                          \
+    "add s1, a3, a3\n   add s2, a4, a4\n   mul s3, a5, s10\n   add s3, s3, s3\n"  \
+    "mul s4, a7, s10\n   add t0, s4, s4\n   mul t1, a6, s10\n"                    \
+    "mul s5, a3, a3\n   mulhu s6, a3, a3\n"                                        \
+    X25519_RV_ACCUMULATE("t0", "a4")                                           \
+    X25519_RV_ACCUMULATE("s3", "a6")                                           \
+    X25519_RV_CARRY("t5")                                                      \
+    X25519_RV_COLUMN("s1", "a4")                                               \
+    X25519_RV_ACCUMULATE("t0", "a5")                                           \
+    X25519_RV_ACCUMULATE("a6", "t1")                                           \
+    X25519_RV_CARRY("t6")                                                      \
+    X25519_RV_COLUMN("s1", "a5")                                               \
+    X25519_RV_ACCUMULATE("a4", "a4")                                           \
+    X25519_RV_ACCUMULATE("t0", "a6")                                           \
+    X25519_RV_CARRY("a1")                                                      \
+    X25519_RV_COLUMN("s1", "a6")                                               \
+    X25519_RV_ACCUMULATE("s2", "a5")                                           \
+    X25519_RV_ACCUMULATE("a7", "s4")                                           \
+    X25519_RV_CARRY("s7")                                                      \
+    "sd s7, " d "+24(" dr ")\n"                                                  \
+    X25519_RV_COLUMN("s1", "a7")                                               \
+    X25519_RV_ACCUMULATE("s2", "a6")                                           \
+    X25519_RV_ACCUMULATE("a5", "a5")                                           \
+    X25519_RV_CARRY("s7")                                                      \
+    "sd s7, " d "+32(" dr ")\n"                                                  \
+    X25519_RV_WRAP_STORE(d, dr)
+
+//      d = a + b, limb by limb, no carry.
+#define X25519_RV_ADD(d, a, b)                                                 \
+    "ld t0, " a "(sp)\n   ld t1, " b "(sp)\n   add t0, t0, t1\n   sd t0, " d "(sp)\n"         \
+    "ld t0, " a "+8(sp)\n   ld t1, " b "+8(sp)\n   add t0, t0, t1\n   sd t0, " d "+8(sp)\n"   \
+    "ld t0, " a "+16(sp)\n   ld t1, " b "+16(sp)\n   add t0, t0, t1\n   sd t0, " d "+16(sp)\n" \
+    "ld t0, " a "+24(sp)\n   ld t1, " b "+24(sp)\n   add t0, t0, t1\n   sd t0, " d "+24(sp)\n" \
+    "ld t0, " a "+32(sp)\n   ld t1, " b "+32(sp)\n   add t0, t0, t1\n   sd t0, " d "+32(sp)\n"
+
+//      d = a + 8p - b; a0 holds 8p's limb zero and a2 the other four.
+#define X25519_RV_SUB(d, a, b)                                                 \
+    "ld t0, " a "(sp)\n   ld t1, " b "(sp)\n   add t0, t0, a0\n   sub t0, t0, t1\n   sd t0, " d "(sp)\n" \
+    "ld t0, " a "+8(sp)\n   ld t1, " b "+8(sp)\n   add t0, t0, a2\n   sub t0, t0, t1\n   sd t0, " d "+8(sp)\n" \
+    "ld t0, " a "+16(sp)\n   ld t1, " b "+16(sp)\n   add t0, t0, a2\n   sub t0, t0, t1\n   sd t0, " d "+16(sp)\n" \
+    "ld t0, " a "+24(sp)\n   ld t1, " b "+24(sp)\n   add t0, t0, a2\n   sub t0, t0, t1\n   sd t0, " d "+24(sp)\n" \
+    "ld t0, " a "+32(sp)\n   ld t1, " b "+32(sp)\n   add t0, t0, a2\n   sub t0, t0, t1\n   sd t0, " d "+32(sp)\n"
+
+//      One limb of d = 121665 e + a: 121665 in t2, the carry in s9.
+#define X25519_RV_A24_LIMB(off, d, e, a)                                       \
+    "ld t0, " e "+" off "(sp)\n   mul t1, t0, t2\n   mulhu t0, t0, t2\n"            \
+    "add t1, t1, s9\n   sltu t3, t1, s9\n   add t0, t0, t3\n"                      \
+    "srli s9, t1, 51\n   slli t0, t0, 13\n   or s9, s9, t0\n   and t1, t1, s11\n"   \
+    "ld t0, " a "+" off "(sp)\n   add t1, t1, t0\n   sd t1, " d "+" off "(sp)\n"
+
+//      The C's crypto_x25519_mul121665 then crypto_x25519_sum.
+#define X25519_RV_A24(d, e, a)                                                 \
+    "li t2, 121665\n   li s9, 0\n"                                                \
+    X25519_RV_A24_LIMB("0", d, e, a)                                           \
+    X25519_RV_A24_LIMB("8", d, e, a)                                           \
+    X25519_RV_A24_LIMB("16", d, e, a)                                          \
+    X25519_RV_A24_LIMB("24", d, e, a)                                          \
+    X25519_RV_A24_LIMB("32", d, e, a)                                          \
+    "mul s9, s9, s10\n   ld t0, " d "(sp)\n   add t0, t0, s9\n   sd t0, " d "(sp)\n"
+
+//      x and y trade places where t6 is all ones and stay where it is zero.
+#define X25519_RV_CSWAP_LIMB(x, y)                                             \
+    "ld t0, " x "(sp)\n   ld t1, " y "(sp)\n   xor t2, t0, t1\n   and t2, t2, t6\n"  \
+    "xor t0, t0, t2\n   xor t1, t1, t2\n   sd t0, " x "(sp)\n   sd t1, " y "(sp)\n"
+
+#define X25519_RV_CSWAP(x, y)                                                  \
+    X25519_RV_CSWAP_LIMB(x, y)                                                 \
+    X25519_RV_CSWAP_LIMB(x "+8", y "+8")                                       \
+    X25519_RV_CSWAP_LIMB(x "+16", y "+16")                                     \
+    X25519_RV_CSWAP_LIMB(x "+24", y "+24")                                     \
+    X25519_RV_CSWAP_LIMB(x "+32", y "+32")
+
+//      A little-endian word from eight bytes at off(base), into reg; t0.
+#define X25519_RV_LOAD_WORD(reg, base, off)                                    \
+    "lbu " reg ", " off "+7(" base ")\n"                                          \
+    "slli " reg ", " reg ", 8\n   lbu t0, " off "+6(" base ")\n   or " reg ", " reg ", t0\n" \
+    "slli " reg ", " reg ", 8\n   lbu t0, " off "+5(" base ")\n   or " reg ", " reg ", t0\n" \
+    "slli " reg ", " reg ", 8\n   lbu t0, " off "+4(" base ")\n   or " reg ", " reg ", t0\n" \
+    "slli " reg ", " reg ", 8\n   lbu t0, " off "+3(" base ")\n   or " reg ", " reg ", t0\n" \
+    "slli " reg ", " reg ", 8\n   lbu t0, " off "+2(" base ")\n   or " reg ", " reg ", t0\n" \
+    "slli " reg ", " reg ", 8\n   lbu t0, " off "+1(" base ")\n   or " reg ", " reg ", t0\n" \
+    "slli " reg ", " reg ", 8\n   lbu t0, " off "(" base ")\n   or " reg ", " reg ", t0\n"
+
+//      reg's eight bytes, little-endian, to off(base); reg is spent.
+#define X25519_RV_STORE_WORD(reg, base, off)                                   \
+    "sb " reg ", " off "(" base ")\n   srli " reg ", " reg ", 8\n"                     \
+    "sb " reg ", " off "+1(" base ")\n   srli " reg ", " reg ", 8\n"                   \
+    "sb " reg ", " off "+2(" base ")\n   srli " reg ", " reg ", 8\n"                   \
+    "sb " reg ", " off "+3(" base ")\n   srli " reg ", " reg ", 8\n"                   \
+    "sb " reg ", " off "+4(" base ")\n   srli " reg ", " reg ", 8\n"                   \
+    "sb " reg ", " off "+5(" base ")\n   srli " reg ", " reg ", 8\n"                   \
+    "sb " reg ", " off "+6(" base ")\n   srli " reg ", " reg ", 8\n"                   \
+    "sb " reg ", " off "+7(" base ")\n"
+
+//      One pass of the C's crypto_x25519_carry over t1..t5; wrap folds the
+//      carry out of the top back in as 19. Uses t0.
+#define X25519_RV_CARRY_PASS(wrap)                                             \
+    "srli t0, t1, 51\n   and t1, t1, s11\n   add t2, t2, t0\n"                    \
+    "srli t0, t2, 51\n   and t2, t2, s11\n   add t3, t3, t0\n"                    \
+    "srli t0, t3, 51\n   and t3, t3, s11\n   add t4, t4, t0\n"                    \
+    "srli t0, t4, 51\n   and t4, t4, s11\n   add t5, t5, t0\n"                    \
+    "srli t0, t5, 51\n   and t5, t5, s11\n"                                        \
+    wrap
+
+#define X25519_RV_WRAP "mul t0, t0, s10\n   add t1, t1, t0\n"
+
+//      The frame, from sp: x1 0, x2 40, z2 80, x3 120, z3 160, A 200, B
+//      240, C 280, D 320, DA 360, CB 400, AA 440, BB 480, E 520, T 560, the
+//      clamped scalar 600 as four words, the output 632 and the last bit
+//      640; the saved registers from 656. s0 is the bit index.
+#define X25519_RV_CALL_MUL(d, s, r)                                            \
+    "addi a0, sp, " d "\n   addi a1, sp, " s "\n   addi a2, sp, " r "\n"             \
+    "call .Lx25519_rv_multiply\n"
+
+#define X25519_RV_CALL_SQR(d, a)                                               \
+    "addi a0, sp, " d "\n   addi a1, sp, " a "\n   call .Lx25519_rv_square\n"
+
+//      d = a^(2^n), n at least two; the count is public and in s0.
+#define X25519_RV_CALL_SQR_N(d, a, n, id)                                      \
+    X25519_RV_CALL_SQR(d, a)                                                   \
+    "li s0, " n "-1\n"                                                           \
+    ".Lx25519_rv_squares_" id ":\n   mv a1, a0\n   call .Lx25519_rv_square\n"        \
+    "addi s0, s0, -1\n   bnez s0, .Lx25519_rv_squares_" id "\n"
 #endif
 
 #if X64
@@ -7750,6 +8380,7 @@ __asm__(
     "xor %eax, %eax\n   cpuid\n   xor %r11d, %r11d\n   cmp $7, %eax\n   jb .Lcpu_hash_detect_x64_store\n"
     "mov $1, %eax\n   xor %ecx, %ecx\n   cpuid\n   mov %ecx, %r11d\n"
     "mov $7, %eax\n   xor %ecx, %ecx\n   cpuid\n"
+    "mov %ebx, %eax\n   and $0x80100, %eax\n   cmp $0x80100, %eax\n   sete cpu_has_mulx(%rip)  # BMI2 and ADX\n"
     "xor %eax, %eax\n   bt $29, %ebx\n   jnc .Lcpu_hash_detect_x64_none\n   bt $19, %r11d\n   jnc .Lcpu_hash_detect_x64_none\n   bt $9, %r11d\n   jnc .Lcpu_hash_detect_x64_none\n   mov $1, %eax\n"
     ".Lcpu_hash_detect_x64_none:\n"
     "mov %eax, %r11d\n"
@@ -8016,6 +8647,11 @@ __asm__(
     "add (%rdi), %r8d\n   add 4(%rdi), %r9d\n   add 8(%rdi), %r10d\n   add 12(%rdi), %r11d\n   add 16(%rdi), %r12d\n"
     "mov %r8d, (%rdi)\n   mov %r9d, 4(%rdi)\n   mov %r10d, 8(%rdi)\n   mov %r11d, 12(%rdi)\n   mov %r12d, 16(%rdi)\n"
     "add $64, %rsi\n   cmp %rbx, %rsi\n   jb .Lsha1_x64_block\n"
+    //  The schedule ring is the block's words: wiped.
+    "xor %eax, %eax\n"
+    "mov %rax, 0(%rsp)\n   mov %rax, 8(%rsp)\n   mov %rax, 16(%rsp)\n   mov %rax, 24(%rsp)\n"
+    "mov %rax, 32(%rsp)\n   mov %rax, 40(%rsp)\n   mov %rax, 48(%rsp)\n   mov %rax, 56(%rsp)\n"
+    "mov %rax, 64(%rsp)\n"
     "add $72, %rsp\n   pop %r12\n   pop %rbx\n"
     ".Lsha1_x64_none:\n"
     ASM_RET
@@ -8597,6 +9233,10 @@ __asm__(
     "add 0(%rdi), %r8d\n   add 4(%rdi), %r9d\n   add 8(%rdi), %r10d\n   add 12(%rdi), %r11d\n   add 16(%rdi), %r12d\n   add 20(%rdi), %r13d\n   add 24(%rdi), %r14d\n   add 28(%rdi), %r15d\n"
     "mov %r8d, 0(%rdi)\n   mov %r9d, 4(%rdi)\n   mov %r10d, 8(%rdi)\n   mov %r11d, 12(%rdi)\n   mov %r12d, 16(%rdi)\n   mov %r13d, 20(%rdi)\n   mov %r14d, 24(%rdi)\n   mov %r15d, 28(%rdi)\n"
     "add $64, %rsi\n   cmp 64(%rsp), %rsi\n   jb .Lsha256_x64_block\n"
+    //  The schedule ring is the block's words: wiped.
+    "xor %eax, %eax\n"
+    "mov %rax, 0(%rsp)\n   mov %rax, 8(%rsp)\n   mov %rax, 16(%rsp)\n   mov %rax, 24(%rsp)\n"
+    "mov %rax, 32(%rsp)\n   mov %rax, 40(%rsp)\n   mov %rax, 48(%rsp)\n   mov %rax, 56(%rsp)\n"
     "add $80, %rsp\n"
     "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
     ".Lsha256_x64_none:\n"
@@ -9274,6 +9914,12 @@ __asm__(
     "add 0(%rdi), %r8\n   add 8(%rdi), %r9\n   add 16(%rdi), %r10\n   add 24(%rdi), %r11\n   add 32(%rdi), %r12\n   add 40(%rdi), %r13\n   add 48(%rdi), %r14\n   add 56(%rdi), %r15\n"
     "mov %r8, 0(%rdi)\n   mov %r9, 8(%rdi)\n   mov %r10, 16(%rdi)\n   mov %r11, 24(%rdi)\n   mov %r12, 32(%rdi)\n   mov %r13, 40(%rdi)\n   mov %r14, 48(%rdi)\n   mov %r15, 56(%rdi)\n"
     "add $128, %rsi\n   cmp 128(%rsp), %rsi\n   jb .Lsha512_x64_block\n"
+    //  The schedule ring is the block's words: wiped.
+    "xor %eax, %eax\n"
+    "mov %rax, 0(%rsp)\n   mov %rax, 8(%rsp)\n   mov %rax, 16(%rsp)\n   mov %rax, 24(%rsp)\n"
+    "mov %rax, 32(%rsp)\n   mov %rax, 40(%rsp)\n   mov %rax, 48(%rsp)\n   mov %rax, 56(%rsp)\n"
+    "mov %rax, 64(%rsp)\n   mov %rax, 72(%rsp)\n   mov %rax, 80(%rsp)\n   mov %rax, 88(%rsp)\n"
+    "mov %rax, 96(%rsp)\n   mov %rax, 104(%rsp)\n   mov %rax, 112(%rsp)\n   mov %rax, 120(%rsp)\n"
     "add $144, %rsp\n"
     "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
     ".Lsha512_x64_none:\n"
@@ -9415,6 +10061,13 @@ __asm__(
     "mov 136(%rsp), %rsi\n"
     "xor %rax, (%rsi)\n   xor %rbx, 8(%rsi)\n   xor %rcx, 16(%rsi)\n   xor %rdx, 24(%rsi)\n   xor %rbp, 32(%rsi)\n   xor %r8, 40(%rsi)\n   xor %r9, 48(%rsi)\n   xor %rdi, 56(%rsi)\n"
     "decq 152(%rsp)\n   jnz .Lblake2b_x64_block\n"
+    //  The message copy and v15: wiped.
+    "xor %eax, %eax\n"
+    "mov %rax, 0(%rsp)\n   mov %rax, 8(%rsp)\n   mov %rax, 16(%rsp)\n   mov %rax, 24(%rsp)\n"
+    "mov %rax, 32(%rsp)\n   mov %rax, 40(%rsp)\n   mov %rax, 48(%rsp)\n   mov %rax, 56(%rsp)\n"
+    "mov %rax, 64(%rsp)\n   mov %rax, 72(%rsp)\n   mov %rax, 80(%rsp)\n   mov %rax, 88(%rsp)\n"
+    "mov %rax, 96(%rsp)\n   mov %rax, 104(%rsp)\n   mov %rax, 112(%rsp)\n   mov %rax, 120(%rsp)\n"
+    "mov %rax, 128(%rsp)\n"
     "add $168, %rsp\n"
     "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
     ".Lblake2b_x64_none:\n"
@@ -10783,6 +11436,9 @@ __asm__(
     "mov $0xffffffff, %edi\n sub %rdi, %rax\n not %rdi\n sbb %rdi, %rdx\n"
     "sbb $-2, %rcx\n sbb $-1, %rbp\n sbb $-1, %rbx\n sbb $-1, %r14\n sbb $0, %r12\n"
     "cmovnc %rax, %r13\n cmovnc %rdx, %rsi\n cmovnc %rcx, %r8\n cmovnc %rbp, %r9\n cmovnc %rbx, %r10\n cmovnc %r14, %r11\n"
+    /* t0 and the high half t6..t11 are the square of a secret: wiped. */
+    "xor %eax, %eax\n mov %rax, (%rsp)\n mov %rax, 8(%rsp)\n mov %rax, 16(%rsp)\n mov %rax, 24(%rsp)\n"
+    "mov %rax, 32(%rsp)\n mov %rax, 40(%rsp)\n mov %rax, 48(%rsp)\n"
     "add $56, %rsp\n pop %rdi\n"
     "mov %r13, (%rdi)\n mov %rsi, 8(%rdi)\n mov %r8, 16(%rdi)\n mov %r9, 24(%rdi)\n mov %r10, 32(%rdi)\n mov %r11, 40(%rdi)\n"
     "pop %r15\n pop %r14\n pop %r13\n pop %r12\n pop %rbp\n pop %rbx\n"
@@ -10921,6 +11577,93 @@ __asm__(
     ".Lmontgomery_x64_none:\n"
     ASM_RET
     ASM_END(montgomery_multiply)
+
+    /* x25519: RFC 7748's X25519(k, u) whole -- the scalar clamped, u taken
+       mod 2^255, the Montgomery ladder, the inversion and the canonical
+       encoding -- written to out, which may alias the inputs.
+
+       Four 64-bit limbs, left below 2^256 rather than below p until the
+       end (see the X25519_X64_ macros): a product's high half folds in by
+       38 = 2^256 mod p and what is left above bit 255 by 19, one pass
+       each. With BMI2 and ADX the products are mulx rows on two carry
+       chains, adcx on one and adox on the other; without them the same
+       rows by mulq. Either way a square makes each cross product once and
+       doubles it. Which body, asked lazily through cpu_hash_detect as the
+       hashes ask theirs, is the only branch outside the counts. Nothing
+       branches or indexes on the scalar, u or anything made from them: the
+       bit a turn is shifted out of the clamped copy at an index the count
+       gives, and the swap is a mask. The ladder step is written out in
+       place over the frame; the inversion calls its two operations as
+       subroutines. The frame and the scratch registers are zeroed before
+       the return.
+
+       On the 9950X, cycles a call at crypto_x25519, BENCH_montgomery's
+       rows: the five-limb C this replaced 134.8k (553k instructions), mulx
+       89.8k (252k), mulq 102.6k (378k); OpenSSL 3.6's ADX body 97.6k a
+       derive. The arm64 body on the M2 Pro: 25.6 us against GCC's C 34.8
+       us. riscv64 under qemu: 490k instructions against 623k. */
+#ifndef KERNEL_MODE
+    ASM_FUNC(x25519)
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n"
+    "sub $544, %rsp\n"
+    "mov %rdi, 512(%rsp)\n"
+    "mov (%rsi), %rax\n   and $-8, %rax\n   mov %rax, 480(%rsp)\n"
+    "mov 8(%rsi), %rax\n   mov %rax, 488(%rsp)\n"
+    "mov 16(%rsi), %rax\n   mov %rax, 496(%rsp)\n"
+    "mov 24(%rsi), %rax\n   btr $63, %rax\n   bts $62, %rax\n   mov %rax, 504(%rsp)\n"
+    "mov (%rdx), %rax\n   mov %rax, 0(%rsp)\n   mov %rax, 96(%rsp)\n"
+    "mov 8(%rdx), %rax\n   mov %rax, 8(%rsp)\n   mov %rax, 104(%rsp)\n"
+    "mov 16(%rdx), %rax\n   mov %rax, 16(%rsp)\n   mov %rax, 112(%rsp)\n"
+    "mov 24(%rdx), %rax\n   btr $63, %rax\n   mov %rax, 24(%rsp)\n   mov %rax, 120(%rsp)\n"
+    "xor %eax, %eax\n   mov $1, %ecx\n"
+    "mov %rcx, 32(%rsp)\n   mov %rax, 40(%rsp)\n   mov %rax, 48(%rsp)\n   mov %rax, 56(%rsp)\n"
+    "mov %rax, 64(%rsp)\n   mov %rax, 72(%rsp)\n   mov %rax, 80(%rsp)\n   mov %rax, 88(%rsp)\n"
+    "mov %rcx, 128(%rsp)\n   mov %rax, 136(%rsp)\n   mov %rax, 144(%rsp)\n   mov %rax, 152(%rsp)\n"
+    "movq $254, 520(%rsp)\n   mov %rax, 528(%rsp)\n"
+    "cmpb $0, cpu_hash_probed(%rip)\n   jne .Lx25519_x64_probed\n"
+    "call cpu_hash_detect\n"
+    ".Lx25519_x64_probed:\n"
+    "cmpb $0, cpu_has_mulx(%rip)\n   je .Lx25519_x64_mulq_step\n"
+    X25519_X64_LADDER("mulx", X25519_X64_MULTIPLY_MULX, X25519_X64_SQUARE_MULX)
+    "jmp .Lx25519_x64_encode\n"
+    X25519_X64_LADDER("mulq", X25519_X64_MULTIPLY_MULQ, X25519_X64_SQUARE_MULQ)
+    //  Below 2^256; the top bit folds in as 19, which leaves at most
+    //  2^255 + 18, and then v + 19 has bit 255 set exactly when v >= p, in
+    //  which case it is v - p with that bit cleared.
+    ".Lx25519_x64_encode:\n"
+    "mov 32(%rsp), %r8\n   mov 40(%rsp), %r9\n   mov 48(%rsp), %r10\n   mov 56(%rsp), %r11\n"
+    "mov %r11, %rax\n   shr $63, %rax\n   lea (%rax,%rax,8), %rcx\n   lea (%rax,%rcx,2), %rax\n"
+    "btr $63, %r11\n"
+    "add %rax, %r8\n   adc $0, %r9\n   adc $0, %r10\n   adc $0, %r11\n"
+    "mov %r8, %rax\n   mov %r9, %rbx\n   mov %r10, %rcx\n   mov %r11, %rdx\n"
+    "add $19, %rax\n   adc $0, %rbx\n   adc $0, %rcx\n   adc $0, %rdx\n"
+    "bt $63, %rdx\n"
+    "cmovc %rax, %r8\n   cmovc %rbx, %r9\n   cmovc %rcx, %r10\n   cmovc %rdx, %r11\n"
+    "btr $63, %r11\n"
+    "mov 512(%rsp), %rdi\n"
+    "mov %r8, (%rdi)\n   mov %r9, 8(%rdi)\n   mov %r10, 16(%rdi)\n   mov %r11, 24(%rdi)\n"
+    "mov %rsp, %rdi\n   mov $68, %ecx\n   xor %eax, %eax\n   rep stosq\n"
+    "xor %edx, %edx\n   xor %esi, %esi\n   xor %edi, %edi\n"
+    "xor %r8d, %r8d\n   xor %r9d, %r9d\n   xor %r10d, %r10d\n   xor %r11d, %r11d\n"
+    "add $544, %rsp\n"
+    "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    ASM_RET
+    //  The inversion's two operations, as subroutines over rdi, rsi and
+    //  rbp; the square leaves rbp, which counts its runs, alone.
+    ".Lx25519_x64_multiply_mulx:\n"
+    X25519_X64_MULTIPLY_MULX("0", "%rdi", "0", "%rsi", "0", "%rbp")
+    ASM_RET
+    ".Lx25519_x64_square_mulx:\n"
+    X25519_X64_SQUARE_MULX("0", "%rdi", "0", "%rsi")
+    ASM_RET
+    ".Lx25519_x64_multiply_mulq:\n"
+    X25519_X64_MULTIPLY_MULQ("0", "%rdi", "0", "%rsi", "0", "%rbp")
+    ASM_RET
+    ".Lx25519_x64_square_mulq:\n"
+    X25519_X64_SQUARE_MULQ("0", "%rdi", "0", "%rsi")
+    ASM_RET
+    ASM_END(x25519)
+#endif
 
     /* A NUL-terminated name normally needs both of these answers. Returning
        them together keeps the bytes in one hardware-floor pass: hash in rax,
@@ -24766,6 +25509,104 @@ __asm__(
     ASM_RET
     ASM_END(montgomery_multiply)
 
+    /* x25519: see the x86_64 body; this is it on arm64, with mul and
+       umulh for mulx and one flags chain a pass. */
+#ifndef KERNEL_MODE
+    ASM_FUNC(x25519)
+    "stp x29, x30, [sp, #-96]!\n   mov x29, sp\n"
+    "stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n   stp x23, x24, [sp, #48]\n"
+    "stp x25, x26, [sp, #64]\n   stp x27, x28, [sp, #80]\n"
+    "sub sp, sp, #512\n   mov x19, x0\n"
+    "ldp x3, x4, [x1]\n   ldp x5, x6, [x1, #16]\n"
+    "and x3, x3, #0xfffffffffffffff8\n   and x6, x6, #0x7fffffffffffffff\n"
+    "orr x6, x6, #0x4000000000000000\n"
+    "stp x3, x4, [sp, #480]\n   stp x5, x6, [sp, #496]\n"
+    "ldp x3, x4, [x2]\n   ldp x5, x6, [x2, #16]\n   and x6, x6, #0x7fffffffffffffff\n"
+    "stp x3, x4, [sp, #0]\n   stp x5, x6, [sp, #16]\n"
+    "stp x3, x4, [sp, #96]\n   stp x5, x6, [sp, #112]\n"
+    "mov x3, #1\n"
+    "stp x3, xzr, [sp, #32]\n   stp xzr, xzr, [sp, #48]\n"
+    "stp xzr, xzr, [sp, #64]\n   stp xzr, xzr, [sp, #80]\n"
+    "stp x3, xzr, [sp, #128]\n   stp xzr, xzr, [sp, #144]\n"
+    "mov x20, #254\n   mov x27, xzr\n   mov x25, #38\n"
+    "movz x26, #0xdb41\n   movk x26, #1, lsl #16\n"
+    ".Lx25519_arm64_step:\n"
+    "lsr x3, x20, #6\n   add x4, sp, #480\n   ldr x3, [x4, x3, lsl #3]\n"
+    "lsr x3, x3, x20\n   and x3, x3, #1\n"
+    "eor x21, x27, x3\n   mov x27, x3\n   neg x21, x21\n"
+    X25519_ARM64_CSWAP("32", "96")
+    X25519_ARM64_CSWAP("64", "128")
+    X25519_ARM64_ADD_SUB("160", "192", "32", "64")
+    X25519_ARM64_ADD_SUB("224", "256", "96", "128")
+    X25519_ARM64_MULTIPLY("288", "sp", "256", "sp", "160", "sp")
+    X25519_ARM64_MULTIPLY("320", "sp", "224", "sp", "192", "sp")
+    X25519_ARM64_SQUARE("352", "sp", "160", "sp")
+    X25519_ARM64_SQUARE("384", "sp", "192", "sp")
+    X25519_ARM64_ADD_SUB("96", "128", "288", "320")
+    X25519_ARM64_SQUARE("96", "sp", "96", "sp")
+    X25519_ARM64_SQUARE("128", "sp", "128", "sp")
+    X25519_ARM64_MULTIPLY("128", "sp", "0", "sp", "128", "sp")
+    X25519_ARM64_MULTIPLY("32", "sp", "352", "sp", "384", "sp")
+    X25519_ARM64_SUB("416", "352", "384")
+    X25519_ARM64_A24("448", "416", "352")
+    X25519_ARM64_MULTIPLY("64", "sp", "416", "sp", "448", "sp")
+    "subs x20, x20, #1\n   b.pl .Lx25519_arm64_step\n"
+    "neg x21, x27\n"
+    X25519_ARM64_CSWAP("32", "96")
+    X25519_ARM64_CSWAP("64", "128")
+    X25519_ARM64_CALL_SQR("160", "64")
+    X25519_ARM64_CALL_SQR_N("192", "160", "2", "1")
+    X25519_ARM64_CALL_MUL("224", "192", "64")
+    X25519_ARM64_CALL_MUL("160", "224", "160")
+    X25519_ARM64_CALL_SQR("192", "160")
+    X25519_ARM64_CALL_MUL("224", "192", "224")
+    X25519_ARM64_CALL_SQR_N("192", "224", "5", "2")
+    X25519_ARM64_CALL_MUL("224", "192", "224")
+    X25519_ARM64_CALL_SQR_N("192", "224", "10", "3")
+    X25519_ARM64_CALL_MUL("256", "192", "224")
+    X25519_ARM64_CALL_SQR_N("192", "256", "20", "4")
+    X25519_ARM64_CALL_MUL("192", "192", "256")
+    X25519_ARM64_CALL_SQR_N("192", "192", "10", "5")
+    X25519_ARM64_CALL_MUL("224", "192", "224")
+    X25519_ARM64_CALL_SQR_N("192", "224", "50", "6")
+    X25519_ARM64_CALL_MUL("256", "192", "224")
+    X25519_ARM64_CALL_SQR_N("192", "256", "100", "7")
+    X25519_ARM64_CALL_MUL("192", "192", "256")
+    X25519_ARM64_CALL_SQR_N("192", "192", "50", "8")
+    X25519_ARM64_CALL_MUL("192", "192", "224")
+    X25519_ARM64_CALL_SQR_N("192", "192", "5", "9")
+    X25519_ARM64_CALL_MUL("192", "192", "160")
+    X25519_ARM64_CALL_MUL("32", "32", "192")
+    //  The canonical encoding, as on x86_64.
+    "ldp x11, x12, [sp, #32]\n   ldp x13, x14, [sp, #48]\n"
+    "lsr x3, x14, #63\n   and x14, x14, #0x7fffffffffffffff\n"
+    "add x4, x3, x3, lsl #1\n   add x3, x4, x3, lsl #4\n"
+    "adds x11, x11, x3\n   adcs x12, x12, xzr\n   adcs x13, x13, xzr\n   adc x14, x14, xzr\n"
+    "adds x3, x11, #19\n   adcs x4, x12, xzr\n   adcs x5, x13, xzr\n   adc x6, x14, xzr\n"
+    "tst x6, #0x8000000000000000\n"
+    "csel x11, x3, x11, ne\n   csel x12, x4, x12, ne\n   csel x13, x5, x13, ne\n   csel x14, x6, x14, ne\n"
+    "and x14, x14, #0x7fffffffffffffff\n"
+    "stp x11, x12, [x19]\n   stp x13, x14, [x19, #16]\n"
+    "mov x3, sp\n   mov x4, #32\n"
+    ".Lx25519_arm64_wipe:\n   stp xzr, xzr, [x3], #16\n   subs x4, x4, #1\n   b.ne .Lx25519_arm64_wipe\n"
+    "mov x0, xzr\n   mov x1, xzr\n   mov x2, xzr\n   mov x3, xzr\n   mov x4, xzr\n   mov x5, xzr\n"
+    "mov x6, xzr\n   mov x7, xzr\n   mov x8, xzr\n   mov x9, xzr\n   mov x10, xzr\n   mov x11, xzr\n"
+    "mov x12, xzr\n   mov x13, xzr\n   mov x14, xzr\n   mov x15, xzr\n   mov x16, xzr\n   mov x17, xzr\n"
+    "add sp, sp, #512\n"
+    "ldp x19, x20, [sp, #16]\n   ldp x21, x22, [sp, #32]\n   ldp x23, x24, [sp, #48]\n"
+    "ldp x25, x26, [sp, #64]\n   ldp x27, x28, [sp, #80]\n"
+    "ldp x29, x30, [sp], #96\n"
+    ASM_RET
+    //  The inversion's two operations, over x0, x1 and x2.
+    ".Lx25519_arm64_multiply:\n"
+    X25519_ARM64_MULTIPLY("0", "x0", "0", "x1", "0", "x2")
+    ASM_RET
+    ".Lx25519_arm64_square:\n"
+    X25519_ARM64_SQUARE("0", "x0", "0", "x1")
+    ASM_RET
+    ASM_END(x25519)
+#endif
+
     // See the x86_64 body for the shared one-pass contract.
     ASM_FUNC(string_hash_33_length)
     //
@@ -38600,6 +39441,134 @@ __asm__(
     ASM_RET
     ASM_END(montgomery_multiply)
 
+    /* x25519: see the x86_64 body for the ladder; riscv64 runs it on the
+       C's five 51-bit limbs (see the X25519_RV_ macros), reads and writes
+       its 32-byte arguments a byte at a time, since they need not be
+       aligned, and then encodes as the C did. */
+#ifndef KERNEL_MODE
+    ASM_FUNC(x25519)
+    "addi sp, sp, -768\n"
+    "sd ra, 656(sp)\n   sd s0, 664(sp)\n   sd s1, 672(sp)\n   sd s2, 680(sp)\n"
+    "sd s3, 688(sp)\n   sd s4, 696(sp)\n   sd s5, 704(sp)\n   sd s6, 712(sp)\n"
+    "sd s7, 720(sp)\n   sd s8, 728(sp)\n   sd s9, 736(sp)\n   sd s10, 744(sp)\n"
+    "sd s11, 752(sp)\n   sd a0, 632(sp)\n"
+    "li s10, 19\n   li s11, 0x7ffffffffffff\n"
+    X25519_RV_LOAD_WORD("t1", "a1", "0")
+    "andi t1, t1, -8\n   sd t1, 600(sp)\n"
+    X25519_RV_LOAD_WORD("t1", "a1", "8")
+    "sd t1, 608(sp)\n"
+    X25519_RV_LOAD_WORD("t1", "a1", "16")
+    "sd t1, 616(sp)\n"
+    X25519_RV_LOAD_WORD("t1", "a1", "24")
+    "slli t1, t1, 1\n   srli t1, t1, 1\n   li t2, 1\n   slli t2, t2, 62\n   or t1, t1, t2\n"
+    "sd t1, 624(sp)\n"
+    X25519_RV_LOAD_WORD("t1", "a2", "0")
+    X25519_RV_LOAD_WORD("t2", "a2", "8")
+    X25519_RV_LOAD_WORD("t3", "a2", "16")
+    X25519_RV_LOAD_WORD("t4", "a2", "24")
+    "and a3, t1, s11\n"
+    "srli t1, t1, 51\n   slli t0, t2, 13\n   or t1, t1, t0\n   and a4, t1, s11\n"
+    "srli t2, t2, 38\n   slli t0, t3, 26\n   or t2, t2, t0\n   and a5, t2, s11\n"
+    "srli t3, t3, 25\n   slli t0, t4, 39\n   or t3, t3, t0\n   and a6, t3, s11\n"
+    "srli t4, t4, 12\n   and a7, t4, s11\n"
+    "sd a3, 0(sp)\n   sd a4, 8(sp)\n   sd a5, 16(sp)\n   sd a6, 24(sp)\n   sd a7, 32(sp)\n"
+    "sd a3, 120(sp)\n   sd a4, 128(sp)\n   sd a5, 136(sp)\n   sd a6, 144(sp)\n   sd a7, 152(sp)\n"
+    "li t0, 1\n"
+    "sd t0, 40(sp)\n   sd zero, 48(sp)\n   sd zero, 56(sp)\n   sd zero, 64(sp)\n   sd zero, 72(sp)\n"
+    "sd zero, 80(sp)\n   sd zero, 88(sp)\n   sd zero, 96(sp)\n   sd zero, 104(sp)\n   sd zero, 112(sp)\n"
+    "sd t0, 160(sp)\n   sd zero, 168(sp)\n   sd zero, 176(sp)\n   sd zero, 184(sp)\n   sd zero, 192(sp)\n"
+    "li s0, 254\n   sd zero, 640(sp)\n"
+    "li a0, 0x3fffffffffff68\n   li a2, 0x3ffffffffffff8\n"
+    ".Lx25519_rv_step:\n"
+    "srli t0, s0, 6\n   slli t0, t0, 3\n   add t0, t0, sp\n   ld t0, 600(t0)\n"
+    "srl t0, t0, s0\n   andi t0, t0, 1\n"
+    "ld t1, 640(sp)\n   xor t6, t1, t0\n   sd t0, 640(sp)\n   neg t6, t6\n"
+    X25519_RV_CSWAP("40", "120")
+    X25519_RV_CSWAP("80", "160")
+    X25519_RV_ADD("200", "40", "80")
+    X25519_RV_SUB("240", "40", "80")
+    X25519_RV_ADD("280", "120", "160")
+    X25519_RV_SUB("320", "120", "160")
+    X25519_RV_MULTIPLY("360", "sp", "320", "sp", "200", "sp")
+    X25519_RV_MULTIPLY("400", "sp", "280", "sp", "240", "sp")
+    X25519_RV_SQUARE("440", "sp", "200", "sp")
+    X25519_RV_SQUARE("480", "sp", "240", "sp")
+    X25519_RV_ADD("560", "360", "400")
+    X25519_RV_SQUARE("120", "sp", "560", "sp")
+    X25519_RV_SUB("560", "360", "400")
+    X25519_RV_SQUARE("560", "sp", "560", "sp")
+    X25519_RV_MULTIPLY("160", "sp", "0", "sp", "560", "sp")
+    X25519_RV_MULTIPLY("40", "sp", "440", "sp", "480", "sp")
+    X25519_RV_SUB("520", "440", "480")
+    X25519_RV_A24("560", "520", "440")
+    X25519_RV_MULTIPLY("80", "sp", "520", "sp", "560", "sp")
+    "addi s0, s0, -1\n   bgez s0, .Lx25519_rv_step\n"
+    "ld t6, 640(sp)\n   neg t6, t6\n"
+    X25519_RV_CSWAP("40", "120")
+    X25519_RV_CSWAP("80", "160")
+    X25519_RV_CALL_SQR("200", "80")
+    X25519_RV_CALL_SQR_N("240", "200", "2", "1")
+    X25519_RV_CALL_MUL("280", "240", "80")
+    X25519_RV_CALL_MUL("200", "280", "200")
+    X25519_RV_CALL_SQR("240", "200")
+    X25519_RV_CALL_MUL("280", "240", "280")
+    X25519_RV_CALL_SQR_N("240", "280", "5", "2")
+    X25519_RV_CALL_MUL("280", "240", "280")
+    X25519_RV_CALL_SQR_N("240", "280", "10", "3")
+    X25519_RV_CALL_MUL("320", "240", "280")
+    X25519_RV_CALL_SQR_N("240", "320", "20", "4")
+    X25519_RV_CALL_MUL("240", "240", "320")
+    X25519_RV_CALL_SQR_N("240", "240", "10", "5")
+    X25519_RV_CALL_MUL("280", "240", "280")
+    X25519_RV_CALL_SQR_N("240", "280", "50", "6")
+    X25519_RV_CALL_MUL("320", "240", "280")
+    X25519_RV_CALL_SQR_N("240", "320", "100", "7")
+    X25519_RV_CALL_MUL("240", "240", "320")
+    X25519_RV_CALL_SQR_N("240", "240", "50", "8")
+    X25519_RV_CALL_MUL("240", "240", "280")
+    X25519_RV_CALL_SQR_N("240", "240", "5", "9")
+    X25519_RV_CALL_MUL("80", "240", "200")
+    X25519_RV_CALL_MUL("40", "40", "80")
+    //  The C's crypto_x25519_store: two wrapping passes, the +19 that
+    //  turns [p, 2p) into a set bit 255, then 2^255 - 19 added back limb by
+    //  limb and the carry out of the top dropped, which subtracts p exactly
+    //  when bit 255 was set.
+    "ld t1, 40(sp)\n   ld t2, 48(sp)\n   ld t3, 56(sp)\n   ld t4, 64(sp)\n   ld t5, 72(sp)\n"
+    X25519_RV_CARRY_PASS(X25519_RV_WRAP)
+    X25519_RV_CARRY_PASS(X25519_RV_WRAP)
+    "addi t1, t1, 19\n"
+    X25519_RV_CARRY_PASS(X25519_RV_WRAP)
+    "li t0, 0x7ffffffffffed\n   add t1, t1, t0\n"
+    "add t2, t2, s11\n   add t3, t3, s11\n   add t4, t4, s11\n   add t5, t5, s11\n"
+    X25519_RV_CARRY_PASS("")
+    "slli t0, t2, 51\n   or t1, t1, t0\n"
+    "srli t2, t2, 13\n   slli t0, t3, 38\n   or t2, t2, t0\n"
+    "srli t3, t3, 26\n   slli t0, t4, 25\n   or t3, t3, t0\n"
+    "srli t4, t4, 39\n   slli t0, t5, 12\n   or t4, t4, t0\n"
+    "ld a1, 632(sp)\n"
+    X25519_RV_STORE_WORD("t1", "a1", "0")
+    X25519_RV_STORE_WORD("t2", "a1", "8")
+    X25519_RV_STORE_WORD("t3", "a1", "16")
+    X25519_RV_STORE_WORD("t4", "a1", "24")
+    "mv t0, sp\n   addi t1, sp, 656\n"
+    ".Lx25519_rv_wipe:\n   sd zero, 0(t0)\n   addi t0, t0, 8\n   bltu t0, t1, .Lx25519_rv_wipe\n"
+    "li t0, 0\n   li t1, 0\n   li t2, 0\n   li t3, 0\n   li t4, 0\n   li t5, 0\n   li t6, 0\n"
+    "li a0, 0\n   li a1, 0\n   li a2, 0\n   li a3, 0\n   li a4, 0\n   li a5, 0\n   li a6, 0\n   li a7, 0\n"
+    "ld ra, 656(sp)\n   ld s0, 664(sp)\n   ld s1, 672(sp)\n   ld s2, 680(sp)\n"
+    "ld s3, 688(sp)\n   ld s4, 696(sp)\n   ld s5, 704(sp)\n   ld s6, 712(sp)\n"
+    "ld s7, 720(sp)\n   ld s8, 728(sp)\n   ld s9, 736(sp)\n   ld s10, 744(sp)\n"
+    "ld s11, 752(sp)\n   addi sp, sp, 768\n"
+    ASM_RET
+    //  The inversion's two operations, over a0, a1 and a2.
+    ".Lx25519_rv_multiply:\n"
+    X25519_RV_MULTIPLY("0", "a0", "0", "a1", "0", "a2")
+    ASM_RET
+    ".Lx25519_rv_square:\n"
+    X25519_RV_SQUARE("0", "a0", "0", "a1")
+    ASM_RET
+    ASM_END(x25519)
+#endif
+
     // See the x86_64 body for the shared one-pass contract.
     ASM_FUNC(string_hash_33_length)
     "mv t0, a0\n   li a2, 5381\n   li a1, 0\n"
@@ -48206,6 +49175,14 @@ fn p384_subtract(p64 address_to d, const p64 address_to a,
 fn montgomery_multiply(p64 address_to d, const p64 address_to a,
                        const p64 address_to b, const p64 address_to m,
                        p64 inverse, positive n);
+/* RFC 7748's X25519(k, u): the 32-byte scalar clamped, the 32-byte u with
+   bit 255 ignored and taken mod p, the Montgomery ladder, and the result
+   written to out as its canonical 32 bytes. A low-order u gives all zeros,
+   which is the caller's to refuse. Nothing branches or indexes on k, u or
+   anything made from them, and the routine's scratch is zeroed before it
+   returns. Not in a kernel build. */
+fn x25519(p8 address_to out, const p8 address_to scalar,
+          const p8 address_to u);
 PURE READS(1, 2) p32 memory_sum_bytes(address_any block, positive size);
 // Writes exactly 2*size lowercase hex bytes, without a terminator, and returns
 // that length. Source and destination must not overlap; size must fit when
@@ -48476,6 +49453,9 @@ extern p8 cpu_has_fma;
 extern p8 cpu_has_sha;
 extern p8 cpu_has_sha512;
 extern p8 cpu_hash_probed;
+/* x86_64's BMI2 with ADX -- mulx, adcx and adox -- asked by the same
+   question, for x25519's products; zero on the other two. */
+extern p8 cpu_has_mulx;
 // Not in the word Spark publishes, which is full: 0 until the first routine
 // that wants it asks the processor, then 1 for absent and 2 for present.
 extern p8 cpu_has_avx512_vbmi2;
@@ -48514,6 +49494,9 @@ __asm__(
     ASM_BSS_OBJECT_BEGIN(cpu_hash_probed, 1)
     ".zero 1\n"
     ASM_OBJECT_END(cpu_hash_probed)
+    ASM_BSS_OBJECT_BEGIN(cpu_has_mulx, 1)
+    ".zero 1\n"
+    ASM_OBJECT_END(cpu_has_mulx)
     ASM_BSS_OBJECT_BEGIN(cpu_has_avx512_vbmi2, 1)
     ".zero 1\n"
     ASM_OBJECT_END(cpu_has_avx512_vbmi2)
@@ -49314,6 +50297,12 @@ extern p8 address_to program_stack_base;
 extern positive program_entry_identity;
 // SPARK_ENTRY_* bits the loader handed over, zero unless it spoke version 3.
 extern p8 program_entry_facts;
+/* The vDSO's clock, as lib.util.c's clock_gettime finds it: 0 while nothing
+   says there is an auxiliary vector to look in -- a Spark stack has none,
+   and past its environment's null lie the strings, not auxv -- 1 once the
+   ELF path of _start has said there is, then 2 when the lookup found no
+   clock, or the entry's address. */
+extern positive program_vdso_clock;
 
 __asm__(
     ASM_BSS_OBJECT_BEGIN(program_stack_base, 8)
@@ -49325,6 +50314,9 @@ __asm__(
     ASM_HIDDEN_BSS_OBJECT_BEGIN(program_entry_facts, 1)
     ".zero 1\n"
     ASM_OBJECT_END(program_entry_facts)
+    ASM_HIDDEN_BSS_OBJECT_BEGIN(program_vdso_clock, 8)
+    ".zero 8\n"
+    ASM_OBJECT_END(program_vdso_clock)
 );
 
 /*
@@ -52867,6 +53859,7 @@ __asm__(
        Spark now falls straight into main; an ordinary ELF pays one jump after
        the much more expensive CPUID/XGETBV fallback. */
     ".Lstart_x64_detect:\n   call moonwater_cpu_detect\n"
+    "movq $1, program_vdso_clock(%rip)  # an ELF stack: auxv follows envp\n"
     "jmp .Lstart_x64_ready\n"
     ASM_END(_start)
 );
@@ -53011,6 +54004,7 @@ __asm__(
     /* An ordinary ELF asks the auxiliary vector, from the stack base kept
        above; the call spends x0, which is reloaded. */
     ".Lstart_arm64_detect:\n   bl moonwater_cpu_detect\n"
+    "mov x1, #1\n   adrp x2, program_vdso_clock\n   str x1, [x2, :lo12:program_vdso_clock]\n"
     "adrp x1, program_stack_base\n   ldr x0, [x1, :lo12:program_stack_base]\n"
     "b .Lstart_arm64_ready\n"
     ASM_END(_start)
@@ -53152,6 +54146,7 @@ __asm__(
     "call exit\n   ebreak\n"
     /* An ordinary ELF asks riscv_hwprobe. */
     ".Lstart_riscv64_detect:\n   call moonwater_cpu_detect\n"
+    "li t1, 1\n   lla t0, program_vdso_clock\n   sd t1, 0(t0)\n"
     "j .Lstart_riscv64_ready\n"
     ASM_END(_start)
 );

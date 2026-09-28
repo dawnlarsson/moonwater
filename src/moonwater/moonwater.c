@@ -1893,7 +1893,7 @@ static bipolar host_machine_wait(bipolar device,
 {
         memory_zero(control, sizeof(address_to control));
         control->op = MOONWATER_WAIT;
-        control->reserved[0] = HOST_RADIO_WAIT_MS;
+        control->reserved[0] = locale_wake_ms(HOST_RADIO_WAIT_MS);
         return system_control(device, MOONWATER_IOCTL_MACHINE, control);
 }
 

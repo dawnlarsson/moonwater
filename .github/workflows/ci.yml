@@ -9,6 +9,14 @@ name: CI
 #
 # Run it from the Actions tab, or with: gh workflow run ci.yml
 # Restore automatic runs by putting the push and pull_request keys back.
+#
+# Security matrix (SECURITY_TEST_MATRIX.md):
+#   - suite runs full `sh test/run`, which includes socket / net / machine and
+#     tls_chains (lane_net invokes `python3 test/differential.py --harness
+#     tls_chains`). Unrelated NOT RUN lanes (native, boot without an image,
+#     …) also make that job exit non-zero, so a green security signal is the
+#     dedicated `security` job below.
+#   - security runs net + machine + an explicit tls_chains step.
 on:
   workflow_dispatch:
 
@@ -70,15 +78,68 @@ jobs:
       # compilers are what runs the assembly in library.c on the machines this
       # one is not. Each lane says so and skips itself when its tool is
       # missing, so a forgotten package here is quiet -- which is exactly why
-      # they are installed rather than assumed.
+      # they are installed rather than assumed. openssl is the tls_chains
+      # oracle used inside lane_net (SECURITY_TEST_MATRIX certificate row),
+      # python3-cryptography the scripted TLS 1.3 server tls_peer serves from.
       - name: Install what the lanes need
         run: |
           sudo apt-get update
           sudo apt-get install -y dash qemu-user \
-            gcc-aarch64-linux-gnu gcc-riscv64-linux-gnu
+            gcc-aarch64-linux-gnu gcc-riscv64-linux-gnu openssl python3-cryptography
 
       - name: Run it
         run: sh test/run
+
+  # Focused gate for SECURITY_TEST_MATRIX network / identity / certificate rows.
+  # suite covers the same lanes via full `sh test/run`, but also fails on
+  # unrelated NOT RUN (native on Linux x86_64, boot without an image, …).
+  security:
+    name: Security lanes (net, machine, tls_chains)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cross compilers + qemu-user let freestanding net/machine exercise
+      # x86_64, arm64, and riscv64. A missing arch is NOT RUN (lane exit 2 →
+      # `did not run:`), which already fails `test/run`. The step below also
+      # greps the tally for all three arch rows so a silent skip cannot pass.
+      - name: Install net/machine/tls_chains dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dash qemu-user \
+            gcc-aarch64-linux-gnu gcc-riscv64-linux-gnu openssl python3-cryptography
+
+      - name: Freestanding net and machine
+        run: |
+          set -o pipefail
+          sh test/run net machine | tee "$RUNNER_TEMP/net-machine.log"
+          # Hard gate: each freestanding suite must have tally rows for all
+          # three arches (names from target_lane / freestanding_checks_one).
+          for suite in net machine; do
+            for arch in x86_64 arm64 riscv64; do
+              if ! grep -E "^  ${suite}-${arch}[[:space:]]+[0-9]+ of [0-9]+$" \
+                  "$RUNNER_TEMP/net-machine.log"; then
+                echo "required security lane missing or did not run: ${suite}-${arch}"
+                exit 1
+              fi
+            done
+          done
+
+      # Also embedded in lane_net; kept explicit so a certificate failure is
+      # a named step. Exit 1 is a real oracle disagreement and fails the job.
+      # Exit 2 is NOT RUN (non-Linux or no openssl) and is reported without
+      # failing — for odd hosts, not for this runner where openssl is installed.
+      - name: TLS chain differential oracle
+        run: |
+          set +e
+          python3 test/differential.py --harness tls_chains
+          status=$?
+          set -e
+          case "$status" in
+            0) echo "tls_chains: ok" ;;
+            2) echo "tls_chains: NOT RUN (needs Linux and openssl)" ;;
+            *) echo "tls_chains: failed (exit $status)"; exit 1 ;;
+          esac
 
   clang:
     name: The library, the probes and the shell under clang

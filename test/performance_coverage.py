@@ -465,6 +465,11 @@ cover('direct_benchmark', 'test/checks.c#BENCH_montgomery', 'montgomery_multiply
       'multiply and square at 4, 6, 32 and 64 limbs against the C Montgomery '
       'arithmetic crypto.c ran (SHARED_montgomery_reference), and the ECDSA '
       'and RSA verifies over it; differential at every limb count in CHECK_net')
+cover('direct_benchmark', 'test/checks.c#BENCH_montgomery', 'x25519',
+      'X25519 at its caller, crypto_x25519, against the five-limb C crypto.c '
+      'ran (SHARED_x25519_reference, the x25519-c row); held to OpenSSL by '
+      'CHECK_crypto_vectors on every body and by crypto_fuzz, which links '
+      'the x86_64 bodies themselves')
 cover('correctness_only', 'test/checks.c#CHECK_net', 'ghash_blocks ghash_key ghash_integer aes128_ctr_blocks',
       'bit-serial differential over every body each machine has (feature '
       'bytes toggled); ghash_blocks timed against the carry-less multiply '

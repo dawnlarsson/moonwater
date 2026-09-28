@@ -665,6 +665,10 @@ cover('nothing_to_fold', None, 'signal_jump_mark signal_jump_to_mark',
 cover('nothing_to_fold', None, 'montgomery_multiply',
      'the modulus, its inverse and the limb count come from a crypto_field or '
      'an RSA key at run time; no call site holds a literal')
+cover('nothing_to_fold', None, 'x25519',
+     'a secret scalar and a peer\'s point, both run-time bytes; the one call '
+     'site holds no literal, and the base point u = 9 is where a fixed-base '
+     'table would go, not a fold')
 cover('nothing_to_fold', None, '''
 file_close file_get_status file_load file_unload file_valid
 library_close library_get library_open

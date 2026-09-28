@@ -75,7 +75,10 @@
         it is held and does not send it again, and a key may run only sixty
         four frames past what was taken, so the sender stops. There is no
         second flow control on top: the window the link keeps anyway is the
-        one the reader controls.
+        one the reader controls. The one copy a held key's sender does send
+        is its oldest frame, when none of the key is in flight, less and less
+        often up to a minute: the acknowledgement that the reader came back
+        can be lost too, and nothing else would ask.
 
         A receiver delivers a stream frame when it is the next and holds it
         when it is ahead; it takes a register frame when it is newer than
@@ -212,6 +215,7 @@ _Static_assert(sizeof(struct waterlink_datagram) == 16,
 #define WATERLINK_KIND_RESPOND 2u  // Noise_IK message two
 #define WATERLINK_KIND_CARRY 3u    // frames, once the session is up
 #define WATERLINK_KIND_CLOSE 4u
+#define WATERLINK_KIND_COOKIE 5u   // a listener under load: ask again with this
 
 /*      A frame, inside the box, so the code that parses attacker-shaped bytes
         only ever runs on bytes that were already authenticated.
@@ -315,7 +319,8 @@ struct waterlink_peer {
         unsigned char address[16]; // last seen, v6 or v4 mapped
         unsigned short port;
         unsigned short address_flags;
-        unsigned int seen; // seconds, this machine's clock, 0 for never
+        unsigned int seen; // group-paired: the member's last greeting stamp,
+                           // older ones are replays; 0 for never
 };
 
 _Static_assert(sizeof(struct waterlink_peer) == 96,

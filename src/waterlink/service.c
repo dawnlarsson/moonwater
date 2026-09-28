@@ -61,6 +61,8 @@
 #define LINK_LOCK_PATH HOST_STATE "/link.lock"
 #define LINK_STATE_PATH HOST_STATE "/link.state"
 #define LINK_STATE_NEXT HOST_STATE "/link.state.next"
+#define LINK_STAMPS_PATH "/root/link.stamps"
+#define LINK_STAMPS_NEXT "/root/link.stamps.next"
 
 #define LINK_PEERS_MAX 64
 #define LINK_SESSIONS 16
@@ -653,46 +655,53 @@ typedef struct
 #define LINK_F_WRLCK 1
 #define LINK_F_UNLCK 2
 
-// A lock file in /run/moonwater, root's own.
-static bipolar link_lock_file(string_address path)
+/*
+        A lock file in /run/moonwater, root's own, asked command -- F_GETLK,
+        F_SETLK or F_SETLKW -- of a write lock over all of it: the handle or
+        the error, and with owner, who holds it (0 for nobody).
+*/
+static bipolar link_lock_file(string_address path, positive command,
+                              b32 address_to owner)
 {
+        link_record_lock lock = {LINK_F_WRLCK, 0, 0, 0, 0, 0, 0};
+        bipolar handle;
+        bipolar asked;
+
         host_state_ready();
-        return system_open_at_mode(AT_FDCWD, path,
-                                   FILE_READ_WRITE | FILE_CREATE | O_NOFOLLOW |
-                                           O_CLOEXEC,
-                                   0600);
+        handle = system_open_at_mode(AT_FDCWD, path,
+                                     FILE_READ_WRITE | FILE_CREATE | O_NOFOLLOW |
+                                             O_CLOEXEC,
+                                     0600);
+        if (handle < 0)
+                return handle;
+        do
+                asked = system_call_3(syscall(fcntl), (positive)handle, command,
+                                      (positive)address_of lock);
+        while (asked == -4);
+        if (asked < 0)
+        {
+                system_close(handle);
+                return asked;
+        }
+        if (owner)
+                address_to owner = lock.type == LINK_F_UNLCK ? 0 : lock.pid;
+        return handle;
 }
 
 static bipolar link_lock_owner(void)
 {
-        link_record_lock lock = {LINK_F_WRLCK, 0, 0, 0, 0, 0, 0};
-        bipolar handle = link_lock_file(LINK_LOCK_PATH);
-        bipolar asked;
+        b32 owner = 0;
+        bipolar handle = link_lock_file(LINK_LOCK_PATH, LINK_F_GETLK,
+                                        address_of owner);
 
-        if (handle < 0)
-                return 0;
-        asked = system_call_3(syscall(fcntl), (positive)handle, LINK_F_GETLK,
-                              (positive)address_of lock);
-        system_close(handle);
-        if (asked < 0 || lock.type == LINK_F_UNLCK)
-                return 0;
-        return lock.pid;
+        if (handle >= 0)
+                system_close(handle);
+        return owner;
 }
 
 static bipolar link_lock_take(void)
 {
-        link_record_lock lock = {LINK_F_WRLCK, 0, 0, 0, 0, 0, 0};
-        bipolar handle = link_lock_file(LINK_LOCK_PATH);
-
-        if (handle < 0)
-                return handle;
-        if (system_call_3(syscall(fcntl), (positive)handle, LINK_F_SETLK,
-                          (positive)address_of lock) < 0)
-        {
-                system_close(handle);
-                return -EAGAIN;
-        }
-        return handle;
+        return link_lock_file(LINK_LOCK_PATH, LINK_F_SETLK, null);
 }
 
 // A signal for whoever holds the lock, and never for a pid reused since.
@@ -733,7 +742,8 @@ struct link_stream {
         p8 key;
         p8 flags;
         bool done;
-        bool quiet; // it said "not now", and no wait has heard it since
+        bool quiet;  // it said "not now", and no wait has heard it since
+        bool socket; // asked with MSG_DONTWAIT, since it is not opened again
 };
 
 struct link_session {
@@ -753,6 +763,7 @@ struct link_session {
         p64 keyings; // how many handshakes this session has made
         p64 heard;
         p64 spoke;
+        p64 noted; // the second the state file last had it seen
         struct waterlink_link address_to link;
 
         //      The streams, and the command behind them at the machine.
@@ -787,6 +798,13 @@ typedef struct
         p16 port;
         p64 seen; // seconds, this machine's clock
 } link_seen_entry;
+
+//      The newest initiation stamp taken from a key: older ones are replays.
+typedef struct
+{
+        p8 key[32];
+        p8 stamp[WATERLINK_STAMP_BYTES];
+} link_stamp_entry;
 
 typedef struct
 {
@@ -824,9 +842,9 @@ typedef struct
         struct waterlink_identity me;
         struct waterlink_admission admission;
         struct link_session session[LINK_SESSIONS];
-        p8 stamp_key[LINK_PEERS_MAX][32];
-        p8 stamp[LINK_PEERS_MAX][WATERLINK_STAMP_BYTES];
+        link_stamp_entry stamp[LINK_PEERS_MAX];
         positive stamps;
+        bool stamps_dirty; // changed since /root/link.stamps was written
         link_state state;
         p64 state_written;
         bool state_dirty;
@@ -1031,6 +1049,32 @@ typedef struct
         b32 padding2;
 } link_message;
 
+/*
+        The int a control message carries, by its level and type, or -1:
+        each cmsghdr is a length, a level and a type, padded to eight bytes,
+        and nothing is read past what the kernel said it wrote.
+*/
+static b32 link_control_int(p8 address_to control, positive length,
+                            positive room, b32 level, b32 type)
+{
+        b32 value = -1;
+
+        for (positive at = 0; at + 16 <= length && at + 16 <= room;)
+        {
+                p64 size;
+                b32 has[2];
+
+                memory_copy(address_of size, control + at, 8);
+                memory_copy(has, control + at + 8, 8);
+                if (size < 16 || size > room - at)
+                        break;
+                if (has[0] == level && has[1] == type && size >= 20)
+                        memory_copy(address_of value, control + at + 16, 4);
+                at += (size + 7) & ~7ull;
+        }
+        return value;
+}
+
 static fn link_batch_flush(void)
 {
         positive count = link_self.batched;
@@ -1212,7 +1256,45 @@ static fn link_stream_set(struct link_stream address_to stream, bipolar fd,
         stream->flags = flags;
         stream->done = fd < 0;
         stream->quiet = false;
+        stream->socket = false;
         stream->skip = 0;
+}
+
+/*
+        One of the client's standard descriptors, as a stream no read or
+        write ever waits on: a write that waited on a full pipe or a paused
+        terminal stopped the whole loop with it -- keepalives, acknowledgements
+        and the rekey -- until the far side gave the link up. A pipe or a
+        terminal is opened again through /proc, a description of this
+        process's own that can be nonblocking without changing it for whoever
+        shares it. A socket cannot be opened again and is asked with
+        MSG_DONTWAIT on each call instead. A file never waits, and is kept as
+        it is: opened again it would lose its offset and O_APPEND.
+*/
+static fn link_stream_own(struct link_stream address_to stream, bipolar fd,
+                          p8 key, p8 flags, positive access)
+{
+        p8 path[] = "/proc/self/fd/0";
+        file_facts facts;
+        p32 format;
+
+        link_stream_set(stream, fd, key, flags);
+        if (fd < 0 || fd > 2 ||
+            !file_look(fd, (string_address)"", AT_EMPTY_PATH, address_of facts))
+                return;
+        format = facts.mode & MODE_FORMAT;
+        path[14] = (p8)('0' + fd);
+        if (format == MODE_SOCKET)
+                stream->socket = true;
+        else if (format == MODE_PIPE || format == MODE_CHARACTER)
+        {
+                bipolar own = system_open_at(AT_FDCWD, path,
+                                             access | O_NONBLOCK | O_NOCTTY |
+                                                     O_CLOEXEC);
+
+                if (own >= 0)
+                        stream->fd = own;
+        }
 }
 
 static fn link_stream_close(struct link_session address_to s,
@@ -1290,6 +1372,10 @@ static DEAD_END fn link_child_exec(string_address address_to words,
         positive at = 0;
         positive blocked = 0;
 
+        //      Only the three descriptors the caller installed cross into
+        //      the command: not the service's sockets and state files, nor
+        //      whatever a hand-started `link serve` inherited.
+        (void)system_call_3(syscall(close_range), 3, ~0u, 0);
         (void)system_signal_mask(2, address_of blocked, null, 8);
         for (b32 signal = 1; signal < 32; signal++)
         {
@@ -1664,8 +1750,13 @@ static fn link_stream_read(struct link_session address_to s,
         while (!stream->done && !stream->quiet && link_room(s))
         {
                 positive want = link_room(s) * LINK_CHUNK;
-                bipolar got = system_read_once(stream->fd, link_read_buffer,
-                                               want);
+                bipolar got = stream->socket
+                                      ? socket_receive((b32)stream->fd,
+                                                       link_read_buffer, want,
+                                                       MSG_DONTWAIT, 0, 0)
+                                      : system_read_once(stream->fd,
+                                                         link_read_buffer,
+                                                         want);
 
                 if (got == -EAGAIN || got == -4)
                 {
@@ -1722,9 +1813,17 @@ static bool link_stream_take(struct link_session address_to s,
         {
                 while (stream->fd >= 0 && stream->skip < length - 1)
                 {
-                        bipolar wrote = system_write_once(
-                                stream->fd, payload + 1 + stream->skip,
-                                length - 1 - stream->skip);
+                        p8 address_to from = payload + 1 + stream->skip;
+                        positive left = length - 1 - stream->skip;
+                        bipolar wrote =
+                                stream->socket
+                                        ? socket_send((b32)stream->fd, from,
+                                                      left,
+                                                      MSG_DONTWAIT |
+                                                              MSG_NOSIGNAL,
+                                                      0, 0)
+                                        : system_write_once(stream->fd, from,
+                                                            left);
 
                         if (wrote == -EAGAIN || wrote == -4)
                         {
@@ -1926,7 +2025,7 @@ static positive link_stamp_at(p8 address_to key)
         positive at;
 
         for (at = 0; at < link_self.stamps; at++)
-                if (crypto_same(link_self.stamp_key[at], key, 32))
+                if (crypto_same(link_self.stamp[at].key, key, 32))
                         break;
 
         return at;
@@ -1946,23 +2045,15 @@ static fn link_stamps_prune(void)
                 return;
         while (at < link_self.stamps)
         {
-                if (link_peer_keyed(address_of peers, link_self.stamp_key[at]))
+                if (link_peer_keyed(address_of peers, link_self.stamp[at].key))
                 {
                         at++;
                         continue;
                 }
-                link_self.stamps--;
-                if (at < link_self.stamps)
-                {
-                        memory_copy(link_self.stamp_key[at],
-                                    link_self.stamp_key[link_self.stamps], 32);
-                        memory_copy(link_self.stamp[at],
-                                    link_self.stamp[link_self.stamps],
-                                    WATERLINK_STAMP_BYTES);
-                }
-                crypto_forget(link_self.stamp_key[link_self.stamps], 32);
-                crypto_forget(link_self.stamp[link_self.stamps],
-                              WATERLINK_STAMP_BYTES);
+                link_self.stamp[at] = link_self.stamp[--link_self.stamps];
+                crypto_forget(link_self.stamp + link_self.stamps,
+                              sizeof(link_stamp_entry));
+                link_self.stamps_dirty = true;
         }
 }
 
@@ -1971,7 +2062,7 @@ static bool link_stamp_new(p8 address_to key, p8 address_to stamp)
         positive at = link_stamp_at(key);
 
         if (at < link_self.stamps)
-                return waterlink_stamp_newer(stamp, link_self.stamp[at]);
+                return waterlink_stamp_newer(stamp, link_self.stamp[at].stamp);
         if (link_self.stamps == LINK_PEERS_MAX)
                 link_stamps_prune();
         /* Every paired peer fits in this table. Once it is full, refusing an
@@ -1991,8 +2082,9 @@ static fn link_stamp_keep(p8 address_to key, p8 address_to stamp)
                         return;
                 link_self.stamps++;
         }
-        memory_copy(link_self.stamp_key[at], key, 32);
-        memory_copy(link_self.stamp[at], stamp, WATERLINK_STAMP_BYTES);
+        memory_copy(link_self.stamp[at].key, key, 32);
+        memory_copy(link_self.stamp[at].stamp, stamp, WATERLINK_STAMP_BYTES);
+        link_self.stamps_dirty = true;
 }
 
 static fn link_server_initiation(p8 address_to datagram, positive length,
@@ -2014,6 +2106,7 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         p64 conversation;
         p32 theirs;
         p32 ours;
+        bipolar admitted;
 
         //      To this machine's key, or a member's greeting to a group's.
         if (!waterlink_gate_passes(me, datagram, length))
@@ -2028,44 +2121,45 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
                 me = address_of link_nearby.keys[group].identity;
                 psk = link_nearby.keys[group].psk;
         }
-        if (!waterlink_admit(address_of link_self.admission, address, now))
-                return;
-        if (!waterlink_accept(address_of noise, me, psk, datagram, who, hello))
+        /*      The cookies' secret, made again once it is two minutes old;
+                under load an initiation without a good mac2 for where it
+                came from is answered with its cookie and goes no further. A
+                group's greeter asks nothing again, so under load greetings
+                wait for the load to pass. */
+        if (!waterlink_cookie_fresh(address_of link_self.admission, now) &&
+            system_random_fill(link_self.admission.secret, 32, 0) >= 0)
+                link_self.admission.secret_made = now ? now : 1;
+        admitted = waterlink_admit(address_of link_self.admission, datagram,
+                                   address, port, now);
+        if (admitted < 0 && system_random_fill(ephemeral, 24, 0) >= 0)
         {
-                crypto_forget(address_of noise, sizeof noise);
-                return;
+                waterlink_cookie_reply(me, address_of link_self.admission,
+                                       datagram, address, port, ephemeral,
+                                       answer);
+                (void)link_send_to(answer, WATERLINK_COOKIE_DATAGRAM, address,
+                                   port);
         }
+        if (admitted <= 0)
+                goto forget;
+        if (!waterlink_accept(address_of noise, me, psk, datagram, who, hello))
+                goto forget;
         if (psk)
         {
-                crypto_forget(address_of noise, sizeof noise);
-                if (link_stamp_new(who, hello))
-                {
-                        if (link_pair_greeted(group, who,
-                                             hello + WATERLINK_STAMP_BYTES,
-                                             address, port, now))
-                                link_stamp_keep(who, hello);
-                }
-                return;
+                if (link_stamp_new(who, hello) &&
+                    link_pair_greeted(group, who, hello, address, port, now))
+                        link_stamp_keep(who, hello);
+                goto forget;
         }
 
         link_peers_load(address_of peers);
         peer = link_peer_keyed(address_of peers, who);
-        if (!peer || !link_stamp_new(who, hello))
-        {
-                crypto_forget(address_of noise, sizeof noise);
-                return;
-        }
-
         memory_copy(address_of conversation, hello + WATERLINK_STAMP_BYTES, 8);
         memory_copy(address_of theirs, hello + WATERLINK_STAMP_BYTES + 8, 4);
         /* Zero is not a session index: link_index_new deliberately never
            issues it, and no carried reply can find it. Refuse it before it
            can reserve a session or consume the peer's replay stamp. */
-        if (!theirs)
-        {
-                crypto_forget(address_of noise, sizeof noise);
-                return;
-        }
+        if (!peer || !link_stamp_new(who, hello) || !theirs)
+                goto forget;
 
         for (positive at = 0; at < LINK_SESSIONS; at++)
         {
@@ -2085,12 +2179,7 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         if (!ours || system_random_fill(ephemeral, 32, 0) < 0 ||
             !waterlink_respond(address_of noise, ephemeral, theirs, ours,
                                answer))
-        {
-                crypto_forget(ephemeral, sizeof ephemeral);
-                crypto_forget(address_of noise, sizeof noise);
-                return;
-        }
-        crypto_forget(ephemeral, sizeof ephemeral);
+                goto forget;
 
         if (!s)
         {
@@ -2099,10 +2188,7 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
                                 if (!link_self.session[at].used)
                                         s = link_self.session + at;
                 if (!s || !link_session_open(s))
-                {
-                        crypto_forget(address_of noise, sizeof noise);
-                        return;
-                }
+                        goto forget;
                 memory_copy(s->peer, who, 32);
                 memory_copy(s->name, peer->name, WATERLINK_NAME_MAX);
                 s->may = peer->may;
@@ -2133,6 +2219,9 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         s->heard = now;
         (void)link_send_to(answer, WATERLINK_DATAGRAM, address, port);
         link_self.state_dirty = true;
+forget:
+        crypto_forget(address_of noise, sizeof noise);
+        crypto_forget(ephemeral, sizeof ephemeral);
 }
 
 // Receiving, at either end ----------------------------------------------------
@@ -2198,6 +2287,7 @@ static bool link_carried(p8 address_to datagram, positive length,
         struct link_keys address_to keys;
         struct waterlink_part parts[WATERLINK_PARTS];
         bipolar count = 0;
+        bool moved;
 
         //      The header is read before the tag is, so a datagram too short
         //      to be one is refused before that read, whoever calls.
@@ -2239,14 +2329,18 @@ static bool link_carried(p8 address_to datagram, positive length,
                 s->next.live = false;
         }
 
-        if (memory_compare(s->address, address, 16) || s->port != port)
-                link_self.state_dirty = true;
+        moved = memory_compare(s->address, address, 16) || s->port != port;
+        link_self.state_dirty |= moved;
         memory_copy(s->address, address, 16);
         s->port = port;
         s->heard = now;
-        if (link_self.server)
+        //      Seen, to the second and from where: once a second a session,
+        //      or when it moves, and not every datagram -- a walk of every
+        //      peer seen, 180 ticks a datagram with 64 of them.
+        if (link_self.server && (s->noted != link_wall(now) || moved))
         {
-                link_note_seen(s, link_wall(now));
+                s->noted = link_self.wall;
+                link_note_seen(s, s->noted);
                 link_self.state_dirty = true;
         }
 
@@ -2311,30 +2405,15 @@ static bipolar link_receive(link_run address_to run)
 
         for (bipolar at = 0; at < count; at++)
         {
-                link_message address_to message = address_of got[at].message;
-                p8 address_to cmsg = (p8 address_to)control[at];
+                b32 segment = link_control_int((p8 address_to)control[at],
+                                               got[at].message.control_length,
+                                               sizeof control[at], 17,
+                                               104); // SOL_UDP, UDP_GRO
 
                 run[at].length = got[at].length;
-                run[at].size = got[at].length;
-                //      cmsghdr: length, level, type, then the size as an int.
-                for (positive place = 0;
-                     place + 20 <= message->control_length &&
-                     place + 20 <= sizeof control[at];)
-                {
-                        p64 length;
-                        b32 level, type, segment;
-
-                        memory_copy(address_of length, cmsg + place, 8);
-                        memory_copy(address_of level, cmsg + place + 8, 4);
-                        memory_copy(address_of type, cmsg + place + 12, 4);
-                        if (length < 20 || place + length > sizeof control[at])
-                                break;
-                        memory_copy(address_of segment, cmsg + place + 16, 4);
-                        if (level == 17 && type == 104 && segment > 0 &&
-                            (positive)segment < run[at].length) // SOL_UDP, UDP_GRO
-                                run[at].size = (positive)segment;
-                        place += (length + 7) & ~7ull;
-                }
+                run[at].size = segment > 0 && (positive)segment < run[at].length
+                                       ? (positive)segment
+                                       : run[at].length;
 
                 if (from[at].family == AF_INET6)
                 {
@@ -2405,6 +2484,63 @@ static fn link_state_write(p64 now)
         }
         (void)link_file_replace(LINK_STATE_NEXT, LINK_STATE_PATH, state,
                                 sizeof(address_to state), false);
+}
+
+/*
+        The replay markers outlive the listener. In memory only, a restart
+        forgot every peer's newest stamp, and an initiation recorded off the
+        wire before it was new again: it held a session slot for LINK_DEAD
+        and drew an answer. So the table is kept in /root/link.stamps and
+        read back when the listener starts, written once a turn in which a
+        stamp moved -- after the turn's answers went, so an initiation's
+        answer does not wait on it. Without fsync: about ten microseconds a
+        write on the NVMe ext4 this was measured on, where rewriting the
+        peers file with its fsync, the other place a marker could live, took
+        600 to 720 and stalled every session with it; a stamp lost to a
+        power cut is the restart case again, for that one peer.
+*/
+static fn link_stamps_save(void)
+{
+        if (!link_self.stamps_dirty)
+                return;
+        link_self.stamps_dirty = false;
+        (void)link_file_replace(LINK_STAMPS_NEXT, LINK_STAMPS_PATH,
+                                link_self.stamp,
+                                link_self.stamps * sizeof(link_stamp_entry),
+                                false);
+}
+
+/*      A stamp is the peer's own clock. One dated past a day ahead of this
+        machine's -- a peer that booted with its clock in 2099, before NTP
+        -- would lock it out for good once its clock was put right, where a
+        restart used to forget it; so such a marker is not read back. A
+        replay was recorded in the past and is still refused; a machine
+        whose own clock is behind at start forgets markers, as before. */
+#define LINK_STAMP_AHEAD 86400
+
+static fn link_stamps_load(void)
+{
+        positive got = 0;
+        p64 wall = system_clock_ns(0) / 1000000000ull + (1ull << 62) +
+                   LINK_STAMP_AHEAD;
+
+        (void)link_read_private_records(LINK_STAMPS_PATH,
+                                        (p8 address_to)link_self.stamp,
+                                        sizeof link_self.stamp,
+                                        sizeof(link_stamp_entry),
+                                        address_of got);
+        link_self.stamps = 0;
+        for (positive at = 0; at < got / sizeof(link_stamp_entry); at++)
+        {
+                p8 address_to stamp = link_self.stamp[at].stamp;
+                p64 seconds = (p64)network_load_32(stamp) << 32 |
+                              network_load_32(stamp + 4);
+
+                if (seconds <= wall)
+                        link_self.stamp[link_self.stamps++] =
+                                link_self.stamp[at];
+        }
+        link_self.stamps_dirty = link_self.stamps != got / sizeof(link_stamp_entry);
 }
 
 
@@ -2548,6 +2684,7 @@ static positive link_sessions_watch(system_poll_descriptor address_to watch,
 }
 
 static fn link_client_answered(p8 address_to datagram, positive length);
+static fn link_client_cookie(p8 address_to datagram, positive length, p64 now);
 
 static fn link_datagram(p8 address_to datagram, positive length,
                         p8 address_to address, p16 port, p64 now)
@@ -2564,6 +2701,8 @@ static fn link_datagram(p8 address_to datagram, positive length,
         {
                 if (head.kind == WATERLINK_KIND_RESPOND)
                         link_client_answered(datagram, length);
+                else if (head.kind == WATERLINK_KIND_COOKIE)
+                        link_client_cookie(datagram, length, now);
         }
         else if (head.kind == WATERLINK_KIND_INITIATE)
                 link_server_initiation(datagram, length, address, port, now);
@@ -2631,6 +2770,7 @@ static b32 link_serve(void)
         //      sending one datagram at a time is measured.
         link_self.gso = !file_environment((string_address) "WATERLINK_NO_SEGMENTS");
         link_self.state_dirty = true;
+        link_stamps_load();
 
         signals = link_signals_open();
 
@@ -2660,6 +2800,7 @@ static b32 link_serve(void)
                 now = link_self.now = link_now();
                 link_receive_all(now);
                 link_nearby_receive(now);
+                link_stamps_save();
         }
 
         link_nearby_stop();
@@ -2690,6 +2831,10 @@ typedef struct
         p32 ours;      // an initiation waiting for its answer, or 0
         p64 initiated; // when it went
         positive attempts;
+        p8 mac1[16];   // its mac1, which a cookie reply to it is sealed to
+        bool cookied;  // it carried a cookie
+        p8 cookie[16]; // what the machine last handed out, under load
+        p64 cookie_at; // when; 0 for never
 } link_client_state;
 
 static link_client_state link_client;
@@ -2720,9 +2865,18 @@ static bool link_client_initiate(struct link_session address_to s, p64 now)
                system_random_fill(ephemeral, 32, 0) >= 0 &&
                waterlink_initiate(address_of link_client.noise,
                                   address_of link_self.me, s->peer, null,
-                                  ephemeral, hello, datagram) &&
-               link_send_to(datagram, WATERLINK_DATAGRAM, s->address,
-                            s->port) >= 0;
+                                  ephemeral, hello, datagram);
+        //      Under a cookie the machine handed out, while it is good.
+        link_client.cookied =
+                link_client.cookie_at &&
+                link_age(now, link_client.cookie_at) <
+                        (p64)(WATERLINK_COOKIE_SECONDS - 5) * 1000000;
+        if (sent && link_client.cookied)
+                waterlink_mac2(link_client.cookie, datagram);
+        memory_copy(link_client.mac1,
+                    datagram + 16 + WATERLINK_INITIATE_BYTES - 16, 16);
+        sent = sent && link_send_to(datagram, WATERLINK_DATAGRAM, s->address,
+                                    s->port) >= 0;
         crypto_forget(ephemeral, sizeof ephemeral);
         if (!sent)
         {
@@ -2777,6 +2931,22 @@ static fn link_client_answered(p8 address_to datagram, positive length)
             link_client_answer(link_self.session, address_of link_client.noise,
                                link_client.ours, datagram, length))
                 link_client.ours = 0;
+}
+
+/*      A cookie reply to the initiation out: kept, and asked again under it
+        at once if that initiation carried none -- only then, so a forged
+        reply cannot keep the client initiating; otherwise the next attempt
+        carries it. Either way it is an attempt. */
+static fn link_client_cookie(p8 address_to datagram, positive length, p64 now)
+{
+        if (!link_client.ours ||
+            !waterlink_cookie_take(link_self.session->peer, link_client.mac1,
+                                   datagram, length, link_client.cookie))
+                return;
+        link_client.cookie_at = now ? now : 1;
+        if (!link_client.cookied)
+                link_client.initiated = now > LINK_ATTEMPT ? now - LINK_ATTEMPT - 1
+                                                           : 0;
 }
 
 static p64 link_rekey_after(void)
@@ -2908,24 +3078,16 @@ static b32 link_client_run(string_address name, p8 kind,
                 return host_fail("randomness", -EIO);
         }
 
-        //      Input is read once the machine has said yes to the request,
-        //      and never waited on: standard input is opened again as a
-        //      description of this process's own, which can be nonblocking
-        //      without changing it for whoever shares the terminal or pipe.
-        if (!input)
-        {
-                bipolar own = system_open_at(AT_FDCWD, "/proc/self/fd/0",
-                                             FILE_READ | O_NONBLOCK | O_CLOEXEC);
-
-                input = own >= 0 ? own : 0;
-        }
-        link_stream_set(s->reads, input, LINK_KEY_INPUT,
+        //      Input is read once the machine has said yes to the request.
+        //      Neither it nor what comes back is ever waited on.
+        link_stream_own(s->reads, input, LINK_KEY_INPUT,
                         WATERLINK_FRAME_DURABLE |
                                 (kind == LINK_KIND_SHELL ? WATERLINK_FRAME_URGENT
-                                                         : 0));
+                                                         : 0),
+                        FILE_READ);
         s->reads[0].done = true;
-        link_stream_set(s->writes, 1, LINK_KEY_OUTPUT, 0);
-        link_stream_set(s->writes + 1, 2, LINK_KEY_ERROR, 0);
+        link_stream_own(s->writes, 1, LINK_KEY_OUTPUT, 0, O_WRONLY);
+        link_stream_own(s->writes + 1, 2, LINK_KEY_ERROR, 0, O_WRONLY);
         signals = link_signals_open();
 
         for (;;)
@@ -2984,6 +3146,7 @@ static b32 link_client_run(string_address name, p8 kind,
                                         break;
                                 }
                                 string_copy((string_address)s->whole, words[1]);
+                                link_stream_close(s, s->writes);
                                 link_stream_set(s->writes, part,
                                                 LINK_KEY_OUTPUT, 0);
                         }

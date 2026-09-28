@@ -2299,7 +2299,11 @@ def self_test():
             #      and without the redirect hop, byte-compared. Measured on the
             #      box as an ordinary user: 66 of 66 in 84 s, 78 s of it the
             #      anchored build, which no lane should pay on every run.
-            BY_HAND = {"https_bench"}
+            #
+            #      x509_corpus is another: it fetches real server chains over
+            #      the network and puts tls_verify_chain's verdicts beside
+            #      openssl verify's, which no lane may depend on.
+            BY_HAND = {"https_bench", "tls_verify_fuzz", "x509_corpus"}
 
             unrun = sorted(set(registered) - asked - BY_HAND)
             self.assertEqual(unrun, [],
@@ -27503,7 +27507,7 @@ call-frame lifetime are covered separately by harness shell_functions.
     #define FILE_PROTECT_WRITE PROT_WRITE
     #define FILE_MAP_PRIVATE MAP_PRIVATE
     #define FILE_MAP_ANONYMOUS MAP_ANONYMOUS
-    typedef uint8_t b8;
+    typedef int8_t b8;
     typedef char p8;
     typedef uintptr_t positive;
     typedef char *string_address;
@@ -33616,7 +33620,8 @@ def harness_https_bench(argv):
     """Loopback HTTPS for wget: a CPU-bound download bench and a framing matrix.
 
     A forked Python TLS 1.3 server (TLS_AES_128_GCM_SHA256, the one suite the
-    client offers, key exchange on --group) serves over the chain shape the
+    client offers, key exchange on --group; --tls12 holds it to TLS 1.2 and
+    ECDHE-ECDSA-AES128-GCM-SHA256) serves over the chain shape the
     Arch mirror sends: a P-256 leaf under two P-384 intermediates under a P-384
     root that is itself in the chain, all generated under WORK/pki and reused
     while they stay valid. Only shells built here by --source trust that root:
@@ -33677,6 +33682,8 @@ def harness_https_bench(argv):
     parser.add_argument('--perf', action='store_true')
     parser.add_argument('--syscalls', action='store_true')
     parser.add_argument('--group', default='prime256v1')
+    parser.add_argument('--tls12', action='store_true',
+                        help='hold the server to TLS 1.2 (ECDHE-ECDSA-AES128-GCM-SHA256)')
     opts = parser.parse_args(argv)
     if opts.runs < 1:
         parser.error('--runs must be positive')
@@ -33783,6 +33790,9 @@ def harness_https_bench(argv):
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_3
+    if opts.tls12:
+        context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_2
+        context.set_ciphers('ECDHE-ECDSA-AES128-GCM-SHA256')
     context.load_cert_chain(pki / 'chain.pem', pki / 'leaf.key')
     context.set_ecdh_curve(opts.group)
 
@@ -35972,37 +35982,16 @@ def harness_term_streams(argv):
     return 1 if failures else 0
 
 
-def harness_dhcp_packets(argv):
-    """DHCP replies from a grammar, through the parser ip watch runs as root.
+def dhcp_lift():
+    """src/net/net.c's DHCP reply side for a hosted build: (shim, head, walk).
 
-    dhcp_read walks a reply's options -- a packet from the network, read
-    by a process with every privilege -- so a length it trusted would be a
-    read past the datagram. The walk is cut out of src/net/net.c and built
-    with the host compiler under AddressSanitizer and UBSan, and fed 200,000
-    seeded replies each in a heap block exactly its length: the fixed BOOTP
-    head with a field now and then wrong (op, hardware type and length,
-    transaction, client address, cookie), then options drawn from PAD, END,
-    the eight the lease reads at their own length and at 0, 3, 5 and 8 bytes,
-    the message type at 0, 1 and 2, unknown options, repeats, masks of every
-    shape, and the datagram cut anywhere from nothing to all of it. Values
-    are cut into pieces now and then, each piece its own option, and option
-    52 now and then says the file and sname fields carry options too, which
-    they sometimes do whether it says so or not. A reply that is whole and
-    well formed has to give the lease a model of the options the generator
-    wrote says it gives -- every piece of a code joined in wire order,
-    options then file then sname, as RFC 2131 and 3396 read it -- and every
-    reply has to be read without the sanitizers saying a word.
-
-        dhcp_packets [COUNT [SEED]]
-    """
-    import subprocess
-    import tempfile
-    count = int(argv[0]) if argv else 200000
-    seed = int(argv[1], 0) if len(argv) > 1 else 0xd4c9
+    head runs from the DHCP defines through dhcp_lease_timers; walk from
+    dhcp_walk through dhcp_reacquisition_answer_matches. dhcp_packets and
+    dhcp_fuzz share it, so a moved anchor breaks both."""
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     head = net[net.index("#define DHCP_HEAD 236"):net.index("static COLD positive dhcp_build(")]
     walk = net[net.index("/*\n        A reply read for what it says."):
-               net.index("//      A mask of n leading bits")]
+               net.index("/*\n        The exchange, confined.")]
     shim = r'''
 #include <stdio.h>
 #include <stdlib.h>
@@ -36024,6 +36013,13 @@ typedef int b32;
 #define memory_compare memcmp
 #define memory_zero(at, size) memset(at, 0, size)
 #define null 0
+static positive memory_span_byte(const void *block, p8 byte, positive size) {
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[i] == byte)
+                i++;
+        return i;
+}
 static p32 network_load_32(const p8 *at) {
         return (p32)at[0] << 24 | (p32)at[1] << 16 | (p32)at[2] << 8 | at[3];
 }
@@ -36032,6 +36028,39 @@ static bipolar system_random_fill(void *into, positive size, positive flags) {
         (void)into; (void)size; (void)flags; return 0;
 }
 '''
+    return shim, head, walk
+
+
+def harness_dhcp_packets(argv):
+    """DHCP replies from a grammar, through the parser ip watch runs as root.
+
+    dhcp_read walks a reply's options -- a packet from the network, read
+    by a process with every privilege -- so a length it trusted would be a
+    read past the datagram. The walk is cut out of src/net/net.c and built
+    with the host compiler under AddressSanitizer and UBSan, and fed 200,000
+    seeded replies each in a heap block exactly its length: the fixed BOOTP
+    head with a field now and then wrong (op, hardware type and length,
+    transaction, client address, cookie), then options drawn from PAD, END,
+    the eight the lease reads at their own length and at 0, 3, 5 and 8 bytes,
+    the message type at 0, 1 and 2, unknown options, repeats, masks of every
+    shape, and the datagram cut anywhere from nothing to all of it. Values
+    are cut into pieces now and then, each piece its own option, and option
+    52 now and then says the file and sname fields carry options too, which
+    they sometimes do whether it says so or not. A reply that is whole and
+    well formed has to give the lease a model of the options the generator
+    wrote says it gives -- every piece of a code joined in wire order,
+    options then file then sname, as RFC 2131 and 3396 read it -- and every
+    reply has to be read without the sanitizers saying a word. Well formed
+    includes the framing RFC 2131 and 2132 ask for: the options field and
+    each field option 52 names end in END, and option 52 is one byte.
+
+        dhcp_packets [COUNT [SEED]]
+    """
+    import subprocess
+    import tempfile
+    count = int(argv[0]) if argv else 200000
+    seed = int(argv[1], 0) if len(argv) > 1 else 0xd4c9
+    shim, head, walk = dhcp_lift()
     driver = r'''
 static uint64_t draws;
 static p32 draw(p32 below) {
@@ -36138,6 +36167,7 @@ int main(int argc, char **argv) {
                 p32 model[8] = {0};
                 p8 kind = 0, overload = 0;
                 bool broken = false, ended = false, spare_ended = false;
+                bool file_ended = false, sname_ended = false;
                 memset(build, 0, sizeof build);
                 memset(&said_pieces, 0, sizeof said_pieces);
                 typed = false;
@@ -36153,10 +36183,18 @@ int main(int argc, char **argv) {
                    do; only when it does may they be read as options. */
                 if (draw(2)) {
                         positive end_file = fill(build, 108, 236, 1, &overload, &spare_ended);
-                        if (!spare_ended && end_file < 236 && draw(2)) build[end_file] = DHCP_OPTION_END;
+                        if (!spare_ended && end_file < 236 && draw(2)) {
+                                build[end_file] = DHCP_OPTION_END;
+                                spare_ended = true;
+                        }
+                        file_ended = spare_ended;
                         spare_ended = false;
                         positive end_sname = fill(build, 44, 108, 2, &overload, &spare_ended);
-                        if (!spare_ended && end_sname < 108 && draw(2)) build[end_sname] = DHCP_OPTION_END;
+                        if (!spare_ended && end_sname < 108 && draw(2)) {
+                                build[end_sname] = DHCP_OPTION_END;
+                                spare_ended = true;
+                        }
+                        sname_ended = spare_ended;
                 }
                 /* An option whose length runs past its field, now and then. */
                 if (overload & 1 && !draw(40)) { build[234] = 3; build[235] = 9; broken = true; }
@@ -36200,7 +36238,13 @@ int main(int argc, char **argv) {
                                 model[offsets[which]] = network_load_32(first[code]);
                 }
                 bool mask_ok = dhcp_mask_valid(model[1]);
-                bool want = kind && mask_ok;
+                /* Every field read ends in END (the rest is PAD, which the
+                   zeroed build gives), and 52 of any other length than one
+                   is a malformed control, not a field left unread. */
+                bool framed = ended && overload < 4 &&
+                              (!read_region[1] || file_ended) &&
+                              (!read_region[2] || sname_ended);
+                bool want = kind && mask_ok && framed;
                 p32 got[8];
                 memcpy(got, &lease, sizeof got);
                 if ((answer == 0) != want ||
@@ -36239,6 +36283,271 @@ int main(int argc, char **argv) {
           % (total, parsed, agreed, whole))
     write_tally("dhcp-packets", agreed, whole)
     return 0
+
+
+def dhcp_fuzz_seeds():
+    """Name to bytes for dhcp_fuzz: replies in dhcp_packets' shapes.
+
+    Byte 0 is control (bit 0 set: the header is taken as it is rather than
+    given this client's identity; bit 1: the clock reading is absolute rather
+    than past the lease start), bytes 1-8 are two 32-bit clock values, and
+    the rest is the reply."""
+    def option(code, value):
+        return bytes([code, len(value)]) + value
+
+    def reply(options, kind=0, file=b"", sname=b"", control=0, clock=b"\0" * 8):
+        head = bytearray(236)
+        head[0:3] = b"\x02\x01\x06"
+        head[4:8] = (0xdeadbeef).to_bytes(4, "big")
+        head[16:20] = bytes([10, 0, 2, 15])
+        head[28:34] = bytes([2, 0, 0, 0, 0, 1])
+        head[44:44 + len(sname)] = sname
+        head[108:108 + len(file)] = file
+        body = (option(53, bytes([kind])) if kind else b"") + options
+        return bytes([control]) + clock + bytes(head) + b"\x63\x82\x53\x63" + body
+
+    four = lambda value: value.to_bytes(4, "big")
+    lease = (option(1, four(0xffffff00)) + option(3, bytes([10, 0, 2, 2])) +
+             option(6, bytes([10, 0, 2, 3])) + option(54, bytes([10, 0, 2, 2])) +
+             option(51, four(86400)))
+    timers = option(58, four(100)) + option(59, four(200))
+    clock = four(1000) + four(150)
+    seeds = {
+        "offer": reply(lease + b"\xff", 2),
+        "ack": reply(lease + timers + b"\xff", 5, clock=clock),
+        "nak": reply(option(54, bytes([10, 0, 2, 2])) + b"\xff", 6),
+        "ack_pad_tail": reply(lease + b"\xff" + b"\0" * 60, 5),
+        "ack_junk_after_end": reply(lease + b"\xff\x03\x04\x0a\0\0\x01", 5),
+        "no_end": reply(lease, 5),
+        "pad_only": reply(b"\0" * 32, 5),
+        "empty_options": reply(b"", 0),
+        "short_head": reply(b"")[:200],
+        "length_off_end": reply(lease + b"\x06\x40\x0a\0", 5),
+        "split_lease_time": reply(option(51, four(3600)[:2]) + option(51, four(3600)[2:]) +
+                                  option(54, bytes([10, 0, 2, 2])) + b"\xff", 5),
+        "split_router_list": reply(option(3, bytes([10, 0, 2, 2, 10])) + option(3, b"\0\2\3") +
+                                   b"\xff", 2),
+        "router_list_long": reply(option(3, bytes(range(252))) + b"\xff", 2),
+        "mask_holey": reply(option(1, four(0xff00ff00)) + b"\xff", 2),
+        "mask_five_bytes": reply(option(1, b"\xff\xff\xff\0\0") + b"\xff", 2),
+        "type_twice": reply(option(53, b"\x05") + option(53, b"\x05") + b"\xff", 0),
+        "type_empty": reply(option(53, b"") + b"\xff", 0),
+        "overload_file": reply(option(52, b"\x01") + b"\xff", 5,
+                               file=lease + b"\xff"),
+        "overload_sname": reply(option(52, b"\x02") + b"\xff", 5,
+                                sname=option(51, four(60)) + b"\xff"),
+        "overload_both_split": reply(option(52, b"\x03") + option(51, b"\0\0") + b"\xff", 5,
+                                     file=option(51, b"\x0e\x10") + b"\xff",
+                                     sname=option(54, bytes([10, 0, 2, 2])) + b"\xff"),
+        "overload_file_no_end": reply(option(52, b"\x01") + b"\xff", 5, file=lease),
+        "overload_value_four": reply(option(52, b"\x04") + b"\xff", 5),
+        "overload_length_two": reply(option(52, b"\x01\x02") + b"\xff", 5),
+        "overload_twice": reply(option(52, b"\x01") + option(52, b"\x01") + b"\xff", 5,
+                                file=b"\xff"),
+        "overload_in_file": reply(option(52, b"\x01") + b"\xff", 5,
+                                  file=option(52, b"\x02") + b"\xff"),
+        "file_runs_past": reply(option(52, b"\x01") + b"\xff", 5,
+                                file=b"\0" * 124 + b"\x03\x09"),
+        "timers_inverted": reply(lease + option(58, four(300)) + option(59, four(200)) +
+                                 b"\xff", 5, clock=clock),
+        "lease_one_second": reply(option(51, four(1)) + option(54, b"\x0a\0\2\2") + b"\xff",
+                                  5, clock=four(7) + four(1)),
+        "lease_three_seconds": reply(option(51, four(3)) + option(54, b"\x0a\0\2\2") + b"\xff",
+                                     5, clock=four(7) + four(2)),
+        "lease_infinite": reply(option(51, four(0xffffffff)) + option(54, b"\x0a\0\2\2") +
+                                b"\xff", 5, clock=four(0xfffffff0) + four(0xffffffff)),
+        "clock_regressed": reply(lease + b"\xff", 5, control=2, clock=four(1000) + four(10)),
+        "raw_wrong_xid": reply(lease + b"\xff", 5, control=1)[:9] + b"\x02\x01\x06\0\1\2\3\4" +
+                         reply(lease + b"\xff", 5)[17:],
+        "raw_bootp_request": bytes([1]) + b"\0" * 8 + b"\x01" + reply(lease + b"\xff", 5)[10:],
+    }
+    return {name + ".bin": data for name, data in seeds.items()}
+
+
+def harness_dhcp_fuzz(argv):
+    """Coverage-guided libFuzzer over the DHCP reply parser and lease clock.
+
+    dhcp_read, dhcp_walk and the lease helpers after them are lifted from
+    src/net/net.c (dhcp_lift, shared with dhcp_packets), and the lease
+    timing functions net_lease_expired_at through net_lease_retry_after from
+    src/sh/net.c. Each input is copied into a heap block exactly its length
+    and read twice: by dhcp_read, and by an independent RFC 2131/2132/3396
+    reference here (options, then file, then sname when option 52 names
+    them, each ending in END and padding, 52 once, one byte, 1..3, in the
+    options field only; pieces of a code joined). The two must agree on the
+    verdict, the message type and all eight lease words, and a refused reply
+    must leave the caller's lease untouched. An accepted lease then goes
+    through dhcp_lease_timers (T1 < T2 < expiry, or both zero under three
+    seconds), dhcp_prefix_of (the mask's population count, 24 for none),
+    dhcp_lease_acknowledge over a held lease (still usable), and the watcher's
+    clock arithmetic at a fuzzed start and now (a wake within the lease, a
+    request never past its boundary, a retry never past expiry). Seeds from
+    dhcp_fuzz_seeds; ASan/UBSan, or MSan with MOONWATER_MSAN=1; NOT RUN (2)
+    without clang/libFuzzer.
+
+        python3 test/differential.py --harness dhcp_fuzz
+    """
+    del argv
+    shim, head, walk = dhcp_lift()
+    shell = (HARNESS_ROOT / "src/sh/net.c").read_text()
+    clock = tls_fuzz_sec(shell, "/*\n        What this machine is holding, and since when.",
+                         "static COLD fn net_rollback_record(")
+    source = shim + r"""
+#define IFNAME_SIZE 16
+#define ERROR_NO_ENTRY 2
+#define ERROR_NO_PROCESS 3
+#define ERROR_NO_DEVICE 19
+#define NETWORK_NANOSECONDS 1000000000
+static positive clock_monotonic_nanoseconds(void) { return 0; }
+""" + head + walk + clock + r"""
+static const p8 fuzz_hardware[6] = {2, 0, 0, 0, 0, 1};
+
+#define FUZZ_REQUIRE(condition, what)                                         \
+        do { if (!(condition)) { fprintf(stderr, "dhcp fuzz: %s\n", what);  \
+                                 __builtin_trap(); } } while (0)
+
+/* The reference: one region's options, RFC 2132 framing, pieces joined. */
+static int reference_region(const p8 *region, long size, int primary, int *overload,
+                            long total[256], p8 first[256][4])
+{
+        for (long at = 0; at < size;) {
+                int code = region[at];
+                if (code == 0) { at++; continue; }
+                if (code == 255) {
+                        for (long rest = at + 1; rest < size; rest++)
+                                if (region[rest]) return 0;
+                        return 1;
+                }
+                if (size - at < 2) return 0;
+                long length = region[at + 1];
+                if (size - at - 2 < length) return 0;
+                if (code == 52) {
+                        int value = length == 1 ? region[at + 2] : 0;
+                        if (!primary || *overload || value < 1 || value > 3) return 0;
+                        *overload = value;
+                }
+                for (long i = 0; i < length; i++)
+                        if (total[code] + i < 4) first[code][total[code] + i] = region[at + 2 + i];
+                total[code] += length;
+                at += 2 + length;
+        }
+        return 0;
+}
+
+static int reference_read(const p8 *packet, long size, p32 lease[8], p8 *kind)
+{
+        static const p8 codes[7] = {1, 3, 6, 54, 51, 58, 59};
+        long total[256] = {0};
+        p8 first[256][4];
+        int overload = 0;
+
+        memset(first, 0, sizeof first);
+        if (size < 240 || packet[0] != 2 || packet[1] != 1 || packet[2] != 6 ||
+            network_load_32(packet + 4) != 0xdeadbeef ||
+            memcmp(packet + 28, fuzz_hardware, 6) ||
+            network_load_32(packet + 236) != 0x63825363)
+                return 0;
+        if (!reference_region(packet + 240, size - 240, 1, &overload, total, first) ||
+            ((overload & 1) && !reference_region(packet + 108, 128, 0, &overload, total, first)) ||
+            ((overload & 2) && !reference_region(packet + 44, 64, 0, &overload, total, first)))
+                return 0;
+        memset(lease, 0, 8 * sizeof(p32));
+        lease[0] = network_load_32(packet + 16);
+        for (int i = 0; i < 7; i++)
+                if (total[codes[i]] == 4 || (total[codes[i]] > 4 && (i == 1 || i == 2)))
+                        lease[i + 1] = network_load_32(first[codes[i]]);
+        /* A mask is ones then zeros: no one bit below the first zero. */
+        for (int bit = 31, zero = 0; bit >= 0; bit--) {
+                if (!(lease[1] >> bit & 1)) zero = 1;
+                else if (zero) return 0;
+        }
+        if (total[53] != 1 || !first[53][0])
+                return 0;
+        *kind = first[53][0];
+        return 1;
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        if (size < 9)
+                return 0;
+        positive length = size - 9;
+        p8 *packet = malloc(length ? length : 1);
+        memcpy(packet, data + 9, length);
+        if (!(data[0] & 1)) {
+                if (length > 2) { packet[0] = 2; packet[1] = 1; packet[2] = 6; }
+                if (length >= 8) memcpy(packet + 4, "\xde\xad\xbe\xef", 4);
+                if (length >= 34) memcpy(packet + 28, fuzz_hardware, 6);
+                if (length >= 240) memcpy(packet + 236, "\x63\x82\x53\x63", 4);
+        }
+
+        dhcp_lease lease;
+        p8 kind = 0xee, want_kind = 0;
+        p32 want[8];
+        memset(&lease, 0xa5, sizeof lease);
+        dhcp_lease untouched = lease;
+        bipolar got = dhcp_read(packet, length, 0xdeadbeef, (p8 *)fuzz_hardware,
+                                &lease, &kind);
+        int accepted = reference_read(packet, (long)length, want, &want_kind);
+        free(packet);
+
+        FUZZ_REQUIRE((got == 0) == (accepted == 1), "dhcp_read and the reference disagree on the verdict");
+        if (got) {
+                FUZZ_REQUIRE(got == -1 && kind == 0xee &&
+                             !memcmp(&lease, &untouched, sizeof lease),
+                             "a refused reply wrote the caller's lease");
+                return 0;
+        }
+        FUZZ_REQUIRE(kind == want_kind && !memcmp(&lease, want, sizeof want),
+                     "dhcp_read and the reference read different values");
+
+        dhcp_lease timed = lease;
+        bool ordered = dhcp_lease_timers(&timed);
+        FUZZ_REQUIRE(ordered == (lease.seconds != 0), "timers refused a lease with a lifetime");
+        if (ordered && timed.seconds < 3)
+                FUZZ_REQUIRE(!timed.renewal && !timed.rebinding, "a short lease kept timers");
+        else if (ordered)
+                FUZZ_REQUIRE(timed.renewal && timed.renewal < timed.rebinding &&
+                             timed.rebinding < timed.seconds, "timers out of order");
+
+        p8 prefix = dhcp_prefix_of(lease.mask);
+        FUZZ_REQUIRE(prefix == (lease.mask ? __builtin_popcount(lease.mask) : 24),
+                     "a prefix that is not the mask's");
+
+        dhcp_lease held = {0x0a00020f, 0xffffff00, 0x0a000202, 0x0a000203,
+                           0x0a000202, 3600, 1800, 3150};
+        FUZZ_REQUIRE(dhcp_lease_acknowledge(&held, &lease) && dhcp_lease_usable(&held),
+                     "an acknowledgement made a held lease unusable");
+
+        if (!ordered)
+                return 0;
+        positive start = network_load_32(data + 1);
+        positive later = network_load_32(data + 5);
+        positive now = data[0] & 2 ? later : start + later;
+        net_holding holding;
+        memset(&holding, 0, sizeof holding);
+        holding.index = 1;
+        holding.lease = timed;
+        holding.taken = start;
+        holding.retry = timed.renewal;
+        bool expired = net_lease_expired_at(&holding, now);
+        positive due = net_lease_due_in(&holding, now);
+        FUZZ_REQUIRE(due >= 1 && due <= timed.seconds, "a wake outside the lease");
+        FUZZ_REQUIRE(expired || (now >= start && now - start < timed.seconds),
+                     "a lease kept past its lifetime");
+        bool rebinding = net_lease_rebinding_at(&holding, now);
+        positive attempt = net_lease_attempt_time(&holding, now, rebinding);
+        FUZZ_REQUIRE(attempt <= 4 && (!attempt ||
+                     now - start + attempt <= (rebinding ? timed.seconds : timed.rebinding)),
+                     "a request allowed past its state boundary");
+        net_lease_retry_after(&holding, now, rebinding);
+        FUZZ_REQUIRE(expired || (holding.retry <= timed.seconds &&
+                                 holding.retry >= now - start),
+                     "a retry scheduled outside the lease");
+        return 0;
+}
+"""
+    return tls_fuzz_run("dhcp", "dhcp", source, 1500)
 
 
 def harness_terminfo_install(argv):
@@ -37010,7 +37319,8 @@ def harness_tls_chains(argv):
     one fixed chain. This builds the shell trusting a P-384 root it makes
     (TLS_BENCH_ANCHOR), then walks a grammar of chains -- the leaf's key
     (P-256, P-384, RSA-2048) against every mutation below -- serving each
-    from a loopback TLS 1.3 server and asking wget for it, and asks openssl
+    from a loopback TLS 1.3 server and asking wget for it (and again over
+    TLS 1.2, whose verdict has to be the same), and asks openssl
     verify the same question with the same root, intermediates, name and
     purpose. The two verdicts have to agree, except where this tree refuses
     by policy what openssl accepts, which DELIBERATE names with its reason.
@@ -37040,24 +37350,261 @@ def harness_tls_chains(argv):
         ("leaf expired", 2, good_leaf, {"leaf_dates": (-400, -1)}),
         ("leaf not yet valid", 2, good_leaf, {"leaf_dates": (2, 90)}),
         ("intermediate expired", 2, good_leaf, {"second_dates": (-400, -1)}),
+        ("first intermediate expired", 2, good_leaf, {"first_dates": (-400, -1)}),
         ("name is another address", 2, good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.2"), {}),
         ("name is only a DNS name", 2, good_leaf.replace("IP:127.0.0.1", "DNS:localhost"), {}),
         ("no subject alternative name", 2, good_leaf.replace("subjectAltName=IP:127.0.0.1\n", ""), {}),
+        ("leaf with only a subject alternative name", 2,
+         "subjectAltName=IP:127.0.0.1\n", {}),
         ("intermediate is not a CA", 2, good_leaf, {"second_ca": "CA:FALSE"}),
+        ("intermediate has no basic constraints", 2, good_leaf,
+         {"second_extensions": "keyUsage=critical,keyCertSign,cRLSign\n"}),
+        ("intermediate may not sign certificates", 2, good_leaf,
+         {"second_key_usage": "digitalSignature"}),
+        ("intermediate constraints are noncritical", 2, good_leaf,
+         {"second_extensions": "basicConstraints=CA:TRUE,pathlen:0\n"
+                               "keyUsage=critical,keyCertSign,cRLSign\n"}),
+        ("intermediate has no key usage", 2, good_leaf,
+         {"second_extensions": "basicConstraints=critical,CA:TRUE,pathlen:0\n"}),
+        ("intermediate is restricted to client auth", 2, good_leaf,
+         {"second_extensions": "basicConstraints=critical,CA:TRUE,pathlen:0\n"
+                               "keyUsage=critical,keyCertSign,cRLSign\n"
+                               "extendedKeyUsage=clientAuth\n"}),
+        ("unknown critical intermediate extension", 2, good_leaf,
+         {"second_extra": "1.2.3.4=critical,DER:05:00\n"}),
+        ("unknown noncritical intermediate extension", 2, good_leaf,
+         {"second_extra": "1.2.3.4=DER:05:00\n"}),
+        # OpenSSL collapses identical extfile keys, so mint two distinct
+        # unknowns and rewrite the second OID on the wire before resigning.
+        ("intermediate duplicate unknown extension", 2, good_leaf,
+         {"second_extra": "1.2.3.4=DER:05:00\n1.2.3.5=DER:05:00\n",
+          "der_dup_unknown_second": True}),
+        # Default second is BC+KU plus auto SKI/AKI (four).  Pin SKI/AKI off
+        # so BC+KU plus sixty-three unknowns are exactly the wire ceiling.
+        ("intermediate sixty-five extensions", 2, good_leaf,
+         {"second_extra": "subjectKeyIdentifier=none\nauthorityKeyIdentifier=none\n" +
+          "".join("1.2.201.%d=DER:05:00\n" % n for n in range(63))}),
+        # Same unknown-duplicate / ceiling cases on the depth-2 "first" cert.
+        ("first intermediate duplicate unknown extension", 2, good_leaf,
+         {"first_extra": "1.2.3.4=DER:05:00\n1.2.3.5=DER:05:00\n",
+          "der_dup_unknown_first": True}),
+        ("first intermediate sixty-five extensions", 2, good_leaf,
+         {"first_extra": "subjectKeyIdentifier=none\nauthorityKeyIdentifier=none\n" +
+          "".join("1.2.202.%d=DER:05:00\n" % n for n in range(63))}),
+        # Semantic refuses / accepts on the depth-2 "first" cert, parallel to second.
+        ("first intermediate is not a CA", 2, good_leaf, {"first_ca": "CA:FALSE"}),
+        ("first intermediate has no basic constraints", 2, good_leaf,
+         {"first_extensions": "keyUsage=critical,keyCertSign,cRLSign\n"}),
+        ("first intermediate may not sign certificates", 2, good_leaf,
+         {"first_key_usage": "digitalSignature"}),
+        ("first intermediate constraints are noncritical", 2, good_leaf,
+         {"first_extensions": "basicConstraints=CA:TRUE,pathlen:1\n"
+                              "keyUsage=critical,keyCertSign,cRLSign\n"}),
+        ("first intermediate has no key usage", 2, good_leaf,
+         {"first_extensions": "basicConstraints=critical,CA:TRUE,pathlen:1\n"}),
+        ("first intermediate is restricted to client auth", 2, good_leaf,
+         {"first_extensions": "basicConstraints=critical,CA:TRUE,pathlen:1\n"
+                              "keyUsage=critical,keyCertSign,cRLSign\n"
+                              "extendedKeyUsage=clientAuth\n"}),
+        ("first intermediate unknown critical extension", 2, good_leaf,
+         {"first_extra": "1.2.3.4=critical,DER:05:00\n"}),
+        ("first intermediate unknown noncritical extension", 2, good_leaf,
+         {"first_extra": "1.2.3.4=DER:05:00\n"}),
+        # Default first is BC+KU plus auto SKI/AKI (four).  Pin SKI/AKI off
+        # so BC+KU plus sixty-two unknowns are the inclusive sixty-four ceiling.
+        ("first intermediate sixty-four extensions", 2, good_leaf,
+         {"first_extra": "subjectKeyIdentifier=none\nauthorityKeyIdentifier=none\n" +
+          "".join("1.2.203.%d=DER:05:00\n" % n for n in range(62))}),
+        ("first intermediate carries name constraints", 2, good_leaf,
+         {"first_extra": "nameConstraints=critical,permitted;IP:127.0.0.0/255.0.0.0\n"}),
+        ("intermediate carries name constraints", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;IP:127.0.0.0/255.0.0.0\n"}),
+        # RFC 5280 4.2.1.10 name constraints, one key type each (the
+        # evaluation is key-blind): every form the leaf or a lower CA
+        # carries against permitted and excluded subtrees of that form.
+        ("intermediate permits another range", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;IP:10.0.0.0/255.0.0.0\n",
+          "keys": ("P-256",)}),
+        ("intermediate excludes the leaf's address", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,excluded;IP:127.0.0.1/255.255.255.255\n",
+          "keys": ("P-256",)}),
+        ("noncritical name constraints still bind", 2, good_leaf,
+         {"second_extra": "nameConstraints=permitted;IP:10.0.0.0/255.0.0.0\n",
+          "keys": ("P-256",)}),
+        ("an IPv6-only range leaves the IPv4 leaf outside", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;IP:2001:db8::/ffff:ffff::\n",
+          "keys": ("P-256",)}),
+        ("intermediate permits the leaf's DNS name", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.example.com"),
+         {"second_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "keys": ("P-256",)}),
+        ("leaf DNS name outside the permitted names", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.evil.test"),
+         {"second_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "keys": ("P-256",)}),
+        ("leaf DNS name under an excluded name", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:a.evil.test"),
+         {"second_extra": "nameConstraints=critical,excluded;DNS:evil.test\n",
+          "keys": ("P-256",)}),
+        ("leaf wildcard whose star can be an excluded label", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:*.example.com"),
+         {"second_extra": "nameConstraints=critical,excluded;DNS:bad.example.com\n",
+          "keys": ("P-256",)}),
+        ("intermediate permits the leaf's subject", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;dirName:subtree\n"
+                          "[subtree]\nCN=127.0.0.1\n", "keys": ("P-256",)}),
+        ("intermediate permits another subject", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;dirName:subtree\n"
+                          "[subtree]\nCN=127.0.0.2\n", "keys": ("P-256",)}),
+        ("intermediate excludes the leaf's subject", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,excluded;dirName:subtree\n"
+                          "[subtree]\nCN=127.0.0.1\n", "keys": ("P-256",)}),
+        ("a permitted subject compared case-folded", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;dirName:subtree\n"
+                          "[subtree]\nO=EXAMPLE  ORG\n",
+          "leaf_subject": "/O=Example Org/CN=127.0.0.1", "keys": ("P-256",)}),
+        ("leaf mailbox on a permitted host", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,email:a@example.com"),
+         {"second_extra": "nameConstraints=critical,permitted;email:example.com\n",
+          "keys": ("P-256",)}),
+        ("leaf mailbox outside the permitted hosts", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,email:a@evil.test"),
+         {"second_extra": "nameConstraints=critical,permitted;email:example.com\n",
+          "keys": ("P-256",)}),
+        ("leaf URI under URI constraints", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,URI:https://a.example.com/"),
+         {"second_extra": "nameConstraints=critical,permitted;URI:.example.com\n",
+          "keys": ("P-256",)}),
+        ("first intermediate's range leaves the leaf outside", 2, good_leaf,
+         {"first_extra": "nameConstraints=critical,permitted;IP:10.0.0.0/255.0.0.0\n",
+          "keys": ("P-256",)}),
+        ("first intermediate excludes the second's subject", 2, good_leaf,
+         {"first_extra": "nameConstraints=critical,excluded;dirName:subtree\n"
+                         "[subtree]\nCN=tls chains second\n", "keys": ("P-256",)}),
+        # rsa8192.badssl.com's shape, the largest key browsers take: the
+        # leaf and the intermediate that signs it both RSA-8192.
+        ("RSA-8192 leaf under an RSA-8192 intermediate", 2, good_leaf,
+         {"keys": ("RSA-8192",), "second_key": "RSA-8192"}),
+        # A left-out intermediate named by the leaf's caIssuers location and
+        # served over plain HTTP from loopback, which the harness build may
+        # reach (TLS_BENCH_ANCHOR). openssl verify fetches nothing, so it is
+        # handed what a browser would have fetched.
+        ("a left-out intermediate fetched from the leaf's caIssuers", 2, good_leaf,
+         {"skip_second": True, "aia": "http://127.0.0.1:%d/second.der",
+          "openssl_untrusted": ["second"], "keys": ("P-256",)}),
+        ("caIssuers answers 404", 2, good_leaf,
+         {"skip_second": True, "aia": "http://127.0.0.1:%d/absent.der",
+          "keys": ("P-256",)}),
+        ("caIssuers serves PEM, not DER", 2, good_leaf,
+         {"skip_second": True, "aia": "http://127.0.0.1:%d/second.pem",
+          "keys": ("P-256",)}),
+        ("caIssuers is https", 2, good_leaf,
+         {"skip_second": True, "aia": "https://127.0.0.1:%d/second.der",
+          "keys": ("P-256",)}),
+        ("caIssuers serves another CA's certificate", 2, good_leaf,
+         {"skip_second": True, "aia": "http://127.0.0.1:%d/first.der",
+          "keys": ("P-256",)}),
+        ("two intermediates left out, each named by caIssuers", 2, good_leaf,
+         {"skip_second": True, "skip_first": True,
+          "aia": "http://127.0.0.1:%d/second.der",
+          "second_extra": "authorityInfoAccess=caIssuers;URI:http://127.0.0.1:%d/first.der\n",
+          "openssl_untrusted": ["second", "first"], "keys": ("P-256",)}),
         ("path length exceeded", 2, good_leaf, {"first_pathlen": 0}),
         ("leaf for clients only", 2, good_leaf.replace("serverAuth", "clientAuth"), {}),
         ("leaf may only sign certificates", 2, good_leaf.replace("digitalSignature", "keyCertSign"), {}),
+        ("unknown critical leaf extension", 2,
+         good_leaf + "1.2.3.4=critical,DER:05:00\n", {}),
+        ("unknown noncritical leaf extension", 2,
+         good_leaf + "1.2.3.4=DER:05:00\n", {}),
+        # OpenSSL's extfile parser keeps one value per OID name, so repeating
+        # "1.2.3.4=..." cannot produce a wire duplicate.  Re-state subjectAltName
+        # under its numeric OID beside the named one: that is two Extension
+        # objects with identical 2.5.29.17 contents on the wire.
+        ("duplicate subjectAltName leaf extension", 2,
+         good_leaf + "2.5.29.17=DER:30:03:82:01:61\n", {}),
+        # OpenSSL collapses identical extfile keys, so mint two distinct
+        # unknowns and rewrite the second OID on the wire before resigning.
+        ("leaf duplicate unknown extension", 2,
+         good_leaf + "1.2.3.4=DER:05:00\n1.2.3.5=DER:05:00\n",
+         {"der_dup_unknown": True}),
+        ("leaf nonadjacent duplicate unknown", 2,
+         good_leaf + "1.2.3.4=DER:05:00\n1.2.3.6=DER:05:00\n1.2.3.5=DER:05:00\n",
+         {"der_rewrite_oids": [(bytes([0x2a, 0x03, 0x05]), bytes([0x2a, 0x03, 0x04]))]}),
+        # Named + numeric OID collapses; mint a same-length stand-in OID and
+        # rewrite it to basicConstraints / keyUsage.  OpenSSL refuses the
+        # duplicate (mutual refuse — not a deliberate disagreement).
+        ("leaf duplicate basicConstraints", 2,
+         good_leaf + "2.5.29.99=critical,DER:30:03:01:01:00\n",
+         {"der_rewrite_oids": [(bytes([0x55, 0x1d, 0x63]), bytes([0x55, 0x1d, 0x13]))]}),
+        ("leaf duplicate keyUsage", 2,
+         good_leaf + "2.5.29.99=critical,DER:03:02:07:80\n",
+         {"der_rewrite_oids": [(bytes([0x55, 0x1d, 0x63]), bytes([0x55, 0x1d, 0x0f]))]}),
+        # OpenSSL may auto-insert subjectKeyIdentifier / authorityKeyIdentifier;
+        # pin them off so good_leaf's four named extensions plus sixty (or
+        # sixty-one) unknowns are exactly the wire count the ceiling uses.
+        ("leaf sixty-four extensions", 2,
+         good_leaf + "subjectKeyIdentifier=none\nauthorityKeyIdentifier=none\n" +
+         "".join("1.2.200.%d=DER:05:00\n" % n for n in range(60)), {}),
+        ("leaf sixty-five extensions", 2,
+         good_leaf + "subjectKeyIdentifier=none\nauthorityKeyIdentifier=none\n" +
+         "".join("1.2.200.%d=DER:05:00\n" % n for n in range(61)), {}),
         ("a stranger's root", 2, good_leaf, {"stranger": True}),
         ("an intermediate left out", 2, good_leaf, {"skip_second": True}),
         ("leaf is a CA", 2, good_leaf.replace("CA:FALSE", "CA:TRUE"), {}),
+        ("leaf signed with SHA-512", 2, good_leaf, {"leaf_digest": "sha512"}),
+        ("first intermediate signed with SHA-512", 2, good_leaf, {"first_digest": "sha512"}),
+        # The served list past the leaf is a pool (RFC 8446 4.4.2): order,
+        # extras nobody needs, and a same-named impostor must not matter.
+        ("intermediates served out of order", 2, good_leaf, {"reverse": True}),
+        ("root served before the intermediates", 2, good_leaf, {"root_first": True}),
+        ("an unrelated root served too", 2, good_leaf, {"extra": "stranger"}),
+        ("a SHA-1 legacy root served too", 2, good_leaf, {"extra": "legacy"}),
+        ("an impostor intermediate served first", 2, good_leaf, {"impostor": True}),
     )
     keys = (("P-256", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"]),
             ("P-384", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]),
-            ("RSA-2048", ["-newkey", "rsa:2048"]))
+            ("RSA-2048", ["-newkey", "rsa:2048"]),
+            ("RSA-8192", ["-newkey", "rsa:8192"]))
+    #   Every row runs under these unless it names its own; an 8,192-bit key
+    #   takes seconds to make, so only the row about it pays for one.
+    every_key = ("P-256", "P-384", "RSA-2048")
     #       This tree's policy where it is stricter than openssl, on purpose.
     DELIBERATE = {
         "no subject alternative name": "a name is taken from subjectAltName only, never the CN",
         "leaf is a CA": "a certificate that says CA:TRUE is not an end entity (tls_leaf_authorized)",
+        "leaf wildcard whose star can be an excluded label":
+            "a wildcard falls in an excluded subtree its star can name, as Chrome reads it",
+        "leaf URI under URI constraints": "a name form under constraints it cannot evaluate fails closed",
+        "two intermediates left out, each named by caIssuers":
+            "a caIssuers fetch is one level: a fetched certificate's own issuer is not fetched",
+        "duplicate subjectAltName leaf extension": "RFC 5280 one-instance rule; OpenSSL may still accept",
+        "leaf duplicate unknown extension": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
+        "leaf nonadjacent duplicate unknown": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
+        "leaf sixty-five extensions": "explicit per-certificate extension work ceiling",
+        "intermediate duplicate unknown extension": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
+        "intermediate sixty-five extensions": "explicit per-certificate extension work ceiling",
+        "first intermediate duplicate unknown extension": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
+        "first intermediate sixty-five extensions": "explicit per-certificate extension work ceiling",
+    }
+    MUST_ACCEPT = {
+        "good", "under the root", "one intermediate", "root served too",
+        "leaf with only a subject alternative name",
+        "intermediate constraints are noncritical", "intermediate has no key usage",
+        "unknown noncritical intermediate extension", "unknown noncritical leaf extension",
+        "leaf sixty-four extensions",
+        "first intermediate constraints are noncritical",
+        "first intermediate has no key usage",
+        "first intermediate unknown noncritical extension",
+        "first intermediate sixty-four extensions",
+        "leaf signed with SHA-512", "first intermediate signed with SHA-512",
+        "intermediates served out of order", "root served before the intermediates",
+        "an unrelated root served too", "a SHA-1 legacy root served too",
+        "an impostor intermediate served first",
+        "first intermediate carries name constraints", "intermediate carries name constraints",
+        "intermediate permits the leaf's DNS name", "intermediate permits the leaf's subject",
+        "a permitted subject compared case-folded", "leaf mailbox on a permitted host",
+        "RSA-8192 leaf under an RSA-8192 intermediate",
+        "a left-out intermediate fetched from the leaf's caIssuers",
     }
 
     checks = Checks()
@@ -37068,18 +37615,112 @@ def harness_tls_chains(argv):
             subprocess.run(["openssl", *arguments], check=True, cwd=work,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+        x509_help = subprocess.run(["openssl", "x509", "-help"], cwd=work,
+                                   capture_output=True, text=True)
+        x509_can_set_dates = "-not_before" in (x509_help.stdout + x509_help.stderr)
+
+        # OpenSSL 3.4 added x509 -not_before/-not_after.  The supported ca
+        # command has always exposed -startdate/-enddate, so older hosts use
+        # a fresh throwaway CA database for each generated certificate.  A
+        # security oracle must not disappear merely because the host's CLI
+        # predates the convenience spelling.
+        (work / "ca.conf").write_text(
+            "[ca]\ndefault_ca=local\n[local]\ndatabase=index\n"
+            "new_certs_dir=.\nserial=serial\ndefault_md=sha384\n"
+            "policy=names\nunique_subject=no\n[names]\ncommonName=supplied\n")
+
         def when(days):
             moment = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days)
             return moment.strftime("%Y%m%d%H%M%SZ")
 
-        def issue(name, key, subject, issuer, extensions, dates=(-1, 90)):
-            (work / (name + ".ext")).write_text(extensions)
+        def issue(name, key, subject, issuer, extensions, dates=(-1, 90), digest="sha384"):
+            (work / (name + ".ext")).write_text("[extensions]\n" + extensions)
             openssl("req", "-new", *key, "-nodes", "-keyout", name + ".key", "-out",
                     name + ".csr", "-subj", subject)
-            openssl("x509", "-req", "-in", name + ".csr", "-CA", issuer + ".pem", "-CAkey",
-                    issuer + ".key", "-set_serial", str(abs(hash(name)) % (1 << 62)),
-                    "-not_before", when(dates[0]), "-not_after", when(dates[1]),
-                    "-out", name + ".pem", "-sha384", "-extfile", name + ".ext")
+            if x509_can_set_dates:
+                openssl("x509", "-req", "-in", name + ".csr", "-CA", issuer + ".pem",
+                        "-CAkey", issuer + ".key", "-set_serial",
+                        str(abs(hash(name)) % (1 << 62)), "-not_before", when(dates[0]),
+                        "-not_after", when(dates[1]), "-out", name + ".pem", "-" + digest,
+                        "-extfile", name + ".ext", "-extensions", "extensions")
+            else:
+                (work / "index").write_text("")
+                (work / "serial").write_text("01\n")
+                openssl("ca", "-batch", "-config", "ca.conf", "-in", name + ".csr",
+                        "-cert", issuer + ".pem", "-keyfile", issuer + ".key",
+                        "-startdate", when(dates[0]), "-enddate", when(dates[1]),
+                        "-out", name + ".pem", "-notext", "-md", digest,
+                        "-extfile", name + ".ext", "-extensions", "extensions")
+
+        def asn1_length(size):
+            if size < 0x80:
+                return bytes([size])
+            if size < 0x100:
+                return bytes([0x81, size])
+            return bytes([0x82, (size >> 8) & 0xff, size & 0xff])
+
+        def asn1_read_length(buf, at):
+            if buf[at] < 0x80:
+                return buf[at], at + 1
+            count = buf[at] & 0x7f
+            at += 1
+            value = 0
+            for _ in range(count):
+                value = (value << 8) | buf[at]
+                at += 1
+            return value, at
+
+        def rewrite_cert_oids(name, issuer_name, rewrites):
+            # OpenSSL's extfile cannot emit two Extensions with the same OID.
+            # Issue distinct OIDs, then rewrite and re-sign so the wire has
+            # the duplicate Moonwater must refuse and OpenSSL still accepts.
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import ec, rsa
+
+            der = bytearray(subprocess.check_output(
+                ["openssl", "x509", "-in", name + ".pem", "-outform", "DER"], cwd=work))
+            for old, new in rewrites:
+                if len(old) != len(new):
+                    raise RuntimeError("OID rewrite lengths must match")
+                at = der.find(old)
+                if at < 0 or der.find(old, at + 1) >= 0:
+                    raise RuntimeError("expected one OID occurrence to rewrite")
+                der[at:at + len(old)] = new
+            if der[0] != 0x30:
+                raise RuntimeError("certificate is not a SEQUENCE")
+            _, body_at = asn1_read_length(der, 1)
+            if der[body_at] != 0x30:
+                raise RuntimeError("TBSCertificate missing")
+            tbs_at = body_at
+            tbs_len, tbs_content = asn1_read_length(der, tbs_at + 1)
+            tbs = bytes(der[tbs_at:tbs_content + tbs_len])
+            alg_at = tbs_content + tbs_len
+            if der[alg_at] != 0x30:
+                raise RuntimeError("signature algorithm missing")
+            alg_len, alg_content = asn1_read_length(der, alg_at + 1)
+            alg = bytes(der[alg_at:alg_content + alg_len])
+            key = serialization.load_pem_private_key(
+                (work / (issuer_name + ".key")).read_bytes(), password=None)
+            if isinstance(key, ec.EllipticCurvePrivateKey):
+                signature = key.sign(tbs, ec.ECDSA(hashes.SHA384()))
+            elif isinstance(key, rsa.RSAPrivateKey):
+                from cryptography.hazmat.primitives.asymmetric import padding
+                signature = key.sign(tbs, padding.PKCS1v15(), hashes.SHA384())
+            else:
+                raise RuntimeError("unsupported issuer key type")
+            bit = bytes([0x03]) + asn1_length(len(signature) + 1) + bytes([0]) + signature
+            body = tbs + alg + bit
+            cert = bytes([0x30]) + asn1_length(len(body)) + body
+            (work / (name + ".der")).write_bytes(cert)
+            openssl("x509", "-inform", "DER", "-in", name + ".der", "-out", name + ".pem")
+
+        def mutate_cert_der(name, issuer_name, change, rewrite_key, dup_key):
+            rewrites = list(change.get(rewrite_key) or ())
+            if change.get(dup_key):
+                # 1.2.3.5 content bytes -> 1.2.3.4 (tag/length stay 06 03).
+                rewrites.append((bytes([0x2a, 0x03, 0x05]), bytes([0x2a, 0x03, 0x04])))
+            if rewrites:
+                rewrite_cert_oids(name, issuer_name, rewrites)
 
         p384 = keys[1][1]
         for root in ("root", "stranger"):
@@ -37087,6 +37728,16 @@ def harness_tls_chains(argv):
                     root + ".pem", "-days", "3650", "-sha384", "-subj", "/CN=tls chains root",
                     "-addext", "basicConstraints=critical,CA:TRUE",
                     "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+        # A crypto policy may refuse to sign with SHA-1; that loses one row,
+        # not the oracle.
+        try:
+            openssl("req", "-x509", *p384, "-nodes", "-keyout", "legacy.key", "-out",
+                    "legacy.pem", "-days", "3650", "-sha1", "-subj", "/CN=tls chains legacy",
+                    "-addext", "basicConstraints=critical,CA:TRUE")
+        except subprocess.CalledProcessError:
+            print("tls chains: a SHA-1 legacy root served too: NOT RUN -- "
+                  "openssl will not sign with SHA-1 here")
+            mutations = tuple(m for m in mutations if m[3].get("extra") != "legacy")
         spki = subprocess.run(["openssl", "pkey", "-in", str(work / "root.key"), "-pubout",
                                "-outform", "DER"], check=True, capture_output=True).stdout
         point = spki[-97:]
@@ -37094,9 +37745,22 @@ def harness_tls_chains(argv):
             "static const p8 tls_bench_anchor_%s[48] = {%s};\n" % (
                 axis, ", ".join("0x%02x" % b for b in coordinate))
             for axis, coordinate in (("x", point[1:49]), ("y", point[49:97]))))
+        # Match freestanding spark builds: pin baseline x86-64 (no BMI2), keep
+        # AArch64 atomics inline without libgcc, and keep RISC-V at the IMAFD
+        # floor. Hard-coding -march=x86-64 silently disabled this oracle on
+        # every non-x86 host.
+        host = platform.machine().lower()
+        if host in ("x86_64", "amd64"):
+            arch_flags = ["-march=x86-64"]
+        elif host in ("aarch64", "arm64"):
+            arch_flags = ["-mno-outline-atomics"]
+        elif host == "riscv64":
+            arch_flags = ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"]
+        else:
+            arch_flags = []
         built = subprocess.run(
             [args.cc, "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
-             "-fno-builtin", "-march=x86-64", "-w", "-T", "src/build/spark.ld", "-Wl,-e,_start",
+             "-fno-builtin", *arch_flags, "-w", "-T", "src/build/spark.ld", "-Wl,-e,_start",
              "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments",
              '-DTLS_BENCH_ANCHOR="%s"' % (work / "anchor.inc"), "-o", str(work / "shell"),
              "programs/shell.c"], cwd=HARNESS_ROOT, capture_output=True, text=True)
@@ -37105,75 +37769,184 @@ def harness_tls_chains(argv):
             return 1
         (work / "wget").symlink_to(work / "shell")
 
+        #   caIssuers locations are served from the work directory.
+        import functools
+        import http.server
+
+        class Quiet(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *arguments):
+                pass
+
+        files = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), functools.partial(Quiet, directory=str(work)))
+        threading.Thread(target=files.serve_forever, daemon=True).start()
+        files_port = files.server_address[1]
+
         for mutation, depth, leaf_ext, change in mutations:
             for key_name, key in keys:
+                if key_name not in change.get("keys", every_key):
+                    continue
                 top = "stranger" if change.get("stranger") else "root"
                 chain = []
                 issuer = top
                 if depth >= 1:
+                    first_extensions = change.get(
+                        "first_extensions",
+                        "basicConstraints=critical,%s\nkeyUsage=critical,%s\n" %
+                        (change.get("first_ca", "CA:TRUE,pathlen:%d" %
+                                    change.get("first_pathlen", 1)),
+                         change.get("first_key_usage", "keyCertSign,cRLSign")))
+                    first_extensions += change.get("first_extra", "")
                     issue("first", p384, "/CN=tls chains first", top,
-                          "basicConstraints=critical,CA:TRUE,pathlen:%d\n"
-                          "keyUsage=critical,keyCertSign,cRLSign\n" % change.get("first_pathlen", 1))
+                          first_extensions,
+                          change.get("first_dates", (-1, 90)),
+                          change.get("first_digest", "sha384"))
+                    if change.get("der_rewrite_oids_first") or change.get("der_dup_unknown_first"):
+                        mutate_cert_der("first", top, change,
+                                        "der_rewrite_oids_first", "der_dup_unknown_first")
                     chain.insert(0, "first")
                     issuer = "first"
                 if depth >= 2:
-                    issue("second", p384, "/CN=tls chains second", "first",
-                          "basicConstraints=critical,%s\nkeyUsage=critical,keyCertSign,cRLSign\n"
-                          % change.get("second_ca", "CA:TRUE,pathlen:0"),
+                    second_extensions = change.get(
+                        "second_extensions",
+                        "basicConstraints=critical,%s\nkeyUsage=critical,%s\n" %
+                        (change.get("second_ca", "CA:TRUE,pathlen:0"),
+                         change.get("second_key_usage", "keyCertSign,cRLSign")))
+                    second_extensions += change.get("second_extra", "").replace(
+                        "%d", str(files_port))
+                    issue("second", dict(keys).get(change.get("second_key"), p384),
+                          "/CN=tls chains second", "first",
+                          second_extensions,
                           change.get("second_dates", (-1, 90)))
+                    if change.get("der_rewrite_oids_second") or change.get("der_dup_unknown_second"):
+                        mutate_cert_der("second", "first", change,
+                                        "der_rewrite_oids_second", "der_dup_unknown_second")
                     chain.insert(0, "second")
                     issuer = "second"
-                issue("leaf", key, "/CN=127.0.0.1", issuer, leaf_ext,
-                      change.get("leaf_dates", (-1, 90)))
-                served = [c for c in chain if not (change.get("skip_second") and c == "second")]
+                    if change.get("impostor"):
+                        issue("impostor", p384, "/CN=tls chains second", "first",
+                              second_extensions)
+                if change.get("aia"):
+                    leaf_ext += "authorityInfoAccess=caIssuers;URI:%s\n" % (
+                        change["aia"] % files_port)
+                    for name in chain:
+                        openssl("x509", "-in", name + ".pem", "-outform", "DER",
+                                "-out", name + ".der")
+                issue("leaf", key, change.get("leaf_subject", "/CN=127.0.0.1"), issuer, leaf_ext,
+                      change.get("leaf_dates", (-1, 90)),
+                      change.get("leaf_digest", "sha384"))
+                if change.get("der_rewrite_oids") or change.get("der_dup_unknown"):
+                    mutate_cert_der("leaf", issuer, change,
+                                    "der_rewrite_oids", "der_dup_unknown")
+                served = [c for c in chain if not (change.get("skip_second") and c == "second")
+                          and not (change.get("skip_first") and c == "first")]
                 if change.get("serve_root"):
                     served.append(top)
+                if change.get("reverse"):
+                    served.reverse()
+                if change.get("root_first"):
+                    served.insert(0, top)
+                if change.get("extra"):
+                    served.append(change["extra"])
+                if change.get("impostor"):
+                    served.insert(0, "impostor")
                 (work / "chain.pem").write_text("".join(
                     (work / (n + ".pem")).read_text() for n in ["leaf"] + served))
                 (work / "untrusted.pem").write_text("".join(
-                    (work / (n + ".pem")).read_text() for n in served) or "")
+                    (work / (n + ".pem")).read_text()
+                    for n in served + change.get("openssl_untrusted", [])) or "")
                 verify = ["openssl", "verify", "-CAfile", "root.pem", "-purpose", "sslserver",
                           "-verify_ip", "127.0.0.1"]
-                if served:
+                if served or change.get("openssl_untrusted"):
                     verify += ["-untrusted", "untrusted.pem"]
                 openssl_ok = subprocess.run(verify + ["leaf.pem"], cwd=work,
                                             capture_output=True).returncode == 0
 
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 context.minimum_version = ssl.TLSVersion.TLSv1_3
-                context.load_cert_chain(work / "chain.pem", work / "leaf.key")
+                try:
+                    context.load_cert_chain(work / "chain.pem", work / "leaf.key")
+                except ssl.SSLError:
+                    # OpenSSL refuses to host some duplicate known-extension
+                    # leaves we still want to verify as refused by wget.
+                    ours_ok = False
+                    name = "%s with a %s leaf" % (mutation, key_name)
+                    expected = mutation in MUST_ACCEPT
+                    checks(openssl_ok == expected or mutation in DELIBERATE,
+                           "%s: the OpenSSL oracle %s a chain the standards matrix says to %s" % (
+                               name, "accepts" if openssl_ok else "refuses",
+                               "accept" if expected else "refuse"))
+                    checks(ours_ok == expected,
+                           "%s: wget %s a chain the standards matrix says to %s (load_cert_chain refused)" % (
+                               name, "accepts" if ours_ok else "refuses",
+                               "accept" if expected else "refuse"))
+                    if mutation in DELIBERATE and openssl_ok and not ours_ok:
+                        checks(True, name)
+                        continue
+                    checks(ours_ok == openssl_ok,
+                           "%s: openssl %s it and wget %s it (load_cert_chain refused)" % (
+                               name, "accepts" if openssl_ok else "refuses",
+                               "accepts" if ours_ok else "refuses"))
+                    continue
                 context.set_ecdh_curve("prime256v1")
-                listener = socket.socket()
-                listener.bind(("127.0.0.1", 0))
-                listener.listen(1)
-                listener.settimeout(20)
 
-                def serve():
-                    try:
-                        raw, _ = listener.accept()
-                        raw.settimeout(20)
-                        with context.wrap_socket(raw, server_side=True) as tls:
-                            head = b""
-                            while b"\r\n\r\n" not in head:
-                                got = tls.recv(4096)
-                                if not got:
-                                    return
-                                head += got
-                            tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n"
-                                        b"Connection: close\r\n\r\ntrusted")
-                    except (OSError, ssl.SSLError):
-                        pass
+                def fetch(context):
+                    listener = socket.socket()
+                    listener.bind(("127.0.0.1", 0))
+                    listener.listen(1)
+                    listener.settimeout(20)
 
-                server = threading.Thread(target=serve, daemon=True)
-                server.start()
-                fetched = subprocess.run(
-                    [str(work / "wget"), "-q", "-O", "-", "https://127.0.0.1:%d/" %
-                     listener.getsockname()[1]], capture_output=True, timeout=30,
-                    env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
-                server.join(25)
-                listener.close()
+                    def serve():
+                        try:
+                            raw, _ = listener.accept()
+                            raw.settimeout(20)
+                            with context.wrap_socket(raw, server_side=True) as tls:
+                                head = b""
+                                while b"\r\n\r\n" not in head:
+                                    got = tls.recv(4096)
+                                    if not got:
+                                        return
+                                    head += got
+                                tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n"
+                                            b"Connection: close\r\n\r\ntrusted")
+                        except (OSError, ssl.SSLError):
+                            pass
+
+                    server = threading.Thread(target=serve, daemon=True)
+                    server.start()
+                    fetched = subprocess.run(
+                        [str(work / "wget"), "-q", "-O", "-", "https://127.0.0.1:%d/" %
+                         listener.getsockname()[1]], capture_output=True, timeout=30,
+                        env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+                    server.join(25)
+                    listener.close()
+                    return fetched
+
+                fetched = fetch(context)
+                # The same chain over TLS 1.2, whose Certificate is relaid
+                # for the one chain check: the verdict may not move.
+                context12 = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context12.minimum_version = context12.maximum_version = \
+                    ssl.TLSVersion.TLSv1_2
+                context12.set_ciphers("ECDHE-ECDSA-AES128-GCM-SHA256:"
+                                      "ECDHE-RSA-AES128-GCM-SHA256")
+                context12.load_cert_chain(work / "chain.pem", work / "leaf.key")
+                fetched12 = fetch(context12)
                 ours_ok = fetched.returncode == 0 and fetched.stdout.startswith(b"truste")
                 name = "%s with a %s leaf" % (mutation, key_name)
+                checks(ours_ok == (fetched12.returncode == 0 and
+                                   fetched12.stdout.startswith(b"truste")),
+                       "%s: wget's TLS 1.2 verdict differs from its TLS 1.3 one" % name)
+                expected = mutation in MUST_ACCEPT
+                checks(openssl_ok == expected or mutation in DELIBERATE,
+                       "%s: the OpenSSL oracle %s a chain the standards matrix says to %s" % (
+                           name, "accepts" if openssl_ok else "refuses",
+                           "accept" if expected else "refuse"))
+                checks(ours_ok == expected,
+                       "%s: wget %s a chain the standards matrix says to %s (%s)" % (
+                           name, "accepts" if ours_ok else "refuses",
+                           "accept" if expected else "refuse",
+                           fetched.stderr.decode(errors="replace").strip()[:200]))
                 if mutation in DELIBERATE and openssl_ok and not ours_ok:
                     checks(True, name)
                     continue
@@ -37182,7 +37955,10797 @@ def harness_tls_chains(argv):
                            name, "accepts" if openssl_ok else "refuses",
                            "accepts" if ours_ok else "refuses",
                            fetched.stderr.decode(errors="replace").strip()[:200]))
+        files.shutdown()
     return checks.verdict("tls chains", "tls-chains")
+
+
+def harness_tls_peer(argv):
+    """wget's TLS 1.3 protocol against OpenSSL's client, one scripted server each.
+
+    tls_chains and https_bench meet real servers that behave; tls_hs_fuzz
+    walks the state machine with the crypto stubbed. This is the real-crypto
+    middle: a TLS 1.3 server written here over the cryptography package
+    (X25519, P-256 or P-384 shares, TLS_AES_128_GCM_SHA256, a P-256 leaf
+    that signs its CertificateVerify) runs a grammar of flights and
+    post-handshake streams -- HelloRetryRequests for a group, a cookie or
+    both, a second retry, a retry for a group already shared or never
+    offered, and a ServerHello that changes the retry's suite or group
+    -- tickets whole, split and at close, KeyUpdate asked and answered
+    (the answer opened under the client's old key, a second one under its
+    new key), a bad KeyUpdate byte or one not ending its record, compatibility and
+    protected CCS, empty, padded and all-padding records, the 2^14 content
+    edge, bad tags, alerts, truncation with and without close_notify, data
+    after close_notify, unasked EncryptedExtensions and a CertificateRequest.
+    TLS 1.2 scripts (a server over the same package: ECDHE-ECDSA, AES-128-GCM,
+    the extended master secret) add their flights, the downgrade sentinel,
+    a retry before TLS 1.2, the other version's messages and extensions, a
+    Finished without change_cipher_spec, HelloRequest, KeyUpdate and an
+    unasked ticket; then real OpenSSL servers held to TLS 1.2 by s_server
+    serve wget over each leaf kind, scheme and group.
+    Each script is served once to the shell's wget (--no-check-certificate,
+    so the leaf is still the CertificateVerify key) and once to Python's ssl
+    client, which is OpenSSL; both are asked whether the body arrived whole
+    by the HTTP framing. The verdicts have to agree with the RFC 8446 column
+    (MUST_ACCEPT) and with each other, except where this client refuses by
+    design what OpenSSL accepts, which DELIBERATE names with its reason.
+    """
+    import datetime
+    import hashlib
+    import hmac as hmac_module
+    import shutil
+    import socket
+    import ssl
+    import subprocess
+    import tempfile
+    import threading
+    parser = argparse.ArgumentParser(prog="differential.py --harness tls_peer")
+    parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+    parser.add_argument("--shell", help="a built shell to use instead of building one")
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux":
+        print("tls peer: NOT RUN -- needs Linux")
+        return 2
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.asymmetric.x25519 import (
+            X25519PrivateKey, X25519PublicKey)
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.x509.oid import NameOID
+    except ImportError:
+        print("tls peer: NOT RUN -- no cryptography package")
+        return 2
+
+    def sha256(data):
+        return hashlib.sha256(data).digest()
+
+    def expand_label(secret, label, context, length):
+        info = (length.to_bytes(2, "big") + bytes([6 + len(label)]) + b"tls13 " +
+                label + bytes([len(context)]) + context)
+        out, block, counter = b"", b"", 1
+        while len(out) < length:
+            block = hmac_module.new(secret, block + info + bytes([counter]),
+                                    hashlib.sha256).digest()
+            out += block
+            counter += 1
+        return out[:length]
+
+    def extract(salt, key):
+        return hmac_module.new(salt, key, hashlib.sha256).digest()
+
+    def message(kind, body):
+        return bytes([kind]) + len(body).to_bytes(3, "big") + body
+
+    def record(kind, body):
+        return bytes([kind, 3, 3]) + len(body).to_bytes(2, "big") + body
+
+    class Direction:
+        """One side's traffic keys: seal writes, open reads, update rekeys."""
+
+        def __init__(self, secret):
+            self.secret = secret
+            self.aead = AESGCM(expand_label(secret, b"key", b"", 16))
+            self.iv = expand_label(secret, b"iv", b"", 12)
+            self.seq = 0
+
+        def nonce(self):
+            self.seq += 1
+            return bytes(a ^ b for a, b in zip(self.iv, (self.seq - 1).to_bytes(12, "big")))
+
+        def seal(self, inner, bad_tag=False):
+            header = record(23, b"")[:3] + (len(inner) + 16).to_bytes(2, "big")
+            sealed = bytearray(self.aead.encrypt(self.nonce(), inner, header))
+            if bad_tag:
+                sealed[-1] ^= 1
+            return header + bytes(sealed)
+
+        def open(self, header, payload):
+            return self.aead.decrypt(self.nonce(), payload, header)
+
+        def update(self):
+            return Direction(expand_label(self.secret, b"traffic upd", b"", 32))
+
+    leaf_key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.datetime.now(datetime.timezone.utc)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "tls peer")])
+    leaf = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+            .public_key(leaf_key.public_key()).serial_number(7)
+            .not_valid_before(now - datetime.timedelta(days=1))
+            .not_valid_after(now + datetime.timedelta(days=30))
+            .sign(leaf_key, hashes.SHA256()).public_bytes(serialization.Encoding.DER))
+    certificate = b"\0" + (len(leaf) + 5).to_bytes(3, "big") + len(leaf).to_bytes(
+        3, "big") + leaf + b"\0\0"
+
+    body = b"hello, record layer"
+    length_head = b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(body)
+    close_head = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"
+    ticket = message(4, b"\0\0\x0e\x10\1\2\3\4\1\0\0\x10" + b"t" * 16 + b"\0\0")
+    key_update = lambda requested: message(24, bytes([requested]))
+
+    # A script: (flight options, the steps after the client's request). A
+    # step is (what, value): app/handshake/alert/inner are sealed with that
+    # inner type (inner is raw inner plaintext), plain is sent as is, rekey
+    # switches the server's keys after a KeyUpdate, badtag seals data with one
+    # tag bit flipped, close is a sealed close_notify, and every script ends
+    # with the socket shut for writing.
+    def app(data, padding=0):
+        return ("inner", data + b"\x17" + b"\0" * padding)
+
+    close = ("inner", b"\1\0\x15")
+    RETRY_RANDOM = sha256(b"HelloRetryRequest")
+    CURVES = {None: (0x1d, None), "prime256v1": (0x17, ec.SECP256R1),
+              "secp384r1": (0x18, ec.SECP384R1)}
+    SCRIPTS = [
+        ("length body, close_notify", {}, [app(length_head + body), close]),
+        ("length body, bare FIN", {}, [app(length_head + body)]),
+        ("close-delimited body, close_notify", {}, [app(close_head + body), close]),
+        ("close-delimited body truncated by FIN", {}, [app(close_head + body)]),
+        ("close-delimited body, fatal alert", {}, [app(close_head + body),
+                                                   ("inner", b"\2\x28\x15")]),
+        ("data after close_notify is ignored", {},
+         [app(close_head + body), close, app(b"after")]),
+        ("ticket before the response", {}, [("inner", ticket + b"\x16"),
+                                            app(length_head + body), close]),
+        ("ticket split across records", {},
+         [("inner", ticket[:9] + b"\x16"), ("inner", ticket[9:] + b"\x16"),
+          app(length_head + body), close]),
+        ("two tickets in one record", {}, [("inner", ticket * 2 + b"\x16"),
+                                           app(length_head + body), close]),
+        ("response inside a split ticket", {},
+         [("inner", ticket[:9] + b"\x16"), app(length_head + body),
+          ("inner", ticket[9:] + b"\x16"), close]),
+        ("close_notify inside a split ticket", {},
+         [app(close_head + body), ("inner", ticket[:9] + b"\x16"), close]),
+        ("empty records before the response", {},
+         [app(b""), app(b""), app(b""), app(length_head + body), close]),
+        ("padded records", {}, [app(length_head, 300), app(body, 7), close]),
+        ("an all-padding record", {}, [("inner", b"\0" * 40),
+                                       app(length_head + body), close]),
+        ("a record of exactly 2^14 content", {"body": b"x" * 16384},
+         [app(b"HTTP/1.1 200 OK\r\nContent-Length: 16384\r\nConnection: close\r\n\r\n"),
+          app(b"x" * 16384), close]),
+        ("a record of 2^14 + 1 content", {"body": b"x" * 16385},
+         [app(b"HTTP/1.1 200 OK\r\nContent-Length: 16385\r\nConnection: close\r\n\r\n"),
+          app(b"x" * 16385), close]),
+        ("a bad tag", {}, [("badtag", close_head + body + b"\x17"), close]),
+        ("a protected change_cipher_spec after Finished", {},
+         [("inner", b"\1\x14"), app(length_head + body), close]),
+        ("a plaintext change_cipher_spec after Finished", {},
+         [("plain", record(20, b"\1")), app(length_head + body), close]),
+        ("KeyUpdate, no update requested", {},
+         [("inner", key_update(0) + b"\x16"), ("rekey", None),
+          app(length_head + body), close]),
+        ("KeyUpdate, update requested", {},
+         [("inner", key_update(1) + b"\x16"), ("rekey", None), ("answer", None),
+          app(length_head + body), close]),
+        ("KeyUpdate asked twice", {},
+         [("inner", key_update(1) + b"\x16"), ("rekey", None), ("answer", None),
+          ("inner", key_update(1) + b"\x16"), ("rekey", None), ("answer", None),
+          app(length_head + body), close]),
+        ("KeyUpdate asking with a byte past update_requested", {},
+         [("inner", key_update(2) + b"\x16"), ("rekey", None),
+          app(length_head + body), close]),
+        ("KeyUpdate not ending its record", {},
+         [("inner", key_update(0) + ticket + b"\x16"), ("rekey", None),
+          app(length_head + body), close]),
+        ("KeyUpdate under the old key after a rekey", {},
+         [("inner", key_update(0) + b"\x16"), app(length_head + body), close]),
+        ("compatibility CCS after ServerHello", {"ccs": True},
+         [app(length_head + body), close]),
+        ("a protected change_cipher_spec in the flight", {"protected_ccs": True},
+         [app(length_head + body), close]),
+        ("key share on P-256", {"curve": "prime256v1"}, [app(length_head + body), close]),
+        ("key share on P-384", {"curve": "secp384r1"}, [app(length_head + body), close]),
+        ("HelloRetryRequest with a cookie", {"retry": {"cookie": b"c" * 40}},
+         [app(length_head + body), close]),
+        ("HelloRetryRequest to P-256 with a cookie",
+         {"curve": "prime256v1", "retry": {"cookie": os.urandom(300)}},
+         [app(length_head + body), close]),
+        ("HelloRetryRequest with a 3000-byte cookie", {"retry": {"cookie": b"k" * 3000}},
+         [app(length_head + body), close]),
+        ("compatibility CCS after HelloRetryRequest",
+         {"curve": "prime256v1", "retry": {"ccs": True}}, [app(length_head + body), close]),
+        ("a second HelloRetryRequest", {"retry": {"cookie": b"c" * 8, "twice": True}},
+         [app(length_head + body), close]),
+        ("HelloRetryRequest naming the group already shared", {"retry": {"group": 0x1d}},
+         [app(length_head + body), close]),
+        ("HelloRetryRequest naming an unoffered group", {"retry": {"group": 0x15}},
+         [app(length_head + body), close]),
+        ("ServerHello after HelloRetryRequest changes the suite",
+         {"curve": "prime256v1", "suite": b"\x13\2"}, [app(length_head + body), close]),
+        ("ServerHello after HelloRetryRequest changes the group",
+         {"curve": "prime256v1", "answer": 0x18}, [app(length_head + body), close]),
+        ("plaintext bytes after ServerHello in its record",
+         {"after_hello": message(8, b"\0\0")}, [app(length_head + body), close]),
+        ("flight one message a record", {"split": True},
+         [app(length_head + body), close]),
+        ("EncryptedExtensions answering supported_groups",
+         {"ee": b"\0\x0a\0\4\0\2\0\x1d"}, [app(length_head + body), close]),
+        ("EncryptedExtensions answering server_name no SNI asked", {"ee": b"\0\0\0\0"},
+         [app(length_head + body), close]),
+        ("EncryptedExtensions answering unasked ALPN", {"ee": b"\0\x10\0\5\0\3\2h2"},
+         [app(length_head + body), close]),
+        ("CertificateRequest in the flight", {"request": True},
+         [app(length_head + body), close]),
+        ("CertificateRequest with a context", {"request": True,
+                                               "request_body": b"\2ab\0\x08\0\x0d\0\4\0\2\4\3"},
+         [app(length_head + body), close]),
+        ("CertificateRequest after the Certificate", {"request_late": True},
+         [app(length_head + body), close]),
+        ("two CertificateRequests", {"request": True, "request_late": True},
+         [app(length_head + body), close]),
+        ("an empty handshake record in the flight", {"empty": True},
+         [app(length_head + body), close]),
+        ("a compatibility CCS inside a split flight message", {"ccs_inside": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2", {"tls12": True}, [app(length_head + body), close]),
+        ("TLS 1.2 close-delimited", {"tls12": True}, [app(close_head + body), close]),
+        ("TLS 1.2 flight one message a record", {"tls12": True, "split": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 CertificateRequest", {"tls12": True, "request": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 empty records", {"tls12": True},
+         [app(b""), app(length_head + body), close]),
+        ("TLS 1.2 without the extended master secret", {"tls12": True, "no_ems": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 ServerHello dropping the extended master secret it keys with",
+         {"tls12": True, "ems_unsent": True}, [app(length_head + body), close]),
+        ("TLS 1.2 with the downgrade sentinel", {"tls12": True, "sentinel": b"DOWNGRD\1"},
+         [app(length_head + body), close]),
+        ("TLS 1.2 after a HelloRetryRequest", {"tls12": True, "retry_first": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 ServerHello with a key share", {"tls12": True,
+                                                  "hello_extra": b"\0\x33\0\4\0\x1d\0\0"},
+         [app(length_head + body), close]),
+        ("TLS 1.2 flight with EncryptedExtensions", {"tls12": True,
+                                                    "extra": [message(8, b"\0\0")]},
+         [app(length_head + body), close]),
+        ("TLS 1.2 flight with a CertificateVerify", {"tls12": True,
+                                                    "extra": [message(15, b"\4\3\0\0")]},
+         [app(length_head + body), close]),
+        ("TLS 1.2 Finished without change_cipher_spec", {"tls12": True, "no_ccs": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 wrong server Finished", {"tls12": True, "bad_finished": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 KeyUpdate", {"tls12": True},
+         [("inner", key_update(0) + b"\x16"), app(length_head + body), close]),
+        ("TLS 1.2 HelloRequest", {"tls12": True},
+         [("inner", message(0, b"") + b"\x16"), app(length_head + body), close]),
+        ("TLS 1.2 NewSessionTicket never asked for", {"tls12": True},
+         [("inner", ticket + b"\x16"), app(length_head + body), close]),
+        ("user_canceled then close_notify", {},
+         [app(close_head + body), ("inner", b"\1\x5a\x15"), close]),
+        ("a warning-level unknown alert", {},
+         [app(close_head + body), ("inner", b"\1\xfe\x15"), close]),
+    ]
+    MUST_ACCEPT = {
+        "length body, close_notify", "length body, bare FIN",
+        "close-delimited body, close_notify", "data after close_notify is ignored",
+        "ticket before the response", "ticket split across records",
+        "two tickets in one record", "empty records before the response",
+        "padded records", "a record of exactly 2^14 content",
+        "KeyUpdate, no update requested", "KeyUpdate, update requested",
+        "KeyUpdate asked twice",
+        "compatibility CCS after ServerHello", "flight one message a record",
+        "key share on P-256", "key share on P-384",
+        "HelloRetryRequest with a cookie", "HelloRetryRequest to P-256 with a cookie",
+        "HelloRetryRequest with a 3000-byte cookie",
+        "TLS 1.2", "TLS 1.2 close-delimited", "TLS 1.2 flight one message a record",
+        "TLS 1.2 CertificateRequest", "TLS 1.2 empty records",
+        # RFC 7627 5.4: a client MAY abort without it; see DELIBERATE.
+        "TLS 1.2 without the extended master secret",
+        "compatibility CCS after HelloRetryRequest",
+        "EncryptedExtensions answering supported_groups",
+        "CertificateRequest in the flight",
+    }
+    # Where OpenSSL 3.6's client accepts what the RFC says to refuse.
+    OPENSSL_LENIENT = {
+        "TLS 1.2 HelloRequest":
+            "RFC 5246 7.4.1.1 lets a client ignore a HelloRequest or answer "
+            "it; OpenSSL renegotiates",
+        "close_notify inside a split ticket":
+            "5.1 forbids interleaving another record type within a split "
+            "handshake message; OpenSSL drops the partial ticket at close",
+        "a plaintext change_cipher_spec after Finished":
+            "5 makes a CCS after the peer's Finished unexpected_message; "
+            "OpenSSL's client still discards it",
+        "a compatibility CCS inside a split flight message":
+            "D.4 lets the compatibility CCS arrive at any time before "
+            "Finished, which both clients read as outranking 5.1's rule "
+            "against interleaving it within a handshake message",
+    }
+    # Where wget accepts what the RFC says to refuse, and why that stays.
+    WGET_LENIENT = {
+        "a compatibility CCS inside a split flight message":
+            "as OpenSSL: the one compatibility CCS may fall anywhere before "
+            "Finished (D.4)",
+    }
+    DELIBERATE = {
+        "TLS 1.2 without the extended master secret":
+            "RFC 7627 lets a client go on without it; this one requires it, "
+            "so a TLS 1.2 master secret is always bound to its handshake",
+        "TLS 1.2 HelloRequest":
+            "renegotiation is refused, so a HelloRequest ends the connection",
+    }
+
+    def prf(secret, label, seed, size):
+        """TLS 1.2's P_SHA256 (RFC 5246 5)."""
+        out, block = b"", label + seed
+        while len(out) < size:
+            block = hmac_module.new(secret, block, hashlib.sha256).digest()
+            out += hmac_module.new(secret, block + label + seed, hashlib.sha256).digest()
+        return out[:size]
+
+    class Direction12:
+        """One side's TLS 1.2 AES-128-GCM keys (RFC 5288): the salt and an
+        explicit nonce that is the sequence number."""
+
+        def __init__(self, key, salt):
+            self.aead, self.salt, self.seq = AESGCM(key), salt, 0
+
+        def seal(self, kind, content):
+            explicit = self.seq.to_bytes(8, "big")
+            aad = explicit + bytes([kind, 3, 3]) + len(content).to_bytes(2, "big")
+            self.seq += 1
+            return record(kind, explicit + self.aead.encrypt(self.salt + explicit, content, aad))
+
+        def open(self, header, payload):
+            aad = (self.seq.to_bytes(8, "big") + header[:3] +
+                   (len(payload) - 24).to_bytes(2, "big"))
+            self.seq += 1
+            return self.aead.decrypt(self.salt + payload[:8], payload[8:], aad)
+
+    def run12(sock, flight, steps):
+        """TLS 1.2 ECDHE-ECDSA-AES128-GCM-SHA256 with the extended master
+        secret, and the knobs that break it: a retry first, the downgrade
+        sentinel, no extended master secret, extra ServerHello extensions,
+        a message of another version in the flight, a CertificateRequest,
+        no change_cipher_spec before Finished, a wrong Finished. Steps
+        take the TLS 1.3 inner form -- content, type byte, padding -- and
+        seal the content under that record type."""
+        hello, session, shares, kinds = read_hello(sock)
+        transcript = b""
+        if flight.get("retry_first"):
+            # The keys follow the transcript a client that let TLS 1.2
+            # answer its retry would keep, so only the refusal refuses.
+            request = retry_request(session, b"\x13\1", 0x17, None)
+            sock.sendall(record(22, request))
+            transcript = message(254, sha256(hello)) + request
+            hello, session, shares, kinds = read_hello(sock)
+        client_random = hello[6:38]
+        server_random = os.urandom(24) + flight.get("sentinel", os.urandom(8))
+        extensions = (b"" if flight.get("no_ems") or flight.get("ems_unsent")
+                      else b"\0\x17\0\0") + \
+            b"\xff\1\0\1\0" + flight.get("hello_extra", b"")
+        mine = X25519PrivateKey.generate()
+        params = b"\3\0\x1d\x20" + mine.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        signature = leaf_key.sign(client_random + server_random + params,
+                                  ec.ECDSA(hashes.SHA256()))
+        messages = [message(2, b"\3\3" + server_random + b"\x20" + os.urandom(32) +
+                            b"\xc0\x2b\0" + len(extensions).to_bytes(2, "big") + extensions),
+                    message(11, (len(leaf) + 3).to_bytes(3, "big") +
+                            len(leaf).to_bytes(3, "big") + leaf),
+                    message(12, params + b"\4\3" + len(signature).to_bytes(2, "big") +
+                            signature)]
+        if flight.get("request"):
+            messages.append(message(13, b"\1\x40\0\2\4\3\0\0"))
+        messages[1:1] = flight.get("extra", [])
+        messages.append(message(14, b""))
+        transcript += hello + b"".join(messages)
+        if flight.get("split"):
+            for part in messages:
+                sock.sendall(record(22, part))
+        else:
+            sock.sendall(record(22, b"".join(messages)))
+        point = None
+        while point is None:
+            header, sent = read_record(sock)
+            if header[0] != 22:
+                raise ValueError("client sent record type %d before its key" % header[0])
+            while sent:
+                kind, size = sent[0], int.from_bytes(sent[1:4], "big")
+                part, sent = sent[:4 + size], sent[4 + size:]
+                if kind == 16:
+                    point = part[5:]
+                elif not (kind == 11 and flight.get("request") and part[4:] == b"\0\0\0"):
+                    raise ValueError("client sent handshake type %d" % kind)
+                transcript += part
+        if read_record(sock)[0][0] != 20:
+            raise ValueError("no change_cipher_spec from the client")
+        premaster = mine.exchange(X25519PublicKey.from_public_bytes(point))
+        if flight.get("no_ems"):
+            master = prf(premaster, b"master secret", client_random + server_random, 48)
+        else:
+            master = prf(premaster, b"extended master secret", sha256(transcript), 48)
+        keys = prf(master, b"key expansion", server_random + client_random, 40)
+        client, server = Direction12(keys[:16], keys[32:36]), Direction12(keys[16:32], keys[36:40])
+        finished = client.open(*read_record(sock))
+        if finished != message(20, prf(master, b"client finished", sha256(transcript), 12)):
+            raise ValueError("the client's Finished does not verify")
+        transcript += finished
+        verify = prf(master, b"server finished", sha256(transcript), 12)
+        finished = message(20, bytes(12) if flight.get("bad_finished") else verify)
+        if flight.get("no_ccs"):
+            sock.sendall(record(22, finished))
+        else:
+            sock.sendall(record(20, b"\1") + server.seal(22, finished))
+        request = b""
+        while b"\r\n\r\n" not in request:
+            header, payload = read_record(sock)
+            if header[0] != 23:
+                raise ValueError("client sent record type %d" % header[0])
+            request += client.open(header, payload)
+        for what, value in steps:
+            if what == "inner":
+                inner = value.rstrip(b"\0")
+                sock.sendall(server.seal(inner[-1], inner[:-1]))
+            elif what == "plain":
+                sock.sendall(value)
+        sock.shutdown(socket.SHUT_WR)
+        try:
+            while sock.recv(4096):
+                pass
+        except OSError:
+            pass
+
+    def serve(listener, flight, steps, outcome):
+        try:
+            raw, _ = listener.accept()
+        except OSError:
+            return
+        raw.settimeout(20)
+        try:
+            with raw:
+                (run12 if flight.get("tls12") else run)(raw, flight, steps)
+                outcome.append("served")
+        except Exception as error:  # the client hung up or refused
+            outcome.append("server: %r" % error)
+
+    def read_exact(sock, size):
+        data = b""
+        while len(data) < size:
+            got = sock.recv(size - len(data))
+            if not got:
+                raise EOFError("peer closed")
+            data += got
+        return data
+
+    def read_record(sock):
+        header = read_exact(sock, 5)
+        return header, read_exact(sock, int.from_bytes(header[3:5], "big"))
+
+    def read_hello(sock):
+        """The next ClientHello, past any compatibility CCS: the message,
+        its session id, its shares by group and its extensions by kind."""
+        header, hello = read_record(sock)
+        while header[0] == 20:
+            header, hello = read_record(sock)
+        if header[0] != 22 or hello[0] != 1:
+            raise ValueError("no ClientHello")
+        at = 4 + 2 + 32
+        session = hello[at + 1:at + 1 + hello[at]]
+        at += 1 + hello[at]
+        at += 2 + int.from_bytes(hello[at:at + 2], "big")
+        at += 1 + hello[at]
+        end = at + 2 + int.from_bytes(hello[at:at + 2], "big")
+        at += 2
+        shares, kinds = {}, {}
+        while at < end:
+            kind = int.from_bytes(hello[at:at + 2], "big")
+            size = int.from_bytes(hello[at + 2:at + 4], "big")
+            data = hello[at + 4:at + 4 + size]
+            kinds[kind] = data
+            at += 4 + size
+            if kind == 0x33:
+                share = 2
+                while share < len(data):
+                    group = int.from_bytes(data[share:share + 2], "big")
+                    width = int.from_bytes(data[share + 2:share + 4], "big")
+                    shares[group] = data[share + 4:share + 4 + width]
+                    share += 4 + width
+        return hello, session, shares, kinds
+
+    def retry_request(session, suite, group, cookie):
+        extensions = b"\0\x2b\0\2\3\4"
+        if group is not None:
+            extensions += b"\0\x33\0\2" + group.to_bytes(2, "big")
+        if cookie is not None:
+            extensions += b"\0\x2c" + (len(cookie) + 2).to_bytes(2, "big") + \
+                len(cookie).to_bytes(2, "big") + cookie
+        return message(2, b"\3\3" + RETRY_RANDOM + bytes([len(session)]) + session +
+                       suite + b"\0" + len(extensions).to_bytes(2, "big") + extensions)
+
+    def run(sock, flight, steps):
+        hello, session, shares, kinds = read_hello(sock)
+        chosen = CURVES[flight.get("curve")][0]
+        transcript = hello
+        # A HelloRetryRequest when the chosen group has no share or the
+        # script asks for one: the group it names (the chosen one unless the
+        # script overrides it), a cookie the second hello has to echo.
+        retry = flight.get("retry", {})
+        rounds = 2 if retry.get("twice") else 1
+        while rounds and (chosen not in shares or retry):
+            rounds -= 1
+            cookie = retry.get("cookie")
+            group = retry.get("group", chosen if chosen not in shares else None)
+            request = retry_request(session, b"\x13\1", group, cookie)
+            transcript = message(254, sha256(transcript)) + request
+            sock.sendall(record(22, request))
+            if retry.get("ccs"):
+                sock.sendall(record(20, b"\1"))
+            hello, session, shares, kinds = read_hello(sock)
+            if cookie is not None and kinds.get(0x2c) != len(cookie).to_bytes(2, "big") + cookie:
+                raise ValueError("the second ClientHello lost the cookie")
+            transcript += hello
+            if not retry.get("twice"):
+                break
+        # The answering share is on the chosen group unless the script
+        # names another; one the client never offered agrees on nothing.
+        answer = flight.get("answer", chosen)
+        peer = shares.get(answer)
+        if answer == 0x1d:
+            mine = X25519PrivateKey.generate()
+            shared = mine.exchange(X25519PublicKey.from_public_bytes(peer)) if peer else bytes(32)
+            public = mine.public_key().public_bytes(serialization.Encoding.Raw,
+                                                    serialization.PublicFormat.Raw)
+        else:
+            curve = {0x17: ec.SECP256R1, 0x18: ec.SECP384R1}[answer]()
+            mine = ec.generate_private_key(curve)
+            shared = mine.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(
+                curve, peer)) if peer else bytes(32)
+            public = mine.public_key().public_bytes(serialization.Encoding.X962,
+                                                    serialization.PublicFormat.UncompressedPoint)
+        share = answer.to_bytes(2, "big") + len(public).to_bytes(2, "big") + public
+        extensions = (b"\0\x2b\0\2\3\4\0\x33" + len(share).to_bytes(2, "big") + share)
+        server_hello = message(2, b"\3\3" + os.urandom(32) + bytes([len(session)]) +
+                               session + flight.get("suite", b"\x13\1") + b"\0" +
+                               len(extensions).to_bytes(2, "big") + extensions)
+        transcript += server_hello
+        sock.sendall(record(22, server_hello + flight.get("after_hello", b"")))
+        if flight.get("ccs"):
+            sock.sendall(record(20, b"\1"))
+        early = extract(b"\0" * 32, b"\0" * 32)
+        secret = extract(expand_label(early, b"derived", sha256(b""), 32), shared)
+        client_hs = Direction(expand_label(secret, b"c hs traffic", sha256(transcript), 32))
+        server_hs = Direction(expand_label(secret, b"s hs traffic", sha256(transcript), 32))
+        answers = flight.get("ee", b"")
+        messages = [message(8, len(answers).to_bytes(2, "big") + answers)]
+        request = message(13, flight.get("request_body", b"\0\0\x08\0\x0d\0\4\0\2\4\3"))
+        if flight.get("request"):
+            messages.append(request)
+        messages.append(message(11, certificate))
+        if flight.get("request_late"):
+            messages.append(request)
+        for part in messages:
+            transcript += part
+        signature = leaf_key.sign(b" " * 64 + b"TLS 1.3, server CertificateVerify\0" +
+                                  sha256(transcript), ec.ECDSA(hashes.SHA256()))
+        messages.append(message(15, b"\4\3" + len(signature).to_bytes(2, "big") + signature))
+        transcript += messages[-1]
+        finished_key = expand_label(server_hs.secret, b"finished", b"", 32)
+        messages.append(message(20, hmac_module.new(finished_key, sha256(transcript),
+                                                    hashlib.sha256).digest()))
+        transcript += messages[-1]
+        if flight.get("empty"):
+            sock.sendall(server_hs.seal(b"\x16"))
+        if flight.get("protected_ccs"):
+            sock.sendall(server_hs.seal(b"\1\x14"))
+        if flight.get("split"):
+            for part in messages:
+                sock.sendall(server_hs.seal(part + b"\x16"))
+        elif flight.get("ccs_inside"):
+            joined = b"".join(messages)
+            sock.sendall(server_hs.seal(joined[:3] + b"\x16"))
+            sock.sendall(record(20, b"\1"))
+            sock.sendall(server_hs.seal(joined[3:] + b"\x16"))
+        else:
+            sock.sendall(server_hs.seal(b"".join(messages) + b"\x16"))
+        master = extract(expand_label(secret, b"derived", sha256(b""), 32), b"\0" * 32)
+        client_ap = Direction(expand_label(master, b"c ap traffic", sha256(transcript), 32))
+        server_ap = Direction(expand_label(master, b"s ap traffic", sha256(transcript), 32))
+        reading = client_hs
+        request = b""
+        while b"\r\n\r\n" not in request:
+            header, payload = read_record(sock)
+            if header[0] == 20:
+                continue
+            if header[0] != 23:
+                raise ValueError("client sent record type %d" % header[0])
+            inner = reading.open(header, payload).rstrip(b"\0")
+            if inner[-1] == 22 and reading is client_hs:
+                # The client's flight: an empty Certificate when one was
+                # requested, then a Finished over everything before it.
+                sent = inner[:-1]
+                while sent:
+                    kind, size = sent[0], int.from_bytes(sent[1:4], "big")
+                    part, sent = sent[:4 + size], sent[4 + size:]
+                    if kind == 11 and flight.get("request") and \
+                            part == message(11, b"\0\0\0\0"):
+                        transcript += part
+                    elif kind == 20:
+                        key = expand_label(client_hs.secret, b"finished", b"", 32)
+                        if part[4:] != hmac_module.new(key, sha256(transcript),
+                                                       hashlib.sha256).digest():
+                            raise ValueError("the client's Finished does not verify")
+                        reading = client_ap
+                    else:
+                        raise ValueError("client sent handshake type %d" % kind)
+            elif inner[-1] == 23:
+                request += inner[:-1]
+            elif inner[-1] == 21:
+                raise ValueError("client alert %r" % inner[:-1])
+        for what, value in steps:
+            if what == "inner":
+                sock.sendall(server_ap.seal(value))
+            elif what == "badtag":
+                sock.sendall(server_ap.seal(value, bad_tag=True))
+            elif what == "plain":
+                sock.sendall(value)
+            elif what == "rekey":
+                server_ap = server_ap.update()
+            elif what == "answer" and not flight.get("answer_deferred"):
+                # The client's own KeyUpdate, under its current key; what
+                # it writes next is under the one after. OpenSSL defers its
+                # answer to its next write (RFC 8446 4.6.3 allows either),
+                # and this client never writes again, so only wget's is read.
+                header, payload = read_record(sock)
+                if client_ap.open(header, payload).rstrip(b"\0") != key_update(0) + b"\x16":
+                    raise ValueError("the client did not answer the KeyUpdate")
+                client_ap = client_ap.update()
+        sock.shutdown(socket.SHUT_WR)
+        try:
+            while sock.recv(4096):
+                pass
+        except OSError:
+            pass
+
+    def whole(received):
+        """The body arrived whole by HTTP/1.1 framing: Content-Length reached,
+        or a close-delimited body the caller saw end cleanly."""
+        head, _, rest = received.partition(b"\r\n\r\n")
+        for line in head.split(b"\r\n")[1:]:
+            field, _, value = line.partition(b":")
+            if field.strip().lower() == b"content-length":
+                return len(rest) >= int(value)
+        return None
+
+    def openssl_client(port, expected, tls12):
+        # OpenSSL's default groups share X25519 (and a hybrid) and list
+        # P-256 and P-384 without shares, so it meets the same retries. It
+        # offers TLS 1.2 only against the TLS 1.2 scripts.
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        context.minimum_version = (ssl.TLSVersion.TLSv1_2 if tls12
+                                   else ssl.TLSVersion.TLSv1_3)
+        received = b""
+        clean = False
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=20) as plain:
+                with context.wrap_socket(plain, suppress_ragged_eofs=False) as tls:
+                    tls.sendall(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                                b"Connection: close\r\n\r\n")
+                    while True:
+                        got = tls.recv(65536)
+                        if not got:
+                            clean = True
+                            break
+                        received += got
+        except (OSError, ssl.SSLError, ValueError):
+            pass
+        framed = whole(received)
+        if framed is not None:
+            return framed and received.endswith(expected)
+        return clean and received.endswith(expected)
+
+    checks = Checks()
+    with tempfile.TemporaryDirectory(prefix="tls-peer-") as temporary:
+        work = Path(temporary)
+        shell = Path(args.shell) if args.shell else work / "shell"
+        if not args.shell:
+            host = platform.machine().lower()
+            arch_flags = {"x86_64": ["-march=x86-64"], "amd64": ["-march=x86-64"],
+                          "aarch64": ["-mno-outline-atomics"],
+                          "arm64": ["-mno-outline-atomics"],
+                          "riscv64": ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"]}
+            built = subprocess.run(
+                [args.cc, "-O2", "-static", "-nostdlib", "-nostartfiles",
+                 "-fno-stack-protector", "-fno-builtin", *arch_flags.get(host, []), "-w",
+                 "-T", "src/build/spark.ld", "-Wl,-e,_start", "-Wl,--build-id=none",
+                 "-Wl,--no-warn-rwx-segments", "-o", str(shell), "programs/shell.c"],
+                cwd=HARNESS_ROOT, capture_output=True, text=True)
+            if built.returncode:
+                print(built.stderr[-3000:])
+                return 1
+        (work / "wget").symlink_to(shell)
+
+        for script, flight, steps in SCRIPTS:
+            verdicts = {}
+            for client in ("wget", "openssl"):
+                listener = socket.socket()
+                listener.bind(("127.0.0.1", 0))
+                listener.listen(1)
+                listener.settimeout(20)
+                port = listener.getsockname()[1]
+                outcome = []
+                server = threading.Thread(target=serve,
+                                          args=(listener, dict(flight, answer_deferred=(
+                                              client == "openssl")), steps, outcome),
+                                          daemon=True)
+                server.start()
+                if client == "wget":
+                    fetched = subprocess.run(
+                        [str(work / "wget"), "-q", "--no-check-certificate", "-O", "-",
+                         "https://127.0.0.1:%d/" % port], capture_output=True, timeout=40,
+                        env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+                    verdicts[client] = (fetched.returncode == 0 and
+                                        fetched.stdout == flight.get("body", body))
+                else:
+                    verdicts[client] = bool(openssl_client(port, flight.get("body", body),
+                                                           flight.get("tls12")))
+                server.join(25)
+                listener.close()
+            expected = script in MUST_ACCEPT
+            ours, theirs = verdicts["wget"], verdicts["openssl"]
+            # A lenient row takes either verdict, so a stricter OpenSSL
+            # does not turn the lane red.
+            checks(theirs == expected or script in OPENSSL_LENIENT,
+                   "%s: OpenSSL %s what RFC 8446 says to %s" % (
+                       script, "accepts" if theirs else "refuses",
+                       "accept" if expected else "refuse"))
+            if script in WGET_LENIENT:
+                checks(ours and not expected,
+                       "%s: listed lenient but wget %s" % (
+                           script, "accepts" if ours else "refuses"))
+                continue
+            if script in DELIBERATE:
+                checks(not ours and theirs,
+                       "%s: listed deliberate but wget %s and OpenSSL %s" % (
+                           script, "accepts" if ours else "refuses",
+                           "accepts" if theirs else "refuses"))
+                continue
+            checks(ours == expected,
+                   "%s: wget %s what RFC 8446 says to %s" % (
+                       script, "accepts" if ours else "refuses",
+                       "accept" if expected else "refuse"))
+
+        # Real OpenSSL servers held to TLS 1.2: each leaf kind, signature
+        # scheme and key exchange group, a certificate request, and one
+        # without the extended master secret, which this client refuses by
+        # design (RFC 7627 lets it).
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        rsa_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        rsa_leaf = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+                    .public_key(rsa_key.public_key()).serial_number(8)
+                    .not_valid_before(now - datetime.timedelta(days=1))
+                    .not_valid_after(now + datetime.timedelta(days=30))
+                    .sign(rsa_key, hashes.SHA256()))
+        for kind, key, certificate_der in (("ec", leaf_key, leaf), ("rsa", rsa_key, rsa_leaf)):
+            (work / (kind + ".key")).write_bytes(key.private_bytes(
+                serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption()))
+            loaded = (certificate_der if kind == "rsa"
+                      else x509.load_der_x509_certificate(certificate_der))
+            (work / (kind + ".pem")).write_bytes(loaded.public_bytes(serialization.Encoding.PEM))
+        SERVERS12 = [
+            ("ECDSA P-256 leaf", "ec", [], True),
+            ("ECDSA P-256 leaf signing with SHA-384", "ec", ["-sigalgs", "ECDSA+SHA384"], True),
+            ("RSA leaf, RSA-PSS", "rsa", ["-sigalgs", "rsa_pss_rsae_sha256"], True),
+            ("RSA leaf, PKCS#1 v1.5 SHA-256", "rsa", ["-sigalgs", "RSA+SHA256"], True),
+            ("RSA leaf, PKCS#1 v1.5 SHA-384", "rsa", ["-sigalgs", "RSA+SHA384"], True),
+            ("P-256 key exchange", "ec", ["-groups", "P-256"], True),
+            ("P-384 key exchange", "ec", ["-groups", "P-384"], True),
+            ("a certificate requested", "ec", ["-verify", "1"], True),
+            ("no extended master secret", "ec", ["-no_ems"], False),
+        ]
+        if not shutil.which("openssl"):
+            print("tls peer: OpenSSL TLS 1.2 servers NOT RUN -- no openssl")
+            SERVERS12 = []
+        for label, kind, extra, expect in SERVERS12:
+            probe = socket.socket()
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+            probe.close()
+            server = subprocess.Popen(
+                ["openssl", "s_server", "-accept", "127.0.0.1:%d" % port, "-cert",
+                 str(work / (kind + ".pem")), "-key", str(work / (kind + ".key")),
+                 "-tls1_2", "-www", "-naccept", "1", *extra],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL)
+            ready = b""
+            for _ in range(8):
+                ready = server.stdout.readline()
+                if not ready or b"ACCEPT" in ready:
+                    break
+            fetched = subprocess.run(
+                [str(work / "wget"), "-q", "--no-check-certificate", "-O", "-",
+                 "https://127.0.0.1:%d/" % port], capture_output=True, timeout=40,
+                env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+            server.kill()
+            server.wait()
+            ours = (b"ACCEPT" in ready and fetched.returncode == 0 and
+                    b"TLSv1.2" in fetched.stdout)
+            checks(ours == expect, "OpenSSL TLS 1.2 server, %s: wget %s it" % (
+                label, "accepts" if ours else "refuses"))
+    return checks.verdict("tls peer", "tls-peer")
+
+
+def harness_https_downgrade(argv):
+    """HTTPS→HTTP Location refusal under wget manners, on a TLS loopback.
+
+    Freestanding CHECK_net's redirect_urls can only unit-test
+    http_transport_allowed: there is no TLS server in that harness. This
+    builds the same anchored wget as tls_chains (follow + allow_tls), serves
+    a TLS 1.3 302 whose Location is http://, and requires the downgrade
+    refuse — not success and not the hop-budget refuse.
+
+        python3 test/differential.py --harness https_downgrade
+    """
+    import datetime
+    import shutil
+    import socket
+    import ssl
+    import subprocess
+    import tempfile
+    import threading
+
+    parser = argparse.ArgumentParser(prog="differential.py --harness https_downgrade")
+    parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux" or not shutil.which("openssl"):
+        print("https downgrade: NOT RUN -- needs Linux and openssl")
+        return 2
+
+    checks = Checks()
+    with tempfile.TemporaryDirectory(prefix="https-downgrade-") as temporary:
+        work = Path(temporary)
+
+        def openssl(*arguments):
+            subprocess.run(["openssl", *arguments], check=True, cwd=work,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        openssl("req", "-x509", "-newkey", "ec",
+                "-pkeyopt", "ec_paramgen_curve:secp384r1", "-nodes",
+                "-keyout", "root.key", "-out", "root.pem", "-days", "3650",
+                "-sha384", "-subj", "/CN=https downgrade root",
+                "-addext", "basicConstraints=critical,CA:TRUE",
+                "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+        (work / "leaf.ext").write_text(
+            "[extensions]\n"
+            "basicConstraints=critical,CA:FALSE\n"
+            "keyUsage=critical,digitalSignature\n"
+            "extendedKeyUsage=serverAuth\n"
+            "subjectAltName=IP:127.0.0.1\n")
+        openssl("req", "-new", "-newkey", "ec",
+                "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+                "-keyout", "leaf.key", "-out", "leaf.csr",
+                "-subj", "/CN=127.0.0.1")
+        # Prefer x509 -not_before when present; else ca -startdate (tls_chains).
+        x509_help = subprocess.run(["openssl", "x509", "-help"], cwd=work,
+                                   capture_output=True, text=True)
+        if "-not_before" in (x509_help.stdout + x509_help.stderr):
+            now = datetime.datetime.now(datetime.timezone.utc)
+            openssl("x509", "-req", "-in", "leaf.csr", "-CA", "root.pem",
+                    "-CAkey", "root.key", "-set_serial", "1",
+                    "-not_before", (now - datetime.timedelta(days=1)).strftime(
+                        "%Y%m%d%H%M%SZ"),
+                    "-not_after", (now + datetime.timedelta(days=90)).strftime(
+                        "%Y%m%d%H%M%SZ"),
+                    "-out", "leaf.pem", "-sha384",
+                    "-extfile", "leaf.ext", "-extensions", "extensions")
+        else:
+            (work / "ca.conf").write_text(
+                "[ca]\ndefault_ca=local\n[local]\ndatabase=index\n"
+                "new_certs_dir=.\nserial=serial\ndefault_md=sha384\n"
+                "policy=names\nunique_subject=no\n[names]\ncommonName=supplied\n")
+            (work / "index").write_text("")
+            (work / "serial").write_text("01\n")
+            now = datetime.datetime.now(datetime.timezone.utc)
+            openssl("ca", "-batch", "-config", "ca.conf", "-in", "leaf.csr",
+                    "-cert", "root.pem", "-keyfile", "root.key",
+                    "-startdate", (now - datetime.timedelta(days=1)).strftime(
+                        "%Y%m%d%H%M%SZ"),
+                    "-enddate", (now + datetime.timedelta(days=90)).strftime(
+                        "%Y%m%d%H%M%SZ"),
+                    "-out", "leaf.pem", "-notext", "-md", "sha384",
+                    "-extfile", "leaf.ext", "-extensions", "extensions")
+        (work / "chain.pem").write_text(
+            (work / "leaf.pem").read_text() + (work / "root.pem").read_text())
+
+        spki = subprocess.run(
+            ["openssl", "pkey", "-in", str(work / "root.key"), "-pubout",
+             "-outform", "DER"], check=True, capture_output=True).stdout
+        point = spki[-97:]
+        (work / "anchor.inc").write_text("".join(
+            "static const p8 tls_bench_anchor_%s[48] = {%s};\n" % (
+                axis, ", ".join("0x%02x" % b for b in coordinate))
+            for axis, coordinate in (("x", point[1:49]), ("y", point[49:97]))))
+
+        host = platform.machine().lower()
+        if host in ("x86_64", "amd64"):
+            arch_flags = ["-march=x86-64"]
+        elif host in ("aarch64", "arm64"):
+            arch_flags = ["-mno-outline-atomics"]
+        elif host == "riscv64":
+            arch_flags = ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"]
+        else:
+            arch_flags = []
+        built = subprocess.run(
+            [args.cc, "-O2", "-static", "-nostdlib", "-nostartfiles",
+             "-fno-stack-protector", "-fno-builtin", *arch_flags, "-w",
+             "-T", "src/build/spark.ld", "-Wl,-e,_start",
+             "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments",
+             '-DTLS_BENCH_ANCHOR="%s"' % (work / "anchor.inc"),
+             "-o", str(work / "shell"), "programs/shell.c"],
+            cwd=HARNESS_ROOT, capture_output=True, text=True)
+        if built.returncode:
+            print(built.stderr[-3000:])
+            return 1
+        (work / "wget").symlink_to(work / "shell")
+
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_3
+        context.load_cert_chain(work / "chain.pem", work / "leaf.key")
+        context.set_ecdh_curve("prime256v1")
+
+        def serve_map(routes, accepts):
+            listener = socket.socket()
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(accepts)
+            listener.settimeout(20)
+            port = listener.getsockname()[1]
+            done = threading.Event()
+
+            def handle():
+                try:
+                    for _ in range(accepts):
+                        raw, _ = listener.accept()
+                        raw.settimeout(20)
+                        with context.wrap_socket(raw, server_side=True) as tls:
+                            head = b""
+                            while b"\r\n\r\n" not in head:
+                                got = tls.recv(4096)
+                                if not got:
+                                    break
+                                head += got
+                            request_line = head.split(b"\r\n", 1)[0]
+                            path = b"/"
+                            parts = request_line.split(b" ")
+                            if len(parts) >= 2:
+                                path = parts[1].split(b"?", 1)[0]
+                            reply = routes.get(path, (
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n"
+                                b"Connection: close\r\n\r\n"))
+                            if callable(reply):
+                                reply = reply(port)
+                            tls.sendall(reply)
+                except (OSError, ssl.SSLError):
+                    pass
+                finally:
+                    done.set()
+                    try:
+                        listener.close()
+                    except OSError:
+                        pass
+
+            threading.Thread(target=handle, daemon=True).start()
+            return port, done
+
+        def redirect(location):
+            return (b"HTTP/1.1 302 Found\r\nLocation: " + location +
+                    b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+
+        def body_ok(_port=None):
+            return (b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                    b"Connection: close\r\n\r\nok")
+
+        def wget(url):
+            return subprocess.run(
+                [str(work / "wget"), "-q", "-O", "-", url],
+                capture_output=True, timeout=30,
+                env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+
+        def expect_downgrade(url, routes, accepts, label):
+            port, done = serve_map(routes, accepts)
+            fetched = wget(url % port)
+            done.wait(25)
+            err = fetched.stderr.decode(errors="replace")
+            checks(fetched.returncode != 0 and
+                   "refused an HTTPS to HTTP redirect" in err and
+                   "too many redirects" not in err,
+                   "%s (%s)" % (label, err.strip()[:200]))
+            return err
+
+        def expect_ok(url, routes, accepts, label):
+            port, done = serve_map(routes, accepts)
+            fetched = wget(url % port)
+            done.wait(25)
+            err = fetched.stderr.decode(errors="replace")
+            checks(fetched.returncode == 0 and fetched.stdout == b"ok",
+                   "%s (%s)" % (label, err.strip()[:200]))
+
+        def expect_refuse_not_downgrade(url, routes, accepts, label):
+            port, done = serve_map(routes, accepts)
+            fetched = wget(url % port)
+            done.wait(25)
+            err = fetched.stderr.decode(errors="replace")
+            checks(fetched.returncode != 0 and
+                   "refused an HTTPS to HTTP redirect" not in err and
+                   fetched.stdout != b"ok",
+                   "%s (%s)" % (label, err.strip()[:200]))
+
+        # 1. First hop already HTTPS; Location is plain HTTP — refuse before
+        #    connecting to the http:// target (hop budget still has room).
+        expect_downgrade(
+            "https://127.0.0.1:%d/",
+            {b"/": lambda p: redirect(b"http://127.0.0.1:9/")},
+            1,
+            "HTTPS Location to http://127.0.0.1 is refused as a downgrade")
+
+        # 2. After an HTTPS→HTTPS upgrade hop, a later http:// Location is
+        #    still refused (secure sticky across hops).
+        expect_downgrade(
+            "https://127.0.0.1:%d/up",
+            {
+                b"/up": lambda p: redirect(
+                    ("https://127.0.0.1:%d/then" % p).encode()),
+                b"/then": lambda p: redirect(b"http://127.0.0.1:9/"),
+            },
+            2,
+            "HTTP Location after an HTTPS hop is still refused")
+
+        # 3. Same-scheme HTTPS redirects still succeed — proves follow works
+        #    and the refuse above is the downgrade guard, not hop budget.
+        expect_ok(
+            "https://127.0.0.1:%d/hop",
+            {
+                b"/hop": lambda p: redirect(
+                    ("https://127.0.0.1:%d/ok" % p).encode()),
+                b"/ok": body_ok,
+            },
+            2,
+            "an HTTPS to HTTPS redirect is still followed")
+
+        # 4. Nested HTTPS hops then http:// — sticky across three hops.
+        expect_downgrade(
+            "https://127.0.0.1:%d/a",
+            {
+                b"/a": lambda p: redirect(
+                    ("https://127.0.0.1:%d/b" % p).encode()),
+                b"/b": lambda p: redirect(
+                    ("https://127.0.0.1:%d/c" % p).encode()),
+                b"/c": lambda p: redirect(b"http://127.0.0.1:9/"),
+            },
+            3,
+            "HTTP Location after nested HTTPS hops is still refused")
+
+        # 5. Scheme case: a scheme is case-insensitive (RFC 3986 3.1), so an
+        #    uppercase HTTP:// Location is plain HTTP and refused as a
+        #    downgrade. It was once read as a same-origin relative path
+        #    "/HTTP://127.0.0.1:9/" and followed, which no other client does.
+        expect_downgrade(
+            "https://127.0.0.1:%d/",
+            {
+                b"/": lambda p: redirect(b"HTTP://127.0.0.1:9/"),
+                b"/HTTP://127.0.0.1:9/": body_ok,
+            },
+            1,
+            "uppercase HTTP:// Location is plain HTTP and refused as a downgrade")
+
+        # 6. Network-path //host keeps the current (HTTPS) scheme — not a
+        #    downgrade; same-host follow still succeeds.
+        expect_ok(
+            "https://127.0.0.1:%d/np",
+            {
+                b"/np": lambda p: redirect(
+                    ("//127.0.0.1:%d/ok" % p).encode()),
+                b"/ok": body_ok,
+            },
+            2,
+            "network-path Location keeps HTTPS and is followed")
+
+        # 7. Credentialed http://user@host — absolutize yields absolute http,
+        #    but http_split_into refuses userinfo (BAD_URL) before the
+        #    downgrade guard; still must not fetch successfully.
+        expect_refuse_not_downgrade(
+            "https://127.0.0.1:%d/cred",
+            {b"/cred": lambda p: redirect(b"http://user@127.0.0.1:9/")},
+            1,
+            "credentialed http:// Location is refused without a silent fetch")
+
+        # 8. http:/// (missing host) — BAD_URL after absolutize, not a
+        #    successful hop and not the HTTPS→HTTP downgrade line alone.
+        expect_refuse_not_downgrade(
+            "https://127.0.0.1:%d/nohost",
+            {b"/nohost": lambda p: redirect(b"http:///")},
+            1,
+            "http:/// Location with no host is refused")
+
+        # 9. http:// without a path still downgrades (authority-only URL).
+        expect_downgrade(
+            "https://127.0.0.1:%d/authonly",
+            {b"/authonly": lambda p: redirect(b"http://127.0.0.1:9")},
+            1,
+            "authority-only http:// Location is refused as a downgrade")
+
+        # Refresh / meta-refresh are not wget redirect inputs in this tree
+        # (only Location on 3xx); no harness row for those shapes.
+
+    return checks.verdict("https downgrade", "https-downgrade")
+
+
+def harness_http_response_framing(argv):
+    """Moonwater HTTP response framing against a written accept/refuse matrix.
+
+    Request-side serialization is already covered; this feeds hostile and
+    interesting response frames through the in-tree framing and chunk decoder
+    (lifted from src/net/net.c) and holds each row to MUST_ACCEPT /
+    MUST_REFUSE. Python's http.client is consulted as a second oracle: where
+    it accepts what this tree refuses by policy, DELIBERATE names the
+    disagreement.
+
+        python3 test/differential.py --harness http_response_framing
+    """
+    del argv
+    import binascii
+    import shutil
+    import tempfile
+    from http.client import HTTPResponse
+    from io import BytesIO
+
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    defines = net[net.index("#define HTTP_PORT 80"):
+                  net.index("#define HTTP_WRITE (-11)") +
+                  len("#define HTTP_WRITE (-11)\n")]
+    headers = net[net.index("//      Where the header ends"):
+                  net.index(
+                      "return http_response_framing_from(bytes, size, "
+                      "address_of resume,\n                                          "
+                      "header_length, response);\n}") +
+                  len(
+                      "return http_response_framing_from(bytes, size, "
+                      "address_of resume,\n                                          "
+                      "header_length, response);\n}")]
+    body = net[net.index("typedef struct\n{\n        http_link address_to link;"):
+               net.index(
+                   "return (bipolar)(body.output - bytes);\n}\n\n"
+                   "/* Bytes copied into an HTTP/1 request") +
+               len("return (bipolar)(body.output - bytes);\n}\n")]
+    status = net[net.index(
+        "static bipolar http_status_code(p8 address_to bytes, "
+        "positive size, b32 address_to code)\n{"):
+                 net.index("return HTTP_OK;\n}\n\nstatic p32 http_lookup") +
+                 len("return HTTP_OK;\n}\n")]
+
+    shim = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <ctype.h>
+typedef uint8_t p8;
+typedef int8_t b8;
+typedef uint16_t p16;
+typedef uint32_t p32;
+typedef uint64_t p64;
+typedef int32_t b32;
+typedef unsigned long positive;
+typedef long bipolar;
+typedef void *address_any;
+typedef char *string_address;
+typedef const char *const_string;
+#define COLD
+#define CONST
+#define PURE
+#define fn void
+#define address_to *
+#define address_of &
+#define null NULL
+#define end ((p8)0)
+#define positive_max (~(positive)0)
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define memory_compare memcmp
+#define memory_copy memcpy
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define string_get(s) (*(const unsigned char *)(s))
+/* glibc ctype macros return bit flags (often > 255); truncate-to-p8
+   would turn a hit into 0 and make every status line look malformed. */
+static inline p8 byte_is_alnum(p8 b) { return isalnum(b) != 0; }
+static inline p8 byte_is_digit(p8 b) { return isdigit(b) != 0; }
+static inline p8 byte_is_control(p8 b) { return b < 0x20 || b == 0x7f; }
+static inline p8 byte_is_blank(p8 b) { return b == ' ' || b == '\t'; }
+static positive string_length(const_string s) { return (positive)strlen(s); }
+static b32 string_compare_max(const void *a, const void *b, positive n)
+{
+        return (b32)memcmp(a, b, n);
+}
+static address_any memory_first_of(address_any block, b8 value, positive size)
+{
+        return memchr(block, value, size);
+}
+static positive memory_span_without_byte(const void *block, p8 byte,
+                                         positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[i] != byte)
+                i++;
+        return i;
+}
+static address_any memory_search(address_any block, positive size,
+                                 address_any needle, positive needle_size)
+{
+        if (!needle_size || needle_size > size)
+                return null;
+        const p8 *hay = block, *ndl = needle;
+        for (positive i = 0; i + needle_size <= size; i++)
+                if (!memcmp(hay + i, ndl, needle_size))
+                        return (address_any)(hay + i);
+        return null;
+}
+static b32 memory_compare_ascii_case(const void *one, const void *two,
+                                     positive size)
+{
+        const p8 *a = one, *b = two;
+        for (positive i = 0; i < size; i++) {
+                p8 x = a[i], y = b[i];
+                if (x >= 'A' && x <= 'Z')
+                        x = (p8)(x - 'A' + 'a');
+                if (y >= 'A' && y <= 'Z')
+                        y = (p8)(y - 'A' + 'a');
+                if (x != y)
+                        return (b32)(x - y);
+        }
+        return 0;
+}
+static unsigned char string_set_blanks[256];
+static positive string_span_max(const_string source, positive bound,
+                                const b8 *set)
+{
+        (void)set;
+        positive i = 0;
+        while (i < bound && (source[i] == ' ' || source[i] == '\t'))
+                i++;
+        return i;
+}
+static positive digit_known(p8 character, positive base)
+{
+        positive v;
+        if (character >= '0' && character <= '9')
+                v = character - '0';
+        else if (character >= 'a' && character <= 'z')
+                v = 10 + character - 'a';
+        else if (character >= 'A' && character <= 'Z')
+                v = 10 + character - 'A';
+        else
+                return base;
+        return v < base ? v : base;
+}
+static bool string_digits_checked(string_address *text, positive base,
+                                  positive *value)
+{
+        string_address at = *text;
+        positive got = 0;
+        bool any = false;
+        while (1) {
+                positive digit = digit_known(string_get(at), base);
+                positive scaled;
+                if (digit >= base)
+                        break;
+                if (__builtin_mul_overflow(got, base, &scaled) ||
+                    __builtin_add_overflow(scaled, digit, &got))
+                        return false;
+                at++;
+                any = true;
+        }
+        if (!any)
+                return false;
+        *text = at;
+        *value = got;
+        return true;
+}
+static positive string_digits_max(string_address source, positive bound,
+                                  positive *used)
+{
+        positive got = 0, n = 0;
+        while (n < bound) {
+                positive digit = digit_known((p8)source[n], 10);
+                if (digit >= 10)
+                        break;
+                got = got * 10 + digit;
+                n++;
+        }
+        if (used)
+                *used = n;
+        return got;
+}
+typedef struct { int handle; bool tls; } tls_conn;
+typedef struct { bipolar handle; bool tls; tls_conn session; } http_link;
+typedef struct { p8 *bytes; positive used; positive room; } http_buffer;
+typedef struct { int dummy; } network_deadline;
+#define TLS_AGAIN (-2)
+#define TLS_OK 0
+#define TLS_FAIL (-1)
+#define ENOSPC 28
+#define syscall(name) 0
+static bipolar tls_borrow(void *a, positive b, p8 **c, positive *d,
+                          positive e, positive f)
+{
+        (void)a; (void)b; (void)c; (void)d; (void)e; (void)f;
+        abort();
+        return TLS_FAIL;
+}
+static bipolar tls_lend(void *a, positive b, p8 **c, positive *d)
+{
+        (void)a; (void)b; (void)c; (void)d;
+        return TLS_AGAIN;
+}
+static bool network_deadline_begin(network_deadline *d, positive s, positive n)
+{
+        (void)d; (void)s; (void)n;
+        abort();
+        return false;
+}
+static bipolar network_stream_read_some_until(bipolar h, p8 *into, positive room,
+                                              const network_deadline *d)
+{
+        (void)h; (void)into; (void)room; (void)d;
+        abort();
+        return -1;
+}
+static bipolar network_stream_read_some_for(bipolar h, p8 *into, positive room,
+                                            positive s, positive ns)
+{
+        (void)h; (void)into; (void)room; (void)s; (void)ns;
+        abort();
+        return -1;
+}
+static bool byte_store_reserve(http_buffer *b, positive need, positive align)
+{
+        (void)b; (void)need; (void)align;
+        abort();
+        return false;
+}
+static bipolar system_call_3(positive a, positive b, positive c, positive d)
+{
+        (void)a; (void)b; (void)c; (void)d;
+        abort();
+        return -1;
+}
+"""
+
+    driver = r"""
+static void emit_hex(const p8 *bytes, positive length)
+{
+        for (positive at = 0; at < length; at++)
+                printf("%02x", bytes[at]);
+}
+
+/* stdin lines: NAME\tMODE\tHEX
+   MODE is frame | unchunk | full | oversize
+   stdout lines: NAME\tACCEPT|REFUSE\tBODYHEX|-  */
+int main(void)
+{
+        char name[128];
+        char mode[16];
+        char hex[2 * (HTTP_HEAD_MAX + 64) + 1];
+
+        while (scanf("%127s %15s %32896s", name, mode, hex) == 3) {
+                positive size = (positive)strlen(hex) / 2;
+                p8 *wire = malloc(size ? size : 1);
+                for (positive at = 0; at < size; at++) {
+                        unsigned value = 0;
+                        sscanf(hex + 2 * at, "%2x", &value);
+                        wire[at] = (p8)value;
+                }
+                int ok = 0;
+                p8 *body = null;
+                positive body_length = 0;
+
+                if (!strcmp(mode, "oversize")) {
+                        p8 *oversized = malloc(HTTP_HEAD_MAX + 4);
+                        memset(oversized, 'x', HTTP_HEAD_MAX + 4);
+                        memcpy(oversized, "HTTP/1.1 200 OK\r\n", 17);
+                        memcpy(oversized + HTTP_HEAD_MAX, "\r\n\r\n", 4);
+                        http_response response;
+                        positive header = 0;
+                        ok = http_response_framing(oversized, HTTP_HEAD_MAX + 4,
+                                                   &header, &response) == HTTP_OK;
+                        free(oversized);
+                } else if (!strcmp(mode, "frame")) {
+                        http_response response;
+                        positive header = 0;
+                        ok = http_response_framing(wire, size, &header,
+                                                   &response) == HTTP_OK;
+                        if (ok && response.body_kind == HTTP_BODY_LENGTH &&
+                            size >= header + response.body_length) {
+                                body = wire + header;
+                                body_length = response.body_length;
+                        }
+                } else if (!strcmp(mode, "unchunk")) {
+                        bipolar got = http_unchunk(wire, size);
+                        ok = got >= 0;
+                        if (ok) {
+                                body = wire;
+                                body_length = (positive)got;
+                        }
+                } else if (!strcmp(mode, "full")) {
+                        http_response response;
+                        positive header = 0;
+                        if (http_response_framing(wire, size, &header,
+                                                  &response) == HTTP_OK) {
+                                if (response.body_kind == HTTP_BODY_CHUNKED) {
+                                        bipolar got = http_unchunk(
+                                            wire + header, size - header);
+                                        ok = got >= 0;
+                                        if (ok) {
+                                                body = wire + header;
+                                                body_length = (positive)got;
+                                        }
+                                } else if (response.body_kind ==
+                                           HTTP_BODY_LENGTH) {
+                                        ok = size >= header + response.body_length;
+                                        if (ok) {
+                                                body = wire + header;
+                                                body_length = response.body_length;
+                                        }
+                                } else
+                                        ok = 1;
+                        }
+                }
+                printf("%s\t%s\t", name, ok ? "ACCEPT" : "REFUSE");
+                if (ok && body)
+                        emit_hex(body, body_length);
+                else
+                        fputc('-', stdout);
+                fputc('\n', stdout);
+                free(wire);
+        }
+        return 0;
+}
+"""
+
+    # (name, mode, wire, expected_body_or_None)
+    # oversize ignores wire (empty).
+    CASES = [
+        ("simple-length", "full",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", b"hello"),
+        ("empty-length", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", b""),
+        ("bare-lf-headers", "frame",
+         b"HTTP/1.1 200 OK\nContent-Length: 0\n\n", None),
+        ("chunked-full", "full",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+         b"5\r\nhello\r\n0\r\n\r\n", b"hello"),
+        ("chunked-extension", "unchunk",
+         b"A;extension=value\r\nabcdefghij\r\n0;finished=yes\r\n\r\n",
+         b"abcdefghij"),
+        ("redirect-location", "frame",
+         b"HTTP/1.1 302 Found\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n",
+         None),
+        ("te-cl-conflict", "frame",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+         b"Content-Length: 5\r\n\r\n5\r\nhello\r\n0\r\n\r\n", None),
+        ("duplicate-content-length", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nx",
+         None),
+        ("bare-cr-in-location", "frame",
+         b"HTTP/1.1 302 Found\r\nLocation: /safe\rhidden\r\n\r\n", None),
+        ("obs-fold-location", "frame",
+         b"HTTP/1.1 302 Found\r\nLocation: https://good.example/\r\n"
+         b" https://evil.example/\r\n\r\n", None),
+        ("space-before-colon", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length : 0\r\n\r\n", None),
+        ("te-not-chunked", "frame",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nxxxx", None),
+        ("duplicate-location", "frame",
+         b"HTTP/1.1 302 Found\r\nLocation: /a\r\nlocation: /b\r\n\r\n", None),
+        ("truncated-chunk-trailer", "unchunk", b"0\r\n", None),
+        ("chunk-size-overflow", "unchunk", b"10000000000000000\r\n", None),
+        ("chunk-non-hex", "unchunk", b"ZZ\r\n", None),
+        ("chunk-truncated-data", "unchunk", b"9\r\nabc\r\n", None),
+        ("malformed-trailer-field", "unchunk",
+         b"0\r\nnot-a-field\r\n\r\n", None),
+        ("oversize-header", "oversize", b"", None),
+        # --- depth: 1xx, HTTP/1.0, duplicate non-framing fields ---
+        ("1xx-then-200", "full",
+         b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n"
+         b"Content-Length: 2\r\n\r\nok", b"ok"),
+        ("1xx-with-cl", "frame",
+         b"HTTP/1.1 100 Continue\r\nContent-Length: 0\r\n\r\n"
+         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", None),
+        ("101-switch", "frame",
+         b"HTTP/1.1 101 Switching Protocols\r\n\r\n", None),
+        ("http10-length", "full",
+         b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok", b"ok"),
+        ("dup-date-ok", "frame",
+         b"HTTP/1.1 200 OK\r\nDate: a\r\nDate: b\r\n"
+         b"Content-Length: 0\r\n\r\n", b""),
+        ("dup-host-ok", "frame",
+         b"HTTP/1.1 200 OK\r\nHost: a\r\nHost: b\r\n"
+         b"Content-Length: 0\r\n\r\n", b""),
+        ("close-delimited", "frame",
+         b"HTTP/1.1 200 OK\r\n\r\nhello", None),
+        # --- depth: NUL / bare CR / obs-fold outside Location ---
+        ("nul-in-cl-value", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 0\x00\r\n\r\n", None),
+        ("nul-in-location", "frame",
+         b"HTTP/1.1 302 Found\r\nLocation: /sa\x00fe\r\n\r\n", None),
+        ("bare-cr-status-line", "frame",
+         b"HTTP/1.1 200 OK\rContent-Length: 0\r\n\r\n", None),
+        ("obs-fold-date", "frame",
+         b"HTTP/1.1 200 OK\r\nDate: Mon,\r\n 01 Jan\r\n"
+         b"Content-Length: 0\r\n\r\n", None),
+        ("obs-fold-cl", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length:\r\n 0\r\n\r\n", None),
+        ("tab-before-colon", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length\t: 0\r\n\r\n", None),
+        ("empty-field-name", "frame",
+         b"HTTP/1.1 200 OK\r\n: empty\r\nContent-Length: 0\r\n\r\n", None),
+        # --- depth: smuggle-ish TE/CL variants ---
+        ("cl-then-te", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n"
+         b"Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n", None),
+        ("dup-te", "frame",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+         b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n", None),
+        ("te-chunked-gzip", "frame",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\n\r\n"
+         b"0\r\n\r\n", None),
+        ("te-identity", "frame",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: identity\r\n\r\nok", None),
+        ("te-chunked-case", "full",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n"
+         b"5\r\nhello\r\n0\r\n\r\n", b"hello"),
+        ("te-chunked-trail-ws", "full",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked \t\r\n\r\n"
+         b"0\r\n\r\n", b""),
+        ("cl-leading-zero", "full",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 05\r\n\r\nhello", b"hello"),
+        ("cl-plus-sign", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: +5\r\n\r\nhello", None),
+        ("cl-trailing-junk", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5x\r\n\r\nhello", None),
+        # --- depth: trailers and chunk-extension edges ---
+        ("trailer-ok", "full",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+         b"5\r\nhello\r\n0\r\nFoo: bar\r\n\r\n", b"hello"),
+        ("trailer-after-final", "unchunk", b"0\r\n\r\nextra", None),
+        ("trailer-obs-fold", "unchunk", b"0\r\n Foo: bar\r\n\r\n", None),
+        ("trailer-space-before-colon", "unchunk",
+         b"0\r\nFoo : bar\r\n\r\n", None),
+        ("trailer-nul", "unchunk", b"0\r\nFoo: ba\x00r\r\n\r\n", None),
+        ("chunk-ext-quoted", "unchunk",
+         b"5;ext=\"hi\"\r\nhello\r\n0\r\n\r\n", b"hello"),
+        ("chunk-ext-ctrl", "unchunk",
+         b"5;ext=\"h\x01\"\r\nhello\r\n0\r\n\r\n", None),
+        ("chunk-ext-empty-name", "unchunk",
+         b"5;=x\r\nhello\r\n0\r\n\r\n", None),
+        ("chunk-ext-bare-semi", "unchunk",
+         b"5;\r\nhello\r\n0\r\n\r\n", None),
+        ("chunk-size-leading-zeros", "unchunk",
+         b"0000000000000005\r\nhello\r\n0\r\n\r\n", b"hello"),
+        ("chunk-size-line-overlong", "unchunk",
+         b"5" + b"0" * 120 + b"\r\nhello\r\n0\r\n\r\n", None),
+        ("chunk-lf-only-delim", "unchunk",
+         b"5\nhello\n0\n\n", b"hello"),
+    ]
+    MUST_ACCEPT = {
+        "simple-length", "empty-length", "bare-lf-headers", "chunked-full",
+        "chunked-extension", "redirect-location",
+        "1xx-then-200", "http10-length", "dup-date-ok", "dup-host-ok",
+        "close-delimited", "te-chunked-case", "te-chunked-trail-ws",
+        "cl-leading-zero", "trailer-ok", "chunk-ext-quoted",
+        "chunk-size-leading-zeros", "chunk-lf-only-delim",
+    }
+    #       Moonwater policy where http.client disagrees on the same bytes.
+    DELIBERATE = {
+        "te-cl-conflict":
+            "RFC 9112 forbids TE with Content-Length; Moonwater refuses both",
+        "duplicate-content-length":
+            "duplicate framing fields are refused before a length is chosen",
+        "bare-cr-in-location":
+            "response field values reject embedded controls (NUL/CR/LF)",
+        "obs-fold-location":
+            "obsolete line folding is refused so a proxy cannot split views",
+        "space-before-colon":
+            "field names are exact tokens; whitespace before ':' is not a name",
+        "te-not-chunked":
+            "only transfer-coding chunked is implemented; anything else is refuse",
+        "duplicate-location":
+            "a redirect with repeated Location is ambiguous and refused",
+        "truncated-chunk-trailer":
+            "chunked bodies must end at a validated blank trailer line",
+        "malformed-trailer-field":
+            "trailer fields share the response header token grammar",
+        "oversize-header":
+            "HTTP_HEAD_MAX is an explicit response-head work ceiling",
+        "1xx-with-cl":
+            "informational responses cannot carry message framing",
+        "101-switch":
+            "101 protocol switch is outside this connection-close client",
+        "nul-in-cl-value":
+            "response field values reject embedded controls (NUL/CR/LF)",
+        "nul-in-location":
+            "response field values reject embedded controls (NUL/CR/LF)",
+        "bare-cr-status-line":
+            "a bare CR mid-status-line is not a field separator",
+        "obs-fold-date":
+            "obsolete line folding is refused so a proxy cannot split views",
+        "obs-fold-cl":
+            "obsolete line folding is refused so a proxy cannot split views",
+        "tab-before-colon":
+            "field names are exact tokens; whitespace before ':' is not a name",
+        "empty-field-name":
+            "an empty field name is not a token",
+        "cl-then-te":
+            "RFC 9112 forbids TE with Content-Length; Moonwater refuses both",
+        "dup-te":
+            "duplicate framing fields are refused before a coding is chosen",
+        "te-chunked-gzip":
+            "only a lone transfer-coding chunked is implemented",
+        "te-identity":
+            "only transfer-coding chunked is implemented; anything else is refuse",
+        "te-chunked-trail-ws":
+            "trailing blanks after chunked are ignored; http.client misreads the coding",
+        "cl-plus-sign":
+            "Content-Length is plain DIGIT; a leading sign is malformed",
+        "cl-trailing-junk":
+            "Content-Length must be DIGIT then optional blanks only",
+        "trailer-after-final":
+            "bytes after the final blank trailer line are leftover framing",
+        "trailer-obs-fold":
+            "trailer fields share the response header token grammar",
+        "trailer-space-before-colon":
+            "trailer fields share the response header token grammar",
+        "trailer-nul":
+            "trailer field values reject embedded controls",
+        "chunk-ext-ctrl":
+            "chunk-extension quoted values reject embedded controls",
+        "chunk-ext-empty-name":
+            "chunk-extension names must be non-empty tokens",
+        "chunk-ext-bare-semi":
+            "a bare ';' is not a valid chunk-extension",
+        "chunk-lf-only-delim":
+            "chunk framing allows LF-only delimiters like response headers",
+    }
+
+    def python_oracle(mode, wire):
+        if mode == "unchunk":
+            wire = (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                    + wire)
+        if mode == "oversize":
+            oversized = bytearray(16384 + 4)
+            oversized[:] = b"x" * (16384 + 4)
+            oversized[:17] = b"HTTP/1.1 200 OK\r\n"
+            oversized[16384:16388] = b"\r\n\r\n"
+            wire = bytes(oversized)
+
+        class Sock(BytesIO):
+            def makefile(self, *a, **k):
+                return self
+
+        try:
+            response = HTTPResponse(Sock(wire))
+            response.begin()
+            body = response.read()
+            return True, body
+        except Exception:
+            return False, None
+
+    checks = Checks()
+    with tempfile.TemporaryDirectory(prefix="http-response-framing-") as temporary:
+        work = Path(temporary)
+        source = shim + defines + headers + body + status + driver
+        (work / "http_response_framing.c").write_text(source)
+        compiler = "clang" if shutil.which("clang") else os.environ.get("CC", "cc")
+        built = subprocess.run(
+            [compiler, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
+             str(work / "http_response_framing.c"),
+             "-o", str(work / "http_response_framing")],
+            capture_output=True, text=True)
+        if built.returncode:
+            print("  FAIL the response framing probe did not build:\n" +
+                  built.stderr[-3000:])
+            write_tally("http-response-framing", 0, 1)
+            return 1
+
+        stdin = "".join(
+            "%s %s %s\n" % (name, mode, wire.hex() or "00")
+            for name, mode, wire, _ in CASES)
+        ran = subprocess.run([str(work / "http_response_framing")],
+                             input=stdin, capture_output=True, text=True,
+                             timeout=60)
+        if ran.returncode or ran.stderr.strip():
+            print("  FAIL the probe aborted:\n" + (ran.stderr or ran.stdout)[-3000:])
+            write_tally("http-response-framing", 0, 1)
+            return 1
+
+        answers = {}
+        for line in ran.stdout.splitlines():
+            name, verdict, body_hex = line.split("\t")
+            body = (binascii.unhexlify(body_hex) if body_hex != "-" else None)
+            answers[name] = (verdict == "ACCEPT", body)
+
+        for name, mode, wire, want_body in CASES:
+            ours_ok, ours_body = answers[name]
+            expected = name in MUST_ACCEPT
+            checks(ours_ok == expected,
+                   "%s: Moonwater %s a frame the matrix says to %s" % (
+                       name, "accepts" if ours_ok else "refuses",
+                       "accept" if expected else "refuse"))
+            if expected and want_body is not None:
+                checks(ours_body == want_body,
+                       "%s: body %r != %r" % (name, ours_body, want_body))
+
+            py_ok, py_body = python_oracle(mode, wire)
+            if name in DELIBERATE:
+                checks(True, "%s: deliberate vs http.client (%s)" % (
+                    name, DELIBERATE[name]))
+                same_verdict = py_ok == ours_ok
+                same_body = (not ours_ok or want_body is None or
+                             (py_ok and py_body == ours_body))
+                if same_verdict and same_body:
+                    checks(False,
+                           "%s: listed deliberate but http.client now agrees; "
+                           "remove it from DELIBERATE" % name)
+                continue
+            checks(py_ok == ours_ok,
+                   "%s: http.client %s it and Moonwater %s it" % (
+                       name, "accepts" if py_ok else "refuses",
+                       "accepts" if ours_ok else "refuses"))
+            if ours_ok and want_body is not None and py_ok:
+                checks(py_body == want_body,
+                       "%s: http.client body %r != %r" % (
+                           name, py_body, want_body))
+
+    return checks.verdict("http response framing", "http-response-framing")
+
+
+def http_fuzz_source(net, util, driver):
+    """The whole HTTP section of net.c from "#define HTTP_PORT 80" to the
+    section's #endif, less http_lookup, over a hosted shim whose transport is
+    a script: each connection serves the next segment of the input, cut into
+    reads (and TLS records) whose sizes a seeded generator picks. Lent TLS
+    spans live in a buffer freed at the next receive, so a span kept past its
+    lifetime is a heap-use-after-free under ASan. memory_copy is memmove and
+    memory_copy_apart is memcpy, the contracts lib.c keeps, so ASan also
+    holds every copy to the overlap it declares. The byte predicates, the
+    checked digit scanner and the byte_store appends are lib.util.c's own."""
+    begin = net.index("#define HTTP_PORT 80")
+    lookup = net.index("static p32 http_lookup(string_address host)")
+    leaf = net.index("static fn http_url_leaf(")
+    finish = net.index("#endif // STANDARD_MODERN_C_NET_HTTP")
+    http = net[begin:lookup] + net[leaf:finish]
+    known = util[util.index("static inline INLINE b32 known_is_digit(b32 value)"):
+                 util.index("static inline INLINE b32 known_is_ascii(b32 value)")]
+    digits = util[util.index("static inline INLINE positive digit_known(p8 character, "
+                             "positive base)"):
+                  util.index("/* A whole numeric word with the checked scanner's range")]
+    appends = util[util.index("static inline bool byte_store_append_span("
+                              "byte_store address_to store,"):
+                   util.index("/* Stable storage owns its mapping outside")]
+    shim = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+typedef uint8_t p8;
+typedef int8_t b8;
+typedef uint16_t p16;
+typedef uint32_t p32;
+typedef uint64_t p64;
+typedef int32_t b32;
+typedef unsigned long positive;
+typedef long bipolar;
+typedef void *address_any;
+typedef p8 *string_address;
+typedef const p8 *const_string;
+#define INLINE
+#define COLD
+#define CONST
+#define PURE
+#define fn void
+#define address_to *
+#define address_of &
+#define null NULL
+#define end ((p8)0)
+#define positive_max (~(positive)0)
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define memory_copy memmove
+#define memory_copy_apart memcpy
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define string_get(s) (*(const unsigned char *)(s))
+#define string_is(source, value) (*(source) == (value))
+#define string_set_blanks fuzz_blanks
+static const b8 fuzz_blanks[256] = {['\t'] = 1, [' '] = 1};
+""" + known + r"""
+#define byte_is_digit known_is_digit
+#define byte_is_alnum known_is_alnum
+#define byte_is_alpha known_is_alpha
+#define byte_is_control known_is_control
+#define byte_is_blank known_is_blank
+static p8 *memory_copy_end(p8 *into, const void *from, positive n)
+{
+        memmove(into, from, n);
+        into[n] = 0;
+        return into + n;
+}
+static p8 *memory_copy_apart_end(p8 *into, const void *from, positive n)
+{
+        memcpy(into, from, n);
+        into[n] = 0;
+        return into + n;
+}
+static positive string_length(const void *s) { return strlen(s); }
+static bool string_equals(const void *a, const void *b) { return !strcmp(a, b); }
+static b32 string_compare_max(const void *a, const void *b, positive n)
+{
+        return strncmp(a, b, n);
+}
+static string_address string_first_of(const void *s, int c)
+{
+        return (string_address)strchr(s, c);
+}
+static string_address string_last_of(const void *s, int c)
+{
+        return (string_address)strrchr(s, c);
+}
+static string_address string_copy(void *into, const void *from)
+{
+        return (string_address)strcpy(into, from);
+}
+static p8 *string_copy_max_end(p8 *into, const void *from, positive bound)
+{
+        positive n = strnlen(from, bound);
+        memcpy(into, from, n);
+        into[n] = 0;
+        return into + n;
+}
+static positive string_span_without_set(const void *s, const char *set)
+{
+        return strcspn(s, set);
+}
+static positive string_span_max(const void *s, positive bound, const b8 *set)
+{
+        const p8 *at = s;
+        positive n = 0;
+        while (n < bound && at[n] && set[at[n]])
+                n++;
+        return n;
+}
+static address_any memory_first_of(const void *block, int value, positive size)
+{
+        return memchr(block, value, size);
+}
+static positive memory_span_without_byte(const void *block, p8 byte, positive size)
+{
+        const p8 *hit = memchr(block, byte, size);
+        return hit ? (positive)(hit - (const p8 *)block) : size;
+}
+static address_any memory_search(const void *block, positive size,
+                                 const void *needle, positive needle_size)
+{
+        return memmem(block, size, needle, needle_size);
+}
+static b32 memory_compare_ascii_case(const void *one, const void *two, positive n)
+{
+        const p8 *a = one, *b = two;
+        for (positive i = 0; i < n; i++)
+                if ((a[i] | (known_is_alpha(a[i]) ? 32 : 0)) !=
+                    (b[i] | (known_is_alpha(b[i]) ? 32 : 0)))
+                        return 1;
+        return 0;
+}
+static positive positive_into(p8 *into, positive value)
+{
+        return (positive)sprintf((char *)into, "%lu", value);
+}
+static positive string_digits_max(string_address source, positive bound,
+                                  positive *used)
+{
+        positive got = 0, n = 0;
+        while (n < bound && source[n] >= '0' && source[n] <= '9')
+                got = got * 10 + (positive)(source[n++] - '0');
+        if (used)
+                *used = n;
+        return got;
+}
+static void crypto_forget(void *at, positive n) { memset(at, 0, n); }
+typedef struct { p8 *bytes; positive room; positive used; } byte_store;
+""" + digits + appends + r"""
+static bool fuzz_reserve(byte_store *store, positive wanted, positive step)
+{
+        (void)step;
+        if (wanted <= store->room)
+                return true;
+        p8 *grown = realloc(store->bytes, wanted);
+        if (!grown)
+                return false;
+        store->bytes = grown;
+        store->room = wanted;
+        return true;
+}
+static void fuzz_release(byte_store *store)
+{
+        free(store->bytes);
+        store->bytes = NULL;
+        store->room = store->used = 0;
+}
+#define byte_store_reserve(store, wanted, step) fuzz_reserve((store), (wanted), (step))
+#define byte_store_release(store) fuzz_release(store)
+
+/* The script. Connection n serves segment n of the input, segments cut at
+   FUZZ_HOP; reads come in sizes the generator picks. */
+#define FUZZ_HOP "\xffHOP"
+static const p8 *fuzz_input;
+static positive fuzz_input_size;
+static const p8 *fuzz_segment;
+static positive fuzz_segment_size;
+static positive fuzz_segment_at;
+static positive fuzz_opened;
+static positive fuzz_requests;
+static p64 fuzz_random;
+static positive fuzz_largest;
+static bool fuzz_write_faults;
+
+static positive fuzz_next(positive bound)
+{
+        fuzz_random = fuzz_random * 6364136223846793005ull + 1442695040888963407ull;
+        return bound ? (positive)(fuzz_random >> 33) % bound : 0;
+}
+
+static void fuzz_die(const char *why)
+{
+        fprintf(stderr, "ERROR: http fuzz invariant: %s\n", why);
+        abort();
+}
+
+static bool fuzz_segment_open(positive index)
+{
+        const p8 *at = fuzz_input;
+        positive left = fuzz_input_size;
+        for (;;) {
+                const p8 *cut = memmem(at, left, FUZZ_HOP, 4);
+                positive size = cut ? (positive)(cut - at) : left;
+                if (!index--) {
+                        fuzz_segment = at;
+                        fuzz_segment_size = size;
+                        fuzz_segment_at = 0;
+                        return true;
+                }
+                if (!cut)
+                        return false;
+                at = cut + 4;
+                left -= size + 4;
+        }
+}
+
+static positive fuzz_take(positive room)
+{
+        positive left = fuzz_segment_size - fuzz_segment_at;
+        positive take = 1 + fuzz_next(fuzz_largest);
+        return min(min(take, left), room);
+}
+
+typedef struct { p16 family; p16 port; p32 host; p64 pad; } socket_address_internet;
+typedef struct { int dummy; } network_deadline;
+#define AF_INET 2
+#define SOCK_STREAM 1
+#define SOCK_CLOEXEC 02000000
+#define ENOSPC 28
+#define network_order_16(v) (v)
+#define network_order_32(v) (v)
+#define FUZZ_SYS_writev 20
+#define syscall(name) FUZZ_SYS_##name
+static bipolar socket_new(int a, int b, int c)
+{
+        (void)a; (void)b; (void)c;
+        if (!fuzz_segment_open(fuzz_opened))
+                return -111;
+        fuzz_opened++;
+        return 1000;
+}
+static bool network_stream_timeout(bipolar h, positive s, positive n)
+{
+        (void)h; (void)s; (void)n;
+        return true;
+}
+static int socket_connect(b32 h, const void *where, positive size)
+{
+        (void)h; (void)where; (void)size;
+        return 0;
+}
+static int socket_close(b32 h) { (void)h; return 0; }
+static bool network_deadline_begin(network_deadline *d, positive s, positive n)
+{
+        (void)d; (void)s; (void)n;
+        return true;
+}
+
+/* Every request this client writes: one request line and four fields, each
+   ended by CRLF, a blank line, and no other CR, LF or control. */
+static void fuzz_request(const p8 *data, positive length)
+{
+        positive lines = 0;
+        fuzz_requests++;
+        if (length < 4 || memcmp(data + length - 4, "\r\n\r\n", 4) ||
+            memcmp(data, "GET /", 5))
+                fuzz_die("request framing");
+        for (positive at = 0; at < length; at++) {
+                p8 byte = data[at];
+                if (byte == '\r') {
+                        if (at + 1 == length || data[at + 1] != '\n')
+                                fuzz_die("bare CR in a request");
+                        lines++;
+                        at++;
+                } else if (byte == '\n' || byte == 0 ||
+                           (byte < 0x20 && byte != '\t') || byte == 0x7f)
+                        fuzz_die("control byte in a request");
+        }
+        if (lines != 6)
+                fuzz_die("request line count");
+        /* "GET " target " HTTP/1.x" CR: the target holds no space. */
+        positive line = (positive)((const p8 *)memchr(data, '\r', length) - data);
+        if (line < 14 || memchr(data + 4, ' ', line - 13))
+                fuzz_die("space inside the request target");
+}
+
+static bool network_stream_send_all(bipolar h, const p8 *data, positive length)
+{
+        (void)h;
+        fuzz_request(data, length);
+        return true;
+}
+
+static bipolar network_stream_read_some_until(bipolar h, p8 *into, positive room,
+                                              const network_deadline *d)
+{
+        (void)h; (void)d;
+        if (!room)
+                fuzz_die("a read of no room");
+        positive take = fuzz_take(room);
+        memcpy(into, fuzz_segment + fuzz_segment_at, take);
+        fuzz_segment_at += take;
+        return (bipolar)take;
+}
+
+/* A plaintext body read waits a length of time rather than to an instant;
+   what it takes is the same segment. */
+static bipolar network_stream_read_some_for(bipolar h, p8 *into, positive room,
+                                            positive s, positive ns)
+{
+        (void)s; (void)ns;
+        return network_stream_read_some_until(h, into, room, NULL);
+}
+
+/* TLS: the segment is cut into records; a receive pulls one to three of them
+   into a buffer of their exact size and frees the one before, which is when
+   the real record layer may overwrite what it lent. */
+#define TLS_OK 0
+#define TLS_FAIL (-1)
+#define TLS_AGAIN (-2)
+typedef struct
+{
+        p8 *receive;
+        positive record[4];
+        positive records;
+        positive record_at;
+        positive plain_at;
+        positive plain_used;
+        bool closed;
+} tls_conn;
+
+static bipolar tls_connect(tls_conn *tls, bipolar h, string_address host, bool check)
+{
+        (void)h; (void)host; (void)check;
+        memset(tls, 0, sizeof *tls);
+        return TLS_OK;
+}
+static void tls_forget(tls_conn *tls)
+{
+        free(tls->receive);
+        memset(tls, 0, sizeof *tls);
+}
+static bipolar tls_write(tls_conn *tls, const p8 *data, positive length)
+{
+        (void)tls;
+        fuzz_request(data, length);
+        return TLS_OK;
+}
+static bool fuzz_tls_receive(tls_conn *tls)
+{
+        positive records = 1 + fuzz_next(3);
+        positive sizes[4] = {0};
+        positive total = 0;
+
+        free(tls->receive);
+        tls->receive = NULL;
+        tls->records = tls->record_at = 0;
+        for (positive i = 0; i < records; i++) {
+                positive left = fuzz_segment_size - fuzz_segment_at - total;
+                positive size = 1 + fuzz_next(fuzz_largest * 4);
+                size = min(size, left);
+                if (!size)
+                        break;
+                sizes[tls->records++] = size;
+                total += size;
+        }
+        if (!total)
+                return false;
+        tls->receive = malloc(total);
+        memcpy(tls->receive, fuzz_segment + fuzz_segment_at, total);
+        fuzz_segment_at += total;
+        memcpy(tls->record, sizes, sizeof sizes);
+        tls->plain_at = 0;
+        tls->plain_used = 0;
+        return true;
+}
+static bipolar fuzz_tls_take(tls_conn *tls, positive room, p8 **span,
+                             positive *got, bool hold)
+{
+        for (;;) {
+                if (tls->plain_used) {
+                        positive take = min(room, tls->plain_used);
+                        *span = tls->receive + tls->plain_at;
+                        tls->plain_at += take;
+                        tls->plain_used -= take;
+                        *got = take;
+                        return TLS_OK;
+                }
+                if (tls->closed) {
+                        *got = 0;
+                        return TLS_OK;
+                }
+                if (tls->record_at < tls->records) {
+                        tls->plain_used = tls->record[tls->record_at++];
+                        continue;
+                }
+                if (hold)
+                        return TLS_AGAIN;
+                if (!fuzz_tls_receive(tls))
+                        tls->closed = true;
+        }
+}
+static bipolar tls_read_until(tls_conn *tls, p8 *into, positive room,
+                              positive *got, const network_deadline *d)
+{
+        p8 *span = NULL;
+        (void)d;
+        bipolar status = fuzz_tls_take(tls, room, &span, got, false);
+        if (!status && *got)
+                memcpy(into, span, *got);
+        return status;
+}
+static bipolar tls_borrow(tls_conn *tls, positive room, p8 **span,
+                          positive *got, positive s, positive n)
+{
+        (void)s; (void)n;
+        return fuzz_tls_take(tls, room, span, got, false);
+}
+static bipolar tls_lend(tls_conn *tls, positive room, p8 **span, positive *got)
+{
+        return fuzz_tls_take(tls, room, span, got, true);
+}
+
+/* writev into a growing sink, sometimes short, and when asked, sometimes a
+   failure. Every span is read whole, so ASan sees a stale one. */
+static p8 *fuzz_sink;
+static positive fuzz_sink_used;
+static bipolar system_call_3(positive number, positive fd, positive spans,
+                             positive count)
+{
+        const struct { void *base; positive length; } *iov = (void *)spans;
+        positive total = 0;
+        if (number != FUZZ_SYS_writev || fd != 7 || !count || count > 64)
+                fuzz_die("writev arguments");
+        for (positive i = 0; i < count; i++) {
+                volatile p8 sum = 0;
+                for (positive at = 0; at < iov[i].length; at++)
+                        sum ^= ((p8 *)iov[i].base)[at];
+                total += iov[i].length;
+        }
+        if (fuzz_write_faults && !fuzz_next(16))
+                return -ENOSPC;
+        positive wrote = fuzz_write_faults ? 1 + fuzz_next(total) : total;
+        fuzz_sink = realloc(fuzz_sink, fuzz_sink_used + wrote + 1);
+        for (positive i = 0, left = wrote; i < count && left; i++) {
+                positive take = min(left, iov[i].length);
+                memcpy(fuzz_sink + fuzz_sink_used, iov[i].base, take);
+                fuzz_sink_used += take;
+                left -= take;
+        }
+        return (bipolar)wrote;
+}
+
+static p32 http_lookup(string_address host)
+{
+        return strcmp(host, "unknown.invalid") ? 0x7f000001 : 0;
+}
+"""
+    return shim + http + driver
+
+
+def harness_http_fuzz(argv):
+    """Coverage-guided libFuzzer over the whole HTTP client in src/net/net.c.
+
+    http_fuzz_source lifts every function from http_split_into to the end of
+    the HTTP section (only http_lookup is shimmed) over a scripted transport.
+    The first input byte picks a lane and the second seeds the read sizes:
+
+      0/1  http_run under wget manners (to a writev sink, plaintext or TLS)
+      2    http_run under fetch manners (to a memory store)
+      3    URLs: split, request, leaf, put_url and absolutize, with
+           invariants on every product
+      4    chunked bodies decoded streaming, through fragmented reads, and in
+           memory; the two must agree
+
+    Every final response is also parsed whole, with http_response_framing
+    and http_unchunk, and a whole-buffer verdict of success must be the
+    streaming verdict with the same bytes. Every request the client writes is
+    held to one request line, four fields and CRLF only. Seeds are the
+    http_response_framing CASES plus URL and redirect shapes, written per
+    run. Bounded run in lane_net; `sh test/run fuzz` runs it longer.
+
+        python3 test/differential.py --harness http_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    util = (HARNESS_ROOT / "src/lib.util.c").read_text()
+    driver = r"""
+static void fuzz_expect_body(const p8 *got, positive got_size,
+                             const p8 *want, positive want_size)
+{
+        if (got_size != want_size || (want_size && memcmp(got, want, want_size)))
+                fuzz_die("streamed body differs from the whole-buffer body");
+}
+
+/* The whole-buffer reading of one segment: 1 and the body when the head is
+   a final 2xx whose body is whole, 0 when the streaming client must refuse
+   it, and -1 when this oracle cannot say (a redirect, or trailing bytes a
+   streaming reader stops before). */
+static int fuzz_whole(const p8 *segment, positive size, bool tls, bool follow,
+                      p8 **body, positive *body_size)
+{
+        http_response response;
+        positive header = 0;
+        p8 *copy = malloc(size + 1);
+        int verdict;
+
+        memcpy(copy, segment, size);
+        *body = copy;
+        *body_size = 0;
+        bipolar status = http_response_framing(copy, size, &header, &response);
+        if (status)
+                return size >= HTTP_HEAD_MAX ? -1 : 0;
+        if (follow && http_response_is_redirect(response.code))
+                return -1;
+        if (!http_response_is_success(response.code))
+                return 0;
+        if (http_response_has_no_body(response.code))
+                return 1;
+        switch (response.body_kind) {
+        case HTTP_BODY_LENGTH:
+                if (size - header < response.body_length)
+                        return 0;
+                memmove(copy, copy + header, response.body_length);
+                *body_size = response.body_length;
+                return 1;
+        case HTTP_BODY_CHUNKED:
+                memmove(copy, copy + header, size - header);
+                verdict = (int)http_unchunk(copy, size - header);
+                if (verdict < 0)
+                        return -1;
+                *body_size = (positive)verdict;
+                return 1;
+        default:
+                /* Close-delimited: plaintext EOF, or close_notify. */
+                memmove(copy, copy + header, size - header);
+                *body_size = size - header;
+                return 1;
+        }
+}
+
+static void fuzz_run(const p8 *data, positive size, int lane)
+{
+        bool tls = lane == 1;
+        bool fetch = lane == 2;
+        const char *start = tls ? "https://127.0.0.1:8443/dir/file.bin?q=1"
+                                : "http://127.0.0.1:8080/dir/file.bin?q=1";
+        http_buffer store = {0};
+        b32 code = 0;
+        bipolar status;
+
+        fuzz_input = data;
+        fuzz_input_size = size;
+        fuzz_opened = 0;
+        fuzz_requests = 0;
+        fuzz_sink_used = 0;
+        status = fetch ? http_get((string_address)start, &store, &code)
+                       : http_fetch_to((string_address)start, 7, true, &code, null);
+        if (fuzz_requests != fuzz_opened)
+                fuzz_die("a connection was opened with no request written on it");
+
+        if (fuzz_opened && !fuzz_write_faults && fuzz_segment_open(fuzz_opened - 1)) {
+                p8 *want = NULL;
+                positive want_size = 0;
+                int whole = fuzz_whole(fuzz_segment, fuzz_segment_size, tls, !fetch,
+                                       &want, &want_size);
+                if (whole == 1 && status)
+                        fuzz_die("the streaming client refused a response the "
+                                 "whole-buffer reading accepts");
+                if (whole == 0 && !status)
+                        fuzz_die("the streaming client accepted a response the "
+                                 "whole-buffer reading refuses");
+                if (whole == 1 && !fetch)
+                        fuzz_expect_body(fuzz_sink, fuzz_sink_used, want, want_size);
+                if (whole == 1 && fetch)
+                        fuzz_expect_body(store.bytes, store.used, want, want_size);
+                free(want);
+        }
+        if (!status && fetch && store.bytes && store.bytes[store.used])
+                fuzz_die("the fetched body is not terminated");
+        http_forget(&store);
+}
+
+static void fuzz_split_same(const p8 *url, const char *host, p16 port, bool tls)
+{
+        p8 again[256];
+        string_address path = NULL;
+        p16 port_again = 0;
+        bool tls_again = false;
+        if (http_split_into((string_address)url, again, sizeof again, &port_again,
+                            &path, &tls_again))
+                fuzz_die("put_url wrote a URL split refuses");
+        if (strcmp((char *)again, host) || port_again != port || tls_again != tls)
+                fuzz_die("put_url and split disagree on the authority");
+}
+
+static void fuzz_url(const p8 *data, positive size)
+{
+        char *url = malloc(size + 1);
+        memcpy(url, data, size);
+        url[size] = 0;
+        char *location = url + strlen(url) + (strlen(url) < size);
+        p8 host[256];
+        string_address path = NULL;
+        p16 port = 0;
+        bool tls = false;
+        p8 request[2048];
+        positive used = 0;
+        p8 leaf[256];
+        p8 next[HTTP_URL_MAX];
+
+        memset(host, 0xa5, sizeof host);
+        if (http_split_into(url, host, sizeof host, &port, &path, &tls)) {
+                if (host[0] != 0xa5)
+                        fuzz_die("a refused URL wrote the host");
+                free(url);
+                return;
+        }
+        if (!host[0] || !path || (path[0] != '/' && path[0] != '?'))
+                fuzz_die("split answered an empty host or a pathless path");
+        for (p8 *at = host; *at; at++)
+                if (!known_is_alnum(*at) && *at != '-' && *at != '.' && *at != '_')
+                        fuzz_die("split let a byte into the host");
+        if (!http_get_request(request, sizeof request, (string_address)host, port,
+                              path, tls, '1', (string_address)"Wget", &used))
+                fuzz_request(request, used);
+        http_url_leaf(path, leaf, sizeof leaf);
+        if (!leaf[0] || strchr((char *)leaf, '/'))
+                fuzz_die("the output name is empty or holds a slash");
+        if (!http_put_url(next, sizeof next, tls, (string_address)host, port, path))
+                fuzz_split_same(next, (char *)host, port, tls);
+        if (!http_absolutize(tls, (string_address)host, port, path,
+                             (string_address)location, next,
+                             sizeof next)) {
+                p8 again[256];
+                string_address again_path = NULL;
+                p16 again_port = 0;
+                bool again_tls = false;
+                if (strlen((char *)next) >= sizeof next)
+                        fuzz_die("absolutize overran");
+                if (location[0] != '/' && strncasecmp(location, "http", 4) &&
+                    !http_split_into((string_address)next, again, sizeof again,
+                                     &again_port, &again_path, &again_tls) &&
+                    (strcmp((char *)again, (char *)host) || again_port != port ||
+                     again_tls != tls))
+                        fuzz_die("a relative Location left the origin");
+        }
+        free(url);
+}
+
+/* Chunked framing decoded twice: streamed through fragmented reads into a
+   store and into the writev sink, and whole in memory. */
+static void fuzz_chunked(const p8 *data, positive size)
+{
+        p8 *whole = malloc(size + 1);
+        p8 *scratch = malloc(HTTP_HEAD_MAX);
+        memcpy(whole, data, size);
+        bipolar decoded = http_unchunk(whole, size);
+
+        for (int sink = 0; sink < 2; sink++) {
+                http_link link = {.handle = 1000};
+                http_buffer store = {0};
+                http_body body = {
+                    .link = &link,
+                    .stash = scratch,
+                    .stash_used = 0,
+                    .scratch = scratch,
+                    .store = sink ? &store : NULL,
+                    .store_limit = HTTP_FETCH_MAX,
+                };
+                fuzz_segment = data;
+                fuzz_segment_size = size;
+                fuzz_segment_at = 0;
+                fuzz_sink_used = 0;
+                bipolar streamed = http_copy_chunked(&body, 7);
+                if (decoded >= 0) {
+                        if (streamed)
+                                fuzz_die("streaming refused chunked framing the "
+                                         "memory decoder accepts");
+                        if (sink)
+                                fuzz_expect_body(store.bytes, store.used, whole,
+                                                 (positive)decoded);
+                        else
+                                fuzz_expect_body(fuzz_sink, fuzz_sink_used, whole,
+                                                 (positive)decoded);
+                }
+                http_forget(&store);
+        }
+        free(scratch);
+        free(whole);
+}
+
+int LLVMFuzzerTestOneInput(const p8 *data, positive size)
+{
+        if (size < 2)
+                return 0;
+        int lane = data[0] % 5;
+        fuzz_random = data[1] * 0x9e3779b97f4a7c15ull + 1;
+        fuzz_largest = (data[1] & 15) ? (positive)(data[1] & 15) * (data[1] >> 4 | 1)
+                                      : 65536;
+        fuzz_write_faults = lane < 2 && (data[0] & 0x80);
+        data += 2;
+        size -= 2;
+        if (lane < 3)
+                fuzz_run(data, size, lane);
+        else if (lane == 3)
+                fuzz_url(data, size);
+        else
+                fuzz_chunked(data, size);
+        return 0;
+}
+"""
+    return tls_fuzz_run("http", "http", http_fuzz_source(net, util, driver), 65536)
+
+
+def http_fuzz_seeds():
+    """http_fuzz's corpus: every http_response_framing CASES row as a wget,
+    TLS and fetch exchange (unchunk rows as chunked bodies), redirect chains
+    across hops, and URL/Location pairs."""
+    framing = inspect.getsource(harness_http_response_framing)
+    cases = eval(re.search(r"CASES = (\[.*?\n    \])", framing, re.S).group(1), {})
+    seeds = {}
+    for name, mode, wire, _ in cases:
+        if mode == "unchunk":
+            seeds["chunked_%s.bin" % name] = b"\x04\x00" + wire
+            wire = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + wire
+        for lane, split in ((0, 0x00), (1, 0x13), (2, 0x31)):
+            seeds["run%d_%s.bin" % (lane, name)] = bytes([lane, split]) + wire
+    hop = b"\xffHOP"
+    ok = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
+    for name, location in (("relative", b"next"), ("absolute_path", b"/a/b?c#d"),
+                           ("query", b"?x=1"), ("fragment", b"#top"),
+                           ("network_path", b"//127.0.0.1:8080/n"),
+                           ("upper_scheme", b"HTTP://127.0.0.1:8080/u"),
+                           ("other_scheme", b"ftp://127.0.0.1/f"),
+                           ("downgrade", b"http://127.0.0.1/p"),
+                           ("unknown_host", b"http://unknown.invalid/"),
+                           ("trailing_blank", b"/p \t"), ("dot_segments", b"../../x"),
+                           ("unbuildable", b"/caf\xe9"), ("percent_cr", b"/%0d")):
+        redirect = (b"HTTP/1.1 302 Found\r\nLocation: " + location +
+                    b"\r\nContent-Length: 0\r\n\r\n")
+        for lane in (0, 1):
+            seeds["hop%d_%s.bin" % (lane, name)] = bytes([lane, 7]) + redirect + hop + ok
+    seeds["hop0_eleven.bin"] = b"\x00\x05" + hop.join(
+        [b"HTTP/1.1 301 Moved\r\nLocation: /again\r\n\r\n"] * 11)
+    seeds["run1_chunked_split_records.bin"] = b"\x01\x11" + (
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" +
+        b"".join(b"%x\r\n%s\r\n" % (n, bytes([65 + n % 26]) * n) for n in range(1, 40)) +
+        b"0\r\nTrailer: x\r\n\r\n")
+    seeds["run0_faults_length.bin"] = b"\x80\x03" + (
+        b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n" + b"z" * 4096)
+    seeds["run1_close_notify.bin"] = b"\x01\x02HTTP/1.1 200 OK\r\n\r\n" + b"q" * 3000
+    seeds["run0_1xx_trickle.bin"] = b"\x00\x01" + (
+        b"HTTP/1.1 100 Continue\r\n\r\n" * 20 + ok)
+    for name, url, location in (
+            ("plain", b"http://example.com/a/b.iso", b"c"),
+            ("port_query", b"https://example.com:8443/a?x=/y#z", b"?q"),
+            ("bare_host", b"example.com", b"//other.example/p"),
+            ("query_only", b"http://h?x", b"#f"),
+            ("dotdot_leaf", b"http://h/a/..", b"../b"),
+            ("upper", b"HTTPS://Example.COM/", b"HTTPS://x/"),
+            ("percent", b"http://h/%250d%0a", b"/%25250a"),
+            ("userinfo", b"http://user@h/", b"http://u@h/"),
+            ("port_zero", b"http://h:0/", b"/"),
+            ("port_big", b"http://h:65536/", b"/"),
+            ("scheme_only", b"gopher://h/", b"mailto:x"),
+            ("long", b"http://h/" + b"a" * 2100, b"b" * 2100)):
+        seeds["url_%s.bin" % name] = b"\x03\x00" + url + b"\x00" + location
+    return seeds
+
+
+def harness_http_urls(argv):
+    """http_split_into and http_absolutize against Python's urllib.parse.
+
+    A seeded grammar writes URLs (schemes in any case, userinfo, hosts in
+    and out of the DNS alphabet, ports at and past the edges, paths, queries
+    and fragments) and relative references against a set of bases. The same
+    hosted lift http_fuzz builds answers each; where the URL is in the subset
+    this client implements -- an http or https scheme, no userinfo, a host of
+    letters, digits, '-', '.' and '_', a port 1..65535, no control, space or
+    backslash, under HTTP_URL_MAX -- urlsplit must name the same scheme,
+    host, port and origin-form target, and every URL urlsplit reads that way
+    must be accepted. A resolved Location must name what urljoin names, less
+    the fragment. DELIBERATE lists where this client refuses what urllib
+    takes. Paths and references carry dot segments too: the client resolves
+    them before it asks, as GNU wget does (http_path_simplify, %2e spellings
+    included), and the oracle by RFC 3986 5.2.4 over urllib's answer.
+
+        python3 test/differential.py --harness http_urls
+    """
+    del argv
+    import binascii
+    import string
+    from urllib.parse import urljoin, urlsplit
+
+    DELIBERATE = {
+        "schemeless": "a URL without a scheme is read as http://; urllib as a path",
+        "other-scheme": "a Location in any scheme but http(s) is refused, not followed",
+        "no-slashes": "\"http:path\" is refused; urljoin reads it as a relative path",
+    }
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    util = (HARNESS_ROOT / "src/lib.util.c").read_text()
+    driver = r"""
+static void emit(const p8 *bytes)
+{
+        for (; *bytes; bytes++)
+                printf("%02x", *bytes);
+        printf("\t");
+}
+
+static p8 *unhex(const char *hex)
+{
+        positive size = strlen(hex) / 2;
+        p8 *out = malloc(size + 1);
+        for (positive at = 0; at < size; at++) {
+                unsigned value;
+                sscanf(hex + 2 * at, "%2x", &value);
+                out[at] = (p8)value;
+        }
+        out[size] = 0;
+        return out;
+}
+
+/* stdin: S HEXURL | A HEXBASE HEXREF (an empty field is "-")
+   stdout: OK host port tls origin-form (hex) | BAD */
+static void answer(const p8 *url)
+{
+        p8 host[256];
+        p8 target[HTTP_URL_MAX];
+        string_address path = NULL;
+        p16 port = 0;
+        bool tls = false;
+        if (http_split_into((string_address)url, host, sizeof host, &port, &path, &tls) ||
+            (http_path_simplify((p8 *)path), http_origin_form(path, target, sizeof target))) {
+                printf("BAD\n");
+                return;
+        }
+        printf("OK\t");
+        emit(host);
+        printf("%u\t%d\t", port, tls);
+        emit(target);
+        printf("\n");
+}
+
+int main(void)
+{
+        char mode[4], first[8192], second[8192];
+        while (scanf("%3s %8191s", mode, first) == 2) {
+                p8 *url = unhex(strcmp(first, "-") ? first : "");
+                if (mode[0] == 'S') {
+                        answer(url);
+                } else if (scanf("%8191s", second) == 1) {
+                        p8 *ref = unhex(strcmp(second, "-") ? second : "");
+                        p8 host[256];
+                        p8 next[HTTP_URL_MAX];
+                        string_address path = NULL;
+                        p16 port = 0;
+                        bool tls = false;
+                        if (http_split_into((string_address)url, host, sizeof host, &port,
+                                            &path, &tls) ||
+                            http_absolutize(tls, (string_address)host, port, path,
+                                            (string_address)ref, next, sizeof next))
+                                printf("BAD\n");
+                        else
+                                answer(next);
+                        free(ref);
+                }
+                free(url);
+                fflush(stdout);
+        }
+        return 0;
+}
+"""
+    source = http_fuzz_source(net, util, driver)
+    random_urls = random.Random(20260928)
+    schemes = ["http://", "https://", "HTTP://", "hTtPs://", "", "ftp://", "http:",
+               "web+x://", "https:/"]
+    #       Mostly well formed, so most URLs reach the comparison; each
+    #       refusal still turns up hundreds of times.
+    users = [""] * 12 + ["user@", "u:p@", "@"]
+    hosts = ["example.com", "Example.COM", "a-b.c_d", "127.0.0.1", "h", "x" * 254] * 3 + [
+        "", "bad!host", "h%41", "[::1]", "x" * 255, "\u00e9.test"]
+    ports = ["", "", "", ":80", ":443", ":8080", ":65535", ":08", ":1"] * 2 + [
+        ":0", ":65536", ":", ":+1", ":1x", ":99999999999999999999"]
+    paths = ["", "/", "/a/b", "/a%20b", "/a;b,c", "/\u00e9", "/a:b@c", "/%0d%0a"] * 2 + [
+        "/a b", "/a\\b", "/a\tb", "/" + "p" * 2100, "/a/./b", "/a/../b", "/a/b/..",
+        "/..", "/./", "/a/%2e%2E/b", "/a/.%2e", "/a/...", "/a//../b", "/%2e/x"]
+    queries = ["", "", "?", "?x=1", "?a/b?c", "?#"]
+    fragments = ["", "", "#", "#f", "#a?b/c"]
+
+    def pick(choices):
+        return random_urls.choice(choices)
+
+    urls = set()
+    for _ in range(4000):
+        urls.add(pick(schemes) + pick(users) + pick(hosts) + pick(ports) +
+                 pick(paths) + pick(queries) + pick(fragments))
+    urls = sorted(urls)
+    bases = ["http://example.com/dir/old", "https://example.com:8443/a/b?q=1",
+             "http://h:80/", "https://h/x?y#z", "http://127.0.0.1:8080/d/e/f"]
+    segments = ["", "p", "p/q", "a%20b", "x;y", "\u00e9", "../x", "./y", "..", ".",
+                "a/../../b", "%2e%2e/z", "..%2f", "../../../up",
+                #   RFC 3986 5.4.2's abnormal examples.
+                "./../g", "./g/.", "g/./h", "g/../h", "g;x=1/./y", "g;x=1/../y",
+                "g.", ".g", "g..", "..g"]
+    references = set()
+    for _ in range(1500):
+        shape = random_urls.randrange(7)
+        tail = pick(segments) + pick(queries) + pick(fragments)
+        references.add([tail, "/" + tail, "//other.example" + pick(ports) + "/" + tail,
+                        pick(["HTTP://", "https://", "Https://"]) + "h2" + pick(ports) + "/" + tail,
+                        pick(["ftp://h/", "mailto:x", "a:b", "javascript:x"]) + tail,
+                        pick(["http:", "https:"]) + tail,
+                        pick(["?", "#"]) + tail][shape])
+    references = sorted(references)
+
+    def encode(text):
+        return text.encode("utf-8").hex() or "-"
+
+    scheme_shape = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):")
+
+    def dot_free(target):
+        """RFC 3986 5.2.4 over the path in front of the query, a segment
+        of dots spelled with %2e too."""
+        path, mark, query = target.partition("?")
+        if not path.startswith("/"):
+            return target
+        kept = []
+        segments = path.split("/")[1:]
+        for at, segment in enumerate(segments):
+            plain = re.sub("%2e", ".", segment, flags=re.I)
+            if plain in (".", ".."):
+                if plain == ".." and kept:
+                    kept.pop()
+                if at == len(segments) - 1:
+                    kept.append("")
+                continue
+            kept.append(segment)
+        return "/" + "/".join(kept) + mark + query
+
+    def subset(url):
+        """What this client must answer for url: a (tls, host, port, target)
+        tuple read with urlsplit, "refuse", or a DELIBERATE key."""
+        raw = url.encode("utf-8")
+        if any(b < 0x20 or b == 0x7f or b in b" \\" for b in raw) or len(raw) >= 2048:
+            return "refuse"
+        scheme = scheme_shape.match(url)
+        if not scheme or not url[scheme.end():].startswith("//"):
+            return "schemeless"
+        if scheme.group(1).lower() not in ("http", "https"):
+            return "refuse"
+        parts = urlsplit(url)
+        host, colon, port = parts.netloc.partition(":")
+        if ("@" in parts.netloc or not host or len(host) > 254 or
+                any(c not in string.ascii_letters + string.digits + "-._" for c in host) or
+                (colon and not (port.isascii() and port.isdigit() and
+                                1 <= int(port) <= 65535))):
+            return "refuse"
+        tls = scheme.group(1).lower() == "https"
+        target = (parts.path or "/") + ("?" + parts.query if "?" in url.split("#", 1)[0] else "")
+        return (tls, host, int(port) if colon else 443 if tls else 80, dot_free(target))
+
+    def same(got, want):
+        """urljoin drops an empty query that RFC 3986 keeps; nothing else
+        is folded."""
+        def bare(target):
+            return target[:-1] if target.find("?") == len(target) - 1 else target
+        return got is not None and got[:3] == want[:3] and bare(got[3]) == bare(want[3])
+
+    checks = Checks()
+    compiler = "clang" if shutil.which("clang") else os.environ.get("CC", "cc")
+    with tempfile.TemporaryDirectory(prefix="http-urls-") as temporary:
+        work = Path(temporary)
+        unit = work / "http_urls.c"
+        unit.write_text(source)
+        flags = [compiler, "-O1", "-g", "-std=gnu11", "-w"]
+        if platform.system() == "Linux":
+            flags.append("-fsanitize=address,undefined")
+        built = subprocess.run(flags + [str(unit), "-o", str(work / "http_urls")],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print("  FAIL the URL lift did not build:\n" + built.stderr[-3000:])
+            write_tally("http-urls", 0, 1)
+            return 1
+        questions = ["S %s" % encode(url) for url in urls]
+        pairs = [(base, reference) for base in bases for reference in references]
+        questions += ["A %s %s" % (encode(base), encode(reference)) for base, reference in pairs]
+        ran = subprocess.run([str(work / "http_urls")], input="\n".join(questions) + "\n",
+                             capture_output=True, text=True, timeout=120,
+                             env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+        answers = ran.stdout.splitlines()
+        if ran.returncode or len(answers) != len(questions):
+            print("  FAIL the URL lift stopped:\n" + ran.stderr[-3000:])
+            write_tally("http-urls", 0, 1)
+            return 1
+
+        def ours(answer):
+            fields = answer.split("\t")
+            if fields[0] != "OK":
+                return None
+            return (fields[3] == "1", binascii.unhexlify(fields[1]).decode("utf-8", "replace"),
+                    int(fields[2]), binascii.unhexlify(fields[4]).decode("utf-8", "replace"))
+
+        seen = collections.Counter()
+        for url, answer in zip(urls, answers):
+            want = subset(url)
+            got = ours(answer)
+            if want == "refuse":
+                checks(got is None, "%r: accepted outside the implemented subset: %r" % (url, got))
+            elif isinstance(want, str):
+                seen[want] += 1
+            else:
+                checks(same(got, want), "%r: split %r, urllib %r" % (url, got, want))
+        for (base, reference), answer in zip(pairs, answers[len(urls):]):
+            got = ours(answer)
+            scheme = scheme_shape.match(reference)
+            if scheme and scheme.group(1).lower() not in ("http", "https"):
+                seen["other-scheme"] += 1
+                checks(got is None, "%r + %r: another scheme was followed: %r"
+                       % (base, reference, got))
+                continue
+            if scheme and not reference[scheme.end():].startswith("//"):
+                seen["no-slashes"] += 1
+                checks(got is None, "%r + %r: a scheme without // was followed: %r"
+                       % (base, reference, got))
+                continue
+            joined = urljoin(base, reference).split("#", 1)[0]
+            want = subset(joined)
+            if isinstance(want, tuple):
+                checks(same(got, want), "%r + %r: absolutize %r, urljoin %r"
+                       % (base, reference, got, joined))
+            else:
+                checks(got is None, "%r + %r: resolved to %r where urljoin's %r is refused"
+                       % (base, reference, got, joined))
+        for key, why in DELIBERATE.items():
+            checks(seen[key] > 0, "DELIBERATE %s never generated (%s)" % (key, why))
+    return checks.verdict("http urls", "http-urls")
+
+
+def tls_fuzz_budget(default_runs=20000, default_seconds=5):
+    """Lane smoke defaults; longer local runs via MOONWATER_FUZZ_* env vars.
+
+    MOONWATER_FUZZ_RUNS / MOONWATER_FUZZ_SECONDS override the libFuzzer
+    -runs / -max_total_time knobs. Lane_net leaves them unset (20000 / 5).
+    `sh test/run fuzz` sets longer values for continuous local fuzzing.
+    """
+    runs = int(os.environ.get("MOONWATER_FUZZ_RUNS", str(default_runs)))
+    seconds = int(os.environ.get("MOONWATER_FUZZ_SECONDS", str(default_seconds)))
+    # Give the process a little headroom past max_total_time for compile-less
+    # shutdown and artifact write; never shorter than the historical 60s smoke.
+    timeout = max(60, seconds + 30) if seconds >= 0 else None
+    return runs, seconds, timeout
+
+
+def moonwater_msan_requested():
+    """True when MOONWATER_MSAN asks the TLS fuzz harnesses for MemorySanitizer."""
+    return os.environ.get("MOONWATER_MSAN", "").strip().lower() not in (
+        "", "0", "false", "no")
+
+
+def clang_supports_msan(clang):
+    """Hosted clang accepts -fsanitize=memory (Linux clang; not Apple clang)."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="msan-probe-") as temporary:
+        work = Path(temporary)
+        unit = work / "probe.c"
+        binary = work / "probe"
+        unit.write_text("int main(void){return 0;}\n")
+        built = subprocess.run(
+            [clang, "-O1", "-fsanitize=memory", str(unit), "-o", str(binary)],
+            capture_output=True, text=True)
+        return built.returncode == 0
+
+
+def tls_fuzz_sanitize_config(clang):
+    """Sanitize flag, run env, and label for tls_*_fuzz; or (None, None, reason).
+
+    Default is libFuzzer + ASan/UBSan. MOONWATER_MSAN=1 switches to
+    libFuzzer + MSan (cannot combine with ASan). Returns reason string when
+    the requested sanitizer is unavailable so callers can NOT RUN.
+    """
+    if moonwater_msan_requested():
+        if not clang_supports_msan(clang):
+            return None, None, (
+                "MOONWATER_MSAN set but clang lacks -fsanitize=memory "
+                "(common on Apple clang and some qemu images)")
+        return ("-fsanitize=fuzzer,memory",
+                dict(os.environ, MSAN_OPTIONS="halt_on_error=1:exitcode=1"),
+                "libFuzzer MSan")
+    return ("-fsanitize=fuzzer,address,undefined",
+            dict(os.environ,
+                 ASAN_OPTIONS="detect_leaks=0:halt_on_error=1",
+                 UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=0"),
+            "libFuzzer ASan/UBSan")
+
+
+#       Seed bytes for the tls_*_fuzz harnesses: hex where the fixture was
+#       taken from checks.c's refuse cases, built below where the shape is the
+#       point. Each run writes them into its own temporary corpus; none is
+#       kept in the tree. Expected TLS_FAIL is ignored, so a seed only has to
+#       reach a parser; empty is the one intentionally empty control.
+TLS_FUZZ_SEED_HEX = {
+    "tls_der": {
+        "cert_list_c1_leftover": "c1000000c90000c33081c03081a6020101300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a8648ce3d03010703420004f56ea07c0c20d314d89a2494012155867696f9a0e5a5762815b1d197bd642aa41ed0ed17eaa6c29b36260c365cd172577bd180bf5ef812f790e65142d3a8cd17300a06082a8648ce3d04030203090030060201010201010000ee",
+        "cert_list_empty": "00000000",
+        "cert_list_trunc_len1": "0000000100",
+        "cert_list_trunc_len2": "000000020000",
+        "cert_list_trunc_mid_cert": "000000640000c33081c03081a6020101300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a",
+        "cert_list_trunc_mid_ext": "0000000c000005300302010100080001",
+        "cert_list_trunc_prefix": "000000c80000c33081c0",
+        "cert_oversize_outer": "3081c13081a6020101300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a8648ce3d03010703420004f56ea07c0c20d314d89a2494012155867696f9a0e5a5762815b1d197bd642aa41ed0ed17eaa6c29b36260c365cd172577bd180bf5ef812f790e65142d3a8cd17300a06082a8648ce3d0403020309003006020101020101",
+        "cert_serial_padded": "3081c13081a702020001300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a8648ce3d03010703420004f56ea07c0c20d314d89a2494012155867696f9a0e5a5762815b1d197bd642aa41ed0ed17eaa6c29b36260c365cd172577bd180bf5ef812f790e65142d3a8cd17300a06082a8648ce3d0403020309003006020101020101",
+        "cert_sig_oid_mismatch": "3081c03081a6020101300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a8648ce3d03010703420004f56ea07c0c20d314d89a2494012155867696f9a0e5a5762815b1d197bd642aa41ed0ed17eaa6c29b36260c365cd172577bd180bf5ef812f790e65142d3a8cd17300a06082a8648ce3d0403030309003006020101020101",
+        "cert_spki_unused_bits": "3081c03081a6020101300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a8648ce3d03010703420104f56ea07c0c20d314d89a2494012155867696f9a0e5a5762815b1d197bd642aa41ed0ed17eaa6c29b36260c365cd172577bd180bf5ef812f790e65142d3a8cd17300a06082a8648ce3d0403020309003006020101020101",
+        "cert_trailing": "3081c03081a6020101300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a8648ce3d03010703420004f56ea07c0c20d314d89a2494012155867696f9a0e5a5762815b1d197bd642aa41ed0ed17eaa6c29b36260c365cd172577bd180bf5ef812f790e65142d3a8cd17300a06082a8648ce3d0403020309003006020101020101ff",
+        "cert_v1_with_extensions": "3081cb3081b1020101300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a8648ce3d03010703420004f56ea07c0c20d314d89a2494012155867696f9a0e5a5762815b1d197bd642aa41ed0ed17eaa6c29b36260c365cd172577bd180bf5ef812f790e65142d3a8cd17a3093007300506012a0400300a06082a8648ce3d0403020309003006020101020101",
+        "empty": "",
+        "ext_bc_canonical": "a3133011300f0603551d13040830060101ff020100",
+        "ext_bc_canonical_then_overlong": "a31c301a30090603551d1304023000300d0604551d8013040530030101ff",
+        "ext_bc_oid_long_form": "a311300f300d068103551d13040530030101ff",
+        "ext_bc_overlong_oid": "a314301230100604551d8013040830060101ff020100",
+        "ext_claim_past_end": "a30a3007300506012a0400",
+        "ext_duplicate_bc": "a318301630090603551d130402300030090603551d1304023000",
+        "ext_duplicate_ku": "a31c301a300b0603551d0f040403020780300b0603551d0f040403020780",
+        "ext_duplicate_mixed_critical": "a3173015300706022a03040100300a06022a030101ff040100",
+        "ext_duplicate_nonadjacent": "a31d301b300706022a03040100300706022a04040100300706022a03040100",
+        "ext_duplicate_san": "a31e301c300c0603551d1104053003820161300c0603551d1104053003820162",
+        "ext_duplicate_unknown": "a3143012300706022a03040100300706022a03040100",
+        "ext_indefinite": "a3803007300506012a04000000",
+        "ext_indefinite_nested": "a30b3080300506012a04000000",
+        "ext_minimal": "a3093007300506012a0400",
+        "ext_name_constraints": "a30d300b30090603551d1e04023000",
+        "ext_octet_overrun": "a30a3008300606012a040200",
+        "ext_oversize": "a38201003000",
+        "ext_trailing_after_short": "a3083006300406012a0400ff",
+        "minimal_cert": "3081c03081a6020101300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a8648ce3d03010703420004f56ea07c0c20d314d89a2494012155867696f9a0e5a5762815b1d197bd642aa41ed0ed17eaa6c29b36260c365cd172577bd180bf5ef812f790e65142d3a8cd17300a06082a8648ce3d0403020309003006020101020101",
+    },
+    "tls_hs": {
+        "cert_3way_chunks": "00030b0000000a18ababababababababab000fababababababababababababababab",
+        "cert_empty_mid_chunks": "00060b000008111100000006111111111111",
+        "cert_whole": "0b000018abababababababababababababababababababababababab",
+        "ee_cert_shared": "0800000200000b000008aabb",
+        "ee_cert_shared_then_rest_chunks": "000c0800000200000b000008aabb0006cccccccccccc",
+        "ee_empty_exts": "080000020000",
+        "empty": "",
+        "flight_3way_chunks": "00050800000200000f000b0000000f000000140000205555001e555555555555555555555555555555555555555555555555555555555555",
+        "flight_cert_before_ee": "0b000000",
+        "flight_complete": "0800000200000b0000000f000000140000205555555555555555555555555555555555555555555555555555555555555555",
+        "flight_complete_then_junk_chunks": "f1000a0800000200000b00000000140f0000001400002055555555555555555555555500155555555555555555555555555555555555555555aa",
+        "flight_ee_overrun": "080000060004000a0001",
+        "flight_empty_mid_chunk": "f100060b000008111100000006111111111111",
+        "flight_trailing_junk": "0800000200000b0000000f000000140000205555555555555555555555555555555555555555555555555555555555555555ff",
+        "one_byte": "08",
+        "sh_2way_chunks": "00020200005800560303000000000000000000000000000000000000000000000000000000000000000000130100002e002b0002030400330024001d00200900000000000000000000000000000000000000000000000000000000000000",
+        "sh_complete": "020000560303000000000000000000000000000000000000000000000000000000000000000000130100002e002b0002030400330024001d00200900000000000000000000000000000000000000000000000000000000000000",
+        "sh_header_prefix": "0200",
+        "sh_magic_2way": "f200020200005800560303000000000000000000000000000000000000000000000000000000000000000000130100002e002b0002030400330024001d00200900000000000000000000000000000000000000000000000000000000000000",
+        "sh_overlong_x25519": "020000570303000000000000000000000000000000000000000000000000000000000000000000130100002f002b0002030400330025001d0020090000000000000000000000000000000000000000000000000000000000000000",
+        "sh_trailing_junk": "020000560303000000000000000000000000000000000000000000000000000000000000000000130100002e002b0002030400330024001d0020090000000000000000000000000000000000000000000000000000000000000000",
+        "sh_wrong_legacy": "020000560302000000000000000000000000000000000000000000000000000000000000000000130100002e002b0002030400330024001d00200900000000000000000000000000000000000000000000000000000000000000",
+    },
+}
+
+
+def tls_seed_len(n):
+    return bytes([n]) if n < 128 else (
+        bytes([0x81, n]) if n < 256 else bytes([0x82, n >> 8 & 0xff, n & 0xff]))
+
+
+def tls_seed_tlv(tag, *parts):
+    body = b"".join(parts)
+    return bytes([tag]) + tls_seed_len(len(body)) + body
+
+
+def tls_seed_ext(oid, value, critical=False):
+    return tls_seed_tlv(0x30, tls_seed_tlv(0x06, oid),
+                        b"\x01\x01\xff" if critical else b"",
+                        tls_seed_tlv(0x04, value))
+
+
+def tls_seed_extensions(*extensions):
+    return tls_seed_tlv(0xa3, tls_seed_tlv(0x30, *extensions))
+
+
+def tls_seed_cert_list(*certs):
+    """A Certificate handshake body: each cert with an empty extension list."""
+    blob = b"".join(len(c).to_bytes(3, "big") + c + b"\0\0" for c in certs)
+    return b"\0" + len(blob).to_bytes(3, "big") + blob
+
+
+def tls_seed_connection(control, *records):
+    """A tls_hs_fuzz connection seed: magic 0xf3, four control bytes (flags
+    and the PRNG seed), then the server's bytes."""
+    return b"\xf3" + control + b"".join(records)
+
+
+def tls_seed_record(kind, payload):
+    return bytes([kind, 3, 3]) + len(payload).to_bytes(2, "big") + payload
+
+
+def tls_seed_sealed(kind, content, padding=0, tag=0):
+    """A record under tls_hs_fuzz's identity AEAD: inner plaintext, then the
+    tag whose first byte opens it when zero."""
+    return tls_seed_record(23, content + bytes([kind]) + b"\0" * padding +
+                           bytes([tag]) + b"\0" * 15)
+
+
+def tls_seed_message(kind, body):
+    return bytes([kind]) + len(body).to_bytes(3, "big") + body
+
+
+def tls_seed_server_hello(group=0x1d, extra=b""):
+    size = {0x1d: 32, 0x17: 65, 0x18: 97}.get(group, 32)
+    share = group.to_bytes(2, "big") + size.to_bytes(2, "big") + b"\4" + b"\x09" * (size - 1)
+    extensions = (b"\0\x2b\0\2\3\4" + b"\0\x33" + len(share).to_bytes(2, "big") +
+                  share + extra)
+    return tls_seed_message(2, b"\3\3" + b"\x42" * 32 + b"\0\x13\1\0" +
+                            len(extensions).to_bytes(2, "big") + extensions)
+
+
+def tls_seed_retry(group=None, cookie=None, suite=b"\x13\1"):
+    """A HelloRetryRequest record asking for group and echoing cookie."""
+    extensions = b"\0\x2b\0\2\3\4"
+    if group is not None:
+        extensions += b"\0\x33\0\2" + group.to_bytes(2, "big")
+    if cookie is not None:
+        extensions += (b"\0\x2c" + (len(cookie) + 2).to_bytes(2, "big") +
+                       len(cookie).to_bytes(2, "big") + cookie)
+    return tls_seed_record(22, tls_seed_message(
+        2, b"\3\3" + hashlib.sha256(b"HelloRetryRequest").digest() + b"\0" + suite +
+        b"\0" + len(extensions).to_bytes(2, "big") + extensions))
+
+
+def tls_seed_hello12(suite=0xc02b, extensions=b"\0\x17\0\0\xff\1\0\1\0", random=b"\x42" * 32):
+    """A TLS 1.2 ServerHello: the suite, a session id, extensions."""
+    return tls_seed_message(2, b"\3\3" + random + b"\x20" + b"\x5e" * 32 +
+                            suite.to_bytes(2, "big") + b"\0" +
+                            len(extensions).to_bytes(2, "big") + extensions)
+
+
+def tls_seed_flight12(leaf=0, group=0x1d, scheme=b"\4\3", request=False):
+    """Certificate (one entry whose last byte picks the stubbed leaf),
+    ServerKeyExchange on group, an optional CertificateRequest, and
+    ServerHelloDone."""
+    size = {0x1d: 32, 0x17: 65, 0x18: 97}[group]
+    point = (b"\4" if size > 32 else b"\x09") + b"\x09" * (size - 1)
+    signature = b"\x30\x06\1\1\1\1\1\1"
+    exchange = (b"\3" + group.to_bytes(2, "big") + bytes([size]) + point + scheme +
+                len(signature).to_bytes(2, "big") + signature)
+    return (tls_seed_message(11, b"\0\0\x05\0\0\2\x30" + bytes([leaf])) +
+            tls_seed_message(12, exchange) +
+            (tls_seed_message(13, b"\1\x40\0\2\4\3\0\0") if request else b"") +
+            tls_seed_message(14, b""))
+
+
+def tls_seed_sealed12(kind, content, tag=0):
+    """A TLS 1.2 record under the identity AEAD: explicit nonce, content,
+    the tag whose first byte opens it when zero."""
+    return tls_seed_record(kind, b"\0" * 8 + content + bytes([tag]) + b"\0" * 15)
+
+
+def tls_seed_flight(leaf=0, scheme=b"\4\3", signature=b"\x30\x06\1\1\1\1\1\1"):
+    """EncryptedExtensions, Certificate (its last byte picks the stubbed
+    leaf), CertificateVerify and a Finished of the stub MAC's zeros."""
+    return (tls_seed_message(8, b"\0\0") +
+            tls_seed_message(11, b"\0\0\0\0" + bytes([leaf])) +
+            tls_seed_message(15, scheme + len(signature).to_bytes(2, "big") + signature) +
+            tls_seed_message(20, b"\0" * 32))
+
+
+def tls_seed_ticket(ticket=b"t" * 16, extensions=b""):
+    return tls_seed_message(4, b"\0\0\x0e\x10" + b"\1\2\3\4" + b"\1\0" +
+                            len(ticket).to_bytes(2, "big") + ticket +
+                            len(extensions).to_bytes(2, "big") + extensions)
+
+
+def tls_seed_connections():
+    """Streams for tls_hs_fuzz's 0xf3 driver: a whole handshake per group and
+    leaf, then the post-handshake and record-layer shapes worth starting from."""
+    hello = tls_seed_record(22, tls_seed_server_hello())
+    ccs = tls_seed_record(20, b"\1")
+    flight = tls_seed_sealed(22, tls_seed_flight())
+    close = tls_seed_sealed(21, b"\1\0")
+    data = tls_seed_sealed(23, b"GET-response " * 40)
+    base = (hello, flight)
+    control = b"\0\0\0\1"
+    seeds = {
+        "conn_x25519.bin": (control, hello, ccs, flight, data, close),
+        "conn_p256.bin": (control, tls_seed_retry(0x17),
+                          tls_seed_record(22, tls_seed_server_hello(0x17)), flight, data, close),
+        "conn_p384_leaf.bin": (b"\0\0\1\2", tls_seed_retry(0x18),
+                               tls_seed_record(22, tls_seed_server_hello(0x18)),
+                               tls_seed_sealed(22, tls_seed_flight(1, b"\5\3")), data, close),
+        "conn_retry_cookie.bin": (control, tls_seed_retry(None, b"c" * 40), hello, flight,
+                                  data, close),
+        "conn_retry_group_cookie_ccs.bin": (control, tls_seed_retry(0x17, b"k" * 3000), ccs,
+                                            tls_seed_record(22, tls_seed_server_hello(0x17)),
+                                            flight, data, close),
+        "conn_retry_twice.bin": (control, tls_seed_retry(None, b"c"), tls_seed_retry(0x17),
+                                 tls_seed_record(22, tls_seed_server_hello(0x17)), flight, close),
+        "conn_retry_same_group.bin": (control, tls_seed_retry(0x1d), hello, flight, close),
+        "conn_retry_group_changed.bin": (control, tls_seed_retry(0x17),
+                                         tls_seed_record(22, tls_seed_server_hello(0x18)),
+                                         flight, close),
+        "conn_unasked_p256.bin": (control, tls_seed_record(22, tls_seed_server_hello(0x17)),
+                                  flight, close),
+        "conn_rsa_leaf.bin": (b"\2\0\1\3", hello,
+                              tls_seed_sealed(22, tls_seed_flight(2, b"\x08\4", b"\1" * 256)),
+                              data, close),
+        "conn_ip_host.bin": (b"\1\0\0\4",) + base + (data, close),
+        "conn_ccs_before_hello.bin": (control, ccs, hello, flight, close),
+        "conn_ccs_twice.bin": (control, hello, ccs, ccs, flight, close),
+        "conn_ccs_protected.bin": (control, hello, tls_seed_sealed(20, b"\1"), flight, close),
+        "conn_ccs_after_finished.bin": (control,) + base + (ccs, data, close),
+        "conn_hello_split.bin": (control, tls_seed_record(22, tls_seed_server_hello()[:30]),
+                                 tls_seed_record(22, tls_seed_server_hello()[30:]),
+                                 flight, close),
+        "conn_flight_per_message.bin": (control, hello) + tuple(
+            tls_seed_sealed(22, part) for part in (
+                tls_seed_message(8, b"\0\0"), tls_seed_message(11, b"\0\0\0\0\0"),
+                tls_seed_message(15, b"\4\3\0\2\1\1"), tls_seed_message(20, b"\0" * 32))) +
+            (data, close),
+        "conn_hrr_shape.bin": (control, tls_seed_record(22, tls_seed_message(
+            2, b"\3\3" + bytes.fromhex("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c") +
+            b"\0\x13\1\0\0\x0c\0\x2b\0\2\3\4\0\x33\0\2\0\x17"))),
+        "conn_ticket.bin": (control,) + base + (tls_seed_sealed(22, tls_seed_ticket()), data, close),
+        "conn_ticket_split.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_ticket()[:9]), tls_seed_sealed(22, tls_seed_ticket()[9:]),
+            data, close),
+        "conn_ticket_then_data_mid.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_ticket()[:9]), data, close),
+        "conn_two_tickets_one_record.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_ticket() + tls_seed_ticket(b"u" * 300)), close),
+        "conn_ticket_at_close.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_ticket()[:9]), close),
+        "conn_key_update.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\1")), data, close),
+        "conn_key_update_quiet.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\0")), data,
+            tls_seed_sealed(22, tls_seed_message(24, b"\1")), data, close),
+        "conn_key_update_bad_byte.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\2")), data, close),
+        "conn_key_update_split.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\1")[:2]),
+            tls_seed_sealed(22, tls_seed_message(24, b"\1")[2:]), data, close),
+        "conn_key_update_then_ticket.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\0") + tls_seed_ticket()), data, close),
+        "conn_empty_app.bin": (control,) + base + (tls_seed_sealed(23, b""),) * 8 + (data, close),
+        "conn_empty_handshake_in_flight.bin": (control, hello, tls_seed_sealed(22, b""),
+                                               flight, close),
+        "conn_padded.bin": (control,) + base + (tls_seed_sealed(23, b"pad", 300), close),
+        "conn_all_padding.bin": (control,) + base + (tls_seed_record(23, b"\0" * 40),),
+        "conn_after_close.bin": (control,) + base + (close, data, data),
+        "conn_fatal_alert.bin": (control,) + base + (data, tls_seed_sealed(21, b"\2\x28")),
+        "conn_plain_alert.bin": (control,) + base + (tls_seed_record(21, b"\1\0"),),
+        "conn_bad_tag.bin": (control,) + base + (tls_seed_sealed(23, b"x", tag=1),),
+        "conn_eof_mid_record.bin": (control,) + base + (data[:40],),
+        "conn_inner_over_2_14.bin": (control,) + base + (
+            tls_seed_sealed(23, b"o" * 16385), close),
+        "conn_record_max.bin": (control,) + base + (
+            tls_seed_sealed(23, b"m" * 16384), close),
+        "conn_record_max_padded.bin": (control,) + base + (
+            tls_seed_sealed(23, b"m" * 16384, 1), close),
+        "conn_plaintext_over_2_14.bin": (control, tls_seed_record(
+            22, tls_seed_server_hello() + b"\0" * 16300), flight, close),
+        "conn_many_records.bin": (b"\0\x10\0\7",) + base + tuple(
+            tls_seed_sealed(23, bytes([n]) * (n * 997 % 16000 + 1)) for n in range(6)) + (close,),
+        "conn_read_limit.bin": (b"\4\0\0\5",) + base + (data,) * 5 + (close,),
+        "conn_write_limit.bin": (b"\x08\0\0\6",) + base + (data, close),
+        "conn_send_fails.bin": (b"\x30\0\0\7",) + base + (close,),
+        "conn_app_before_finished.bin": (control, hello, data, flight, close),
+        "conn_cert_first.bin": (control, hello, tls_seed_sealed(22, tls_seed_flight()[6:]),
+                                close),
+        "conn_flight_trailing.bin": (control, hello,
+                                     tls_seed_sealed(22, tls_seed_flight() + b"\4"), close),
+        "conn_certificate_request.bin": (control, hello, tls_seed_sealed(22, (
+            tls_seed_message(8, b"\0\0") + tls_seed_message(13, b"\0\0\0") +
+            tls_seed_flight()[6:])), close),
+        "conn_ee_unrequested.bin": (control, hello, tls_seed_sealed(22, (
+            tls_seed_message(8, b"\0\4\0\x10\0\0") + tls_seed_flight()[6:])), close),
+    }
+    # TLS 1.2: the flight after its ServerHello in plaintext, the server's
+    # change_cipher_spec, then a Finished of the stub PRF's zeros.
+    hello12 = tls_seed_record(22, tls_seed_hello12() + tls_seed_flight12())
+    finished12 = tls_seed_sealed12(22, tls_seed_message(20, b"\0" * 12))
+    data12 = tls_seed_sealed12(23, b"GET-response " * 40)
+    close12 = tls_seed_sealed12(21, b"\1\0")
+    done12 = (hello12, ccs, finished12)
+    seeds.update({
+        "conn12_ecdsa.bin": (control,) + done12 + (data12, close12),
+        "conn12_rsa_pss.bin": (b"\2\0\1\5", tls_seed_record(22, tls_seed_hello12(0xc02f) +
+                                                             tls_seed_flight12(2, 0x1d, b"\x08\4")),
+                               ccs, finished12, data12, close12),
+        "conn12_rsa_pkcs1_p256.bin": (control, tls_seed_record(22, tls_seed_hello12(0xc02f) +
+                                                                tls_seed_flight12(2, 0x17, b"\4\1")),
+                                      ccs, finished12, data12, close12),
+        "conn12_p384_request.bin": (control, tls_seed_record(22, tls_seed_hello12() +
+                                                              tls_seed_flight12(1, 0x18, b"\5\3", True)),
+                                    ccs, finished12, data12, close12),
+        "conn12_split_records.bin": (control, tls_seed_record(22, tls_seed_hello12()),
+                                     tls_seed_record(22, tls_seed_flight12()[:7]),
+                                     tls_seed_record(22, tls_seed_flight12()[7:]),
+                                     ccs, finished12, data12, close12),
+        "conn12_empty_app.bin": (control,) + done12 + (tls_seed_sealed12(23, b""), data12, close12),
+        "conn12_sentinel.bin": (control, tls_seed_record(22, tls_seed_hello12(
+            random=b"\x42" * 24 + b"DOWNGRD\1") + tls_seed_flight12()), ccs, finished12),
+        "conn12_no_ems.bin": (control, tls_seed_record(22, tls_seed_hello12(
+            extensions=b"\xff\1\0\1\0") + tls_seed_flight12()), ccs, finished12),
+        "conn12_after_retry.bin": (control, tls_seed_retry(0x17), hello12, ccs, finished12),
+        "conn12_encrypted_extensions.bin": (control, tls_seed_record(22, tls_seed_hello12() +
+                                                                      tls_seed_message(8, b"\0\0") +
+                                                                      tls_seed_flight12()),
+                                            ccs, finished12),
+        "conn12_ccs_before_done.bin": (control, tls_seed_record(22, tls_seed_hello12()), ccs,
+                                       tls_seed_record(22, tls_seed_flight12()), finished12),
+        "conn12_bytes_after_done.bin": (control, tls_seed_record(22, tls_seed_hello12() +
+                                                                  tls_seed_flight12() + b"\x14"),
+                                        ccs, finished12),
+        "conn12_finished_unprotected.bin": (control, hello12,
+                                            tls_seed_record(22, tls_seed_message(20, b"\0" * 12))),
+        "conn12_two_ccs.bin": (control,) + done12[:2] + (ccs, finished12),
+        "conn12_hello_request.bin": (control,) + done12 + (
+            tls_seed_sealed12(22, tls_seed_message(0, b"")), data12),
+        "conn12_key_update.bin": (control,) + done12 + (
+            tls_seed_sealed12(22, tls_seed_message(24, b"\0")), data12),
+        "conn12_ticket.bin": (control,) + done12 + (tls_seed_sealed12(22, tls_seed_ticket()), data12),
+        "conn12_bad_tag.bin": (control,) + done12 + (tls_seed_sealed12(23, b"x", tag=1),),
+        "conn12_suite_leaf_mismatch.bin": (control, tls_seed_record(22, tls_seed_hello12(0xc02f) +
+                                                                     tls_seed_flight12(0)),
+                                           ccs, finished12),
+        "conn12_read_limit.bin": (b"\4\0\0\5",) + done12 + (data12,) * 4 + (close12,),
+        "conn12_write_limit.bin": (b"\x08\0\0\6",) + done12 + (data12, close12),
+    })
+    return {name: tls_seed_connection(parts[0], *parts[1:]) for name, parts in seeds.items()}
+
+
+def tls_fuzz_seeds(corpus):
+    """Name to bytes for the tls_der or tls_hs corpus: the hex fixtures, and the
+    hostile NC/EKU/SAN/ceiling/alg-id/BMPString/chain shapes built here. The
+    tls_der magic first bytes pick a lane: C1 list body, C2 EKU value, C3 SAN,
+    C4 basicConstraints, C5 keyUsage, C6 cert+host, C7 extensions+host, C8
+    ECDSA signature DER, C9 AlgorithmIdentifier, CC NameConstraints and a
+    name."""
+    if corpus == "waterlink":
+        return waterlink_fuzz_seeds()
+    if corpus == "dhcp":
+        return dhcp_fuzz_seeds()
+    if corpus == "sntp":
+        return sntp_fuzz_seeds()
+    if corpus in ("dns", "netlink"):
+        return dns_fuzz_seeds() if corpus == "dns" else netlink_fuzz_seeds()
+    if corpus == "crypto":
+        return crypto_fuzz_seeds()
+    if corpus == "http":
+        return http_fuzz_seeds()
+    seeds = {name + ".bin": bytes.fromhex(hx)
+             for name, hx in TLS_FUZZ_SEED_HEX[corpus].items()}
+    if corpus == "tls_hs":
+        # The framing fixtures are handshake bytes, some as chunks (a
+        # 16-bit length before each); they become the records of a
+        # connection: a ServerHello's own, or the flight after an X25519
+        # ServerHello, sealed.
+        hello = tls_seed_record(22, tls_seed_server_hello())
+        connections = {}
+        for name, raw in seeds.items():
+            if raw[:1] in (b"\xf1", b"\xf2"):
+                raw = raw[1:]
+            pieces = [raw]
+            if "chunks" in name:
+                pieces, at = [], 0
+                while at + 2 <= len(raw):
+                    size = int.from_bytes(raw[at:at + 2], "big")
+                    pieces.append(raw[at + 2:at + 2 + size])
+                    at += 2 + size
+            if name.startswith("sh_"):
+                records = tuple(tls_seed_record(22, piece) for piece in pieces)
+            else:
+                records = (hello,) + tuple(tls_seed_sealed(22, piece) for piece in pieces)
+            connections[name] = tls_seed_connection(b"\0\0\0\1", *records)
+        fill = b"\x0b\x00\x40\x00" + b"\xcd" * 16380
+        connections["hs_max_fill.bin"] = tls_seed_connection(
+            b"\0\0\0\1", hello, tls_seed_sealed(22, fill[:16000]),
+            tls_seed_sealed(22, fill[16000:]))
+        connections["hs_max_plus.bin"] = tls_seed_connection(
+            b"\0\0\0\1", hello, tls_seed_sealed(22, fill[:16000]),
+            tls_seed_sealed(22, fill[16000:] + b"\0"))
+        connections.update(tls_seed_connections())
+        return connections
+    minimal = seeds["minimal_cert.bin"]
+    for count, name in ((1, "cert_list_1"), (7, "cert_list_7"), (8, "cert_list_8"),
+                        (9, "cert_list_9_leftover"), (2, "cert_list_two_minimal")):
+        seeds[name + ".bin"] = tls_seed_cert_list(*[minimal] * count)
+    two = seeds["cert_list_two_minimal.bin"]
+    unknown = [bytes([0x30, 7, 6, 2, 0x2a, i, 4, 1, 0]) for i in range(65)]
+    eku, nc, san, bc = b"\x55\x1d\x25", b"\x55\x1d\x1e", b"\x55\x1d\x11", b"\x55\x1d\x13"
+    server_auth = tls_seed_tlv(0x06, b"\x2b\x06\x01\x05\x05\x07\x03\x01")
+    client_auth = tls_seed_tlv(0x06, b"\x2b\x06\x01\x05\x05\x07\x03\x02")
+    eku_server = tls_seed_tlv(0x30, server_auth)
+    eku_client = tls_seed_tlv(0x30, client_auth)
+    eku_many = tls_seed_tlv(0x30, *[tls_seed_tlv(0x06, bytes([0x2a, i])) for i in range(40)])
+    nc_perm = tls_seed_tlv(0x30, tls_seed_tlv(0xa0, tls_seed_tlv(0x30, b"\x82\x07foo.com")))
+    nc_excl = tls_seed_tlv(0x30, tls_seed_tlv(0xa1, tls_seed_tlv(0x30, b"\x82\x07bad.com")))
+    nc_both = tls_seed_tlv(0x30, tls_seed_tlv(0xa0, tls_seed_tlv(0x30, b"\x82\x03a.b")),
+                           tls_seed_tlv(0xa1, tls_seed_tlv(0x30, b"\x82\x03x.y")))
+    #   Magic CC: form, constraint length, NameConstraints, then a name.
+    def nc_seed(form, constraints, name):
+        return b"\xcc" + bytes([form, len(constraints)]) + constraints + name
+    us = tls_seed_tlv(0x31, tls_seed_tlv(0x30, b"\x06\x03\x55\x04\x06",
+                                         tls_seed_tlv(0x13, b"US")))
+    org = tls_seed_tlv(0x31, tls_seed_tlv(0x30, b"\x06\x03\x55\x04\x0a",
+                                          tls_seed_tlv(0x0c, b" Ex  ample ")))
+    nc_dir = tls_seed_tlv(0x30, tls_seed_tlv(0xa1, tls_seed_tlv(0x30, tls_seed_tlv(
+        0xa4, tls_seed_tlv(0x30, us, org)))))
+    nc_ip = tls_seed_tlv(0x30, tls_seed_tlv(0xa0, tls_seed_tlv(
+        0x30, tls_seed_tlv(0x87, b"\x0a\0\0\0\xff\0\0\0")), tls_seed_tlv(
+        0x30, tls_seed_tlv(0x87, b"\x20\x01\x0d\xb8" + b"\0" * 12 +
+                           b"\xff" * 4 + b"\0" * 12))))
+    nc_mail = tls_seed_tlv(0x30, tls_seed_tlv(0xa0, tls_seed_tlv(
+        0x30, tls_seed_tlv(0x81, b".example.com")), tls_seed_tlv(
+        0x30, tls_seed_tlv(0x86, b"x"))))
+    nc_seeds = {
+        "magic_nc_dns_wildcard.bin": nc_seed(0x82, nc_excl, b"*.com"),
+        "magic_nc_dns_under.bin": nc_seed(0x82, nc_both, b"q.a.b."),
+        "magic_nc_ip_v6.bin": nc_seed(0x87, nc_ip, b"\x20\x01\x0d\xb8" + b"\0" * 11 + b"\x01"),
+        "magic_nc_ip_v4.bin": nc_seed(0x87, nc_ip, b"\x0a\x01\x02\x03"),
+        "magic_nc_dir_folded.bin": nc_seed(0xa4, nc_dir, tls_seed_tlv(0x30, us, tls_seed_tlv(
+            0x31, tls_seed_tlv(0x30, b"\x06\x03\x55\x04\x0a", tls_seed_tlv(0x13, b"EX AMPLE"))))),
+        "magic_nc_mail.bin": nc_seed(0x81, nc_mail, b"a@b.example.com"),
+        "magic_nc_san_list.bin": nc_seed(0x82, nc_mail, tls_seed_tlv(
+            0x30, b"\x81\x03a@b", b"\x86\x01x", b"\x82\x03a.b")),
+    }
+    #   The wildcard and URI names claim fewer bytes than follow them (11 of
+    #   13, 15 of 17); they are kept as they were seeded.
+    san_dns = tls_seed_tlv(0x30, b"\x82\x0bexample.com")
+    san_multi = tls_seed_tlv(0x30, b"\x82\x0bexample.com", b"\x82\x07foo.com",
+                             b"\x87\x04\xc0\x00\x02\x01")
+    bmp = b"\x1e" + tls_seed_len(2048) + b"\x00A" * 1024
+    huge_name = tls_seed_tlv(0x30, tls_seed_tlv(0x31, tls_seed_tlv(
+        0x30, tls_seed_tlv(0x06, b"\x55\x04\x03"), bmp)))
+    one = lambda oid, value, critical=False: tls_seed_extensions(
+        tls_seed_ext(oid, value, critical))
+    seeds.update({
+        "ext_too_many_65.bin": tls_seed_extensions(*unknown),
+        "ext_ceiling_64.bin": tls_seed_extensions(*unknown[:64]),
+        "ext_eku_server_auth.bin": one(eku, eku_server),
+        "ext_eku_client_only.bin": one(eku, eku_client),
+        "ext_eku_server_and_client.bin": one(
+            eku, tls_seed_tlv(0x30, server_auth, client_auth)),
+        "ext_eku_empty.bin": one(eku, tls_seed_tlv(0x30)),
+        "ext_eku_many_oids.bin": one(eku, eku_many),
+        "ext_eku_critical_client.bin": one(eku, eku_client, True),
+        "ext_eku_duplicate.bin": tls_seed_extensions(
+            tls_seed_ext(eku, eku_server), tls_seed_ext(eku, eku_server)),
+        "ext_nc_empty.bin": one(nc, tls_seed_tlv(0x30)),
+        "ext_nc_permitted_dns.bin": one(nc, nc_perm),
+        "ext_nc_excluded_dns.bin": one(nc, nc_excl),
+        "ext_nc_both.bin": one(nc, nc_both),
+        "ext_nc_critical.bin": one(nc, nc_perm, True),
+        "ext_nc_ip.bin": one(nc, nc_ip),
+        "ext_aia_ca_issuers.bin": one(b"\x2b\x06\x01\x05\x05\x07\x01\x01", tls_seed_tlv(
+            0x30, tls_seed_tlv(0x30, b"\x06\x08\x2b\x06\x01\x05\x05\x07\x30\x01",
+                               b"\x86\x0ehttp://ocsp.x/"),
+            tls_seed_tlv(0x30, b"\x06\x08\x2b\x06\x01\x05\x05\x07\x30\x02",
+                         b"\x86\x10http://ca.x/i.der"))),
+        "ext_aia_critical.bin": one(b"\x2b\x06\x01\x05\x05\x07\x01\x01", tls_seed_tlv(
+            0x30, tls_seed_tlv(0x30, b"\x06\x08\x2b\x06\x01\x05\x05\x07\x30\x02",
+                               b"\x86\x0bhttp://x/i")), True),
+        "ext_nc_directory.bin": one(nc, nc_dir, True),
+        **nc_seeds,
+        "ext_san_dns.bin": one(san, san_dns),
+        "ext_san_wildcard.bin": one(san, tls_seed_tlv(0x30, b"\x82\x0b*.example.com")),
+        "ext_san_ipv4.bin": one(san, tls_seed_tlv(0x30, b"\x87\x04\xc0\x00\x02\x01")),
+        "ext_san_ipv6.bin": one(san, tls_seed_tlv(0x30, b"\x87\x10" + b"\0" * 16)),
+        "ext_san_control.bin": one(san, tls_seed_tlv(0x30, b"\x82\x05a\x01b.c")),
+        "ext_san_multi.bin": one(san, san_multi),
+        "ext_san_uri.bin": one(san, tls_seed_tlv(0x30, b"\x86\x0fhttps://evil.test")),
+        "ext_bc_pathlen_without_ca.bin": one(bc, tls_seed_tlv(0x30, b"\x02\x01\x00")),
+        "ext_bc_pathlen_huge.bin": one(
+            bc, tls_seed_tlv(0x30, b"\x01\x01\xff\x02\x05\x01\x00\x00\x00\x00")),
+        "ext_bc_bool_bad.bin": one(bc, tls_seed_tlv(0x30, b"\x01\x01\x01")),
+        "ext_unknown_critical.bin": one(
+            b"\x2a\x03", tls_seed_tlv(0x30, b"\x02\x01\x01"), True),
+        "magic_eku_server.bin": b"\xc2" + eku_server,
+        "magic_eku_many.bin": b"\xc2" + eku_many,
+        "magic_san_dns.bin": b"\xc3" + san_dns,
+        "magic_san_multi.bin": b"\xc3" + san_multi,
+        "magic_san_ipv6.bin": b"\xc3" + tls_seed_tlv(
+            0x30, b"\x82\x10www.example.com.", b"\x87\x10\x20\x01\x0d\xb8" +
+            b"\0" * 8 + b"\xc0\0\x02\x01"),
+        "magic_bc_ca.bin": b"\xc4" + tls_seed_tlv(0x30, b"\x01\x01\xff\x02\x01\x00"),
+        "magic_ku_ds.bin": b"\xc5\x03\x02\x07\x80",
+        "magic_cert_host.bin": b"\xc6" + minimal,
+        "magic_ext_host.bin": b"\xc7" + one(san, san_dns),
+        "magic_ecdsa_sig.bin": b"\xc8\x30\x06\x02\x01\x01\x02\x01\x02",
+        "magic_alg_ecdsa.bin": bytes.fromhex("c9300a06082a8648ce3d040302"),
+        "magic_alg_ecdsa_null.bin": bytes.fromhex("c9300c06082a8648ce3d0403020500"),
+        "magic_alg_rsa_missing_null.bin": bytes.fromhex("c9300b06092a864886f70d01010b"),
+        "magic_alg_unknown.bin": bytes.fromhex("c9300706052b0e03021a"),
+        "magic_alg_oid_long_form.bin": bytes.fromhex("c9300b0681082a8648ce3d040302"),
+        "name_huge_bmpstring.bin": huge_name,
+        "magic_name_huge_bmp.bin": b"\xc9" + huge_name,
+        "cert_list_two_trunc_second.bin": two[:len(two) // 2],
+        "cert_list_two_host.bin": b"\xc1" + two,
+        # tls_verify_fuzz's generated chain: in order, shuffled behind the
+        # unrelated RSA root, cycling, and one overwrite of the served bytes.
+        "verify_chain_in_order.bin": b"\xcb\x00\x01\x02",
+        "verify_chain_shuffled.bin": b"\xcb\x00\x04\x02\x01\x03",
+        "verify_chain_repeats.bin": b"\xcb\x00\x01\x01\x02\x01\x02\x03\x03\x04",
+        "verify_chain_overwrite.bin": b"\xca\x01\x00\xff\x00",
+        "verify_chain_short_of_one.bin": b"\xcb\x00\x02",
+    })
+    return seeds
+
+
+def tls_fuzz_write_seeds(corpus, directory):
+    """The corpus (a tls_fuzz_seeds name, or name-to-bytes) written into
+    directory, one file a seed; the paths, sorted."""
+    directory.mkdir(parents=True, exist_ok=True)
+    seeds = corpus if isinstance(corpus, dict) else tls_fuzz_seeds(corpus)
+    for name, data in seeds.items():
+        (directory / name).write_bytes(data)
+    return sorted(directory.iterdir())
+
+
+def tls_fuzz_run(label, corpus, source, max_len, extra=()):
+    """Build source as a libFuzzer target and run it over corpus's seeds.
+
+    The bounded fixed-seed run the lanes use; MOONWATER_FUZZ_RUNS and
+    MOONWATER_FUZZ_SECONDS lengthen it. extra follows the unit on the
+    compile line (libraries, say). Returns 2 (NOT RUN) when clang,
+    libFuzzer or the asked-for sanitizer is missing; 1 on any sanitizer
+    report; expected TLS_FAIL verdicts are ignored."""
+    runs, seconds, timeout = tls_fuzz_budget()
+    name = label.replace(" ", "_") + "_fuzz"
+    clang = shutil.which("clang")
+    if not clang:
+        print("%s fuzz: NOT RUN -- no clang" % label)
+        return 2
+    sanitize, environment, san_label = tls_fuzz_sanitize_config(clang)
+    if sanitize is None:
+        print("%s fuzz: NOT RUN -- %s" % (label, san_label))
+        return 2
+    with tempfile.TemporaryDirectory(prefix=name.replace("_", "-") + "-") as temporary:
+        work = Path(temporary)
+        unit = work / (name + ".c")
+        binary = work / name
+        flags = [clang, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
+                 "-fno-sanitize-recover=all", sanitize]
+        # A toolchain without libFuzzer is NOT RUN; the lift itself failing
+        # to build (a moved net.c slice anchor, say) is a failure, never a
+        # soft skip.
+        probe = work / "probe.c"
+        probe.write_text("int LLVMFuzzerTestOneInput(const unsigned char *d, "
+                         "unsigned long n) { (void)d; (void)n; return 0; }\n")
+        if subprocess.run(flags + [str(probe), "-o", str(work / "probe")],
+                          capture_output=True, text=True).returncode:
+            need = "fuzzer,memory" if moonwater_msan_requested() else "fuzzer"
+            print("%s fuzz: NOT RUN -- clang lacks libFuzzer "
+                  "(need -fsanitize=%s)" % (label, need))
+            return 2
+        unit.write_text(source)
+        built = subprocess.run(flags + [str(unit), "-o", str(binary)] + list(extra),
+                               capture_output=True, text=True)
+        if built.returncode:
+            print("  FAIL %s fuzz lift does not build:\n" % label +
+                  built.stderr[-2000:])
+            write_tally(name.replace("_", "-"), 0, 1)
+            return 1
+        seeds = tls_fuzz_write_seeds(corpus, work / "corpus")
+        ran = subprocess.run(
+            [str(binary), str(work / "corpus"),
+             "-seed=1", "-runs=%d" % runs, "-max_total_time=%d" % seconds,
+             "-max_len=%d" % max_len,
+             "-artifact_prefix=" + str(work) + "/",
+             "-print_final_stats=0"],
+            capture_output=True, text=True, env=environment, timeout=timeout)
+        tally = name.replace("_", "-")
+        ok = ran.returncode == 0 and "ERROR" not in ran.stderr and \
+            "Sanitizer" not in ran.stderr and "runtime error" not in ran.stderr
+        if not ok:
+            print("  FAIL %s libFuzzer:\n" % label +
+                  (ran.stderr or ran.stdout)[-3000:])
+            write_tally(tally, 0, 1)
+            return 1
+        print("  %s fuzz: %d seeds, %s (-runs=%d -max_total_time=%d) clean" %
+              (label, len(seeds), san_label, runs, seconds))
+        write_tally(tally, 1, 1)
+        return 0
+
+
+def tls_fuzz_sec(text, first, following):
+    """Slice net.c from the first occurrence of first through before following."""
+    i = text.index(first)
+    return text[i:text.index(following, i)]
+
+
+def tls_der_fuzz_lift_parts(net):
+    """OIDs, ASN.1/cert parsers, pure path-policy helpers, list framing, shim.
+
+    Policy lifts cover names_chain and leaf/issuer authorization (no crypto).
+    Shared by tls_der_fuzz and tls_verify_fuzz so both stay on the same
+    production slices.
+    """
+    oids = tls_fuzz_sec(net, "static const p8 tls_oid_ec[7] = {",
+                        "typedef struct\n{\n        bipolar handle;")
+    #   net.c includes suffixes.inc beside anchors.inc; the lift has no
+    #   include path, so the table comes in as text, and so do the RSA
+    #   limits tls_cert is sized by (the verify lift's crypto slice repeats
+    #   them word for word, which C allows).
+    limits = re.search(r"#define CRYPTO_RSA_LIMBS .*\n#define CRYPTO_RSA_BYTES .*\n#define CRYPTO_RSA_EXPONENT_BITS .*\n", net)
+    if not limits:
+        raise ValueError("CRYPTO_RSA_LIMBS / CRYPTO_RSA_BYTES")
+    oids = limits.group(0) + (HARNESS_ROOT / "src/net/suffixes.inc").read_text() + \
+        oids[:oids.rfind("};\n") + 3]
+    parsers = tls_fuzz_sec(
+        net,
+        "static COLD bipolar tls_asn1_length(p8 address_to bytes, positive size,",
+        "/* An anchor's key laid out the way tls_parse_cert lays out a served one. */")
+    # Pure Name compare; skip tls_verify_one crypto.
+    policy = tls_fuzz_sec(
+        net,
+        "static COLD bool tls_certificate_names_chain(const tls_cert address_to child,",
+        "static COLD bool tls_verify_one(tls_cert address_to child, tls_cert address_to issuer)")
+    # Date/path-length/EKU authorization without tls_date_now / keep_leaf.
+    policy += "\n" + tls_fuzz_sec(
+        net,
+        "static COLD bool tls_cert_current(tls_cert address_to cert, p64 now)",
+        "// A TLS handshake length: three bytes, most significant first.\n"
+        "static PURE positive tls_load_24")
+    framing = tls_fuzz_sec(
+        net,
+        "// A TLS handshake length: three bytes, most significant first.\n"
+        "static PURE positive tls_load_24",
+        "static COLD bool tls_verify_chain")
+    shim = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include <ctype.h>
+typedef uint8_t p8;
+/* lib.c's b8 is signed: crypto_wnaf's digits are negative half the time,
+   and an unsigned b8 indexes crypto_point_add_digit's table far past its 8
+   entries. */
+typedef int8_t b8;
+typedef uint16_t p16;
+typedef uint32_t p32;
+typedef uint64_t p64;
+typedef int32_t b32;
+typedef long bipolar;
+typedef unsigned long positive;
+typedef void *address_any;
+typedef char *string_address;
+typedef const char *const_string;
+#define COLD
+#define CONST
+#define PURE
+#define fn void
+#define address_to *
+#define address_of &
+#define null NULL
+#define end ((p8)0)
+#define positive_max (~(positive)0)
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define array_count(a) (sizeof(a) / sizeof((a)[0]))
+#define memory_compare memcmp
+#define memory_copy memcpy
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define TLS_OK 0
+#define TLS_FAIL (-1)
+/* glibc ctype macros return bit flags (often > 255); truncate-to-p8
+   would turn a hit into 0. Keep the same helpers as http_response_framing. */
+static inline p8 byte_is_alnum(p8 b) { return isalnum(b) != 0; }
+static inline p8 byte_is_digit(p8 b) { return isdigit(b) != 0; }
+static inline p8 byte_is_control(p8 b) { return b < 0x20 || b == 0x7f; }
+static inline p8 byte_is_blank(p8 b) { return b == ' ' || b == '\t'; }
+static positive string_length(const_string s) { return (positive)strlen(s); }
+static string_address string_first_of(string_address s, int c)
+{
+        return (string_address)strchr(s, c);
+}
+static b32 memory_compare_ascii_case(const void *one, const void *two,
+                                     positive size)
+{
+        const p8 *a = one, *b = two;
+        for (positive i = 0; i < size; i++) {
+                p8 x = a[i], y = b[i];
+                if (x >= 'A' && x <= 'Z')
+                        x = (p8)(x - 'A' + 'a');
+                if (y >= 'A' && y <= 'Z')
+                        y = (p8)(y - 'A' + 'a');
+                if (x != y)
+                        return (b32)(x - y);
+        }
+        return 0;
+}
+static positive memory_span_without_byte(const void *block, p8 byte,
+                                         positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[i] != byte)
+                i++;
+        return i;
+}
+static p16 network_load_16(const p8 *bytes)
+{
+        return (p16)(((p16)bytes[0] << 8) | (p16)bytes[1]);
+}
+static p32 network_load_32(const p8 *bytes)
+{
+        return ((p32)bytes[0] << 24) | ((p32)bytes[1] << 16) |
+               ((p32)bytes[2] << 8) | (p32)bytes[3];
+}
+/* Named hosts take the dNSName path (return < 0). A dotted-decimal IPv4
+   host is recognized so iPAddress SANs exercise tls_general_name_match. */
+static bipolar string_to_host(string_address host)
+{
+        unsigned a, b, c, d;
+        char tail;
+
+        if (!host)
+                return -1;
+        if (sscanf(host, "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) == 4 &&
+            a < 256 && b < 256 && c < 256 && d < 256)
+                return (bipolar)(((p32)a << 24) | ((p32)b << 16) |
+                                 ((p32)c << 8) | (p32)d);
+        return -1;
+}
+"""
+    return oids, parsers, policy, framing, shim
+
+
+#       What tls_verify_fuzz adds to tls_der_fuzz's hosted shim so production
+#       tls_verify_one links without the freestanding library: the crypto_*
+#       helpers it calls, and a compact SHA-256 / SHA-384. CHECK_net proves
+#       the freestanding path with lib.c's assembly; this lets libFuzzer run
+#       the same verify under ASan/UBSan/MSan.
+TLS_VERIFY_HOSTED_C = r"""
+typedef unsigned __int128 crypto_wide;
+static void crypto_forget(address_any secret, positive length)
+{
+        volatile p8 *at = secret;
+        while (length)
+        {
+                *at++ = 0;
+                length--;
+        }
+}
+static p64 crypto_be64(const p8 *bytes)
+{
+        return ((p64)(((p32)bytes[0] << 24) | ((p32)bytes[1] << 16) |
+                      ((p32)bytes[2] << 8) | (p32)bytes[3])
+                << 32) |
+               (p64)(((p32)bytes[4] << 24) | ((p32)bytes[5] << 16) |
+                     ((p32)bytes[6] << 8) | (p32)bytes[7]);
+}
+static void crypto_put_be64(p8 *bytes, p64 value)
+{
+        bytes[0] = (p8)(value >> 56);
+        bytes[1] = (p8)(value >> 48);
+        bytes[2] = (p8)(value >> 40);
+        bytes[3] = (p8)(value >> 32);
+        bytes[4] = (p8)(value >> 24);
+        bytes[5] = (p8)(value >> 16);
+        bytes[6] = (p8)(value >> 8);
+        bytes[7] = (p8)value;
+}
+static positive memory_span_byte(const void *block, p8 byte, positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[i] == byte)
+                i++;
+        return i;
+}
+/* Compact SHA-256 / SHA-384 for hosted tls_verify_fuzz (public-domain style). */
+typedef struct {
+        p64 len;
+        p32 state[8];
+        p8 buf[64];
+        positive used;
+} fuzz_sha256;
+
+static void fuzz_sha256_init(fuzz_sha256 *h)
+{
+        h->len = 0;
+        h->used = 0;
+        h->state[0] = 0x6a09e667u;
+        h->state[1] = 0xbb67ae85u;
+        h->state[2] = 0x3c6ef372u;
+        h->state[3] = 0xa54ff53au;
+        h->state[4] = 0x510e527fu;
+        h->state[5] = 0x9b05688cu;
+        h->state[6] = 0x1f83d9abu;
+        h->state[7] = 0x5be0cd19u;
+}
+
+static p32 fuzz_rotr32(p32 x, positive n)
+{
+        return (x >> n) | (x << (32 - n));
+}
+
+static void fuzz_sha256_block(fuzz_sha256 *h, const p8 *block)
+{
+        static const p32 K[64] = {
+            0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u, 0x3956c25bu,
+            0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u, 0xd807aa98u, 0x12835b01u,
+            0x243185beu, 0x550c7dc3u, 0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u,
+            0xc19bf174u, 0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+            0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau, 0x983e5152u,
+            0xa831c66du, 0xb00327c8u, 0xbf597fc7u, 0xc6e00bf3u, 0xd5a79147u,
+            0x06ca6351u, 0x14292967u, 0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu,
+            0x53380d13u, 0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+            0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u, 0xd192e819u,
+            0xd6990624u, 0xf40e3585u, 0x106aa070u, 0x19a4c116u, 0x1e376c08u,
+            0x2748774cu, 0x34b0bcb5u, 0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu,
+            0x682e6ff3u, 0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+            0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u};
+        p32 w[64];
+        p32 a, b, c, d, e, f, g, hh;
+        positive i;
+
+        for (i = 0; i < 16; i++)
+                w[i] = ((p32)block[i * 4] << 24) | ((p32)block[i * 4 + 1] << 16) |
+                       ((p32)block[i * 4 + 2] << 8) | (p32)block[i * 4 + 3];
+        for (; i < 64; i++)
+        {
+                p32 s0 = fuzz_rotr32(w[i - 15], 7) ^ fuzz_rotr32(w[i - 15], 18) ^
+                         (w[i - 15] >> 3);
+                p32 s1 = fuzz_rotr32(w[i - 2], 17) ^ fuzz_rotr32(w[i - 2], 19) ^
+                         (w[i - 2] >> 10);
+                w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        }
+        a = h->state[0];
+        b = h->state[1];
+        c = h->state[2];
+        d = h->state[3];
+        e = h->state[4];
+        f = h->state[5];
+        g = h->state[6];
+        hh = h->state[7];
+        for (i = 0; i < 64; i++)
+        {
+                p32 S1 = fuzz_rotr32(e, 6) ^ fuzz_rotr32(e, 11) ^ fuzz_rotr32(e, 25);
+                p32 ch = (e & f) ^ ((~e) & g);
+                p32 t1 = hh + S1 + ch + K[i] + w[i];
+                p32 S0 = fuzz_rotr32(a, 2) ^ fuzz_rotr32(a, 13) ^ fuzz_rotr32(a, 22);
+                p32 maj = (a & b) ^ (a & c) ^ (b & c);
+                p32 t2 = S0 + maj;
+                hh = g;
+                g = f;
+                f = e;
+                e = d + t1;
+                d = c;
+                c = b;
+                b = a;
+                a = t1 + t2;
+        }
+        h->state[0] += a;
+        h->state[1] += b;
+        h->state[2] += c;
+        h->state[3] += d;
+        h->state[4] += e;
+        h->state[5] += f;
+        h->state[6] += g;
+        h->state[7] += hh;
+}
+
+static void fuzz_sha256_update(fuzz_sha256 *h, const p8 *data, positive n)
+{
+        h->len += (p64)n * 8;
+        while (n)
+        {
+                positive take = 64 - h->used;
+                if (take > n)
+                        take = n;
+                memory_copy(h->buf + h->used, data, take);
+                h->used += take;
+                data += take;
+                n -= take;
+                if (h->used == 64)
+                {
+                        fuzz_sha256_block(h, h->buf);
+                        h->used = 0;
+                }
+        }
+}
+
+static void fuzz_sha256_final(fuzz_sha256 *h, p8 *out)
+{
+        p8 pad[64];
+        p64 bits = h->len;
+        positive i;
+
+        memory_fill(pad, 0, sizeof pad);
+        pad[0] = 0x80;
+        if (h->used > 55)
+        {
+                fuzz_sha256_update(h, pad, 64 - h->used);
+                memory_fill(pad, 0, 56);
+                fuzz_sha256_update(h, pad, 56);
+        }
+        else
+                fuzz_sha256_update(h, pad, 56 - h->used);
+        for (i = 0; i < 8; i++)
+                pad[i] = (p8)(bits >> (56 - 8 * i));
+        fuzz_sha256_update(h, pad, 8);
+        for (i = 0; i < 8; i++)
+        {
+                out[i * 4] = (p8)(h->state[i] >> 24);
+                out[i * 4 + 1] = (p8)(h->state[i] >> 16);
+                out[i * 4 + 2] = (p8)(h->state[i] >> 8);
+                out[i * 4 + 3] = (p8)h->state[i];
+        }
+}
+
+typedef struct {
+        p64 len_hi;
+        p64 len_lo;
+        p64 state[8];
+        p8 buf[128];
+        positive used;
+        positive words;
+} fuzz_sha512;
+
+static p64 fuzz_rotr64(p64 x, positive n)
+{
+        return (x >> n) | (x << (64 - n));
+}
+
+static void fuzz_sha384_init(fuzz_sha512 *h)
+{
+        h->len_hi = 0;
+        h->len_lo = 0;
+        h->used = 0;
+        h->state[0] = 0xcbbb9d5dc1059ed8ull;
+        h->state[1] = 0x629a292a367cd507ull;
+        h->state[2] = 0x9159015a3070dd17ull;
+        h->state[3] = 0x152fecd8f70e5939ull;
+        h->state[4] = 0x67332667ffc00b31ull;
+        h->state[5] = 0x8eb44a8768581511ull;
+        h->state[6] = 0xdb0c2e0d64f98fa7ull;
+        h->state[7] = 0x47b5481dbefa4fa4ull;
+        h->words = 6;
+}
+
+static void fuzz_sha512_init(fuzz_sha512 *h)
+{
+        static const p64 iv[8] = {
+            0x6a09e667f3bcc908ull, 0xbb67ae8584caa73bull, 0x3c6ef372fe94f82bull,
+            0xa54ff53a5f1d36f1ull, 0x510e527fade682d1ull, 0x9b05688c2b3e6c1full,
+            0x1f83d9abfb41bd6bull, 0x5be0cd19137e2179ull};
+
+        fuzz_sha384_init(h);
+        memory_copy(h->state, iv, sizeof iv);
+        h->words = 8;
+}
+
+static void fuzz_sha512_block(fuzz_sha512 *h, const p8 *block)
+{
+        static const p64 K[80] = {
+            0x428a2f98d728ae22ull, 0x7137449123ef65cdull, 0xb5c0fbcfec4d3b2full,
+            0xe9b5dba58189dbbcull, 0x3956c25bf348b538ull, 0x59f111f1b605d019ull,
+            0x923f82a4af194f9bull, 0xab1c5ed5da6d8118ull, 0xd807aa98a3030242ull,
+            0x12835b0145706fbeull, 0x243185be4ee4b28cull, 0x550c7dc3d5ffb4e2ull,
+            0x72be5d74f27b896full, 0x80deb1fe3b1696b1ull, 0x9bdc06a725c71235ull,
+            0xc19bf174cf692694ull, 0xe49b69c19ef14ad2ull, 0xefbe4786384f25e3ull,
+            0x0fc19dc68b8cd5b5ull, 0x240ca1cc77ac9c65ull, 0x2de92c6f592b0275ull,
+            0x4a7484aa6ea6e483ull, 0x5cb0a9dcbd41fbd4ull, 0x76f988da831153b5ull,
+            0x983e5152ee66dfabull, 0xa831c66d2db43210ull, 0xb00327c898fb213full,
+            0xbf597fc7beef0ee4ull, 0xc6e00bf33da88fc2ull, 0xd5a79147930aa725ull,
+            0x06ca6351e003826full, 0x142929670a0e6e70ull, 0x27b70a8546d22ffcull,
+            0x2e1b21385c26c926ull, 0x4d2c6dfc5ac42aedull, 0x53380d139d95b3dfull,
+            0x650a73548baf63deull, 0x766a0abb3c77b2a8ull, 0x81c2c92e47edaee6ull,
+            0x92722c851482353bull, 0xa2bfe8a14cf10364ull, 0xa81a664bbc423001ull,
+            0xc24b8b70d0f89791ull, 0xc76c51a30654be30ull, 0xd192e819d6ef5218ull,
+            0xd69906245565a910ull, 0xf40e35855771202aull, 0x106aa07032bbd1b8ull,
+            0x19a4c116b8d2d0c8ull, 0x1e376c085141ab53ull, 0x2748774cdf8eeb99ull,
+            0x34b0bcb5e19b48a8ull, 0x391c0cb3c5c95a63ull, 0x4ed8aa4ae3418acbull,
+            0x5b9cca4f7763e373ull, 0x682e6ff3d6b2b8a3ull, 0x748f82ee5defb2fcull,
+            0x78a5636f43172f60ull, 0x84c87814a1f0ab72ull, 0x8cc702081a6439ecull,
+            0x90befffa23631e28ull, 0xa4506cebde82bde9ull, 0xbef9a3f7b2c67915ull,
+            0xc67178f2e372532bull, 0xca273eceea26619cull, 0xd186b8c721c0c207ull,
+            0xeada7dd6cde0eb1eull, 0xf57d4f7fee6ed178ull, 0x06f067aa72176fbaull,
+            0x0a637dc5a2c898a6ull, 0x113f9804bef90daeull, 0x1b710b35131c471bull,
+            0x28db77f523047d84ull, 0x32caab7b40c72493ull, 0x3c9ebe0a15c9bebcull,
+            0x431d67c49c100d4cull, 0x4cc5d4becb3e42b6ull, 0x597f299cfc657e2aull,
+            0x5fcb6fab3ad6faecull, 0x6c44198c4a475817ull};
+        p64 w[80];
+        p64 a, b, c, d, e, f, g, hh;
+        positive i;
+
+        for (i = 0; i < 16; i++)
+        {
+                w[i] = ((p64)block[i * 8] << 56) | ((p64)block[i * 8 + 1] << 48) |
+                       ((p64)block[i * 8 + 2] << 40) | ((p64)block[i * 8 + 3] << 32) |
+                       ((p64)block[i * 8 + 4] << 24) | ((p64)block[i * 8 + 5] << 16) |
+                       ((p64)block[i * 8 + 6] << 8) | (p64)block[i * 8 + 7];
+        }
+        for (; i < 80; i++)
+        {
+                p64 s0 = fuzz_rotr64(w[i - 15], 1) ^ fuzz_rotr64(w[i - 15], 8) ^
+                         (w[i - 15] >> 7);
+                p64 s1 = fuzz_rotr64(w[i - 2], 19) ^ fuzz_rotr64(w[i - 2], 61) ^
+                         (w[i - 2] >> 6);
+                w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        }
+        a = h->state[0];
+        b = h->state[1];
+        c = h->state[2];
+        d = h->state[3];
+        e = h->state[4];
+        f = h->state[5];
+        g = h->state[6];
+        hh = h->state[7];
+        for (i = 0; i < 80; i++)
+        {
+                p64 S1 = fuzz_rotr64(e, 14) ^ fuzz_rotr64(e, 18) ^ fuzz_rotr64(e, 41);
+                p64 ch = (e & f) ^ ((~e) & g);
+                p64 t1 = hh + S1 + ch + K[i] + w[i];
+                p64 S0 = fuzz_rotr64(a, 28) ^ fuzz_rotr64(a, 34) ^ fuzz_rotr64(a, 39);
+                p64 maj = (a & b) ^ (a & c) ^ (b & c);
+                p64 t2 = S0 + maj;
+                hh = g;
+                g = f;
+                f = e;
+                e = d + t1;
+                d = c;
+                c = b;
+                b = a;
+                a = t1 + t2;
+        }
+        h->state[0] += a;
+        h->state[1] += b;
+        h->state[2] += c;
+        h->state[3] += d;
+        h->state[4] += e;
+        h->state[5] += f;
+        h->state[6] += g;
+        h->state[7] += hh;
+}
+
+static void fuzz_sha512_update(fuzz_sha512 *h, const p8 *data, positive n)
+{
+        p64 add = (p64)n * 8;
+        h->len_lo += add;
+        if (h->len_lo < add)
+                h->len_hi++;
+        while (n)
+        {
+                positive take = 128 - h->used;
+                if (take > n)
+                        take = n;
+                memory_copy(h->buf + h->used, data, take);
+                h->used += take;
+                data += take;
+                n -= take;
+                if (h->used == 128)
+                {
+                        fuzz_sha512_block(h, h->buf);
+                        h->used = 0;
+                }
+        }
+}
+
+static void fuzz_sha384_final(fuzz_sha512 *h, p8 *out)
+{
+        p8 pad[128];
+        p64 hi = h->len_hi;
+        p64 lo = h->len_lo;
+        positive i;
+
+        memory_fill(pad, 0, sizeof pad);
+        pad[0] = 0x80;
+        if (h->used > 111)
+        {
+                fuzz_sha512_update(h, pad, 128 - h->used);
+                memory_fill(pad, 0, 112);
+                fuzz_sha512_update(h, pad, 112);
+        }
+        else
+                fuzz_sha512_update(h, pad, 112 - h->used);
+        for (i = 0; i < 8; i++)
+                pad[i] = (p8)(hi >> (56 - 8 * i));
+        for (i = 0; i < 8; i++)
+                pad[8 + i] = (p8)(lo >> (56 - 8 * i));
+        fuzz_sha512_update(h, pad, 16);
+        for (i = 0; i < h->words; i++)
+        {
+                out[i * 8] = (p8)(h->state[i] >> 56);
+                out[i * 8 + 1] = (p8)(h->state[i] >> 48);
+                out[i * 8 + 2] = (p8)(h->state[i] >> 40);
+                out[i * 8 + 3] = (p8)(h->state[i] >> 32);
+                out[i * 8 + 4] = (p8)(h->state[i] >> 24);
+                out[i * 8 + 5] = (p8)(h->state[i] >> 16);
+                out[i * 8 + 6] = (p8)(h->state[i] >> 8);
+                out[i * 8 + 7] = (p8)h->state[i];
+        }
+}
+
+typedef fuzz_sha256 crypto_sha256;
+typedef fuzz_sha512 crypto_sha512;
+static void crypto_sha256_open(crypto_sha256 *h) { fuzz_sha256_init(h); }
+static void crypto_sha256_write(crypto_sha256 *h, p8 *d, positive n)
+{
+        fuzz_sha256_update(h, d, n);
+}
+static void crypto_sha256_close(crypto_sha256 *h, p8 *out)
+{
+        fuzz_sha256_final(h, out);
+}
+static void crypto_sha256_of(p8 *d, positive n, p8 *out)
+{
+        crypto_sha256 h;
+        fuzz_sha256_init(&h);
+        fuzz_sha256_update(&h, d, n);
+        fuzz_sha256_final(&h, out);
+}
+/* lib.util.c's streaming digest, for the three tls_verify_one takes. */
+#define DIGEST_SHA256 3
+#define DIGEST_SHA384 4
+#define DIGEST_SHA512 5
+typedef struct {
+        positive algorithm;
+        fuzz_sha256 small;
+        fuzz_sha512 large;
+} digest_state;
+static void digest_open(digest_state *d, positive algorithm, positive length)
+{
+        (void)length;
+        d->algorithm = algorithm;
+        if (algorithm == DIGEST_SHA256)
+                fuzz_sha256_init(&d->small);
+        else if (algorithm == DIGEST_SHA384)
+                fuzz_sha384_init(&d->large);
+        else
+                fuzz_sha512_init(&d->large);
+}
+static void digest_write(digest_state *d, const void *data, positive n)
+{
+        if (d->algorithm == DIGEST_SHA256)
+                fuzz_sha256_update(&d->small, data, n);
+        else
+                fuzz_sha512_update(&d->large, data, n);
+}
+static void digest_close(digest_state *d, p8 *out)
+{
+        if (d->algorithm == DIGEST_SHA256)
+                fuzz_sha256_final(&d->small, out);
+        else
+                fuzz_sha384_final(&d->large, out);
+}
+static void crypto_sha384(p8 *d, positive n, p8 *out)
+{
+        crypto_sha512 h;
+        fuzz_sha384_init(&h);
+        fuzz_sha512_update(&h, d, n);
+        fuzz_sha384_final(&h, out);
+}
+
+"""
+
+
+def tls_verify_ecdsa_chain():
+    """C arrays of a fresh chain, leaf first, whose links are ECDSA P-256
+    under SHA-256, P-384 under SHA-384, P-384 under SHA-512 and RSA-2048
+    under SHA-512: the kinds WR2 under GTS Root R1 (RSA SHA-256) leaves.
+    The leaf names example.com and 192.0.2.1, and link 1 as its caIssuers
+    at http://example.com/link1.der; the rest say CA:TRUE. Link 2
+    permits example.com and 192.0.2.0/24, and a sixth certificate is link 2
+    again -- its name and key, under link 3 -- excluding example.com, the
+    constrained impostor a path must pass over."""
+    import datetime
+    import ipaddress
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec, rsa
+    from cryptography.x509.oid import NameOID
+    keys = (ec.generate_private_key(ec.SECP256R1()), ec.generate_private_key(ec.SECP256R1()),
+            ec.generate_private_key(ec.SECP384R1()), ec.generate_private_key(ec.SECP384R1()),
+            rsa.generate_private_key(public_exponent=65537, key_size=2048))
+    digests = (hashes.SHA256(), hashes.SHA384(), hashes.SHA512(), hashes.SHA512(),
+               hashes.SHA512())
+    ders = []
+    for at, key in enumerate(keys):
+        signer = min(at + 1, len(keys) - 1)
+        signed = x509.CertificateBuilder().subject_name(
+            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "link %d" % at)])).issuer_name(
+            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "link %d" % signer)])).public_key(
+            key.public_key()).serial_number(at + 1).not_valid_before(
+            datetime.datetime(2020, 1, 1)).not_valid_after(datetime.datetime(2040, 1, 1))
+        if at == 2:
+            signed = signed.add_extension(x509.NameConstraints(
+                permitted_subtrees=[x509.DNSName("example.com"), x509.IPAddress(
+                    ipaddress.ip_network("192.0.2.0/24"))], excluded_subtrees=None),
+                critical=True)
+        if at:
+            signed = signed.add_extension(x509.BasicConstraints(ca=True, path_length=None),
+                                          critical=True)
+        else:
+            signed = signed.add_extension(x509.SubjectAlternativeName([
+                x509.DNSName("example.com"),
+                x509.IPAddress(ipaddress.ip_address("192.0.2.1"))]), critical=False)
+            signed = signed.add_extension(x509.AuthorityInformationAccess([
+                x509.AccessDescription(x509.oid.AuthorityInformationAccessOID.CA_ISSUERS,
+                                       x509.UniformResourceIdentifier(
+                                           "http://example.com/link1.der"))]),
+                critical=False)
+        ders.append(signed.sign(keys[signer], digests[at]).public_bytes(
+            serialization.Encoding.DER))
+    ders.append(x509.CertificateBuilder().subject_name(
+        x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "link 2")])).issuer_name(
+        x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "link 3")])).public_key(
+        keys[2].public_key()).serial_number(len(keys) + 1).not_valid_before(
+        datetime.datetime(2020, 1, 1)).not_valid_after(datetime.datetime(2040, 1, 1)).add_extension(
+        x509.NameConstraints(permitted_subtrees=None,
+                             excluded_subtrees=[x509.DNSName("example.com")]),
+        critical=True).add_extension(x509.BasicConstraints(ca=True, path_length=None),
+                                     critical=True).sign(keys[3], hashes.SHA512()).public_bytes(
+        serialization.Encoding.DER))
+    return ("enum { FUZZ_ECDSA_CHAIN = %d, FUZZ_ECDSA_LINKS = %d };\n"
+            "static const positive fuzz_ecdsa_length[] = { %s };\n"
+            "static const p8 fuzz_ecdsa_der[][1024] = { %s };\n" %
+            (len(ders), len(keys), ", ".join(str(len(d)) for d in ders),
+             ", ".join("{ %s }" % ", ".join("0x%02x" % b for b in d) for d in ders)))
+
+
+def tls_verify_hosted_source(net, checks, driver):
+    """tls_verify_fuzz's program: tls_der_fuzz's lifts, the ECDSA/RSA verify
+    from net.c with lib.c's p256_/p384_ field fast paths cut so the C
+    montgomery from checks.c's SHARED_montgomery_reference carries them,
+    production tls_verify_one, and fuzz_prove_wr2_gts built from checks.c's
+    WR2 and GTS Root R1 certificates. Raises ValueError when a slice is gone
+    and RuntimeError when a field fast path survived the cut."""
+    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
+    ecdsa = tls_fuzz_sec(
+        net, "#define CRYPTO_FE_MAX 6\n",
+        "static bool crypto_scalar_reduce_be(p8 address_to out, const p8 address_to bytes,")
+    for field_op in ("add", "subtract"):
+        ecdsa = re.sub(
+            r"if \(f == address_of crypto_p256_field\)\s*\{\s*p256_%s\(d, a, b\);\s*return;\s*\}\s*"
+            r"if \(f == address_of crypto_p384_field\)\s*\{\s*p384_%s\(d, a, b\);\s*return;\s*\}"
+            % (field_op, field_op), "", ecdsa)
+    for field_op, args in (("multiply", "d, a, b"), ("square", "d, a")):
+        ecdsa = re.sub(
+            r"if \(f == address_of crypto_p256_field\)\s*p256_%s\(%s\);\s*"
+            r"else if \(f == address_of crypto_p384_field\)\s*p384_%s\(%s\);\s*"
+            r"else\s*" % (field_op, args, field_op, args), "", ecdsa)
+    rsa = tls_fuzz_sec(
+        net,
+        "/* x = 2x mod m for x below m.  Public moduli only: the reduction branches. */\n"
+        "static fn crypto_rsa_double",
+        "static fn crypto_mgf1_sha256")
+    montgomery = tls_fuzz_sec(checks, "#elif defined(SHARED_montgomery_reference)",
+                              "#elif defined(SHARED_unicode_width_reference)")
+    montgomery = montgomery.split("\n", 1)[1]
+    montgomery = montgomery[:montgomery.rfind("#endif") + len("#endif")].replace(
+        "montgomery_reference_multiply", "montgomery_multiply")
+    verify_one = tls_fuzz_sec(
+        net,
+        "static COLD bool tls_verify_one(tls_cert address_to child, tls_cert address_to issuer)",
+        "/* The last certificate served names its issuer.")
+
+    def der(name):
+        found = re.search(r'static const char %s\[\] =\s*((?:"[0-9a-fA-F]+"\s*)+);' % name,
+                          checks)
+        if not found:
+            raise ValueError("missing %s in checks.c" % name)
+        return ", ".join("0x%02x" % b for b in bytes.fromhex(
+            re.sub(r'["\s]', "", found.group(1))))
+
+    prove = r"""
+static const p8 fuzz_wr2_der[] = { %s };
+static const p8 fuzz_gts_der[] = { %s };
+%s
+
+static bool fuzz_prove_wr2_gts(void)
+{
+        p8 wr2_buf[sizeof fuzz_wr2_der];
+        p8 gts_buf[sizeof fuzz_gts_der];
+        tls_cert wr2, gts;
+
+        memory_copy(wr2_buf, fuzz_wr2_der, sizeof fuzz_wr2_der);
+        memory_copy(gts_buf, fuzz_gts_der, sizeof fuzz_gts_der);
+        memory_fill(address_of wr2, 0, sizeof wr2);
+        memory_fill(address_of gts, 0, sizeof gts);
+        if (tls_parse_cert(wr2_buf, sizeof fuzz_wr2_der, address_of wr2, null))
+                return false;
+        if (tls_parse_cert(gts_buf, sizeof fuzz_gts_der, address_of gts, null))
+                return false;
+        if (!tls_certificate_names_chain(address_of wr2, address_of gts))
+                return false;
+        if (!tls_verify_one(address_of wr2, address_of gts))
+                return false;
+        wr2.sig[wr2.sig_length - 1] ^= 1;
+        if (tls_verify_one(address_of wr2, address_of gts))
+                return false;
+        /* Each generated link accepts, and refuses one flipped signature
+           bit: a verify that is never seen to pass proves nothing when it
+           refuses. */
+        for (positive link = 0; link + 1 < FUZZ_ECDSA_LINKS; link++)
+        {
+                p8 child_buf[1024];
+                p8 issuer_buf[1024];
+                tls_cert child, issuer;
+
+                memory_copy(child_buf, fuzz_ecdsa_der[link],
+                            fuzz_ecdsa_length[link]);
+                memory_copy(issuer_buf, fuzz_ecdsa_der[link + 1],
+                            fuzz_ecdsa_length[link + 1]);
+                if (tls_parse_cert(child_buf, fuzz_ecdsa_length[link],
+                                   address_of child, null) ||
+                    tls_parse_cert(issuer_buf, fuzz_ecdsa_length[link + 1],
+                                   address_of issuer, null) ||
+                    !tls_verify_one(address_of child, address_of issuer))
+                        return false;
+                child.sig[child.sig_length - 8] ^= 1;
+                if (tls_verify_one(address_of child, address_of issuer))
+                        return false;
+        }
+        return true;
+}
+""" % (der("wr2_hex"), der("gts_r1_hex"), tls_verify_ecdsa_chain())
+    source = "\n".join((shim + TLS_VERIFY_HOSTED_C, montgomery, ecdsa, rsa, oids,
+                        parsers, policy, verify_one, prove, framing, driver))
+    left = re.search(r"\bp(?:256|384)_(?:multiply|add|square|subtract)\s*\(", source)
+    if left:
+        raise RuntimeError("hosted tls_verify lift still calls " + left.group(0))
+    return source
+
+
+def harness_tls_der_fuzz(argv):
+    """Coverage-guided libFuzzer over DER certs and Certificate HS framing.
+
+    Lifts DER readers, certificate-list framing, and pure verify-path policy
+    (names_chain, leaf/issuer authorization) from src/net/net.c. Magic-prefix
+    lanes hit EKU/SAN/BC/KU value parsers, host-aware SAN, ECDSA sig DER, and
+    AlgorithmIdentifier junk. Seeds come from tls_fuzz_seeds("tls_der").
+    Bounded fixed-seed run; return 2 (NOT RUN) when clang/libFuzzer is
+    unavailable. Expected TLS_FAIL is ignored; only ASan/UBSan aborts fail
+    (or MSan when MOONWATER_MSAN=1). Override MOONWATER_FUZZ_RUNS /
+    MOONWATER_FUZZ_SECONDS for longer local runs.
+
+        python3 test/differential.py --harness tls_der_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
+
+    driver = r"""
+/* Fixed "now" for leaf/issuer policy without calling tls_date_now / libc time. */
+enum { FUZZ_TLS_NOW = 20200101000000ull };
+
+/* Walk a Certificate handshake body the way tls_verify_chain frames the
+   list. Parse each cert, then run the pure verify-path checks that do not
+   need signatures: names_chain between adjacent entries, leaf/issuer
+   authorization against a fixed now. Same empty-list / leftover refuse as
+   production. No abort on TLS_FAIL. */
+static void fuzz_certificate_list(p8 *body, positive body_length,
+                                  string_address host)
+{
+        tls_cert certs[8];
+        positive at;
+        positive list_end;
+        positive count = 0;
+        positive i;
+
+        if (!tls_certificate_body_open(body, body_length,
+                                       address_of at, address_of list_end))
+                return;
+
+        while (at + 3 <= list_end && count < 8)
+        {
+                positive cert_length = tls_load_24(body + at);
+                positive ext_length;
+
+                at += 3;
+                if (at + cert_length + 2 > list_end)
+                        return;
+                memory_fill(address_of certs[count], 0, sizeof(certs[0]));
+                (void)tls_parse_cert(body + at, cert_length,
+                                     address_of certs[count],
+                                     count ? null : host);
+                at += cert_length;
+                ext_length = network_load_16(body + at);
+                at += 2;
+                if (at + ext_length > list_end)
+                        return;
+                at += ext_length;
+                count++;
+        }
+
+        /* Same post-loop refuse as tls_verify_chain: empty list, or bytes
+           past the last framed entry (including a 9th entry past certs[8]). */
+        if (!count || at != list_end)
+                return;
+
+        (void)tls_leaf_authorized(address_of certs[0], FUZZ_TLS_NOW);
+        for (i = 1; i < count; i++)
+        {
+                (void)tls_certificate_names_chain(address_of certs[i - 1],
+                                                  address_of certs[i]);
+                (void)tls_issuer_authorized(address_of certs[i], i - 1,
+                                            FUZZ_TLS_NOW);
+        }
+}
+
+/* Magic-prefix lanes deepen pure parsers the list walk alone under-hits:
+   EKU OID walks, SAN GeneralNames, BC/KU values, host-aware SAN, ECDSA
+   signature DER, AlgorithmIdentifier junk, name constraints. Prefixes: C1
+   list, C2 EKU, C3 SAN+host, C4 BC, C5 KU, C6 cert+host, C7 exts+host, C8
+   ECDSA sig, C9 AlgorithmIdentifier, CC NameConstraints and a name. */
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        tls_cert cert;
+        p8 *buf;
+        positive length;
+        p8 *oid;
+        positive oid_length;
+        positive alg_at;
+        p8 r[48], s[48];
+        positive r_length, s_length;
+        bool matched;
+
+        if (size > 65536)
+                size = 65536;
+        length = (positive)size;
+        buf = (p8 *)malloc(length ? length : 1);
+        if (!buf)
+                return 0;
+        if (length)
+                memcpy(buf, data, length);
+
+        memory_fill(address_of cert, 0, sizeof cert);
+        (void)tls_parse_extensions(buf, length, 0, 2, address_of cert, null);
+        (void)tls_leaf_authorized(address_of cert, FUZZ_TLS_NOW);
+        (void)tls_issuer_authorized(address_of cert, 0, FUZZ_TLS_NOW);
+
+        memory_fill(address_of cert, 0, sizeof cert);
+        (void)tls_parse_cert(buf, length, address_of cert, null);
+        (void)tls_leaf_authorized(address_of cert, FUZZ_TLS_NOW);
+        (void)tls_issuer_authorized(address_of cert, 0, FUZZ_TLS_NOW);
+
+        fuzz_certificate_list(buf, length, null);
+
+        if (length > 1)
+        {
+                p8 *rest = buf + 1;
+                positive rest_len = length - 1;
+
+                switch (buf[0])
+                {
+                case 0xc1:
+                        fuzz_certificate_list(rest, rest_len, null);
+                        fuzz_certificate_list(rest, rest_len,
+                                              (string_address)"example.com");
+                        break;
+                case 0xc2:
+                        memory_fill(address_of cert, 0, sizeof cert);
+                        (void)tls_parse_extended_key_usage(rest, rest_len,
+                                                           address_of cert);
+                        break;
+                case 0xc3:
+                        matched = false;
+                        (void)tls_parse_san(rest, rest_len,
+                                            (string_address)"example.com",
+                                            address_of matched);
+                        matched = false;
+                        (void)tls_parse_san(rest, rest_len,
+                                            (string_address)"192.0.2.1",
+                                            address_of matched);
+                        /* An IPv6 literal and an absolute name reach the
+                           canonicalising half of tls_general_name_match. */
+                        matched = false;
+                        (void)tls_parse_san(rest, rest_len,
+                                            (string_address)"[2001:db8::c000:201]",
+                                            address_of matched);
+                        matched = false;
+                        (void)tls_parse_san(rest, rest_len,
+                                            (string_address)"www.example.com.",
+                                            address_of matched);
+                        break;
+                case 0xc4:
+                        memory_fill(address_of cert, 0, sizeof cert);
+                        (void)tls_parse_basic_constraints(rest, rest_len,
+                                                          address_of cert);
+                        break;
+                case 0xc5:
+                        memory_fill(address_of cert, 0, sizeof cert);
+                        (void)tls_parse_key_usage(rest, rest_len,
+                                                  address_of cert);
+                        break;
+                case 0xc6:
+                        memory_fill(address_of cert, 0, sizeof cert);
+                        (void)tls_parse_cert(rest, rest_len, address_of cert,
+                                             (string_address)"example.com");
+                        (void)tls_leaf_authorized(address_of cert, FUZZ_TLS_NOW);
+                        break;
+                case 0xc7:
+                        memory_fill(address_of cert, 0, sizeof cert);
+                        (void)tls_parse_extensions(
+                            rest, rest_len, 0, 2, address_of cert,
+                            (string_address)"example.com");
+                        break;
+                case 0xc8:
+                        r_length = s_length = 0;
+                        (void)tls_parse_ecdsa_sig(rest, rest_len, r,
+                                                  address_of r_length, s,
+                                                  address_of s_length);
+                        break;
+                case 0xcc:
+                        /* A form, a NameConstraints length, the value, and
+                           a name: the value checked as the parser does,
+                           then walked for the name in every form, and as a
+                           certificate's subject and SAN list. */
+                        if (rest_len >= 2 && rest[1] <= rest_len - 2)
+                        {
+                                static const p8 forms[] = {
+                                    0x81, 0x82, 0x86, 0x87, 0xa0, 0xa4};
+                                p8 *constraints = rest + 2;
+                                positive constraints_length = rest[1];
+                                p8 *name = constraints + constraints_length;
+                                positive name_length =
+                                    rest_len - 2 - constraints_length;
+
+                                (void)tls_name_allowed(constraints,
+                                                       constraints_length, 0,
+                                                       null, 0);
+                                (void)tls_name_allowed(constraints,
+                                                       constraints_length, rest[0],
+                                                       name, name_length);
+                                for (positive k = 0; k < sizeof forms; k++)
+                                        (void)tls_name_allowed(
+                                            constraints, constraints_length,
+                                            forms[k], name, name_length);
+                                memory_fill(address_of cert, 0, sizeof cert);
+                                cert.subject = name;
+                                cert.subject_length = name_length;
+                                cert.san = name;
+                                cert.san_length = name_length;
+                                (void)tls_cert_names_permitted(
+                                    constraints, constraints_length,
+                                    address_of cert);
+                        }
+                        break;
+                case 0xc9:
+                        alg_at = 0;
+                        oid = null;
+                        oid_length = 0;
+                        (void)tls_signature_algorithm(rest, rest_len,
+                                                      address_of alg_at,
+                                                      address_of oid,
+                                                      address_of oid_length);
+                        break;
+                default:
+                        break;
+                }
+        }
+
+        free(buf);
+        return 0;
+}
+"""
+
+    return tls_fuzz_run("tls der", "tls_der",
+                        shim + oids + "\n" + parsers + policy + framing + driver,
+                        4096)
+
+
+def harness_tls_hs_fuzz(argv):
+    """Coverage-guided libFuzzer over the whole TLS 1.3 client protocol.
+
+    Lifts src/net/net.c's record layer (tls_forget through the transcript)
+    and its handshake and application half (tls_hello_append through
+    tls_read_until) verbatim, with the crypto, the socket and the certificate
+    verdict stubbed in BoringSSL's fuzzer-mode shape: the AEAD is the
+    identity and opens when the tag's first byte is zero, the Finished MAC is
+    zeros, and a signature or certificate passes unless its marked byte is
+    0xff. A server byte stream after the magic 0xf3 then walks tls_connect
+    and a PRNG-chosen run of tls_read_until / tls_borrow / tls_lend /
+    tls_write, reads arriving in PRNG-sized pieces with interruptions. What
+    ASan cannot see inside the connection is asserted: the buffer offsets,
+    lent spans that must not move while tls_lend gathers more, and a closed
+    connection that must stay closed. Every input is a connection (the
+    seeds' leading 0xf3 is optional); the framing seeds of the old
+    ServerHello and flight walks arrive as records of one. Seeds from
+    tls_fuzz_seeds("tls_hs"). Bounded
+    fixed-seed run; return 2 (NOT RUN) when clang/libFuzzer is unavailable.
+    Expected TLS_FAIL is ignored; only sanitizer reports and the asserts fail
+    the lane (or MSan when MOONWATER_MSAN=1). Override MOONWATER_FUZZ_RUNS /
+    MOONWATER_FUZZ_SECONDS for longer local runs (see `sh test/run fuzz` and
+    `sh test/run msan`).
+
+        python3 test/differential.py --harness tls_hs_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    sec = tls_fuzz_sec
+
+    defines = sec(net, "/* RFC 8446 5.1 and 5.4: a record carries at most 2^14",
+                  "/* One trust anchor from anchors.inc")
+    connection = sec(net, "typedef struct\n{\n        bipolar handle;\n"
+                     "        bool check_cert;", "static fn tls_forget(")
+    #   The leaf modulus room is sized in the crypto section.
+    connection = re.search(r"#define CRYPTO_RSA_LIMBS .*\n#define CRYPTO_RSA_BYTES .*\n#define CRYPTO_RSA_EXPONENT_BITS .*\n",
+                           net).group(0) + connection
+    record = sec(net, "static fn tls_forget(",
+                 "static COLD bipolar tls_asn1_length(")
+    load24 = sec(
+        net,
+        "// A TLS handshake length: three bytes, most significant first.\n"
+        "static PURE positive tls_load_24",
+        "static COLD bool tls_certificate_body_open")
+    protocol = sec(net, "static COLD bool tls_hello_append(",
+                   "#endif\n\n/*\n        Enough HTTP to fetch a file")
+
+    shim = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+typedef uint8_t p8;
+typedef uint16_t p16;
+typedef uint32_t p32;
+typedef uint64_t p64;
+typedef int32_t b32;
+typedef long bipolar;
+typedef unsigned long positive;
+typedef void *address_any;
+typedef char *string_address;
+#define COLD
+#define PURE
+#define fn void
+#define address_to *
+#define address_of &
+#define null NULL
+#define positive_max (~(positive)0)
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define memory_compare memcmp
+/* Production memory_copy is memmove; the peels copy within one buffer. */
+#define memory_copy memmove
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define string_length(s) ((positive)strlen(s))
+#define MSG_DONTWAIT 0x40
+#define NETWORK_INTERRUPTED (-4)
+#define NETWORK_TRY_AGAIN (-11)
+/* Two whole records and a little: compaction and the refill edge happen
+   within inputs the fuzzer can reach. */
+#define TLS_RECEIVE_ROOM ((positive)(2 * (5 + 16640) + 509))
+typedef struct { positive began, budget; } network_deadline;
+typedef struct { p64 state; p64 length; } crypto_sha256;
+typedef struct { p8 round[16]; } crypto_aesgcm_key;
+static const p8 crypto_p256_n[32] = {0xff};
+static const p8 crypto_p384_n[48] = {0xff};
+
+/* Every stub initializes all it writes: MSan reports belong to the lift. */
+static fn crypto_forget(address_any at, positive length)
+{
+        memset(at, 0, length);
+        __asm__ __volatile__("" : : "r"(at) : "memory");
+}
+static p16 network_load_16(const p8 *bytes)
+{
+        return (p16)(((p16)bytes[0] << 8) | (p16)bytes[1]);
+}
+static fn network_store_16(p8 address_to bytes, p16 value)
+{
+        bytes[0] = (p8)(value >> 8);
+        bytes[1] = (p8)value;
+}
+static fn fuzz_mix(p8 address_to out, positive out_length, const p8 *in,
+                   positive in_length, p64 salt)
+{
+        p64 h = 0xcbf29ce484222325ull ^ salt;
+        for (positive i = 0; i < in_length; i++)
+                h = (h ^ in[i]) * 0x100000001b3ull;
+        for (positive i = 0; i < out_length; i++)
+        {
+                h = (h ^ i) * 0x100000001b3ull;
+                out[i] = (p8)(h >> 29);
+        }
+}
+static fn crypto_sha256_open(crypto_sha256 address_to hash)
+{
+        hash->state = 0x6a09e667;
+        hash->length = 0;
+}
+static fn crypto_sha256_write(crypto_sha256 address_to hash, p8 address_to data,
+                              positive length)
+{
+        for (positive i = 0; i < length; i++)
+                hash->state = (hash->state ^ data[i]) * 0x100000001b3ull;
+        hash->length += length;
+}
+static fn crypto_sha256_close(crypto_sha256 address_to hash, p8 address_to out)
+{
+        fuzz_mix(out, 32, (const p8 *)hash, sizeof *hash, 1);
+}
+static fn crypto_sha256_of(p8 address_to data, positive length, p8 address_to out)
+{
+        fuzz_mix(out, 32, data, length, 2);
+}
+static fn crypto_sha384(p8 address_to data, positive length, p8 address_to out)
+{
+        fuzz_mix(out, 48, data, length, 3);
+}
+static fn crypto_hkdf_extract(p8 address_to salt, positive salt_length,
+                              p8 address_to key, positive key_length,
+                              p8 address_to out)
+{
+        p8 both[32];
+        fuzz_mix(both, 32, salt, salt_length, 4);
+        fuzz_mix(out, 32, key, key_length, both[0]);
+}
+static fn crypto_hkdf_expand(p8 address_to prk, p8 address_to info,
+                             positive info_length, p8 address_to out,
+                             positive out_length)
+{
+        fuzz_mix(out, out_length, info, info_length, prk[0] | (p64)prk[31] << 8);
+}
+/* The Finished MAC every Finished must carry is 32 zero bytes. */
+static fn crypto_hmac_sha256(p8 address_to key, positive key_length,
+                             p8 address_to data, positive length,
+                             p8 address_to out)
+{
+        p8 sink[1];
+        fuzz_mix(sink, 1, key, key_length, 5);
+        fuzz_mix(sink, 1, data, length, sink[0]);
+        memset(out, 0, 32);
+}
+static bool crypto_same(const p8 address_to left, const p8 address_to right,
+                        positive length)
+{
+        p8 diff = 0;
+        for (positive at = 0; at < length; at++)
+                diff |= (p8)(left[at] ^ right[at]);
+        return !diff;
+}
+static bool crypto_x25519(p8 address_to out, p8 address_to scalar,
+                          p8 address_to u)
+{
+        fuzz_mix(out, 32, scalar, 32, u[0]);
+        return u[0] != 0xff;
+}
+static bool crypto_scalar_reduce_be(p8 address_to out, const p8 address_to bytes,
+                                    positive length, const p8 address_to n,
+                                    positive words)
+{
+        (void)n;
+        (void)words;
+        memcpy(out, bytes, length);
+        return true;
+}
+static bool crypto_ecdh_p256_public(p8 address_to out, p8 address_to scalar)
+{
+        out[0] = 4;
+        fuzz_mix(out + 1, 64, scalar, 32, 6);
+        return true;
+}
+static bool crypto_ecdh_p384_public(p8 address_to out, p8 address_to scalar)
+{
+        out[0] = 4;
+        fuzz_mix(out + 1, 96, scalar, 48, 7);
+        return true;
+}
+static bool crypto_ecdh_p256_shared(p8 address_to out, p8 address_to scalar,
+                                    p8 address_to peer)
+{
+        fuzz_mix(out, 32, peer, 65, scalar[0]);
+        return peer[0] == 4;
+}
+static bool crypto_ecdh_p384_shared(p8 address_to out, p8 address_to scalar,
+                                    p8 address_to peer)
+{
+        fuzz_mix(out, 48, peer, 97, scalar[0]);
+        return peer[0] == 4;
+}
+static bool crypto_ecdsa_p256(p8 address_to hash, positive hash_length,
+                              p8 address_to r, positive r_length,
+                              p8 address_to s, positive s_length,
+                              p8 address_to qx, p8 address_to qy)
+{
+        p8 sink[1];
+        fuzz_mix(sink, 1, hash, hash_length, qx[0] ^ qy[0]);
+        fuzz_mix(sink, 1, s, s_length, sink[0]);
+        return r_length && r[0] != 0xff;
+}
+static bool crypto_ecdsa_p384(p8 address_to hash, positive hash_length,
+                              p8 address_to r, positive r_length,
+                              p8 address_to s, positive s_length,
+                              p8 address_to qx, p8 address_to qy)
+{
+        return crypto_ecdsa_p256(hash, hash_length, r, r_length, s, s_length,
+                                 qx, qy);
+}
+static bool crypto_rsa_pss_sha256(p8 address_to n, positive n_length, p64 e,
+                                  p8 address_to signature,
+                                  positive signature_length,
+                                  p8 address_to message,
+                                  positive message_length)
+{
+        p8 sink[1];
+        fuzz_mix(sink, 1, n, n_length, e);
+        fuzz_mix(sink, 1, message, message_length, sink[0]);
+        return signature_length && signature[0] != 0xff;
+}
+static bool crypto_rsa_pkcs1(p8 address_to n, positive n_length, p64 e,
+                             p8 address_to signature, positive signature_length,
+                             const p8 address_to info, positive info_length,
+                             p8 address_to hash, positive hash_length)
+{
+        p8 sink[1];
+        fuzz_mix(sink, 1, n, n_length, e);
+        fuzz_mix(sink, 1, info, info_length, sink[0]);
+        fuzz_mix(sink, 1, hash, hash_length, sink[0]);
+        return signature_length && signature[0] != 0xff;
+}
+static fn crypto_put_be64(p8 address_to bytes, p64 value)
+{
+        for (int i = 0; i < 8; i++)
+                bytes[i] = (p8)(value >> (56 - 8 * i));
+}
+static fn crypto_aesgcm_prepare(crypto_aesgcm_key address_to key,
+                                p8 address_to raw)
+{
+        memcpy(key->round, raw, 16);
+}
+/* The identity cipher: the tag carries the key's first byte, so a record is
+   open only under the key it was sealed with and when that byte is zero. */
+static fn crypto_aesgcm_seal(crypto_aesgcm_key address_to key,
+                             p8 address_to iv, p8 address_to aad,
+                             positive aad_length, p8 address_to text,
+                             positive text_length, p8 address_to tag)
+{
+        p8 sink[1];
+        fuzz_mix(sink, 1, iv, 12, key->round[0]);
+        fuzz_mix(sink, 1, aad, aad_length, sink[0]);
+        fuzz_mix(sink, 1, text, text_length, sink[0]);
+        memset(tag, 0, 16);
+}
+static bool crypto_aesgcm_open(crypto_aesgcm_key address_to key,
+                               p8 address_to iv, p8 address_to aad,
+                               positive aad_length, p8 address_to text,
+                               positive text_length, p8 address_to tag)
+{
+        p8 sink[1];
+        fuzz_mix(sink, 1, key->round, 16, 8);
+        fuzz_mix(sink, 1, iv, 12, sink[0]);
+        fuzz_mix(sink, 1, aad, aad_length, sink[0]);
+        fuzz_mix(sink, 1, text, text_length, sink[0]);
+        /* TLS 1.3's AAD is the record header; TLS 1.2's the sequence, the
+           header's type and version, and the plaintext's length. */
+        if (aad_length == 13
+                ? aad[8] < 21 || aad[8] > 23 || aad[9] != 3 || aad[10] != 3 ||
+                      network_load_16(aad + 11) != text_length
+                : aad_length != 5 || aad[0] != 23 || aad[1] != 3 ||
+                      aad[2] != 3 || network_load_16(aad + 3) != text_length + 16)
+                abort();
+        if (tag[0])
+        {
+                crypto_forget(text, text_length);
+                return false;
+        }
+        return true;
+}
+
+/* The server: fuzz_stream is what it sends, taken in PRNG-sized reads that
+   are sometimes interrupted or not ready yet. */
+static const p8 *fuzz_stream;
+static positive fuzz_stream_length;
+static positive fuzz_stream_at;
+static p64 fuzz_state;
+static bool fuzz_send_fails;
+
+static p64 fuzz_next(void)
+{
+        fuzz_state ^= fuzz_state << 13;
+        fuzz_state ^= fuzz_state >> 7;
+        fuzz_state ^= fuzz_state << 17;
+        return fuzz_state;
+}
+static bipolar fuzz_read(p8 address_to into, positive room)
+{
+        positive left = fuzz_stream_length - fuzz_stream_at;
+        p64 roll = fuzz_next();
+        positive take = room;
+
+        if (!room || room > TLS_RECEIVE_ROOM)
+                abort();
+        if (!left)
+                return 0;
+        if (!(roll & 3))
+                take = 1 + (positive)(roll >> 8) % 64;
+        take = min(take, min(room, left));
+        memcpy(into, fuzz_stream + fuzz_stream_at, take);
+        fuzz_stream_at += take;
+        return (bipolar)take;
+}
+static bipolar system_read_retry(positive handle, address_any into,
+                                 positive length)
+{
+        (void)handle;
+        return fuzz_read(into, length);
+}
+static bipolar socket_receive(b32 handle, address_any into, positive length,
+                              b32 flags, address_any from, positive from_length)
+{
+        p64 roll = fuzz_next() % 16;
+
+        (void)handle;
+        (void)from;
+        (void)from_length;
+        if (flags != MSG_DONTWAIT)
+                abort();
+        if (!roll)
+                return NETWORK_INTERRUPTED;
+        if (roll == 1)
+                return NETWORK_TRY_AGAIN;
+        return fuzz_read(into, length);
+}
+static bipolar network_stream_read_some_until(
+    bipolar handle, p8 address_to into, positive length,
+    const network_deadline address_to deadline)
+{
+        (void)handle;
+        if (!deadline)
+                abort();
+        return fuzz_read(into, length);
+}
+/* wait.c's: what is queued, an interrupted receive asked again. */
+static bipolar network_stream_read_now(bipolar handle, p8 address_to into,
+                                       positive length)
+{
+        bipolar got;
+
+        do
+                got = socket_receive((b32)handle, into, length, MSG_DONTWAIT,
+                                     null, 0);
+        while (got == NETWORK_INTERRUPTED);
+        return got;
+}
+/* One wait in sixty-four finds the budget spent. */
+static bool network_deadline_left(const network_deadline address_to deadline,
+                                  positive address_to seconds,
+                                  positive address_to nanoseconds)
+{
+        if (!deadline->budget)
+                abort();
+        *seconds = 1;
+        *nanoseconds = 0;
+        return fuzz_next() % 64 != 0;
+}
+static bool network_deadline_begin(network_deadline address_to deadline,
+                                   positive seconds, positive nanoseconds)
+{
+        deadline->began = 1;
+        deadline->budget = seconds * 1000000000ul + nanoseconds;
+        return deadline->budget != 0;
+}
+/* Whatever the client sends has to be whole, well-formed records, every
+   byte written. */
+static bool network_stream_send_all(bipolar handle, p8 address_to data,
+                                    positive length)
+{
+        p8 sink[1];
+
+        (void)handle;
+        if (!length)
+                abort();
+        for (positive at = 0; at < length;)
+        {
+                positive size;
+
+                if (length - at < 5 || data[at + 1] != 3 || data[at + 2] != 3)
+                        abort();
+                size = network_load_16(data + at + 3);
+                if (size > length - at - 5 ||
+                    (data[at] == 20 ? size != 1 || data[at + 5] != 1
+                                    : data[at] != 22 && data[at] != 23) ||
+                    (data[at] == 23 && size < 17) || size > 16640)
+                        abort();
+                at += 5 + size;
+        }
+        fuzz_mix(sink, 1, data, length, 9);
+        if (sink[0] == 0x5a && fuzz_state == 0)
+                abort();
+        return !fuzz_send_fails;
+}
+static bipolar system_random_fill(address_any into, positive length,
+                                  positive flags)
+{
+        (void)flags;
+        memset(into, 0x5c, length);
+        return 0;
+}
+static bipolar string_to_host(string_address host)
+{
+        return host[0] >= '0' && host[0] <= '9' ? 1 : -1;
+}
+"""
+
+    stubs = r"""
+/* The certificate verdict is another lift's: here the Certificate body's last
+   byte picks the leaf (0 P-256, 1 P-384, 2 RSA) and 0xff refuses it; when
+   that byte is 0, the one three before it picks, which is a TLS 1.2 list's
+   last certificate byte once relaid with its empty extensions. */
+static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
+                                  string_address host, tls_conn address_to tls)
+{
+        p8 kind;
+
+        if (!body_length || !host || body[body_length - 1] == 0xff)
+                return false;
+        kind = body[body_length - 1];
+        if (!kind && body_length > 3)
+                kind = body[body_length - 3];
+        if (kind == 0xff)
+                return false;
+        kind %= 3;
+        tls->leaf_curve = (p8)(1 + kind);
+        memset(tls->leaf_qx, 0x11, sizeof tls->leaf_qx);
+        memset(tls->leaf_qy, 0x22, sizeof tls->leaf_qy);
+        memset(tls->leaf_n, 0x33, sizeof tls->leaf_n);
+        tls->leaf_n_length = kind == 2 ? 256 : 0;
+        tls->leaf_e = 65537;
+        return true;
+}
+static COLD bipolar tls_parse_ecdsa_sig(p8 address_to sig, positive length,
+                                        p8 address_to r,
+                                        positive address_to r_length,
+                                        p8 address_to s,
+                                        positive address_to s_length)
+{
+        positive half = length / 2;
+
+        if (!half || half > 48)
+                return TLS_FAIL;
+        memcpy(r, sig, half);
+        memcpy(s, sig + half, half);
+        *r_length = half;
+        *s_length = half;
+        return TLS_OK;
+}
+"""
+
+    driver = r"""
+static fn fuzz_offsets(tls_conn address_to tls)
+{
+        if (tls->receive_start > tls->receive_end ||
+            tls->receive_end > tls->receive_high ||
+            tls->receive_high > TLS_RECEIVE_ROOM ||
+            tls->post_handshake_used > TLS_HS_MAX ||
+            (tls->plain_used &&
+             (tls->plain_at > tls->receive_start ||
+              tls->plain_used > tls->receive_start - tls->plain_at)))
+                abort();
+}
+
+static p8 fuzz_shadow[16 * 16640];
+
+/* http_copy's gather: one borrow that may receive, then lends that never
+   do. Every span lent must still hold what it held when it was lent. */
+static bipolar fuzz_gather(tls_conn address_to tls, positive want,
+                           positive address_to got_total)
+{
+        p8 address_to spans[16];
+        positive lengths[16];
+        positive count = 0;
+        positive shadow = 0;
+        positive total = 0;
+        bipolar status;
+        p8 address_to span = null;
+        positive got = 0;
+
+        status = tls_borrow(tls, want, address_of span, address_of got, 1, 0);
+        fuzz_offsets(tls);
+        *got_total = got;
+        if (status || !got)
+                return status;
+        for (;;)
+        {
+                if (got > want - total || span < tls->receive ||
+                    span + got > tls->receive + TLS_RECEIVE_ROOM)
+                        abort();
+                spans[count] = span;
+                lengths[count] = got;
+                memcpy(fuzz_shadow + shadow, span, got);
+                shadow += got;
+                total += got;
+                count++;
+                if (count == 16 || total == want)
+                        break;
+                status = tls_lend(tls, want - total, address_of span,
+                                  address_of got);
+                fuzz_offsets(tls);
+                if (status == TLS_AGAIN || (!status && !got))
+                        break;
+                if (status)
+                        return status;
+        }
+        shadow = 0;
+        for (positive at = 0; at < count; at++)
+        {
+                if (memcmp(spans[at], fuzz_shadow + shadow, lengths[at]))
+                        abort();
+                shadow += lengths[at];
+        }
+        *got_total = total;
+        return TLS_OK;
+}
+
+static fn fuzz_connection(const p8 *data, positive length)
+{
+        static const positive rooms[] = {1, 2, 7, 100, 4096, 16384, 65536,
+                                         16623};
+        static p8 into[65536];
+        tls_conn address_to tls;
+        network_deadline deadline = {1, 1};
+        p8 flags;
+        bool closed = false;
+        bipolar status;
+
+        if (length < 4)
+                return;
+        flags = data[0];
+        fuzz_state = ((p64)data[1] << 16 | (p64)data[2] << 8 | data[3]) + 1;
+        fuzz_stream = data + 4;
+        fuzz_stream_length = length - 4;
+        fuzz_stream_at = 0;
+        fuzz_send_fails = (flags & 0x30) == 0x30;
+
+        /* Uninitialized, as http_link_open leaves the buffers. */
+        tls = (tls_conn address_to)malloc(sizeof *tls);
+        if (!tls)
+                return;
+        status = tls_connect(tls, 3, flags & 1 ? "192.0.2.1" : "example.test",
+                             flags & 2);
+        if (status)
+        {
+                /* Only a checked Certificate can be the reason. */
+                if (tls->handle != -1 ||
+                    (status != TLS_FAIL &&
+                     (status != TLS_UNTRUSTED || !(flags & 2))))
+                        abort();
+                free(tls);
+                return;
+        }
+        fuzz_offsets(tls);
+        if (!tls->application || !tls->encrypted)
+                abort();
+        if (flags & 4)
+                tls->seq_read = TLS_AES_GCM_RECORD_LIMIT - 3;
+        if (flags & 8)
+                tls->seq_write = TLS_AES_GCM_RECORD_LIMIT - 1;
+
+        for (int turn = 0; turn < 48; turn++)
+        {
+                p64 roll = fuzz_next();
+                positive room = rooms[(roll >> 8) % 8];
+                positive got = 7;
+                bipolar status;
+
+                switch (roll % 4)
+                {
+                case 0:
+                        status = tls_read_until(tls, into, room, &got,
+                                                (roll & 16) ? &deadline : null);
+                        break;
+                case 1:
+                {
+                        p8 address_to span = null;
+                        status = tls_borrow(tls, room, &span, &got, 1, 0);
+                        if (!status && got)
+                                memcpy(into, span, got);
+                        break;
+                }
+                case 2:
+                        status = fuzz_gather(tls, room, &got);
+                        break;
+                default:
+                        memset(into, 0x61, 700);
+                        status = tls_write(tls, into, 1 + (positive)(roll >> 20) % 700);
+                        got = 0;
+                        break;
+                }
+                fuzz_offsets(tls);
+                if (status == TLS_FAIL)
+                        break;
+                if (status != TLS_OK || got > room)
+                        abort();
+                if (roll % 4 == 3)
+                        continue;
+                if (closed && got)
+                        abort();
+                closed |= !got;
+        }
+        tls_forget(tls);
+        for (positive at = sizeof tls->handle; at < TLS_CONN_HEAD; at++)
+                if (((p8 address_to)tls)[at])
+                        abort();
+        free(tls);
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        p8 *buf;
+        positive length;
+        p8 *payload;
+        positive payload_length;
+
+        if (size > 131072)
+                size = 131072;
+        length = (positive)size;
+        buf = (p8 *)malloc(length ? length : 1);
+        if (!buf)
+                return 0;
+        if (length)
+                memcpy(buf, data, length);
+
+        /* The magic 0xf3 of the seeds is optional: every input is a
+           connection. */
+        payload = buf;
+        payload_length = length;
+        if (length > 0 && buf[0] == 0xf3)
+        {
+                payload = buf + 1;
+                payload_length = length - 1;
+        }
+        fuzz_connection(payload, payload_length);
+
+        free(buf);
+        return 0;
+}
+"""
+
+    return tls_fuzz_run("tls hs", "tls_hs",
+                        shim + defines + connection + stubs + record + "\n" +
+                        load24 + "\n" + protocol + "\n" + driver,
+                        81920)
+
+
+def tls_verify_chain_lift(net, now=None, aia=None):
+    """Production tls_verify_chain and what it calls past tls_verify_one:
+    anchors.inc, tls_anchor_key, tls_spki_is_anchor, tls_anchor_verifies,
+    tls_keep_leaf over a tls_conn holding only what they touch, and
+    tls_date_now -- libc's clock, or the constant named by now -- and
+    tls_aia_fetch, whose network half lives in the HTTP client: aia is the C
+    body that stands in for it, by default a fetch that finds nothing.
+    Appended to tls_verify_hosted_source's program; a TLS_BENCH_ANCHOR
+    defined before it is used as net.c uses it. Raises ValueError when a
+    slice is gone."""
+    anchor_types = tls_fuzz_sec(net, "typedef struct\n{\n        p8 name[8];",
+                                '#include "anchors.inc"')
+    anchor_code = tls_fuzz_sec(
+        net, "/* An anchor's key laid out the way tls_parse_cert lays out a served one. */",
+        "static COLD bool tls_certificate_names_chain(").replace(
+        "#include TLS_BENCH_ANCHOR\n", "")
+    anchor_code += tls_fuzz_sec(net, "/* The last certificate served names its issuer.",
+                                "static COLD bool tls_date_now(p64 address_to value)")
+    if now:
+        date = ("static bool tls_date_now(p64 address_to value)\n"
+                "{\n        address_to value = %s;\n        return true;\n}\n" % now)
+    else:
+        date = "#include <time.h>\ntypedef struct tm tm;\n" + tls_fuzz_sec(
+            net, "static COLD bool tls_date_now(p64 address_to value)",
+            "static COLD bool tls_cert_current(")
+    return (r"""
+#define array_count(a) (sizeof(a) / sizeof((a)[0]))
+typedef struct
+{
+        bool check_cert;
+        p8 leaf_qx[48];
+        p8 leaf_qy[48];
+        p8 leaf_n[CRYPTO_RSA_BYTES];
+        positive leaf_n_length;
+        p64 leaf_e;
+        p8 leaf_curve;
+} tls_conn;
+""" + anchor_types + (HARNESS_ROOT / "src/net/anchors.inc").read_text() + anchor_code + date +
+            "static COLD positive tls_aia_fetch(const p8 address_to url, positive length,\n"
+            "                                   p8 address_to into, positive room)\n{\n" +
+            (aia or "        (void)url;\n        (void)length;\n        (void)into;\n"
+                    "        (void)room;\n        return 0;\n") + "}\n" +
+            tls_fuzz_sec(net, "static COLD bool tls_verify_chain(p8 address_to body",
+                         "static COLD bool tls_hello_append("))
+
+
+#       The Public Suffix List file suffixes.inc was generated from, fetched
+#       from https://publicsuffix.org/list/public_suffix_list.dat on the box
+#       2026-09-28. Only its ICANN section is used, the section Chrome's
+#       wildcard check reads.
+PUBLIC_SUFFIX_LIST_SHA256 = "257b298daca42f6d8ec964e238c2a55518e14f09d3117917ec8acee6f188503e"
+
+
+def public_suffix_rules(text):
+    """The ICANN section's rules, lower case, each U-label as its A-label."""
+    rules = []
+    icann = False
+    for line in text.splitlines():
+        line = line.strip()
+        if "===BEGIN ICANN DOMAINS===" in line:
+            icann = True
+        elif "===END ICANN DOMAINS===" in line:
+            icann = False
+        elif icann and line and not line.startswith("//"):
+            labels = []
+            for label in line.split()[0].split("."):
+                mark = "!" if label.startswith("!") else ""
+                label = label[len(mark):].lower()
+                if not label.isascii():
+                    label = "xn--" + label.encode("punycode").decode()
+                labels.append(mark + label)
+            rules.append(".".join(labels))
+    return rules
+
+
+def public_suffix_entries(rules):
+    """The multi-label rules as suffixes.inc keeps them, labels reversed
+    ("uk.co"): the plain rules sorted, the wildcards' parents ("ck" for
+    "*.ck") and the exceptions ("ck.www" for "!www.ck")."""
+    reverse = lambda name: ".".join(reversed(name.split(".")))
+    plain = sorted(reverse(r) for r in rules if "." in r and r[0] not in "*!")
+    wildcards = sorted(reverse(r[2:]) for r in rules if r.startswith("*."))
+    exceptions = sorted(reverse(r[1:]) for r in rules if r.startswith("!"))
+    return plain, wildcards, exceptions
+
+
+def public_suffix_compact(tables, name):
+    """What tls_public_suffix answers from the three tables."""
+    plain, wildcards, exceptions = tables
+    key = ".".join(reversed(name.lower().split(".")))
+    return key not in exceptions and (key.rpartition(".")[0] in wildcards or key in plain)
+
+
+def public_suffix_encode(entries):
+    """Front coding: a capital, 'A' plus the bytes shared with the entry
+    before (at most 25), then the rest of the entry. Each top-level label's
+    run starts from nothing, at the offsets returned beside the text."""
+    out = []
+    runs = []
+    before = ""
+    at = 0
+    for entry in entries:
+        shared = 0
+        if before.split(".")[0] != entry.split(".")[0]:
+            runs.append(at)
+        else:
+            while shared < min(len(before), len(entry), 25) and before[shared] == entry[shared]:
+                shared += 1
+        piece = chr(ord("A") + shared) + entry[shared:]
+        out.append(piece)
+        at += len(piece)
+        before = entry
+    return "".join(out), runs
+
+
+def public_suffix_decode(text):
+    entries = []
+    for found in re.finditer(r"([A-Z])([^A-Z]*)", text):
+        before = entries[-1] if entries else ""
+        entries.append(before[:ord(found.group(1)) - ord("A")] + found.group(2))
+    return entries
+
+
+def public_suffix_is_suffix(rules, name):
+    """The Public Suffix List algorithm itself: whether name is its own
+    public suffix under the prevailing rule (exception first, else the rule
+    of most labels, else the implicit "*")."""
+    labels = name.lower().split(".")
+    best = 1
+    for rule in rules:
+        parts = rule.lstrip("!").split(".")
+        if len(parts) <= len(labels) and all(
+                p == "*" or p == l for p, l in zip(reversed(parts), reversed(labels))):
+            if rule.startswith("!"):
+                return len(parts) - 1 == len(labels)
+            best = max(best, len(parts))
+    return best == len(labels)
+
+
+def public_suffix_probes(tables):
+    """Names derived from every entry: the rule, a name under it and its
+    parent, a wildcard's expansions and base, an exception and a name under
+    it, mixed case."""
+    plain, wildcards, exceptions = tables
+    names = set()
+    for entry in plain + wildcards + exceptions:
+        name = ".".join(reversed(entry.split(".")))
+        names.update((name, "zz." + name, "zz.zz." + name, name.upper(),
+                      name.partition(".")[2]))
+    names.update(("example.com", "example.foo", "co.uk.example", "github.io", "appspot.com"))
+    return sorted(n for n in names if n.count(".") >= 1)
+
+
+def harness_public_suffixes(argv):
+    """The wildcard public-suffix tables in src/net/suffixes.inc and the C
+    lookup that reads them.
+
+    With --list FILE (a copy of the Public Suffix List whose sha256 is
+    PUBLIC_SUFFIX_LIST_SHA256) and --write, regenerates suffixes.inc, after
+    proving that the compact test tls_public_suffix makes -- not an
+    exception, and a wildcard parent or a plain rule -- equals the Public
+    Suffix List algorithm over every rule-derived name. Without --list it
+    decodes suffixes.inc and holds the lifted tls_public_suffix and
+    tls_host_match to it over the same names: each is a suffix exactly when
+    the tables say so, and "*.<name>" identifies "a.<name>" exactly when it
+    is not.
+
+        python3 test/differential.py --harness public_suffixes
+        python3 test/differential.py --harness public_suffixes --list FILE --write
+
+    The list changes most days, and --list takes only the pinned copy: to
+    move to a newer one, fetch https://publicsuffix.org/list/public_suffix_list.dat,
+    set PUBLIC_SUFFIX_LIST_SHA256 and the date in its comment and in the
+    written header to the new copy's, rerun with --write (about 40 s, most
+    of it the reference algorithm), and commit suffixes.inc with the pin.
+    """
+    parser = argparse.ArgumentParser(prog="differential.py --harness public_suffixes")
+    parser.add_argument("--list")
+    parser.add_argument("--write", action="store_true")
+    args = parser.parse_args(argv)
+    path = HARNESS_ROOT / "src/net/suffixes.inc"
+    checks = Checks()
+
+    def c_list(name, items):
+        return "static const char %s[] =\n%s;\n" % (
+            name, "\n".join('    "%s\\0"' % item for item in items))
+
+    if args.list:
+        raw = Path(args.list).read_bytes()
+        if hashlib.sha256(raw).hexdigest() != PUBLIC_SUFFIX_LIST_SHA256:
+            print("public suffixes: FAIL -- %s is not the pinned list" % args.list)
+            return 1
+        rules = public_suffix_rules(raw.decode("utf-8"))
+        tables = public_suffix_entries(rules)
+        wrong = [name for name in public_suffix_probes(tables)
+                 if public_suffix_compact(tables, name) != public_suffix_is_suffix(rules, name)]
+        checks(not wrong, "the compact test differs from the list's algorithm for %s" %
+               " ".join(wrong[:10]))
+        encoded, runs = public_suffix_encode(tables[0])
+        checks(public_suffix_decode(encoded) == tables[0], "the front coding does not decode")
+        if args.write and not wrong:
+            lines = [encoded[at:at + 72] for at in range(0, len(encoded), 72)]
+            path.write_text(
+                "/*\n        Public suffixes a certificate wildcard may not stand on "
+                "(tls_public_suffix).\n\n"
+                "        Generated by test/differential.py --harness public_suffixes "
+                "--list FILE --write\n"
+                "        from the Public Suffix List, sha256 %s...,\n"
+                "        fetched from publicsuffix.org 2026-09-28: the %d multi-label "
+                "rules of its\n        ICANN section (U-labels as A-labels), labels "
+                "reversed. The plain rules are\n        sorted and front-coded -- a "
+                "capital letter, 'A' plus the bytes shared with\n        the entry "
+                "before, then the rest -- and each top-level label's run starts\n"
+                "        from 'A' at an offset in tls_public_suffix_runs. %d bytes "
+                "of text.\n*/\n\n"
+                "static const char tls_public_suffixes[] =\n%s;\n\n"
+                "static const p16 tls_public_suffix_runs[] = {\n%s};\n\n%s\n%s" % (
+                    PUBLIC_SUFFIX_LIST_SHA256[:16], sum(map(len, tables)), len(encoded),
+                    "\n".join('    "%s"' % line for line in lines),
+                    "".join("    %s,\n" % ", ".join(str(r) for r in runs[at:at + 10])
+                            for at in range(0, len(runs), 10)),
+                    c_list("tls_public_suffix_wildcards", tables[1]),
+                    c_list("tls_public_suffix_exceptions", tables[2])))
+            print("public suffixes: wrote %s (%d rules, %d bytes, %d runs)" % (
+                path, sum(map(len, tables)), len(encoded), len(runs)))
+        return checks.verdict("public suffixes", "public-suffixes")
+
+    text = path.read_text()
+
+    def c_strings(name):
+        found = re.search(r"%s\[\] =\n((?:\s*\"[^\"]*\"\n?)+);" % name, text)
+        return "".join(re.findall(r'"([^"]*)"', found.group(1))) if found else None
+
+    encoded = c_strings("tls_public_suffixes")
+    wildcards = c_strings("tls_public_suffix_wildcards")
+    exceptions = c_strings("tls_public_suffix_exceptions")
+    if None in (encoded, wildcards, exceptions):
+        print("public suffixes: FAIL -- a table is missing from suffixes.inc")
+        return 1
+    tables = (public_suffix_decode(encoded), wildcards.split("\\0")[:-1],
+              exceptions.split("\\0")[:-1])
+    names = public_suffix_probes(tables)
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
+    driver = r"""
+int main(void)
+{
+        char line[512];
+
+        while (fgets(line, sizeof line, stdin))
+        {
+                char star[520];
+                char host[520];
+                positive length = strcspn(line, "\n");
+
+                line[length] = 0;
+                snprintf(star, sizeof star, "*.%s", line);
+                snprintf(host, sizeof host, "a.%s", line);
+                printf("%d %d\n", tls_public_suffix((p8 *)line, length),
+                       tls_host_match(host, (p8 *)star, strlen(star)));
+        }
+        return 0;
+}
+"""
+    with tempfile.TemporaryDirectory(prefix="public-suffixes-") as temporary:
+        work = Path(temporary)
+        (work / "suffix.c").write_text(shim + oids + "\n" + parsers + driver)
+        built = subprocess.run([os.environ.get("CC", "cc"), "-O1", "-w", "-o",
+                                str(work / "suffix"), str(work / "suffix.c")],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print("public suffixes: FAIL -- the lift does not build:\n" + built.stderr[-2000:])
+            return 1
+        ran = subprocess.run([str(work / "suffix")], input="\n".join(names) + "\n",
+                             capture_output=True, text=True)
+    answers = ran.stdout.split("\n")
+    wrong = []
+    for name, answer in zip(names, answers):
+        suffix = public_suffix_compact(tables, name)
+        if answer != "%d %d" % (suffix, not suffix):
+            wrong.append("%s(%s)" % (name, answer))
+    checks(len(answers) > len(names) and not wrong,
+           "tls_public_suffix disagrees with suffixes.inc for %d of %d names: %s" % (
+               len(wrong), len(names), " ".join(wrong[:10])))
+    print("public suffixes: %d rules, %d names probed" % (sum(map(len, tables)), len(names)))
+    return checks.verdict("public suffixes", "public-suffixes")
+
+#       Public HTTPS hosts for x509_corpus: the popular sites, CDNs, clouds and
+#       registries, and a deliberate spread of governments, banks and national
+#       CAs (Certum, D-Trust, Actalis, HARICA, NetLock, e-Szigno, TWCA, SECOM,
+#       FNMT, Buypass, Telia...) whose chains are the least uniform. 2026-09-28.
+X509_CORPUS_HOSTS = """
+1.1.1.1 163.com accounts.google.com accuweather.com acm.org acme-v02.api.letsencrypt.org
+actalis.it adidas.com adobe.com airbnb.com ajax.googleapis.com akamai.com alibaba.com
+aliexpress.com alipay.com aljazeera.com alpinelinux.org amazon.co.jp amazon.co.uk
+amazon.com amazon.de amd.com americanexpress.com android.com anthropic.com apache.org
+apnews.com apnic.net apple.com archive.org archlinux.org arin.net arxiv.org att.com
+australia.gov.au aws.amazon.com azure.com azure.microsoft.com baidu.com
+bankofamerica.com barclays.co.uk bbc.co.uk bbc.com berkeley.edu bestbuy.com bing.com
+bitbucket.org blogger.com bloomberg.com bmw.com bnpparibas.com booking.com bosch.com
+box.com bp.com brave.com bt.com bund.de buypass.com cam.ac.uk canada.ca capitalone.com
+cdc.gov cdn.jsdelivr.net cdnjs.cloudflare.com centos.org certum.pl chase.com
+chrome.google.com cisco.com citi.com claude.ai cloud.google.com cloudflare.com cnn.com
+code.jquery.com coinbase.com commerzbank.de comodoca.com console.aws.amazon.com
+costco.com craigslist.org crates.io credit-suisse.com danskebank.com daum.net debian.org
+dell.com deutsche-bank.de digicert.com digitalocean.com discord.com discover.com dmm.com
+dnb.no docker.com docs.google.com doordash.com drive.google.com dropbox.com
+duckduckgo.com e-szigno.hu ea.com ebay.com ec.europa.eu economist.com eff.org elpais.com
+elsevier.com en.wikipedia.org entrust.com epicgames.com ericsson.com espn.com ethz.ch
+etsy.com europa.eu expedia.com exxonmobil.com facebook.com fastly.com fda.gov
+federalreserve.gov fedoraproject.org fidelity.com fifa.com files.pythonhosted.org
+firebase.google.com firefox.com flipkart.com fly.io fonts.googleapis.com
+fonts.gstatic.com forbes.com ford.com freebsd.org fsf.org ft.com gandi.net gcr.io
+gentoo.org ghcr.io git.kernel.org github.com gitlab.com glassdoor.com globalsign.com
+globo.com gmail.com gnu.org go.dev gob.mx godaddy.com golang.org goldmansachs.com
+google.com gov.br gov.uk gstatic.com handelsbanken.se harica.gr harvard.edu
+hashicorp.com helm.sh heroku.com hetzner.com hm.com honda.com hotstar.com hp.com
+hub.docker.com huggingface.co iana.org ibm.com icann.org icloud.com identrust.com
+ieee.org ietf.org ikea.com imdb.com imf.org indeed.com india.gov.in ing.com
+instagram.com intel.com irs.gov itunes.apple.com jd.com jpmorgan.com k8s.io kaggle.com
+kakao.com kernel.org kraken.com kth.se kubernetes.io lemonde.fr lenovo.com
+letsencrypt.org lg.com line.me linkedin.com linode.com live.com lloydsbank.com
+login.live.com login.microsoftonline.com lyft.com mail.google.com mail.ru
+maps.google.com marca.com mastercard.com maxcdn.bootstrapcdn.com mediawiki.org
+medium.com mercadolibre.com.ar mercadolivre.com.br mercedes-benz.com microsoft.com
+minecraft.net mit.edu monster.com morganstanley.com mozilla.org namecheap.com nasa.gov
+nasdaq.com nato.int nature.com natwest.com naver.com nba.com netbsd.org netflix.com
+netlify.com networksolutions.com nfl.com nicovideo.jp nih.gov nike.com nintendo.com
+nodejs.org nokia.com nordea.com npmjs.com npr.org nvidia.com nyse.com nytimes.com
+objects.githubusercontent.com oecd.org office.com ok.ru olympics.com one.one.one.one
+openai.com openbsd.org openstreetmap.org opensuse.org oracle.com orange.fr outlook.com
+ovh.com ox.ac.uk pages.dev paypal.com philips.com pinterest.com play.google.com
+playstation.com portal.azure.com proton.me protonmail.com pypi.org python.org qq.com
+quay.io quora.com quovadisglobal.com rabobank.nl rakuten.co.jp raw.githubusercontent.com
+rbc.com reddit.com redhat.com registry.npmjs.org render.com reuters.com rfc-editor.org
+ripe.net roblox.com rust-lang.org s3.amazonaws.com salesforce.com samsung.com
+santander.com schwab.com science.org scotiabank.com seb.se sec.gov sectigo.com service-
+public.fr shell.com shopify.com siemens.com signal.org signin.aws.amazon.com sina.com.cn
+skysports.com slack.com sohu.com sony.com soundcloud.com spiegel.de spotify.com
+springer.com squareup.com ssa.gov ssl.com stackoverflow.com stanford.edu state.gov
+steamcommunity.com storage.googleapis.com store.steampowered.com stripe.com swedbank.se
+swisssign.com t-mobile.com taobao.com target.com td.com teams.microsoft.com telegram.org
+telekom.de terraform.io tesla.com theguardian.com tiktok.com tmall.com torproject.org
+toyota.com tripadvisor.com trustwave.com tumblr.com tutanota.com twitch.tv twitter.com
+uber.com ubisoft.com ubs.com ubuntu.com un.org uniqlo.com unpkg.com uol.com.br
+update.microsoft.com upload.wikimedia.org usa.gov usbank.com vanguard.com vercel.com
+verisign.com verizon.com visa.com vk.com vodafone.com volkswagen.de vultr.com w3.org
+walmart.com washingtonpost.com weather.com web.archive.org weibo.com wellsfargo.com
+whatsapp.com whatwg.org whitehouse.gov who.int wikimedia.org wikipedia.org
+wiktionary.org windowsupdate.microsoft.com wordpress.com wordpress.org workers.dev
+worldbank.org wsj.com wto.org www.a-trust.at www.abnamro.nl www.accv.es www.actalis.it
+www.admin.ch www.affirmtrust.com www.agid.gov.it www.aib.ie www.alphassl.com
+www.alrajhibank.com.sa www.amazon.ca www.amazon.com www.amazon.com.br www.amazon.com.mx
+www.amazon.es www.amazon.fr www.amazon.in www.amazon.it www.ameli.fr www.android.com
+www.anf.es www.anz.co.nz www.anz.com.au www.apple.com www.argentina.gob.ar www.aruba.it
+www.ato.gov.au www.audible.com www.australia.gov.au www.banamex.com www.bancochile.cl
+www.bancolombia.com www.bankofchina.com www.bb.com.br www.bbva.es www.bbva.mx
+www.bca.co.id www.bcr.ro www.bdo.com.ph www.belgium.be www.bing.com www.blogger.com
+www.bmf.gv.at www.bmo.com www.bna.com.ar www.boc.cn www.borger.dk www.bundesdruckerei.de
+www.bundesregierung.de www.buypass.no www.caixa.gov.br www.caixabank.es
+www.camerfirma.com www.canada.ca www.cca.gov.in www.certigna.com www.certsign.ro
+www.certum.eu www.cfca.com.cn www.cgd.pt www.cht.com.tw www.cloudflare.com
+www.commbank.com.au www.comodo.com www.cra-arc.gc.ca www.credit-agricole.fr www.csob.cz
+www.d-trust.net www.dbs.com.sg www.difi.no www.digicert.com www.digid.nl www.disig.sk
+www.docomo.ne.jp www.e-tugra.com www.eesti.ee www.elster.de www.emiratesnbd.com
+www.emudhra.com www.entrust.com www.entrustdatacard.com www.firmaprofesional.com
+www.fnmt.es www.garantibbva.com.tr www.gdca.com.cn www.geotrust.com www.globalsign.com
+www.gob.cl www.gob.ec www.gob.pe www.godaddy.com www.google.co.jp www.google.co.uk
+www.google.com www.google.de www.gosuslugi.ru www.gouvernement.fr www.gov.am www.gov.az
+www.gov.br www.gov.cn www.gov.co www.gov.cz www.gov.gr www.gov.hk www.gov.hr www.gov.ie
+www.gov.il www.gov.kr www.gov.kz www.gov.ph www.gov.pl www.gov.pt www.gov.ro www.gov.sg
+www.gov.si www.gov.sk www.gov.tw www.gov.ua www.gov.uk www.gov.uz www.gov.vn www.gov.za
+www.government.bg www.government.nl www.governo.it www.govt.nz www.gub.uy www.halcom.si
+www.hanwha.com www.harica.gr www.hdfcbank.com www.hsbc.com.hk www.ica.cz www.icbc.com.cn
+www.icicibank.com www.impots.gouv.fr www.infocert.it www.infosys.com www.instantssl.com
+www.intesasanpaolo.com www.ird.govt.nz www.itau.com.br www.izenpe.eus www.jpki.go.jp
+www.kamusm.gov.tr www.kantei.go.jp www.kbc.be www.kiwibank.co.nz www.korea.kr
+www.lamoncloa.gob.es www.latvija.lv www.letsencrypt.org www.leumi.co.il www.lrv.lt
+www.maybank2u.com.my www.mbank.pl www.microsec.hu www.mitid.dk www.mofa.go.jp
+www.moi.gov.tw www.mozilla.org www.nab.com.au www.namirial.com www.naver.com www.nbg.gr
+www.netlock.hu www.networksolutions.com www.nic.in www.nta.go.jp www.ntt.com
+www.nttdata.com www.office365.com www.op.fi www.otpbank.hu www.overheid.nl www.pkobp.pl
+www.positivessl.com www.poste.it www.postfinance.ch www.postsignum.cz
+www.president.gov.tw www.privatbank.ua www.qatarairways.com www.quovadis.bm
+www.rapidssl.com www.regeringen.se www.regjeringen.no www.sat.gob.mx www.sberbank.ru
+www.sbi.co.in www.scb.co.th www.secom.co.jp www.sectigo.com www.securetrust.com
+www.sede.fnmt.gob.es www.sheca.com www.sifytechnologies.com www.singpass.gov.sg
+www.sk.ee www.skatteverket.se www.skype.com www.slovensko.sk www.societegenerale.com
+www.softbank.jp www.sparkasse.de www.srbija.gov.rs www.ssl.com www.standardbank.co.za
+www.starfield.com www.starfieldtech.com www.suomi.fi www.swedbank.ee www.swisscom.ch
+www.swisssign.com www.symantec.com www.tcs.com www.telesec.de www.telia.fi www.telia.se
+www.thawte.com www.tinkoff.ru www.trustasia.com www.trustwave.com www.turkiye.gov.tr
+www.twca.com.tw www.u.ae www.uanataca.com www.unicredit.it www.usa.gov www.verisign.com
+www.vietcombank.com.vn www.westpac.com.au www.wipro.com www.wosign.com www.xbox.com
+www.xramp.com www.youtube.com www.zerossl.com x.com xbox.com xfinity.com yahoo.co.jp
+yahoo.com yandex.ru yelp.com youtube.com zara.com zillow.com zoom.us
+""".split()
+
+
+def harness_x509_corpus(argv):
+    """Production tls_verify_chain against openssl verify over real servers.
+
+    Fetches each X509_CORPUS_HOSTS chain with openssl s_client -showcerts
+    into --work (kept, so a rerun with --offline reads the same bytes),
+    runs the chain through the hosted lift of tls_parse_cert and
+    tls_verify_chain with the shipped anchors and the real clock, and asks
+    openssl verify (system bundle, -purpose sslserver, the host's name) the
+    same question. Fails if this tree accepts any chain openssl refuses;
+    lists the hosts openssl accepts that this refuses, which is
+    reachability, not security. Needs the network, so no lane runs it.
+    2026-09-28, live: 644 chains, 635 of the 635 openssl accepts verify,
+    and none of the 9 it refuses.
+
+    A certificate's http: caIssuers location is fetched too, once, into
+    --work/aia (the lift's tls_aia_fetch reads it from there), and handed
+    to openssl as untrusted, so openssl's verdict is the browser's that
+    completes a short chain the same way. 2026-09-28, live again after
+    name constraints, the suffix check, RSA-8192 and caIssuers: 642 chains,
+    openssl (with the fetched issuers) accepts 636 and this tree all 636,
+    none it refuses; the pinned base over the same chains accepted 633 of
+    the 633 openssl took without fetching (gob.mx, monster.com, ssa.gov are
+    the three a fetch completes).
+
+        python3 test/differential.py --harness x509_corpus --work DIR
+    """
+    import base64
+    import concurrent.futures
+    parser = argparse.ArgumentParser(prog="differential.py --harness x509_corpus")
+    parser.add_argument("--work", required=True)
+    parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--bundle", default="/etc/ssl/certs/ca-certificates.crt")
+    args = parser.parse_args(argv)
+    work = Path(args.work)
+    (work / "chains").mkdir(parents=True, exist_ok=True)
+    if not shutil.which("openssl") or not shutil.which("clang"):
+        print("x509 corpus: NOT RUN -- needs openssl and clang")
+        return 2
+
+    def fetch(host):
+        path = work / "chains" / (host + ".pem")
+        if not args.offline and not path.exists():
+            try:
+                got = subprocess.run(
+                    ["openssl", "s_client", "-showcerts", "-servername", host,
+                     "-connect", host + ":443"], stdin=subprocess.DEVNULL,
+                    capture_output=True, timeout=20).stdout
+            except subprocess.TimeoutExpired:
+                got = b""
+            if b"BEGIN CERTIFICATE" in got:
+                path.write_bytes(got)
+        return path if path.exists() else None
+
+    with concurrent.futures.ThreadPoolExecutor(24) as pool:
+        chains = [(h, p) for h, p in zip(X509_CORPUS_HOSTS, pool.map(fetch, X509_CORPUS_HOSTS))
+                  if p]
+    pem = re.compile(rb"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", re.S)
+    (work / "aia").mkdir(exist_ok=True)
+
+    def aia_name(url):
+        return re.sub(r"[^A-Za-z0-9._-]", "_", url)
+
+    def aia_urls(text):
+        from cryptography import x509
+        urls = []
+        for found in pem.finditer(text):
+            try:
+                cert = x509.load_der_x509_certificate(
+                    base64.b64decode(b"".join(found.group(1).split())))
+                access = cert.extensions.get_extension_for_class(
+                    x509.AuthorityInformationAccess).value
+            except Exception:
+                continue
+            urls += [d.access_location.value for d in access
+                     if d.access_method == x509.oid.AuthorityInformationAccessOID.CA_ISSUERS
+                     and isinstance(d.access_location, x509.UniformResourceIdentifier)
+                     and d.access_location.value.lower().startswith("http://")][:1]
+        return urls
+
+    def aia_fetch(url):
+        import urllib.request
+        path = work / "aia" / aia_name(url)
+        if not args.offline and not path.exists():
+            try:
+                with urllib.request.urlopen(url, timeout=10) as reply:
+                    path.write_bytes(reply.read(16384))
+            except Exception:
+                pass
+        return path
+
+    urls = sorted({u for _, path in chains for u in aia_urls(path.read_bytes())})
+    with concurrent.futures.ThreadPoolExecutor(16) as pool:
+        list(pool.map(aia_fetch, urls))
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    aia = r"""
+        char path[4096];
+        int at = snprintf(path, sizeof path, "%s/", getenv("X509_AIA"));
+        FILE *f;
+        positive got;
+
+        for (positive i = 0; i < length && at < (int)sizeof path - 1; i++)
+                path[at++] = isalnum(url[i]) || url[i] == '.' || url[i] == '-' ||
+                                     url[i] == '_' ? url[i] : '_';
+        path[at] = 0;
+        f = fopen(path, "rb");
+        got = f ? fread(into, 1, room, f) : 0;
+        if (f)
+                fclose(f);
+        return got;
+"""
+    driver = tls_verify_chain_lift(net, aia=aia) + r"""
+static p8 body[1 << 20];
+
+/* argv: host, then the served DER files in order; prints 1 or 0. */
+int main(int argc, char **argv)
+{
+        positive at = 4;
+        tls_conn tls;
+
+        for (int i = 2; i < argc; i++)
+        {
+                FILE *f = fopen(argv[i], "rb");
+                positive n = f ? fread(body + at + 3, 1, sizeof body - at - 5, f) : 0;
+
+                if (f)
+                        fclose(f);
+                body[at] = (p8)(n >> 16);
+                body[at + 1] = (p8)(n >> 8);
+                body[at + 2] = (p8)n;
+                at += 3 + n;
+                body[at++] = 0;
+                body[at++] = 0;
+        }
+        body[0] = 0;
+        body[1] = (p8)((at - 4) >> 16);
+        body[2] = (p8)((at - 4) >> 8);
+        body[3] = (p8)(at - 4);
+        memory_fill(&tls, 0, sizeof tls);
+        tls.check_cert = true;
+        printf("%d\n", tls_verify_chain(body, at, argv[1], &tls));
+        return 0;
+}
+"""
+    source = tls_verify_hosted_source(net, (HARNESS_ROOT / "test/checks.c").read_text(), driver)
+    (work / "verify.c").write_text(source)
+    built = subprocess.run(["clang", "-O2", "-std=gnu11", "-w", str(work / "verify.c"),
+                            "-o", str(work / "verify")], capture_output=True, text=True)
+    if built.returncode:
+        print("x509 corpus: FAIL -- the lift does not build:\n" + built.stderr[-2000:])
+        return 1
+
+    def judge(item):
+        host, path = item
+        text = path.read_bytes()
+        ders = []
+        for at, found in enumerate(pem.finditer(text)):
+            der = work / "chains" / ("%s.%d.der" % (host, at))
+            der.write_bytes(base64.b64decode(b"".join(found.group(1).split())))
+            ders.append(str(der))
+        leaf = work / "chains" / (host + ".leaf.pem")
+        rest = work / "chains" / (host + ".rest.pem")
+        blocks = [m.group(0) + b"\n" for m in pem.finditer(text)]
+        leaf.write_bytes(blocks[0])
+        for url in aia_urls(text):
+            fetched = work / "aia" / aia_name(url)
+            try:
+                from cryptography import x509
+                from cryptography.hazmat.primitives import serialization
+                blocks.append(x509.load_der_x509_certificate(fetched.read_bytes()).public_bytes(
+                    serialization.Encoding.PEM))
+            except Exception:
+                pass
+        rest.write_bytes(b"".join(blocks[1:]))
+        verify = ["openssl", "verify", "-CAfile", args.bundle, "-purpose", "sslserver",
+                  "-verify_ip" if re.fullmatch(r"[0-9.]+", host) else "-verify_hostname", host]
+        if len(blocks) > 1:
+            verify += ["-untrusted", str(rest)]
+        theirs = subprocess.run(verify + [str(leaf)], capture_output=True).returncode == 0
+        ours = subprocess.run([str(work / "verify"), host] + ders, capture_output=True,
+                              text=True, env=dict(os.environ, X509_AIA=str(work / "aia"))
+                              ).stdout.strip() == "1"
+        return host, ours, theirs
+
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        verdicts = list(pool.map(judge, chains))
+    checks = Checks()
+    both = sum(ours and theirs for _, ours, theirs in verdicts)
+    refused = sorted(host for host, ours, theirs in verdicts if theirs and not ours)
+    for host, ours, theirs in verdicts:
+        checks(theirs or not ours, "%s: tls_verify_chain accepts a chain openssl refuses" % host)
+    print("x509 corpus: %d chains; openssl accepts %d, this tree %d of those; "
+          "refused where openssl accepts: %s" % (
+              len(verdicts), both + len(refused), both, " ".join(refused) or "none"))
+    return checks.verdict("x509 corpus", "x509-corpus")
+
+
+def harness_tls_verify_fuzz(argv):
+    """libFuzzer over production tls_verify_chain, anchors and path building.
+
+    Lifts the same DER parsers and path-policy helpers as tls_der_fuzz, the
+    hosted ECDSA/RSA verify (C montgomery from SHARED_montgomery_reference,
+    compact SHA-2) so every link goes through production
+    ``tls_verify_one(child, issuer)``, and tls_verify_chain itself with
+    anchors.inc, tls_anchor_verifies and tls_spki_is_anchor. The P-384 key
+    of tls_verify_ecdsa_chain's fourth certificate stands in as the
+    TLS_BENCH_ANCHOR, so its leaf and two intermediates verify all the way.
+    LLVMFuzzerInitialize runs fuzz_prove_wr2_gts() and proves that chain
+    accepts, then refuses with one signature bit flipped. Input lanes: the
+    raw Certificate body; 0xC1 the body after one byte; 0xCA overwrite the
+    good chain at an input-chosen offset; 0xCB serve the generated
+    certificates in an input-chosen order, repeats and omissions included,
+    which is path building's whole input space, and abort unless the
+    verdict is exactly the one that order must get. Not in lane_net's smoke;
+    `sh test/run fuzz` runs it through tls_fuzz. Bounded fixed-seed; returns
+    2 when clang/libFuzzer is unavailable.
+
+        python3 test/differential.py --harness tls_verify_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    checks = (HARNESS_ROOT / "test/checks.c").read_text()
+    #   The leaf's caIssuers location serves link 1 while fuzz_aia is set.
+    aia = r"""
+        static const char named[] = "http://example.com/link1.der";
+
+        if (!fuzz_aia || length != sizeof named - 1 ||
+            memory_compare(url, named, length) || fuzz_ecdsa_length[1] > room)
+                return 0;
+        memory_copy(into, fuzz_ecdsa_der[1], fuzz_ecdsa_length[1]);
+        return fuzz_ecdsa_length[1];
+"""
+    try:
+        chain = tls_verify_chain_lift(net, "FUZZ_TLS_NOW", aia)
+    except ValueError as exc:
+        print("tls verify fuzz: FAIL -- net.c slice anchor moved: %s" % exc)
+        return 1
+
+    driver = r"""
+#define TLS_BENCH_ANCHOR 1
+enum { FUZZ_TLS_NOW = 20200101000000ull };
+static p8 tls_bench_anchor_x[48];
+static p8 tls_bench_anchor_y[48];
+static bool fuzz_aia;
+""" + chain + r"""
+static p8 fuzz_body[9 * (1024 + 5) + 4];
+
+/* A Certificate body serving fuzz_ecdsa_der[picks[i] % FUZZ_ECDSA_CHAIN]. */
+static positive fuzz_chain_body(const p8 *picks, positive count)
+{
+        positive at = 4;
+
+        fuzz_body[0] = 0;
+        for (positive i = 0; i < count; i++)
+        {
+                positive which = picks[i] % FUZZ_ECDSA_CHAIN;
+                positive length = fuzz_ecdsa_length[which];
+
+                fuzz_body[at++] = 0;
+                fuzz_body[at++] = (p8)(length >> 8);
+                fuzz_body[at++] = (p8)length;
+                memory_copy(fuzz_body + at, fuzz_ecdsa_der[which], length);
+                at += length;
+                fuzz_body[at++] = 0;
+                fuzz_body[at++] = 0;
+        }
+        fuzz_body[1] = (p8)((at - 4) >> 16);
+        fuzz_body[2] = (p8)((at - 4) >> 8);
+        fuzz_body[3] = (p8)(at - 4);
+        return at;
+}
+
+static bool fuzz_verify(p8 *body, positive length, string_address host)
+{
+        tls_conn tls;
+
+        memory_fill(address_of tls, 0, sizeof tls);
+        tls.check_cert = host != null;
+        return tls_verify_chain(body, length, host, address_of tls);
+}
+
+int LLVMFuzzerInitialize(int *argc, char ***argv)
+{
+        static const p8 good[3] = {0, 1, 2};
+        static const p8 shuffled[4] = {0, 4, 2, 1};
+        static const p8 impostor[4] = {0, 1, 5, 2};
+        static const p8 short_of_one[2] = {0, 2};
+        tls_cert anchor;
+        positive length;
+        bool proved;
+
+        (void)argc;
+        (void)argv;
+        memory_fill(address_of anchor, 0, sizeof anchor);
+        proved = fuzz_prove_wr2_gts() &&
+                 !tls_parse_cert((p8 *)fuzz_ecdsa_der[3], fuzz_ecdsa_length[3],
+                                 address_of anchor, null) &&
+                 anchor.curve == 2;
+        memory_copy(tls_bench_anchor_x, anchor.qx, 48);
+        memory_copy(tls_bench_anchor_y, anchor.qy, 48);
+        length = fuzz_chain_body(good, 3);
+        proved = proved &&
+                 fuzz_verify(fuzz_body, length, (string_address)"example.com") &&
+                 fuzz_verify(fuzz_body, length, (string_address)"192.0.2.1") &&
+                 !fuzz_verify(fuzz_body, length, (string_address)"example.org");
+        fuzz_body[length - 10] ^= 1;
+        proved = proved &&
+                 !fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        /* Served out of order with an unneeded root first: still a path. */
+        length = fuzz_chain_body(shuffled, 4);
+        proved = proved &&
+                 fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        /* Link 2's twin excludes example.com, a name the leaf carries
+           whichever host is asked for: alone it refuses, and served first
+           it is passed over for link 2, whose subtrees hold the leaf. */
+        length = fuzz_chain_body(impostor, 3);
+        proved = proved &&
+                 !fuzz_verify(fuzz_body, length, (string_address)"example.com") &&
+                 !fuzz_verify(fuzz_body, length, (string_address)"192.0.2.1");
+        length = fuzz_chain_body(impostor, 4);
+        proved = proved &&
+                 fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        /* Link 1 left out: refused until the leaf's caIssuers serves it,
+           then a path through the fetched link 1. */
+        length = fuzz_chain_body(short_of_one, 2);
+        proved = proved &&
+                 !fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        fuzz_aia = true;
+        proved = proved &&
+                 fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        fuzz_aia = false;
+        if (!proved)
+        {
+                fprintf(stderr, "tls_verify_fuzz: WR2/GTS or generated-chain prove failed\n");
+                exit(1);
+        }
+        return 0;
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        p8 *buf;
+        positive length;
+
+        if (size > 65536)
+                size = 65536;
+        length = (positive)size;
+        buf = (p8 *)malloc(length ? length : 1);
+        if (!buf)
+                return 0;
+        if (length)
+                memcpy(buf, data, length);
+
+        (void)fuzz_verify(buf, length, null);
+        (void)fuzz_verify(buf, length, (string_address)"example.com");
+        (void)fuzz_verify(buf, length, (string_address)"192.0.2.1");
+
+        if (length > 1 && buf[0] == 0xc1)
+                (void)fuzz_verify(buf + 1, length - 1, (string_address)"example.com");
+        if (length > 3 && buf[0] == 0xca)
+        {
+                static const p8 good[3] = {0, 1, 2};
+                positive body = fuzz_chain_body(good, 3);
+                positive at = ((positive)buf[1] << 8 | buf[2]) % body;
+                positive n = min(length - 3, body - at);
+
+                memory_copy(fuzz_body + at, buf + 3, n);
+                (void)fuzz_verify(fuzz_body, body, (string_address)"example.com");
+        }
+        if (length > 1 && buf[0] == 0xcb)
+        {
+                /* The verdict is known exactly: key 3 is the anchor and
+                   every generated subject but link 2's twin is distinct,
+                   so a path needs the leaf first, the first and second
+                   intermediates anywhere after it, and no more than eight
+                   entries; the twin, whose subtrees exclude the leaf's
+                   name, never stands in for link 2. */
+                positive n = min(length - 1, (positive)9);
+                positive body = fuzz_chain_body(buf + 1, n);
+                bool served[FUZZ_ECDSA_CHAIN] = {false};
+                bool framed = n <= 8;
+                bool first = buf[1] % FUZZ_ECDSA_CHAIN == 0;
+
+                for (positive i = 1; i < n; i++)
+                        served[buf[1 + i] % FUZZ_ECDSA_CHAIN] = true;
+                /* With the leaf's caIssuers answering, link 1 need not be
+                   served: it is fetched, and still needs link 2 above it. */
+                fuzz_aia = false;
+                if (fuzz_verify(fuzz_body, body, (string_address)"example.com") !=
+                        (framed && first && served[1] && served[2]) ||
+                    fuzz_verify(fuzz_body, body, null) != framed)
+                {
+                        fprintf(stderr, "tls_verify_fuzz: wrong verdict for a served order\n");
+                        abort();
+                }
+                fuzz_aia = true;
+                if (fuzz_verify(fuzz_body, body, (string_address)"example.com") !=
+                    (framed && first && served[2]))
+                {
+                        fprintf(stderr, "tls_verify_fuzz: wrong verdict with caIssuers\n");
+                        abort();
+                }
+                fuzz_aia = false;
+        }
+
+        free(buf);
+        return 0;
+}
+"""
+
+    try:
+        source = tls_verify_hosted_source(net, checks, driver)
+    except (ValueError, RuntimeError) as exc:
+        print("tls verify fuzz: NOT RUN -- hosted lift failed: " + str(exc))
+        return 2
+    return tls_fuzz_run("tls verify", "tls_der", source, 4096)
+
+
+SNTP_FUZZ_SHIM = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+typedef uint8_t p8;
+typedef uint32_t p32;
+typedef uint64_t p64;
+typedef int32_t b32;
+typedef long bipolar;
+typedef unsigned long positive;
+#define INLINE
+#define CONST
+#define PURE
+#define COLD
+#define HOT
+#define fn void
+#define address_to *
+#define address_of &
+#define null NULL
+#define if_rare(c) if (c)
+#define if_common(c) if (c)
+#define bipolar_max INT64_MAX
+#define bipolar_min INT64_MIN
+#define SOL_SOCKET 1
+#define LOGGER_TIMEX_WORDS 26
+#define LOGGER_TIMEX_MAXERROR 3
+#define LOGGER_TIMEX_STATUS 5
+#define LOGGER_TIMEX_TIME_SEC 9
+#define LOGGER_TIMEX_TIME_NSEC 10
+#define array_count(a) (sizeof(a) / sizeof((a)[0]))
+#define memory_compare memcmp
+#define memory_copy memcpy
+#define memory_zero(at, n) memset((at), 0, (n))
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+static p32 network_load_32(const p8 *b)
+{
+        return ((p32)b[0] << 24) | ((p32)b[1] << 16) | ((p32)b[2] << 8) | b[3];
+}
+static void network_store_32(p8 *b, p32 v)
+{
+        b[0] = (p8)(v >> 24); b[1] = (p8)(v >> 16); b[2] = (p8)(v >> 8); b[3] = (p8)v;
+}
+"""
+
+SNTP_FUZZ_DRIVER = r"""
+static p64 fuzz_load_64(const p8 *b)
+{
+        p64 v = 0;
+        for (int i = 0; i < 8; i++)
+                v = v << 8 | b[i];
+        return v;
+}
+
+int LLVMFuzzerInitialize(int *argc, char ***argv)
+{
+        (void)argc;
+        (void)argv;
+        if (!sntp_math_ok() || !locale_discipline_ok())
+        {
+                fprintf(stderr, "sntp_fuzz: the lifted self-tests fail\n");
+                exit(1);
+        }
+        return 0;
+}
+
+/*
+        One exchange's worth of input, three servers' worth of replies: a
+        flag byte, the nonce the request carried, the two local timespecs
+        (t1 held to what sntp_exchange lets through, t4 as the kernel's
+        stamp arrives), the discipline's kernel state, three 48-byte
+        replies, and whatever is left as a control-message buffer.
+*/
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        p8 in[1 + 8 + 32 + 24 + 3 * SNTP_PACKET];
+        positive control[SNTP_CONTROL_WORDS];
+        p8 request[SNTP_PACKET];
+        p8 reply[SNTP_PACKET];
+        sntp_sample heard[SNTP_SERVERS];
+        positive heard_count = 0;
+        positive words[LOGGER_TIMEX_WORDS];
+        p64 arrived[2];
+        p32 sequence = 0;
+        p8 flags;
+        bipolar t1;
+        bipolar t4;
+        positive rest;
+
+        memset(in, 0, sizeof in);
+        memcpy(in, data, size < sizeof in ? size : sizeof in);
+        rest = size > sizeof in ? size - sizeof in : 0;
+        memset(control, 0, sizeof control);
+        memcpy(control, data + (size - rest),
+               rest < sizeof control ? rest : sizeof control);
+        (void)sntp_control_stamp((p8 *)control, rest < sizeof control ? rest
+                                                                      : sizeof control,
+                                 SNTP_TIMESTAMPNS, arrived);
+        (void)sntp_control_stamp((p8 *)control, rest < sizeof control ? rest
+                                                                      : sizeof control,
+                                 SNTP_TIMESTAMPING, arrived);
+        (void)sntp_control_sequence((p8 *)control, rest < sizeof control ? rest
+                                                                         : sizeof control,
+                                    &sequence);
+
+        flags = in[0];
+        memset(request, 0, sizeof request);
+        request[0] = SNTP_LI_VN_MODE;
+        memcpy(request + 40, in + 1, 8);
+        t1 = flags & 4 ? 0 : sntp_timespec_ns(fuzz_load_64(in + 9), fuzz_load_64(in + 17));
+        t4 = sntp_timespec_ns(fuzz_load_64(in + 25), fuzz_load_64(in + 33));
+        if (!sntp_local_ok(t1))
+                return 0;
+
+        for (positive at = 0; at < SNTP_SERVERS; at++)
+        {
+                memcpy(reply, in + 65 + at * SNTP_PACKET, SNTP_PACKET);
+                if (flags & 1)
+                        memcpy(reply + 24, request + 40, 8);
+                memset(heard + heard_count, 0, sizeof heard[0]);
+                if (sntp_reply_sample(reply, request, t1, t4, flags & 2,
+                                      heard + heard_count) == SNTP_OK)
+                        heard_count++;
+        }
+        (void)sntp_pick(heard, heard_count);
+        if (heard_count && sntp_choose(heard, heard_count) >= 0)
+        {
+                bipolar chosen = sntp_choose(heard, heard_count);
+                bipolar offset = heard[chosen].offset_ns;
+
+                /* what sntp_choose promises: past 2 s, never one word */
+                if (!sntp_within(offset, SNTP_OFFSET_SYNCED_NS))
+                {
+                        positive agreeing = 0;
+
+                        for (positive at = 0; at < heard_count; at++)
+                                agreeing += at != (positive)chosen && heard[at].ok &&
+                                            heard[at].offset_ns - heard[at].distance_ns <=
+                                                offset + heard[chosen].distance_ns &&
+                                            offset - heard[chosen].distance_ns <=
+                                                heard[at].offset_ns + heard[at].distance_ns;
+                        if (!agreeing)
+                                abort();
+                }
+                bipolar now = t4 < 0 ? 0 : t4;
+                bipolar target = 0;
+                bipolar sec = 0;
+                bipolar nsec = 0;
+                /* the kernel's state as locale_ntp_apply_offset reads it:
+                   a pending slew within half a second, a frequency the
+                   kernel holds to 500 ppm, and an elapsed boot time */
+                bipolar pending = (bipolar)(fuzz_load_64(in + 41) % 1000000001ull) - 500000000;
+                bipolar frequency = (bipolar)(fuzz_load_64(in + 49) % (2 * (p64)LOCALE_NTP_FREQ_MOST + 1)) -
+                                    LOCALE_NTP_FREQ_MOST;
+                bipolar elapsed = (bipolar)(fuzz_load_64(in + 57) >> 2);
+
+                if (sntp_target_ok(now, offset, &target))
+                {
+                        sntp_split_offset(offset, &sec, &nsec);
+                        locale_ntp_first = flags & 8;
+                        locale_ntp_discipline_words(offset, sec, nsec,
+                                locale_ntp_error_us(heard[chosen].distance_ns), words);
+                        (void)locale_ntp_learned(offset - pending, elapsed, frequency);
+                }
+        }
+        return 0;
+}
+"""
+
+
+def sntp_fuzz_seeds():
+    """Name to bytes for the sntp corpus: the flag byte, nonce, t1/t4 and
+    kernel state, then replies shaped like a real stratum-2 answer, the
+    kiss codes, both eras, the window's edges and a lying control buffer."""
+    import struct
+
+    def stamp(unix_seconds, fraction=0):
+        ntp = (unix_seconds + 2208988800) & 0xffffffff
+        return struct.pack(">II", ntp, fraction)
+
+    def reply(first=0x24, stratum=2, delay=0x100, dispersion=0x100, ref_id=0,
+              reference=1800000000, receive=1800000001, transmit=1800000001):
+        return (bytes([first, stratum, 6, 0xec]) + struct.pack(">II", delay, dispersion) +
+                struct.pack(">I", ref_id) + stamp(reference) + b"\0" * 8 +
+                stamp(receive, 0x40000000) + stamp(transmit, 0x40010000))
+
+    def head(flags, t1, t4, pending=500000000, frequency=0, elapsed=0):
+        return (bytes([flags]) + b"\xc0\xff\xee\x00\x0b\xad\xf0\x0d" +
+                struct.pack(">QQQQ", t1, 0, t4, 1000) +
+                struct.pack(">QQQ", pending, frequency, elapsed << 2))
+
+    now = 1800000000
+    good = reply()
+    seeds = {
+        "empty.bin": b"",
+        "one_flag.bin": b"\x01",
+        "stratum2_three.bin": head(1, now, now + 1) + good * 3,
+        "stratum2_tight.bin": head(3, now, now + 1) + good * 3,
+        "epoch_clock.bin": head(5, 0, 1) + good * 3,
+        "first_step.bin": head(9, now - 3600, now - 3599) + good * 3,
+        "falseticker.bin": head(1, now, now + 1) + good * 2 +
+            reply(receive=now + 50, transmit=now + 50),
+        "one_far.bin": head(1, now - 7200, now - 7199) + good + reply(first=0x23) * 2,
+        "two_far_agree.bin": head(1, now - 7200, now - 7199) + good * 2 + reply(first=0x23),
+        "two_disagree.bin": head(1, now, now + 1) + good +
+            reply(delay=0, dispersion=0, receive=now + 7200, transmit=now + 7200) +
+            reply(first=0x23),
+        "kiss_rate.bin": head(1, now, now + 1) + reply(stratum=0, ref_id=0x52415445) * 3,
+        "kiss_deny.bin": head(1, now, now + 1) + reply(stratum=0, ref_id=0x44454e59) * 3,
+        "alarm.bin": head(1, now, now + 1) + reply(first=0xe4) * 3,
+        "root_second.bin": head(1, now, now + 1) + reply(delay=0x10000, dispersion=0x10000) * 3,
+        "root_sign.bin": head(1, now, now + 1) + reply(delay=0x80000000) * 3,
+        "era1.bin": head(1, now, now + 1) + reply(reference=2085978496,
+                                                  receive=2085978497,
+                                                  transmit=2085978497) * 3,
+        "window_edge.bin": head(1, 2082758400 - 1, 2082758400) +
+            reply(reference=2082758399, receive=2082758400, transmit=2082758400) * 3,
+        "not_echoed.bin": head(0, now, now + 1) + good * 3,
+        "reference_future.bin": head(1, now, now + 1) + reply(reference=now + 5) * 3,
+        "learn_long.bin": head(1, now, now + 1, 0, 0, 200000 * 10**9) +
+            reply(receive=now + 199, transmit=now + 199) * 3,
+    }
+    control = struct.pack("<QiiQQ", 32, 1, 35, now, 250000000)
+    seeds["control_stamp.bin"] = head(1, now, now + 1) + good * 3 + control
+    seeds["control_lies.bin"] = head(1, now, now + 1) + good * 3 + \
+        struct.pack("<Qii", 0xffffffffffffffff, 1, 35) + b"\0" * 16
+    seeds["control_errqueue.bin"] = head(1, now, now + 1) + good * 3 + \
+        struct.pack("<Qii", 16, 1, 7) + struct.pack("<QiiQQ", 32, 1, 37, now, 1) + \
+        struct.pack("<Qii", 32, 0, 11) + bytes([0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0])
+    return seeds
+
+
+def sntp_fuzz_source(host):
+    """host.c's SNTP parse, selection and discipline arithmetic, lifted whole
+    by the literal anchors below, behind SNTP_FUZZ_SHIM."""
+    sec = tls_fuzz_sec
+    parts = (
+        sec(host, "#define SNTP_PORT 123", "static inline INLINE bipolar sntp_now_ns(void)"),
+        sec(host, "static inline INLINE PURE bipolar sntp_load_stamp",
+            "/*\n        t4 is meant to be"),
+        sec(host, "static p8 address_to sntp_control_find(", "/*\n        recvmsg into one buffer"),
+        sec(host, "static bool sntp_control_sequence(", "static HOT bool sntp_transmit_stamp("),
+        sec(host, "static COLD bipolar sntp_reply_ok(", "static HOT bipolar sntp_exchange("),
+        sec(host, "#define LOCALE_NTP_RETRY_LEAST", "/*\n        A query that runs in a child"),
+        sec(host, "#define LOCALE_TIMEX_ESTERROR", "static fn locale_clock_mark_synced("),
+        sec(host, "static bool locale_ntp_first;", "static const char locale_ntp_fallback"),
+    )
+    return SNTP_FUZZ_SHIM + "\n".join(parts) + SNTP_FUZZ_DRIVER
+
+
+def harness_sntp_fuzz(argv):
+    """libFuzzer over host.c's SNTP reply path: sntp_reply_sample (header,
+    kiss codes, the four stamps and their window), sntp_choose over three
+    servers, the control-message walks, and the discipline arithmetic the
+    chosen offset reaches (sntp_target_ok, the timex words,
+    locale_ntp_learned). The production functions are lifted by literal
+    anchors; LLVMFuzzerInitialize runs sntp_math_ok and locale_discipline_ok
+    on the lift first. Bounded fixed-seed; 2 when clang/libFuzzer is absent.
+
+        python3 test/differential.py --harness sntp_fuzz
+    """
+    del argv
+    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    try:
+        source = sntp_fuzz_source(host)
+    except ValueError as exc:
+        print("  FAIL sntp fuzz: an anchor moved: " + str(exc))
+        return 1
+    return tls_fuzz_run("sntp", "sntp", source, 1024)
+
+
+#       The hosted floor dns_fuzz and netlink_fuzz share: lib.c's names over
+#       libc, and sockets, clock, poll, randomness and file reads that serve
+#       the fuzz input instead of a kernel. Every DNS reply, TCP chunk and
+#       netlink datagram is a frame of the input; nothing is mocked above the
+#       syscall layer, so the resolver's and the dump walk's own loops, retries
+#       and deadlines run as shipped.
+NET_ZONE_FUZZ_SHIM = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdarg.h>
+typedef uint8_t p8; typedef uint16_t p16; typedef uint32_t p32; typedef uint64_t p64;
+typedef int16_t b16; typedef int32_t b32; typedef int64_t b64; typedef int8_t b8;
+typedef long bipolar; typedef unsigned long positive;
+typedef void *address_any; typedef char *string_address; typedef const char *const_string;
+typedef void (*writer)(address_any data, positive length);
+#define COLD
+#define PURE
+#define CONST
+#define INLINE
+#define fn void
+#define address_to *
+#define address_of &
+#define null NULL
+#define end ((p8)0)
+#define positive_max (~(positive)0)
+#define array_count(a) (sizeof(a) / sizeof((a)[0]))
+#define memory_compare memcmp
+#define memory_copy memcpy
+#define memory_copy_apart memcpy
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define memory_first_of(block, byte, size) memchr((block), (byte), (size))
+#define memory_load_unaligned(type, at) \
+        ({ type loaded_; memcpy(&loaded_, (at), sizeof loaded_); loaded_; })
+#define string_get(s) (*(p8 *)(s))
+#define string_is(s, v) (*(s) == (v))
+#define string_length(s) strlen((const char *)(s))
+#define string_equals(a, b) (strcmp((const char *)(a), (const char *)(b)) == 0)
+#define string_has_prefix(s, p) \
+        (strncmp((const char *)(s), (p), strlen(p)) == 0)
+#define byte_is_blank(b) ((b) == ' ' || (b) == '\t')
+#define network_order_16(v) ((p16)__builtin_bswap16((p16)(v)))
+#define network_order_32(v) ((p32)__builtin_bswap32((p32)(v)))
+#define AF_UNSPEC 0
+#define AF_INET 2
+#define AF_NETLINK 16
+#define SOCK_STREAM 1
+#define SOCK_DGRAM 2
+#define SOCK_NONBLOCK 04000
+#define SOCK_CLOEXEC 02000000
+#define MSG_PEEK 2
+#define MSG_TRUNC 0x20
+#define MSG_DONTWAIT 0x40
+#define MSG_NOSIGNAL 0x4000
+#define EALREADY 114
+#define EINPROGRESS 115
+#define ERROR_NO_MEMORY 12
+#define SOL_SOCKET 1
+#define SO_ERROR 4
+#define SO_RCVTIMEO 20
+#define SO_SNDTIMEO 21
+#define SOL_NETLINK 270
+#define NETLINK_EXT_ACK 11
+#define NETLINK_ROUTE 0
+#define SYSTEM_POLL_READ 0x001
+#define SYSTEM_POLL_WRITE 0x004
+#define SYSTEM_POLL_INVALID 0x020
+typedef struct { b64 tv_sec; b64 tv_nsec; } timespec;
+typedef struct { b64 tv_sec; b64 tv_usec; } timeval;
+typedef struct { b32 descriptor; b16 events; b16 returned; } system_poll_descriptor;
+typedef struct { p16 family; p16 port; p32 host; p8 padding[8]; } socket_address_internet;
+typedef struct { p16 family; p16 padding; p32 port; p32 groups; } socket_address_netlink;
+static const b8 string_set_blanks[256] = {[' '] = 1, ['\t'] = 1};
+
+static p16 network_load_16(const p8 *at) { return (p16)(at[0] << 8 | at[1]); }
+static p32 network_load_32(const p8 *at)
+{
+        return (p32)at[0] << 24 | (p32)at[1] << 16 | (p32)at[2] << 8 | at[3];
+}
+static void network_store_16(p8 *at, p16 value)
+{
+        at[0] = (p8)(value >> 8);
+        at[1] = (p8)value;
+}
+static b32 memory_compare_ascii_case(const void *one, const void *two,
+                                     positive size)
+{
+        const p8 *a = one, *b = two;
+        for (positive i = 0; i < size; i++)
+        {
+                p8 x = (p8)(a[i] - 'A') < 26 ? a[i] | 0x20 : a[i];
+                p8 y = (p8)(b[i] - 'A') < 26 ? b[i] | 0x20 : b[i];
+                if (x != y)
+                        return (b32)(x - y);
+        }
+        return 0;
+}
+static positive memory_span_without_byte(const void *block, p8 byte,
+                                         positive size)
+{
+        const p8 *at = memchr(block, byte, size);
+        return at ? (positive)(at - (const p8 *)block) : size;
+}
+static positive string_span_max(const_string source, positive bound,
+                                const b8 *set)
+{
+        positive at = 0;
+        while (at < bound && set[(p8)source[at]])
+                at++;
+        return at;
+}
+static string_address string_first_of_or_end(string_address at, int byte)
+{
+        while (*at && *at != (char)byte)
+                at++;
+        return at;
+}
+static p8 *string_copy_max_end(void *into, const void *source, positive bound)
+{
+        positive length = strnlen((const char *)source, bound);
+        memcpy(into, source, length);
+        ((p8 *)into)[length] = 0;
+        return (p8 *)into + length;
+}
+/* lib.c's grammar: four octets of one to three digits, single dots, nothing
+   after the last one. */
+static bipolar string_to_host(const_string text)
+{
+        p32 host = 0;
+        for (int octet = 0; octet < 4; octet++)
+        {
+                positive value = 0, digits = 0;
+                while (text[digits] >= '0' && text[digits] <= '9' && digits < 4)
+                        value = value * 10 + (positive)(text[digits++] - '0');
+                if (!digits || digits > 3 || value > 255)
+                        return -1;
+                text += digits;
+                if (octet < 3 && *text++ != '.')
+                        return -1;
+                host = host << 8 | (p32)value;
+        }
+        return *text ? -1 : (bipolar)host;
+}
+static bool fuzz_reserve(void **held, positive *have, positive want,
+                         positive unit)
+{
+        void *grown;
+
+        if (want <= *have)
+                return true;
+        if (want > ((positive)1 << 25) / unit)
+                return false;
+        grown = realloc(*held, want * unit);
+        if (!grown)
+                return false;
+        *held = grown;
+        *have = want;
+        return true;
+}
+#define array_store_reserve(array, room, used, wanted, step) \
+        fuzz_reserve((void **)&(array), &(room), (wanted), sizeof((array)[0]))
+#define array_store_release(array, room, used) \
+        (free(array), (array) = NULL, (room) = 0, (used) = 0)
+static positive host_into(p8 *into, p32 host)
+{
+        return (positive)sprintf((char *)into, "%u.%u.%u.%u", host >> 24,
+                                 host >> 16 & 255, host >> 8 & 255, host & 255);
+}
+
+/* The input's frames. Each is served whole to whichever fake socket asks
+   for its kind next. */
+enum { FUZZ_UDP = 3, FUZZ_TCP = 4, FUZZ_NETLINK = 5, FUZZ_FRAMES = 96 };
+typedef struct { const p8 *bytes; positive length; p8 tag; } fuzz_frame;
+static fuzz_frame fuzz_frames[FUZZ_FRAMES];
+static positive fuzz_frame_count;
+static positive fuzz_next[6];
+static positive fuzz_tcp_taken;
+static positive fuzz_clock;
+static p8 fuzz_faults;
+static const p8 *fuzz_file;
+static positive fuzz_file_length;
+enum { FAULT_SOCKET = 2, FAULT_CONNECTING = 4, FAULT_SO_ERROR = 8,
+       FAULT_POLL_INVALID = 16, FAULT_SEND = 32, FAULT_INTERRUPT = 64,
+       FAULT_SEND_INTERRUPT = 128 };
+
+static bool fuzz_frame_is(positive at, b32 handle)
+{
+        p8 tag = fuzz_frames[at].tag;
+        return handle == FUZZ_NETLINK || (handle == FUZZ_TCP) == (tag & 1);
+}
+static fuzz_frame *fuzz_frame_next(b32 handle)
+{
+        positive at = fuzz_next[handle];
+        while (at < fuzz_frame_count && !fuzz_frame_is(at, handle))
+                at++;
+        fuzz_next[handle] = at;
+        return at < fuzz_frame_count ? &fuzz_frames[at] : null;
+}
+static const p8 *fuzz_frames_load(const p8 *at, positive left)
+{
+        fuzz_frame_count = fuzz_tcp_taken = fuzz_clock = 0;
+        memset(fuzz_next, 0, sizeof fuzz_next);
+        while (left >= 3 && fuzz_frame_count < FUZZ_FRAMES)
+        {
+                positive length = (positive)at[1] << 8 | at[2];
+                if (length > left - 3)
+                        length = left - 3;
+                fuzz_frames[fuzz_frame_count++] =
+                    (fuzz_frame){at + 3, length, at[0]};
+                at += 3 + length;
+                left -= 3 + length;
+        }
+        return at;
+}
+
+static positive clock_monotonic_nanoseconds(void)
+{
+        return fuzz_clock += 1000000;
+}
+static bipolar system_random_fill(address_any into, positive width, b32 flags)
+{
+        (void)flags;
+        memset(into, 0xa5, width);
+        return 0;
+}
+static bipolar system_poll_wait(system_poll_descriptor *waited, positive count,
+                                timespec *limit, positive *mask)
+{
+        (void)count, (void)limit, (void)mask;
+        waited->returned = 0;
+        if (fuzz_faults & FAULT_POLL_INVALID)
+                return waited->returned = SYSTEM_POLL_INVALID, 1;
+        if ((waited->events & SYSTEM_POLL_WRITE) ||
+            waited->descriptor == FUZZ_TCP ||
+            fuzz_frame_next(waited->descriptor))
+                return waited->returned = waited->events, 1;
+        return 0;
+}
+static bipolar system_read_retry(positive handle, address_any data,
+                                 positive length)
+{
+        (void)handle, (void)data, (void)length;
+        return 0;
+}
+static bipolar socket_new(b32 family, b32 kind, b32 protocol)
+{
+        (void)protocol;
+        if (fuzz_faults & FAULT_SOCKET)
+                return -24;
+        return family == AF_NETLINK ? FUZZ_NETLINK
+               : (kind & 15) == SOCK_STREAM ? FUZZ_TCP : FUZZ_UDP;
+}
+static bipolar socket_bind(b32 handle, address_any at, positive size)
+{
+        (void)handle, (void)at, (void)size;
+        return 0;
+}
+static bipolar socket_connect(b32 handle, address_any at, positive size)
+{
+        (void)at, (void)size;
+        return handle == FUZZ_TCP && (fuzz_faults & FAULT_CONNECTING)
+                   ? -EINPROGRESS : 0;
+}
+static bipolar socket_close(b32 handle)
+{
+        (void)handle;
+        return 0;
+}
+static bipolar socket_name(b32 handle, address_any at, address_any size)
+{
+        socket_address_netlink self = {.family = AF_NETLINK, .port = 0x1234};
+        (void)handle;
+        memcpy(at, &self, sizeof self);
+        *(p32 *)size = sizeof self;
+        return 0;
+}
+static bipolar socket_option_set(b32 handle, b32 level, b32 name,
+                                 address_any value, positive size)
+{
+        (void)handle, (void)level, (void)name, (void)value, (void)size;
+        return 0;
+}
+static bipolar socket_option_get(b32 handle, b32 level, b32 name,
+                                 address_any value, address_any size)
+{
+        (void)handle, (void)level, (void)name;
+        *(b32 *)value = (fuzz_faults & FAULT_SO_ERROR) ? 111 : 0;
+        *(p32 *)size = sizeof(b32);
+        return 0;
+}
+static bipolar socket_send(b32 handle, address_any data, positive size,
+                           b32 flags, address_any to, positive to_size)
+{
+        volatile p8 touched = 0;
+        (void)handle, (void)flags, (void)to, (void)to_size;
+        for (positive at = 0; at < size; at++)
+                touched ^= ((const p8 *)data)[at];
+        if (fuzz_faults & FAULT_SEND_INTERRUPT)
+        {
+                fuzz_faults &= (p8)~FAULT_SEND_INTERRUPT;
+                return -4;
+        }
+        return (fuzz_faults & FAULT_SEND) ? -28 : (bipolar)size;
+}
+static bipolar socket_receive(b32 handle, address_any data, positive size,
+                              b32 flags, address_any from, address_any from_size)
+{
+        fuzz_frame *frame;
+        positive copied;
+
+        if (fuzz_faults & FAULT_INTERRUPT)
+        {
+                fuzz_faults &= (p8)~FAULT_INTERRUPT;
+                return -4;
+        }
+        frame = fuzz_frame_next(handle);
+        if (!frame)
+                return handle == FUZZ_TCP ? 0 : -11;
+        if (handle == FUZZ_TCP)
+        {
+                copied = frame->length - fuzz_tcp_taken;
+                copied = copied < size ? copied : size;
+                memcpy(data, frame->bytes + fuzz_tcp_taken, copied);
+                fuzz_tcp_taken += copied;
+                if (fuzz_tcp_taken == frame->length)
+                        fuzz_next[handle]++, fuzz_tcp_taken = 0;
+                return (bipolar)copied;
+        }
+        if (from && from_size)
+        {
+                /* An even tag is the kernel's port zero; odd is a process. */
+                socket_address_netlink source = {
+                    .family = AF_NETLINK, .port = frame->tag & 1 ? 77 : 0};
+                positive room = *(p32 *)from_size;
+                memcpy(from, &source, room < sizeof source ? room : sizeof source);
+                *(p32 *)from_size = sizeof source;
+        }
+        copied = frame->length < size ? frame->length : size;
+        if (copied)
+                memcpy(data, frame->bytes, copied);
+        if (!(flags & MSG_PEEK))
+                fuzz_next[handle]++;
+        return (bipolar)((flags & MSG_TRUNC) ? frame->length : copied);
+}
+static bipolar file_slurp(string_address path, p8 *into, positive capacity)
+{
+        positive length = fuzz_file_length;
+        (void)path;
+        if (!fuzz_file || !capacity)
+                return -2;
+        if (length > capacity - 1)
+                length = capacity - 1;
+        memcpy(into, fuzz_file, length);
+        into[length] = 0;
+        return (bipolar)length;
+}
+"""
+
+
+def net_zone_fuzz_slice(text, first, following):
+    """text from first up to following, or ValueError naming the anchor."""
+    at = text.find(first)
+    stop = text.find(following, at + 1) if at >= 0 else -1
+    if at < 0 or stop < 0:
+        raise ValueError("anchor moved: %r .. %r" % (first[:40], following[:40]))
+    return text[at:stop]
+
+
+def net_zone_fuzz_wait():
+    """wait.c's deadlines, stream helpers and transaction ids, whole."""
+    wait = (HARNESS_ROOT / "src/net/wait.c").read_text()
+    return net_zone_fuzz_slice(wait, "#define NETWORK_INTERRUPTED", "\n#endif")
+
+
+def dns_fuzz_seed_name(name):
+    return b"".join(bytes([len(label)]) + label for label in
+                    name.encode("latin-1").split(b".") if label) + b"\0"
+
+
+def dns_fuzz_seed_record(owner, kind, data, cls=1):
+    return owner + struct.pack(">HHIH", kind, cls, 300, len(data)) + data
+
+
+def dns_fuzz_seed_reply(name, answers=(), authority=(), additional=(),
+                        flags=0x8180, ident=0xa5a5, tail=b""):
+    """A reply to the fuzz resolver's question: id 0xa5a5 (the shim's
+    randomness), the asked name spelled at offset 12 for c00c to name."""
+    return (struct.pack(">HHHHHH", ident, flags, 1, len(answers),
+                        len(authority), len(additional)) +
+            dns_fuzz_seed_name(name) + b"\0\1\0\1" +
+            b"".join(answers) + b"".join(authority) + b"".join(additional) +
+            tail)
+
+
+def net_zone_fuzz_frame(tag, data):
+    return bytes([tag]) + struct.pack(">H", len(data)) + data
+
+
+def dns_fuzz_seeds():
+    """The resolver's inputs: [faults|resolv.conf bit][name length][name]
+    [resolv.conf length 16 + text when bit 0][frames: tag, length 16, bytes;
+    odd tags are TCP chunks, even ones UDP datagrams]."""
+    a = lambda owner, host: dns_fuzz_seed_record(owner, 1, bytes(host))
+    cname = lambda owner, target: dns_fuzz_seed_record(owner, 5, target)
+    at12 = b"\xc0\x0c"
+
+    def seed(name, *frames, mode=0, conf=None):
+        raw = name.encode("latin-1")
+        head = bytes([mode | (1 if conf is not None else 0), len(raw)]) + raw
+        if conf is not None:
+            head += struct.pack(">H", len(conf)) + conf
+        return head + b"".join(frames)
+
+    udp = lambda data: net_zone_fuzz_frame(0, data)
+    tcp = lambda data: net_zone_fuzz_frame(1, data)
+    plain = dns_fuzz_seed_reply("example.com", [a(at12, [192, 0, 2, 1])])
+    truncated = dns_fuzz_seed_reply("example.com", flags=0x8380)
+    framed = struct.pack(">H", len(plain)) + plain
+    chain = dns_fuzz_seed_reply("www.example.com", [
+        cname(at12, dns_fuzz_seed_name("edge.example.net")),
+        a(dns_fuzz_seed_name("EDGE.example.NET"), [198, 51, 100, 7])])
+    a_first = dns_fuzz_seed_reply("www.example.com", [
+        a(dns_fuzz_seed_name("edge.example.com"), [203, 0, 113, 9]),
+        cname(at12, b"\x04edge\xc0\x10")])
+    cycle = dns_fuzz_seed_reply("a.test", [
+        cname(at12, dns_fuzz_seed_name("b.test")),
+        cname(b"\xc0\x24", at12)])
+    soa = dns_fuzz_seed_record(b"\xc0\x14", 6, b"\0\0" + b"\0" * 20)
+    #   A run of pointers, each to the one before it and the first to the
+    #   question, owned by records whose names point at its far end.
+    run = b"".join(struct.pack(">H", 0xc000 | (12 if i == 0 else 39 + 2 * i))
+                   for i in range(400))
+    deep = dns_fuzz_seed_reply(
+        "example.com",
+        [dns_fuzz_seed_record(at12, 16, run)] +
+        [dns_fuzz_seed_record(struct.pack(">H", 0xc000 | (41 + 2 * 399)), 16, b"")
+         for _ in range(60)])
+    long_label = "a" * 63 + ".b"
+    longest = ".".join(["a" * 63] * 3 + ["b" * 61])
+    conf = (b"# written by hand\nsearch example.com\noptions ndots:2 timeout:1\n"
+            b"nameserver\t10.0.0.1 # first\r\nnameserver ::1\n"
+            b"nameserver 192.0.2.53\nnameserver 10.0.0.300\nnameserver")
+    return {
+        "a_plain.bin": seed("example.com", udp(plain)),
+        "junk_then_answer.bin": seed(
+            "example.com",
+            udp(dns_fuzz_seed_reply("example.com", ident=0x1234)),
+            udp(dns_fuzz_seed_reply("other.com")), udp(plain)),
+        "cname_chain.bin": seed("www.example.com", udp(chain)),
+        "a_before_cname.bin": seed("www.example.com", udp(a_first)),
+        "cname_cycle.bin": seed("a.test", udp(cycle)),
+        "nxdomain_soa.bin": seed("example.com", udp(dns_fuzz_seed_reply(
+            "example.com", authority=[soa], flags=0x8183))),
+        "no_address.bin": seed("example.com", udp(dns_fuzz_seed_reply("example.com"))),
+        "servfail.bin": seed("example.com", udp(dns_fuzz_seed_reply(
+            "example.com", flags=0x8182))),
+        "trailing_bytes.bin": seed("example.com", udp(dns_fuzz_seed_reply(
+            "example.com", [a(at12, [1, 2, 3, 4])], tail=b"\0"))),
+        "tc_then_tcp_split.bin": seed(
+            "example.com", udp(truncated),
+            tcp(framed[:1]), tcp(framed[1:9]), tcp(framed[9:]), mode=4),
+        "tc_then_tcp_oversize.bin": seed(
+            "example.com", udp(truncated), tcp(b"\xff\xff" + plain)),
+        "tc_then_tcp_wrong_id.bin": seed(
+            "example.com", udp(truncated),
+            tcp(struct.pack(">H", len(plain)) + b"\x12\x34" + plain[2:])),
+        "tc_then_tcp_eof.bin": seed("example.com", udp(truncated), tcp(framed[:20])),
+        "udp_oversize.bin": seed("example.com", udp(plain + b"\0" * 4096)),
+        "udp_oversize_tc.bin": seed("example.com",
+                                    udp(truncated + b"\0" * 4096), tcp(framed)),
+        "pointer_loop.bin": seed("example.com", udp(dns_fuzz_seed_reply(
+            "example.com", [a(b"\xc0\x1d", [1, 1, 1, 1])]))),
+        "pointer_forward.bin": seed("example.com", udp(dns_fuzz_seed_reply(
+            "example.com", [a(b"\xc0\x40", [1, 1, 1, 1])]))),
+        "pointer_run.bin": seed("example.com", udp(deep)),
+        "label_63.bin": seed(long_label, udp(dns_fuzz_seed_reply(
+            long_label, [a(at12, [10, 0, 0, 1])]))),
+        "name_255.bin": seed(longest, udp(dns_fuzz_seed_reply(
+            longest, [a(at12, [10, 0, 0, 2])]))),
+        "name_odd_bytes.bin": seed("\x7f\xff.x\x01", udp(dns_fuzz_seed_reply(
+            "\x7f\xff.x\x01", [a(at12, [10, 0, 0, 3])]))),
+        "name_empty_label.bin": seed("a..b", udp(plain)),
+        "name_trailing_dot.bin": seed("example.com.", udp(plain)),
+        "resolv_conf.bin": seed("example.com",
+                                udp(dns_fuzz_seed_reply("example.com", flags=0x8183)),
+                                udp(plain), conf=conf),
+        "resolv_conf_empty.bin": seed("example.com", udp(plain), conf=b""),
+        "faults_socket.bin": seed("example.com", udp(plain), mode=2),
+        "faults_so_error.bin": seed("example.com", udp(truncated), tcp(framed),
+                                    mode=4 | 8),
+        "faults_poll_invalid.bin": seed("example.com", udp(plain), mode=16),
+        "faults_send.bin": seed("example.com", udp(plain), mode=32),
+        "faults_interrupt.bin": seed("example.com", udp(plain), mode=64),
+        "faults_send_interrupt.bin": seed("example.com", udp(plain), mode=128),
+    }
+
+
+def harness_dns_fuzz(argv):
+    """Coverage-guided libFuzzer over the DNS resolver, socket to answer.
+
+    Lifts src/net/net.c's whole DNS section and all of src/net/wait.c over
+    NET_ZONE_FUZZ_SHIM, whose sockets serve the input's frames: UDP
+    datagrams in order (junk, truncated and oversized ones too), TCP chunks
+    for the fallback's framing, a resolv.conf for dns_resolve_any, and fault
+    bits for socket, connect, SO_ERROR, poll, send and EINTR. Each UDP frame
+    is also parsed as a reply to its own question, so the record walks see
+    bytes without having to win the id and question first. Seeds come from
+    dns_fuzz_seeds(). Exit 2 (NOT RUN) without clang/libFuzzer.
+
+        python3 test/differential.py --harness dns_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    try:
+        dns = net_zone_fuzz_slice(net, "#define DNS_PORT 53",
+                                  "#endif // STANDARD_MODERN_C_NET_DNS")
+        wait = net_zone_fuzz_wait()
+    except ValueError as error:
+        print("  FAIL dns fuzz lift: " + str(error))
+        write_tally("dns-fuzz", 0, 1)
+        return 1
+    driver = r"""
+static void fuzz_own_question(fuzz_frame *frame)
+{
+        p8 *copy = malloc(frame->length ? frame->length : 1);
+        p32 found = 0;
+        bipolar question;
+
+        memcpy(copy, frame->bytes, frame->length);
+        question = dns_skip_name(copy, frame->length, DNS_HEADER);
+        if (frame->length >= DNS_HEADER && question > 0 &&
+            (positive)question + 4 <= frame->length)
+                (void)dns_reply_result(copy, frame->length,
+                                       network_load_16(copy), copy,
+                                       (positive)question + 4 - DNS_HEADER,
+                                       address_of found);
+        free(copy);
+}
+
+static bipolar fuzz_resolve(const char *name, const p8 *frames, positive left,
+                            p8 faults, p32 *found)
+{
+        bipolar status;
+
+        fuzz_frames_load(frames, left);
+        fuzz_faults = faults;
+        status = fuzz_file
+                     ? dns_resolve_any("/etc/resolv.conf", (string_address)name,
+                                       found, 3)
+                     : dns_resolve_at(0x7f000001, DNS_PORT, (string_address)name,
+                                      found, 3);
+        fuzz_faults = 0;
+        return status;
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        char name[256];
+        positive length;
+        const p8 *at;
+        positive left;
+        p32 found = 0;
+        p32 again = 0;
+        bipolar status;
+
+        if (size < 2 || data[1] > size - 2)
+                return 0;
+        length = data[1];
+        memcpy(name, data + 2, length);
+        name[length] = 0;
+        at = data + 2 + length;
+        left = size - 2 - length;
+        fuzz_file = null;
+        if (data[0] & 1)
+        {
+                if (left < 2)
+                        return 0;
+                fuzz_file_length = (positive)at[0] << 8 | at[1];
+                if (fuzz_file_length > left - 2)
+                        fuzz_file_length = left - 2;
+                fuzz_file = at + 2;
+                at += 2 + fuzz_file_length;
+                left -= 2 + fuzz_file_length;
+        }
+        status = fuzz_resolve(name, at, left, data[0], &found);
+        /* A send a signal interrupted is sent again: the same question has
+           the same answer with or without the interruption. */
+        if (!(data[0] & (FAULT_SEND | FAULT_SEND_INTERRUPT)) &&
+            (fuzz_resolve(name, at, left, data[0] | FAULT_SEND_INTERRUPT,
+                          &again) != status || again != found))
+        {
+                fprintf(stderr, "an interrupted send changed the answer\n");
+                abort();
+        }
+        for (positive frame = 0; frame < fuzz_frame_count; frame++)
+                fuzz_own_question(&fuzz_frames[frame]);
+        return 0;
+}
+"""
+    return tls_fuzz_run("dns", "dns", NET_ZONE_FUZZ_SHIM + wait + dns + driver, 8192)
+
+
+def netlink_fuzz_seeds():
+    """The dump walk's inputs: [mode][frames: tag, length 16, datagram;
+    an even tag is the kernel's port zero, odd a process]. Requests are
+    sequence 1 (the routes after the names, 2) and the socket's port 0x1234.
+    mode & 7: 0 discovery (preference mode >> 4), 1 a named link, 2 routes,
+    3 links, 4 addresses, 5-7 the link-up, address and route acks."""
+    port = 0x1234
+
+    def pad(data):
+        return data + b"\0" * (-len(data) % 4)
+
+    def message(kind, body=b"", flags=2, sequence=1, owner=port):
+        return pad(struct.pack("<IHHII", 16 + len(body), kind, flags, sequence,
+                               owner) + body)
+
+    def rta(kind, data):
+        return pad(struct.pack("<HH", 4 + len(data), kind) + data)
+
+    def link(index, flags, name, *more):
+        return message(16, struct.pack("<BBHiII", 0, 0, 1, index, flags, 0) +
+                       rta(3, name + b"\0") + b"".join(more))
+
+    def done(status=0, sequence=1):
+        return message(3, struct.pack("<i", status), sequence=sequence)
+
+    def error(status, sequence=1):
+        return message(2, struct.pack("<i", status) +
+                       struct.pack("<IHHII", 32, 16, 5, sequence, 0),
+                       sequence=sequence)
+
+    kernel = lambda *messages: net_zone_fuzz_frame(0, b"".join(messages))
+    process = lambda *messages: net_zone_fuzz_frame(1, b"".join(messages))
+    hardware = rta(1, bytes([2, 0, 0, 0, 0, 1]))
+    lo = link(1, 1 | 8 | 64, b"lo")
+    eth = link(2, 1 | 2 | 64, b"eth0", hardware)
+    wifi = link(3, 1 | 2 | 64, b"wlan0", hardware,
+                rta(18, rta(1, b"wlan")), rta(11, b"\0" * 4))
+    down = link(4, 2, b"eth1", rta(1, b"\1\2\3"))
+    address = message(20, struct.pack("<BBBBI", 2, 24, 0, 0, 2) +
+                      rta(2, bytes([10, 0, 0, 5])) + rta(3, b"eth0\0"),
+                      sequence=1)
+    route = message(24, struct.pack("<BBBBBBBBI", 2, 0, 0, 0, 254, 3, 0, 1, 0) +
+                    rta(5, bytes([10, 0, 0, 1])) + rta(4, struct.pack("<I", 2)),
+                    sequence=2)
+    subnet = message(24, struct.pack("<BBBBBBBBI", 2, 24, 0, 0, 254, 3, 253, 1, 0) +
+                     rta(1, bytes([10, 0, 0, 0])) + rta(4, struct.pack("<I", 9)),
+                     sequence=2)
+    odd_route = message(24, struct.pack("<BBBBBBBBI", 2, 0, 0, 0, 254, 3, 0, 1, 0) +
+                        rta(5, bytes([10, 0, 0])), sequence=2)
+    return {
+        "discover.bin": b"\0" + kernel(lo, eth, down) + kernel(done()),
+        "discover_wifi.bin": b"\x20" + kernel(lo, eth, wifi, done()),
+        "discover_wired.bin": b"\x10" + kernel(lo, wifi, eth, done()),
+        "named.bin": b"\1" + kernel(lo, eth, wifi, done()),
+        "link_show.bin": b"\3" + kernel(lo, eth, wifi, down, done()),
+        "addr_show.bin": b"\4" + kernel(address, message(
+            20, struct.pack("<BBBBI", 2, 8, 0, 0, 3) + rta(2, b"\1\2\3\4") +
+            rta(3, b"unterminated")), done()),
+        "route_show.bin": b"\2" + kernel(lo, eth, done()) +
+                          kernel(route, subnet, odd_route, done(sequence=2)),
+        "userspace_first.bin": b"\0" + process(lo, eth, done()) +
+                               kernel(lo, eth, done()),
+        "notification_between.bin": b"\0" + kernel(
+            message(16, b"\0" * 16, sequence=0, owner=0), lo,
+            message(16, b"\0" * 16, sequence=7), eth, done()),
+        "interrupted.bin": b"\0" + kernel(message(16, b"\0" * 16, flags=0x12), done()),
+        "error_busy.bin": b"\0" + kernel(error(-16)),
+        "error_positive.bin": b"\0" + kernel(error(5)),
+        "error_short.bin": b"\0" + kernel(message(2, b"\0\0")),
+        "done_bare.bin": b"\0" + kernel(message(3)),
+        "ack_link_up.bin": b"\5" + kernel(error(0)),
+        "ack_address.bin": b"\6" + kernel(error(-17)),
+        "ack_route.bin": b"\7" + kernel(error(0)),
+        "header_short.bin": b"\0" + kernel(struct.pack("<IHHII", 8, 16, 2, 1, port)),
+        "header_long.bin": b"\0" + kernel(struct.pack("<IHHII", 4096, 16, 2, 1, port)),
+        "attribute_short.bin": b"\0" + kernel(message(
+            16, struct.pack("<BBHiII", 0, 0, 1, 2, 64, 0) +
+            struct.pack("<HH", 2, 3)), done()),
+        "attribute_past_end.bin": b"\0" + kernel(message(
+            16, struct.pack("<BBHiII", 0, 0, 1, 2, 64, 0) +
+            struct.pack("<HH", 200, 3) + b"eth0"), done()),
+        "empty_datagram.bin": b"\0" + kernel() + kernel(done()),
+        "empty.bin": b"",
+    }
+
+
+def harness_netlink_fuzz(argv):
+    """Coverage-guided libFuzzer over the rtnetlink walk and ip's printers.
+
+    Lifts src/net/net.c's whole netlink section, all of src/net/wait.c and
+    src/sh/net.c's name table and link/address/route lines over
+    NET_ZONE_FUZZ_SHIM, whose socket serves the input's datagrams with a
+    kernel or a process as their sender. The mode byte picks discovery (any
+    preference), a named link, ip link/addr/route show, or the link-up,
+    address and route acknowledgements; every datagram is then also walked
+    the way a multicast listener walks one. Seeds come from
+    netlink_fuzz_seeds(). Exit 2 (NOT RUN) without clang/libFuzzer.
+
+        python3 test/differential.py --harness netlink_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    shell = (HARNESS_ROOT / "src/sh/net.c").read_text()
+    try:
+        netlink = net_zone_fuzz_slice(net, "#define NETLINK_HEADER 16",
+                                      "#endif // STANDARD_MODERN_C_NET_NETLINK")
+        wait = net_zone_fuzz_wait()
+        printers = (net_zone_fuzz_slice(shell, "static COLD string_address net_host_text(",
+                                        "/*\n        A.B.C.D/N split") +
+                    net_zone_fuzz_slice(shell, "// The flags of a link, in the shape",
+                                        "//      The index of the link the user named."))
+    except ValueError as error:
+        print("  FAIL netlink fuzz lift: " + str(error))
+        write_tally("netlink-fuzz", 0, 1)
+        return 1
+    driver = r"""
+/* string_format and string_report, reading every argument the way the real
+   writers do: %s and %w's names to their terminator. */
+static void fuzz_sink(address_any data, positive length)
+{
+        volatile p8 touched = 0;
+        for (positive at = 0; at < length; at++)
+                touched ^= ((const p8 *)data)[at];
+}
+static writer net_out = fuzz_sink;
+static void writer_terminal_name(writer output, string_address value)
+{
+        output(value, strlen(value));
+}
+static void fuzz_format(writer output, const char *format, va_list list)
+{
+        for (; *format; format++)
+        {
+                if (*format != '%')
+                        continue;
+                switch (*++format)
+                {
+                case 's':
+                {
+                        string_address text = va_arg(list, string_address);
+                        output(text, strlen(text));
+                        break;
+                }
+                case 'w':
+                {
+                        void (*quoted)(writer, string_address) =
+                            va_arg(list, void (*)(writer, string_address));
+                        quoted(output, va_arg(list, string_address));
+                        break;
+                }
+                default:
+                        (void)va_arg(list, positive);
+                }
+        }
+}
+static void string_format(writer output, const char *format, ...)
+{
+        va_list list;
+        va_start(list, format);
+        fuzz_format(output, format, list);
+        va_end(list);
+}
+static bool string_report(writer output, bool result, const char *format, ...)
+{
+        va_list list;
+        va_start(list, format);
+        fuzz_format(output, format, list);
+        va_end(list);
+        return result;
+}
+""" + printers + r"""
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        netlink_search search;
+        p8 mode;
+
+        if (!size)
+                return 0;
+        mode = data[0];
+        fuzz_frames_load(data + 1, size - 1);
+        netlink_sequence_next = 1;
+        memset(&search, 0, sizeof search);
+        switch (mode & 7)
+        {
+        case 0:
+                search.skip_loopback = true;
+                search.prefer = (p8)(mode >> 4) % 3;
+                (void)netlink_link_find(FUZZ_NETLINK, &search);
+                break;
+        case 1:
+                search.wanted = "eth0";
+                (void)netlink_link_find(FUZZ_NETLINK, &search);
+                break;
+        case 2:
+                if (net_names_gather(FUZZ_NETLINK) >= 0)
+                        (void)netlink_dump(FUZZ_NETLINK, RTM_GETROUTE,
+                                           sizeof(netlink_route), AF_INET,
+                                           net_route_line, null);
+                netlink_forget(&net_names);
+                break;
+        case 3:
+                (void)netlink_dump(FUZZ_NETLINK, RTM_GETLINK, sizeof(netlink_link),
+                                   AF_UNSPEC, net_link_line, null);
+                break;
+        case 4:
+                (void)netlink_dump(FUZZ_NETLINK, RTM_GETADDR,
+                                   sizeof(netlink_address), AF_INET,
+                                   net_address_line, null);
+                break;
+        case 5:
+                (void)netlink_link_up(FUZZ_NETLINK, 2);
+                break;
+        case 6:
+                (void)netlink_address_add(FUZZ_NETLINK, 2, 0x0a000005, 24);
+                break;
+        default:
+                (void)netlink_route_add(FUZZ_NETLINK, 0, 0, 0x0a000001, 2);
+        }
+
+        /* A multicast listener's walk: whole messages inside the datagram,
+           each handed to every visitor. */
+        for (positive frame = 0; frame < fuzz_frame_count; frame++)
+        {
+                positive length = fuzz_frames[frame].length;
+                p8 *copy = malloc(length ? length : 1);
+                positive at = 0;
+
+                memcpy(copy, fuzz_frames[frame].bytes, length);
+                while (at <= length && length - at >= NETLINK_HEADER)
+                {
+                        netlink_header *header = (netlink_header *)(copy + at);
+
+                        if (header->length < NETLINK_HEADER ||
+                            header->length > length - at)
+                                break;
+                        memset(&search, 0, sizeof search);
+                        search.skip_loopback = frame & 1;
+                        search.wanted = "eth0";
+                        (void)netlink_link_seen(header, &search);
+                        (void)net_link_line(header, null);
+                        (void)net_address_line(header, null);
+                        (void)net_route_line(header, null);
+                        (void)netlink_status(header, frame & 1);
+                        at += netlink_align(header->length);
+                }
+                free(copy);
+        }
+        return 0;
+}
+"""
+    return tls_fuzz_run("netlink", "netlink",
+                        NET_ZONE_FUZZ_SHIM + wait + netlink + driver, 16384)
+
+
+#       The NIST curves as integers, for the vectors crypto_vectors has to
+#       build by hand: a signature whose point R has x above the order, a
+#       public key solved so a chosen signature verifies, a point off the
+#       curve. cryptography is still the verdict on every one of them.
+CRYPTO_CURVES = {
+    256: dict(
+        size=32,
+        p=0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff,
+        n=0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551,
+        b=0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b,
+        gx=0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296,
+        gy=0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5),
+    384: dict(
+        size=48,
+        p=int("fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe"
+              "ffffffff0000000000000000ffffffff", 16),
+        n=int("ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf"
+              "581a0db248b0a77aecec196accc52973", 16),
+        b=int("b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875a"
+              "c656398d8a2ed19d2a85c8edd3ec2aef", 16),
+        gx=int("aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a38"
+               "5502f25dbf55296c3a545e3872760ab7", 16),
+        gy=int("3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c0"
+               "0a60b1ce1d7e819d7a431d7c90ea0e5f", 16)),
+}
+
+
+def crypto_ec_add(c, one, two):
+    """one + two in affine coordinates, None for infinity, a = -3."""
+    p = c["p"]
+    if one is None:
+        return two
+    if two is None:
+        return one
+    if one[0] == two[0]:
+        if (one[1] + two[1]) % p == 0:
+            return None
+        slope = (3 * one[0] * one[0] - 3) * pow(2 * one[1], -1, p) % p
+    else:
+        slope = (two[1] - one[1]) * pow(two[0] - one[0], -1, p) % p
+    x = (slope * slope - one[0] - two[0]) % p
+    return x, (slope * (one[0] - x) - one[1]) % p
+
+
+def crypto_ec_multiply(c, k, point):
+    result = None
+    for bit in bin(k % c["n"])[2:] if k % c["n"] else "":
+        result = crypto_ec_add(c, result, result)
+        if bit == "1":
+            result = crypto_ec_add(c, result, point)
+    return result
+
+
+def crypto_ec_lift(c, x):
+    """A point with this x, or None when x^3 - 3x + b is not a square
+    (both primes are 3 mod 4, so the root is one power)."""
+    p = c["p"]
+    right = (x * x * x - 3 * x + c["b"]) % p
+    y = pow(right, (p + 1) // 4, p)
+    return (x, y) if y * y % p == right else None
+
+
+def crypto_vectors_lines(seed):
+    """Every vector crypto_vectors prints, as (kind, expect, fields) with
+    expect 1 for accept and 0 for refuse and fields bytes; the kinds are
+    CHECK_crypto_vectors' switch."""
+    from cryptography.exceptions import InvalidSignature, InvalidTag
+    import hmac as hmac_module
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa, utils
+    from cryptography.hazmat.primitives.asymmetric.x25519 import (
+        X25519PrivateKey, X25519PublicKey)
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    rng = random.Random(seed)
+    out = []
+
+    def draw(size):
+        return bytes(rng.getrandbits(8) for _ in range(size))
+
+    def emit(kind, expect, *fields):
+        out.append((kind, int(bool(expect)), fields))
+
+    def be(value, size):
+        return value.to_bytes(size, "big")
+
+    def minimal(value):
+        return value.to_bytes(max(1, (value.bit_length() + 7) // 8), "big")
+
+    # ---- hashes, HMAC, HKDF, PBKDF2 ----------------------------------
+    #   Lengths either side of every padding boundary: 55/56 bytes is where
+    #   SHA-256's length field stops fitting, 111/112 SHA-384's.
+    for length in (0, 1, 3, 55, 56, 57, 63, 64, 65, 111, 112, 113, 127, 128,
+                   129, 191, 192, 1000, 4096 + 7):
+        data = draw(length)
+        emit("sha256", 1, data, hashlib.sha256(data).digest())
+        emit("sha384", 1, data, hashlib.sha384(data).digest())
+    #   A key up to the 64-byte block is padded, a longer one is hashed first.
+    for key_length in (0, 1, 31, 32, 63, 64, 65, 100, 131, 200):
+        key = draw(key_length)
+        message = draw(rng.choice((0, 1, 55, 64, 200)))
+        emit("hmac256", 1, key, message,
+             hmac_module.new(key, message, hashlib.sha256).digest())
+    #   RFC 5869's length ceiling is 255 blocks; every length to the second
+    #   block boundary and a few past it, then the ceiling itself.
+    for length in list(range(1, 66)) + [96, 97, 1000, 255 * 32]:
+        ikm = draw(rng.choice((0, 22, 32, 80)))
+        salt = draw(rng.choice((0, 13, 32, 64, 80)))
+        info = draw(rng.choice((0, 10, 50, 255)))
+        okm = HKDF(algorithm=hashes.SHA256(), length=length,
+                   salt=salt or None, info=info).derive(ikm)
+        emit("hkdf", 1, salt, ikm, info, be(length, 2), okm)
+    for algorithm, name, size in (("sha1", 1, 20), ("sha256", 3, 32)):
+        for rounds, length in ((1, size), (2, size), (3, size + 1),
+                               (7, 2 * size + 5), (4096, 32), (1, 1)):
+            password = draw(rng.choice((0, 8, 63, 64, 65)))
+            salt = draw(rng.choice((0, 4, 36)))
+            emit("pbkdf2", 1, bytes((name,)), password, salt, be(rounds, 4),
+                 hashlib.pbkdf2_hmac(algorithm, password, salt, rounds, length))
+
+    # ---- AES-128-GCM --------------------------------------------------
+    #   Text and AAD either side of every turn the bodies take -- the
+    #   integer floor's single blocks, the xmm body's 8, the zmm body's 48,
+    #   and a TLS record's 16 KiB -- then the tag's every byte flipped.
+    lengths = sorted({0, 1, 15, 16, 17, 31, 33} |
+                     {16 * k + d for k in (4, 8, 48, 96) for d in (-15, -1, 0, 1, 15)} |
+                     {16384, 16384 + 17})
+    for length in lengths:
+        key = draw(16)
+        iv = draw(12)
+        aad = draw(rng.choice((0, 1, 5, 13, 16, 17, 64, 200)))
+        plain = draw(length)
+        sealed = AESGCM(key).encrypt(iv, plain, aad)
+        emit("gcm", 1, key, iv, aad, plain, sealed[:-16], sealed[-16:])
+    key, iv, aad, plain = draw(16), draw(12), draw(13), draw(40)
+    sealed = AESGCM(key).encrypt(iv, plain, aad)
+    for at in range(16):
+        tag = bytearray(sealed[-16:])
+        tag[at] ^= 1 << rng.randrange(8)
+        emit("gcm", 0, key, iv, aad, plain, sealed[:-16], bytes(tag))
+    for at in (0, 39):
+        text = bytearray(sealed[:-16])
+        text[at] ^= 0x80
+        emit("gcm", 0, key, iv, aad, plain, bytes(text), sealed[-16:])
+    emit("gcm", 0, key, iv, aad[:-1], plain, sealed[:-16], sealed[-16:])
+    #   The tag the empty text makes, over an AAD alone (GMAC).
+    sealed = AESGCM(key).encrypt(iv, b"", aad)
+    emit("gcm", 1, key, iv, aad, b"", b"", sealed)
+
+    # ---- X25519 -------------------------------------------------------
+    p25519 = 2 ** 255 - 19
+    #   RFC 7748 and Wycheproof's low-order and edge u: each of them makes
+    #   the all-zero secret, which the exchange must refuse.
+    low_order = [0, 1, p25519 - 1, p25519, p25519 + 1,
+                 325606250916557431795983626356110631294008115727848805560023387167927233504,
+                 39382357235489614581723060781553021112529911719440698176882885853963445705823,
+                 2 ** 255 - 1, 2 ** 255 - 20]
+    #   Non-canonical and high-bit u: reduced mod p, bit 255 ignored.
+    odd_u = [p25519 + 9, 2 ** 255 - 2, 2 ** 255 + 9, 2 ** 256 - 1, 9 + 2 ** 255]
+    for index in range(60):
+        scalar = draw(32)
+        if index < len(low_order):
+            u = (low_order[index] % 2 ** 256).to_bytes(32, "little")
+        elif index < len(low_order) + len(odd_u):
+            u = odd_u[index - len(low_order)].to_bytes(32, "little")
+        else:
+            u = X25519PrivateKey.from_private_bytes(draw(32)).public_key().public_bytes_raw()
+        try:
+            shared = X25519PrivateKey.from_private_bytes(scalar).exchange(
+                X25519PublicKey.from_public_bytes(u))
+            emit("x25519", 1, scalar, u, shared)
+        except ValueError:
+            emit("x25519", 0, scalar, u, bytes(32))
+    for index in range(8):
+        scalar = draw(32) if index > 1 else bytes(32) if index else b"\xff" * 32
+        emit("x25519", 1, scalar, (9).to_bytes(32, "little"),
+             X25519PrivateKey.from_private_bytes(scalar).public_key().public_bytes_raw())
+
+    # ---- ECDH on P-256 and P-384 ------------------------------------
+    for bits, curve in ((256, ec.SECP256R1()), (384, ec.SECP384R1())):
+        c = CRYPTO_CURVES[bits]
+        size, n, p = c["size"], c["n"], c["p"]
+        g = (c["gx"], c["gy"])
+        share, secret = "share%d" % bits, "ecdh%d" % bits
+
+        def encode(point):
+            return b"\x04" + be(point[0], size) + be(point[1], size)
+
+        #   Key shares over the whole scalar range, the ends included.
+        for k in [1, 2, 3, 15, 16, 17, n - 1, n - 2, n // 2, 2 ** (bits - 1)] + \
+                 [rng.randrange(1, n) for _ in range(8)]:
+            public = ec.derive_private_key(k, curve).public_key().public_bytes(
+                Encoding.X962, PublicFormat.UncompressedPoint)
+            emit(share, 1, be(k, size), public)
+        #   Scalars our shares refuse: zero and the order and above.
+        for k in (0, n, n + 1, 2 ** bits - 1):
+            emit(share, 0, be(k, size), bytes(2 * size + 1))
+
+        def exchange(k, peer):
+            try:
+                other = ec.EllipticCurvePublicKey.from_encoded_point(curve, peer)
+                return ec.derive_private_key(k, curve).exchange(ec.ECDH(), other)
+            except ValueError:
+                return None
+
+        peers = []
+        for _ in range(6):
+            peers.append(encode(crypto_ec_multiply(c, rng.randrange(1, n), g)))
+        peers.append(encode(g))
+        peers.append(encode((g[0], p - g[1])))
+        for peer in peers:
+            k = rng.randrange(1, n)
+            emit(secret, 1, be(k, size), peer, exchange(k, peer))
+            #   The ends of the private range against a real peer.
+        for k in (1, n - 1):
+            emit(secret, 1, be(k, size), peers[0], exchange(k, peers[0]))
+        for k in (0, n):
+            emit(secret, 0, be(k, size), peers[0], bytes(size))
+        #   Off the curve, a coordinate at or above p, the wrong prefix, the
+        #   compressed form (TLS 1.3 sends only the uncompressed one, so
+        #   refusing it is policy), and the encoding of nothing.
+        good = crypto_ec_multiply(c, rng.randrange(1, n), g)
+        bad = [b"\x04" + be(good[0], size) + be((good[1] + 1) % p, size),
+               b"\x04" + be(good[0] + p if good[0] + p < 2 ** bits else p, size) +
+               be(good[1], size),
+               b"\x04" + be(good[0], size) + be(good[1] + p if good[1] + p < 2 ** bits else p,
+                                              size),
+               b"\x04" + bytes(2 * size),
+               b"\x05" + encode(good)[1:],
+               b"\x00" + bytes(2 * size),
+               b"\x04" + be(p, size) + be(0, size)]
+        for x in range(0, 40):
+            lifted = crypto_ec_lift(c, x)
+            if lifted is None:
+                bad.append(b"\x04" + be(x, size) + be(rng.randrange(p), size))
+                break
+        for peer in bad:
+            k = rng.randrange(1, n)
+            if exchange(k, peer) is not None:
+                raise RuntimeError("crypto_vectors: OpenSSL took the bad peer %s" % peer.hex())
+            emit(secret, 0, be(k, size), peer, bytes(size))
+        compressed = bytes((2 + (good[1] & 1),)) + be(good[0], size)
+        k = rng.randrange(1, n)
+        if exchange(k, compressed) is None:
+            raise RuntimeError("crypto_vectors: OpenSSL refused a compressed peer")
+        emit(secret, 0, be(k, size), compressed + bytes(size), bytes(size))
+
+    # ---- ECDSA on P-256 and P-384 ------------------------------------
+    for bits, curve in ((256, ec.SECP256R1()), (384, ec.SECP384R1())):
+        c = CRYPTO_CURVES[bits]
+        size, n, p = c["size"], c["n"], c["p"]
+        g = (c["gx"], c["gy"])
+        kind = "ecdsa%d" % bits
+
+        def as_integer(digest):
+            return int.from_bytes(digest[:size], "big")
+
+        def verdict(digest, r, s, q):
+            try:
+                key = ec.EllipticCurvePublicNumbers(q[0], q[1], curve).public_key()
+            except ValueError:
+                return False
+            algorithm = hashes.SHA256() if len(digest) == 32 else hashes.SHA384()
+            try:
+                key.verify(utils.encode_dss_signature(r, s), digest,
+                           ec.ECDSA(utils.Prehashed(algorithm)))
+                return True
+            except InvalidSignature:
+                return False
+
+        def add(digest, r, s, q, r_bytes=None, s_bytes=None, expect=None,
+                policy=True):
+            want = policy and 0 <= r < 2 ** bits and 0 <= s < 2 ** bits and \
+                verdict(digest, r, s, q)
+            if expect is not None and want != expect:
+                raise RuntimeError("crypto_vectors: %s vector is %s to OpenSSL" %
+                                   (kind, want))
+            emit(kind, want, digest, r_bytes if r_bytes is not None else minimal(r),
+                 s_bytes if s_bytes is not None else minimal(s),
+                 be(q[0], size), be(q[1], size))
+
+        def sign(d, digest, k=None):
+            while True:
+                k = k or rng.randrange(1, n)
+                point = crypto_ec_multiply(c, k, g)
+                r = point[0] % n
+                s = pow(k, -1, n) * (as_integer(digest) + r * d) % n
+                if r and s:
+                    return r, s
+                k = None
+
+        #   Honest signatures over both hashes on both curves, each with its
+        #   high-S twin (ECDSA itself accepts both), a flipped hash bit and a
+        #   flipped key.
+        for index in range(12):
+            d = rng.randrange(1, n)
+            q = crypto_ec_multiply(c, d, g)
+            digest = draw(32 if index % 2 else 48)
+            r, s = sign(d, digest)
+            add(digest, r, s, q, expect=True)
+            add(digest, r, n - s, q, expect=True)
+            add(bytes([digest[0] ^ 1]) + digest[1:], r, s, q, expect=False)
+            add(digest, r, s, crypto_ec_multiply(c, d + 1, g), expect=False)
+            if index == 0:
+                #   r and s at and past the order, zero, and one; padded and
+                #   overlong encodings.
+                for bad_r, bad_s in ((0, s), (r, 0), (n, s), (r, n), (r + n, s),
+                                     (r, s + n), (1, s), (r, 1), (n - 1, s)):
+                    add(digest, bad_r, bad_s, q)
+                #   The API takes r and s as the DER reader leaves them, a
+                #   leading zero already gone: a longer field is refused.
+                add(digest, r, s, q, r_bytes=b"\x00" + be(r, size), policy=False)
+                add(digest, r, s, q, r_bytes=be(r, size), s_bytes=be(s, size),
+                    expect=True)
+                #   The key off the curve, at a coordinate of p, at (0, 0).
+                add(digest, r, s, (q[0], (q[1] + 1) % p))
+                add(digest, r, s, (q[0], q[1] + p) if q[1] + p < 2 ** bits else (q[0], p))
+                add(digest, r, s, (0, 0))
+        #   A digest that is all ones, and one of zeros: e reduced by n.
+        for fill in (b"\xff", b"\x00"):
+            d = rng.randrange(1, n)
+            q = crypto_ec_multiply(c, d, g)
+            for length in (32, 48):
+                digest = fill * length
+                r, s = sign(d, digest)
+                add(digest, r, s, q, expect=True)
+        #   Constructed keys: pick R, r, s and e, and solve for the Q that
+        #   makes the signature verify, Q = (s R - e G) / r. First an R whose
+        #   x is at or above n, so r = x - n; the verifier must reduce R.x.
+        found = 0
+        for offset in range(1, 4000):
+            x = n + offset
+            if x >= p:
+                break
+            point = crypto_ec_lift(c, x)
+            if point is None:
+                continue
+            r = x - n
+            for s in (rng.randrange(1, n), 1):
+                digest = draw(size)
+                e = as_integer(digest)
+                q = crypto_ec_add(c, crypto_ec_multiply(c, s, point),
+                                  crypto_ec_multiply(c, n - e % n, g))
+                q = crypto_ec_multiply(c, pow(r, -1, n), q)
+                add(digest, r, s, q, expect=True)
+                #   The same R.x without its reduction must not pass.
+                add(digest, x, s, q, expect=False) if x < 2 ** bits else None
+            found += 1
+            if found == 3:
+                break
+        #   Small r and s, so their encodings are short: R with a tiny x.
+        for x in range(1, 200):
+            point = crypto_ec_lift(c, x)
+            if point is None:
+                continue
+            for s in (1, 2, rng.randrange(1, 256), rng.randrange(1, n)):
+                digest = draw(size)
+                e = as_integer(digest)
+                q = crypto_ec_add(c, crypto_ec_multiply(c, s, point),
+                                  crypto_ec_multiply(c, n - e % n, g))
+                q = crypto_ec_multiply(c, pow(x, -1, n), q)
+                add(digest, x, s, q, expect=True)
+            break
+        #   Q = G with e = r and s = 2r/k makes u1 = u2 = k/2, so the two
+        #   wNAF chains add the same point at their first digit: the public
+        #   add's doubling case. Q = -G makes that first pair opposite, and
+        #   the sum infinity.
+        for _ in range(2):
+            k = rng.randrange(1, n)
+            r = crypto_ec_multiply(c, k, g)[0] % n
+            s = 2 * r * pow(k, -1, n) % n
+            add(be(r, size), r, s, g, expect=True)
+            add(be(r, size), r, s, (g[0], p - g[1]), expect=False)
+        #   u1 G = -u2 Q: the sum is infinity and must be refused. u1 G = u2 Q:
+        #   the sum is a doubling.
+        for _ in range(3):
+            digest = draw(size)
+            e = as_integer(digest) % n or 1
+            r = rng.randrange(1, n)
+            s = rng.randrange(1, n)
+            q = crypto_ec_multiply(c, (n - e) * pow(r, -1, n) % n, g)
+            add(digest, r, s, q, expect=False)
+            u1 = e * pow(s, -1, n) % n
+            point = crypto_ec_multiply(c, 2 * u1, g)
+            r = point[0] % n
+            q = crypto_ec_multiply(c, e * pow(r, -1, n) % n, g)
+            add(digest, r, s, q, expect=True)
+
+    # ---- RSA ----------------------------------------------------------
+    #   RSA keys are OpenSSL's, fresh each run: Python's own arithmetic took
+    #   seconds a 4096-bit key. Everything signed with them is seeded.
+    #   OpenSSL makes even sizes only, so an odd one -- 2049 bits is the
+    #   modulus whose PSS encoding is a byte shorter than it -- takes one
+    #   prime from a key a bit longer and one from a key a bit shorter. Its
+    #   primes are above sqrt(2) times their power of two, so the product
+    #   has exactly the bits asked for.
+    def rsa_key(bits, e):
+        def primes(size):
+            numbers = rsa.generate_private_key(public_exponent=e,
+                                               key_size=size).private_numbers()
+            return numbers.p, numbers.q
+
+        one, two = primes(bits) if bits % 2 == 0 else (primes(bits + 1)[0],
+                                                        primes(bits - 1)[0])
+        n = one * two
+        if n.bit_length() != bits:
+            raise RuntimeError("crypto_vectors: a %d-bit key came out %d" %
+                               (bits, n.bit_length()))
+        return n, (one, two, pow(e, -1, (one - 1) * (two - 1)))
+
+    def emsa_pkcs1(prefix, digest, k, ps=None):
+        info = prefix + digest
+        ps = ps if ps is not None else b"\xff" * (k - 3 - len(info))
+        return b"\x00\x01" + ps + b"\x00" + info
+
+    def mgf1(seed, length):
+        mask = b""
+        for counter in range((length + 31) // 32):
+            mask += hashlib.sha256(seed + counter.to_bytes(4, "big")).digest()
+        return mask[:length]
+
+    def emsa_pss(message, em_bits, salt, trailer=0xbc, top=True):
+        em_length = (em_bits + 7) // 8
+        mhash = hashlib.sha256(message).digest()
+        h = hashlib.sha256(b"\x00" * 8 + mhash + salt).digest()
+        db = b"\x00" * (em_length - len(salt) - 32 - 2) + b"\x01" + salt
+        masked = bytearray(x ^ y for x, y in zip(db, mgf1(h, len(db))))
+        if top:
+            masked[0] &= 0xff >> (8 * em_length - em_bits)
+        return bytes(masked) + h + bytes((trailer,))
+
+    sha256_info = bytes.fromhex("3031300d060960864801650304020105000420")
+    sha384_info = bytes.fromhex("3041300d060960864801650304020205000430")
+    sha256_bare = bytes.fromhex("302f300b0609608648016503040201" "0420")
+
+    def rsa_verdict(n, e, signature, digest, scheme, message=None):
+        try:
+            key = rsa.RSAPublicNumbers(e, n).public_key()
+        except ValueError:
+            return False
+        try:
+            if scheme == "pss":
+                key.verify(signature, message,
+                           padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32),
+                           hashes.SHA256())
+            else:
+                algorithm = hashes.SHA256() if scheme == "pkcs256" else hashes.SHA384()
+                key.verify(signature, digest, padding.PKCS1v15(), utils.Prehashed(algorithm))
+            return True
+        except (InvalidSignature, ValueError):
+            return False
+
+    def rsa_add(scheme, n, e, signature, digest=b"", message=b"", expect=None,
+                policy=True):
+        k = (n.bit_length() + 7) // 8
+        want = policy and rsa_verdict(n, e, signature, digest, scheme, message)
+        if expect is not None and want != expect:
+            raise RuntimeError("crypto_vectors: %s vector is %s to OpenSSL" % (scheme, want))
+        emit(scheme, want, be(n, k), be(e, 8), signature,
+             message if scheme == "pss" else digest)
+
+    for bits, e in ((2048, 65537), (2049, 65537), (2055, 3), (3072, 65537),
+                    (4096, 65537), (8192, 65537), (2047, 65537), (2048, 3)):
+        n, (one, two, d) = rsa_key(bits, e)
+        k = (bits + 7) // 8
+        policy = bits >= 2048
+        if bits == 8192:
+            #   Past 8,192 bits policy refuses before any arithmetic, so the
+            #   modulus need not factor: this key's, shifted a byte up.
+            wide = n << 8 | 0xff
+            rsa_add("pkcs256", wide, e, be(12345, k + 1), draw(32), policy=False)
+            rsa_add("pss", wide, e, be(12345, k + 1), message=draw(3), policy=False)
+
+        def raw(em):
+            m = int.from_bytes(em, "big")
+            first = pow(m, d % (one - 1), one)
+            second = pow(m, d % (two - 1), two)
+            return be(second + two * ((first - second) * pow(two, -1, one) % one), k)
+
+        for scheme, info, length in (("pkcs256", sha256_info, 32), ("pkcs384", sha384_info, 48)):
+            digest = draw(length)
+            good = raw(emsa_pkcs1(info, digest, k))
+            rsa_add(scheme, n, e, good, digest, expect=policy, policy=policy)
+            if not policy:
+                continue
+            rsa_add(scheme, n, e, good, bytes([digest[0] ^ 1]) + digest[1:], expect=False)
+            flipped = bytearray(good)
+            flipped[-1] ^= 1
+            rsa_add(scheme, n, e, bytes(flipped), digest, expect=False)
+            #   The other hash's DigestInfo, a padding byte that is not FF, a
+            #   block type of 2, trailing bytes after the digest, and
+            #   SHA-256's DigestInfo without its NULL parameters.
+            other, other_length = (sha384_info, 48) if scheme == "pkcs256" else (sha256_info, 32)
+            rsa_add(scheme, n, e, raw(emsa_pkcs1(other, draw(other_length), k)),
+                    digest, expect=False)
+            em = bytearray(emsa_pkcs1(info, digest, k))
+            em[5] = 0xfe
+            rsa_add(scheme, n, e, raw(bytes(em)), digest, expect=False)
+            em = bytearray(emsa_pkcs1(info, digest, k))
+            em[1] = 2
+            rsa_add(scheme, n, e, raw(bytes(em)), digest, expect=False)
+            em = emsa_pkcs1(info, digest + b"\x00", k)
+            rsa_add(scheme, n, e, raw(em), digest, expect=False)
+            if scheme == "pkcs256":
+                rsa_add(scheme, n, e, raw(emsa_pkcs1(sha256_bare, digest, k)), digest)
+                #   Seven FF bytes of padding, and the rest a longer
+                #   DigestInfo, and no padding at all.
+                em = b"\x00\x01" + b"\xff" * 7 + b"\x00" + b"\x00" * (k - 10 - len(info) - 32) + \
+                    info + digest
+                rsa_add(scheme, n, e, raw(em), digest, expect=False)
+            #   s = 0, 1, n - 1, n, and a signature a byte short.
+            for value in (0, 1, n - 1):
+                rsa_add(scheme, n, e, be(value, k), digest, expect=False)
+            rsa_add(scheme, n, e, be(n, k), digest, expect=False)
+            rsa_add(scheme, n, e, good[1:] if good[0] == 0 else good[:-1], digest,
+                    expect=False)
+            if e == 3:
+                #   Bleichenbacher's e = 3 forgery: 00 01 FF 00, the
+                #   DigestInfo and digest, then garbage chosen so the whole
+                #   is a cube. Only a verifier that stops reading at the
+                #   digest takes it.
+                prefix = b"\x00\x01\xff\x00" + info + digest
+                target = int.from_bytes(prefix + b"\xff" * (k - len(prefix)), "big")
+                lo, hi = 0, 1 << (bits // 3 + 2)
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    if mid ** 3 < target:
+                        lo = mid + 1
+                    else:
+                        hi = mid
+                root = lo - 1
+                del lo, hi
+                rsa_add(scheme, n, e, be(root, k), digest, expect=False)
+
+        em_bits = bits - 1
+        message = draw(rng.choice((0, 3, 64, 300)))
+        salt = draw(32)
+        good = raw(emsa_pss(message, em_bits, salt))
+        rsa_add("pss", n, e, good, message=message, expect=policy, policy=policy)
+        if not policy:
+            continue
+        rsa_add("pss", n, e, good, message=message + b"x", expect=False)
+        rsa_add("pss", n, e, raw(emsa_pss(message, em_bits, salt, trailer=0xbd)),
+                message=message, expect=False)
+        if em_bits % 8:
+            rsa_add("pss", n, e, raw(emsa_pss(message, em_bits, salt, top=False)),
+                    message=message)
+        for salt_length in (0, 20, 31, 33, 64):
+            rsa_add("pss", n, e, raw(emsa_pss(message, em_bits, draw(salt_length))),
+                    message=message, expect=False)
+        for value in (0, 1, n - 1):
+            rsa_add("pss", n, e, be(value, k), message=message, expect=False)
+        rsa_add("pss", n, e, be(n, k), message=message, expect=False)
+        flipped = bytearray(good)
+        flipped[k // 2] ^= 4
+        rsa_add("pss", n, e, bytes(flipped), message=message, expect=False)
+    #   A modulus that is even, and an exponent that is even or one: refused
+    #   before any arithmetic, by policy where OpenSSL has none.
+    n, _ = rsa_key(2048, 65537)
+    digest = draw(32)
+    for bad_n, bad_e in ((n + 1, 65537), (n, 65536), (n, 1), (n, 2)):
+        rsa_add("pkcs256", bad_n, bad_e, be(12345, 256), digest, policy=False)
+    return out
+
+
+#       The only conditional branches the x25519 bodies may hold, each on
+#       the line that decides it: a count loaded as a constant and stepped
+#       down -- the ladder's bit index, a run of squares, the frame wipe --
+#       or, on x86_64, the feature bytes. Nothing the scalar or u reaches.
+CRYPTO_X25519_COUNTED = (
+    r'"decq 520\(%rsp\)\\n\s+jns \.Lx25519_x64_" s "_step\\n"',
+    r'"dec %ebp\\n\s+jnz \.Lx25519_x64_" s "_squares_" id "\\n"',
+    r'"cmpb \$0, cpu_hash_probed\(%rip\)\\n\s+jne \.Lx25519_x64_probed\\n"',
+    r'"cmpb \$0, cpu_has_mulx\(%rip\)\\n\s+je \.Lx25519_x64_mulq_step\\n"',
+    r'"subs x20, x20, #1\\n\s+b\.pl \.Lx25519_arm64_step\\n"',
+    r'"subs x20, x20, #1\\n\s+b\.ne \.Lx25519_arm64_squares_" id "\\n"',
+    r'stp xzr, xzr, \[x3\], #16\\n\s+subs x4, x4, #1\\n\s+b\.ne \.Lx25519_arm64_wipe\\n"',
+    r'"addi s0, s0, -1\\n\s+bgez s0, \.Lx25519_rv_step\\n"',
+    r'"addi s0, s0, -1\\n\s+bnez s0, \.Lx25519_rv_squares_" id "\\n"',
+    r'addi t0, t0, 8\\n\s+bltu t0, t1, \.Lx25519_rv_wipe\\n"',
+)
+
+
+def crypto_branchless_bodies():
+    """The P-256, P-384 and X25519 field bodies in lib.c, on every machine
+    that has them, and the FIELD_ and X25519_ macros they expand, with any
+    conditional branch they hold: (routine, line, text), text None for a
+    body's first line. ECDH and X25519 run their secret scalars through
+    these, and each body promises that nothing branches on a value, so
+    there should be none -- save, in x25519, the counted loops
+    CRYPTO_X25519_COUNTED names."""
+    lines = (HARNESS_ROOT / "src/lib.c").read_text().split("\n")
+    branch = re.compile(r"\b(j(?!mp\b)[a-z]{1,3}|b\.[a-z]{2}|cbn?z|tbn?z|"
+                        r"b(?:eq|ne|lt|ge|gt|le)u?z?)\s")
+    counted = [re.compile(pattern) for pattern in CRYPTO_X25519_COUNTED]
+
+    def refused(text):
+        code = text.split("//")[0]
+        return bool(branch.search(code)) and not any(
+            pattern.search(code) for pattern in counted)
+
+    found = []
+    for at, line in enumerate(lines):
+        #   The rows, reductions and final subtractions the bodies expand.
+        macro = re.match(r"#define ((?:FIELD|X25519)_(?:X64|ARM64|RV)_\w+)", line)
+        if macro:
+            number = at
+            while True:
+                if refused(lines[number]):
+                    found.append((macro.group(1), number + 1, lines[number].strip()))
+                if not lines[number].rstrip().endswith("\\"):
+                    break
+                number += 1
+        start = re.search(r"ASM_FUNC\((p(?:256|384)_(?:multiply|square|add|subtract)|x25519)\)",
+                          line)
+        if not start:
+            continue
+        name = start.group(1)
+        stop = at
+        while "ASM_END(%s)" % name not in lines[stop]:
+            stop += 1
+        found.append((name, at + 1, None))
+        for number in range(at + 1, stop):
+            if refused(lines[number]):
+                found.append((name, number + 1, lines[number].strip()))
+    return found
+
+
+#       One x25519 of a scalar and u drawn from argv[1]'s first byte, for
+#       crypto_x25519_instruction_counts: everything but the call runs the
+#       same instructions whatever the byte is.
+CRYPTO_X25519_COUNT_C = r"""
+#include "src/lib.c"
+b32 main(void)
+{
+        p8 scalar[32], u[32], out[32];
+        string_address which = program_argument(1);
+        p64 seed = 0x9e3779b97f4a7c15ull * (p64)(p8)which[0];
+
+        for (positive i = 0; i < 32; i++)
+        {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                scalar[i] = (p8)seed;
+                u[i] = (p8)(seed >> 8);
+        }
+        x25519(out, scalar, u);
+        return out[0] & 0;
+}
+"""
+
+
+def crypto_x25519_instruction_counts():
+    """x25519's guest instruction count under qemu-user and test/insn.c, for
+    six scalar and u pairs, on each machine and x86_64 body: a Nehalem
+    has no BMI2 or ADX and takes the mulq body, -cpu max has both. Every
+    pair must retire the same count -- what a branch or a
+    loop on a secret would change. Returns (lines, failed); a machine
+    whose cross compiler, qemu or the plugin's headers are missing says
+    NOT RUN in its line and does not fail."""
+    lines, failed = [], False
+    cc = shutil.which("gcc")
+    if not cc:
+        return ["x25519 instructions: NOT RUN -- no gcc for the qemu plugin"], False
+    with tempfile.TemporaryDirectory(prefix="x25519-count-") as temporary:
+        work = Path(temporary)
+        glib = subprocess.run(["pkg-config", "--cflags", "glib-2.0"], capture_output=True,
+                              text=True)
+        plugin = work / "insn.so"
+        if glib.returncode or subprocess.run(
+                [cc, "-O2", "-shared", "-fPIC"] + glib.stdout.split() +
+                ["-o", str(plugin), str(HARNESS_ROOT / "test/insn.c")],
+                capture_output=True).returncode:
+            return ["x25519 instructions: NOT RUN -- the qemu plugin does not build"], False
+        unit = work / "count.c"
+        unit.write_text(CRYPTO_X25519_COUNT_C)
+        for machine, compiler, flags, runner, cpus in (
+                ("x86_64", "x86_64-linux-gnu-gcc" if os.uname().machine != "x86_64" else "gcc",
+                 ["-march=x86-64"], "qemu-x86_64",
+                 (("mulq", ["-cpu", "Nehalem"]), ("mulx", ["-cpu", "max"]))),
+                ("arm64", "aarch64-linux-gnu-gcc", ["-mno-outline-atomics"], "qemu-aarch64",
+                 (("", []),)),
+                ("riscv64", "riscv64-linux-gnu-gcc",
+                 ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"], "qemu-riscv64", (("", []),))):
+            if not shutil.which(compiler) or not shutil.which(runner):
+                lines.append("x25519 instructions %s: NOT RUN -- no %s or %s"
+                             % (machine, compiler, runner))
+                continue
+            binary = work / ("count." + machine)
+            built = subprocess.run(
+                [compiler] + flags + ["-O2", "-static", "-nostdlib", "-nostartfiles",
+                                      "-fno-stack-protector", "-fno-builtin", "-w",
+                                      "-I", str(HARNESS_ROOT), "-T",
+                                      str(HARNESS_ROOT / "src/build/spark.ld"),
+                                      "-Wl,-e,_start", "-Wl,--build-id=none",
+                                      "-Wl,--no-warn-rwx-segments", "-o", str(binary),
+                                      str(unit)], capture_output=True, text=True)
+            if built.returncode:
+                lines.append("x25519 instructions %s: did not build\n%s"
+                             % (machine, built.stderr[-1500:]))
+                failed = True
+                continue
+            for body, cpu in cpus:
+                counts = []
+                for which in "anqz19":
+                    ran = subprocess.run([runner] + cpu + ["-plugin", str(plugin), str(binary),
+                                                           which],
+                                         capture_output=True, text=True)
+                    counts.append(ran.stderr.strip().split("\n")[-1] if ran.returncode == 0
+                                  else "exit %d" % ran.returncode)
+                same = len(set(counts)) == 1 and counts[0].isdigit()
+                failed = failed or not same
+                lines.append("x25519 instructions %s%s: %s" % (
+                    machine, " " + body if body else "",
+                    ("%s for each of six keys" % counts[0]) if same else
+                    "FAIL -- they differ: " + ", ".join(counts)))
+    return lines, failed
+
+
+def harness_crypto_vectors(argv):
+    """Wycheproof-style vectors for the crypto in src/net/net.c, answered by
+    Python's cryptography (OpenSSL) and printed for CHECK_crypto_vectors.
+
+    lane_net feeds this program's output to test/checks.c's
+    CHECK_crypto_vectors on x86_64, arm64 and riscv64, which runs every
+    vector through the production crypto_* routines over lib.c's assembly
+    -- each hardware body in turn where the machine has more than one --
+    and counts every verdict or output that differs. Nothing is read from
+    a vector file: the categories are generated here from a fixed seed,
+    all but the RSA keys, which OpenSSL makes fresh each run (Python's own
+    arithmetic took seconds a 4096-bit key); a failing line's number
+    names it in $work/crypto_vectors.in.
+
+    - SHA-256/384, HMAC-SHA256, HKDF-SHA256 (every length to 66 and the
+      255-block ceiling), PBKDF2 over SHA-1 and SHA-256
+    - AES-128-GCM across every turn size and tail, the tag's every byte
+      flipped, the text and AAD tampered, GMAC over an empty text
+    - X25519 on RFC 7748's low-order and non-canonical u, which must
+      refuse the all-zero secret, and random pairs
+    - P-256/P-384 key shares over the scalar range's ends and refusals,
+      ECDH against peers off the curve, at p, compressed or malformed
+    - ECDSA P-256/P-384: honest and high-S signatures over SHA-256 and
+      SHA-384 digests, r and s at 0, n and past, padded encodings, keys off
+      the curve, and constructed keys whose R has x above n, whose r and s
+      are short, whose u1 G + u2 Q is infinity or a doubling
+    - RSA PKCS#1 v1.5 (SHA-256/384) and PSS-SHA256 at 2048, 2049, 2055,
+      3072, 4096 and 8192 bits: malformed padding, the wrong DigestInfo, a
+      missing NULL, trailing bytes, short padding, s at 0/1/n-1/n, e = 3's
+      cube-root forgery, PSS trailers, top bits and salt lengths; moduli
+      under 2048 or over 8192 bits, even moduli and exponents refused by
+      policy
+
+    First, the P-256 and P-384 field bodies in lib.c -- all eight on all
+    three machines, the arithmetic ECDH's secret scalar runs through --
+    and x25519 on all three must hold no conditional branch but x25519's
+    counted loops (CRYPTO_X25519_COUNTED), and x25519 must retire the same
+    number of instructions for six different keys on every machine and
+    x86_64 body (crypto_x25519_instruction_counts, under qemu-user); any
+    other exit is a failure.
+
+    Verdicts are OpenSSL's, except where this client is stricter on
+    purpose (RSA under 2048 or over 8192 bits, an even or unit exponent, a compressed
+    ECDH share, a signature not exactly the modulus' length); the
+    generator raises if OpenSSL disagrees with a verdict a vector was built
+    to have. Returns 2 when cryptography is missing.
+
+        python3 test/differential.py --harness crypto_vectors [--seed N]
+    """
+    seed = 20260928
+    if argv[:1] == ["--seed"] and len(argv) > 1:
+        seed = int(argv[1])
+    try:
+        import cryptography  # noqa: F401
+    except ImportError:
+        print("crypto vectors: NOT RUN -- python3 cryptography is missing", file=sys.stderr)
+        return 2
+    bodies = crypto_branchless_bodies()
+    branches = [row for row in bodies if row[2]]
+    if len(bodies) - len(branches) != 27 or branches:
+        print("crypto vectors: lib.c's P-256/P-384/X25519 bodies: %d of 27 found, branches %s"
+              % (len(bodies) - len(branches), branches[:4]), file=sys.stderr)
+        return 1
+    counts, uneven = crypto_x25519_instruction_counts()
+    for line in counts:
+        print("crypto vectors: " + line, file=sys.stderr)
+    if uneven:
+        return 1
+    lines = crypto_vectors_lines(seed)
+    kinds = collections.Counter(kind for kind, _, _ in lines)
+    accepts = collections.Counter(kind for kind, expect, _ in lines if expect)
+    for kind in kinds:
+        if not accepts[kind]:
+            raise RuntimeError("crypto_vectors: no accepting %s vector" % kind)
+    for index, (kind, expect, fields) in enumerate(lines):
+        sys.stdout.write("%s %d %d %s\n" % (kind, index, expect, " ".join(
+            field.hex() or "-" for field in fields)))
+    print("crypto vectors: %d (%s)" % (len(lines), ", ".join(
+        "%s %d" % item for item in sorted(kinds.items()))), file=sys.stderr)
+    return 0
+
+
+#       What crypto_fuzz puts under net.c's crypto so it links hosted: the
+#       streaming digests over a plain C SHA-1/256/384, GHASH bit by bit, and
+#       AES-128 from the S-box crypto_aes_substitute makes. None of it is
+#       what is under test -- lane_net's crypto_vectors holds lib.c's bodies
+#       to OpenSSL -- it is what lets libFuzzer, ASan and MSan read every
+#       byte net.c's own C touches.
+CRYPTO_FUZZ_HOSTED_C = r"""
+#define INLINE
+static void network_store_32(p8 *bytes, p32 value)
+{
+        bytes[0] = (p8)(value >> 24);
+        bytes[1] = (p8)(value >> 16);
+        bytes[2] = (p8)(value >> 8);
+        bytes[3] = (p8)value;
+}
+static positive memory_span_byte(const void *block, p8 byte, positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[i] == byte)
+                i++;
+        return i;
+}
+
+typedef struct { p32 state[5]; p8 block[64]; positive used; p64 total; } fuzz_sha1;
+static p32 fuzz_rol32(p32 x, int n) { return (x << n) | (x >> (32 - n)); }
+static void fuzz_sha1_block(fuzz_sha1 *h, const p8 *p)
+{
+        p32 w[80], a = h->state[0], b = h->state[1], c = h->state[2],
+            d = h->state[3], e = h->state[4];
+        for (int i = 0; i < 16; i++)
+                w[i] = (p32)p[4 * i] << 24 | (p32)p[4 * i + 1] << 16 |
+                       (p32)p[4 * i + 2] << 8 | p[4 * i + 3];
+        for (int i = 16; i < 80; i++)
+                w[i] = fuzz_rol32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+        for (int i = 0; i < 80; i++)
+        {
+                p32 f = i < 20 ? (b & c) | (~b & d) :
+                        i < 40 ? b ^ c ^ d :
+                        i < 60 ? (b & c) | (b & d) | (c & d) : b ^ c ^ d;
+                p32 k = i < 20 ? 0x5a827999 : i < 40 ? 0x6ed9eba1 :
+                        i < 60 ? 0x8f1bbcdc : 0xca62c1d6;
+                p32 t = fuzz_rol32(a, 5) + f + e + k + w[i];
+                e = d; d = c; c = fuzz_rol32(b, 30); b = a; a = t;
+        }
+        h->state[0] += a; h->state[1] += b; h->state[2] += c;
+        h->state[3] += d; h->state[4] += e;
+}
+static void fuzz_sha1_init(fuzz_sha1 *h)
+{
+        static const p32 start[5] = {0x67452301, 0xefcdab89, 0x98badcfe,
+                                     0x10325476, 0xc3d2e1f0};
+        memcpy(h->state, start, sizeof start);
+        h->used = 0;
+        h->total = 0;
+}
+static void fuzz_sha1_update(fuzz_sha1 *h, const p8 *d, positive n)
+{
+        h->total += n;
+        while (n--)
+        {
+                h->block[h->used++] = *d++;
+                if (h->used == 64)
+                {
+                        fuzz_sha1_block(h, h->block);
+                        h->used = 0;
+                }
+        }
+}
+static void fuzz_sha1_final(fuzz_sha1 *h, p8 *out)
+{
+        p64 bits = h->total * 8;
+        p8 pad = 0x80, zero = 0, length[8];
+        fuzz_sha1_update(h, &pad, 1);
+        while (h->used != 56)
+                fuzz_sha1_update(h, &zero, 1);
+        for (int i = 0; i < 8; i++)
+                length[i] = (p8)(bits >> (56 - 8 * i));
+        fuzz_sha1_update(h, length, 8);
+        for (int i = 0; i < 5; i++)
+                network_store_32(out + 4 * i, h->state[i]);
+}
+
+#define DIGEST_SHA1 1
+#define DIGEST_SHA256 3
+#define DIGEST_SHA384 4
+typedef struct
+{
+        positive algorithm;
+        positive size;
+        fuzz_sha1 one;
+        fuzz_sha256 two;
+        fuzz_sha512 five;
+} digest_state;
+static void digest_open(digest_state *d, positive algorithm, positive size)
+{
+        memset(d, 0, sizeof *d);
+        d->algorithm = algorithm;
+        d->size = size;
+        if (algorithm == DIGEST_SHA1)
+                fuzz_sha1_init(&d->one);
+        else if (algorithm == DIGEST_SHA256)
+                fuzz_sha256_init(&d->two);
+        else
+                fuzz_sha384_init(&d->five);
+}
+static void digest_write(digest_state *d, const void *data, positive n)
+{
+        if (d->algorithm == DIGEST_SHA1)
+                fuzz_sha1_update(&d->one, data, n);
+        else if (d->algorithm == DIGEST_SHA256)
+                fuzz_sha256_update(&d->two, (p8 *)data, n);
+        else
+                fuzz_sha512_update(&d->five, (p8 *)data, n);
+}
+static void digest_close(digest_state *d, p8 *out)
+{
+        if (d->algorithm == DIGEST_SHA1)
+                fuzz_sha1_final(&d->one, out);
+        else if (d->algorithm == DIGEST_SHA256)
+                fuzz_sha256_final(&d->two, out);
+        else
+                fuzz_sha384_final(&d->five, out);
+}
+
+/* GHASH: the table holds H, and each block is one bit-serial multiply. */
+#define GHASH_KEY_SIZE 16
+static void ghash_key(p8 *table, const p8 *h) { memcpy(table, h, 16); }
+static void ghash_blocks(p8 *state, const p8 *table, const p8 *data,
+                         positive blocks)
+{
+        for (positive b = 0; b < blocks; b++)
+        {
+                p8 x[16], z[16], v[16];
+                for (int i = 0; i < 16; i++)
+                        x[i] = state[i] ^ data[16 * b + i];
+                memset(z, 0, 16);
+                memcpy(v, table, 16);
+                for (int i = 0; i < 128; i++)
+                {
+                        p8 low = v[15] & 1;
+                        if ((x[i / 8] >> (7 - i % 8)) & 1)
+                                for (int k = 0; k < 16; k++)
+                                        z[k] ^= v[k];
+                        for (int k = 15; k > 0; k--)
+                                v[k] = (p8)((v[k] >> 1) | (v[k - 1] << 7));
+                        v[0] >>= 1;
+                        if (low)
+                                v[0] ^= 0xe1;
+                }
+                memcpy(state, z, 16);
+        }
+}
+"""
+
+#       AES-128 over the schedule, once crypto_aes_substitute exists.
+CRYPTO_FUZZ_AES_C = r"""
+static p8 fuzz_aes_sbox[256];
+static p8 fuzz_aes_xtime(p8 x) { return (p8)((x << 1) ^ ((x >> 7) * 0x1b)); }
+static void fuzz_aes_encrypt(const p8 *round, const p8 *in, p8 *out)
+{
+        p8 s[16], t[16];
+        if (!fuzz_aes_sbox[0])
+                for (int v = 0; v < 256; v++)
+                        fuzz_aes_sbox[v] = crypto_aes_substitute((p8)v);
+        for (int i = 0; i < 16; i++)
+                s[i] = in[i] ^ round[i];
+        for (int r = 1; r <= 10; r++)
+        {
+                for (int i = 0; i < 16; i++)
+                        t[i] = fuzz_aes_sbox[s[(i + 4 * (i % 4)) % 16]];
+                for (int c = 0; c < 4 && r < 10; c++)
+                {
+                        p8 *col = t + 4 * c, a0 = col[0], a1 = col[1],
+                           a2 = col[2], a3 = col[3], all = a0 ^ a1 ^ a2 ^ a3;
+                        col[0] ^= all ^ fuzz_aes_xtime(a0 ^ a1);
+                        col[1] ^= all ^ fuzz_aes_xtime(a1 ^ a2);
+                        col[2] ^= all ^ fuzz_aes_xtime(a2 ^ a3);
+                        col[3] ^= all ^ fuzz_aes_xtime(a3 ^ a0);
+                }
+                for (int i = 0; i < 16; i++)
+                        s[i] = t[i] ^ round[16 * r + i];
+        }
+        memcpy(out, s, 16);
+}
+static void aes128_ctr_blocks(const p8 *round, p8 *counter, const p8 *in,
+                              p8 *out, positive blocks)
+{
+        for (positive b = 0; b < blocks; b++)
+        {
+                p8 stream[16];
+                p32 low;
+                fuzz_aes_encrypt(round, counter, stream);
+                for (int i = 0; i < 16; i++)
+                        out[16 * b + i] = in[16 * b + i] ^ stream[i];
+                low = network_load_32(counter + 12) + 1;
+                network_store_32(counter + 12, low);
+        }
+}
+"""
+
+#       The oracle half of crypto_fuzz: OpenSSL answering the same inputs.
+#       An MSan build leaves it out, since libcrypto is not instrumented.
+CRYPTO_FUZZ_ORACLE_INCLUDES = r"""
+#include <openssl/bn.h>
+#include <openssl/ec.h>
+#include <openssl/ecdsa.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/kdf.h>
+#include <openssl/obj_mac.h>
+#include <openssl/rsa.h>
+#include <openssl/sha.h>
+"""
+
+CRYPTO_FUZZ_DRIVER_C = r"""
+/* The input, taken from the front a field at a time; what is missing
+   reads as zeros. */
+typedef struct { const p8 *at; positive left; } fuzz_take;
+static void take(fuzz_take *f, p8 *into, positive n)
+{
+        positive have = n < f->left ? n : f->left;
+        memcpy(into, f->at, have);
+        memset(into + have, 0, n - have);
+        f->at += have;
+        f->left -= have;
+}
+static p8 take_byte(fuzz_take *f)
+{
+        p8 b;
+        take(f, &b, 1);
+        return b;
+}
+
+static void disagree(const char *what)
+{
+        fprintf(stderr, "crypto_fuzz: ours and OpenSSL disagree on %s\n", what);
+        abort();
+}
+
+/* PKCS#1 v1.5 at the two digests the vectors ask about; production
+   reaches crypto_rsa_pkcs1 through tls_verify_one's signature table. */
+static bool crypto_rsa_pkcs1_sha256(p8 address_to n_bytes, positive n_length,
+                                    p64 exponent, p8 address_to sig,
+                                    positive sig_length, p8 address_to hash)
+{
+        static const p8 digestinfo[19] = {
+            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+            0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20};
+
+        return crypto_rsa_pkcs1(n_bytes, n_length, exponent, sig, sig_length,
+                                digestinfo, sizeof digestinfo, hash, 32);
+}
+
+static bool crypto_rsa_pkcs1_sha384(p8 address_to n_bytes, positive n_length,
+                                    p64 exponent, p8 address_to sig,
+                                    positive sig_length, p8 address_to hash)
+{
+        static const p8 digestinfo[19] = {
+            0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+            0x65, 0x03, 0x04, 0x02, 0x02, 0x05, 0x00, 0x04, 0x30};
+
+        return crypto_rsa_pkcs1(n_bytes, n_length, exponent, sig, sig_length,
+                                digestinfo, sizeof digestinfo, hash, 48);
+}
+
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+static int oracle_curve(positive size) { return size == 32 ? NID_X9_62_prime256v1 : NID_secp384r1; }
+
+/* k G, or k Q from an uncompressed or compressed encoding; the x of the
+   product, or the encoding of k G. 0 when OpenSSL refuses. */
+static int oracle_multiply(positive size, const p8 *scalar, const p8 *peer,
+                           positive peer_length, p8 *out)
+{
+        EC_GROUP *group = EC_GROUP_new_by_curve_name(oracle_curve(size));
+        BN_CTX *ctx = BN_CTX_new();
+        BIGNUM *k = BN_bin2bn(scalar, (int)size, NULL);
+        EC_POINT *q = EC_POINT_new(group), *r = EC_POINT_new(group);
+        BIGNUM *x = BN_new();
+        int ok = !BN_is_zero(k) && BN_cmp(k, EC_GROUP_get0_order(group)) < 0;
+
+        if (ok && peer)
+                ok = EC_POINT_oct2point(group, q, peer, peer_length, ctx) &&
+                     EC_POINT_is_on_curve(group, q, ctx) == 1 &&
+                     EC_POINT_mul(group, r, NULL, q, k, ctx) &&
+                     !EC_POINT_is_at_infinity(group, r) &&
+                     EC_POINT_get_affine_coordinates(group, r, x, NULL, ctx) &&
+                     BN_bn2binpad(x, out, (int)size) == (int)size;
+        else if (ok)
+                ok = EC_POINT_mul(group, r, k, NULL, NULL, ctx) &&
+                     EC_POINT_point2oct(group, r, POINT_CONVERSION_UNCOMPRESSED,
+                                        out, 2 * size + 1, ctx) == 2 * size + 1;
+        BN_free(x);
+        EC_POINT_free(q);
+        EC_POINT_free(r);
+        BN_free(k);
+        BN_CTX_free(ctx);
+        EC_GROUP_free(group);
+        return ok;
+}
+
+/* ECDSA with the nonce named: r = (k G).x mod n, s = (e + r d) / k. */
+static int oracle_sign(positive size, const p8 *d_bytes, const p8 *k_bytes,
+                       const p8 *digest, positive digest_length, p8 *r_out,
+                       p8 *s_out, p8 *q_out)
+{
+        EC_GROUP *group = EC_GROUP_new_by_curve_name(oracle_curve(size));
+        const BIGNUM *n = EC_GROUP_get0_order(group);
+        BN_CTX *ctx = BN_CTX_new();
+        BIGNUM *d = BN_bin2bn(d_bytes, (int)size, NULL);
+        BIGNUM *k = BN_bin2bn(k_bytes, (int)size, NULL);
+        BIGNUM *e = BN_bin2bn(digest, (int)(digest_length < size ? digest_length : size), NULL);
+        BIGNUM *r = BN_new(), *s = BN_new(), *x = BN_new(), *y = BN_new();
+        EC_POINT *point = EC_POINT_new(group);
+        int ok;
+
+        BN_nnmod(d, d, n, ctx);
+        BN_nnmod(k, k, n, ctx);
+        if (BN_is_zero(d))
+                BN_one(d);
+        if (BN_is_zero(k))
+                BN_one(k);
+        ok = EC_POINT_mul(group, point, k, NULL, NULL, ctx) &&
+             EC_POINT_get_affine_coordinates(group, point, x, NULL, ctx) &&
+             BN_nnmod(r, x, n, ctx) && !BN_is_zero(r) &&
+             BN_mod_mul(s, r, d, n, ctx) && BN_mod_add(s, s, e, n, ctx) &&
+             BN_mod_inverse(k, k, n, ctx) && BN_mod_mul(s, s, k, n, ctx) &&
+             !BN_is_zero(s) &&
+             EC_POINT_mul(group, point, d, NULL, NULL, ctx) &&
+             EC_POINT_get_affine_coordinates(group, point, x, y, ctx) &&
+             BN_bn2binpad(r, r_out, (int)size) > 0 &&
+             BN_bn2binpad(s, s_out, (int)size) > 0 &&
+             BN_bn2binpad(x, q_out, (int)size) > 0 &&
+             BN_bn2binpad(y, q_out + size, (int)size) > 0;
+        BN_free(d); BN_free(k); BN_free(e); BN_free(r); BN_free(s);
+        BN_free(x); BN_free(y);
+        EC_POINT_free(point);
+        BN_CTX_free(ctx);
+        EC_GROUP_free(group);
+        return ok;
+}
+
+static int oracle_ecdsa(positive size, const p8 *digest, positive digest_length,
+                        const p8 *r_bytes, positive r_length, const p8 *s_bytes,
+                        positive s_length, const p8 *qx, const p8 *qy)
+{
+        EC_KEY *key = EC_KEY_new_by_curve_name(oracle_curve(size));
+        const EC_GROUP *group = EC_KEY_get0_group(key);
+        BIGNUM *x = BN_bin2bn(qx, (int)size, NULL), *y = BN_bin2bn(qy, (int)size, NULL);
+        BIGNUM *p = BN_new();
+        ECDSA_SIG *sig = ECDSA_SIG_new();
+        int ok;
+
+        EC_GROUP_get_curve(group, p, NULL, NULL, NULL);
+        /* The client takes r and s no longer than the order, the DER reader
+           having dropped a leading zero, and coordinates only below p. */
+        ok = r_length && s_length && r_length <= size && s_length <= size &&
+             BN_cmp(x, p) < 0 && BN_cmp(y, p) < 0 &&
+             EC_KEY_set_public_key_affine_coordinates(key, x, y) == 1 &&
+             ECDSA_SIG_set0(sig, BN_bin2bn(r_bytes, (int)r_length, NULL),
+                            BN_bin2bn(s_bytes, (int)s_length, NULL)) &&
+             ECDSA_do_verify(digest, (int)digest_length, sig, key) == 1;
+        ECDSA_SIG_free(sig);
+        BN_free(x); BN_free(y); BN_free(p);
+        EC_KEY_free(key);
+        return ok;
+}
+
+static RSA *oracle_rsa[2];
+
+/* A 2048-bit key and a 2049-bit one, whose PSS encoding is a byte shorter
+   than the modulus: primes of 1024 and 1025 bits with their top two bits
+   set multiply to exactly 2049. */
+static RSA *oracle_rsa_key(int bits)
+{
+        BIGNUM *p = BN_new(), *q = BN_new(), *n = BN_new(), *e = BN_new();
+        BIGNUM *d = BN_new(), *p1 = BN_new(), *q1 = BN_new(), *phi = BN_new();
+        BN_CTX *ctx = BN_CTX_new();
+        RSA *rsa = RSA_new();
+
+        BN_set_word(e, 65537);
+        do
+        {
+                BN_generate_prime_ex(p, (bits + 1) / 2, 0, NULL, NULL, NULL);
+                BN_generate_prime_ex(q, bits / 2, 0, NULL, NULL, NULL);
+                BN_mul(n, p, q, ctx);
+                BN_sub(p1, p, BN_value_one());
+                BN_sub(q1, q, BN_value_one());
+                BN_mul(phi, p1, q1, ctx);
+        } while (BN_num_bits(n) != bits || !BN_mod_inverse(d, e, phi, ctx));
+        RSA_set0_key(rsa, n, e, d);
+        RSA_set0_factors(rsa, p, q);
+        BN_free(p1); BN_free(q1); BN_free(phi);
+        BN_CTX_free(ctx);
+        return rsa;
+}
+#endif
+
+int LLVMFuzzerInitialize(int *argc, char ***argv)
+{
+        (void)argc;
+        (void)argv;
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+        oracle_rsa[0] = oracle_rsa_key(2048);
+        oracle_rsa[1] = oracle_rsa_key(2049);
+#endif
+        return 0;
+}
+
+static void fuzz_x25519(fuzz_take *f)
+{
+        p8 scalar[32], u[32], ours[32];
+        bool valid;
+
+        take(f, scalar, 32);
+        take(f, u, 32);
+        valid = crypto_x25519(ours, scalar, u);
+#ifdef CRYPTO_FUZZ_X25519_LIFTED
+        {
+                //      lib.c's other x86_64 body, mulq for mulx, on the
+                //      same input: it must agree with the first.
+                p8 floor[32];
+                p8 mulx = cpu_has_mulx;
+                bool again;
+
+                cpu_has_mulx = 0;
+                again = crypto_x25519(floor, scalar, u);
+                cpu_has_mulx = mulx;
+                if (again != valid || memcmp(floor, ours, 32))
+                        disagree("X25519 mulq body");
+        }
+#endif
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+        {
+                EVP_PKEY *mine = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, scalar, 32);
+                EVP_PKEY *peer = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL, u, 32);
+                EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(mine, NULL);
+                p8 theirs[32];
+                size_t length = 32;
+                int ok = EVP_PKEY_derive_init(ctx) == 1 &&
+                         EVP_PKEY_derive_set_peer(ctx, peer) == 1 &&
+                         EVP_PKEY_derive(ctx, theirs, &length) == 1 && length == 32;
+
+                EVP_PKEY_CTX_free(ctx);
+                EVP_PKEY_free(mine);
+                EVP_PKEY_free(peer);
+                if (ok != valid || (ok && memcmp(ours, theirs, 32)))
+                        disagree("X25519");
+        }
+#endif
+}
+
+static void fuzz_ecdh(fuzz_take *f, positive size, bool share)
+{
+        p8 scalar[48], peer[97], ours[97], theirs[97];
+        positive peer_length = 2 * size + 1;
+        bool valid;
+        p8 form = take_byte(f);
+
+        take(f, scalar, size);
+        take(f, peer, peer_length);
+        if (share)
+                valid = size == 32 ? crypto_ecdh_p256_public(ours, scalar)
+                                   : crypto_ecdh_p384_public(ours, scalar);
+        else
+                valid = size == 32 ? crypto_ecdh_p256_shared(ours, scalar, peer)
+                                   : crypto_ecdh_p384_shared(ours, scalar, peer);
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+        {
+                int ok;
+
+                /* A share made on the spot, so the peer is on the curve and
+                   the product is the case that matters, unless the form
+                   byte says to send the fuzzer's bytes as they are. */
+                if (!share && form & 1)
+                {
+                        p8 made[97];
+
+                        if (!oracle_multiply(size, peer, NULL, 0, made))
+                                return;
+                        memcpy(peer, made, peer_length);
+                        if (form & 2)
+                                peer[1 + (form >> 2) % (2 * size)] ^= (p8)(1 << (form % 8));
+                        valid = size == 32 ? crypto_ecdh_p256_shared(ours, scalar, peer)
+                                           : crypto_ecdh_p384_shared(ours, scalar, peer);
+                }
+                /* TLS 1.3 sends only the uncompressed form. */
+                ok = share ? oracle_multiply(size, scalar, NULL, 0, theirs)
+                           : peer[0] == 4 &&
+                             oracle_multiply(size, scalar, peer, peer_length, theirs);
+                if (ok != valid ||
+                    (ok && memcmp(ours, theirs, share ? peer_length : size)))
+                        disagree(share ? "a key share" : "ECDH");
+        }
+#else
+        (void)form;
+        (void)theirs;
+#endif
+}
+
+static void fuzz_ecdsa(fuzz_take *f, positive size)
+{
+        p8 mode = take_byte(f);
+        positive digest_length = 1 + take_byte(f) % 64;
+        positive r_length = 1 + take_byte(f) % (size + 1);
+        positive s_length = 1 + take_byte(f) % (size + 1);
+        p8 digest[64], r[49], s[49], q[96];
+        bool valid;
+
+        take(f, digest, digest_length);
+        take(f, r, r_length);
+        take(f, s, s_length);
+        take(f, q, 2 * size);
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+        /* Signed here, with the key and nonce from the input, then bent the
+           way the mode says: high S, r or s past n, a flipped bit. */
+        if (mode & 1)
+        {
+                p8 d[48], k[48];
+
+                memcpy(d, q, size);
+                memcpy(k, q + size, size);
+                if (!oracle_sign(size, d, k, digest, digest_length, r, s, q))
+                        return;
+                r_length = s_length = size;
+                switch ((mode >> 1) % 6)
+                {
+                case 1:
+                {
+                        EC_GROUP *group = EC_GROUP_new_by_curve_name(oracle_curve(size));
+                        BIGNUM *value = BN_bin2bn(s, (int)size, NULL);
+                        BN_sub(value, EC_GROUP_get0_order(group), value);
+                        BN_bn2binpad(value, s, (int)size);
+                        BN_free(value);
+                        EC_GROUP_free(group);
+                        break;
+                }
+                case 2:
+                        r[(mode >> 4) % size] ^= (p8)(1 << (mode % 8));
+                        break;
+                case 3:
+                        digest[(mode >> 4) % digest_length] ^= 1;
+                        break;
+                case 4:
+                        q[(mode >> 4) % (2 * size)] ^= 0x80;
+                        break;
+                case 5:
+                        /* A leading zero dropped from r, when there is one. */
+                        while (r_length > 1 && !r[0])
+                        {
+                                memmove(r, r + 1, --r_length);
+                        }
+                        break;
+                }
+        }
+#endif
+        valid = size == 32 ? crypto_ecdsa_p256(digest, digest_length, r, r_length,
+                                               s, s_length, q, q + size)
+                           : crypto_ecdsa_p384(digest, digest_length, r, r_length,
+                                               s, s_length, q, q + size);
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+        if (valid != oracle_ecdsa(size, digest, digest_length, r, r_length, s,
+                                  s_length, q, q + size))
+                disagree("ECDSA");
+#else
+        (void)valid;
+        (void)mode;
+#endif
+}
+
+/* An encoded message for the 2048- or 2049-bit key, signed, then checked.
+   A valid encoding first, when the mode says so, with the input's bytes
+   xored over it at the offsets they name. */
+static void fuzz_rsa(fuzz_take *f, int scheme)
+{
+        static const p8 info256[19] = {0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86,
+                                       0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05,
+                                       0x00, 0x04, 0x20};
+        static const p8 info384[19] = {0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86,
+                                       0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02, 0x05,
+                                       0x00, 0x04, 0x30};
+        p8 mode = take_byte(f);
+        p8 message[64], digest[48], em[512], sig[512], n_bytes[512];
+        positive message_length = take_byte(f) % 64;
+        positive digest_length = scheme == 1 ? 48 : 32;
+        bool valid;
+
+        take(f, message, message_length);
+        take(f, digest, digest_length);
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+        {
+                RSA *rsa = oracle_rsa[mode & 1];
+                positive k = (positive)RSA_size(rsa);
+                int ok;
+
+                BN_bn2binpad(RSA_get0_n(rsa), n_bytes, (int)k);
+                memset(em, 0, sizeof em);
+                if (mode & 2)
+                {
+                        if (scheme == 2)
+                        {
+                                p8 mhash[32];
+
+                                SHA256(message, message_length, mhash);
+                                /* The 2049-bit key's encoding is k - 1
+                                   bytes, after a zero. */
+                                RSA_padding_add_PKCS1_PSS_mgf1(rsa, em, mhash, EVP_sha256(),
+                                                               EVP_sha256(), 32);
+                        }
+                        else
+                        {
+                                const p8 *info = scheme ? info384 : info256;
+                                positive tail = 19 + digest_length;
+
+                                em[1] = 1;
+                                memset(em + 2, 0xff, k - 3 - tail);
+                                memcpy(em + k - tail, info, 19);
+                                memcpy(em + k - digest_length, digest, digest_length);
+                        }
+                        while (f->left >= 2)
+                        {
+                                positive at = take_byte(f) * 3u % k;
+                                em[at] ^= take_byte(f);
+                        }
+                }
+                else
+                        take(f, em, k);
+                if (RSA_private_encrypt((int)k, em, sig, rsa, RSA_NO_PADDING) != (int)k)
+                        memcpy(sig, em, k);
+                if (scheme == 2)
+                {
+                        p8 mhash[32], decoded[512];
+
+                        SHA256(message, message_length, mhash);
+                        ok = RSA_public_decrypt((int)k, sig, decoded, rsa, RSA_NO_PADDING) ==
+                                 (int)k &&
+                             RSA_verify_PKCS1_PSS_mgf1(rsa, mhash, EVP_sha256(), EVP_sha256(),
+                                                       decoded, 32) == 1;
+                        valid = crypto_rsa_pss_sha256(n_bytes, k, 65537, sig, k, message,
+                                                      message_length);
+                }
+                else
+                {
+                        ok = RSA_verify(scheme ? NID_sha384 : NID_sha256, digest,
+                                        (unsigned)digest_length, sig, (unsigned)k, rsa) == 1;
+                        valid = scheme ? crypto_rsa_pkcs1_sha384(n_bytes, k, 65537, sig, k, digest)
+                                       : crypto_rsa_pkcs1_sha256(n_bytes, k, 65537, sig, k, digest);
+                }
+                if (ok != valid)
+                        disagree(scheme == 2 ? "RSA-PSS" : "RSA PKCS#1");
+        }
+#else
+        {
+                /* No private key to sign with: the modulus and signature
+                   as the input gives them, for the memory the checks read. */
+                positive k = 256 + (mode & 1);
+                p64 exponent = 3 + 2 * (positive)take_byte(f);
+
+                take(f, n_bytes, k);
+                n_bytes[0] |= 0x80;
+                n_bytes[k - 1] |= 1;
+                take(f, sig, k);
+                if (scheme == 2)
+                        valid = crypto_rsa_pss_sha256(n_bytes, k, exponent, sig, k, message,
+                                                      message_length);
+                else
+                        valid = scheme ? crypto_rsa_pkcs1_sha384(n_bytes, k, exponent, sig, k, digest)
+                                       : crypto_rsa_pkcs1_sha256(n_bytes, k, exponent, sig, k, digest);
+                (void)valid;
+                (void)em;
+        }
+#endif
+}
+
+static void fuzz_gcm(fuzz_take *f)
+{
+        static crypto_aesgcm_key key;
+        p8 raw[16], iv[12], aad[80], tag[16], text[600], sealed[600];
+        positive aad_length = take_byte(f) % 80;
+        positive text_length;
+        p8 flip = take_byte(f);
+        bool opened;
+
+        take(f, raw, 16);
+        take(f, iv, 12);
+        take(f, aad, aad_length);
+        text_length = f->left < sizeof text ? f->left : sizeof text;
+        take(f, text, text_length);
+        crypto_aesgcm_prepare(&key, raw);
+        memcpy(sealed, text, text_length);
+        crypto_aesgcm_seal(&key, iv, aad, aad_length, sealed, text_length, tag);
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+        {
+                EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+                p8 theirs[600], their_tag[16];
+                int length = 0;
+                int ok = EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, raw, iv) &&
+                         EVP_EncryptUpdate(ctx, NULL, &length, aad, (int)aad_length) &&
+                         EVP_EncryptUpdate(ctx, theirs, &length, text, (int)text_length) &&
+                         EVP_EncryptFinal_ex(ctx, theirs + length, &length) &&
+                         EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, their_tag);
+                EVP_CIPHER_CTX_free(ctx);
+                if (!ok || memcmp(sealed, theirs, text_length) || memcmp(tag, their_tag, 16))
+                        disagree("AES-GCM seal");
+        }
+#endif
+        if (flip & 1)
+                tag[(flip >> 1) % 16] ^= (p8)(1 << (flip >> 5));
+        if (!text_length)
+                flip &= (p8)~2;
+        if (flip & 2)
+                sealed[(flip >> 2) % text_length] ^= 0x40;
+        opened = crypto_aesgcm_open(&key, iv, aad, aad_length, sealed, text_length, tag);
+        if (opened != !(flip & 3))
+                disagree("AES-GCM open");
+        if (opened && memcmp(sealed, text, text_length))
+                disagree("AES-GCM plaintext");
+        for (positive i = 0; !opened && i < text_length; i++)
+                if (sealed[i])
+                        disagree("AES-GCM refused text left behind");
+        crypto_forget(&key, sizeof key);
+}
+
+static void fuzz_kdf(fuzz_take *f)
+{
+        p8 which = take_byte(f);
+        positive salt_length = take_byte(f) % 100;
+        positive ikm_length = take_byte(f) % 100;
+        positive info_length = take_byte(f) % 100;
+        positive length = 1 + (take_byte(f) | (positive)take_byte(f) << 8) % (255 * 32);
+        p8 salt[100], ikm[100], info[100], prk[32];
+        static p8 ours[255 * 32], theirs[255 * 32];
+
+        take(f, salt, salt_length);
+        take(f, ikm, ikm_length);
+        take(f, info, info_length);
+        if (which & 1)
+        {
+                positive rounds = 1 + which % 9;
+                positive algorithm = which & 2 ? DIGEST_SHA1 : DIGEST_SHA256;
+
+                length %= 100;
+                crypto_pbkdf2(algorithm, algorithm == DIGEST_SHA1 ? 20 : 32, ikm, ikm_length,
+                              salt, salt_length, rounds, ours, length);
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+                if (length && (PKCS5_PBKDF2_HMAC((const char *)ikm, (int)ikm_length, salt,
+                                                 (int)salt_length, (int)rounds,
+                                                 algorithm == DIGEST_SHA1 ? EVP_sha1() : EVP_sha256(),
+                                                 (int)length, theirs) != 1 ||
+                               memcmp(ours, theirs, length)))
+                        disagree("PBKDF2");
+#endif
+                return;
+        }
+        crypto_hkdf_extract(salt, salt_length, ikm, ikm_length, prk);
+        crypto_hkdf_expand(prk, info, info_length, ours, length);
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+        {
+                EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
+                size_t out = length;
+                int ok = EVP_PKEY_derive_init(ctx) == 1 &&
+                         EVP_PKEY_CTX_set_hkdf_md(ctx, EVP_sha256()) == 1 &&
+                         EVP_PKEY_CTX_set1_hkdf_salt(ctx, salt, (int)salt_length) == 1 &&
+                         EVP_PKEY_CTX_set1_hkdf_key(ctx, ikm, (int)ikm_length) == 1 &&
+                         EVP_PKEY_CTX_add1_hkdf_info(ctx, info, (int)info_length) == 1 &&
+                         EVP_PKEY_derive(ctx, theirs, &out) == 1 && out == length;
+                p8 mac[32];
+                unsigned mac_length = 32;
+
+                EVP_PKEY_CTX_free(ctx);
+                if (!ok || memcmp(ours, theirs, length))
+                        disagree("HKDF");
+                crypto_hmac_sha256(salt, salt_length, info, info_length, ours);
+                HMAC(EVP_sha256(), salt, (int)salt_length, info, info_length, mac, &mac_length);
+                if (memcmp(ours, mac, 32))
+                        disagree("HMAC-SHA256");
+        }
+#endif
+}
+
+int LLVMFuzzerTestOneInput(const p8 *data, size_t size)
+{
+        fuzz_take f = {data, size};
+
+        switch (take_byte(&f) % 10)
+        {
+        case 0: fuzz_x25519(&f); break;
+        case 1: fuzz_ecdh(&f, 32, false); break;
+        case 2: fuzz_ecdh(&f, 48, false); break;
+        case 3: fuzz_ecdh(&f, 32 + 16 * (take_byte(&f) & 1), true); break;
+        case 4: fuzz_ecdsa(&f, 32); break;
+        case 5: fuzz_ecdsa(&f, 48); break;
+        case 6: fuzz_rsa(&f, take_byte(&f) % 3); break;
+        case 7: fuzz_gcm(&f); break;
+        default: fuzz_kdf(&f); break;
+        }
+        return 0;
+}
+"""
+
+
+#       x25519 as the fuzz links it when lib.c's own x86_64 body is lifted:
+#       the prototype crypto_x25519 calls, the two feature bytes the body
+#       reads, answered from the host, and the probe it would call, which
+#       cpu_hash_probed set means it never does.
+CRYPTO_FUZZ_X25519_LIFTED_C = r"""
+#define CRYPTO_FUZZ_X25519_LIFTED 1
+void x25519(p8 *out, const p8 *scalar, const p8 *u);
+p8 cpu_hash_probed = 1;
+p8 cpu_has_mulx;
+void cpu_hash_detect(void) {}
+__attribute__((constructor)) static void crypto_fuzz_mulx(void)
+{
+        cpu_has_mulx = __builtin_cpu_supports("bmi2") && __builtin_cpu_supports("adx");
+}
+"""
+
+
+def library_routine_assembly(names):
+    """lib.c's x86_64 bodies of names as assembly text, for a hosted x86_64
+    program to link: lib.c compiled with -S and each routine's own section
+    cut out of the output, .pushsection to .popsection, so the bytes are
+    the ones every build assembles, macros expanded by the preprocessor
+    that expands them there. None when this is not an x86_64 host with a C
+    compiler, or a routine is missing."""
+    cc = shutil.which("gcc") or shutil.which("cc")
+    if os.uname().machine != "x86_64" or not cc:
+        return None
+    with tempfile.TemporaryDirectory(prefix="library-lift-") as temporary:
+        unit = Path(temporary) / "lift.c"
+        unit.write_text('#include "%s"\n' % (HARNESS_ROOT / "src/lib.c"))
+        if subprocess.run([cc, "-S", "-O2", "-march=x86-64", "-fno-builtin", "-w",
+                           "-o", str(unit.with_suffix(".s")), str(unit)],
+                          capture_output=True).returncode:
+            return None
+        lines = unit.with_suffix(".s").read_text().split("\n")
+    out = []
+    for name in names:
+        opener = '.pushsection .text.%s, "ax", %%progbits' % name
+        begins = [i for i, line in enumerate(lines) if line.strip() == opener]
+        if len(begins) != 1:
+            return None
+        end = next((i for i in range(begins[0], len(lines))
+                    if lines[i].strip() == ".size %s, .-%s" % (name, name)), None)
+        if end is None or lines[end + 1].strip() != ".popsection":
+            return None
+        out += lines[begins[0]:end + 2]
+    return "\n".join(out) + "\n"
+
+
+def crypto_fuzz_source(net, checks, oracle, lifted=False):
+    """crypto_fuzz's program: net.c's crypto section whole, from crypto_wide
+    to its #endif, with the p256_/p384_ fast paths cut so every field runs
+    the C montgomery from checks.c's SHARED_montgomery_reference, over the
+    hosted digests, GHASH and AES above; then the driver. x25519 is lib.c's
+    own x86_64 body when lifted (library_routine_assembly, linked beside
+    the program) and otherwise the C crypto.c ran before it, from
+    SHARED_x25519_reference. Raises ValueError when a slice is gone and
+    RuntimeError when a lib.c call survives."""
+    crypto = tls_fuzz_sec(net, "typedef unsigned __int128 crypto_wide;",
+                          "#endif\n#include \"wait.c\"")
+    for field_op in ("add", "subtract"):
+        crypto = re.sub(
+            r"if \(f == address_of crypto_p256_field\)\s*\{\s*p256_%s\(d, a, b\);\s*return;\s*\}\s*"
+            r"if \(f == address_of crypto_p384_field\)\s*\{\s*p384_%s\(d, a, b\);\s*return;\s*\}"
+            % (field_op, field_op), "", crypto)
+    for field_op, args in (("multiply", "d, a, b"), ("square", "d, a")):
+        crypto = re.sub(
+            r"if \(f == address_of crypto_p256_field\)\s*p256_%s\(%s\);\s*"
+            r"else if \(f == address_of crypto_p384_field\)\s*p384_%s\(%s\);\s*"
+            r"else\s*" % (field_op, args, field_op, args), "", crypto)
+    montgomery = tls_fuzz_sec(checks, "#elif defined(SHARED_montgomery_reference)",
+                              "#elif defined(SHARED_unicode_width_reference)")
+    montgomery = montgomery.split("\n", 1)[1]
+    montgomery = montgomery[:montgomery.rfind("#endif") + len("#endif")].replace(
+        "montgomery_reference_multiply", "montgomery_multiply")
+    if lifted:
+        curve = CRYPTO_FUZZ_X25519_LIFTED_C
+    else:
+        curve = tls_fuzz_sec(checks, "#elif defined(SHARED_x25519_reference)",
+                             "#elif defined(SHARED_number_stream)")
+        curve = curve.split("\n", 1)[1]
+        curve = curve[:curve.rfind("#endif") + len("#endif")]
+        curve = re.sub(r"\bx25519_reference\(", "x25519(", curve)
+    hosted = TLS_VERIFY_HOSTED_C
+    sha = hosted[hosted.index("typedef struct {"):hosted.index("typedef fuzz_sha256 crypto_sha256;")]
+    shim = tls_der_fuzz_lift_parts(net)[4]
+    # The AES shim needs crypto_aes_substitute, so it goes after the slice's
+    # S-box and before the first key expansion calls it.
+    at = crypto.index("static fn crypto_aes128_expand(")
+    crypto = crypto[:at] + CRYPTO_FUZZ_AES_C + crypto[at:]
+    #   OpenSSL's headers name parameters fn, which the shim defines.
+    source = "\n".join((CRYPTO_FUZZ_ORACLE_INCLUDES if oracle else
+                         "#define CRYPTO_FUZZ_NO_ORACLE",
+                        shim, "#include <stdlib.h>", sha, CRYPTO_FUZZ_HOSTED_C,
+                        montgomery, curve, crypto, CRYPTO_FUZZ_DRIVER_C))
+    left = re.search(r"\b(?:p(?:256|384)_(?:multiply|add|square|subtract)|"
+                     r"sha256_blocks|sha512_blocks)\s*\(", source)
+    if left:
+        raise RuntimeError("hosted crypto lift still calls " + left.group(0))
+    return source
+
+
+def crypto_fuzz_seeds():
+    """crypto_fuzz's seeds, one or more a lane, from a fixed seed: the first
+    byte picks the lane (0 X25519, 1-2 ECDH, 3 shares, 4-5 ECDSA, 6 RSA,
+    7 AES-GCM, 8-9 HKDF/HMAC/PBKDF2)."""
+    rng = random.Random(1917)
+
+    def draw(size):
+        return bytes(rng.getrandbits(8) for _ in range(size))
+
+    seeds = {"empty.bin": b""}
+    low = bytes(32)
+    seeds["x25519_random.bin"] = b"\x00" + draw(64)
+    seeds["x25519_zero_u.bin"] = b"\x00" + draw(32) + low
+    seeds["x25519_one_u.bin"] = b"\x00" + draw(32) + b"\x01" + bytes(31)
+    seeds["x25519_high_u.bin"] = b"\x00" + draw(32) + b"\xff" * 32
+    for lane, size in ((1, 32), (2, 48)):
+        seeds["ecdh%d_made.bin" % size] = bytes((lane, 1)) + draw(size) + draw(2 * size + 1)
+        seeds["ecdh%d_bent.bin" % size] = bytes((lane, 0x13)) + draw(size) + draw(2 * size + 1)
+        seeds["ecdh%d_raw.bin" % size] = bytes((lane, 0, )) + draw(size) + b"\x04" + draw(2 * size)
+        seeds["ecdh%d_zero.bin" % size] = bytes((lane, 1)) + bytes(size) + draw(2 * size + 1)
+    seeds["share256.bin"] = b"\x03\x00" + draw(32)
+    seeds["share384.bin"] = b"\x03\x01" + draw(48)
+    seeds["share_high.bin"] = b"\x03\x00" + b"\xff" * 32
+    for lane, size in ((4, 32), (5, 48)):
+        for mode in range(12):
+            seeds["ecdsa%d_mode%d.bin" % (size, mode)] = bytes(
+                (lane, mode * 2 + 1 if mode < 6 else rng.getrandbits(8) | 1,
+                 31 if mode % 2 else 47, size - 1, size - 1)) + draw(64 + 2 * size + 2 * size)
+        seeds["ecdsa%d_raw.bin" % size] = bytes((lane, 0, 31, size - 1, size - 1)) + draw(
+            32 + 4 * size)
+    for scheme in range(3):
+        for mode in range(4):
+            seeds["rsa%d_mode%d.bin" % (scheme, mode)] = bytes(
+                (6, scheme, mode, 20)) + draw(20 + 48 + (8 if mode & 2 else 257))
+    for length in (0, 1, 15, 16, 17, 64, 200, 599):
+        seeds["gcm_%d.bin" % length] = bytes((7, 13, 0)) + draw(16 + 12 + 13 + length)
+    seeds["gcm_flip_tag.bin"] = bytes((7, 5, 0x21)) + draw(16 + 12 + 5 + 40)
+    seeds["gcm_flip_text.bin"] = bytes((7, 0, 0x0a)) + draw(16 + 12 + 40)
+    seeds["hkdf_short.bin"] = bytes((8, 0, 13, 22, 10, 42, 0)) + draw(45)
+    seeds["hkdf_ceiling.bin"] = bytes((8, 0, 0, 32, 99, 0xdf, 0x1f)) + draw(131)
+    seeds["pbkdf2_sha1.bin"] = bytes((9, 3, 8, 16, 0, 40, 0)) + draw(24)
+    seeds["pbkdf2_sha256.bin"] = bytes((9, 1, 8, 70, 0, 70, 0)) + draw(78)
+    return seeds
+
+
+def harness_crypto_fuzz(argv):
+    """libFuzzer over net.c's crypto, every verdict and output held to
+    OpenSSL's on the same input.
+
+    The whole crypto section of src/net/net.c is lifted hosted -- lib.c's
+    field, digest, GHASH and AES routines replaced by plain C (the stdin
+    lane crypto_vectors is what holds the assembly to OpenSSL) -- and
+    linked against libcrypto. x25519 is the exception on an x86_64 host:
+    lib.c's own body is linked (library_routine_assembly), and every X25519
+    input runs its mulx and its mulq body both. Each input picks a lane by
+    its first byte: X25519, ECDH and key shares on P-256/P-384 (OpenSSL's share of the
+    input's scalar, then optionally a bit bent), ECDSA signed here with the
+    input's key and nonce and then bent (high S, r or s flipped, digest or
+    key bit flipped, leading zero dropped) or taken raw, RSA PKCS#1
+    SHA-256/384 and PSS over a 2048- and a 2049-bit key with the encoded
+    message either raw or a valid encoding xored at the input's offsets,
+    AES-GCM seal then open with the tag or text tampered, HKDF to the
+    255-block ceiling, HMAC-SHA256 and PBKDF2. A disagreement aborts, so
+    libFuzzer keeps the input. MOONWATER_MSAN=1 builds without the oracle
+    (libcrypto is not instrumented) and runs the same lanes for memory
+    alone. Seeds come from crypto_fuzz_seeds. Returns 2 when clang,
+    libFuzzer or OpenSSL's headers and libcrypto are missing
+    (MOONWATER_CRYPTO_FUZZ_LIBRARY names another link flag).
+
+        python3 test/differential.py --harness crypto_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    checks = (HARNESS_ROOT / "test/checks.c").read_text()
+    oracle = not moonwater_msan_requested()
+    #   MemorySanitizer sees nothing an assembly body stores, so under it
+    #   x25519 is the C reference; otherwise lib.c's own body is the one held
+    #   to OpenSSL, both of its x86_64 bodies on every input.
+    lifted = library_routine_assembly(["x25519"]) if oracle else None
+    source = crypto_fuzz_source(net, checks, oracle, lifted is not None)
+    extra = ["-Wno-deprecated-declarations",
+             os.environ.get("MOONWATER_CRYPTO_FUZZ_LIBRARY", "-lcrypto")] if oracle else []
+    clang = shutil.which("clang")
+    #   A machine without OpenSSL's headers or library cannot build the
+    #   oracle, which is the machine's gap and not the lift's.
+    if clang and oracle:
+        with tempfile.TemporaryDirectory(prefix="crypto-fuzz-probe-") as temporary:
+            probe = Path(temporary) / "probe.c"
+            probe.write_text("#include <openssl/evp.h>\n"
+                             "int main(void) { return EVP_aes_128_gcm() == 0; }\n")
+            if subprocess.run([clang, str(probe), "-o", str(Path(temporary) / "probe")] + extra,
+                              capture_output=True).returncode:
+                print("crypto fuzz: NOT RUN -- no OpenSSL headers or libcrypto to link")
+                return 2
+    if lifted is None:
+        return tls_fuzz_run("crypto", "crypto", source, 2048, extra)
+    with tempfile.TemporaryDirectory(prefix="crypto-fuzz-x25519-") as temporary:
+        assembly = Path(temporary) / "x25519.s"
+        assembly.write_text(lifted)
+        print("crypto fuzz: x25519 is lib.c's x86_64 body, mulx and mulq")
+        return tls_fuzz_run("crypto", "crypto", source, 2048, extra + [str(assembly)])
+
+
+def harness_tls_fuzz(argv):
+    """tls_der_fuzz, tls_hs_fuzz, tls_verify_fuzz, waterlink_pre_fuzz,
+    waterlink_fuzz, dhcp_fuzz, sntp_fuzz, dns_fuzz, netlink_fuzz,
+    crypto_fuzz and http_fuzz in turn: `sh test/run fuzz`.
+
+    Continuous by default, an hour a target with no run cap, unless
+    MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise. With
+    MOONWATER_FUZZ_REPORT=PATH the default budget is lane_net's smoke (20000
+    runs / 5 s), and a JSON report of the toolchain, seed counts, budget and
+    each target's exit and duration is printed and written to PATH (relative
+    to the tree). Coverage here is seed inventory plus a clean sanitizer run,
+    not source-line coverage. Exit 1 when a target failed, else 2 when one
+    did not run.
+    """
+    del argv
+    import traceback
+
+    report = os.environ.get("MOONWATER_FUZZ_REPORT")
+    os.environ.setdefault("MOONWATER_FUZZ_RUNS", "20000" if report else "-1")
+    os.environ.setdefault("MOONWATER_FUZZ_SECONDS", "5" if report else "3600")
+    runs, seconds, _ = tls_fuzz_budget()
+    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp then sntp then dns then netlink then crypto then http "
+          "(runs=%d seconds=%d)" % (runs, seconds))
+    seeds = {corpus: len(tls_fuzz_seeds(corpus))
+             for corpus in ("tls_der", "tls_hs", "waterlink", "dhcp", "sntp", "dns", "netlink", "crypto", "http")}
+    seeds["waterlink_pre"] = len(waterlink_pre_seeds())
+    targets = []
+    for name, corpus, harness in (
+            ("tls_der_fuzz", "tls_der", harness_tls_der_fuzz),
+            ("tls_hs_fuzz", "tls_hs", harness_tls_hs_fuzz),
+            ("tls_verify_fuzz", "tls_der", harness_tls_verify_fuzz),
+            ("waterlink_pre_fuzz", "waterlink_pre", harness_waterlink_pre_fuzz),
+            ("waterlink_fuzz", "waterlink", harness_waterlink_fuzz),
+            ("dhcp_fuzz", "dhcp", harness_dhcp_fuzz),
+            ("sntp_fuzz", "sntp", harness_sntp_fuzz),
+            ("dns_fuzz", "dns", harness_dns_fuzz),
+            ("netlink_fuzz", "netlink", harness_netlink_fuzz),
+            ("crypto_fuzz", "crypto", harness_crypto_fuzz),
+            ("http_fuzz", "http", harness_http_fuzz)):
+        began = time.time()
+        try:
+            code = harness([])
+        except Exception:
+            traceback.print_exc()
+            code = 1
+        targets.append(dict(name=name, seeds=seeds[corpus], runs=runs,
+                            max_total_time_seconds=seconds,
+                            duration_seconds=int(time.time() - began), exit=code))
+    codes = [target["exit"] for target in targets]
+    overall = 1 if any(code not in (0, 2) for code in codes) else (2 if 2 in codes else 0)
+    if not report:
+        return overall
+
+    clang = shutil.which("clang")
+
+    def first_line(command):
+        try:
+            done = subprocess.run(command, capture_output=True, text=True)
+        except OSError:
+            return ""
+        return (done.stdout.splitlines() or [""])[0].strip()
+
+    text = json.dumps({
+        "schema": "moonwater.fuzz_report.v1",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "git_commit": first_line(["git", "-C", str(HARNESS_ROOT), "rev-parse", "HEAD"])
+                      or "unknown",
+        "host": {"system": os.uname().sysname, "arch": os.uname().machine},
+        "sanitizer": {
+            "clang": clang,
+            "version": first_line([clang, "--version"]) if clang else "(no clang)",
+            "flags": "-fsanitize=fuzzer," + (
+                "memory" if moonwater_msan_requested() else "address,undefined"),
+            "note": "Targets exit 2 (NOT RUN) when clang cannot link libFuzzer.",
+        },
+        "corpora": {corpus: {"path": 'tls_fuzz_seeds("%s") in test/differential.py' % corpus,
+                             "seed_count": count} for corpus, count in seeds.items()},
+        "budget": {"runs": runs, "seconds": seconds},
+        "targets": targets,
+        "coverage_note": (
+            "Seed inventory plus sanitizer libFuzzer completion under the "
+            "recorded budget, not LLVM source-line coverage. The seeds are "
+            "test/differential.py's tls_fuzz_seeds at git_commit."),
+        "overall_exit": overall,
+    }, indent=2)
+    print(text)
+    path = Path(report) if Path(report).is_absolute() else HARNESS_ROOT / report
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text + "\n")
+        print("tls fuzz: wrote " + str(path), file=sys.stderr)
+    except OSError as error:
+        print("tls fuzz: could not write %s (%s); the report is above" % (path, error),
+              file=sys.stderr)
+    return overall
+
+
+def harness_msan_net(argv):
+    """Local/hosted MemorySanitizer lane for net wire parsers.
+
+    Opt-in only (not lane_net, not CI push). Under clang -fsanitize=memory:
+      1. intentional ABI pad proves (generic wire header + netlink-attr-shaped)
+      2. thin hosted lifts of freestanding wire parsers from net.c over
+         fully-initialized hostile buffers (dns_copy_name, TLS record header,
+         HTTP header/chunk framing, DHCP option gather, netlink attribute walk)
+         plus one intentional uninit catch per new surface
+      3. TLS extension/cert parse seed replay under MSan without libFuzzer
+         (same lift pieces as tls_der_fuzz)
+      4. thin CHECK_net-equivalent probes (align/sizeof + parser shape checks);
+         not a full freestanding CHECK_net under MSan
+      5. short tls_der_fuzz / tls_hs_fuzz / sntp_fuzz / dns_fuzz / netlink_fuzz
+         seed smokes with MOONWATER_MSAN=1
+    Returns 2 (NOT RUN) when MSan is unavailable (Apple clang, many qemu
+    images).
+
+        sh test/run msan
+        MOONWATER_MSAN=1 python3 test/differential.py --harness tls_der_fuzz
+    """
+    del argv
+    import shutil
+    import tempfile
+
+    clang = shutil.which("clang")
+    if not clang:
+        print("msan net: NOT RUN -- no clang")
+        return 2
+    if not clang_supports_msan(clang):
+        print("msan net: NOT RUN -- clang lacks -fsanitize=memory "
+              "(Apple clang and many qemu images)")
+        return 2
+
+    checks = Checks()
+    msan_env = dict(os.environ, MSAN_OPTIONS="halt_on_error=1:exitcode=1")
+    msan_cc = [clang, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
+               "-fno-sanitize-recover=all", "-fsanitize=memory"]
+
+    def msan_build_run(work, name, source, run_args=None):
+        unit = work / (name + ".c")
+        binary = work / name
+        unit.write_text(source)
+        built = subprocess.run(msan_cc + [str(unit), "-o", str(binary)],
+                               capture_output=True, text=True)
+        if built.returncode:
+            return None, built.stderr
+        cmd = [str(binary)]
+        if run_args:
+            cmd.extend(run_args)
+        ran = subprocess.run(cmd, capture_output=True, text=True,
+                             env=msan_env)
+        return ran, built.stderr
+
+    def msan_expect_fire(ran, label):
+        fired = (ran is not None and ran.returncode != 0 and
+                 "uninitialized" in (ran.stderr or "").lower())
+        if ran is not None and ran.stderr:
+            print(ran.stderr, end="" if ran.stderr.endswith("\n") else "\n")
+        checks(fired, label)
+        if not fired:
+            detail = "" if ran is None else (
+                "(rc=%d):\n" % ran.returncode + (ran.stderr or "")[-1500:])
+            print("  FAIL %s did not fire %s" % (label, detail))
+        return fired
+
+    def msan_expect_clean(ran, label, err=None):
+        if ran is None:
+            print("  FAIL msan net: cannot link %s:\n" % label +
+                  (err or "")[-2000:])
+            checks(False, label)
+            return False
+        if ran.stderr:
+            print(ran.stderr, end="" if ran.stderr.endswith("\n") else "\n")
+        clean = (ran.returncode == 0 and
+                 "uninitialized" not in (ran.stderr or "").lower() and
+                 "Sanitizer" not in (ran.stderr or "") and
+                 "ERROR" not in (ran.stderr or ""))
+        checks(clean, label)
+        if not clean:
+            print("  FAIL %s (rc=%d):\n" % (label, ran.returncode) +
+                  (ran.stderr or ran.stdout or "")[-2000:])
+        return clean
+
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+
+    def sec(text, first, following):
+        i = text.index(first)
+        return text[i:text.index(following, i)]
+
+    # Shared hosted typedefs/macros for freestanding net.c lifts.
+    base_shim = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include <ctype.h>
+typedef uint8_t p8;
+typedef int8_t b8;
+typedef uint16_t p16;
+typedef uint32_t p32;
+typedef uint64_t p64;
+typedef int32_t b32;
+typedef long bipolar;
+typedef unsigned long positive;
+typedef void *address_any;
+typedef char *string_address;
+typedef const char *const_string;
+#define COLD
+#define CONST
+#define PURE
+#define fn void
+#define address_to *
+#define address_of &
+#define null NULL
+#define end ((p8)0)
+#define positive_max (~(positive)0)
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define memory_compare memcmp
+#define memory_copy memcpy
+#define memory_copy_apart memcpy
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define memory_zero(at, size) memset((at), 0, (size))
+#define string_get(s) (*(const unsigned char *)(s))
+static inline p8 byte_is_alnum(p8 b) { return isalnum(b) != 0; }
+static inline p8 byte_is_digit(p8 b) { return isdigit(b) != 0; }
+static inline p8 byte_is_control(p8 b) { return b < 0x20 || b == 0x7f; }
+static inline p8 byte_is_blank(p8 b) { return b == ' ' || b == '\t'; }
+static positive string_length(const_string s) { return (positive)strlen(s); }
+static string_address string_first_of(string_address s, int c)
+{
+        return (string_address)strchr(s, c);
+}
+static address_any memory_first_of(address_any block, b8 value, positive size)
+{
+        return memchr(block, value, size);
+}
+static positive memory_span_without_byte(const void *block, p8 byte,
+                                         positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[i] != byte)
+                i++;
+        return i;
+}
+static positive memory_span_byte(const void *block, p8 byte, positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[i] == byte)
+                i++;
+        return i;
+}
+static address_any memory_search(address_any block, positive size,
+                                 address_any needle, positive needle_size)
+{
+        if (!needle_size || needle_size > size)
+                return null;
+        const p8 *hay = block, *ndl = needle;
+        for (positive i = 0; i + needle_size <= size; i++)
+                if (!memcmp(hay + i, ndl, needle_size))
+                        return (address_any)(hay + i);
+        return null;
+}
+static b32 memory_compare_ascii_case(const void *one, const void *two,
+                                     positive size)
+{
+        const p8 *a = one, *b = two;
+        for (positive i = 0; i < size; i++) {
+                p8 x = a[i], y = b[i];
+                if (x >= 'A' && x <= 'Z')
+                        x = (p8)(x - 'A' + 'a');
+                if (y >= 'A' && y <= 'Z')
+                        y = (p8)(y - 'A' + 'a');
+                if (x != y)
+                        return (b32)(x - y);
+        }
+        return 0;
+}
+static unsigned char string_set_blanks[256];
+static positive string_span_max(const_string source, positive bound,
+                                const b8 *set)
+{
+        (void)set;
+        positive i = 0;
+        while (i < bound && (source[i] == ' ' || source[i] == '\t'))
+                i++;
+        return i;
+}
+static positive digit_known(p8 character, positive base)
+{
+        positive v;
+        if (character >= '0' && character <= '9')
+                v = character - '0';
+        else if (character >= 'a' && character <= 'z')
+                v = 10 + character - 'a';
+        else if (character >= 'A' && character <= 'Z')
+                v = 10 + character - 'A';
+        else
+                return base;
+        return v < base ? v : base;
+}
+static bool string_digits_checked(string_address *text, positive base,
+                                  positive *value)
+{
+        string_address at = *text;
+        positive got = 0;
+        bool any = false;
+        while (1) {
+                positive digit = digit_known(string_get(at), base);
+                positive scaled;
+                if (digit >= base)
+                        break;
+                if (__builtin_mul_overflow(got, base, &scaled) ||
+                    __builtin_add_overflow(scaled, digit, &got))
+                        return false;
+                at++;
+                any = true;
+        }
+        if (!any)
+                return false;
+        *text = at;
+        *value = got;
+        return true;
+}
+static p16 network_load_16(const p8 *bytes)
+{
+        return (p16)(((p16)bytes[0] << 8) | (p16)bytes[1]);
+}
+static p32 network_load_32(const p8 *bytes)
+{
+        return ((p32)bytes[0] << 24) | ((p32)bytes[1] << 16) |
+               ((p32)bytes[2] << 8) | (p32)bytes[3];
+}
+"""
+
+    # --- 1a. Generic wire-header pad prove (original). ---
+    pad_source = r"""
+#include <stdint.h>
+#include <stdio.h>
+#include <stddef.h>
+#include <sanitizer/msan_interface.h>
+
+/* Wire-style header with ABI padding between type and id. A serializer that
+   memcpy(sizeof) without zeroing the hole would ship stack junk; this probe
+   leaves the hole uninitialized and asks MSan to notice. Not a production
+   bug — it proves the sanitizer lane can see padding. */
+struct wire_hdr {
+        uint16_t len;
+        uint8_t type;
+        uint32_t id;
+};
+
+int main(void)
+{
+        struct wire_hdr pkt;
+        size_t pad_off;
+
+        pkt.len = 4;
+        pkt.type = 1;
+        pkt.id = 0xAABBCCDD;
+        pad_off = offsetof(struct wire_hdr, type) + 1;
+        fprintf(stderr,
+                "msan pad prove: sizeof=%zu type@%zu id@%zu pad@%zu\n",
+                sizeof pkt, offsetof(struct wire_hdr, type),
+                offsetof(struct wire_hdr, id), pad_off);
+        if (pad_off >= offsetof(struct wire_hdr, id)) {
+                fprintf(stderr, "msan pad prove: no padding on this ABI\n");
+                return 2;
+        }
+        __msan_check_mem_is_initialized((char *)&pkt + pad_off, 1);
+        fprintf(stderr, "msan pad prove: REACHED (MSan missed padding)\n");
+        return 0;
+}
+"""
+    # --- 1b. CHECK_net-adjacent: netlink-attr-shaped hole (distinct). ---
+    nlattr_pad_source = r"""
+#include <stdint.h>
+#include <stdio.h>
+#include <stddef.h>
+#include <sanitizer/msan_interface.h>
+
+struct nlattr_hosted {
+        uint16_t nla_len;
+        uint8_t nla_type;
+        uint32_t value;
+};
+
+int main(void)
+{
+        struct nlattr_hosted attr;
+        size_t pad_off;
+
+        attr.nla_len = 8;
+        attr.nla_type = 1;
+        attr.value = 0x11223344;
+        pad_off = offsetof(struct nlattr_hosted, nla_type) + 1;
+        fprintf(stderr,
+                "msan nlattr pad: sizeof=%zu type@%zu value@%zu pad@%zu\n",
+                sizeof attr, offsetof(struct nlattr_hosted, nla_type),
+                offsetof(struct nlattr_hosted, value), pad_off);
+        if (pad_off >= offsetof(struct nlattr_hosted, value)) {
+                fprintf(stderr, "msan nlattr pad: no padding on this ABI\n");
+                return 2;
+        }
+        __msan_check_mem_is_initialized((char *)&attr + pad_off, 1);
+        fprintf(stderr, "msan nlattr pad: REACHED (MSan missed padding)\n");
+        return 0;
+}
+"""
+
+    with tempfile.TemporaryDirectory(prefix="msan-pad-") as temporary:
+        work = Path(temporary)
+        ran, err = msan_build_run(work, "pad_prove", pad_source)
+        if ran is None:
+            print("  FAIL msan net: cannot link MSan probe:\n" +
+                  (err or "")[-2000:])
+            return 1
+        msan_expect_fire(
+            ran, "intentional ABI wire-header padding is visible to MSan")
+
+        ran, err = msan_build_run(work, "nlattr_pad", nlattr_pad_source)
+        if ran is None:
+            print("  FAIL msan net: cannot link nlattr pad probe:\n" +
+                  (err or "")[-2000:])
+            return 1
+        msan_expect_fire(
+            ran,
+            "intentional netlink-attr-shaped ABI padding is visible to MSan")
+
+    # --- 2. Thin hosted lifts: dns_copy_name + TLS record header. ---
+    dns_copy = sec(
+        net,
+        "//      A wire name is at most 255 bytes",
+        "\n#define DNS_OK 0") + "\n" + sec(
+        net,
+        "static COLD bipolar dns_copy_name(",
+        "//      Where a name ends, for a caller")
+    tls_ver = sec(
+        net,
+        "static bool tls_record_version_valid(p8 address_to header)",
+        "/* Receive behind receive_end.")
+
+    wire_lift_source = base_shim + r"""
+#define DNS_MALFORMED (-3)
+""" + dns_copy + "\n" + tls_ver + r"""
+/* Thin stand-in for the header half of tls_record_whole / tls_next_record:
+   version check + length load against a fully-initialized buffer. */
+static bool tls_record_header_open(p8 address_to header, positive have,
+                                   p8 address_to type,
+                                   positive address_to payload_length)
+{
+        if (have < 5)
+                return false;
+        if (!tls_record_version_valid(header))
+                return false;
+        address_to type = header[0];
+        address_to payload_length = network_load_16(header + 3);
+        return have - 5 >= address_to payload_length;
+}
+
+static int failures;
+
+static void expect_dns(const char *label, const p8 *msg, positive size,
+                       positive at, int want_ok)
+{
+        p8 into[256];
+        positive ended = 0;
+        bipolar used = dns_copy_name((p8 address_to)msg, size, at, into,
+                                     sizeof into, address_of ended);
+        int ok = used >= 0;
+        if (ok != want_ok) {
+                fprintf(stderr, "msan wire lift: FAIL dns %s (used=%ld)\n",
+                        label, (long)used);
+                failures++;
+        }
+}
+
+static void expect_tls(const char *label, const p8 *hdr, positive have,
+                       int want_ok)
+{
+        p8 type = 0;
+        positive plen = 0;
+        int ok = tls_record_header_open((p8 address_to)hdr, have,
+                                        address_of type, address_of plen);
+        if (ok != want_ok) {
+                fprintf(stderr, "msan wire lift: FAIL tls %s\n", label);
+                failures++;
+        }
+}
+
+int main(void)
+{
+        /* Every buffer is fully initialized before any parse. Hostile shapes
+           must refuse or accept without MSan complaints. */
+        p8 simple[] = {3, 'w', 'w', 'w', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+                       3, 'c', 'o', 'm', 0};
+        p8 compress[] = {
+                7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0,
+                0xc0, 0x00
+        };
+        p8 forward_ptr[] = {0xc0, 0x02, 0x00};
+        p8 truncated[] = {3, 'a', 'b'};
+        p8 loop_labels[8];
+        p8 tls_ok[5 + 4];
+        p8 tls_bad_ver[5];
+        p8 tls_short[4];
+        p8 tls_claim[5];
+
+        memory_fill(loop_labels, 0, sizeof loop_labels);
+        loop_labels[0] = 0xc0;
+        loop_labels[1] = 0x04;
+        loop_labels[4] = 0xc0;
+        loop_labels[5] = 0x00;
+
+        expect_dns("simple", simple, sizeof simple, 0, 1);
+        expect_dns("compress", compress, sizeof compress, 13, 1);
+        expect_dns("forward_ptr", forward_ptr, sizeof forward_ptr, 0, 0);
+        expect_dns("truncated", truncated, sizeof truncated, 0, 0);
+        expect_dns("forward_loop", loop_labels, sizeof loop_labels, 0, 0);
+
+        memory_fill(tls_ok, 0, sizeof tls_ok);
+        tls_ok[0] = 22;
+        tls_ok[1] = 0x03;
+        tls_ok[2] = 0x03;
+        tls_ok[3] = 0x00;
+        tls_ok[4] = 0x04;
+        expect_tls("whole", tls_ok, sizeof tls_ok, 1);
+
+        memory_fill(tls_bad_ver, 0x41, sizeof tls_bad_ver);
+        tls_bad_ver[0] = 23;
+        tls_bad_ver[1] = 0x03;
+        tls_bad_ver[2] = 0x01;
+        tls_bad_ver[3] = 0x00;
+        tls_bad_ver[4] = 0x00;
+        expect_tls("bad_ver", tls_bad_ver, sizeof tls_bad_ver, 0);
+
+        memory_fill(tls_short, 0, sizeof tls_short);
+        expect_tls("short", tls_short, sizeof tls_short, 0);
+
+        memory_fill(tls_claim, 0, sizeof tls_claim);
+        tls_claim[0] = 23;
+        tls_claim[1] = 0x03;
+        tls_claim[2] = 0x03;
+        tls_claim[3] = 0xff;
+        tls_claim[4] = 0xff;
+        expect_tls("overclaim", tls_claim, sizeof tls_claim, 0);
+
+        if (failures) {
+                fprintf(stderr, "msan wire lift: %d failure(s)\n", failures);
+                return 1;
+        }
+        fprintf(stderr, "msan wire lift: dns_copy_name + tls record header "
+                "clean on fully-initialized hostile buffers\n");
+        return 0;
+}
+"""
+
+    with tempfile.TemporaryDirectory(prefix="msan-wire-") as temporary:
+        work = Path(temporary)
+        ran, err = msan_build_run(work, "wire_lift", wire_lift_source)
+        msan_expect_clean(
+            ran,
+            "dns_copy_name + tls record header clean under MSan "
+            "(fully-initialized hostile buffers)",
+            err)
+
+    # --- 3. HTTP header / chunk framing lift. ---
+    http_framing = sec(
+        net,
+        "static PURE bipolar http_header_end(",
+        "static bipolar http_unchunk(p8 address_to bytes, positive size);")
+
+    http_clean_source = base_shim + r"""
+#define HTTP_OK 0
+#define HTTP_MALFORMED (-5)
+""" + http_framing + r"""
+static int failures;
+
+static void expect_chunk(const char *label, const char *line, int want_ok,
+                         positive want_len)
+{
+        positive chunk = 0;
+        positive n = (positive)strlen(line);
+        bipolar st = http_chunk_line((p8 address_to)line, n, address_of chunk);
+        int ok = st == HTTP_OK;
+        if (ok != want_ok || (want_ok && chunk != want_len)) {
+                fprintf(stderr, "msan http: FAIL chunk %s st=%ld chunk=%lu\n",
+                        label, (long)st, (unsigned long)chunk);
+                failures++;
+        }
+}
+
+int main(void)
+{
+        const char *ok_head =
+                "HTTP/1.1 200 OK\r\nHost: a\r\nContent-Length: 0\r\n\r\n";
+        const char *fold =
+                "HTTP/1.1 200 OK\r\nX: y\r\n folded\r\n\r\n";
+        p8 bare[] = {
+                'H','T','T','P','/','1','.','1',' ','2','0','0',' ','O','K','\n',
+                'A',':',' ','b','\n','\n'
+        };
+        p8 chunk_body[] = {
+                '5','\r','\n','h','e','l','l','o','\r','\n',
+                '0','\r','\n','\r','\n'
+        };
+        bipolar hend;
+        positive clen = 0;
+        /* Avoid the moonwater `end` null-pointer macro as a local name. */
+        static const p8 nul_head[] = {
+                'H','T','T','P','/','1','.','1',' ','2','0','0',' ','O','K','\r','\n',
+                'X',0,'Y',':',' ','z','\r','\n','\r','\n'
+        };
+
+        hend = http_header_end((p8 *)ok_head, (positive)strlen(ok_head));
+        if (hend < 0) {
+                fprintf(stderr, "msan http: FAIL header_end ok\n");
+                failures++;
+        } else if (!http_header_block_valid((p8 *)ok_head, (positive)hend)) {
+                fprintf(stderr, "msan http: FAIL block_valid ok\n");
+                failures++;
+        }
+
+        hend = http_header_end((p8 *)fold, (positive)strlen(fold));
+        if (hend < 0 || http_header_block_valid((p8 *)fold, (positive)hend)) {
+                fprintf(stderr, "msan http: FAIL obs-fold must refuse\n");
+                failures++;
+        }
+
+        /* NUL in field name: walk still bounded; validity refuses. */
+        hend = http_header_end((p8 *)nul_head, sizeof nul_head);
+        (void)hend;
+        if (http_header_block_valid((p8 *)nul_head, sizeof nul_head)) {
+                fprintf(stderr, "msan http: FAIL nul name must refuse\n");
+                failures++;
+        }
+
+        hend = http_header_end(bare, sizeof bare);
+        if (hend != (bipolar)sizeof bare ||
+            !http_header_block_valid(bare, (positive)hend)) {
+                fprintf(stderr, "msan http: FAIL bare LF head\n");
+                failures++;
+        }
+
+        expect_chunk("plain", "a\r\n", 1, 10);
+        expect_chunk("ext", "3;foo=bar\r\n", 1, 3);
+        expect_chunk("bad_ext", "1;=\r\n", 0, 0);
+        expect_chunk("overflow",
+                     "ffffffffffffffffffffffffffffffff\r\n", 0, 0);
+
+        if (http_trailer_line((p8 *)"\r\n", 2) != 1) {
+                fprintf(stderr, "msan http: FAIL blank trailer\n");
+                failures++;
+        }
+        if (http_trailer_line((p8 *)"X-Trail: v\r\n", 12) != 0) {
+                fprintf(stderr, "msan http: FAIL trailer field\n");
+                failures++;
+        }
+        if (http_trailer_line((p8 *)":bad\r\n", 6) >= 0) {
+                fprintf(stderr, "msan http: FAIL empty trailer name\n");
+                failures++;
+        }
+
+        /* Touch chunk_body so hostile framing bytes stay initialized. */
+        if (http_chunk_line(chunk_body, 3, address_of clen) != HTTP_OK ||
+            clen != 5) {
+                fprintf(stderr, "msan http: FAIL chunk size line\n");
+                failures++;
+        }
+
+        if (failures) {
+                fprintf(stderr, "msan http: %d failure(s)\n", failures);
+                return 1;
+        }
+        fprintf(stderr, "msan http: header/chunk framing clean on "
+                "fully-initialized hostile buffers\n");
+        return 0;
+}
+"""
+
+    http_uninit_source = (
+        '#include <sanitizer/msan_interface.h>\n' + base_shim + r"""
+#define HTTP_OK 0
+#define HTTP_MALFORMED (-5)
+""" + http_framing + r"""
+int main(void)
+{
+        /* Claim a full header block; poison the unread tail so the line walk
+           must load uninitialized bytes — intentional MSan catch. */
+        p8 buf[64];
+        volatile int sink;
+
+        memcpy(buf, "HTTP/1.1 200 OK\r\n", 17);
+        __msan_poison(buf + 17, sizeof buf - 17);
+        sink = http_header_block_valid(buf, sizeof buf);
+        (void)sink;
+        fprintf(stderr, "msan http uninit: REACHED (MSan missed)\n");
+        return 0;
+}
+""")
+
+    with tempfile.TemporaryDirectory(prefix="msan-http-") as temporary:
+        work = Path(temporary)
+        ran, err = msan_build_run(work, "http_clean", http_clean_source)
+        if ran is None:
+            print("  FAIL msan net: cannot link HTTP framing lift:\n" +
+                  (err or "")[-2000:])
+            return 1
+        msan_expect_clean(
+            ran,
+            "HTTP header/chunk framing clean under MSan "
+            "(fully-initialized hostile buffers)",
+            err)
+        ran, err = msan_build_run(work, "http_uninit", http_uninit_source)
+        if ran is None:
+            print("  FAIL msan net: cannot link HTTP uninit probe:\n" +
+                  (err or "")[-2000:])
+            return 1
+        msan_expect_fire(
+            ran,
+            "intentional HTTP header-block uninit read is visible to MSan")
+
+    # --- 4. DHCP option gather (dhcp_walk). ---
+    dhcp_walk = sec(
+        net,
+        "static COLD bipolar dhcp_walk(",
+        "static COLD bipolar dhcp_read(")
+
+    dhcp_clean_source = base_shim + r"""
+#define DHCP_OPTION_PAD 0
+#define DHCP_OPTION_END 255
+#define DHCP_OPTION_TYPE 53
+#define DHCP_OPTION_OVERLOAD 52
+#define DHCP_OPTION_MASK 1
+""" + """
+typedef struct
+{
+        p8 first[4];
+        positive length;
+} dhcp_gathered;
+
+""" + dhcp_walk + r"""
+static int failures;
+
+int main(void)
+{
+        dhcp_gathered gathered[256];
+        p8 overload = 0;
+        p8 ok[] = {
+                DHCP_OPTION_TYPE, 1, 2,
+                DHCP_OPTION_MASK, 4, 255, 255, 255, 0,
+                DHCP_OPTION_PAD, DHCP_OPTION_PAD,
+                DHCP_OPTION_END
+        };
+        p8 overrun[] = {DHCP_OPTION_TYPE, 5, 1, 2, 3};
+        p8 overload_opt[] = {
+                DHCP_OPTION_OVERLOAD, 1, 3,
+                DHCP_OPTION_TYPE, 1, 5,
+                DHCP_OPTION_END
+        };
+        p8 huge[] = {DHCP_OPTION_TYPE, 8, 1, 2, 3, 4, 5, 6, 7, 8,
+                     DHCP_OPTION_END};
+
+        memory_zero(gathered, sizeof gathered);
+        if (dhcp_walk(ok, sizeof ok, gathered, address_of overload) != 0 ||
+            gathered[DHCP_OPTION_TYPE].length != 1 ||
+            gathered[DHCP_OPTION_TYPE].first[0] != 2 ||
+            gathered[DHCP_OPTION_MASK].length != 4) {
+                fprintf(stderr, "msan dhcp: FAIL ok walk\n");
+                failures++;
+        }
+
+        memory_zero(gathered, sizeof gathered);
+        if (dhcp_walk(overrun, sizeof overrun, gathered, null) >= 0) {
+                fprintf(stderr, "msan dhcp: FAIL overrun must refuse\n");
+                failures++;
+        }
+
+        memory_zero(gathered, sizeof gathered);
+        overload = 0;
+        if (dhcp_walk(overload_opt, sizeof overload_opt, gathered,
+                      address_of overload) != 0 || overload != 3) {
+                fprintf(stderr, "msan dhcp: FAIL overload gather\n");
+                failures++;
+        }
+
+        memory_zero(gathered, sizeof gathered);
+        if (dhcp_walk(huge, sizeof huge, gathered, null) != 0 ||
+            gathered[DHCP_OPTION_TYPE].length != 8 ||
+            gathered[DHCP_OPTION_TYPE].first[0] != 1 ||
+            gathered[DHCP_OPTION_TYPE].first[3] != 4) {
+                fprintf(stderr, "msan dhcp: FAIL first-4 gather cap\n");
+                failures++;
+        }
+
+        if (failures) {
+                fprintf(stderr, "msan dhcp: %d failure(s)\n", failures);
+                return 1;
+        }
+        fprintf(stderr, "msan dhcp: dhcp_walk clean on fully-initialized "
+                "hostile option regions\n");
+        return 0;
+}
+"""
+
+    dhcp_uninit_source = (
+        '#include <sanitizer/msan_interface.h>\n' + base_shim + r"""
+#define DHCP_OPTION_PAD 0
+#define DHCP_OPTION_END 255
+#define DHCP_OPTION_TYPE 53
+#define DHCP_OPTION_OVERLOAD 52
+""" + """
+typedef struct
+{
+        p8 first[4];
+        positive length;
+} dhcp_gathered;
+
+""" + dhcp_walk + r"""
+int main(void)
+{
+        dhcp_gathered gathered[256];
+        p8 buf[16];
+        bipolar st;
+
+        memory_zero(gathered, sizeof gathered);
+        memory_fill(buf, 0xcc, sizeof buf);
+        /* Type + length claim 10 payload bytes; poison the payload. The
+           stream still needs its END, or the walk refuses it before the
+           payload is ever read. */
+        buf[0] = DHCP_OPTION_TYPE;
+        buf[1] = 10;
+        __msan_poison(buf + 2, 10);
+        buf[12] = DHCP_OPTION_END;
+        st = dhcp_walk(buf, 13, gathered, null);
+        if (st != 0 || gathered[DHCP_OPTION_TYPE].length != 10) {
+                fprintf(stderr, "msan dhcp uninit: walk did not gather "
+                        "(st=%ld len=%lu)\n",
+                        (long)st,
+                        (unsigned long)gathered[DHCP_OPTION_TYPE].length);
+                return 2;
+        }
+        /* dhcp_walk copies poisoned payload into first[]; ask MSan. */
+        __msan_check_mem_is_initialized(gathered[DHCP_OPTION_TYPE].first, 1);
+        fprintf(stderr, "msan dhcp uninit: REACHED (MSan missed)\n");
+        return 0;
+}
+""")
+
+    with tempfile.TemporaryDirectory(prefix="msan-dhcp-") as temporary:
+        work = Path(temporary)
+        ran, err = msan_build_run(work, "dhcp_clean", dhcp_clean_source)
+        if ran is None:
+            print("  FAIL msan net: cannot link DHCP walk lift:\n" +
+                  (err or "")[-2000:])
+            return 1
+        msan_expect_clean(
+            ran,
+            "dhcp_walk option gather clean under MSan "
+            "(fully-initialized hostile buffers)",
+            err)
+        ran, err = msan_build_run(work, "dhcp_uninit", dhcp_uninit_source)
+        if ran is None:
+            print("  FAIL msan net: cannot link DHCP uninit probe:\n" +
+                  (err or "")[-2000:])
+            return 1
+        msan_expect_fire(
+            ran,
+            "intentional DHCP option-payload uninit read is visible to MSan")
+
+    # --- 5. Netlink attribute walk (netlink_find_span). ---
+    nl_find = sec(
+        net,
+        "static COLD address_any netlink_find_span(",
+        "static COLD address_any netlink_find(")
+
+    nl_clean_source = base_shim + r"""
+#define NLA_TYPE_MASK 0x3fff
+#define netlink_align(value) (((value) + 3) & ~(positive)3)
+typedef struct
+{
+        p16 length;
+        p16 type;
+} netlink_attribute;
+""" + nl_find + r"""
+static int failures;
+
+static void put_attr(p8 *at, p16 length, p16 type, const void *payload,
+                     positive payload_n)
+{
+        at[0] = (p8)(length & 0xff);
+        at[1] = (p8)(length >> 8);
+        at[2] = (p8)(type & 0xff);
+        at[3] = (p8)(type >> 8);
+        if (payload_n)
+                memcpy(at + 4, payload, payload_n);
+}
+
+int main(void)
+{
+        p8 buf[64];
+        p8 value[4] = {1, 2, 3, 4};
+        positive size = 0;
+        address_any got;
+
+        memory_fill(buf, 0, sizeof buf);
+        put_attr(buf, 8, 1, value, 4);
+        put_attr(buf + 8, 8, 2, value, 4);
+
+        got = netlink_find_span(buf, 16, 2, address_of size);
+        if (!got || size != 4 || memory_compare(got, value, 4)) {
+                fprintf(stderr, "msan nl: FAIL find type 2\n");
+                failures++;
+        }
+
+        got = netlink_find_span(buf, 16, 9, address_of size);
+        if (got) {
+                fprintf(stderr, "msan nl: FAIL missing type\n");
+                failures++;
+        }
+
+        /* Short length (< header): walk must stop, not run forever. */
+        memory_fill(buf, 0, sizeof buf);
+        put_attr(buf, 2, 1, null, 0);
+        got = netlink_find_span(buf, 8, 1, address_of size);
+        if (got) {
+                fprintf(stderr, "msan nl: FAIL short attr length\n");
+                failures++;
+        }
+
+        /* Length past buffer end. */
+        memory_fill(buf, 0, sizeof buf);
+        put_attr(buf, 32, 1, value, 4);
+        got = netlink_find_span(buf, 8, 1, address_of size);
+        if (got) {
+                fprintf(stderr, "msan nl: FAIL oversize attr\n");
+                failures++;
+        }
+
+        /* Nested-looking chain with align hole (payload 1 byte → pad to 8). */
+        memory_fill(buf, 0xaa, sizeof buf);
+        put_attr(buf, 5, 7, "Z", 1);
+        put_attr(buf + 8, 8, 8, value, 4);
+        got = netlink_find_span(buf, 16, 8, address_of size);
+        if (!got || size != 4) {
+                fprintf(stderr, "msan nl: FAIL align walk\n");
+                failures++;
+        }
+
+        if (failures) {
+                fprintf(stderr, "msan nl: %d failure(s)\n", failures);
+                return 1;
+        }
+        fprintf(stderr, "msan nl: netlink_find_span clean on "
+                "fully-initialized hostile attributes\n");
+        return 0;
+}
+"""
+
+    nl_uninit_source = (
+        '#include <sanitizer/msan_interface.h>\n' + base_shim + r"""
+#define NLA_TYPE_MASK 0x3fff
+#define netlink_align(value) (((value) + 3) & ~(positive)3)
+typedef struct
+{
+        p16 length;
+        p16 type;
+} netlink_attribute;
+""" + nl_find + r"""
+int main(void)
+{
+        positive size = 0;
+        p8 buf[16];
+        volatile address_any sink;
+
+        memory_fill(buf, 0, sizeof buf);
+        /* Poison the attribute header fields the walk must load. */
+        __msan_poison(buf, 4);
+        sink = netlink_find_span(buf, 16, 1, address_of size);
+        (void)sink;
+        fprintf(stderr, "msan nl uninit: REACHED (MSan missed)\n");
+        return 0;
+}
+""")
+
+    with tempfile.TemporaryDirectory(prefix="msan-nl-") as temporary:
+        work = Path(temporary)
+        ran, err = msan_build_run(work, "nl_clean", nl_clean_source)
+        if ran is None:
+            print("  FAIL msan net: cannot link netlink walk lift:\n" +
+                  (err or "")[-2000:])
+            return 1
+        msan_expect_clean(
+            ran,
+            "netlink_find_span clean under MSan "
+            "(fully-initialized hostile buffers)",
+            err)
+        ran, err = msan_build_run(work, "nl_uninit", nl_uninit_source)
+        if ran is None:
+            print("  FAIL msan net: cannot link netlink uninit probe:\n" +
+                  (err or "")[-2000:])
+            return 1
+        msan_expect_fire(
+            ran,
+            "intentional netlink attribute-header uninit read is visible to MSan")
+
+    # --- 6. TLS extension/cert parse under MSan without libFuzzer. ---
+    # Reuse fuzz lift slices (oids/parsers/framing); skip path-policy helpers
+    # that need extra date stubs for this thin seed replay.
+    oids, parsers, _policy, framing, tls_der_shim = tls_der_fuzz_lift_parts(net)
+
+    tls_der_driver = r"""
+static void feed(p8 *buf, positive length)
+{
+        tls_cert cert;
+
+        memory_fill(address_of cert, 0, sizeof cert);
+        (void)tls_parse_extensions(buf, length, 0, 2, address_of cert, null);
+        memory_fill(address_of cert, 0, sizeof cert);
+        (void)tls_parse_cert(buf, length, address_of cert, null);
+}
+
+int main(int argc, char **argv)
+{
+        positive i;
+        /* Fully-initialized hostile seeds (subset of fuzz corpus shapes). */
+        static const p8 empty[] = {0};
+        static const p8 ext_minimal[] = {
+                0xa3, 0x09, 0x30, 0x07, 0x30, 0x05, 0x06, 0x01, 0x2a, 0x04, 0x00
+        };
+        static const p8 ext_indefinite[] = {
+                0xa3, 0x80, 0x30, 0x07, 0x30, 0x05, 0x06, 0x01, 0x2a, 0x04, 0x00,
+                0x00, 0x00
+        };
+        static const p8 ext_dup[] = {
+                0xa3, 0x14, 0x30, 0x12, 0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04,
+                0x01, 0x00, 0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x01, 0x00
+        };
+        static const p8 trunc[] = {0x30, 0x81, 0xc0, 0x30, 0x81};
+        static const p8 list_empty[] = {0x00, 0x00, 0x00, 0x00};
+
+        feed((p8 *)empty, 0);
+        feed((p8 *)ext_minimal, sizeof ext_minimal);
+        feed((p8 *)ext_indefinite, sizeof ext_indefinite);
+        feed((p8 *)ext_dup, sizeof ext_dup);
+        feed((p8 *)trunc, sizeof trunc);
+        feed((p8 *)list_empty, sizeof list_empty);
+
+        /* Also replay materialized corpus files when a directory is passed. */
+        if (argc > 1) {
+                /* Directory walk kept trivial: argv[1..] are file paths. */
+                for (i = 1; i < (positive)argc; i++) {
+                        FILE *f = fopen(argv[i], "rb");
+                        p8 buf[8192];
+                        size_t n;
+                        if (!f)
+                                continue;
+                        n = fread(buf, 1, sizeof buf, f);
+                        fclose(f);
+                        feed(buf, (positive)n);
+                }
+        }
+
+        fprintf(stderr, "msan tls der: extension/cert parse clean on "
+                "fully-initialized hostile seeds\n");
+        return 0;
+}
+"""
+
+    tls_der_uninit = tls_der_shim + oids + "\n" + parsers + framing + r"""
+int main(void)
+{
+        tls_cert cert;
+        p8 *buf = (p8 *)malloc(64);
+        if (!buf)
+                return 2;
+        /* SEQUENCE tag + long-form length claiming a body into poison. */
+        buf[0] = 0x30;
+        buf[1] = 0x3a; /* 58 more bytes */
+        memory_fill(address_of cert, 0, sizeof cert);
+        (void)tls_parse_cert(buf, 60, address_of cert, null);
+        fprintf(stderr, "msan tls der uninit: REACHED (MSan missed)\n");
+        free(buf);
+        return 0;
+}
+"""
+
+    with tempfile.TemporaryDirectory(prefix="msan-tlsder-") as temporary:
+        work = Path(temporary)
+        seed_paths = [str(p) for p in
+                      tls_fuzz_write_seeds("tls_der", work / "corpus")[:24]]
+        der_clean_source = tls_der_shim + oids + "\n" + parsers + framing + tls_der_driver
+        ran, err = msan_build_run(work, "tls_der_clean", der_clean_source,
+                                  run_args=seed_paths)
+        if ran is None:
+            print("  FAIL msan net: cannot link TLS DER MSan lift:\n" +
+                  (err or "")[-2000:])
+            return 1
+        label = ("tls_parse_extensions/cert clean under MSan without fuzzer "
+                 "(fully-initialized hostile seeds, %d corpus files)" % len(seed_paths))
+        msan_expect_clean(ran, label, err)
+
+        ran, err = msan_build_run(work, "tls_der_uninit", tls_der_uninit)
+        if ran is None:
+            print("  FAIL msan net: cannot link TLS DER uninit probe:\n" +
+                  (err or "")[-2000:])
+            return 1
+        msan_expect_fire(
+            ran,
+            "intentional TLS DER body uninit read is visible to MSan")
+
+    # --- 7. Thin CHECK_net-equivalent probes (honest limits). ---
+    # Full freestanding CHECK_net cannot host under MSan: it needs the
+    # moonwater freestanding runtime, syscall layer, and CHECK harness
+    # macros. These are the wire-shape probes that lift cleanly.
+    check_net_thin = base_shim + r"""
+#define NLA_TYPE_MASK 0x3fff
+#define netlink_align(value) (((value) + 3) & ~(positive)3)
+#define HTTP_OK 0
+#define HTTP_MALFORMED (-5)
+#define DHCP_OPTION_PAD 0
+#define DHCP_OPTION_END 255
+#define DHCP_OPTION_TYPE 53
+#define DHCP_OPTION_OVERLOAD 52
+typedef struct { p16 length; p16 type; } netlink_attribute;
+typedef struct { p8 first[4]; positive length; } dhcp_gathered;
+""" + nl_find + "\n" + http_framing + "\n" + dhcp_walk + r"""
+static int failures;
+#define CHECK(cond, label) do { \
+        if (!(cond)) { fprintf(stderr, "msan check_net thin: FAIL %s\n", label); \
+                       failures++; } \
+} while (0)
+
+int main(void)
+{
+        dhcp_gathered gathered[256];
+        p8 opts[] = {DHCP_OPTION_TYPE, 1, 5, DHCP_OPTION_END};
+        p8 attrs[8];
+        positive size = 0;
+        positive chunk = 0;
+
+        CHECK(netlink_align(0) == 0, "align 0");
+        CHECK(netlink_align(1) == 4, "align 1");
+        CHECK(netlink_align(3) == 4, "align 3");
+        CHECK(netlink_align(4) == 4, "align 4");
+        CHECK(netlink_align(5) == 8, "align 5");
+        CHECK(sizeof(netlink_attribute) == 4, "attribute is 4");
+
+        memory_fill(attrs, 0, sizeof attrs);
+        attrs[0] = 8; attrs[2] = 1;
+        attrs[4] = 0x11; attrs[5] = 0x22; attrs[6] = 0x33; attrs[7] = 0x44;
+        CHECK(netlink_find_span(attrs, 8, 1, address_of size) == attrs + 4 &&
+              size == 4, "find_span value");
+
+        CHECK(http_chunk_line((p8 *)"10\r\n", 4, address_of chunk) ==
+              HTTP_OK && chunk == 16, "chunk hex 10");
+        CHECK(http_chunk_line((p8 *)"G\r\n", 3, address_of chunk) ==
+              HTTP_MALFORMED, "chunk non-hex");
+
+        memory_zero(gathered, sizeof gathered);
+        CHECK(dhcp_walk(opts, sizeof opts, gathered, null) == 0 &&
+              gathered[DHCP_OPTION_TYPE].first[0] == 5, "dhcp type gather");
+
+        if (failures) {
+                fprintf(stderr, "msan check_net thin: %d failure(s)\n", failures);
+                return 1;
+        }
+        fprintf(stderr, "msan check_net thin: align/sizeof + http_chunk/"
+                "dhcp_walk/netlink_find_span probes clean under MSan "
+                "(not full CHECK_net)\n");
+        return 0;
+}
+"""
+
+    with tempfile.TemporaryDirectory(prefix="msan-checknet-") as temporary:
+        work = Path(temporary)
+        ran, err = msan_build_run(work, "check_net_thin", check_net_thin)
+        if ran is None:
+            print("  FAIL msan net: cannot link CHECK_net-thin probes:\n" +
+                  (err or "")[-2000:])
+            return 1
+        msan_expect_clean(
+            ran,
+            "CHECK_net-equivalent thin probes clean under MSan "
+            "(not full freestanding CHECK_net)",
+            err)
+
+    # --- 8. Seed-corpus TLS fuzz smokes under MSan. ---
+    prior = os.environ.get("MOONWATER_MSAN")
+    os.environ["MOONWATER_MSAN"] = "1"
+    try:
+        der = harness_tls_der_fuzz([])
+        hs = harness_tls_hs_fuzz([])
+        dhcp = harness_dhcp_fuzz([])
+        sntp = harness_sntp_fuzz([])
+        dns = harness_dns_fuzz([])
+        netlink = harness_netlink_fuzz([])
+        crypto = harness_crypto_fuzz([])
+        http = harness_http_fuzz([])
+    finally:
+        if prior is None:
+            os.environ.pop("MOONWATER_MSAN", None)
+        else:
+            os.environ["MOONWATER_MSAN"] = prior
+
+    if 2 in (der, hs, sntp, dns, netlink, http):
+        print("msan net: NOT RUN -- fuzz under MSan unavailable "
+              "(der=%s hs=%s sntp=%s dns=%s netlink=%s http=%s)"
+              % (der, hs, sntp, dns, netlink, http))
+        return 2
+    checks(der == 0, "tls_der_fuzz clean under MSan")
+    checks(hs == 0, "tls_hs_fuzz clean under MSan")
+    checks(dhcp == 0, "dhcp_fuzz clean under MSan")
+    checks(sntp == 0, "sntp_fuzz clean under MSan")
+    checks(dns == 0, "dns_fuzz clean under MSan")
+    checks(netlink == 0, "netlink_fuzz clean under MSan")
+    checks(crypto in (0, 2), "crypto_fuzz clean under MSan")
+    checks(http == 0, "http_fuzz clean under MSan")
+    return checks.verdict("msan net", "msan-net")
+
+
+def harness_security_hygiene(argv):
+    """Guards on the net/tar security tests that no single harness sees, run at
+    the top of lane_net and lane_tar. Untallied, like the script it replaced:
+    it prints "security hygiene N/N" and returns 1 on any failure.
+
+    - the security harnesses stay registered, HARNESS_CHECKS has no key twice,
+      and test/run asks for them, with lane_net's and lane_tar's soft skips
+    - neither seed corpus is empty, only empty.bin is empty, and no seed file
+      sits in test/ (they are written to each run's temporary directory)
+    - tls_verify_fuzz calls production tls_verify_one with the WR2/GTS prove
+      over the hosted crypto lift, and CHECK_net keeps its freestanding proves
+    - the security docs never say tls_verify_fuzz's signatures are mocked, and
+      the harness names SECURITY_TEST_MATRIX.md gives are registered
+    - http_response_framing's CASES / MUST_ACCEPT / DELIBERATE agree, and its
+      DELIBERATE rows keep the must-disagree assert against http.client
+    - https_downgrade keeps several Location shapes
+    """
+    del argv
+    checks = Checks()
+    run = (HARNESS_ROOT / "test/run").read_text()
+    source = Path(__file__).resolve().read_text()
+
+    security = ("tls_chains", "https_downgrade", "http_response_framing",
+                "tls_der_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
+                "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
+                "http_fuzz", "http_urls")
+    for name in security + ("tls_verify_fuzz",):
+        checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
+    table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
+    keys = re.findall(r'^\s*"(\w+)":', table.group(1), re.M) if table else []
+    checks(bool(keys), "differential.py: cannot find the HARNESS_CHECKS literal")
+    twice = sorted({key for key in keys if keys.count(key) > 1})
+    checks(not twice, "differential.py: registered twice: " + ", ".join(twice))
+    for name in security:
+        checks("--harness " + name in run, "test/run: no lane asks for --harness " + name)
+    for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race", "dhcp_fuzz",
+                 "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "http_fuzz"):
+        checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
+
+    names = set()
+    for corpus in ("tls_der", "tls_hs", "dhcp", "sntp", "dns", "netlink", "http"):
+        seeds = tls_fuzz_seeds(corpus)
+        names.update(seeds)
+        checks(bool(seeds), "tls_fuzz_seeds(%r) is empty" % corpus)
+        empty = sorted(name for name, data in seeds.items()
+                       if not data and name != "empty.bin")
+        checks(not empty, "%s: empty hostile seeds (empty.bin is the one control): %s"
+               % (corpus, ", ".join(empty)))
+    stale = sorted(str(path.relative_to(HARNESS_ROOT))
+                   for path in (HARNESS_ROOT / "test").rglob("*.bin") if path.name in names)
+    checks(not stale, "seed files in the tree (seeds are written per run; remove them): "
+           + ", ".join(stale[:8]))
+
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    checks_c = (HARNESS_ROOT / "test/checks.c").read_text()
+    verify = inspect.getsource(harness_tls_verify_fuzz)
+    checks("tls_verify_one(" in verify and "fuzz_prove_wr2_gts()" in verify and
+           "tls_verify_hosted_source(" in verify and "Mocked signature" not in verify,
+           "tls_verify_fuzz: must drive production tls_verify_one after the WR2/GTS prove")
+    try:
+        lifted = tls_verify_hosted_source(net, checks_c, "")
+    except (ValueError, RuntimeError) as error:
+        lifted = ""
+        checks(False, "tls_verify_hosted_source: " + str(error))
+    for needle in ("montgomery_multiply", "crypto_sha256_of", "crypto_sha384",
+                   "static COLD bool tls_verify_one", "fuzz_prove_wr2_gts"):
+        checks(not lifted or needle in lifted, "hosted tls_verify lift lacks " + needle)
+    start = checks_c.find("#ifdef CHECK_net")
+    following = re.search(r"\n#ifdef CHECK_", checks_c[start + 1:])
+    region = checks_c[start:start + 1 + following.start()] if following else checks_c[start:]
+    for needle in ('check("WR2 chains to the served GTS Root R1"',
+                   "tls_verify_one(address_of wr2_cert, address_of gts_cert)",
+                   'check("the SHA-384 PKCS#1 verify refuses one flipped signature bit"'):
+        checks(start >= 0 and needle in region,
+               "CHECK_net: missing freestanding verify proof: " + needle[:60])
+
+    for doc in ("SECURITY_CHECKLIST.md", "SECURITY_TEST_MATRIX.md"):
+        path = HARNESS_ROOT / doc
+        lower = path.read_text().lower() if path.is_file() else ""
+        for phrase in ("signatures mocked", "mocked signature", "mocked refuse",
+                       "signatures always refuse"):
+            for found in re.finditer(re.escape(phrase), lower):
+                window = lower[max(0, found.start() - 120):found.end() + 120]
+                checks("tls_verify" not in window and "verify_fuzz" not in window,
+                       "%s: still says %r near tls_verify_fuzz" % (doc, phrase))
+    matrix = HARNESS_ROOT / "SECURITY_TEST_MATRIX.md"
+    named = set(re.findall(r"`([a-z][a-z0-9_]*(?:_fuzz|_race))`",
+                           matrix.read_text() if matrix.is_file() else ""))
+    unknown = sorted(named - set(HARNESS_CHECKS))
+    checks(not unknown, "SECURITY_TEST_MATRIX.md names unregistered harnesses: "
+           + ", ".join(unknown))
+
+    framing = inspect.getsource(harness_http_response_framing)
+    cases = re.search(r"CASES\s*=\s*\[(.*?)\n\s*\]", framing, re.S)
+    accept = re.search(r"MUST_ACCEPT\s*=\s*\{(.*?)\n\s*\}", framing, re.S)
+    deliberate = re.search(r"DELIBERATE\s*=\s*\{(.*?)\n\s*\}", framing, re.S)
+    checks(cases and accept and deliberate,
+           "http_response_framing: cannot find CASES / MUST_ACCEPT / DELIBERATE")
+    if cases and accept and deliberate:
+        rows = re.findall(r'\(\s*"([^"]+)"\s*,', cases.group(1))
+        checks(len(rows) == len(set(rows)), "http_response_framing: a CASES name twice")
+        for table_name, found in (("MUST_ACCEPT", re.findall(r'"([^"]+)"', accept.group(1))),
+                                  ("DELIBERATE", re.findall(r'"([^"]+)"\s*:',
+                                                            deliberate.group(1)))):
+            loose = sorted(set(found) - set(rows))
+            checks(not loose, "http_response_framing: %s not in CASES: %s"
+                   % (table_name, ", ".join(loose[:8])))
+    checks("listed deliberate but http.client now agrees" in framing,
+           "http_response_framing: DELIBERATE must still assert http.client disagrees")
+
+    downgrade = inspect.getsource(harness_https_downgrade)
+    shapes = sum(needle in downgrade for needle in ("http://", "HTTP://", "//", "user@",
+                                                    "http:///"))
+    checks(shapes >= 4, "https_downgrade: %d Location shapes, want several" % shapes)
+
+    print("security hygiene %d/%d" % (checks.checks - checks.failures, checks.checks))
+    return 1 if checks.failures else 0
+
+
+def pathname_race_budget(default_rounds=80, default_seconds=2.0):
+    """Lane smoke defaults; longer local runs via MOONWATER_PATHNAME_RACE_*.
+
+    MOONWATER_PATHNAME_RACE_ROUNDS / MOONWATER_PATHNAME_RACE_SECONDS override
+    the argparse defaults (CLI flags still win when passed explicitly).
+    lane_tar leaves them unset (80 rounds / 2s). Effect asserts are the same
+    at any budget: outside victim unchanged, no escape past the extract root.
+    """
+    rounds = int(os.environ.get("MOONWATER_PATHNAME_RACE_ROUNDS",
+                                str(default_rounds)))
+    seconds = float(os.environ.get("MOONWATER_PATHNAME_RACE_SECONDS",
+                                   str(default_seconds)))
+    return rounds, seconds
+
+
+def harness_pathname_race(argv):
+    """Continuous file↔directory↔symlink exchange race against tar extract.
+
+    While moonwater tar extracts into a staged tree, sibling threads rapidly
+    cycle every contested pathname through regular file, empty directory, and
+    symlink-to-outside-dir forms (renameat2 RENAME_EXCHANGE when available,
+    else a rename dance). Contested names include shallow leaves and parents
+    of deeper extract trees so dir↔symlink-to-dir swaps hit mid-walk pins.
+    Effect-based fail-closed checks: an outside victim's bytes stay unchanged,
+    the outside keep/ dir stays empty (no nested/deep escape), and private-edit
+    style exclusive creates (O_EXCL|O_NOFOLLOW leaf, dirfd+leaf, shell
+    noclobber, install -D) do not follow swaps through to outside.
+
+        python3 test/differential.py --harness pathname_race --binary ours=PATH
+        sh test/run tar   # freestanding CHECK_tar then this harness
+        MOONWATER_PATHNAME_RACE_SECONDS=30 MOONWATER_PATHNAME_RACE_ROUNDS=800 \\
+            python3 test/differential.py --harness pathname_race --binary ours=PATH
+
+    Returns 2 (NOT RUN) when threads or rename primitives are unavailable.
+    """
+    import argparse
+    import ctypes
+    import tempfile
+    import threading
+    import time
+    from pathlib import Path
+
+    budget_rounds, budget_seconds = pathname_race_budget()
+    parser = argparse.ArgumentParser(prog="pathname_race")
+    parser.add_argument("--binary", action="append", required=True,
+                        metavar="LABEL=PATH")
+    parser.add_argument("--rounds", type=int, default=budget_rounds,
+                        help="extract iterations while the scheduler runs "
+                             "(default from MOONWATER_PATHNAME_RACE_ROUNDS "
+                             "or 80)")
+    parser.add_argument("--seconds", type=float, default=budget_seconds,
+                        help="minimum wall time to keep exchanging "
+                             "(default from MOONWATER_PATHNAME_RACE_SECONDS "
+                             "or 2.0)")
+    opts = parser.parse_args(argv)
+    if opts.rounds < 1:
+        parser.error("--rounds must be positive")
+    if opts.seconds < 0:
+        parser.error("--seconds must be non-negative")
+
+    binaries = []
+    for specification in opts.binary:
+        label, sep, binary = specification.partition("=")
+        if (not sep or not label or not Path(binary).is_file()):
+            parser.error("--binary requires LABEL=existing-file")
+        binaries.append((label, str(Path(binary).resolve())))
+
+    try:
+        import _thread  # noqa: F401
+    except ImportError:
+        print("pathname race: NOT RUN -- no thread support")
+        return 2
+
+    RENAME_EXCHANGE = 2
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is not None:
+        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p,
+                              ctypes.c_int, ctypes.c_char_p,
+                              ctypes.c_uint]
+        renameat2.restype = ctypes.c_int
+
+    def exchange_names(directory, left, right):
+        """Swap two directory entries via renameat2 or a rename dance."""
+        left_b = os.fsencode(left)
+        right_b = os.fsencode(right)
+        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            if renameat2 is not None:
+                if renameat2(dir_fd, left_b, dir_fd, right_b,
+                             RENAME_EXCHANGE) == 0:
+                    return True
+            hold = right + ".hold"
+            try:
+                os.rename(left, hold, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                os.rename(right, left, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                os.rename(hold, right, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                return True
+            except OSError:
+                for src, dst in ((hold, left), (left, right), (right, hold)):
+                    try:
+                        os.rename(src, dst, src_dir_fd=dir_fd,
+                                  dst_dir_fd=dir_fd)
+                    except OSError:
+                        pass
+                return False
+        finally:
+            os.close(dir_fd)
+
+    # Probe rename support once in a throwaway tree.
+    with tempfile.TemporaryDirectory(prefix="pathname-race-probe-") as probe:
+        probe_path = Path(probe)
+        (probe_path / "a").write_bytes(b"a")
+        (probe_path / "b").write_bytes(b"b")
+        if not exchange_names(str(probe_path), "a", "b"):
+            print("pathname race: NOT RUN -- rename exchange unavailable")
+            return 2
+        # Confirm the probe actually swapped (not a no-op).
+        if ((probe_path / "a").read_bytes() != b"b" or
+                (probe_path / "b").read_bytes() != b"a"):
+            print("pathname race: NOT RUN -- rename exchange is a no-op")
+            return 2
+
+    VICTIM = b"VICTIM_UNCHANGED\n"
+    ESCAPE_LEAF = b"ESCAPE_THROUGH_LEAF\n"
+    ESCAPE_NEST = b"ESCAPE_THROUGH_NEST\n"
+    ESCAPE_DEEP = b"ESCAPE_THROUGH_DEEP\n"
+
+    def ustar_header(name, size, typeflag=b"0", linkname=b"", mode=0o644):
+        block = bytearray(512)
+
+        def put(off, width, data):
+            data = data[:width]
+            block[off:off + len(data)] = data
+
+        def octal(off, width, value):
+            put(off, width,
+                ("%0*o" % (width - 1, value)).encode("ascii") + b"\0")
+
+        put(0, 100, name if isinstance(name, bytes) else name.encode())
+        octal(100, 8, mode)
+        octal(108, 8, 0)
+        octal(116, 8, 0)
+        octal(124, 12, size)
+        octal(136, 12, 0)
+        block[156:157] = (typeflag if isinstance(typeflag, bytes)
+                          else bytes([ord(typeflag)]))
+        put(157, 100,
+            linkname if isinstance(linkname, bytes) else linkname.encode())
+        put(257, 6, b"ustar\0")
+        put(263, 2, b"00")
+        put(148, 8, b"        ")
+        put(148, 8, ("%06o" % sum(block)).encode("ascii") + b"\0 ")
+        return bytes(block)
+
+    def padded(payload):
+        return payload + bytes((512 - (len(payload) % 512)) % 512)
+
+    def ustar_archive(members):
+        return b"".join(members) + bytes(1024)
+
+    def member(name, typeflag, data=b"", link=b""):
+        flag = typeflag.encode() if isinstance(typeflag, str) else typeflag
+        return (ustar_header(name, len(data), typeflag=flag, linkname=link) +
+                padded(data))
+
+    def archive_leaf(name):
+        return ustar_archive([member(name, "0", ESCAPE_LEAF)])
+
+    def archive_nested(name):
+        return ustar_archive([
+            member(name + "/", "5"),
+            member(name + "/nested", "0", ESCAPE_NEST),
+        ])
+
+    # Several small members under a raced parent keep extract in the walk
+    # while the scheduler flips the parent form. Keep the count modest so
+    # clearing the directory between exchanges stays cheap.
+    def archive_burst(name, count=16):
+        parts = [member(name + "/", "5")]
+        for i in range(count):
+            parts.append(member("%s/m%02d" % (name, i), "0",
+                                ("burst-%02d\n" % i).encode()))
+        return ustar_archive(parts)
+
+    # Deep tree under the raced parent: dir↔symlink-to-dir swaps must not
+    # let mid-walk creation escape through the swapped component.
+    def archive_deep(name, depth=5):
+        parts = [member(name + "/", "5")]
+        prefix = name
+        for level in range(depth):
+            prefix = "%s/d%d" % (prefix, level)
+            parts.append(member(prefix + "/", "5"))
+        parts.append(member(prefix + "/payload", "0", ESCAPE_DEEP))
+        return ustar_archive(parts)
+
+    def archive_deep_burst(name, depth=4, count=8):
+        parts = [member(name + "/", "5")]
+        prefix = name
+        for level in range(depth):
+            prefix = "%s/l%d" % (prefix, level)
+            parts.append(member(prefix + "/", "5"))
+        for i in range(count):
+            parts.append(member("%s/b%02d" % (prefix, i), "0",
+                                ("deep-burst-%02d\n" % i).encode()))
+        return ustar_archive(parts)
+
+    checks = Checks()
+    # flip/parent: shallow leaf + one-level nest (historical). mid/deep: same
+    # scheduler forms but archives walk several components under the raced
+    # name so symlink-to-dir swaps hit pinned parents mid-extract.
+    contested_names = ("flip", "parent", "mid", "deep")
+
+    with tempfile.TemporaryDirectory(prefix="pathname-race-") as temporary:
+        root = Path(temporary)
+        outside = root / "outside"
+        extract = root / "extract"
+        staging = root / "staging"
+        outside.mkdir()
+        extract.mkdir()
+        staging.mkdir()
+        victim = outside / "victim"
+        victim.write_bytes(VICTIM)
+        # Directory the symlink form points at (escape target for nested/deep).
+        keep = outside / "keep"
+        keep.mkdir()
+        install_source = root / "install-source"
+        install_source.write_bytes(b"install-payload\n")
+
+        # Per contested name: three prepared forms under staging/, live under
+        # extract/. Scheduler exchanges live with the next form in round-robin.
+        # link → outside/keep (directory): dir↔symlink-to-dir is the contested
+        # swap that would let a nested/deep member escape if pins slip.
+        forms = ("file", "dir", "link")
+        for name in contested_names:
+            (staging / (name + ".file")).write_bytes(b"race-file\n")
+            (staging / (name + ".dir")).mkdir()
+            os.symlink(os.path.relpath(keep, extract),
+                       staging / (name + ".link"))
+            os.rename(staging / (name + ".dir"), extract / name)
+            (staging / (name + ".dir")).mkdir()
+
+        stop = threading.Event()
+        exchanges = {name: 0 for name in contested_names}
+        exchange_errors = {name: 0 for name in contested_names}
+        form_index = {name: 0 for name in contested_names}
+        lock = threading.Lock()
+
+        def clear_tree(path):
+            if not path.exists() and not path.is_symlink():
+                return
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+                return
+            for child in list(path.iterdir()):
+                clear_tree(child)
+            try:
+                path.rmdir()
+            except OSError:
+                pass
+
+        def ensure_form(slot_path, kind, link_target):
+            """Make staging slot hold exactly the requested form."""
+            if slot_path.exists() or slot_path.is_symlink():
+                clear_tree(slot_path)
+            if kind == "file":
+                slot_path.write_bytes(b"race-file\n")
+            elif kind == "dir":
+                slot_path.mkdir()
+            else:
+                os.symlink(link_target, slot_path)
+
+        def scheduler(name):
+            link_target = os.path.relpath(keep, extract)
+            live = extract / name
+            while not stop.is_set():
+                nxt = forms[(form_index[name] + 1) % len(forms)]
+                slot = staging / (name + "." + nxt)
+                try:
+                    if not (live.exists() or live.is_symlink()):
+                        # Extract or a failed dance removed the live name;
+                        # re-seed so the cycle can continue.
+                        ensure_form(live, "dir", link_target)
+                    ensure_form(slot, nxt, link_target)
+                    hold = staging / (name + ".hold")
+                    if hold.exists() or hold.is_symlink():
+                        clear_tree(hold)
+                    dir_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        live_rel = os.path.relpath(live, root)
+                        slot_rel = os.path.relpath(slot, root)
+                        hold_rel = os.path.relpath(hold, root)
+                        swapped = False
+                        if renameat2 is not None:
+                            # RENAME_EXCHANGE swaps even a non-empty directory
+                            # with a file/symlink — no need to clear children.
+                            if renameat2(
+                                    dir_fd, os.fsencode(live_rel),
+                                    dir_fd, os.fsencode(slot_rel),
+                                    RENAME_EXCHANGE) == 0:
+                                swapped = True
+                        if not swapped:
+                            # Rename dance needs an empty directory.
+                            if live.is_dir() and not live.is_symlink():
+                                for child in list(live.iterdir()):
+                                    clear_tree(child)
+                            os.rename(live_rel, hold_rel, src_dir_fd=dir_fd,
+                                      dst_dir_fd=dir_fd)
+                            os.rename(slot_rel, live_rel, src_dir_fd=dir_fd,
+                                      dst_dir_fd=dir_fd)
+                            os.rename(hold_rel, slot_rel, src_dir_fd=dir_fd,
+                                      dst_dir_fd=dir_fd)
+                            swapped = True
+                        if swapped:
+                            with lock:
+                                exchanges[name] += 1
+                                form_index[name] = (
+                                    form_index[name] + 1) % len(forms)
+                    finally:
+                        os.close(dir_fd)
+                except OSError:
+                    with lock:
+                        exchange_errors[name] += 1
+                # No vacuous sleep: yield only so extract can make progress.
+                time.sleep(0)
+
+        threads = [threading.Thread(target=scheduler, args=(name,),
+                                    name="race-" + name, daemon=True)
+                   for name in contested_names]
+        for thread in threads:
+            thread.start()
+
+        # Give the scheduler a moment to prove it exchanges before extract.
+        deadline = time.monotonic() + 0.2
+        while time.monotonic() < deadline and sum(exchanges.values()) < 3:
+            time.sleep(0.001)
+
+        archives = root / "archives"
+        archives.mkdir()
+        shapes = []
+        for name in contested_names:
+            for kind, builder in (
+                    ("leaf", archive_leaf),
+                    ("nested", archive_nested),
+                    ("burst", archive_burst),
+                    ("deep", archive_deep),
+                    ("deep_burst", archive_deep_burst)):
+                path = archives / ("%s-%s.tar" % (name, kind))
+                path.write_bytes(builder(name))
+                shapes.append(path)
+
+        def outside_escaped():
+            """True if extract wrote anything outside beyond victim + empty keep."""
+            if not victim.exists() or victim.read_bytes() != VICTIM:
+                return True
+            try:
+                names = {entry.name for entry in outside.iterdir()}
+            except OSError:
+                return True
+            if names - {"victim", "keep"}:
+                return True
+            try:
+                if any(keep.iterdir()):
+                    return True
+            except OSError:
+                return True
+            return False
+
+        def farm_applet(binary, label, applet):
+            native = Path(binary).parent / applet
+            if Path(binary).name == applet:
+                return str(Path(binary).resolve())
+            if native.is_file():
+                return str(native.resolve())
+            farm = root / ("bin-" + label)
+            farm.mkdir(exist_ok=True)
+            link = farm / applet
+            if not link.exists():
+                link.symlink_to(binary)
+            return str(link)
+
+        extract_results = []
+        exclusive_ok = True
+        exclusive_detail = ""
+        private_edit_ok = True
+        private_edit_detail = ""
+        noclobber_ok = True
+        noclobber_detail = ""
+        install_ok = True
+        install_detail = ""
+        started = time.monotonic()
+        round_at = 0
+        # Syscall probes are cheap; subprocess probes stay modest on lane
+        # smoke and grow with an explicit longer stress budget.
+        probe_iters = max(40, min(400, opts.rounds // 2))
+        sub_iters = max(12, min(120, int(opts.seconds * 6) + opts.rounds // 20))
+
+        for label, binary in binaries:
+            tar = [farm_applet(binary, label, "tar")]
+            shell = farm_applet(binary, label, "sh")
+            install = farm_applet(binary, label, "install")
+
+            while (round_at < opts.rounds or
+                   time.monotonic() - started < opts.seconds):
+                archive = shapes[round_at % len(shapes)]
+                # Keep the extract root; the scheduler owns contested names.
+                # Escape detection is effect-based on outside/, not on a
+                # pristine tree.
+                ran = subprocess.run(
+                    tar + ["-xf", str(archive), "-C", str(extract)],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    timeout=30)
+                extract_results.append(ran.returncode)
+                round_at += 1
+                if outside_escaped():
+                    break
+
+            # O_EXCL|O_NOFOLLOW on a contested leaf must not follow a symlink
+            # swap through to the outside victim / keep tree.
+            for _ in range(probe_iters):
+                for name in contested_names:
+                    path = extract / name
+                    try:
+                        fd = os.open(path, os.O_WRONLY | os.O_CREAT |
+                                     os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                        os.write(fd, b"exclusive\n")
+                        os.close(fd)
+                    except OSError:
+                        pass
+                if outside_escaped():
+                    exclusive_ok = False
+                    exclusive_detail = "escape during O_EXCL leaf probe"
+                    break
+
+            # Private-edit style (fc history_edit): open contested name as a
+            # directory with O_NOFOLLOW|O_DIRECTORY, then exclusive-create a
+            # leaf inside via dirfd. A dir→symlink-to-dir swap must not let
+            # the create land under outside/keep.
+            for _ in range(probe_iters):
+                for name in contested_names:
+                    dfd = -1
+                    fd = -1
+                    try:
+                        dfd = os.open(extract / name,
+                                      os.O_RDONLY | os.O_DIRECTORY |
+                                      os.O_NOFOLLOW)
+                        fd = os.open("commands",
+                                     os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                                     os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+                        os.write(fd, b"private-edit\n")
+                    except OSError:
+                        pass
+                    finally:
+                        if fd >= 0:
+                            os.close(fd)
+                        if dfd >= 0:
+                            os.close(dfd)
+                if outside_escaped():
+                    private_edit_ok = False
+                    private_edit_detail = (
+                        "escape during private-edit dirfd+O_EXCL probe")
+                    break
+
+            # Shell noclobber (set -C) exclusive create onto contested names —
+            # moonwater's O_EXCL redirect path under the same scheduler.
+            for _ in range(sub_iters):
+                for name in contested_names:
+                    target = extract / name
+                    try:
+                        # argv after -c is $0/$1; noclobber create onto target.
+                        subprocess.run(
+                            [shell, "-c",
+                             "set -C; printf noclobber > \"$1\"",
+                             "pathname-race", str(target)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            timeout=5)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                if outside_escaped():
+                    noclobber_ok = False
+                    noclobber_detail = "escape during shell noclobber probe"
+                    break
+
+            # install -D through a raced parent: secure creation must refuse
+            # symlink parents; effect check is outside/keep stays clean.
+            for _ in range(sub_iters):
+                for name in contested_names:
+                    dest = extract / name / "installed"
+                    try:
+                        subprocess.run(
+                            [install, "-D", str(install_source), str(dest)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            timeout=5)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                if outside_escaped():
+                    install_ok = False
+                    install_detail = "escape during install -D probe"
+                    break
+
+        stop.set()
+        for thread in threads:
+            thread.join(timeout=2.0)
+
+        total_exchanges = sum(exchanges.values())
+        elapsed = time.monotonic() - started
+        print("pathname race: %d exchanges across %s in %d extract rounds "
+              "(%.2fs, errors=%s, shapes=%d)" %
+              (total_exchanges, exchanges, round_at, elapsed,
+               exchange_errors, len(shapes)))
+
+        # Floor stays fixed so longer env budgets tighten wall time / rounds
+        # without weakening the continuity proof required of a short smoke.
+        min_total = 30
+        min_each = 5
+        checks(total_exchanges >= min_total,
+               "scheduler exchanged forms continuously "
+               "(%d exchanges)" % total_exchanges)
+        for name in contested_names:
+            checks(exchanges[name] >= min_each,
+                   "pathname %r exchanged through file/dir/symlink "
+                   "(%d)" % (name, exchanges[name]))
+
+        victim_bytes = victim.read_bytes() if victim.exists() else b""
+        keep_entries = []
+        try:
+            keep_entries = sorted(p.name for p in keep.iterdir())
+        except OSError as error:
+            keep_entries = ["<unreadable:%s>" % error]
+        outside_extra = sorted(
+            p.name for p in outside.iterdir()
+            if p.name not in ("victim", "keep"))
+
+        checks(victim_bytes == VICTIM,
+               "outside victim unchanged under leaf/nested/deep race "
+               "(now=%r)" % victim_bytes[:40])
+        checks(not keep_entries,
+               "symlink-to-dir keep/ stays empty under dir↔link swaps "
+               "(found=%r)" % keep_entries)
+        checks(not outside_extra,
+               "no escape entries beside victim/keep outside extract "
+               "(found=%r)" % outside_extra)
+        checks(ESCAPE_LEAF not in victim_bytes and
+               ESCAPE_NEST not in victim_bytes and
+               ESCAPE_DEEP not in victim_bytes,
+               "escape payloads never reached the outside victim")
+        checks(round_at >= opts.rounds or elapsed >= opts.seconds,
+               "subject extract ran under the scheduler "
+               "(%d rounds, %.2fs)" % (round_at, elapsed))
+        checks(len(extract_results) > 0 and
+               all(isinstance(code, int) for code in extract_results),
+               "every extract completed without hang/timeout")
+        checks(exclusive_ok and victim_bytes == VICTIM and not keep_entries,
+               "O_EXCL|O_NOFOLLOW exclusive create does not follow "
+               "symlink swaps" +
+               ((": " + exclusive_detail) if exclusive_detail else ""))
+        checks(private_edit_ok and victim_bytes == VICTIM and not keep_entries,
+               "private-edit dirfd+O_EXCL|O_NOFOLLOW create does not "
+               "follow dir↔symlink-to-dir swaps" +
+               ((": " + private_edit_detail) if private_edit_detail else ""))
+        checks(noclobber_ok and victim_bytes == VICTIM and not keep_entries,
+               "shell noclobber (set -C) exclusive create does not "
+               "follow symlink swaps" +
+               ((": " + noclobber_detail) if noclobber_detail else ""))
+        checks(install_ok and victim_bytes == VICTIM and not keep_entries,
+               "install -D through raced parent does not escape to "
+               "outside keep/" +
+               ((": " + install_detail) if install_detail else ""))
+
+    return checks.verdict("pathname race", "pathname-race")
+
 
 
 def harness_machine_scan(argv):
@@ -37923,13 +49486,19 @@ say(status != 0 and b"not a usable link key" in err,
 status, _, err = on("b", "%s link pair me %s" % (moon, keys["b"]))
 say(status != 0, "a machine will not pair its own key")
 
-server = subprocess.Popen(argv_on("b", moon + " link serve"), stdin=subprocess.DEVNULL,
+#       Descriptor 7 open in the server stands for anything a hand-started
+#       `link serve` inherited; no remote command may see it.
+server = subprocess.Popen(argv_on("b", moon + " link serve 7</etc/hostname"), stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
 time.sleep(0.5)
 
 def runs(tag):
     status, out, err = on("a", moon + " link run b 'echo hello; echo there'")
     say(status == 0 and out == b"hello\nthere\n", tag + "run carries output and status 0 (%r %r)" % (status, out[:80]))
+    status, out, err = on("a", moon + " link run b 'ls /proc/self/fd'")
+    fds = [int(x) for x in out.split() if x.isdigit()]
+    say(status == 0 and fds and max(fds) <= 3,
+        tag + "a remote command holds only its own descriptors (%r)" % (fds,))
     status, out, err = on("a", moon + " link run b 'echo to-error >&2; exit 7'")
     say(status == 7 and err.endswith(b"to-error\n") and out == b"", tag + "standard error and status 7 (%r)" % (status,))
     status, out, err = on("a", moon + " link run b 'kill -9 $$'")
@@ -38011,6 +49580,19 @@ spent = spent[2] + spent[3]
 say(status == 0 and out == b"slept\n" and spent < 0.5,
     "a client whose input is at its end sleeps while the command runs "
     "(%.2f s of CPU over 2 s)" % spent)
+
+#       A reader that stops just before the end, behind a standard output
+#       that says "not now" rather than blocking: the last of the output and
+#       the exit are held here while the far command is long done. The
+#       listener must not take held for taken and close the link on them.
+nonblocking = ("python3 -c 'import fcntl, os, sys; "
+               "fcntl.fcntl(1, fcntl.F_SETFL, fcntl.fcntl(1, fcntl.F_GETFL) | os.O_NONBLOCK); "
+               "os.execv(sys.argv[1], sys.argv[1:])' ")
+status, out, err = on("a", nonblocking + moon + " link run b 'seq 1 400000' | "
+                      "(head -c 2600000 > /dev/null; sleep 3; wc -c)", timeout=120)
+say(status == 0 and out.strip() == b"88895" and b"closed" not in err,
+    "sec: output held for a slow reader is not dropped when the command ends "
+    "(%r %r)" % (out.strip(), err[-80:]))
 
 status, out, err = on("a", moon + " link run b 'for i in $(seq 1 25); do echo line $i; sleep 0.2; done'",
                       extra={"WATERLINK_REKEY_SECONDS": "1"}, timeout=60)
@@ -39279,7 +50861,7 @@ def harness_waterlink_mdns(argv):
     return checks.verdict("waterlink mdns:", "waterlink-mdns")
 
 
-def harness_waterlink_sanitized(argv):
+def harness_waterlink_sanitized(argv, lift=False):
     """waterlink's parsers and link core, hosted under ASan and UBSan.
 
     The in-tree checks compile freestanding with -fno-stack-protector, so a
@@ -39713,6 +51295,41 @@ static void crypto_aesgcm_prepare(crypto_aesgcm_key *key, const p8 *raw)
 {
         memset(key, 0, sizeof *key);
         memcpy(key->round, raw, 16);
+}
+/*      The cookie box's AEAD, standing in: a keyed stream and a tag over the
+        key, nonce, associated data and cipher text. */
+static void wl_aead_tag(crypto_aesgcm_key *key, const p8 *iv, const p8 *ad,
+                        positive ads, const p8 *text, positive size, p8 *tag)
+{
+        crypto_sha256 hash;
+        p8 full[32];
+
+        crypto_sha256_open(&hash);
+        crypto_sha256_write(&hash, key->round, 16);
+        crypto_sha256_write(&hash, iv, 12);
+        crypto_sha256_write(&hash, ad, ads);
+        crypto_sha256_write(&hash, text, size);
+        crypto_sha256_close(&hash, full);
+        memcpy(tag, full, 16);
+}
+static void crypto_aesgcm_seal(crypto_aesgcm_key *key, const p8 *iv, const p8 *ad,
+                               positive ads, p8 *text, positive size, p8 *tag)
+{
+        for (positive at = 0; at < size; at++)
+                text[at] ^= key->round[at % 16] ^ iv[at % 12] ^ (p8)at;
+        wl_aead_tag(key, iv, ad, ads, text, size, tag);
+}
+static bool crypto_aesgcm_open(crypto_aesgcm_key *key, const p8 *iv, const p8 *ad,
+                               positive ads, p8 *text, positive size, const p8 *tag)
+{
+        p8 want[16];
+
+        wl_aead_tag(key, iv, ad, ads, text, size, want);
+        if (memcmp(want, tag, 16))
+                return false;
+        for (positive at = 0; at < size; at++)
+                text[at] ^= key->round[at % 16] ^ iv[at % 12] ^ (p8)at;
+        return true;
 }
 '''
     ASM_MACROS = r'''
@@ -40364,7 +51981,9 @@ static bool ref_gate(struct waterlink_identity *me, const p8 *datagram, positive
                 body = WATERLINK_RESPOND_BYTES;
         else
                 return false;
-        for (positive at = 16 + body; at < length; at++)
+        //      An initiation's mac2 follows its mac1, and the padding it.
+        for (positive at = 16 + body + (kind == WATERLINK_KIND_INITIATE ? 16 : 0);
+             at < length; at++)
                 if (datagram[at])
                         return false;
         waterlink_mac1(me->gate, (p8 *)datagram, 16 + body - 16, mac);
@@ -40450,14 +52069,44 @@ int main(int argc, char **argv)
         struct waterlink_admission table;
         memset(&table, 0, sizeof table);
         unsigned long admit_bad = 0;
+        p8 *initiation = malloc(WATERLINK_DATAGRAM);
+        memset(initiation, 0, WATERLINK_DATAGRAM);
         {
                 p8 fresh[16];
                 for (int i = 0; i < 16; i++) fresh[i] = (p8)draw(256);
                 int ok = 0;
                 for (int i = 0; i < WATERLINK_ADMIT_BURST; i++)
-                        ok += waterlink_admit(&table, fresh, 1000);
+                        ok += waterlink_admit(&table, initiation, fresh, 7, 1000) == 1;
                 if (ok != WATERLINK_ADMIT_BURST) admit_bad++;
-                if (waterlink_admit(&table, fresh, 1000)) admit_bad++; // dry now
+                if (waterlink_admit(&table, initiation, fresh, 7, 1000)) admit_bad++; // dry now
+        }
+        /*      Under load: with no secret nothing, with one a cookie for an
+                initiation without mac2, and the curve's buckets untouched;
+                with its mac2, the buckets decide again. */
+        {
+                p8 place[16] = {1};
+                p8 cookie[16];
+                struct waterlink_bucket all;
+
+                memset(&table, 0, sizeof table);
+                for (int i = 0; i < WATERLINK_ADMIT_LOADED; i++)
+                {
+                        place[15] = (p8)i;
+                        (void)waterlink_admit(&table, initiation, place, 9, 5000);
+                }
+                all = table.all;
+                if (waterlink_admit(&table, initiation, place, 9, 5000) != 0) admit_bad++;
+                for (int i = 0; i < 32; i++) table.secret[i] = (p8)draw(256);
+                table.secret_made = 4000;
+                if (waterlink_admit(&table, initiation, place, 9, 5000) != -1) admit_bad++;
+                if (memcmp(&all, &table.all, sizeof all)) admit_bad++;
+                waterlink_cookie_of(&table, place, 9, cookie);
+                waterlink_mac2(cookie, initiation);
+                if (waterlink_admit(&table, initiation, place, 9, 5000) != 1) admit_bad++;
+                if (waterlink_admit(&table, initiation, place, 10, 5000) != -1) admit_bad++;
+                table.secret_made = 5000 - (p64)WATERLINK_COOKIE_SECONDS * 1000000;
+                if (waterlink_admit(&table, initiation, place, 9, 5000) != 0) admit_bad++;
+                memset(initiation, 0, WATERLINK_DATAGRAM);
         }
         for (long n = 0; n < 200000; n++)
         {
@@ -40466,8 +52115,14 @@ int main(int argc, char **argv)
 
                 for (int i = 0; i < 16; i++)
                         address[i] = draw(3) ? (p8)draw(4) : (p8)draw(256);
-                (void)waterlink_admit(&table, address, now);
+                if (!draw(64))
+                {
+                        table.secret_made = now ? now - draw(2) * 130000000ull : 0;
+                        initiation[16 + WATERLINK_INITIATE_BYTES + draw(16)] = (p8)draw(256);
+                }
+                (void)waterlink_admit(&table, initiation, address, (p16)draw(65536), now);
         }
+        free(initiation);
 
         printf("gate: %ld cases, %lu passed, %lu model failures; admit %lu failures\n",
                count, passed, model_bad, admit_bad);
@@ -40550,7 +52205,10 @@ static bool sink_hear(address_any context, struct waterlink_frame *head, p8 *pay
         free chain plus what the keys hold is every held entry; the flight is
         a doubly linked list with no cycle. A corruption of any list shows
         here before it is a wild read. */
-static bool invariants(struct waterlink_link *link, const char *where)
+#ifndef WL_QUIET
+#define WL_QUIET
+#endif
+static WL_QUIET bool invariants(struct waterlink_link *link, const char *where)
 {
         p32 seen = 0;
         p32 at = link->free;
@@ -40612,7 +52270,9 @@ static bool invariants(struct waterlink_link *link, const char *where)
         return true;
 }
 
-#ifdef WL_FUZZER
+#if defined(WL_STATE)
+/*      waterlink_fuzz's driver follows and brings its own entry. */
+#elif defined(WL_FUZZER)
 /*      libFuzzer's entry: coverage-guided over the same two readings, with a
         guard page behind the body, and the input delivered into a link.
         Deterministic under a fixed -seed; statics are reset each call. */
@@ -40837,6 +52497,7 @@ int main(int argc, char **argv)
 
     mdns_source = "\n".join([
         SHIM, wl,
+        sec(net, "//      A wire name is at most 255 bytes", "\n#define DNS_OK 0"),
         sec(net, "static COLD bipolar dns_copy_name(",
             "//      Where a name ends, for a caller"),
         sec(disc, "#define WATERLINK_MDNS_PORT 5353", "struct waterlink_group_keys {"),
@@ -40897,7 +52558,7 @@ static void *memory_copy_apart(void *into, const void *from, positive size)
 }
 '''
 
-    def core_source(with_asm, fuzzer):
+    def core_source(with_asm, fuzzer, extra=""):
         parts = [SHIM, wl, vli, ASM_CALLEES,
                  "#define X64 %d\n#define ARM64 0\n#define RISCV64 0\n"
                  % (1 if with_asm else 0) + ASM_MACROS, core_text]
@@ -40911,8 +52572,11 @@ static void *memory_copy_apart(void *into, const void *from, positive size)
             parts.append(FILL_MODEL)
         if not with_asm and not apply_c:
             parts.append(APPLY_MODEL)
-        parts.append(driver)
+        parts += [driver, extra]
         return "\n".join(parts)
+
+    if lift:
+        return core_source, SHIM
 
     is_elf_x86 = (platform.system() != "Darwin" and
                   platform.machine() in ("x86_64", "amd64"))
@@ -41031,6 +52695,1880 @@ static void *memory_copy_apart(void *into, const void *from, positive size)
     return checks_run.verdict("waterlink sanitized:", "waterlink-sanitized")
 
 
+def waterlink_pre_source():
+    """The pre-authentication half of the listener as one hosted C unit.
+
+    Everything a stranger on the network reaches before a key is proved:
+    discover.c and handshake.c whole, nearby.c's greeting and answering,
+    and service.c's receive loop (recvmmsg and its UDP_GRO runs), dispatch,
+    initiation, carried-datagram checks, the stamp table and the client's
+    answer -- sliced from the tree by their source text, so what is fuzzed
+    is what ships. The system calls, the peers file and the cryptography
+    stand in: X25519 is multiplication mod 2^64 (so it commutes and a real
+    handshake completes), AES-GCM and the seal are a keyed mix with a tag,
+    and the seal.c/link.c datapath past the tag is a counting stub (the
+    core is waterlink_sanitized's)."""
+    root = HARNESS_ROOT
+
+    def read(path):
+        return (root / path).read_text()
+
+    def sec(text, first, following):
+        i = text.index(first)
+        return text[i:text.index(following, i)]
+
+    wl = sec(read("src/waterlink/waterlink.c"), "#ifndef WATERLINK_INCLUDED",
+             "#endif // WATERLINK_INCLUDED") + "\n#endif\n"
+    link = read("src/waterlink/link.c")
+    net = read("src/net/net.c")
+    hs = read("src/waterlink/handshake.c")
+    disc = read("src/waterlink/discover.c")
+    near = read("src/waterlink/nearby.c")
+    svc = read("src/waterlink/service.c")
+
+    SHIM = r'''#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+typedef uint8_t p8;
+typedef uint16_t p16;
+typedef uint32_t p32;
+typedef unsigned long long p64;
+typedef int16_t b16;
+typedef int32_t b32;
+typedef long long b64;
+typedef p64 positive;
+typedef b64 bipolar;
+typedef p8 *string_address;
+#define address_to *
+#define address_of &
+#define address_any void *
+#define null ((void *)0)
+#define fn void
+#define COLD
+#define HOT
+#define PURE
+#define CONST
+#define KEEP
+#define array_count(a) (sizeof(a) / sizeof((a)[0]))
+#define EPERM 1
+#define ENOENT 2
+#define EIO 5
+#define EAGAIN 11
+#define ENOMEM 12
+#define ERROR_EXISTS 17
+#define EADDRINUSE 98
+#define AF_INET 2
+#define AF_INET6 10
+#define SOL_SOCKET 1
+#define MSG_DONTWAIT 0x40
+#define MSG_NOSIGNAL 0x4000
+#define HOST_STATE "/run/moonwater"
+#define DNS_MALFORMED (-3)
+#define DIGEST_SHA256 3
+typedef struct { p16 family; p16 port; p32 host; p8 padding[8]; } socket_address_internet;
+typedef struct { p16 family; p16 port; p32 flow; p8 host[16]; p32 scope; } socket_address_internet6;
+
+static void *memory_copy(void *into, const void *from, positive size)
+{
+        if (size)
+                memcpy(into, from, size);
+        return into;
+}
+#define memory_copy_apart memory_copy
+static void memory_zero(void *into, positive size) { if (size) memset(into, 0, size); }
+static b32 memory_compare(const void *a, const void *b, positive size)
+{
+        return size ? memcmp(a, b, size) : 0;
+}
+static positive memory_span_byte(const void *block, p8 value, positive size)
+{
+        const p8 *bytes = block;
+        positive at = 0;
+
+        while (at < size && bytes[at] == value)
+                at++;
+        return at;
+}
+static b32 memory_compare_ascii_case(const void *one, const void *two, positive size)
+{
+        const p8 *a = one, *b = two;
+
+        for (positive at = 0; at < size; at++)
+        {
+                p8 x = a[at] >= 'A' && a[at] <= 'Z' ? a[at] + 32 : a[at];
+                p8 y = b[at] >= 'A' && b[at] <= 'Z' ? b[at] + 32 : b[at];
+
+                if (x != y)
+                        return x < y ? -1 : 1;
+        }
+        return 0;
+}
+static positive memory_into_hex(void *into, const void *from, positive size)
+{
+        static const char digits[] = "0123456789abcdef";
+        p8 *out = into;
+        const p8 *in = from;
+
+        for (positive at = 0; at < size; at++)
+        {
+                out[2 * at] = digits[in[at] >> 4];
+                out[2 * at + 1] = digits[in[at] & 15];
+        }
+        return 2 * size;
+}
+static positive string_length(const void *text) { return strlen(text); }
+static void *string_copy(void *into, const void *from) { return strcpy(into, from); }
+static bool string_equals(const void *a, const void *b) { return !strcmp(a, b); }
+static b32 byte_is_alnum(b32 c)
+{
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+static bool crypto_same(const void *one, const void *two, positive size)
+{
+        const p8 *a = one, *b = two;
+        p8 differ = 0;
+
+        for (positive at = 0; at < size; at++)
+                differ |= a[at] ^ b[at];
+        return !differ;
+}
+static void crypto_forget(void *into, positive size) { memory_zero(into, size); }
+static void network_store_16(p8 *at, p16 v) { at[0] = v >> 8; at[1] = (p8)v; }
+static void network_store_32(p8 *at, p32 v)
+{
+        at[0] = v >> 24; at[1] = v >> 16; at[2] = v >> 8; at[3] = (p8)v;
+}
+static p16 network_load_16(const p8 *at) { return (p16)(at[0] << 8 | at[1]); }
+static p32 network_load_32(const p8 *at)
+{
+        return (p32)at[0] << 24 | (p32)at[1] << 16 | (p32)at[2] << 8 | at[3];
+}
+static void crypto_put_be64(p8 *at, p64 v)
+{
+        for (int i = 0; i < 8; i++)
+                at[i] = (p8)(v >> (56 - 8 * i));
+}
+#define network_order_16(v) ((p16)((((p16)(v)) >> 8) | (((p16)(v)) << 8)))
+#define network_order_32(v) __builtin_bswap32((p32)(v))
+
+/*      The cryptography, standing in: a keyed mix for the hashes and the
+        MACs, and X25519 as multiplication of the scalar's low word by the
+        point's, mod 2^64 -- it commutes, so both ends of a handshake reach
+        the same secret and the code behind every tag is reachable. */
+typedef struct { p64 lane[4]; p64 length; } crypto_sha256;
+static p64 wl_mix(p64 x)
+{
+        x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ull;
+        x ^= x >> 27; x *= 0x94d049bb133111ebull;
+        return x ^ (x >> 31);
+}
+static void crypto_sha256_open(crypto_sha256 *h)
+{
+        for (int i = 0; i < 4; i++)
+                h->lane[i] = 0x6a09e667f3bcc908ull * (i + 1);
+        h->length = 0;
+}
+static void crypto_sha256_write(crypto_sha256 *h, const void *data, positive size)
+{
+        const p8 *bytes = data;
+
+        for (positive at = 0; at < size; at++, h->length++)
+                h->lane[h->length & 3] =
+                        wl_mix(h->lane[h->length & 3] ^ bytes[at] ^ h->length << 8);
+}
+static void crypto_sha256_close(crypto_sha256 *h, p8 *out)
+{
+        //      Every word of the digest depends on every lane: a digest cut
+        //      to sixteen bytes, as the MACs and keys are, still sees every
+        //      byte written.
+        p64 all = wl_mix(h->lane[0] ^ wl_mix(h->lane[1] ^ wl_mix(h->lane[2] ^
+                                                                 wl_mix(h->lane[3]))));
+
+        for (int i = 0; i < 4; i++)
+        {
+                p64 word = wl_mix(h->lane[i] ^ all ^ h->length ^ (p64)i << 56);
+
+                memcpy(out + 8 * i, &word, 8);
+        }
+}
+static void crypto_sha256_of(const void *data, positive size, p8 *out)
+{
+        crypto_sha256 h;
+
+        crypto_sha256_open(&h);
+        crypto_sha256_write(&h, data, size);
+        crypto_sha256_close(&h, out);
+}
+static void crypto_hmac_sha256(const p8 *key, positive key_size, const void *message,
+                               positive size, p8 *out)
+{
+        crypto_sha256 h;
+
+        crypto_sha256_open(&h);
+        crypto_sha256_write(&h, key, key_size);
+        crypto_sha256_write(&h, "\x36", 1);
+        crypto_sha256_write(&h, message, size);
+        crypto_sha256_close(&h, out);
+}
+static void crypto_hkdf_extract(const p8 *salt, positive salt_size, const p8 *ikm,
+                                positive size, p8 *prk)
+{
+        crypto_hmac_sha256(salt, salt_size, ikm, size, prk);
+}
+static void crypto_hkdf_expand(const p8 *prk, const p8 *info, positive info_size,
+                               p8 *out, positive size)
+{
+        p8 block[32];
+        p8 input[64 + 33];
+
+        for (positive at = 0, round = 1; at < size; at += 32, round++)
+        {
+                positive take = size - at < 32 ? size - at : 32;
+
+                memcpy(input, info, info_size);
+                input[info_size] = (p8)round;
+                crypto_hmac_sha256(prk, 32, input, info_size + 1, block);
+                memcpy(out + at, block, take);
+        }
+}
+static void crypto_pbkdf2(positive algorithm, positive size, const p8 *secret,
+                          positive secret_size, const p8 *salt, positive salt_size,
+                          positive rounds, p8 *out, positive out_size)
+{
+        crypto_sha256 h;
+        p8 block[32];
+
+        (void)algorithm; (void)size; (void)rounds;
+        crypto_sha256_open(&h);
+        crypto_sha256_write(&h, secret, secret_size);
+        crypto_sha256_write(&h, salt, salt_size);
+        crypto_sha256_close(&h, block);
+        memcpy(out, block, out_size < 32 ? out_size : 32);
+}
+static unsigned long wl_curves;
+static bool crypto_x25519(p8 *out, const p8 *scalar, const p8 *point)
+{
+        p64 s, u, product;
+
+        wl_curves++;
+        memcpy(&s, scalar, 8);
+        memcpy(&u, point, 8);
+        product = (s | 1) * u;
+        memset(out, 0, 32);
+        memcpy(out, &product, 8);
+        return product != 0;
+}
+typedef struct { p8 raw[16]; } crypto_aesgcm_key;
+static void crypto_aesgcm_prepare(crypto_aesgcm_key *key, const p8 *raw)
+{
+        memcpy(key->raw, raw, 16);
+}
+static void wl_stream(const crypto_aesgcm_key *key, const p8 *iv, positive ivs,
+                      p8 *text, positive size)
+{
+        p64 state = 0x9e3779b97f4a7c15ull;
+
+        for (positive i = 0; i < 16; i++)
+                state = wl_mix(state ^ key->raw[i] ^ i << 8);
+        for (positive i = 0; i < ivs; i++)
+                state = wl_mix(state ^ iv[i] ^ i << 12);
+        for (positive at = 0; at < size; at++)
+                text[at] ^= (p8)wl_mix(state ^ at);
+}
+static void wl_tag(const crypto_aesgcm_key *key, const p8 *iv, positive ivs,
+                   const p8 *ad, positive ads, const p8 *text, positive size,
+                   p8 *tag)
+{
+        crypto_sha256 h;
+        p8 full[32];
+
+        crypto_sha256_open(&h);
+        crypto_sha256_write(&h, key->raw, 16);
+        crypto_sha256_write(&h, iv, ivs);
+        crypto_sha256_write(&h, ad, ads);
+        crypto_sha256_write(&h, text, size);
+        crypto_sha256_close(&h, full);
+        memcpy(tag, full, 16);
+}
+static void crypto_aesgcm_seal(crypto_aesgcm_key *key, const p8 *iv, const p8 *ad,
+                               positive ads, p8 *text, positive size, p8 *tag)
+{
+        wl_stream(key, iv, 12, text, size);
+        wl_tag(key, iv, 12, ad, ads, text, size, tag);
+}
+static bool crypto_aesgcm_open(crypto_aesgcm_key *key, const p8 *iv, const p8 *ad,
+                               positive ads, p8 *text, positive size, const p8 *tag)
+{
+        p8 want[16];
+
+        wl_tag(key, iv, 12, ad, ads, text, size, want);
+        if (!crypto_same(want, tag, 16))
+                return false;
+        wl_stream(key, iv, 12, text, size);
+        return true;
+}
+
+/*      The machine around it: a clock the driver moves, entropy it can cut
+        off, and system calls answered from what the driver queued. */
+static p64 wl_clock = 1000000000ull;
+static p64 wl_wall = 1700000000000000000ull;
+static bool wl_entropy_down;
+static p64 wl_random_state = 1;
+static p64 system_clock_ns(int which) { return which ? wl_clock : wl_wall + wl_clock; }
+static bipolar system_random_fill(void *into, positive size, positive flags)
+{
+        (void)flags;
+        if (wl_entropy_down)
+                return -EIO;
+        for (positive at = 0; at < size; at++)
+                ((p8 *)into)[at] = (p8)(wl_random_state = wl_mix(wl_random_state + at));
+        return (bipolar)size;
+}
+enum { WL_SYSCALL_mmap = 1, WL_SYSCALL_recvmmsg, WL_SYSCALL_recvmsg };
+#define syscall(name) WL_SYSCALL_##name
+static bipolar wl_system(positive n, positive a, positive b, positive c, positive d,
+                         positive e, positive f);
+#define system_call_3(n, a, b, c) wl_system(n, (positive)(a), (positive)(b), (positive)(c), 0, 0, 0)
+#define system_call_5(n, a, b, c, d, e) wl_system(n, (positive)(a), (positive)(b), (positive)(c), (positive)(d), (positive)(e), 0)
+#define system_call_6(n, a, b, c, d, e, f) wl_system(n, (positive)(a), (positive)(b), (positive)(c), (positive)(d), (positive)(e), (positive)(f))
+static bipolar socket_send(b32 socket, const void *bytes, positive size, b32 flags,
+                           const void *to, positive to_size);
+static bipolar socket_option_set(b32 s, b32 l, b32 o, const void *v, positive n)
+{
+        (void)s; (void)l; (void)o; (void)v; (void)n;
+        return 0;
+}
+static fn system_close(bipolar handle) { (void)handle; }
+'''
+
+    LINK_STUBS = r'''
+/*      Past the tag is the core's (waterlink_sanitized fuzzes it): a
+        counting stand-in here, with a body whose first byte is 0xff judged
+        malformed, so link_carried's refusal after a good tag is reachable. */
+static unsigned long wl_applied;
+fn waterlink_link_reset(struct waterlink_link *link) { memset(link, 0, sizeof *link); }
+p64 waterlink_wake(struct waterlink_link *link, p64 now) { (void)link; return now + 1000000; }
+bipolar waterlink_judge(address_any body, positive length, struct waterlink_part *parts)
+{
+        (void)parts;
+        return length && ((p8 *)body)[0] == 0xff ? -1 : 0;
+}
+fn waterlink_apply(struct waterlink_link *link, address_any body,
+                   struct waterlink_part *parts, positive count, p64 now,
+                   waterlink_sink sink, address_any context)
+{
+        (void)link; (void)body; (void)parts; (void)count; (void)now; (void)sink;
+        (void)context;
+        wl_applied++;
+}
+static positive waterlink_box(positive used)
+{
+        positive box = (used + 15) & ~15ull;
+
+        return box ? box : 16;
+}
+positive waterlink_seal(crypto_aesgcm_key *key, p8 *datagram, positive used)
+{
+        positive box;
+
+        if (used > WATERLINK_PAYLOAD)
+                return 0;
+        box = waterlink_box(used);
+        memset(datagram + 16 + used, 0, box - used);
+        wl_stream(key, datagram + 8, 8, datagram + 16, box);
+        wl_tag(key, datagram + 8, 8, datagram, 16, datagram + 16, box,
+               datagram + 16 + box);
+        return 16 + box + 16;
+}
+bool waterlink_open(crypto_aesgcm_key *key, p8 *datagram, positive length)
+{
+        p8 want[16];
+
+        if (length < 48 || length > WATERLINK_DATAGRAM || length % 16)
+                return false;
+        wl_tag(key, datagram + 8, 8, datagram, 16, datagram + 16, length - 32, want);
+        if (!crypto_same(want, datagram + length - 16, 16))
+                return false;
+        wl_stream(key, datagram + 8, 8, datagram + 16, length - 32);
+        return true;
+}
+'''
+
+    SERVICE_STUBS = r'''
+/*      The peers file, in memory: what pairing saved is what the next load
+        reads, and the driver can make it unreadable. Every name saved must
+        be one link_name_good takes -- the file is printed to terminals. */
+static link_peers wl_file;
+static bool wl_file_unreadable;
+static unsigned long wl_bad_names;
+static bipolar link_peers_read(link_peers *peers)
+{
+        memset(peers, 0, sizeof *peers);
+        if (wl_file_unreadable)
+                return -EPERM;
+        *peers = wl_file;
+        return 0;
+}
+static fn link_peers_load(link_peers *peers) { (void)link_peers_read(peers); }
+static bool link_peers_for_change(link_peers *peers)
+{
+        bipolar read = link_peers_read(peers);
+
+        return read >= 0 || read == -ENOENT;
+}
+static bipolar link_peers_save(link_peers *peers)
+{
+        for (positive at = 0; at < peers->count; at++)
+                if (!link_name_good((string_address)peers->peer[at].name))
+                        wl_bad_names++;
+        wl_file = *peers;
+        return 0;
+}
+static p16 link_port(void) { return LINK_PORT; }
+'''
+
+    NEARBY_STUBS = r'''
+static bipolar link_peers_lock(void) { return 5; }
+static fn link_peers_unlock(bipolar handle) { (void)handle; }
+'''
+
+    parts = [
+        SHIM, wl,
+        sec(link, "// The largest frame that can share", "fn waterlink_link_reset("),
+        sec(link, "typedef bool (address_to waterlink_sink)",
+            "// Hand one frame to the application"),
+        sec(link, "struct waterlink_part\n{", "/*\n        Judge an authenticated body whole"),
+        sec(link, "#define WATERLINK_REPLAY_BLOCKS", "#endif // WATERLINK_LINK_INCLUDED"),
+        LINK_STUBS,
+        sec(net, "//      A wire name is at most 255 bytes", "\n#define DNS_OK 0"),
+        sec(net, "static COLD bipolar dns_copy_name(",
+            "//      Where a name ends, for a caller"),
+        sec(hs, "#define WATERLINK_PROTOCOL", "#endif // WATERLINK_HANDSHAKE_INCLUDED"),
+        sec(disc, "#define WATERLINK_MDNS_PORT 5353", "#endif // WATERLINK_DISCOVER_INCLUDED"),
+        sec(svc, "#define LINK_PORT 22348", "/*      A grant by name"),
+        sec(svc, "static p64 link_now(void)", "// All digits and nothing else"),
+        sec(svc, "static bool link_name_good(", "/* Everything waterlink keeps"),
+        sec(svc, "typedef struct\n{\n        struct waterlink_peer peer[LINK_PEERS_MAX];",
+            "static bipolar link_peers_read("),
+        sec(svc, "static struct waterlink_peer address_to link_peer_named(",
+            "static p16 link_port(void)"),
+        sec(svc, "static fn link_address_v4(", "static bool link_hex_group("),
+        sec(svc, "static fn link_socket_address(", "// The lock ----"),
+        sec(svc, "// Sessions ----", "static bool link_part_owned("),
+        sec(svc, "static fn link_keys_install(", "// Sending ----"),
+        sec(svc, "static positive link_destination(",
+            "/*\n        A run of full datagrams to one place"),
+        sec(svc, "typedef struct\n{\n        address_any base;", "static fn link_batch_flush(void)"),
+        sec(svc, "// A sealed datagram of nothing", "static bool link_post("),
+        SERVICE_STUBS,
+        sec(near, "#define LINK_GROUPS_PATH", "fn link_groups_load("),
+        NEARBY_STUBS,
+        sec(near, "static fn link_name_for(", "// The listener's side of it"),
+        sec(near, "// The listener's side of it", "typedef struct\n{\n        p32 multiaddr;"),
+        sec(near, "typedef struct\n{\n        p32 multiaddr;",
+            "/*\n        Every interface with an IPv4 address"),
+        sec(near, "static fn link_nearby_send(", "// Goodbye, with TTL zero"),
+        sec(near, "// The same place is greeted once in a while",
+            "/*\n        The listener's turn:"),
+        sec(near, "// Read what is waiting on the mDNS socket",
+            "#endif // WATERLINK_NEARBY_INCLUDED"),
+        "static bool link_hear(address_any context, struct waterlink_frame *head, "
+        "p8 *payload)\n{\n        (void)context; (void)head; (void)payload;\n"
+        "        return true;\n}\n",
+        sec(svc, "// The handshake, at the machine's end", "// The state file, for"),
+        sec(svc, "static fn link_note_seen(struct link_session address_to s, p64 wall)\n{",
+            "//      Never more than once a fifth"),
+        sec(svc, "typedef struct\n{\n        struct waterlink_noise noise;",
+            "/*      The client's terminal goes raw"),
+        sec(svc, "// The initiator's half of the handshake", "static bool link_client_answer("),
+        sec(svc, "static fn link_client_answered(p8 address_to datagram, positive length);",
+            "/*\n        `moonwater link serve`"),
+        sec(svc, "static bool link_client_answer(", "static p64 link_rekey_after(void)"),
+        WATERLINK_PRE_DRIVER,
+    ]
+    return "\n".join(parts)
+
+
+WATERLINK_PRE_DRIVER = r'''
+/*      The driver: one input is a script of what arrives at a listener (or,
+        with the first byte odd, at a client waiting for its answer). Three
+        identities are in play -- two paired, one a stranger -- and one group.
+        After every step the invariants a stranger must not be able to move
+        are asked, and a broken one is an abort, which libFuzzer reports:
+
+          - the session table stays within LINK_SESSIONS, and within
+            LINK_SESSIONS_A_PEER of any one peer, and only a paired key holds
+            one; the stamp table stays within LINK_PEERS_MAX;
+          - a handshake that completes agrees on its keys at both ends;
+          - every name pairing saves is one link_name_good takes;
+          - greetings an mDNS packet provoked number at most LINK_GREETED in
+            any LINK_GREET_AGAIN, and one-shot answers at most one in any
+            LINK_ANSWER_AGAIN: nothing a spoofed packet says makes this an
+            amplifier;
+          - an initiation answered with a cookie reply spent no curve, and a
+            cookie reply is WATERLINK_COOKIE_DATAGRAM bytes, a sixteenth of
+            what provoked it.
+*/
+static const p8 *wl_in;
+static positive wl_left;
+static p8 take8(void) { if (!wl_left) return 0; wl_left--; return *wl_in++; }
+static p16 take16(void) { p16 v = take8(); return (p16)(v << 8 | take8()); }
+static p32 take32(void) { p32 v = take16(); return v << 16 | take16(); }
+static positive take_bytes(p8 *into, positive want)
+{
+        positive n = want < wl_left ? want : wl_left;
+
+        memcpy(into, wl_in, n);
+        wl_in += n;
+        wl_left -= n;
+        return n;
+}
+
+/*      What the system calls hand back: runs queued for recvmmsg, packets
+        for the mDNS socket's recvmsg. */
+struct wl_run { p8 *bytes; positive length; positive segment; p8 address[16]; p16 port; bool v4; };
+static struct wl_run wl_runs[4];
+static positive wl_run_count, wl_run_next;
+static struct wl_run wl_mdns[4];
+static positive wl_mdns_count, wl_mdns_next;
+static b32 wl_mdns_ttl[4];
+static void *wl_mapped[LINK_SESSIONS * 4];
+static positive wl_mapped_count;
+
+static bipolar wl_system(positive n, positive a, positive b, positive c, positive d,
+                         positive e, positive f)
+{
+        (void)a; (void)d; (void)e; (void)f;
+        if (n == WL_SYSCALL_mmap)
+        {
+                void *mapped;
+
+                if (wl_mapped_count == array_count(wl_mapped))
+                        return -ENOMEM;
+                mapped = calloc(1, b);
+                wl_mapped[wl_mapped_count++] = mapped;
+                return mapped ? (bipolar)(intptr_t)mapped : -ENOMEM;
+        }
+        if (n == WL_SYSCALL_recvmmsg)
+        {
+                link_received *got = (link_received *)(intptr_t)b;
+                bipolar count = 0;
+
+                for (; count < (bipolar)c && wl_run_next < wl_run_count; count++)
+                {
+                        struct wl_run *run = wl_runs + wl_run_next++;
+                        link_message *m = &got[count].message;
+                        positive take = run->length < m->parts[0].length
+                                                ? run->length : m->parts[0].length;
+                        p8 *control = m->control;
+
+                        memcpy(m->parts[0].base, run->bytes, take);
+                        got[count].length = (b32)take;
+                        if (run->v4)
+                        {
+                                socket_address_internet *from = m->name;
+
+                                memset(from, 0, sizeof *from);
+                                from->family = AF_INET;
+                                from->port = network_order_16(run->port);
+                                from->host = network_order_32(network_load_32(run->address + 12));
+                        }
+                        else
+                        {
+                                socket_address_internet6 *from = m->name;
+
+                                memset(from, 0, sizeof *from);
+                                from->family = AF_INET6;
+                                from->port = network_order_16(run->port);
+                                memcpy(from->host, run->address, 16);
+                        }
+                        if (run->segment && m->control_length >= 24)
+                        {
+                                p64 length = 20;
+                                b32 level = 17, type = 104, segment = (b32)run->segment;
+
+                                memcpy(control, &length, 8);
+                                memcpy(control + 8, &level, 4);
+                                memcpy(control + 12, &type, 4);
+                                memcpy(control + 16, &segment, 4);
+                                m->control_length = 24;
+                        }
+                        else
+                                m->control_length = 0;
+                }
+                return count ? count : -EAGAIN;
+        }
+        if (n == WL_SYSCALL_recvmsg)
+        {
+                link_message *m = (link_message *)(intptr_t)b;
+                struct wl_run *run;
+                socket_address_internet *from = m->name;
+                p8 *control = m->control;
+                positive take;
+                b32 ttl;
+
+                if (wl_mdns_next == wl_mdns_count)
+                        return -EAGAIN;
+                ttl = wl_mdns_ttl[wl_mdns_next];
+                run = wl_mdns + wl_mdns_next++;
+                take = run->length < m->parts[0].length ? run->length : m->parts[0].length;
+                memcpy(m->parts[0].base, run->bytes, take);
+                memset(from, 0, sizeof *from);
+                from->family = AF_INET;
+                from->port = network_order_16(run->port);
+                from->host = network_order_32(network_load_32(run->address + 12));
+                if (m->control_length >= 24)
+                {
+                        p64 length = 20;
+                        b32 level = 0, type = 2;
+
+                        memcpy(control, &length, 8);
+                        memcpy(control + 8, &level, 4);
+                        memcpy(control + 12, &type, 4);
+                        memcpy(control + 16, &ttl, 4);
+                        m->control_length = 24;
+                }
+                return (bipolar)run->length;
+        }
+        return -38;
+}
+
+/*      Every datagram sent, as the kernel would see it. */
+static int wl_phase; // 0 authenticated work, 1 mDNS heard
+static p64 wl_greeted_at[256];
+static positive wl_greeted_count;
+static p64 wl_answered_at[256];
+static positive wl_answered_count;
+static p8 wl_last_respond[WATERLINK_DATAGRAM];
+static p8 wl_client_first[WATERLINK_DATAGRAM];
+static bool wl_have_respond;
+static p8 wl_last_cookie[WATERLINK_COOKIE_DATAGRAM];
+static bool wl_have_cookie;
+static void wl_check(bool good, const char *what);
+static bipolar socket_send(b32 socket, const void *bytes, positive size, b32 flags,
+                           const void *to, positive to_size)
+{
+        const p8 *b = bytes;
+        p32 kind = size >= 4 ? (p32)b[0] | (p32)b[1] << 8 | (p32)b[2] << 16 |
+                                       (p32)b[3] << 24
+                             : 0;
+
+        (void)flags; (void)to_size;
+        if (socket == 4 && wl_phase == 1)
+        {
+                /*      The mDNS socket answers a one-shot asker unicast; its
+                        announcements to the group are multicast. */
+                const socket_address_internet *where = to;
+
+                if (where->host != network_order_32(0xe00000fbu) &&
+                    wl_answered_count < array_count(wl_answered_at))
+                        wl_answered_at[wl_answered_count++] = wl_clock / 1000;
+        }
+        if (socket == 3 && kind == WATERLINK_KIND_INITIATE && wl_phase == 1 &&
+            wl_greeted_count < array_count(wl_greeted_at))
+                wl_greeted_at[wl_greeted_count++] = wl_clock / 1000;
+        if (socket == 3 && kind == WATERLINK_KIND_INITIATE && !link_self.server &&
+            size == WATERLINK_DATAGRAM)
+                memcpy(wl_client_first, bytes, size);
+        if (socket == 3 && kind == WATERLINK_KIND_RESPOND && size == WATERLINK_DATAGRAM)
+        {
+                memcpy(wl_last_respond, bytes, size);
+                wl_have_respond = true;
+        }
+        if (socket == 3 && kind == WATERLINK_KIND_COOKIE)
+        {
+                wl_check(size == WATERLINK_COOKIE_DATAGRAM,
+                         "a cookie reply of another size");
+                memcpy(wl_last_cookie, bytes, WATERLINK_COOKIE_DATAGRAM);
+                wl_have_cookie = true;
+        }
+        //      As the kernel: no datagram goes to port zero. What was made
+        //      for it is counted above all the same.
+        return ((const socket_address_internet *)to)->port ? (bipolar)size : -22;
+}
+
+static struct waterlink_identity wl_id[3];
+static struct waterlink_group_keys wl_group;
+static p8 wl_addresses[4][16];
+
+static void wl_check(bool good, const char *what)
+{
+        if (!good)
+        {
+                fprintf(stderr, "waterlink pre: invariant broken: %s\n", what);
+                abort();
+        }
+}
+
+//      At most `most` of the times fall in any `span`.
+static bool wl_within(const p64 *at, positive count, positive most, p64 span)
+{
+        for (positive i = 0; i + most < count; i++)
+                if (at[i + most] - at[i] < span)
+                        return false;
+        return true;
+}
+
+static void wl_invariants(void)
+{
+        positive used = 0;
+
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+        {
+                struct link_session *s = link_self.session + at;
+                positive same = 0;
+                bool paired = false;
+
+                if (!s->used)
+                        continue;
+                used++;
+                for (positive other = 0; other < LINK_SESSIONS; other++)
+                        same += link_self.session[other].used &&
+                                !memcmp(link_self.session[other].peer, s->peer, 32);
+                wl_check(same <= LINK_SESSIONS_A_PEER, "sessions a peer");
+                for (positive p = 0; p < wl_file.count; p++)
+                        paired |= !memcmp(wl_file.peer[p].key, s->peer, 32);
+                wl_check(paired || !link_self.server, "a session for an unpaired key");
+        }
+        wl_check(used <= LINK_SESSIONS, "sessions");
+        wl_check(link_self.stamps <= LINK_PEERS_MAX, "stamps");
+        wl_check(!wl_bad_names, "a saved name link_name_good refuses");
+        wl_check(wl_within(wl_greeted_at, wl_greeted_count, LINK_GREETED,
+                           LINK_GREET_AGAIN),
+                 "greetings an mDNS packet provoked, over budget");
+        wl_check(wl_within(wl_answered_at, wl_answered_count, 1, LINK_ANSWER_AGAIN),
+                 "one-shot answers, over budget");
+}
+
+static void wl_reset(bool server)
+{
+        p8 secret[32];
+
+        for (positive at = 0; at < wl_mapped_count; at++)
+                free(wl_mapped[at]);
+        wl_mapped_count = 0;
+        memset(&link_self, 0, sizeof link_self);
+        memset(&link_nearby, 0, sizeof link_nearby);
+        memset(&link_client, 0, sizeof link_client);
+        memset(&wl_file, 0, sizeof wl_file);
+        wl_file_unreadable = wl_entropy_down = false;
+        wl_bad_names = 0;
+        wl_greeted_count = wl_answered_count = 0;
+        wl_run_count = wl_run_next = wl_mdns_count = wl_mdns_next = 0;
+        wl_have_respond = wl_have_cookie = false;
+        wl_clock = 1000000000ull;
+        wl_random_state = 1;
+        for (int i = 0; i < 3; i++)
+        {
+                for (int b = 0; b < 32; b++)
+                        secret[b] = (p8)(i * 77 + b * 13 + 1);
+                waterlink_identity_from(&wl_id[i], secret);
+        }
+        for (int b = 0; b < 32; b++)
+                secret[b] = (p8)(b * 7 + 3);
+        waterlink_identity_from(&link_self.me, secret);
+        link_self.server = server;
+        link_self.socket = 3;
+        link_nearby.socket = 4;
+        for (int p = 0; p < 2; p++)
+        {
+                struct waterlink_peer *peer = wl_file.peer + wl_file.count++;
+
+                memcpy(peer->key, wl_id[p].public, 32);
+                strcpy(peer->name, p ? "peer-b" : "peer-a");
+                peer->may = 0xffffffffu;
+        }
+        link_nearby.groups.count = 1;
+        strcpy(link_nearby.groups.record[0].namespace, "office");
+        memset(link_nearby.groups.record[0].key, 0x5a, 32);
+        waterlink_group_keys_from(&wl_group, link_nearby.groups.record[0].key, "office");
+        link_nearby.keys[0] = wl_group;
+        strcpy((char *)link_nearby.name, "machine");
+        for (int a = 0; a < 4; a++)
+        {
+                link_address_v4(wl_addresses[a], 0x0a000001u + (p32)a);
+                if (a == 3)
+                        memset(wl_addresses[a], 0xfe, 8); // one IPv6
+        }
+}
+
+//      A first message from one of the three, stamped delta seconds on.
+static void wl_initiation(p8 *datagram, int who, bool group, p32 delta,
+                          p64 conversation, p32 index, struct waterlink_noise *noise)
+{
+        p8 hello[WATERLINK_HELLO_BYTES];
+        p8 ephemeral[32];
+
+        memset(hello, 0, sizeof hello);
+        waterlink_stamp(hello, 1700000000ull + delta, 0);
+        if (group)
+        {
+                positive n = take_bytes(hello + WATERLINK_STAMP_BYTES,
+                                        take8() % (WATERLINK_NAME_MAX + 1));
+                (void)n;
+        }
+        else
+        {
+                memcpy(hello + WATERLINK_STAMP_BYTES, &conversation, 8);
+                memcpy(hello + WATERLINK_STAMP_BYTES + 8, &index, 4);
+        }
+        system_random_fill(ephemeral, 32, 0);
+        (void)waterlink_initiate(noise, &wl_id[who], group ? wl_group.identity.public
+                                                           : link_self.me.public,
+                                 group ? wl_group.psk : null, ephemeral, hello,
+                                 datagram);
+}
+
+//      A byte or two spoiled, as the driver says, and mac1 made good again
+//      when it says that too, so what is behind the gate is reached.
+static void wl_spoil(p8 *datagram, struct waterlink_identity *to, bool initiation)
+{
+        p8 how = take8();
+
+        if (how & 1)
+        {
+                positive at = take16() % WATERLINK_DATAGRAM;
+
+                datagram[at] ^= take8() | 1;
+        }
+        if (how & 2)
+        {
+                positive at = take16() % WATERLINK_DATAGRAM;
+
+                datagram[at] = take8();
+        }
+        if (how & 4)
+        {
+                positive body = initiation ? WATERLINK_INITIATE_BYTES
+                                           : WATERLINK_RESPOND_BYTES;
+                p8 gate[32];
+
+                waterlink_gate_of(to->public, gate);
+                waterlink_mac1(gate, datagram, 16 + body - 16, datagram + body);
+        }
+}
+
+static void wl_step(bool server)
+{
+        p8 op = take8();
+        p8 *datagram = malloc(WATERLINK_DATAGRAM);
+        p8 *address = wl_addresses[take8() & 3];
+        p16 port = take8() & 1 ? WATERLINK_MDNS_PORT : take16();
+        p64 now = wl_clock / 1000;
+
+        switch (op % 10)
+        {
+        case 0:
+        {
+                //      Anything at all, at an exact length.
+                positive length = take16() % (WATERLINK_DATAGRAM + 64);
+                p8 *raw = malloc(length ? length : 1);
+
+                length = take_bytes(raw, length);
+                link_datagram(raw, length, address, port, now);
+                free(raw);
+                break;
+        }
+        case 1:
+        case 2:
+        {
+                //      A first message from a paired key, the stranger, or a
+                //      group member, then perhaps spoiled; a good one is
+                //      answered, and the answer must key both ends alike.
+                int who = take8() % 3;
+                bool group = op % 10 == 2;
+                struct waterlink_noise noise;
+                p64 conversation = take8() & 3;
+                p32 index = take32();
+                p32 delta = take16();
+                bool spoil = take8() & 1;
+
+                wl_initiation(datagram, who, group, delta, conversation, index, &noise);
+                if (spoil)
+                        wl_spoil(datagram, group ? &wl_group.identity : &link_self.me, true);
+                wl_have_respond = false;
+                if (server)
+                        link_datagram(datagram, WATERLINK_DATAGRAM, address, port, now);
+                if (server && !group && !spoil && wl_have_respond && who < 2 &&
+                    waterlink_gate_passes(&wl_id[who], wl_last_respond, WATERLINK_DATAGRAM))
+                {
+                        p32 theirs = 0;
+                        p8 send[16], receive[16];
+                        bool keyed = false;
+
+                        wl_check(waterlink_answered(&noise, &wl_id[who], wl_last_respond,
+                                                    &theirs),
+                                 "an answer the server made does not open");
+                        waterlink_split(&noise, true, send, receive);
+                        for (positive at = 0; at < LINK_SESSIONS; at++)
+                        {
+                                struct link_session *s = link_self.session + at;
+                                struct link_keys *k[] = {&s->now, &s->next};
+
+                                for (int i = 0; i < 2; i++)
+                                        keyed |= s->used && k[i]->live &&
+                                                 k[i]->ours == theirs &&
+                                                 !memcmp(k[i]->receive.raw, send, 16) &&
+                                                 !memcmp(k[i]->send.raw, receive, 16);
+                        }
+                        wl_check(keyed, "the two ends of a handshake keyed differently");
+                }
+                crypto_forget(&noise, sizeof noise);
+                break;
+        }
+        case 3:
+        {
+                //      A carried datagram for a session, sealed with the key
+                //      its sender holds or not, at a counter and length the
+                //      driver picks.
+                struct link_session *s = link_self.session + take8() % LINK_SESSIONS;
+                struct link_keys *keys = (take8() & 1) ? &s->next : &s->now;
+                struct waterlink_datagram head;
+                positive used = take16() % (WATERLINK_PAYLOAD + 32);
+                positive length;
+                p8 how = take8();
+
+                head.kind = how & 1 ? WATERLINK_KIND_CLOSE : WATERLINK_KIND_CARRY;
+                head.receiver = how & 2 ? take32() : keys->ours;
+                head.counter = how & 4 ? take32() : keys->counter;
+                memset(datagram, 0, WATERLINK_DATAGRAM);
+                memcpy(datagram, &head, 16);
+                take_bytes(datagram + 16, used < WATERLINK_PAYLOAD ? used : WATERLINK_PAYLOAD);
+                length = waterlink_seal(&keys->receive, datagram,
+                                        used < WATERLINK_PAYLOAD ? used : WATERLINK_PAYLOAD);
+                if (how & 8)
+                        length = take16() % (WATERLINK_DATAGRAM + 1);
+                if (how & 16 && length)
+                        datagram[take16() % length] ^= 1;
+                link_datagram(datagram, length, address, port, now);
+                break;
+        }
+        case 4:
+                wl_clock += (p64)take16() * (take8() & 1 ? 1000000ull : 1000ull);
+                break;
+        case 5:
+        {
+                //      An mDNS packet, from anywhere on the link.
+                positive length = take16() % (WATERLINK_MDNS_MAX + 2);
+                p8 *raw = malloc(length ? length : 1);
+
+                length = take_bytes(raw, length);
+                wl_phase = 1;
+                link_nearby_heard(raw, length, wl_addresses[0], port, now);
+                wl_phase = 0;
+                free(raw);
+                break;
+        }
+        case 6:
+        {
+                //      A run from the socket: datagrams coalesced by UDP_GRO
+                //      at a segment size, two runs a call.
+                positive runs = 1 + take8() % 3;
+                p8 *bytes[3] = {0, 0, 0};
+
+                wl_run_count = wl_run_next = 0;
+                for (positive r = 0; r < runs; r++)
+                {
+                        struct wl_run *run = wl_runs + wl_run_count++;
+                        positive length = take16() % 4096;
+
+                        bytes[r] = malloc(length ? length : 1);
+                        run->length = take_bytes(bytes[r], length);
+                        run->bytes = bytes[r];
+                        run->segment = take8() & 1 ? take16() : 0;
+                        memcpy(run->address, wl_addresses[take8() & 3], 16);
+                        run->v4 = take8() & 1;
+                        run->port = take16();
+                }
+                link_self.socket_quiet = false;
+                link_receive_all(now);
+                for (positive r = 0; r < runs; r++)
+                        free(bytes[r]);
+                wl_run_count = wl_run_next = 0;
+                break;
+        }
+        case 7:
+        {
+                //      mDNS through the socket, with whatever TTL it arrived at.
+                positive packets = 1 + take8() % 3;
+                p8 *bytes[3] = {0, 0, 0};
+
+                wl_mdns_count = wl_mdns_next = 0;
+                for (positive r = 0; r < packets; r++)
+                {
+                        struct wl_run *run = wl_mdns + wl_mdns_count;
+                        positive length = take16() % (WATERLINK_MDNS_MAX + 8);
+
+                        wl_mdns_ttl[wl_mdns_count++] = take8() & 1 ? 255 : take8();
+                        bytes[r] = malloc(length ? length : 1);
+                        run->length = take_bytes(bytes[r], length);
+                        run->bytes = bytes[r];
+                        memcpy(run->address, wl_addresses[take8() % 3], 16);
+                        run->port = take8() & 1 ? WATERLINK_MDNS_PORT : take16();
+                }
+                wl_phase = 1;
+                link_nearby_receive(now);
+                wl_phase = 0;
+                for (positive r = 0; r < packets; r++)
+                        free(bytes[r]);
+                wl_mdns_count = wl_mdns_next = 0;
+                break;
+        }
+        case 9:
+        {
+                /*      A flood of good mac1s from made-up addresses, then one
+                        of the three from here, perhaps again under the cookie
+                        the listener handed back: no curve is spent on an
+                        initiation the listener answers with a cookie. */
+                positive count = take8() % 48;
+                int who = take8() % 3;
+                struct waterlink_noise noise;
+                p8 place[16];
+
+                if (!server)
+                        break;
+                for (positive at = 0; at <= count; at++)
+                {
+                        unsigned long curves;
+                        p64 cookies = link_self.admission.cookies;
+                        bool last = at == count;
+
+                        wl_initiation(datagram, last ? who : 2, false,
+                                      take16(), take8(), take32() | 1, &noise);
+                        curves = wl_curves;
+                        memcpy(place, wl_addresses[1], 16);
+                        place[13] = (p8)at;
+                        wl_have_cookie = false;
+                        link_datagram(datagram, WATERLINK_DATAGRAM,
+                                      last ? address : place,
+                                      last ? port : (p16)(2000 + at), now);
+                        wl_check(link_self.admission.cookies == cookies ||
+                                         wl_curves == curves,
+                                 "a curve spent on an initiation answered "
+                                 "with a cookie");
+                        crypto_forget(&noise, sizeof noise);
+                }
+                if (wl_have_cookie && take8() & 1)
+                {
+                        p8 cookie[16];
+
+                        if (waterlink_cookie_take(
+                                    link_self.me.public,
+                                    datagram + 16 + WATERLINK_INITIATE_BYTES - 16,
+                                    wl_last_cookie, WATERLINK_COOKIE_DATAGRAM,
+                                    cookie))
+                        {
+                                wl_initiation(datagram, who, false, take16(),
+                                              take8(), take32() | 1, &noise);
+                                waterlink_mac2(cookie, datagram);
+                                if (take8() & 1)
+                                        wl_spoil(datagram, &link_self.me, true);
+                                link_datagram(datagram, WATERLINK_DATAGRAM,
+                                              address, port, now);
+                                crypto_forget(&noise, sizeof noise);
+                        }
+                }
+                break;
+        }
+        default:
+        {
+                //      At the client: the answer to the initiation it has out,
+                //      from the machine it asked, perhaps spoiled. If the
+                //      client keys, it keys what the machine keyed.
+                struct waterlink_noise noise;
+                p8 who[32], hello[WATERLINK_HELLO_BYTES], ephemeral[32];
+                p8 send[16], receive[16];
+                struct link_session *s = link_self.session;
+                p32 ours = link_client.ours;
+
+                if (server || !s->used)
+                        break;
+                if (!ours)
+                {
+                        (void)link_client_initiate(s, now);
+                        break;
+                }
+                memcpy(datagram, wl_client_first, WATERLINK_DATAGRAM);
+                if (take8() & 1)
+                {
+                        /*      Under load the machine answers with a cookie;
+                                the next initiation must carry mac2 by it. */
+                        struct waterlink_admission table;
+                        p8 reply[WATERLINK_COOKIE_DATAGRAM];
+                        p8 nonce[24];
+                        p8 cookie[16];
+                        p8 copy[WATERLINK_DATAGRAM];
+
+                        memset(&table, 0, sizeof table);
+                        take_bytes(table.secret, 32);
+                        take_bytes(nonce, 24);
+                        table.secret_made = now ? now : 1;
+                        waterlink_cookie_reply(&wl_id[0], &table, datagram, address,
+                                               port, nonce, reply);
+                        if (take8() & 1)
+                                reply[take8() % sizeof reply] ^= take8() | 1;
+                        link_client.cookie_at = 0;
+                        link_datagram(reply, take8() & 1 ? sizeof reply
+                                                         : take8() % 128,
+                                      address, port, now);
+                        if (!link_client.cookie_at)
+                                break;
+                        waterlink_cookie_of(&table, address, port, cookie);
+                        wl_check(!memcmp(cookie, link_client.cookie, 16),
+                                 "the client kept a cookie it was not handed");
+                        (void)link_client_initiate(s, now);
+                        memcpy(copy, wl_client_first, WATERLINK_DATAGRAM);
+                        memset(copy + 16 + WATERLINK_INITIATE_BYTES, 0, 16);
+                        waterlink_mac2(cookie, copy);
+                        wl_check(!memcmp(copy, wl_client_first, WATERLINK_DATAGRAM),
+                                 "the initiation after a cookie lacks its mac2");
+                        break;
+                }
+                if (!waterlink_accept(&noise, &wl_id[0], null, datagram, who, hello))
+                        break;
+                system_random_fill(ephemeral, 32, 0);
+                if (!waterlink_respond(&noise, ephemeral, ours, take32() | 1, datagram))
+                        break;
+                waterlink_split(&noise, false, send, receive);
+                if (take8() & 1)
+                        wl_spoil(datagram, &link_self.me, false);
+                link_datagram(datagram, WATERLINK_DATAGRAM, address, port, now);
+                if (!link_client.ours)
+                        wl_check(s->now.live && s->now.ours == ours &&
+                                         !memcmp(s->now.receive.raw, send, 16) &&
+                                         !memcmp(s->now.send.raw, receive, 16),
+                                 "the client keyed what the machine did not");
+                break;
+        }
+        }
+        free(datagram);
+        wl_invariants();
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        bool server;
+
+        wl_in = data;
+        wl_left = size;
+        server = !(take8() & 1);
+        wl_reset(server);
+        if (!server && link_session_open(link_self.session))
+        {
+                struct link_session *s = link_self.session;
+
+                memcpy(s->peer, wl_id[0].public, 32);
+                memcpy(s->address, wl_addresses[1], 16);
+                s->port = LINK_PORT;
+        }
+        for (int steps = 0; wl_left && steps < 64; steps++)
+                wl_step(server);
+        wl_reset(true);
+        return 0;
+}
+'''
+
+
+def waterlink_pre_seeds():
+    """Scripts for the pre-auth driver, built here: each reaches one of its
+    steps with the shape that matters (a handshake that completes, a carried
+    datagram to it, a greeting, announcements naming many ports, questions
+    from a one-shot asker, coalesced runs, mDNS through the socket, and the
+    client's answer)."""
+    def head(op, address=0, port=None):
+        return bytes([op, address]) + (b"\x01" if port is None else
+                                        b"\x00" + port.to_bytes(2, "big"))
+
+    def name(*labels):
+        return b"".join(bytes([len(l)]) + l for l in labels) + b"\x00"
+
+    service = (b"_waterlink", b"_udp", b"local")
+
+    def announce(ports, ident=0):
+        body = b""
+        for i, port in enumerate(ports):
+            body += name(b"wl-%02d" % i, *service) + b"\x00\x21\x80\x01" + \
+                b"\x00\x00\x11\x94" + (6 + len(name(b"h"))).to_bytes(2, "big") + \
+                b"\x00\x00\x00\x00" + port.to_bytes(2, "big") + name(b"h")
+        return ident.to_bytes(2, "big") + b"\x84\x00\x00\x00" + \
+            len(ports).to_bytes(2, "big") + b"\x00\x00\x00\x00" + body
+
+    query = b"\x12\x34\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00" + \
+        name(*service) + b"\x00\x0c\x00\x01"
+
+    def op5(packet, port=None):
+        return head(5, 0, port) + len(packet).to_bytes(2, "big") + packet
+
+    def initiation(who, conversation=0, index=0x01020304, delta=5, spoil=0):
+        return head(1) + bytes([who, conversation]) + index.to_bytes(4, "big") + \
+            delta.to_bytes(2, "big") + bytes([spoil])
+
+    carried = head(3) + bytes([0, 0]) + (24).to_bytes(2, "big") + b"\x00" + \
+        b"\x01\x02\x03" + bytes(21)
+    greeting = head(2) + bytes([2, 0]) + (1).to_bytes(4, "big") + \
+        (7).to_bytes(2, "big") + b"\x00" + bytes([6]) + b"newbox"
+    run = head(6) + b"\x00" + (2400).to_bytes(2, "big") + \
+        (b"\x03\x00\x00\x00" + bytes(1196)) * 2 + b"\x01" + (1200).to_bytes(2, "big") + \
+        b"\x00\x00" + (22348).to_bytes(2, "big")
+    socket_mdns = head(7) + b"\x00" + len(query).to_bytes(2, "big") + b"\x01" + query + \
+        b"\x00\x01"
+    many = [announce(range(1000 + 8 * k, 1008 + 8 * k)) for k in range(4)]
+    return {
+        "handshake_then_carried.bin": b"\x00" + initiation(0) + carried,
+        "rekey_and_replay.bin": b"\x00" + initiation(0) + initiation(0, delta=6) +
+        initiation(0, delta=6) + carried,
+        "stranger_and_spoiled.bin": b"\x00" + initiation(2) + initiation(1, spoil=1) +
+        b"\x05" + (100).to_bytes(2, "big") + b"\x07",
+        "greeting.bin": b"\x00" + greeting,
+        "announcements_many_ports.bin": b"\x00" + b"".join(op5(m) for m in many),
+        "announcements_port_zero.bin": b"\x00" + b"".join(
+            op5(announce([0] * 8, k)) for k in range(4)),
+        "one_shot_questions.bin": b"\x00" + b"".join(op5(query, 40000) for _ in range(4)),
+        "coalesced_run.bin": b"\x00" + run,
+        "mdns_socket.bin": b"\x00" + socket_mdns,
+        "client_answer.bin": b"\x01" + head(8) + head(8) + b"\x00\x00\x00\x07\x00",
+        "raw.bin": b"\x00" + head(0) + (64).to_bytes(2, "big") + bytes(range(64)),
+        "flood_then_cookie.bin": b"\x00" + head(9) + bytes([40, 0]) + b"".join(
+            (i + 1).to_bytes(2, "big") + bytes([i & 3]) + (0x100 + i).to_bytes(4, "big")
+            for i in range(41)) + b"\x01" + (900).to_bytes(2, "big") + b"\x01" +
+        (0x5151).to_bytes(4, "big") + b"\x00",
+        "client_cookie.bin": b"\x01" + head(8) + head(8) + b"\x01" + bytes(range(56)) +
+        b"\x00\x01",
+        "empty.bin": b"",
+    }
+
+
+def harness_waterlink_pre_fuzz(argv):
+    """Coverage-guided libFuzzer over waterlink's pre-authentication surface.
+
+    waterlink_pre_source() lifts it from the tree: discover.c's mDNS reader
+    and writer, handshake.c whole (gate, admission, Noise IK, stamps),
+    nearby.c's greeting and answering, and service.c's receive loop with
+    its UDP_GRO runs, datagram dispatch, initiation, carried-datagram checks
+    and the client's answer, driven as a script of arrivals at a listener
+    or a client. The invariants the driver asks after every step (session
+    and stamp tables bounded, handshakes that key both ends alike, saved
+    names printable, mDNS-provoked greetings and one-shot answers within
+    their budgets) turn a logic bug into a report as well as a sanitizer
+    finding. Bounded fixed-seed run; MOONWATER_FUZZ_RUNS / _SECONDS lengthen
+    it, MOONWATER_MSAN=1 runs it under MemorySanitizer, NOT RUN (2) without
+    clang's libFuzzer. --emit PATH writes the unit and exits.
+
+        python3 test/differential.py --harness waterlink_pre_fuzz
+    """
+    source = waterlink_pre_source()
+    if len(argv) >= 2 and argv[0] == "--emit":
+        Path(argv[1]).write_text(source)
+        return 0
+    return tls_fuzz_run("waterlink pre", waterlink_pre_seeds(), source, 16384)
+
+
+def waterlink_fuzz_seeds():
+    """Scripts for waterlink_fuzz's state driver, made here: a stream in
+    bulk over a lossy, reordering network, a register storm, keystrokes with
+    a reader that pauses, the replay window's edges, hostile bodies and
+    acknowledgements, and seeded mixes of everything."""
+    import random
+
+    def post(key, shape, size):
+        return bytes([0, key, shape, size])
+    send_a, send_b, clock, toggle = b"\x03", b"\x07", b"\x09", b"\x0a"
+
+    def arrive(way, pick, mode=0):  # mode 0 deliver, 1 drop, 3 duplicate
+        return bytes([(5 if way == 0 else 8) | mode << 4, pick])
+    stream = b"".join(post(1, 0, 200) + send_a + arrive(0, 0) + send_b + arrive(1, 0)
+                      for _ in range(24))
+    lossy = b"".join(post(3, 0, 180 + i % 60) + send_a + send_a +
+                     arrive(0, i, 1 if i % 4 == 0 else 3 if i % 5 == 0 else 0) +
+                     send_b + arrive(1, 0) + clock + bytes([i])
+                     for i in range(40))
+    register = b"".join(post(2, 1, i % 48) + (send_a + arrive(0, 0) if i % 3 else b"")
+                        for i in range(60)) + send_b + arrive(1, 0)
+    keys = b"".join(post(k, 2 | (k & 1), 1) + send_a + arrive(0, 0)
+                    for k in range(32)) + toggle + b"".join(
+        post(k, 2, 1) + send_a + arrive(0, 0) for k in range(8)) + toggle + b"\x0b\x05"
+    ended = post(4, 0x7c, 10) + post(4, 0, 10) + send_a + arrive(0, 0) + send_b + arrive(1, 0)
+    replay = b"".join(bytes([13, how, arg, arg ^ 0x5a]) for how in range(8)
+                      for arg in (0, 1, 63, 64, 200, 255))
+    #   The top walked forward a block at a time past the ring's length,
+    #   probing inside the window after every step.
+    replay += b"".join(bytes([13, 1, 63, 13, 7, step % 40, step]) for step in range(80))
+    hostile = b"".join(bytes([12, how]) + bytes([37]) + bytes(range(185))
+                       for how in (0, 0x10, 3)) + b"".join(
+        bytes([12, how, 7, 9]) for how in (1, 9, 0x11, 0x19)) + \
+        post(1, 0, 20) + send_a + bytes([12, 2, 0, 3, 77])
+    seeds = {"waterlink_empty.bin": b"", "waterlink_stream.bin": stream,
+             "waterlink_lossy.bin": lossy, "waterlink_register.bin": register,
+             "waterlink_keys_paused.bin": keys, "waterlink_ended.bin": ended,
+             "waterlink_replay.bin": replay, "waterlink_hostile.bin": hostile}
+    generator = random.Random(0x3a7e)
+    for index in range(6):
+        seeds["waterlink_mix_%d.bin" % index] = bytes(
+            generator.randrange(256) for _ in range(300 + 300 * index))
+    return seeds
+
+
+WATERLINK_FUZZ_DRIVER = r'''/*      The link core with its state carried across a whole script, the
+        input read as operations: posts on the sender A, datagrams filled
+        into a network that loses, repeats and reorders them, acknowledgements
+        back, a reader on B that refuses and resumes, clock jumps, hostile
+        bodies judged and delivered to either side, and the replay window
+        against a model of what it has accepted.
+
+        What must hold after every operation: the lists of both links
+        (invariants), a stream key handed on exactly once and in order from
+        sequence one, a register key only ever newer, nothing after a key's
+        last frame, every payload the bytes posted under that key and
+        sequence, and fill writing nothing past what it returns. At the end,
+        unless a hostile acknowledgement reached a key A is sending on, a
+        lossless drain must bring every posted stream frame and every
+        register's newest value across: a stall is a failure too.
+*/
+
+#define WL_TRACKED 32   // keys the model follows; hostile frames stay above
+#define WL_SEQUENCES 1024
+#define WL_QUEUE 16
+
+static struct waterlink_link state_a, state_b, state_c;
+static p16 posted_length[WL_TRACKED][WL_SEQUENCES];
+static p8 posted_class[WL_TRACKED];
+static p32 posted_last[WL_TRACKED];
+static p32 taken[WL_TRACKED];
+static p8 taken_over[WL_TRACKED];
+static bool reader_refuses, tainted;
+static p8 network[2][WL_QUEUE][WATERLINK_PAYLOAD];
+static positive network_length[2][WL_QUEUE];
+static positive network_count[2];
+static p8 *state_body, *state_fill;
+static p64 replay_accepted[4096];
+static positive replay_count;
+static p64 replay_top;
+static struct waterlink_replay state_window;
+static int state_a_tag, state_b_tag, state_c_tag;
+
+static const p8 *script;
+static positive script_left;
+
+static p8 take(void)
+{
+        if (!script_left)
+                return 0;
+        script_left--;
+        return *script++;
+}
+
+static p8 stamp(p8 key, p32 sequence, positive at)
+{
+        return (p8)(key * 131u + sequence * 7u + (sequence >> 8) + at * 13u);
+}
+
+static bool state_sink(address_any context, struct waterlink_frame *head,
+                       p8 *payload)
+{
+        p8 key = head->key;
+        p32 sequence = head->sequence;
+
+        if (key >= WATERLINK_KEYS || head->length > WATERLINK_FRAME_MAX)
+                abort();
+        if (context != &state_b_tag || key >= WL_TRACKED)
+                return true;
+        if (reader_refuses)
+                return false;
+        if (taken_over[key] || !posted_class[key] ||
+            (head->flags & (WATERLINK_FRAME_REPLACEABLE | WATERLINK_FRAME_DURABLE)) !=
+                    posted_class[key])
+                abort();
+        if (posted_class[key] == WATERLINK_FRAME_DURABLE ? sequence != taken[key] + 1
+                                                        : sequence <= taken[key])
+                abort();
+        if (sequence > posted_last[key] || sequence >= WL_SEQUENCES ||
+            posted_length[key][sequence] != head->length + 1u)
+                abort();
+        for (positive at = 0; at < head->length; at++)
+                if (payload[at] != stamp(key, sequence, at))
+                        abort();
+        taken[key] = sequence;
+        if (head->flags & WATERLINK_FRAME_LAST)
+                taken_over[key] = 1;
+        return true;
+}
+
+//      The lists of the links an operation touched: 1 A, 2 B, 4 C.
+static void state_check(int touched)
+{
+        if (((touched & 1) && !invariants(&state_a, "A")) ||
+            ((touched & 2) && !invariants(&state_b, "B")) ||
+            ((touched & 4) && !invariants(&state_c, "C")))
+                abort();
+}
+
+static void state_post(p64 now)
+{
+        p8 key = take() % WL_TRACKED;
+        p8 shape = take();
+        p8 flags = (shape & 1 ? WATERLINK_FRAME_REPLACEABLE : WATERLINK_FRAME_DURABLE) |
+                   (shape & 2 ? WATERLINK_FRAME_URGENT : 0) |
+                   ((shape & 0x7c) == 0x7c ? WATERLINK_FRAME_LAST : 0);
+        p8 size = take();
+        p16 length = size < 160 ? size % 48
+                   : size < 240 ? (p16)(WATERLINK_FRAME_MAX - size % 16)
+                                : (p16)(size * 4);
+        p32 sequence = state_a.sending[key].sequence;
+        p8 payload[WATERLINK_FRAME_MAX];
+
+        if (sequence >= WL_SEQUENCES)
+                return;
+        for (positive at = 0; at < length; at++)
+                payload[at] = stamp(key, sequence, at);
+        if (!waterlink_post(&state_a, key, flags, payload, length, now))
+                return;
+        if (state_a.sending[key].sequence != sequence + 1)
+                abort();
+        posted_class[key] = flags & (WATERLINK_FRAME_REPLACEABLE | WATERLINK_FRAME_DURABLE);
+        posted_length[key][sequence] = length + 1;
+        posted_last[key] = sequence;
+}
+
+//      Fill into a body flush against its guard page, with the bytes past
+//      where fill says it stopped marked, and check they are untouched.
+static positive state_fill_one(struct waterlink_link *link, p64 now, p8 *into)
+{
+        bool alone = false;
+        positive used;
+
+        static p8 marks[WATERLINK_PAYLOAD];
+
+        memset(marks, 0xa5, WATERLINK_PAYLOAD);
+        memset(state_fill, 0xa5, WATERLINK_PAYLOAD);
+        used = waterlink_fill(link, state_fill, now, &alone);
+        if (used > WATERLINK_PAYLOAD ||
+            memcmp(state_fill + used, marks, WATERLINK_PAYLOAD - used))
+                abort();
+        if (used && into)
+                memcpy(into, state_fill, used);
+        return used;
+}
+
+static bool state_deliver(struct waterlink_link *link, const p8 *body,
+                          positive length, p64 now, address_any tag)
+{
+        p8 *at = state_body + (WATERLINK_PAYLOAD + 1 - length);
+
+        if (length)
+                memcpy(at, body, length);
+        return waterlink_deliver(link, at, length, now, state_sink, tag);
+}
+
+static void state_send(int way, p64 now)
+{
+        positive used;
+
+        if (network_count[way] == WL_QUEUE)
+                return;
+        used = state_fill_one(way ? &state_b : &state_a, now,
+                              network[way][network_count[way]]);
+        if (used)
+                network_length[way][network_count[way]++] = used;
+}
+
+static void state_arrive(int way, p64 now, bool keep, bool drop)
+{
+        positive at;
+
+        if (!network_count[way])
+                return;
+        at = take() % network_count[way];
+        if (!drop && !state_deliver(way ? &state_a : &state_b, network[way][at],
+                                    network_length[way][at], now,
+                                    way ? (address_any)&state_a_tag
+                                        : (address_any)&state_b_tag))
+                abort(); // a body fill made must be well formed
+        if (keep)
+                return;
+        network_count[way]--;
+        memmove(network[way][at], network[way][at + 1],
+                (network_count[way] - at) * sizeof network[way][0]);
+        memmove(network_length[way] + at, network_length[way] + at + 1,
+                (network_count[way] - at) * sizeof network_length[way][0]);
+}
+
+/*      A hostile body: the script's own bytes, or a plausible one the tree's
+        generator makes from a seed the script gives, or a queued body with
+        a byte changed. Frames on a key the model follows would be the model
+        lying to itself, so a body carrying one goes to C; one carrying an
+        acknowledgement for a key A sends on makes A free what B never took,
+        which is allowed to stall the stream and so turns the drain off. */
+static void state_hostile(p64 now)
+{
+        p8 body[WATERLINK_PAYLOAD + 2];
+        struct waterlink_part parts[WATERLINK_PARTS];
+        p8 how = take();
+        positive length;
+        bipolar count;
+        bool tracked_frame = false, tracked_ack = false;
+
+        if (how % 3 == 0)
+        {
+                length = take();
+                length = length * 5 % (WATERLINK_PAYLOAD + 2);
+                for (positive at = 0; at < length; at++)
+                        body[at] = take();
+        }
+        else if (how % 3 == 1 || !network_count[0])
+        {
+                judge_state = ((p64)take() << 8 | take()) * 0x9e3779b97f4a7c15ull | 1;
+                length = judge_body(body, how & 8);
+        }
+        else
+        {
+                positive at = take() % network_count[0];
+
+                length = network_length[0][at];
+                memcpy(body, network[0][at], length);
+                body[take() % length] ^= (p8)(1 + take() % 255);
+        }
+        if (length > WATERLINK_PAYLOAD + 1)
+                length = WATERLINK_PAYLOAD + 1;
+        memcpy(state_body + (WATERLINK_PAYLOAD + 1 - length), body, length);
+        count = waterlink_judge(state_body + (WATERLINK_PAYLOAD + 1 - length),
+                                length, parts);
+        if (count < -1 || count > (bipolar)WATERLINK_PARTS)
+                abort();
+        for (bipolar at = 0; at < count; at++)
+                if (parts[at].key < WL_TRACKED)
+                {
+                        if (parts[at].flags & WATERLINK_FRAME_ACK)
+                                tracked_ack = true;
+                        else
+                                tracked_frame = true;
+                }
+        if (tracked_frame)
+                (void)state_deliver(&state_c, body, length, now, &state_c_tag);
+        else if (how & 0x10)
+                (void)state_deliver(&state_b, body, length, now, &state_b_tag);
+        else
+        {
+                tainted |= tracked_ack;
+                (void)state_deliver(&state_a, body, length, now, &state_a_tag);
+        }
+}
+
+static void state_replay(void)
+{
+        p8 how = take();
+        p64 counter;
+        bool want, got;
+
+        if (replay_count == array_count(replay_accepted))
+                return;
+        switch (how % 8)
+        {
+        case 0: counter = replay_top + 1; break;
+        case 1: counter = replay_top + 1 + take(); break;
+        case 2: counter = replay_top - (WATERLINK_REPLAY_WINDOW - 1); break;
+        case 3: counter = replay_top - WATERLINK_REPLAY_WINDOW; break;
+        case 4: counter = replay_top - take() * 9u; break;
+        case 5: counter = replay_top + ((p64)take() << (take() % 24)); break;
+        case 6: counter = replay_count ? replay_accepted[take() % replay_count] : 0; break;
+        default: counter = replay_top - 64 * (take() % 40) + take() % 64; break;
+        }
+        if (counter > replay_top)
+                want = true;
+        else if (replay_top - counter >= WATERLINK_REPLAY_WINDOW)
+                want = false;
+        else
+        {
+                want = true;
+                for (positive at = 0; at < replay_count; at++)
+                        if (replay_accepted[at] == counter)
+                                want = false;
+        }
+        got = waterlink_replay_new(&state_window, counter);
+        if (got != want)
+                abort();
+        if (got && replay_count < array_count(replay_accepted))
+        {
+                replay_accepted[replay_count++] = counter;
+                if (counter > replay_top)
+                        replay_top = counter;
+        }
+}
+
+/*      Everything posted, brought across a network that loses nothing: the
+        clock past any timer each round, the reader taking everything. It
+        can take many rounds and still be right: a hold-back pool the script
+        filled with frames ahead of a gap -- a stream's own, or a peer's on
+        keys nobody reads -- spills what arrives beyond it, the sender times
+        that out and starts again from the least window, and only the next
+        frame in order is always taken (one script took 73 rounds). A stall
+        is a round count no such script reaches. */
+static void state_drain(p64 now)
+{
+        reader_refuses = false;
+        for (positive round = 0; round < 1024; round++)
+        {
+                p64 due_a, due_b;
+
+                now += WATERLINK_RTO_MOST + 1000;
+                //      As the service's turn does: when to come back, which is
+                //      also when a held frame is asked about again.
+                due_a = waterlink_wake(&state_a, now);
+                due_b = waterlink_wake(&state_b, now);
+                if (due_a == ~0ull && due_b == ~0ull && waterlink_idle(&state_a) &&
+                    waterlink_idle(&state_b))
+                        break;
+                for (p8 key = 0; key < WATERLINK_KEYS; key++)
+                        if (waterlink_paused(&state_b, key))
+                                waterlink_resume(&state_b, key, state_sink, &state_b_tag);
+                for (positive turn = 0; turn < 4 * WATERLINK_SLOTS; turn++)
+                {
+                        positive used = state_fill_one(&state_a, now, network[0][0]);
+
+                        if (!used)
+                                break;
+                        if (!state_deliver(&state_b, network[0][0], used, now, &state_b_tag))
+                                abort();
+                }
+                for (positive turn = 0; turn < 64; turn++)
+                {
+                        positive used = state_fill_one(&state_b, now, network[1][0]);
+
+                        if (!used)
+                                break;
+                        if (!state_deliver(&state_a, network[1][0], used, now, &state_a_tag))
+                                abort();
+                }
+        }
+        state_check(3);
+        for (p8 key = 0; key < WL_TRACKED; key++)
+                if (posted_class[key] && taken[key] != posted_last[key])
+                {
+                        fprintf(stderr, "drain: key %u (%s) took %u of %u\n", key,
+                                posted_class[key] == WATERLINK_FRAME_DURABLE
+                                        ? "stream" : "register",
+                                taken[key], posted_last[key]);
+                        abort();
+                }
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        p64 now = 1000;
+
+        if (!wl_page)
+        {
+                wl_page = sysconf(_SC_PAGESIZE);
+                state_body = guard_region(WATERLINK_PAYLOAD + 1);
+                state_fill = guard_region(WATERLINK_PAYLOAD);
+        }
+        script = data;
+        script_left = size;
+        waterlink_link_reset(&state_a);
+        waterlink_link_reset(&state_b);
+        waterlink_link_reset(&state_c);
+        memset(posted_length, 0, sizeof posted_length);
+        memset(posted_class, 0, sizeof posted_class);
+        memset(posted_last, 0, sizeof posted_last);
+        memset(taken, 0, sizeof taken);
+        memset(taken_over, 0, sizeof taken_over);
+        memset(&state_window, 0, sizeof state_window);
+        memset(network_count, 0, sizeof network_count);
+        replay_count = 0;
+        replay_top = 0;
+        reader_refuses = tainted = false;
+
+        while (script_left)
+        {
+                p8 op = take();
+                int touched = 0;
+
+                switch (op % 16)
+                {
+                case 0: case 1: case 2: state_post(now); touched = 1; break;
+                case 3: case 4: state_send(0, now); touched = 1; break;
+                case 5: case 6: state_arrive(0, now, (op & 0x30) == 0x30, (op & 0x30) == 0x10);
+                        touched = 2;
+                        break;
+                case 7: state_send(1, now); touched = 2; break;
+                case 8: state_arrive(1, now, (op & 0x30) == 0x30, (op & 0x30) == 0x10);
+                        touched = 1;
+                        break;
+                case 9: now += op & 0x10 ? WATERLINK_RTO_MOST / 2 * (1 + take() % 4)
+                                         : 1 + take() * 37u;
+                        break;
+                case 10: reader_refuses = !reader_refuses; break;
+                case 11:
+                {
+                        p8 key = take();
+
+                        waterlink_resume(&state_b, op & 0x10 ? key : key % WL_TRACKED,
+                                         state_sink, &state_b_tag);
+                        touched = 2;
+                        break;
+                }
+                case 12: state_hostile(now); touched = 7; break;
+                case 13: case 14: state_replay(); break;
+                default:
+                        (void)waterlink_wake(&state_a, now);
+                        (void)waterlink_wake(&state_b, now);
+                        if (waterlink_post(&state_a, take() | WATERLINK_KEYS,
+                                           WATERLINK_FRAME_DURABLE, 0, 0, now) ||
+                            waterlink_post(&state_a, 1, take() | WATERLINK_FRAME_ACK, 0,
+                                           0, now))
+                                abort();
+                        touched = 1;
+                        break;
+                }
+                state_check(touched);
+        }
+        if (!tainted)
+                state_drain(now);
+        return 0;
+}
+'''
+
+
+def harness_waterlink_fuzz(argv):
+    """The waterlink core as a state machine under libFuzzer: a script of
+    posts, fills, losses, repeats, reorders, acknowledgements, clock jumps,
+    reader pauses, hostile bodies and replay-window counters over two links,
+    the lists of both checked after every step, streams exactly once and in
+    order, registers only newer, every payload what was posted, fill writing
+    nothing past what it returns, the replay window against a model, and a
+    lossless drain at the end that must bring everything across.
+
+    The core is waterlink_sanitized's lift: on an x86_64 ELF host the judge,
+    fill and apply are the tree's assembly (with the body flush against a
+    guard page); under MOONWATER_MSAN=1, whose shadow the assembly's stores
+    would not reach, test/checks.c's C references stand in. Seeds come from
+    waterlink_fuzz_seeds. lane_waterlink runs the bounded smoke; `sh test/run
+    fuzz` runs it for as long as the TLS targets.
+
+        waterlink_fuzz
+    """
+    del argv
+    import platform
+    lifted = harness_waterlink_sanitized([], lift=True)
+    if not isinstance(lifted, tuple):
+        print("waterlink fuzz: NOT RUN -- no C compiler")
+        return 2
+    core_source, shim = lifted
+    if waterlink_script_scan(shim):
+        return 1
+    with_asm = (platform.system() != "Darwin" and
+                platform.machine() in ("x86_64", "amd64") and
+                not moonwater_msan_requested())
+    #   The lists are walked after every step; tracing their compares for
+    #   coverage cost four fifths of the run and found nothing new.
+    source = ("#define WL_STATE 1\n#define WL_QUIET __attribute__((no_sanitize("
+              "\"coverage\")))\n" + core_source(with_asm, False, WATERLINK_FUZZ_DRIVER))
+    return tls_fuzz_run("waterlink", "waterlink", source, 4096)
+
+
+def waterlink_script_scan(shim):
+    """command.c's link_script_names_secret, hosted under ASan with each
+    script and namespace in a block of exactly its length, against a
+    regular expression over a grammar of machine-script lines. It once
+    compared the namespace's whole length with memory_compare wherever
+    "link join " was found, reading past a script that ended sooner.
+    Returns 1 on a report or a disagreement, 0 otherwise, and 0 without
+    a compiler that has ASan."""
+    import random
+    import subprocess
+    import tempfile
+    command = (HARNESS_ROOT / "src/waterlink/command.c").read_text()
+    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    scan = tls_fuzz_sec(command, "static bool link_script_names_secret(",
+                        "static b32 link_status(void)")
+    starts = tls_fuzz_sec(host, "static bool host_starts(", "static fn host_pause(")
+    driver = shim + r"""
+static b32 string_compare_max(const void *one, const void *two, positive size)
+{
+        return strncmp(one, two, size);
+}
+static positive string_span_of_set(const void *text, const char *set)
+{
+        return strspn(text, set);
+}
+""" + starts + scan + r"""
+int main(void)
+{
+        static p8 line[70000];
+        positive size;
+
+        while (fgets((char *)line, sizeof line, stdin))
+        {
+                p8 *tab = (p8 *)strchr((char *)line, '\t');
+                p8 *name, *text;
+
+                if (!tab)
+                        return 2;
+                *tab = 0;
+                size = strlen((char *)tab + 1);
+                tab[size] = 0; // the newline that ends the case
+                name = malloc(strlen((char *)line) + 1);
+                strcpy((char *)name, (char *)line);
+                text = malloc(size);
+                for (positive at = 0; at + 1 < size; at++)
+                        text[at] = tab[1 + at] == 1 ? '\n' : tab[1 + at];
+                text[size - 1] = 0;
+                putchar(link_script_names_secret(text, name) ? '1' : '0');
+                free(name);
+                free(text);
+        }
+        return 0;
+}
+"""
+    clang = shutil.which("clang") or shutil.which("cc")
+    generator = random.Random(0x5c1e)
+    names = ["home", "lab.1", "a", "net_9", "office-2", "x" * 31]
+    pieces = ["link join ", "link join  ", "link join", "allow", "allowed", "run",
+              " ", "  ", "\x01", ";", "#", "secret", "s3cr3t", "blink join ",
+              "moonwater link join "] + names
+
+    def case():
+        name = generator.choice(names)
+        if generator.randrange(3) == 0:
+            text = "".join(generator.choice(pieces) for _ in range(generator.randrange(12)))
+        else:
+            cut = generator.randrange(len(name) + 1)
+            text = generator.choice(["", "x\x01", "#\x01"]) + "link join " + (
+                name[:cut] if generator.randrange(2) else name +
+                generator.choice(["", " ", "  allow run", " s", " ;", " #", "\x01"]))
+        return name, text
+    cases = [case() for _ in range(20000)]
+    with tempfile.TemporaryDirectory(prefix="wl-script-") as temporary:
+        work = Path(temporary)
+        (work / "scan.c").write_text(driver)
+        built = subprocess.run([clang, "-O1", "-g", "-w", "-fsanitize=address,undefined",
+                                "-fno-sanitize-recover=all", str(work / "scan.c"), "-o",
+                                str(work / "scan")], capture_output=True, text=True)
+        if built.returncode:
+            print("  waterlink script scan: NOT RUN -- no ASan build\n" +
+                  built.stderr[-800:])
+            return 0
+        ran = subprocess.run([str(work / "scan")], capture_output=True, text=True,
+                             input="".join("%s\t%s\n" % pair for pair in cases),
+                             env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+    wrong = [pair for pair, got in zip(cases, ran.stdout)
+             if (got == "1") != bool(re.search(
+                 "link join +" + re.escape(pair[0]) + " +(?! |allow)[^\x01;#]",
+                 pair[1]))]
+    if ran.returncode or len(ran.stdout) != len(cases) or wrong:
+        report = [line for line in (ran.stderr or "").splitlines()
+                  if "ERROR" in line or "SUMMARY" in line or
+                  line.lstrip().startswith("#")][:8]
+        print("  FAIL waterlink script scan: %s %s" % ("\n".join(report), wrong[:3]))
+        write_tally("waterlink-script", 0, 1)
+        return 1
+    print("  waterlink script scan: %d machine scripts under ASan agree with the "
+          "model" % len(cases))
+    write_tally("waterlink-script", 1, 1)
+    return 0
+
+
 HARNESS_CHECKS = {
     "https_bench": harness_https_bench,
     "compression": harness_compression,
@@ -41060,6 +54598,7 @@ HARNESS_CHECKS = {
     "inventory_mutations": harness_inventory_mutations,
     "terminfo_install": harness_terminfo_install,
     "dhcp_packets": harness_dhcp_packets,
+    "dhcp_fuzz": harness_dhcp_fuzz,
     "term_streams": harness_term_streams,
     "console_queue": harness_console_queue,
     "sort_spill_names": harness_sort_spill_names,
@@ -41069,10 +54608,31 @@ HARNESS_CHECKS = {
     "moonwater_cli": harness_moonwater_cli,
     "machine_reap": harness_machine_reap,
     "tls_chains": harness_tls_chains,
+    "tls_peer": harness_tls_peer,
+    "https_downgrade": harness_https_downgrade,
+    "http_response_framing": harness_http_response_framing,
+    "http_fuzz": harness_http_fuzz,
+    "http_urls": harness_http_urls,
+    "tls_der_fuzz": harness_tls_der_fuzz,
+    "tls_hs_fuzz": harness_tls_hs_fuzz,
+    "tls_verify_fuzz": harness_tls_verify_fuzz,
+    "sntp_fuzz": harness_sntp_fuzz,
+    "dns_fuzz": harness_dns_fuzz,
+    "netlink_fuzz": harness_netlink_fuzz,
+    "crypto_vectors": harness_crypto_vectors,
+    "crypto_fuzz": harness_crypto_fuzz,
+    "x509_corpus": harness_x509_corpus,
+    "public_suffixes": harness_public_suffixes,
+    "tls_fuzz": harness_tls_fuzz,
+    "msan_net": harness_msan_net,
+    "security_hygiene": harness_security_hygiene,
+    "pathname_race": harness_pathname_race,
     "machine_scan": harness_machine_scan,
     "waterlink_noise": harness_waterlink_noise,
     "waterlink_mdns": harness_waterlink_mdns,
     "waterlink_sanitized": harness_waterlink_sanitized,
+    "waterlink_pre_fuzz": harness_waterlink_pre_fuzz,
+    "waterlink_fuzz": harness_waterlink_fuzz,
     "waterlink_link": harness_waterlink_link,
 }
 

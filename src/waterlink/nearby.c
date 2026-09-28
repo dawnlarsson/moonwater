@@ -50,6 +50,7 @@
 #define LINK_ANNOUNCE_EVERY 60000000ull  // after the first three
 #define LINK_ASK_EVERY 30000000ull
 #define LINK_GREET_AGAIN 10000000ull     // the same place, not sooner
+#define LINK_ANSWER_AGAIN 100000ull      // a one-shot asker's answer, not sooner
 
 struct link_group_record {
         char namespace[WATERLINK_NAMESPACE_MAX];
@@ -121,16 +122,7 @@ fn link_group_check(string_address namespace, p8 address_to secret,
 */
 static bipolar link_peers_lock(void)
 {
-        link_record_lock lock = {LINK_F_WRLCK, 0, 0, 0, 0, 0, 0};
-        bipolar handle = link_lock_file(LINK_PEERS_LOCK);
-
-        if (handle < 0)
-                return handle;
-        //      F_SETLKW: wait for the other writer.
-        while (system_call_3(syscall(fcntl), (positive)handle, 7,
-                             (positive)address_of lock) == -4)
-                ;
-        return handle;
+        return link_lock_file(LINK_PEERS_LOCK, 7, null); // F_SETLKW: wait
 }
 
 static fn link_peers_unlock(bipolar handle)
@@ -223,6 +215,7 @@ typedef struct
         positive announced;
         positive asked;
         p64 last_answer;
+        p64 last_reply;
         p64 interfaces_looked;
         bool labels_ready;
         struct link_greeted greeted[LINK_GREETED];
@@ -247,10 +240,16 @@ static bool link_nearby_labels(void)
         or moved, when the record is the group's own. A record paired by hand
         or by another group is never replaced or widened. True when the
         member was new here.
+
+        The record keeps the seconds of the last greeting it took, which is
+        the replay marker that outlives the listener: the markers in memory
+        are gone after a restart, and a greeting recorded on the link, played
+        back from anywhere, would otherwise move the member there for good.
 */
 static bool link_pair_keep(positive group, p8 address_to key,
-                           p8 address_to offered, p8 address_to address,
-                           p16 port, bool address_to accepted)
+                           p8 address_to offered, p32 stamped,
+                           p8 address_to address, p16 port,
+                           bool address_to accepted)
 {
         struct waterlink_group_keys address_to keys = link_nearby.keys + group;
         link_peers peers;
@@ -284,12 +283,16 @@ static bool link_pair_keep(positive group, p8 address_to key,
                 peer->group = keys->mark;
                 new = changed = true;
         }
-        if (peer && peer->group == keys->mark &&
-            (memory_compare(peer->address, address, 16) || peer->port != port))
+        else if (peer && peer->group == keys->mark && stamped <= peer->seen)
+                peer = null;
+        if (peer && peer->group == keys->mark)
         {
+                changed |= peer->seen != stamped ||
+                           memory_compare(peer->address, address, 16) ||
+                           peer->port != port;
                 memory_copy(peer->address, address, 16);
                 peer->port = port;
-                changed = true;
+                peer->seen = stamped;
         }
         if (changed)
         {
@@ -322,19 +325,17 @@ typedef struct
 static bool link_nearby_address(netlink_header address_to header,
                                 address_any context)
 {
-        netlink_address address_to body;
+        netlink_address address_to body =
+            netlink_message_body(header, sizeof(netlink_address));
         positive size = 0;
         p8 address_to host;
         link_mreqn join = {network_order_32(WATERLINK_MDNS_GROUP), 0, 0};
         bipolar joined;
 
         (void)context;
-        if (header->type != RTM_NEWADDR ||
-            header->length < NETLINK_HEADER + sizeof(netlink_address) ||
+        if (header->type != RTM_NEWADDR || !body ||
             link_nearby.interfaces == LINK_INTERFACES)
                 return true;
-        body = (netlink_address address_to)((p8 address_to)header +
-                                            NETLINK_HEADER);
         host = netlink_find(header, sizeof(netlink_address), IFA_LOCAL,
                              address_of size);
         if (body->family != AF_INET || !host || size < 4)
@@ -532,14 +533,17 @@ static fn link_pair_begin(positive group, p8 address_to address, p16 port,
                         (p32)(wall % 1000000000ull));
         memory_copy(hello + WATERLINK_STAMP_BYTES, link_nearby.name,
                     WATERLINK_NAME_MAX);
+        //      Counted whether or not it could be sent: the curve work is
+        //      done, and a place that refuses it (port zero, say) is neither
+        //      greeted again at once nor outside the budget.
         if (waterlink_initiate(address_of noise, address_of link_self.me,
                                keys->identity.public, keys->psk, ephemeral,
-                               hello, datagram) &&
-            link_send_to(datagram, WATERLINK_DATAGRAM, address, port) >= 0)
+                               hello, datagram))
         {
                 struct link_greeted address_to next =
                         link_nearby.greeted + link_nearby.greeted_next;
 
+                (void)link_send_to(datagram, WATERLINK_DATAGRAM, address, port);
                 link_nearby.greeted_next =
                         (link_nearby.greeted_next + 1) % LINK_GREETED;
                 memory_copy(next->address, address, 16);
@@ -552,12 +556,13 @@ static fn link_pair_begin(positive group, p8 address_to address, p16 port,
 
 //      A greeting that opened: the member is kept, and greeted back if new.
 static bool link_pair_greeted(positive group, p8 address_to key,
-                              p8 address_to name, p8 address_to address,
+                              p8 address_to hello, p8 address_to address,
                               p16 port, p64 now)
 {
         bool accepted;
 
-        if (link_pair_keep(group, key, name, address, port,
+        if (link_pair_keep(group, key, hello + WATERLINK_STAMP_BYTES,
+                           network_load_32(hello + 4), address, port,
                            address_of accepted))
                 link_pair_begin(group, address, port, now);
         return accepted;
@@ -579,6 +584,10 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
 
         if (found.asked && link_nearby.groups.count)
         {
+                //      Unicast to wherever the packet says it came from, which
+                //      nobody checked: a few a second, or a stream of spoofed
+                //      questions is a stream of answers four times their size
+                //      at somebody else.
                 if (source_port != WATERLINK_MDNS_PORT && found.question_length)
                 {
                         //      A one-shot asker gets the answer back to
@@ -597,10 +606,14 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                             .port = network_order_16(source_port),
                             .host = network_order_32(network_load_32(address + 12))};
 
-                        if (reply_length)
+                        if (reply_length &&
+                            link_age(now, link_nearby.last_reply) >= LINK_ANSWER_AGAIN)
+                        {
+                                link_nearby.last_reply = now;
                                 (void)socket_send((b32)link_nearby.socket, reply,
                                                   reply_length, MSG_NOSIGNAL,
                                                   address_of to, sizeof to);
+                        }
                 }
                 else if (now - link_nearby.last_answer > 1000000)
                 {
@@ -628,6 +641,7 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                 for (positive group = 0; group < link_nearby.groups.count; group++)
                 {
                         bool known = false;
+                        p64 oldest = link_nearby.greeted[link_nearby.greeted_next].at;
 
                         for (positive p = 0; p < peers.count && !known; p++)
                                 known = peers.peer[p].group ==
@@ -635,7 +649,15 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                                         peers.peer[p].port == instance->port &&
                                         !memory_compare(peers.peer[p].address,
                                                         address, 16);
-                        if (!known)
+                        //      Anyone may announce, naming any port, as many as
+                        //      a packet holds: the ring of places greeted is
+                        //      also the budget, LINK_GREETED greetings in
+                        //      LINK_GREET_AGAIN, so a made-up announcement
+                        //      cannot turn this machine into a sprayer of
+                        //      handshakes. A greeting back to a member whose
+                        //      own greeting opened is not held to it.
+                        if (!known && (!oldest || link_age(now, oldest) >=
+                                                          LINK_GREET_AGAIN))
                                 link_pair_begin(group, address, instance->port,
                                                 now);
                 }
@@ -719,7 +741,6 @@ static fn link_nearby_receive(p64 now)
                 p64 control[8];
                 link_message message;
                 bipolar got;
-                b32 ttl = -1;
                 p8 address[16];
 
                 memory_zero(address_of message, sizeof message);
@@ -736,23 +757,9 @@ static fn link_nearby_receive(p64 now)
                 if ((positive)got > WATERLINK_MDNS_MAX)
                         continue;
 
-                //      cmsghdr: length, level, type, then the TTL as an int.
-                for (positive at = 0;
-                     at + 16 <= message.control_length && at + 16 <= sizeof control;)
-                {
-                        p64 cmsg_length;
-                        b32 level, type;
-
-                        memory_copy(address_of cmsg_length, (p8 address_to)control + at, 8);
-                        memory_copy(address_of level, (p8 address_to)control + at + 8, 4);
-                        memory_copy(address_of type, (p8 address_to)control + at + 12, 4);
-                        if (cmsg_length < 16 || at + cmsg_length > sizeof control)
-                                break;
-                        if (level == 0 && type == 2 && cmsg_length >= 20)
-                                memory_copy(address_of ttl, (p8 address_to)control + at + 16, 4);
-                        at += (cmsg_length + 7) & ~7ull;
-                }
-                if (ttl != 255)
+                if (link_control_int((p8 address_to)control,
+                                     message.control_length, sizeof control, 0,
+                                     2) != 255) // IPPROTO_IP, IP_TTL
                         continue;
 
                 link_address_v4(address, network_order_32(from.host));
