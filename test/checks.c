@@ -55356,16 +55356,16 @@ static fn tls_client_hello_bounds(void)
 
         used = 0;
         check("a ClientHello fits its exact named-host bound",
-              tls_client_hello(address_of client, hello, 140,
+              tls_client_hello(address_of client, hello, 165,
                                address_of used, null, 0) == TLS_OK &&
-                  used == 140);
+                  used == 165);
 
         client.host = "127.0.0.1";
         used = 0;
         check("a numeric-host ClientHello omits SNI at its exact bound",
-              tls_client_hello(address_of client, hello, 120,
+              tls_client_hello(address_of client, hello, 145,
                                address_of used, null, 0) == TLS_OK &&
-                  used == 120);
+                  used == 145);
 }
 
 /*
@@ -55534,7 +55534,7 @@ static fn tls_client_hello_groups(void)
         static string_address hosts[] = {
             "example.com", "repo.chimera-linux.org", "geo.mirror.pkgbuild.com",
             "dl-cdn.alpinelinux.org", "127.0.0.1", "192.0.2.1"};
-        static const positive ciphers[] = {0x1301};
+        static const positive ciphers[] = {0x1301, 0xc02b, 0xc02f};
         tls_conn client = {0};
         p8 hello[512];
         positive host;
@@ -55562,7 +55562,7 @@ static fn tls_client_hello_groups(void)
                 check("ClientHello carries no P-384 key share until asked",
                       !tls_hello_offers_share(hello, used, 0x0018, 97));
                 for (at = 0; at < array_count(ciphers); at++)
-                        check("ClientHello offers the TLS 1.3 ciphers it implements",
+                        check("ClientHello offers the TLS 1.3 and 1.2 ciphers it implements",
                               tls_hello_offers_cipher(hello, used, ciphers[at]));
         }
 }
@@ -55616,6 +55616,8 @@ static bipolar tls_walk(p8 flight, positive address_to messages)
         return used == length ? TLS_OK : TLS_FAIL;
 }
 
+static tls_conn tls_hello_conn;
+
 static fn tls_server_hello_validation(void)
 {
         p8 hello[91] = {0};
@@ -55626,6 +55628,7 @@ static fn tls_server_hello_validation(void)
         positive cookie_length = 0;
         p8 changed[91];
 
+        tls_hello_conn.group = 0x1d;
         hello[0] = TLS_HS_SERVER_HELLO;
         hello[3] = 86;
         hello[4] = 0x03;
@@ -55655,41 +55658,41 @@ static fn tls_server_hello_validation(void)
         hello[58] = 9;
 
         check("a complete TLS 1.3 ServerHello is accepted",
-              tls_server_hello_keys(hello, 90, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) ==
+              tls_server_hello_keys(hello, 90, &tls_hello_conn, peer, sizeof peer, &share, &group, &cookie, &cookie_length) ==
                       TLS_OK && group == 0x001d && share == 32 &&
                   !memory_compare(peer, hello + 58, 32));
 
         memory_copy(changed, hello, 90);
         changed[5] = 0x02;
         check("a ServerHello with the wrong legacy version is refused",
-              tls_server_hello_keys(changed, 90, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
+              tls_server_hello_keys(changed, 90, &tls_hello_conn, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[38] = 1;
         check("a ServerHello cannot invent a session id echo",
-              tls_server_hello_keys(changed, 90, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
+              tls_server_hello_keys(changed, 90, &tls_hello_conn, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[41] = 1;
         check("a ServerHello with compression is refused",
-              tls_server_hello_keys(changed, 90, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
+              tls_server_hello_keys(changed, 90, &tls_hello_conn, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[49] = 0x03;
         check("a ServerHello must select TLS 1.3",
-              tls_server_hello_keys(changed, 90, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
+              tls_server_hello_keys(changed, 90, &tls_hello_conn, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[45] = 0x34;
         check("an unexpected ServerHello extension is refused",
-              tls_server_hello_keys(changed, 90, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
+              tls_server_hello_keys(changed, 90, &tls_hello_conn, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[3] = 87;
         changed[43] = 47;
         changed[90] = 0;
         check("trailing ServerHello extension bytes are refused",
-              tls_server_hello_keys(changed, 91, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
+              tls_server_hello_keys(changed, 91, &tls_hello_conn, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[3] = 87;
@@ -55697,7 +55700,7 @@ static fn tls_server_hello_validation(void)
         changed[53] = 37;
         changed[90] = 0;
         check("an overlong X25519 ServerHello share is refused",
-              tls_server_hello_keys(changed, 91, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
+              tls_server_hello_keys(changed, 91, &tls_hello_conn, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         {
                 p8 records[2 * 5 + 90];
@@ -55713,7 +55716,7 @@ static fn tls_server_hello_validation(void)
                                          address_of tls_walk_ccs, null) ==
                               TLS_OK &&
                           used == 90 && length == 90 &&
-                          tls_server_hello_keys(tls_walk_hs, length, 0x1d, peer,
+                          tls_server_hello_keys(tls_walk_hs, length, &tls_hello_conn, peer,
                                                 sizeof peer, &share, &group,
                                                 &cookie, &cookie_length) ==
                               TLS_OK);
@@ -55808,7 +55811,8 @@ static fn tls_hello_retry_rows(void)
                 hello[40] = 0x01;
                 hello[43] = rows[row].length;
                 memory_copy(hello + 44, rows[row].bytes, rows[row].length);
-                got = tls_server_hello_keys(hello, length, rows[row].offered,
+                tls_hello_conn.group = rows[row].offered;
+                got = tls_server_hello_keys(hello, length, &tls_hello_conn,
                                             peer, sizeof peer,
                                             &share, &group, &cookie,
                                             &cookie_length);
@@ -55990,14 +55994,14 @@ static fn tls_server_flight_validation(void)
                 crypto_sha256_open(address_of tls.transcript);
                 tls.named = true;
                 check("EncryptedExtensions may answer server_name and supported_groups",
-                      tls_flight_message(address_of tls, asked, sizeof asked) ==
+                      tls_flight_message(address_of tls, asked, sizeof asked, null) ==
                           TLS_OK);
                 check("EncryptedExtensions answering what was never offered is refused",
                       tls_flight_message(address_of tls, unasked,
-                                         sizeof unasked) == TLS_FAIL);
+                                         sizeof unasked, null) == TLS_FAIL);
                 tls.named = false;
                 check("EncryptedExtensions answering server_name without SNI is refused",
-                      tls_flight_message(address_of tls, asked, sizeof asked) ==
+                      tls_flight_message(address_of tls, asked, sizeof asked, null) ==
                           TLS_FAIL);
         }
 }
@@ -58287,6 +58291,404 @@ static fn tls_trust_anchor_chains(void)
               bad_anchors == 0 && array_count(tls_anchors) == 120);
 }
 
+/*
+        TLS 1.2, piece by piece. ServerHello rows: a 1.2 answer needs one of
+        the two suites, the extended master secret and an empty
+        renegotiation_info, may carry point formats holding uncompressed
+        and a server_name ack when a name was sent, and never the
+        downgrade sentinel; either version refuses the other's extensions
+        and suites. Then the PRF's published vector (the IETF TLS list's
+        P_SHA256 "test label"), the record layer both ways over a socket
+        pair, the Certificate relayout under a real P-256 leaf, a
+        ServerKeyExchange that leaf signed (SHA-256, and SHA-384, which
+        only 1.2 lets a P-256 key use), and the 1.2 flight's shape.
+*/
+static tls_conn tls12_near;
+static tls_conn tls12_far;
+
+static fn tls12_pieces(void)
+{
+        static const struct
+        {
+                string_address name;
+                bool named;
+                p8 session;
+                p16 suite;
+                p8 sentinel;
+                p8 length;
+                p8 bytes[24];
+                bool accept;
+        } rows[] = {
+            {"EMS and renegotiation_info", false, 0, 0xc02f, 0, 9,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, true},
+            {"ECDSA suite, point formats", false, 0, 0xc02b, 0, 15,
+             {0xff, 1, 0, 1, 0, 0, 0x0b, 0, 2, 1, 0, 0, 0x17, 0, 0}, true},
+            {"a server_name ack after SNI", true, 0, 0xc02f, 0, 13,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0, 0, 0, 0, 0}, true},
+            {"a 32-byte session id", false, 32, 0xc02f, 0, 9,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, true},
+            {"DOWNGRD with another last byte", false, 0, 0xc02f, 2, 9,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, true},
+            {"a server_name ack without SNI", false, 0, 0xc02f, 0, 13,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0, 0, 0, 0, 0}, false},
+            {"no extended master secret", false, 0, 0xc02f, 0, 5,
+             {0xff, 1, 0, 1, 0}, false},
+            {"no renegotiation_info", false, 0, 0xc02f, 0, 4,
+             {0, 0x17, 0, 0}, false},
+            {"no extensions", false, 0, 0xc02f, 0, 0, {0}, false},
+            {"renegotiation_info naming a connection", false, 0, 0xc02f, 0, 10,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 2, 1, 0}, false},
+            {"an extended master secret with a body", false, 0, 0xc02f, 0, 10,
+             {0, 0x17, 0, 1, 0, 0xff, 1, 0, 1, 0}, false},
+            {"point formats without uncompressed", false, 0, 0xc02f, 0, 15,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0, 0, 0x0b, 0, 2, 1, 1}, false},
+            {"two extended master secrets", false, 0, 0xc02f, 0, 13,
+             {0, 0x17, 0, 0, 0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, false},
+            {"a session ticket never offered", false, 0, 0xc02f, 0, 13,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0, 0, 0x23, 0, 0}, false},
+            {"a key share in TLS 1.2", false, 0, 0xc02f, 0, 17,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0, 0, 0x33, 0, 4, 0, 0x1d, 0, 0},
+             false},
+            {"a 33-byte session id", false, 33, 0xc02f, 0, 9,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, false},
+            {"the TLS 1.2 downgrade sentinel", false, 0, 0xc02f, 1, 9,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, false},
+            {"the TLS 1.1 downgrade sentinel", false, 0, 0xc02f, 3, 9,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, false},
+            {"a suite not offered", false, 0, 0xc030, 0, 9,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, false},
+            {"the TLS 1.3 suite without supported_versions", false, 0, 0x1301,
+             0, 9, {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, false},
+            {"a TLS 1.2 suite with supported_versions", false, 0, 0xc02f, 0, 15,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, false},
+            {"a TLS 1.3 hello with the extended master secret", false, 0, 0x1301,
+             0, 10, {0, 0x2b, 0, 2, 3, 4, 0, 0x17, 0, 0}, false},
+        };
+        static const char leaf_hex[] =
+            "3082016d30820113a003020102021455c272b1a79dee4b99d62c9376aefccc93"
+            "8e06b0300a06082a8648ce3d040302300c310a300806035504030c0174301e17"
+            "0d3236303932383139333632315a170d3336303932353139333632315a300c31"
+            "0a300806035504030c01743059301306072a8648ce3d020106082a8648ce3d03"
+            "0107034200048e06f0f7254a2e463f5e610d5a092058892a66a8fa8c88566142"
+            "732dab00bcd59d3bc5d840989aad6d4b46b326348c60186404341fa3b7968377"
+            "6d1a619256f8a3533051301d0603551d0e04160414ac137b72a7e6f580deb9f2"
+            "90665a39f4c9e57d67301f0603551d23041830168014ac137b72a7e6f580deb9"
+            "f290665a39f4c9e57d67300f0603551d130101ff040530030101ff300a06082a"
+            "8648ce3d0403020348003045022100966cb2113ba91368e1a98e15226125bb95"
+            "7aa536dc9b5c05a14ec1ea58b82dd202207d37421503a6147eb36d49a294c126"
+            "7c84712d513fd627dd39e49b9b7839ea82";
+        static const char exchange_hex[] =
+            "03001d208f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e"
+            "2138285f040300473045022037c0d819210f38a335325473e6244dc55af82d0b"
+            "5be7fe75e0be23fe2074a4f5022100e962d171c0a43631dfd14f1f1de8ca230c"
+            "1f659730c4b8b454f98382ac368cc8";
+        static const char exchange384_hex[] =
+            "03001d208f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e"
+            "2138285f05030046304402207df9f44ffb3548a58f822e8696b8c921f72ebfda"
+            "e656d71ede24ec576bb1a22c0220162c6a9afd763182574bf2612248d546ee5a"
+            "2157cab2bf19fb83e24eaf7dc098";
+        static const char prf_hex[] =
+            "e3f229ba727be17b8d122620557cd453c2aab21d07c3d495329b52d4e61edb5a"
+            "6b301791e90d35c9c9a46b4e14baf9af0fa022f7077def17abfd3797c0564bab"
+            "4fbc91666e9def9b97fce34f796789baa48082d122ee42c5a72e5a5110fff701"
+            "87347b66";
+        static p8 scratch[5 + TLS_PLAINTEXT_MAX];
+        tls_conn address_to tls = address_of tls_hello_conn;
+        bool all = true;
+
+        for (positive row = 0; row < array_count(rows); row++)
+        {
+                p8 hello[44 + 33 + 24] = {TLS_HS_SERVER_HELLO, 0, 0, 0, 3, 3};
+                p8 peer[97];
+                positive share = 0;
+                positive group = 0;
+                p8 address_to cookie = null;
+                positive cookie_length = 0;
+                positive at = 38;
+                bool accepted;
+
+                memory_fill(tls, 0, TLS_CONN_HEAD);
+                tls->group = 0x1d;
+                tls->named = rows[row].named;
+                memory_fill(hello + 6, 0x42, 32);
+                if (rows[row].sentinel)
+                {
+                        memory_copy(hello + 6 + 24, "DOWNGRD", 7);
+                        hello[6 + 31] = rows[row].sentinel == 3 ? 0
+                                                                : rows[row].sentinel - 1 ? 2 : 1;
+                }
+                hello[at++] = rows[row].session;
+                at += rows[row].session;
+                network_store_16(hello + at, rows[row].suite);
+                at += 3;
+                if (rows[row].length)
+                {
+                        network_store_16(hello + at, rows[row].length);
+                        memory_copy(hello + at + 2, rows[row].bytes,
+                                    rows[row].length);
+                        at += 2 + rows[row].length;
+                }
+                hello[3] = (p8)(at - 4);
+                accepted = tls_server_hello_keys(hello, at, tls, peer, sizeof peer,
+                                                 &share, &group, &cookie,
+                                                 &cookie_length) == TLS_OK &&
+                           tls->tls12 && tls->suite == rows[row].suite &&
+                           !memory_compare(tls->server_random, hello + 6, 32);
+                if (accepted != rows[row].accept)
+                {
+                        all = false;
+                        string_format(log, "  TLS 1.2 hello row: %s\n",
+                                      rows[row].name);
+                }
+        }
+        check("each TLS 1.2 ServerHello row answers its verdict", all);
+
+        {
+                p8 secret[16];
+                p8 seed[16];
+                p8 want[100];
+                p8 got[100];
+
+                crypto_hex_into(secret, sizeof secret,
+                                "9bbe436ba940f017b17652849a71db35");
+                crypto_hex_into(seed, sizeof seed,
+                                "a0ba9f936cda311827a6f796ffd5198c");
+                crypto_hex_into(want, sizeof want, prf_hex);
+                tls12_prf(secret, sizeof secret, "test label", seed, 8,
+                          seed + 8, 8, got, sizeof got);
+                check("the TLS 1.2 PRF gives the published P_SHA256 vector",
+                      !memory_compare(got, want, sizeof want));
+        }
+
+        /* Records both ways under zero keys: the explicit nonce is the
+           sequence, the header names the type, a close_notify alert ends
+           the stream, and a changed explicit nonce does not open. */
+        {
+                tls_conn address_to near = address_of tls12_near;
+                tls_conn address_to far = address_of tls12_far;
+                b32 pair[2];
+                p8 record[5 + 8 + 2 + 16];
+                p8 got_bytes[8];
+                positive got = 0;
+                p8 type = 0;
+                p8 address_to inner = null;
+                positive length = 0;
+                bool opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                            SOCK_STREAM, 0,
+                                            (positive)pair) == 0;
+
+                check("TLS 1.2 record socket pair opens", opened);
+                if (opened)
+                {
+                        memory_fill(near, 0, TLS_CONN_HEAD);
+                        memory_fill(far, 0, TLS_CONN_HEAD);
+                        near->handle = pair[0];
+                        far->handle = pair[1];
+                        near->tls12 = far->tls12 = true;
+                        near->encrypted = far->encrypted = true;
+                        near->application = far->application = true;
+                        /* Prepared keys: an unprepared all-zero GHASH
+                           table would authenticate no additional data. */
+                        memory_fill(got_bytes, 7, sizeof got_bytes);
+                        memory_copy(record, got_bytes, 8);
+                        memory_copy(record + 8, got_bytes, 8);
+                        crypto_aesgcm_prepare(address_of near->c_gcm, record);
+                        crypto_aesgcm_prepare(address_of far->s_gcm, record);
+                        near->seq_write = far->seq_read = 5;
+                        check("a TLS 1.2 record is sealed with its explicit nonce",
+                              tls_seal(near, TLS_CT_APP, (p8 address_to)"hi", 2,
+                                       record) == sizeof record &&
+                                  record[0] == TLS_CT_APP &&
+                                  network_load_16(record + 3) == 8 + 2 + 16 &&
+                                  crypto_be64(record + 5) == 5);
+                        check("a TLS 1.2 record does not open at another sequence",
+                              tls_send_enc(near, TLS_CT_APP,
+                                           (p8 address_to)"ok", 2) == TLS_OK &&
+                                  tls_read(far, got_bytes, 1,
+                                           address_of got) == TLS_FAIL);
+                        far->seq_read = 6;
+                        memory_fill(far->receive, 0, 64);
+                        far->receive_start = far->receive_end = 0;
+                        far->plain_used = 0;
+                        near->seq_write = 6;
+                        check("a TLS 1.2 record opens at its sequence",
+                              tls_send_enc(near, TLS_CT_APP,
+                                           (p8 address_to)"ok", 2) == TLS_OK &&
+                                  tls_read(far, got_bytes, sizeof got_bytes,
+                                           address_of got) == TLS_OK &&
+                                  got == 2 && !memory_compare(got_bytes, "ok", 2));
+                        check("a TLS 1.2 close_notify is a clean close",
+                              tls_send_enc(near, TLS_CT_ALERT,
+                                           (p8 address_to)"\1\0", 2) == TLS_OK &&
+                                  tls_read(far, got_bytes, sizeof got_bytes,
+                                           address_of got) == TLS_OK &&
+                                  !got);
+                        near->seq_write = 0;
+                        far->seq_read = 0;
+                        far->receive_start = far->receive_end = 0;
+                        far->handle = -1;
+                        tls_seal(near, TLS_CT_APP, (p8 address_to)"hi", 2,
+                                 far->receive);
+                        far->receive[12] ^= 1;
+                        far->receive_end = far->receive_high = sizeof record;
+                        check("a changed TLS 1.2 explicit nonce does not open",
+                              tls_next_record(far, address_of type,
+                                              address_of inner,
+                                              address_of length, null) ==
+                                  TLS_FAIL);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                        tls_forget(near);
+                        tls_forget(far);
+                }
+        }
+
+        /* The relayout: one real P-256 leaf in a TLS 1.2 list, checked
+           under the ECDSA suite and refused under the RSA one; broken
+           framing is refused before any certificate is read. */
+        {
+                p8 body[3 + 3 + 369];
+                p8 exchange[111];
+                p8 exchange384[110];
+
+                crypto_hex_into(body + 6, 369, leaf_hex);
+                body[0] = 0;
+                network_store_16(body + 1, 372);
+                body[3] = 0;
+                network_store_16(body + 4, 369);
+                memory_fill(tls, 0, TLS_CONN_HEAD);
+                tls->tls12 = true;
+                tls->host = "t";
+                tls->suite = 0xc02f;
+                check("a TLS 1.2 ECDSA leaf is refused under the RSA suite",
+                      !tls12_certificate(tls, body, sizeof body, scratch));
+                tls->suite = 0xc02b;
+                check("a TLS 1.2 Certificate is relaid and its leaf kept",
+                      tls12_certificate(tls, body, sizeof body, scratch) &&
+                          tls->leaf_curve == 1 && scratch[0] == 0 &&
+                          tls_load_24(scratch + 1) == 3 + 369 + 2);
+                body[2]++;
+                check("a TLS 1.2 certificate list longer than its message is refused",
+                      !tls12_certificate(tls, body, sizeof body, scratch));
+                body[2]--;
+                body[5]++;
+                check("a TLS 1.2 certificate longer than its list is refused",
+                      !tls12_certificate(tls, body, sizeof body, scratch));
+                body[5]--;
+
+                crypto_hex_into(exchange, sizeof exchange, exchange_hex);
+                crypto_hex_into(exchange384, sizeof exchange384,
+                                exchange384_hex);
+                memory_fill(tls->client_random, 0x11, 32);
+                memory_fill(tls->server_random, 0x22, 32);
+                {
+                        static const p8 zeros[32];
+
+                        check("a signed TLS 1.2 ServerKeyExchange draws the share",
+                              tls12_key_exchange(tls, exchange, sizeof exchange) &&
+                                  tls->group == 0x1d &&
+                                  memory_compare(tls->master, zeros, 32) &&
+                                  memory_compare(tls->share, zeros, 32) &&
+                                  !memory_compare(tls->scalar, zeros, 32));
+                }
+                {
+                        p8 signed_bytes[64 + 36];
+
+                        memory_fill(signed_bytes, 0x11, 32);
+                        memory_fill(signed_bytes + 32, 0x22, 32);
+                        memory_copy(signed_bytes + 64, exchange384, 36);
+                        check("TLS 1.2 lets a P-256 key sign with SHA-384",
+                              tls_signature_valid(tls, 0x0503, signed_bytes,
+                                                  sizeof signed_bytes,
+                                                  exchange384 + 40, 70) &&
+                                  tls12_key_exchange(tls, exchange384,
+                                                     sizeof exchange384));
+                        tls->tls12 = false;
+                        check("TLS 1.3 binds ecdsa_secp384r1_sha384 to P-384",
+                              !tls_signature_valid(tls, 0x0503, signed_bytes,
+                                                   sizeof signed_bytes,
+                                                   exchange384 + 40, 70));
+                        check("TLS 1.3 keeps RSA PKCS#1 v1.5 to certificates",
+                              !tls_signature_valid(tls, 0x0401, signed_bytes,
+                                                   sizeof signed_bytes,
+                                                   exchange384 + 40, 70));
+                        tls->tls12 = true;
+                }
+                exchange[50] ^= 1;
+                check("a TLS 1.2 ServerKeyExchange with a broken signature is refused",
+                      !tls12_key_exchange(tls, exchange, sizeof exchange));
+                exchange[50] ^= 1;
+                exchange[2] = 0x19;
+                check("a TLS 1.2 ServerKeyExchange on a group never offered is refused",
+                      !tls12_key_exchange(tls, exchange, sizeof exchange));
+                exchange[2] = 0x1d;
+                exchange[0] = 1;
+                check("a TLS 1.2 ServerKeyExchange with explicit curve parameters is refused",
+                      !tls12_key_exchange(tls, exchange, sizeof exchange));
+                exchange[0] = 3;
+                check("a TLS 1.2 ServerKeyExchange with bytes after its signature is refused",
+                      !tls12_key_exchange(tls, exchange, sizeof exchange - 1));
+                tls->suite = 0;
+                memory_fill(tls, 0, TLS_CONN_HEAD);
+        }
+
+        {
+                static const p8 request[] = {1, 64, 0, 2, 4, 3, 0, 0};
+                static const p8 request_trailing[] = {1, 64, 0, 2, 4, 3, 0, 0, 0};
+                static const p8 request_no_types[] = {0, 0, 2, 4, 3, 0, 0};
+                p8 state = TLS12_FLIGHT_CERTIFICATE;
+
+                check("a TLS 1.2 CertificateRequest is framed",
+                      tls12_certificate_request((p8 address_to)request,
+                                                sizeof request));
+                check("a TLS 1.2 CertificateRequest with trailing bytes is refused",
+                      !tls12_certificate_request((p8 address_to)request_trailing,
+                                                 sizeof request_trailing));
+                check("a TLS 1.2 CertificateRequest without types is refused",
+                      !tls12_certificate_request((p8 address_to)request_no_types,
+                                                 sizeof request_no_types));
+                check("a TLS 1.2 flight refuses EncryptedExtensions",
+                      !tls_server_flight_step(address_of state,
+                                              TLS_HS_ENCRYPTED_EXTS));
+                check("a TLS 1.2 flight refuses ServerKeyExchange before Certificate",
+                      !tls_server_flight_step(address_of state,
+                                              TLS_HS_SERVER_KEY_EXCHANGE));
+                check("a TLS 1.2 flight takes Certificate, ServerKeyExchange and a request",
+                      tls_server_flight_step(address_of state,
+                                             TLS_HS_CERTIFICATE) &&
+                          tls_server_flight_step(address_of state,
+                                                 TLS_HS_SERVER_KEY_EXCHANGE) &&
+                          tls_server_flight_step(address_of state,
+                                                 TLS_HS_CERT_REQUEST));
+                check("a TLS 1.2 flight refuses CertificateVerify from the server",
+                      !tls_server_flight_step(address_of state,
+                                              TLS_HS_CERT_VERIFY));
+                check("a TLS 1.2 flight refuses Finished before ServerHelloDone",
+                      !tls_server_flight_step(address_of state,
+                                              TLS_HS_FINISHED));
+                check("a TLS 1.2 flight pauses after ServerHelloDone",
+                      tls_server_flight_step(address_of state,
+                                             TLS_HS_SERVER_HELLO_DONE) &&
+                          state == TLS12_FLIGHT_FINISHED);
+                check("a TLS 1.2 flight ends with Finished and nothing after",
+                      tls_server_flight_step(address_of state,
+                                             TLS_HS_FINISHED) &&
+                          state == TLS12_FLIGHT_COMPLETE &&
+                          !tls_server_flight_step(address_of state,
+                                                  TLS_HS_CERTIFICATE));
+                state = TLS_SERVER_FLIGHT_EE;
+                check("a TLS 1.3 flight refuses ServerKeyExchange",
+                      !tls_server_flight_step(address_of state,
+                                              TLS_HS_SERVER_KEY_EXCHANGE));
+                state = TLS_SERVER_FLIGHT_CERTIFICATE;
+                check("a TLS 1.3 flight refuses ServerHelloDone",
+                      tls_server_flight_step(address_of state,
+                                             TLS_HS_CERTIFICATE) &&
+                          !tls_server_flight_step(address_of state,
+                                                  TLS_HS_SERVER_HELLO_DONE));
+        }
+}
+
 static fn redirect_urls(void)
 {
         p8 into[256];
@@ -60179,6 +60581,7 @@ b32 main(void)
         crypto_floor_aes();
         crypto_rsa_served_sizes();
         tls_trust_anchor_chains();
+        tls12_pieces();
         redirect_urls();
         fetching_for_real();
         leasing();

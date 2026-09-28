@@ -1779,19 +1779,25 @@ static COLD bipolar dns_resolve_any(string_address path, string_address name,
 #define STANDARD_MODERN_C_NET_HTTP
 
 /*
-        TLS 1.3 client for wget.
+        TLS 1.3 and 1.2 client for wget.
 
-        One cipher: TLS_AES_128_GCM_SHA256. Groups: X25519, P-256 and
-        P-384; the ClientHello carries an X25519 share alone, and a
-        HelloRetryRequest may ask once for either of the others (Chimera's
-        secp384r1 servers, Microsoft's P-256 ones). Certificates walk to one of the
+        TLS 1.3 with TLS_AES_128_GCM_SHA256; TLS 1.2 with ECDHE-ECDSA and
+        ECDHE-RSA over AES-128-GCM, the extended master secret required,
+        renegotiation refused, and the TLS 1.3 downgrade sentinel checked.
+        Groups: X25519, P-256 and P-384; the ClientHello carries an X25519
+        share alone, and a HelloRetryRequest may ask once for either of the
+        others (Chimera's secp384r1 servers, Microsoft's P-256 ones).
+        Certificates walk to one of the
         Mozilla TLS roots in anchors.inc: a served certificate carrying an
         anchor's key ends the chain, or the last one served names an anchor
         as its issuer and verifies under it. Chain signatures may be ECDSA
         with SHA-256 or SHA-384 on P-256 or P-384, or RSA PKCS#1 v1.5 with
         SHA-256 or SHA-384.
         Signature algorithms advertised are ecdsa_secp256r1_sha256,
-        ecdsa_secp384r1_sha384 and rsa_pss_rsae_sha256. close_notify is a
+        ecdsa_secp384r1_sha384, rsa_pss_rsae_sha256, and for TLS 1.2 and
+        certificates rsa_pkcs1_sha256 and rsa_pkcs1_sha384. A
+        CertificateRequest is answered with no certificate; a KeyUpdate is
+        taken and, asked, answered. close_notify is a
         clean end of the body, not a handshake failure.
         --no-check-certificate skips the chain and still encrypts.
 */
@@ -4362,9 +4368,12 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #include "wait.c"
 
 /* RFC 8446 5.1 and 5.4: a record carries at most 2^14 bytes of content, and
-   under AES-128-GCM a protected one adds the inner type byte and the tag. */
+   under AES-128-GCM a protected one adds the inner type byte and the tag.
+   A TLS 1.2 one (RFC 5288 3) adds the eight-byte explicit nonce and the tag
+   instead, and that larger size is the room every buffer keeps. */
 #define TLS_PLAINTEXT_MAX 16384
 #define TLS_RECORD_MAX (TLS_PLAINTEXT_MAX + 1 + 16)
+#define TLS12_RECORD_MAX (TLS_PLAINTEXT_MAX + 8 + 16)
 /* One receive takes as many whole records as the socket has queued and this
    room holds: about fifteen full records. At least two whole records must
    fit, since the unopened tail moves to the front only when a record would
@@ -4390,7 +4399,10 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #define TLS_HS_NEW_SESSION_TICKET 4
 #define TLS_HS_ENCRYPTED_EXTS 8
 #define TLS_HS_CERTIFICATE 11
+#define TLS_HS_SERVER_KEY_EXCHANGE 12
 #define TLS_HS_CERT_REQUEST 13
+#define TLS_HS_SERVER_HELLO_DONE 14
+#define TLS_HS_CLIENT_KEY_EXCHANGE 16
 #define TLS_HS_CERT_VERIFY 15
 #define TLS_HS_FINISHED 20
 #define TLS_HS_KEY_UPDATE 24
@@ -4446,6 +4458,15 @@ typedef struct
         p8 s_ap_traffic[32];
         bool update_asked;
         bool cert_requested;
+        /* TLS 1.2 (RFC 5246, 5288, 7627): the suite, the server's random,
+           the master secret -- the premaster until the client's flight --
+           and the client's key exchange point, made when the server's
+           arrives. */
+        bool tls12;
+        p16 suite;
+        p8 server_random[32];
+        p8 master[48];
+        p8 share[97];
         p8 c_iv[12];
         p8 s_iv[12];
         crypto_aesgcm_key c_gcm;
@@ -4597,6 +4618,15 @@ static fn tls_record_header(p8 address_to header, p8 type, positive length)
         network_store_16(header + 3, (p16)length);
 }
 
+/* RFC 5246 6.2.3.3: a TLS 1.2 record's additional data is its sequence
+   number, then its header with the plaintext's length. */
+static fn tls12_aad(p8 address_to aad, p64 seq, p8 address_to header,
+                    positive length)
+{
+        crypto_put_be64(aad, seq);
+        tls_record_header(aad + 8, header[0], length);
+}
+
 /* Seal a record into record, which has room for 5 + TLS_RECORD_MAX bytes,
    and answer its length, or 0 when the body is too long or the write key is
    spent. It is sealed where it lies, so what leaves and what stays behind
@@ -4606,18 +4636,36 @@ static positive tls_seal(tls_conn address_to tls, p8 inner_type,
                          p8 address_to record)
 {
         p8 nonce[12];
+        p8 aad[13];
+        positive at = 5;
 
         if (length > TLS_PLAINTEXT_MAX ||
             tls->seq_write >= TLS_AES_GCM_RECORD_LIMIT)
                 return 0;
-        tls_record_header(record, TLS_CT_APP, length + 1 + 16);
-        memory_copy(record + 5, body, length);
-        record[5 + length] = inner_type;
-        tls_nonce(tls->c_iv, tls->seq_write++, nonce);
-        crypto_aesgcm_seal(address_of tls->c_gcm, nonce, record, 5, record + 5,
-                           length + 1, record + 5 + length + 1);
+        tls_nonce(tls->c_iv, tls->seq_write, nonce);
+        if (tls->tls12)
+        {
+                /* The type is the record's own and the explicit nonce the
+                   sequence number, which c_iv's zero tail makes the
+                   nonce's; the AAD is sequence, header and length. */
+                tls_record_header(record, inner_type, 8 + length + 16);
+                memory_copy(record + 5, nonce + 4, 8);
+                at += 8;
+                tls12_aad(aad, tls->seq_write, record, length);
+        }
+        else
+        {
+                tls_record_header(record, TLS_CT_APP, length + 1 + 16);
+                record[5 + length] = inner_type;
+        }
+        memory_copy(record + at, body, length);
+        length += !tls->tls12;
+        tls->seq_write++;
+        crypto_aesgcm_seal(address_of tls->c_gcm, nonce,
+                           tls->tls12 ? aad : record, tls->tls12 ? 13 : 5,
+                           record + at, length, record + at + length);
         crypto_forget(nonce, sizeof nonce);
-        return 5 + length + 17;
+        return at + length + 16;
 }
 
 /* A record leaves in one send: sent in pieces, everything after the first
@@ -4625,7 +4673,7 @@ static positive tls_seal(tls_conn address_to tls, p8 inner_type,
 static bipolar tls_send_enc(tls_conn address_to tls, p8 inner_type,
                             p8 address_to body, positive length)
 {
-        p8 record[5 + TLS_RECORD_MAX];
+        p8 record[5 + TLS12_RECORD_MAX];
         positive sealed = tls_seal(tls, inner_type, body, length, record);
 
         return sealed && network_stream_send_all(tls->handle, record, sealed)
@@ -4634,27 +4682,43 @@ static bipolar tls_send_enc(tls_conn address_to tls, p8 inner_type,
 
 /* Open a record where it lies. The inner type is its last nonzero byte;
    zeros after it are padding, and a record of nothing else is refused. A
-   failed open wipes what it decrypted. */
+   TLS 1.2 record's type is its header's, its plaintext follows the
+   explicit nonce, and its nonce is the four-byte salt and that. A failed
+   open wipes what it decrypted. */
 static bipolar tls_decrypt_record(tls_conn address_to tls, p8 address_to payload,
                                   positive payload_length, p8 address_to aad,
                                   positive address_to inner_length,
                                   p8 address_to type)
 {
         p8 nonce[12];
-        positive at = payload_length - 16;
+        p8 aad12[13];
+        positive skip = tls->tls12 ? 8 : 0;
+        positive at = payload_length - 16 - skip;
         bool opened;
 
-        if (payload_length < 16 ||
+        if (payload_length < 16 + skip ||
             tls->seq_read >= TLS_AES_GCM_RECORD_LIMIT)
                 return TLS_FAIL;
         tls_nonce(tls->s_iv, tls->seq_read, nonce);
-        opened = crypto_aesgcm_open(address_of tls->s_gcm, nonce, aad, 5,
-                                    payload, at, payload + at);
+        if (skip)
+        {
+                memory_copy(nonce + 4, payload, 8);
+                tls12_aad(aad12, tls->seq_read, aad, at);
+        }
+        opened = crypto_aesgcm_open(address_of tls->s_gcm, nonce,
+                                    skip ? aad12 : aad, skip ? 13 : 5,
+                                    payload + skip, at, payload + skip + at);
         crypto_forget(nonce, sizeof nonce);
         if (!opened)
                 return TLS_FAIL;
 
         tls->seq_read++;
+        if (skip)
+        {
+                address_to type = aad[0];
+                address_to inner_length = at;
+                return TLS_OK;
+        }
         while (at && payload[at - 1] == 0)
                 at--;
         if (!at)
@@ -4703,7 +4767,7 @@ static bool tls_receive(tls_conn address_to tls,
                 tls->receive_start = 0;
                 tls->receive_end = 0;
         }
-        else if (sizeof(tls->receive) - tls->receive_end < 5 + TLS_RECORD_MAX)
+        else if (sizeof(tls->receive) - tls->receive_end < 5 + TLS12_RECORD_MAX)
         {
                 memory_copy(tls->receive, tls->receive + tls->receive_start,
                             have);
@@ -4773,7 +4837,9 @@ static bipolar tls_next_record(tls_conn address_to tls, p8 address_to type,
                         if (!tls_record_version_valid(header))
                                 return TLS_FAIL;
                         payload_length = network_load_16(header + 3);
-                        if (!payload_length || payload_length > TLS_RECORD_MAX)
+                        if (!payload_length ||
+                            payload_length > (tls->tls12 ? TLS12_RECORD_MAX
+                                                         : TLS_RECORD_MAX))
                                 return TLS_FAIL;
                         if (have - 5 >= payload_length)
                                 break;
@@ -4807,12 +4873,18 @@ static bipolar tls_next_record(tls_conn address_to tls, p8 address_to type,
                 return TLS_OK;
         }
 
-        /* A change_cipher_spec that arrives protected is unexpected. */
-        if (header[0] != TLS_CT_APP ||
+        /* A change_cipher_spec that arrives protected is unexpected. A TLS
+           1.2 record names its own type, and only alerts, handshake and
+           application data are protected. */
+        if ((tls->tls12 ? header[0] != TLS_CT_ALERT &&
+                              header[0] != TLS_CT_HANDSHAKE &&
+                              header[0] != TLS_CT_APP
+                        : header[0] != TLS_CT_APP) ||
             tls_decrypt_record(tls, payload, payload_length, header,
                                address_of inner_length, address_of inner_type) ||
             inner_type == TLS_CT_CCS)
                 goto refused;
+        payload += tls->tls12 ? 8 : 0;
 
         if (inner_type == TLS_CT_ALERT)
         {
@@ -6206,14 +6278,23 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
             TLS_HS_CLIENT_HELLO, 0, 0, 0, 0x03, 0x03};
         static const p8 parameters[] = {
             0,                    // empty legacy session id
-            0, 2, 0x13, 0x01,    // TLS_AES_128_GCM_SHA256
+            0, 6, 0x13, 0x01,    // TLS_AES_128_GCM_SHA256
+            0xc0, 0x2b,           // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+            0xc0, 0x2f,           // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
             1, 0,                 // null legacy compression
             0, 0};                // extensions length, filled below
+        /* ec_point_formats (uncompressed), supported_groups,
+           extended_master_secret and an empty renegotiation_info: TLS 1.2
+           needs them, TLS 1.3 servers pass them over. */
         static const p8 groups[] = {
-            0, 0x0a, 0, 8, 0, 6, 0, 0x1d, 0, 0x17, 0, 0x18};
+            0, 0x0b, 0, 2, 1, 0,
+            0, 0x0a, 0, 8, 0, 6, 0, 0x1d, 0, 0x17, 0, 0x18,
+            0, 0x17, 0, 0,
+            0xff, 0x01, 0, 1, 0};
         static const p8 tail[] = {
-            0, 0x2b, 0, 3, 2, 0x03, 0x04,
-            0, 0x0d, 0, 8, 0, 6, 0x04, 0x03, 0x05, 0x03, 0x08, 0x04};
+            0, 0x2b, 0, 5, 4, 0x03, 0x04, 0x03, 0x03,
+            0, 0x0d, 0, 12, 0, 10, 0x04, 0x03, 0x05, 0x03, 0x08, 0x04,
+            0x04, 0x01, 0x05, 0x01};
         p8 share[10 + 97];
         positive share_length;
         positive host_length = string_length(tls->host);
@@ -6308,25 +6389,35 @@ static const p8 tls_retry_random[32] = {
     0x1e, 0x65, 0xb8, 0x91, 0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e,
     0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c};
 
-/* A ServerHello answers TLS_OK with the peer's share in peer, on offered,
-   the one group the client sent a share for; a HelloRetryRequest answers
-   TLS_RETRY with the group it asks for in group (0 when it asks for none)
-   and its cookie extension body in cookie and cookie_length (null and 0
-   when it has none). A retry has to ask for something -- a group offered
-   but not already shared, or a cookie -- and may carry nothing else (RFC
-   8446 4.1.4). */
+/* A ServerHello answers TLS_OK with the peer's share in peer, on the one
+   group tls->group the client sent a share for; a HelloRetryRequest
+   answers TLS_RETRY with the group it asks for in group (0 when it asks
+   for none) and its cookie extension body in cookie and cookie_length
+   (null and 0 when it has none). A retry has to ask for something -- a
+   group offered but not already shared, or a cookie -- and may carry
+   nothing else (RFC 8446 4.1.4).
+
+   Without supported_versions the answer is TLS 1.2, which sets tls->tls12
+   and tls->suite: one of the two ECDHE suites offered, the extended master
+   secret (RFC 7627) and an empty renegotiation_info (RFC 5746) required,
+   point formats that include uncompressed, a session id the server may
+   choose; and never the random's downgrade sentinel, since TLS 1.3 was on
+   offer (RFC 8446 4.1.3). Each version refuses the other's extensions.
+   Both record the server's random. */
 static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
-                                     positive offered,
+                                     tls_conn address_to tls,
                                      p8 address_to peer, positive room,
                                      positive address_to share_length,
                                      positive address_to group,
                                      p8 address_to address_to cookie,
                                      positive address_to cookie_length)
 {
+        static const p8 kinds[] = {0x2b, 0x33, 0x2c, 0x17, 0x0b, 0x00};
         positive at;
+        positive session;
+        positive suite;
+        positive seen = 0;
         bool retry;
-        bool seen_share = false;
-        bool seen_version = false;
 
         if (length < 44 || hello[0] != TLS_HS_SERVER_HELLO ||
             tls_load_24(hello + 1) != length - 4 || hello[4] != 0x03 ||
@@ -6334,52 +6425,66 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                 return TLS_FAIL;
 
         retry = !memory_compare(hello + 6, tls_retry_random, 32);
+        memory_copy(tls->server_random, hello + 6, 32);
         address_to group = 0;
         address_to cookie = null;
         address_to cookie_length = 0;
         at = 4 + 2 + 32;
-        /* The client sent an empty legacy_session_id, so the echo is empty. */
-        if (hello[at++])
+        session = hello[at++];
+        if (session > 32 || length - at < session + 3)
                 return TLS_FAIL;
-        if (hello[at] != 0x13 || hello[at + 1] != 0x01)
-                return TLS_FAIL;
+        at += session;
+        suite = network_load_16(hello + at);
         at += 2;
-        if (hello[at++] != 0)
+        if (hello[at++] != 0 ||
+            (at < length && (length - at < 2 ||
+                             network_load_16(hello + at) != length - at - 2)))
                 return TLS_FAIL;
-        if (length - at < 2 || network_load_16(hello + at) != length - at - 2)
-                return TLS_FAIL;
-        at += 2;
+        at += at < length ? 2 : 0;
 
         while (at < length)
         {
+                positive id;
+                positive elen;
+                positive bit = 7;
+
                 if (length - at < 4)
                         return TLS_FAIL;
-
-                positive id = network_load_16(hello + at);
-                positive elen = network_load_16(hello + at + 2);
+                id = network_load_16(hello + at);
+                elen = network_load_16(hello + at + 2);
                 at += 4;
                 if (elen > length - at)
                         return TLS_FAIL;
+                /* One bit a kind this client offered, in kinds' order and
+                   renegotiation_info last; any other kind, or one twice,
+                   fails. */
+                for (positive kind = 0; kind < sizeof kinds; kind++)
+                        if (id == kinds[kind])
+                                bit = kind;
+                if (id == 0xff01)
+                        bit = 6;
+                if (bit == 7 || seen >> bit & 1)
+                        return TLS_FAIL;
+                seen |= (positive)1 << bit;
 
                 if (id == 0x002b)
                 {
-                        if (seen_version || elen != 2 || hello[at] != 0x03 ||
+                        if (elen != 2 || hello[at] != 0x03 ||
                             hello[at + 1] != 0x04)
                                 return TLS_FAIL;
-                        seen_version = true;
                 }
                 else if (id == 0x0033)
                 {
                         positive named;
                         positive klen;
 
-                        if (seen_share || elen < 2)
+                        if (elen < 2)
                                 return TLS_FAIL;
                         named = network_load_16(hello + at);
                         klen = tls_share_length(named);
                         /* A retry names an offered group not yet shared; a
                            hello answers the share, at its one length. */
-                        if (!klen || (named == offered) == retry ||
+                        if (!klen || (named == tls->group) == retry ||
                             (retry ? elen != 2
                                    : elen != 4 + klen || klen > room ||
                                          network_load_16(hello + at + 2) !=
@@ -6390,26 +6495,51 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                         memory_copy(peer, hello + at + 4, klen);
                         address_to share_length = klen;
                         address_to group = named;
-                        seen_share = true;
                 }
-                else if (id == 0x002c && retry && !address_to cookie)
+                else if (id == 0x002c)
                 {
-                        if (elen < 3 || network_load_16(hello + at) != elen - 2)
+                        if (!retry || elen < 3 ||
+                            network_load_16(hello + at) != elen - 2)
                                 return TLS_FAIL;
                         address_to cookie = hello + at;
                         address_to cookie_length = elen;
                 }
-                else
+                else if (id == 0x000b)
+                {
+                        /* The formats list has to hold uncompressed. */
+                        bool uncompressed = false;
+
+                        for (positive i = 1; i < elen; i++)
+                                uncompressed |= !hello[at + i];
+                        if (!uncompressed || hello[at] != elen - 1)
+                                return TLS_FAIL;
+                }
+                else if ((id == 0x0000 && (elen || !tls->named)) ||
+                         (id == 0x0017 && elen) ||
+                         (id == 0xff01 && (elen != 1 || hello[at])))
                         return TLS_FAIL;
 
                 at += elen;
         }
 
-        if (!seen_version)
+        if (seen & 1)
+        {
+                /* TLS 1.3: supported_versions, a key share or a retry's
+                   request, and nothing of TLS 1.2's. */
+                if (session || suite != 0x1301 || seen >> 3)
+                        return TLS_FAIL;
+                if (retry)
+                        return seen & 6 ? TLS_RETRY : TLS_FAIL;
+                return seen & 2 ? TLS_OK : TLS_FAIL;
+        }
+        if (retry || (suite != 0xc02b && suite != 0xc02f) || seen & 6 ||
+            (seen & 0x48) != 0x48 ||
+            (!memory_compare(hello + 6 + 24, "DOWNGRD", 7) &&
+             hello[6 + 31] <= 1))
                 return TLS_FAIL;
-        if (retry)
-                return seen_share || address_to cookie ? TLS_RETRY : TLS_FAIL;
-        return seen_share ? TLS_OK : TLS_FAIL;
+        tls->tls12 = true;
+        tls->suite = (p16)suite;
+        return TLS_OK;
 }
 
 /* The handshake protocol is a byte stream layered over records: the next
@@ -6531,16 +6661,63 @@ static COLD fn tls_finished_mac(tls_conn address_to tls, p8 address_to traffic,
         crypto_forget(address_of copy, sizeof copy);
 }
 
+/* The TLS 1.2 PRF (RFC 5246 5): P_SHA256(secret, label + seed_a +
+   seed_b), one-shot HMACs over a block that holds A(i) with the label and
+   seeds behind it. The longest label is "extended master secret" and the
+   longest seed the two randoms. */
+static COLD fn tls12_prf(p8 address_to secret, positive secret_length,
+                         string_address label, const p8 address_to seed_a,
+                         positive a_length, const p8 address_to seed_b,
+                         positive b_length, p8 address_to out,
+                         positive out_length)
+{
+        p8 block[32 + 22 + 64];
+        p8 mac[32];
+        positive label_length = string_length(label);
+        positive seed_length = label_length + a_length + b_length;
+
+        memory_copy(block + 32, label, label_length);
+        memory_copy(block + 32 + label_length, seed_a, a_length);
+        memory_copy(block + 32 + label_length + a_length, seed_b, b_length);
+        crypto_hmac_sha256(secret, secret_length, block + 32, seed_length,
+                           block);
+        for (positive at = 0; at < out_length; at += 32)
+        {
+                crypto_hmac_sha256(secret, secret_length, block,
+                                   32 + seed_length, mac);
+                memory_copy(out + at, mac, min((positive)32, out_length - at));
+                crypto_hmac_sha256(secret, secret_length, block, 32, block);
+        }
+        crypto_forget(block, sizeof block);
+        crypto_forget(mac, sizeof mac);
+}
+
+/* A TLS 1.2 Finished's verify_data: the PRF over the transcript's hash. */
+static COLD fn tls12_verify_data(tls_conn address_to tls, string_address label,
+                                 p8 address_to out)
+{
+        p8 hash[32];
+        crypto_sha256 copy = tls->transcript;
+
+        crypto_sha256_close(address_of copy, hash);
+        tls12_prf(tls->master, 48, label, hash, 32, hash, 0, out, 12);
+        crypto_forget(address_of copy, sizeof copy);
+}
+
 static COLD bipolar tls_check_finished(tls_conn address_to tls, p8 address_to verify,
                                   positive length)
 {
         p8 expect[32];
+        positive size = tls->tls12 ? 12 : 32;
         bool same;
 
-        if (length != 32)
+        if (length != size)
                 return TLS_FAIL;
-        tls_finished_mac(tls, tls->s_hs_traffic, expect);
-        same = crypto_same(expect, verify, 32);
+        if (tls->tls12)
+                tls12_verify_data(tls, "server finished", expect);
+        else
+                tls_finished_mac(tls, tls->s_hs_traffic, expect);
+        same = crypto_same(expect, verify, size);
         crypto_forget(expect, sizeof expect);
         return same ? TLS_OK : TLS_FAIL;
 }
@@ -6568,79 +6745,82 @@ static COLD bipolar tls_send_finished(tls_conn address_to tls,
                                                              : TLS_FAIL;
 }
 
-static COLD bipolar tls_check_cert_verify(tls_conn address_to tls, p8 address_to msg,
-                                     positive length)
+/* A signature by the leaf's key over message under a scheme the
+   ClientHello offered: ECDSA with SHA-256 or SHA-384, RSA-PSS with
+   SHA-256, and in TLS 1.2 RSA PKCS#1 v1.5 with SHA-256 or SHA-384. TLS 1.3
+   binds an ECDSA scheme to its curve and keeps PKCS#1 v1.5 to certificates
+   (RFC 8446 4.2.3); TLS 1.2's schemes name only the hash. */
+static COLD bool tls_signature_valid(tls_conn address_to tls, positive scheme,
+                                     p8 address_to message,
+                                     positive message_length,
+                                     p8 address_to sig, positive sig_length)
 {
-        p8 signed_bytes[130];
-        p8 hash[32];
+        p8 hash[48];
         p8 r[48];
         p8 s[48];
         positive r_length = 0;
         positive s_length = 0;
-        positive at;
-        positive sig_length;
-        p16 scheme;
-        crypto_sha256 copy = tls->transcript;
-        static const p8 context[] = "TLS 1.3, server CertificateVerify";
-
-        if (length < 8)
-                return TLS_FAIL;
-        at = 4;
-        scheme = network_load_16(msg + at);
-        at += 2;
-        sig_length = network_load_16(msg + at);
-        at += 2;
-        if (sig_length != length - at)
-                return TLS_FAIL;
-
-        memory_fill(signed_bytes, 0x20, 64);
-        memory_copy(signed_bytes + 64, context, 33);
-        signed_bytes[97] = 0;
-        crypto_sha256_close(address_of copy, hash);
-        memory_copy(signed_bytes + 98, hash, 32);
-
-        if (scheme == 0x0403)
-        {
-                crypto_sha256_of(signed_bytes, sizeof(signed_bytes), hash);
-                if (tls_parse_ecdsa_sig(msg + at, sig_length, r, address_of r_length,
-                                        s, address_of s_length))
-                        return TLS_FAIL;
-                if (tls->leaf_curve != 1)
-                        return TLS_FAIL;
-                return crypto_ecdsa_p256(hash, 32, r, r_length, s, s_length,
-                                         tls->leaf_qx + 16, tls->leaf_qy + 16)
-                           ? TLS_OK
-                           : TLS_FAIL;
-        }
-
-        if (scheme == 0x0503)
-        {
-                p8 hash384[48];
-
-                crypto_sha384(signed_bytes, sizeof(signed_bytes), hash384);
-                if (tls_parse_ecdsa_sig(msg + at, sig_length, r, address_of r_length,
-                                        s, address_of s_length))
-                        return TLS_FAIL;
-                if (tls->leaf_curve != 2)
-                        return TLS_FAIL;
-                return crypto_ecdsa_p384(hash384, 48, r, r_length, s, s_length,
-                                         tls->leaf_qx, tls->leaf_qy)
-                           ? TLS_OK
-                           : TLS_FAIL;
-        }
+        positive hash_length = scheme >> 8 == 5 ? 48 : 32;
+        p8 curve = tls->leaf_curve;
 
         if (scheme == 0x0804)
+                return curve == 3 && tls->leaf_n_length &&
+                       crypto_rsa_pss_sha256(tls->leaf_n, tls->leaf_n_length,
+                                             tls->leaf_e, sig, sig_length,
+                                             message, message_length);
+        if (scheme != 0x0403 && scheme != 0x0503 &&
+            (!tls->tls12 || (scheme != 0x0401 && scheme != 0x0501)))
+                return false;
+        if (hash_length == 48)
+                crypto_sha384(message, message_length, hash);
+        else
+                crypto_sha256_of(message, message_length, hash);
+        if ((scheme & 0xff) == 1)
         {
-                if (tls->leaf_curve != 3 || !tls->leaf_n_length)
-                        return TLS_FAIL;
-                return crypto_rsa_pss_sha256(tls->leaf_n, tls->leaf_n_length,
-                                             tls->leaf_e, msg + at, sig_length,
-                                             signed_bytes, sizeof(signed_bytes))
-                           ? TLS_OK
-                           : TLS_FAIL;
-        }
+                /* DigestInfo: AlgorithmIdentifier {id-sha256 or -384, NULL}
+                   and the OCTET STRING hash. */
+                const p8 info[19] = {
+                    0x30, (p8)(17 + hash_length), 0x30, 0x0d, 0x06, 0x09,
+                    0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+                    (p8)(hash_length / 16 - 1), 0x05, 0x00, 0x04,
+                    (p8)hash_length};
 
-        return TLS_FAIL;
+                return curve == 3 && tls->leaf_n_length &&
+                       crypto_rsa_pkcs1(tls->leaf_n, tls->leaf_n_length,
+                                        tls->leaf_e, sig, sig_length, info,
+                                        sizeof info, hash, hash_length);
+        }
+        if ((curve != 1 && curve != 2) ||
+            (!tls->tls12 && curve != hash_length / 16 - 1) ||
+            tls_parse_ecdsa_sig(sig, sig_length, r, address_of r_length, s,
+                                address_of s_length))
+                return false;
+        return curve == 1 ? crypto_ecdsa_p256(hash, hash_length, r, r_length,
+                                              s, s_length, tls->leaf_qx + 16,
+                                              tls->leaf_qy + 16)
+                          : crypto_ecdsa_p384(hash, hash_length, r, r_length,
+                                              s, s_length, tls->leaf_qx,
+                                              tls->leaf_qy);
+}
+
+/* TLS 1.3's CertificateVerify signs 64 spaces, its context string with the
+   NUL, and the transcript's hash (RFC 8446 4.4.3). */
+static COLD bipolar tls_check_cert_verify(tls_conn address_to tls, p8 address_to msg,
+                                     positive length)
+{
+        static const p8 context[] = "TLS 1.3, server CertificateVerify";
+        p8 signed_bytes[64 + sizeof context + 32];
+        crypto_sha256 copy = tls->transcript;
+
+        if (length < 8 || network_load_16(msg + 6) != length - 8)
+                return TLS_FAIL;
+        memory_fill(signed_bytes, 0x20, 64);
+        memory_copy(signed_bytes + 64, context, sizeof context);
+        crypto_sha256_close(address_of copy, signed_bytes + 64 + sizeof context);
+        return tls_signature_valid(tls, network_load_16(msg + 4), signed_bytes,
+                                   sizeof signed_bytes, msg + 8, length - 8)
+                   ? TLS_OK
+                   : TLS_FAIL;
 }
 
 #define TLS_SERVER_FLIGHT_EE 0
@@ -6649,13 +6829,20 @@ static COLD bipolar tls_check_cert_verify(tls_conn address_to tls, p8 address_to
 #define TLS_SERVER_FLIGHT_CERT_VERIFY 3
 #define TLS_SERVER_FLIGHT_FINISHED 4
 #define TLS_SERVER_FLIGHT_COMPLETE 5
+#define TLS12_FLIGHT_CERTIFICATE 6
+#define TLS12_FLIGHT_FINISHED 10
+#define TLS12_FLIGHT_COMPLETE 11
 
-/* This client offers no PSK, so the server flight has one legal shape, in
-   which only a CertificateRequest is optional.  Keeping that shape in one
-   transition function prevents a duplicate message from overwriting parsed
-   certificate state or an early Finished from authenticating an incomplete
-   transcript. An optional step (the high bit) is passed over when the
-   message is the next one instead; a refused message leaves the state. */
+/* This client offers no PSK and resumes nothing, so each version's server
+   flight has one legal shape, in which only a CertificateRequest is
+   optional: TLS 1.3's from EncryptedExtensions, TLS 1.2's from Certificate
+   to ServerHelloDone and, after the client's flight, Finished. A zero ends
+   each, so neither version's walk reaches the other's messages. Keeping
+   the shapes in one transition function prevents a duplicate message from
+   overwriting parsed certificate state or an early Finished from
+   authenticating an incomplete transcript. An optional step (the high bit)
+   is passed over when the message is the next one instead; a refused
+   message leaves the state. */
 static COLD bool tls_server_flight_step(p8 address_to state, p8 type)
 {
         static const p8 expected[] = {
@@ -6664,9 +6851,16 @@ static COLD bool tls_server_flight_step(p8 address_to state, p8 type)
             TLS_HS_CERTIFICATE,
             TLS_HS_CERT_VERIFY,
             TLS_HS_FINISHED,
+            0,
+            TLS_HS_CERTIFICATE,
+            TLS_HS_SERVER_KEY_EXCHANGE,
+            TLS_HS_CERT_REQUEST | 0x80,
+            TLS_HS_SERVER_HELLO_DONE,
+            TLS_HS_FINISHED,
+            0,
         };
 
-        for (p8 at = *state; at < TLS_SERVER_FLIGHT_COMPLETE; at++)
+        for (p8 at = *state; at < sizeof expected && expected[at]; at++)
         {
                 if (type == (expected[at] & 0x7f))
                 {
@@ -6850,17 +7044,108 @@ static COLD bipolar tls_post_handshake_append(tls_conn address_to tls,
         return TLS_OK;
 }
 
+/* A TLS 1.2 Certificate is the list alone, each entry without
+   extensions. Laid out again as TLS 1.3's -- an empty context, two empty
+   extension bytes after each certificate -- in into, which has room for
+   5 + TLS_PLAINTEXT_MAX bytes, it goes through the one chain check; then
+   the leaf's key has to be the kind the suite signs with. */
+static COLD bool tls12_certificate(tls_conn address_to tls, p8 address_to body,
+                                   positive length, p8 address_to into)
+{
+        positive at = 3;
+        positive out = 4;
+
+        if (length < 3 || tls_load_24(body) != length - 3)
+                return false;
+        into[0] = 0;
+        while (at < length)
+        {
+                positive size;
+
+                if (length - at < 3)
+                        return false;
+                size = tls_load_24(body + at);
+                if (size > length - at - 3 ||
+                    size + 5 > 5 + TLS_PLAINTEXT_MAX - out)
+                        return false;
+                memory_copy(into + out, body + at, 3 + size);
+                into[out + 3 + size] = 0;
+                into[out + 4 + size] = 0;
+                out += 5 + size;
+                at += 3 + size;
+        }
+        into[1] = (p8)((out - 4) >> 16);
+        network_store_16(into + 2, (p16)(out - 4));
+        return tls_verify_chain(into, out, tls->host, tls) &&
+               (tls->leaf_curve == 3) == (tls->suite == 0xc02f);
+}
+
+/* ServerKeyExchange (RFC 8422 5.4): a named curve this client offered and a
+   point at that curve's length, signed by the leaf with both randoms in
+   front under a scheme offered. The client's share on that curve is drawn
+   now: the premaster goes to master and the point to share, for the
+   client's flight, and the scalar is spent. */
+static COLD bool tls12_key_exchange(tls_conn address_to tls, p8 address_to body,
+                                    positive length)
+{
+        p8 signed_bytes[64 + 4 + 97];
+        positive point;
+        positive params;
+        bool agreed;
+
+        if (length < 4 || body[0] != 3)
+                return false;
+        point = tls_share_length(network_load_16(body + 1));
+        params = 4 + point;
+        if (!point || body[3] != point || length - 4 < params ||
+            network_load_16(body + params + 2) != length - params - 4)
+                return false;
+        memory_copy(signed_bytes, tls->client_random, 32);
+        memory_copy(signed_bytes + 32, tls->server_random, 32);
+        memory_copy(signed_bytes + 64, body, params);
+        if (!tls_signature_valid(tls, network_load_16(body + params),
+                                 signed_bytes, 64 + params, body + params + 4,
+                                 length - params - 4))
+                return false;
+        agreed = tls_share_scalar(tls, network_load_16(body + 1)) &&
+                 tls_share_use(tls, body + 4, tls->master) &&
+                 tls_share_use(tls, null, tls->share);
+        crypto_forget(tls->scalar, sizeof tls->scalar);
+        return agreed;
+}
+
+/* A TLS 1.2 CertificateRequest (RFC 5246 7.4.4): certificate types, then
+   signature algorithms, then authorities, each vector whole. */
+static COLD bool tls12_certificate_request(p8 address_to body, positive length)
+{
+        positive at;
+
+        if (!length || !body[0] || body[0] > length - 1)
+                return false;
+        at = 1 + body[0];
+        for (positive vector = 0; vector < 2; vector++)
+        {
+                if (length - at < 2 ||
+                    network_load_16(body + at) > length - at - 2)
+                        return false;
+                at += 2 + network_load_16(body + at);
+        }
+        return at == length;
+}
+
 /* One message of the server's flight, framed by tls_handshake_next and
    placed by tls_server_flight_step: checked, then added to the transcript,
    so a CertificateVerify and a Finished are checked against what came
    before them. As answers, in EncryptedExtensions, only what the
    ClientHello asked for may come back (RFC 8446 4.2): supported_groups,
-   and server_name when the host was a name. A CertificateRequest has an
-   empty context during the handshake (RFC 8446 4.3.2) and well-framed
-   extensions; with no certificate to offer, the answer is an empty
-   Certificate and the server decides. */
+   and server_name when the host was a name. A TLS 1.3 CertificateRequest
+   has an empty context during the handshake (RFC 8446 4.3.2) and
+   well-framed extensions; with no certificate to offer, the answer to
+   either version's is an empty Certificate and the server decides.
+   scratch has room for 5 + TLS_PLAINTEXT_MAX bytes. */
 static COLD bipolar tls_flight_message(tls_conn address_to tls,
-                                       p8 address_to msg, positive length)
+                                       p8 address_to msg, positive length,
+                                       p8 address_to scratch)
 {
         p8 address_to body = msg + 4;
         positive body_length = length - 4;
@@ -6871,11 +7156,20 @@ static COLD bipolar tls_flight_message(tls_conn address_to tls,
                     body, body_length, (positive)1 << 0x000a | tls->named);
         else if (msg[0] == TLS_HS_CERT_REQUEST)
                 valid = tls->cert_requested =
-                    body_length >= 3 && !body[0] &&
-                    tls_encrypted_extensions_valid(body + 1, body_length - 1,
-                                                   positive_max);
+                    tls->tls12 ? tls12_certificate_request(body, body_length)
+                               : body_length >= 3 && !body[0] &&
+                                     tls_encrypted_extensions_valid(
+                                         body + 1, body_length - 1,
+                                         positive_max);
         else if (msg[0] == TLS_HS_CERTIFICATE)
-                valid = tls_verify_chain(body, body_length, tls->host, tls);
+                valid = tls->tls12 ? tls12_certificate(tls, body, body_length,
+                                                       scratch)
+                                   : tls_verify_chain(body, body_length,
+                                                      tls->host, tls);
+        else if (msg[0] == TLS_HS_SERVER_KEY_EXCHANGE)
+                valid = tls12_key_exchange(tls, body, body_length);
+        else if (msg[0] == TLS_HS_SERVER_HELLO_DONE)
+                valid = !body_length;
         else if (msg[0] == TLS_HS_CERT_VERIFY)
                 valid = !tls_check_cert_verify(tls, msg, length);
         else
@@ -6883,6 +7177,111 @@ static COLD bipolar tls_flight_message(tls_conn address_to tls,
         if (!valid)
                 return TLS_FAIL;
         tls_transcript_add(tls, msg, length);
+        return TLS_OK;
+}
+
+/* The client's TLS 1.2 flight, sealed into out and sent at once: an empty
+   Certificate when one was requested and ClientKeyExchange in one
+   plaintext record, the change_cipher_spec, and Finished under the new
+   keys. The master secret is the extended one (RFC 7627), taken over the
+   transcript through ClientKeyExchange, so it is bound to this handshake;
+   the key block (RFC 5288 3) is the two keys and the two four-byte salts,
+   and each IV is its salt before eight zero bytes that tls_nonce fills with
+   the sequence. */
+static COLD bipolar tls12_client_flight(tls_conn address_to tls,
+                                        p8 address_to out)
+{
+        static const p8 no_certificate[7] = {TLS_HS_CERTIFICATE, 0, 0, 3};
+        static const p8 change[6] = {TLS_CT_CCS, 3, 3, 0, 1, 1};
+        p8 hash[32];
+        p8 keys[48];
+        p8 finished[16] = {TLS_HS_FINISHED, 0, 0, 12};
+        positive point = tls_share_length(tls->group);
+        positive at = 5;
+        crypto_sha256 copy;
+        positive sealed;
+
+        if (tls->cert_requested)
+        {
+                memory_copy(out + at, no_certificate, sizeof no_certificate);
+                at += sizeof no_certificate;
+        }
+        out[at] = TLS_HS_CLIENT_KEY_EXCHANGE;
+        out[at + 1] = 0;
+        network_store_16(out + at + 2, (p16)(1 + point));
+        out[at + 4] = (p8)point;
+        memory_copy(out + at + 5, tls->share, point);
+        at += 5 + point;
+        tls_record_header(out, TLS_CT_HANDSHAKE, at - 5);
+        tls_transcript_add(tls, out + 5, at - 5);
+        memory_copy(out + at, change, sizeof change);
+        at += sizeof change;
+
+        copy = tls->transcript;
+        crypto_sha256_close(address_of copy, hash);
+        tls12_prf(tls->master, tls->group == 0x0018 ? 48 : 32,
+                  "extended master secret", hash, 32, hash, 0, keys, 48);
+        memory_copy(tls->master, keys, 48);
+        tls12_prf(tls->master, 48, "key expansion", tls->server_random, 32,
+                  tls->client_random, 32, keys, 40);
+        crypto_aesgcm_prepare(address_of tls->c_gcm, keys);
+        crypto_aesgcm_prepare(address_of tls->s_gcm, keys + 16);
+        memory_fill(tls->c_iv, 0, 12);
+        memory_fill(tls->s_iv, 0, 12);
+        memory_copy(tls->c_iv, keys + 32, 4);
+        memory_copy(tls->s_iv, keys + 36, 4);
+        crypto_forget(keys, sizeof keys);
+        crypto_forget(address_of copy, sizeof copy);
+
+        tls12_verify_data(tls, "client finished", finished + 4);
+        tls_transcript_add(tls, finished, sizeof finished);
+        sealed = tls_seal(tls, TLS_CT_HANDSHAKE, finished, sizeof finished,
+                          out + at);
+        crypto_forget(finished, sizeof finished);
+        return sealed && network_stream_send_all(tls->handle, out, at + sealed)
+                   ? TLS_OK
+                   : TLS_FAIL;
+}
+
+/* TLS 1.2 after its ServerHello, whose records the flight may share. The
+   server's one change_cipher_spec comes after the client's Finished, with
+   no handshake bytes pending, and turns on the read keys; a compatibility
+   CCS has no place in TLS 1.2, so any other fails. */
+static COLD bipolar tls12_handshake(tls_conn address_to tls, p8 address_to hs,
+                                    positive used, positive length,
+                                    bool seen_ccs, p8 address_to out,
+                                    const network_deadline address_to deadline)
+{
+        p8 flight = TLS12_FLIGHT_CERTIFICATE;
+        p8 type = 0;
+        p8 address_to record = null;
+        positive record_length = 0;
+
+        if (seen_ccs)
+                return TLS_FAIL;
+        seen_ccs = true;
+        crypto_forget(tls->scalar, sizeof tls->scalar);
+        while (flight != TLS12_FLIGHT_FINISHED)
+                if (tls_handshake_next(tls, hs, address_of used,
+                                       address_of length, address_of seen_ccs,
+                                       deadline) ||
+                    !tls_server_flight_step(address_of flight, hs[0]) ||
+                    tls_flight_message(tls, hs, length, out))
+                        return TLS_FAIL;
+        if (used != length || tls12_client_flight(tls, out) ||
+            tls_next_record(tls, address_of type, address_of record,
+                            address_of record_length, deadline) ||
+            type != TLS_CT_CCS)
+                return TLS_FAIL;
+        tls->encrypted = true;
+        if (tls_handshake_next(tls, hs, address_of used, address_of length,
+                               address_of seen_ccs, deadline) ||
+            !tls_server_flight_step(address_of flight, hs[0]) ||
+            tls_flight_message(tls, hs, length, out) || used != length)
+                return TLS_FAIL;
+        tls->application = true;
+        crypto_forget(tls->master, sizeof tls->master);
+        crypto_forget(address_of tls->transcript, sizeof tls->transcript);
         return TLS_OK;
 }
 
@@ -6926,7 +7325,7 @@ static COLD bipolar tls_handshake(
                         goto done;
 
                 hello_kind = tls_server_hello_keys(
-                    hs, length, tls->group, peer, sizeof peer,
+                    hs, length, tls, peer, sizeof peer,
                     address_of share_length, address_of group,
                     address_of cookie, address_of cookie_length);
                 if (hello_kind != TLS_RETRY)
@@ -6952,11 +7351,18 @@ static COLD bipolar tls_handshake(
                 tls_transcript_add(tls, hs, length);
         }
 
-        /* The keys change after ServerHello, so nothing may share its
-           records. */
-        if (hello_kind || used != length)
+        /* TLS 1.2 is never the answer to a retry. In TLS 1.3 the keys
+           change after ServerHello, so nothing may share its records. */
+        if (hello_kind || (retried && tls->tls12) ||
+            (!tls->tls12 && used != length))
                 goto done;
         tls_transcript_add(tls, hs, length);
+        if (tls->tls12)
+        {
+                status = tls12_handshake(tls, hs, used, length, seen_ccs, out,
+                                         deadline);
+                goto done;
+        }
 
         secret_length = tls_share_use(tls, peer, shared);
         crypto_forget(tls->scalar, sizeof tls->scalar);
@@ -6970,7 +7376,7 @@ static COLD bipolar tls_handshake(
                                        address_of length, address_of seen_ccs,
                                        deadline) ||
                     !tls_server_flight_step(address_of flight, hs[0]) ||
-                    tls_flight_message(tls, hs, length))
+                    tls_flight_message(tls, hs, length, out))
                         goto done;
         /* Nothing follows Finished under the handshake keys. */
         if (used != length)
@@ -7016,7 +7422,7 @@ static bipolar tls_write(tls_conn address_to tls, p8 address_to data,
         {
                 positive take = min(length, (positive)TLS_PLAINTEXT_MAX);
 
-                if ((tls->seq_write >= TLS_KEY_UPDATE_AT &&
+                if ((tls->seq_write >= TLS_KEY_UPDATE_AT && !tls->tls12 &&
                      tls_key_update(tls, false)) ||
                     tls_send_enc(tls, TLS_CT_APP, data, take))
                         return TLS_FAIL;
@@ -7096,18 +7502,23 @@ static bipolar tls_take(tls_conn address_to tls, positive room,
                 }
                 if (status)
                         return TLS_FAIL;
+                /* TLS 1.2 after its handshake has only renegotiation to
+                   say in handshake messages, and that is refused. */
                 if (type == TLS_CT_HANDSHAKE)
                 {
-                        if (tls_post_handshake_append(tls, inner, length))
+                        if (tls->tls12 ||
+                            tls_post_handshake_append(tls, inner, length))
                                 return TLS_FAIL;
                         crypto_forget(inner, length);
                 }
                 else if (type != TLS_CT_APP || tls->post_handshake_used)
                         return TLS_FAIL;
-                /* Half way to the read key's limit, the peer is asked for a
-                   KeyUpdate, once; its answer starts the count over. */
+                /* Half way to the read key's limit, a TLS 1.3 peer is asked
+                   for a KeyUpdate, once; its answer starts the count over.
+                   TLS 1.2 has no rekeying without renegotiation, so its keys
+                   run to the limit. */
                 if (tls->seq_read >= TLS_KEY_UPDATE_AT && !tls->update_asked &&
-                    tls_key_update(tls, true))
+                    !tls->tls12 && tls_key_update(tls, true))
                         return TLS_FAIL;
                 if (type == TLS_CT_HANDSHAKE || !length)
                         continue;
