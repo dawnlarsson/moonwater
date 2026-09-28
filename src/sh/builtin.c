@@ -22470,18 +22470,11 @@ COLD fn shell_prompt_written(writer write, string_address text)
                         //      byte of what they spell.
                         if (letter >= '0' && letter <= '7')
                         {
-                                positive number = (positive)(letter - '0');
-                                positive digits = 1;
-                                p8 byte;
+                                positive used;
+                                p8 byte = (p8)string_digits_octal_max(
+                                    text - 1, 3, address_of used);
 
-                                while (digits < 3 && string_get(text) >= '0' &&
-                                       string_get(text) <= '7')
-                                {
-                                        number = number * 8 +
-                                                 (positive)(string_get(text++) - '0');
-                                        digits++;
-                                }
-                                byte = (p8)number;
+                                text += used - 1;
                                 write(address_of byte, 1);
                                 break;
                         }
