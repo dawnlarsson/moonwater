@@ -55663,9 +55663,9 @@ static fn tls_encrypted_flight_hs_reassembly(void)
                           walk.used == TLS_HS_MAX);
         }
 
-        /* 3. Empty mid-message fragment: flight path has no !length guard
-           (unlike tls_handshake_one_append / post-handshake), so length 0 is
-           a no-op that leaves the held prefix alone. */
+        /* 3. Empty mid-message fragment: RFC 8446 5.1 forbids sending one,
+           and the flight refuses it as the other appends do, leaving the
+           held prefix alone. */
         {
                 p8 cert[4 + 8];
                 tls_flight_hs_walk walk = {.flight = TLS_SERVER_FLIGHT_CERTIFICATE};
@@ -55673,16 +55673,12 @@ static fn tls_encrypted_flight_hs_reassembly(void)
                 tls_flight_hs_put_header(cert, TLS_HS_CERTIFICATE, 8);
                 memory_fill(cert + 4, 0x11, 8);
 
-                check("an empty encrypted-flight fragment is ignored mid-message",
+                check("an empty encrypted-flight fragment is refused mid-message",
                       tls_flight_hs_append(address_of walk, cert, 6) == TLS_OK &&
                           walk.used == 6 &&
                           tls_flight_hs_append(address_of walk, cert, 0) ==
-                              TLS_OK &&
+                              TLS_FAIL &&
                           walk.used == 6 && !walk.messages);
-                check("Certificate reassembly resumes after an empty fragment",
-                      tls_flight_hs_append(address_of walk, cert + 6,
-                                          sizeof cert - 6) == TLS_OK &&
-                          !walk.used && walk.messages == 1);
         }
 
         /* 4. Two HS messages in one record: tiny EE consumed, Certificate start held. */

@@ -6780,9 +6780,10 @@ static COLD bipolar tls_post_handshake_append(p8 address_to held,
 
 /* Encrypted server flight: handshake bytes are a stream across records, so
    each plaintext fragment is appended to hs[] and every complete message is
-   peeled from the front.  Unlike tls_handshake_one_append, an empty fragment
-   is a no-op (no !length guard) and several messages may share one record.
-   Leftover bytes after the flight reaches COMPLETE are refused.
+   peeled from the front.  Several messages may share one record; an empty
+   fragment is refused, as RFC 8446 5.1 forbids sending one and as the other
+   appends refuse it.  Leftover bytes after the flight reaches COMPLETE are
+   refused.
 
    tls may be null: then only framing and tls_server_flight_step run, which is
    how the unit checks exercise the same walk without keys or a peer. */
@@ -6794,7 +6795,7 @@ static COLD bipolar tls_encrypted_flight_append(
 {
         positive msg_at = 0;
 
-        if (*hs_used > room || length > room - *hs_used)
+        if (!length || *hs_used > room || length > room - *hs_used)
                 return TLS_FAIL;
         memory_copy(hs + *hs_used, fragment, length);
         *hs_used += length;
