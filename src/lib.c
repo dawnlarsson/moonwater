@@ -3987,6 +3987,19 @@ __asm__(
     "adcx %rbx, %r15\n   adox %rbx, %r15\n"                                       \
     X25519_X64_REDUCE_MULX(d, dr)
 
+//      r8..r15 = W folded by 38 with mulq and then by 19, and stored.
+#define X25519_X64_REDUCE_MULQ(d, dr)                                          \
+    "mov $38, %ecx\n"                                                            \
+    "mov %r12, %rax\n   mul %rcx\n   add %rax, %r8\n   adc $0, %rdx\n   mov %rdx, %rbx\n" \
+    "mov %r13, %rax\n   mul %rcx\n   add %rbx, %rax\n   adc $0, %rdx\n"          \
+    "add %rax, %r9\n   adc $0, %rdx\n   mov %rdx, %rbx\n"                          \
+    "mov %r14, %rax\n   mul %rcx\n   add %rbx, %rax\n   adc $0, %rdx\n"          \
+    "add %rax, %r10\n   adc $0, %rdx\n   mov %rdx, %rbx\n"                         \
+    "mov %r15, %rax\n   mul %rcx\n   add %rbx, %rax\n   adc $0, %rdx\n"          \
+    "add %rax, %r11\n   adc $0, %rdx\n   xor %ebx, %ebx\n"                         \
+    X25519_X64_FOLD("%rdx")                                                    \
+    X25519_X64_STORE(d, dr)
+
 //      One row of a b by mulq: b[off] times a into t0..t4, t4 fresh.
 #define X25519_X64_ROW_MULQ(off, a, ar, b, br, t0, t1, t2, t3, t4)              \
     "mov " b "+" off "(" br "), %rcx\n"                                              \
@@ -4010,19 +4023,34 @@ __asm__(
     X25519_X64_ROW_MULQ("8", a, ar, b, br, "%r9", "%r10", "%r11", "%r12", "%r13")  \
     X25519_X64_ROW_MULQ("16", a, ar, b, br, "%r10", "%r11", "%r12", "%r13", "%r14") \
     X25519_X64_ROW_MULQ("24", a, ar, b, br, "%r11", "%r12", "%r13", "%r14", "%r15") \
-    "mov $38, %ecx\n"                                                            \
-    "mov %r12, %rax\n   mul %rcx\n   add %rax, %r8\n   adc $0, %rdx\n   mov %rdx, %rbx\n" \
-    "mov %r13, %rax\n   mul %rcx\n   add %rbx, %rax\n   adc $0, %rdx\n"          \
-    "add %rax, %r9\n   adc $0, %rdx\n   mov %rdx, %rbx\n"                          \
-    "mov %r14, %rax\n   mul %rcx\n   add %rbx, %rax\n   adc $0, %rdx\n"          \
-    "add %rax, %r10\n   adc $0, %rdx\n   mov %rdx, %rbx\n"                         \
-    "mov %r15, %rax\n   mul %rcx\n   add %rbx, %rax\n   adc $0, %rdx\n"          \
-    "add %rax, %r11\n   adc $0, %rdx\n   xor %ebx, %ebx\n"                         \
-    X25519_X64_FOLD("%rdx")                                                    \
-    X25519_X64_STORE(d, dr)
+    X25519_X64_REDUCE_MULQ(d, dr)
 
+//      The six cross products once, doubled, and the four squares, by mulq.
 #define X25519_X64_SQUARE_MULQ(d, dr, a, ar)                                   \
-    X25519_X64_MULTIPLY_MULQ(d, dr, a, ar, a, ar)
+    "mov " a "(" ar "), %rcx\n"                                                    \
+    "mov " a "+8(" ar "), %rax\n   mul %rcx\n   mov %rax, %r9\n   mov %rdx, %r10\n" \
+    "mov " a "+16(" ar "), %rax\n   mul %rcx\n   add %rax, %r10\n   adc $0, %rdx\n" \
+    "mov %rdx, %r11\n"                                                           \
+    "mov " a "+24(" ar "), %rax\n   mul %rcx\n   add %rax, %r11\n   adc $0, %rdx\n" \
+    "mov %rdx, %r12\n"                                                           \
+    "mov " a "+8(" ar "), %rcx\n"                                                  \
+    "mov " a "+16(" ar "), %rax\n   mul %rcx\n   add %rax, %r11\n   adc $0, %rdx\n" \
+    "mov %rdx, %rbx\n"                                                           \
+    "mov " a "+24(" ar "), %rax\n   mul %rcx\n   add %rbx, %rax\n   adc $0, %rdx\n" \
+    "add %rax, %r12\n   adc $0, %rdx\n   mov %rdx, %r13\n"                         \
+    "mov " a "+16(" ar "), %rcx\n"                                                 \
+    "mov " a "+24(" ar "), %rax\n   mul %rcx\n   add %rax, %r13\n   adc $0, %rdx\n" \
+    "mov %rdx, %r14\n   xor %r15d, %r15d\n"                                        \
+    "add %r9, %r9\n   adc %r10, %r10\n   adc %r11, %r11\n   adc %r12, %r12\n"      \
+    "adc %r13, %r13\n   adc %r14, %r14\n   adc $0, %r15\n"                          \
+    "mov " a "(" ar "), %rax\n   mul %rax\n   mov %rax, %r8\n   mov %rdx, %rbx\n"     \
+    "mov " a "+8(" ar "), %rax\n   mul %rax\n   add %rbx, %r9\n   adc %rax, %r10\n"   \
+    "adc $0, %rdx\n   mov %rdx, %rbx\n"                                             \
+    "mov " a "+16(" ar "), %rax\n   mul %rax\n   add %rbx, %r11\n   adc %rax, %r12\n" \
+    "adc $0, %rdx\n   mov %rdx, %rbx\n"                                             \
+    "mov " a "+24(" ar "), %rax\n   mul %rax\n   add %rbx, %r13\n   adc %rax, %r14\n" \
+    "adc %rdx, %r15\n"                                                           \
+    X25519_X64_REDUCE_MULQ(d, dr)
 
 /*
         The frame, from rsp: x1 0, x2 32, z2 64, x3 96, z3 128, then A 160,
@@ -11552,20 +11580,28 @@ __asm__(
 
     /* x25519: RFC 7748's X25519(k, u) whole -- the scalar clamped, u taken
        mod 2^255, the Montgomery ladder, the inversion and the canonical
-       encoding -- written to out, which may alias neither input's frame
-       copy but may alias the inputs themselves.
+       encoding -- written to out, which may alias the inputs.
 
-       Four 64-bit limbs, reduced by 38 = 2^256 mod p and left below 2^256
-       rather than below p until the end (see the X25519_X64_ macros). With
-       BMI2 and ADX the products are mulx rows with two carry chains, adcx
-       on one and adox on the other, and the square makes each cross
-       product once; without them the same rows by mulq, and the square is
-       the product with itself. Which, asked lazily through cpu_hash_detect
-       as the hashes ask theirs, is the only branch outside the counts.
-       Nothing branches or indexes on the scalar, u or anything made from
-       them: the bit a turn is shifted out of the clamped copy at an index
-       the count gives, and the swap is a mask. The frame and the scratch
-       registers are zeroed before the return. */
+       Four 64-bit limbs, left below 2^256 rather than below p until the
+       end (see the X25519_X64_ macros): a product's high half folds in by
+       38 = 2^256 mod p and what is left above bit 255 by 19, one pass
+       each. With BMI2 and ADX the products are mulx rows on two carry
+       chains, adcx on one and adox on the other; without them the same
+       rows by mulq. Either way a square makes each cross product once and
+       doubles it. Which body, asked lazily through cpu_hash_detect as the
+       hashes ask theirs, is the only branch outside the counts. Nothing
+       branches or indexes on the scalar, u or anything made from them: the
+       bit a turn is shifted out of the clamped copy at an index the count
+       gives, and the swap is a mask. The ladder step is written out in
+       place over the frame; the inversion calls its two operations as
+       subroutines. The frame and the scratch registers are zeroed before
+       the return.
+
+       On the 9950X, cycles a call at crypto_x25519, BENCH_montgomery's
+       rows: the five-limb C this replaced 134.8k (553k instructions), mulx
+       89.8k (252k), mulq 102.6k (378k); OpenSSL 3.6's ADX body 97.6k a
+       derive. The arm64 body on the M2 Pro: 25.6 us against GCC's C 34.8
+       us. riscv64 under qemu: 490k instructions against 623k. */
 #ifndef KERNEL_MODE
     ASM_FUNC(x25519)
     "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n"
