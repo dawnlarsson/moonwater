@@ -6936,6 +6936,401 @@ static u64 next(void)
 }
 #endif
 
+#elif defined(SHARED_x25519_reference)
+/*
+        RFC 7748 X25519 as crypto.c ran it in C before lib.c's x25519: five
+        51-bit limbs, field reduce, freeze and the Montgomery step after the
+        public-domain 64-bit curve25519-donna, the volatile wipes included.
+        Kept whole so BENCH_montgomery can time the assembly against it at
+        crypto_x25519, its caller, and crypto_fuzz can run it where the
+        assembly cannot be lifted (MemorySanitizer, a host that is not
+        x86_64). Include it after crypto.c.
+*/
+#ifndef DAWNING_X25519_REFERENCE_C
+#define DAWNING_X25519_REFERENCE_C
+
+typedef unsigned __int128 x25519_reference_wide;
+
+//      crypto.c's crypto_forget as it stood.
+static fn x25519_reference_forget(address_any secret, positive length)
+{
+        memory_fill(secret, 0, length);
+        __asm__ __volatile__("" : : "r"(secret) : "memory");
+}
+
+typedef p64 x25519_reference_fe[5];
+
+static p64 x25519_reference_load64(p8 address_to in)
+{
+        return (p64)in[0] | ((p64)in[1] << 8) | ((p64)in[2] << 16) |
+               ((p64)in[3] << 24) | ((p64)in[4] << 32) | ((p64)in[5] << 40) |
+               ((p64)in[6] << 48) | ((p64)in[7] << 56);
+}
+
+static fn x25519_reference_store64(p8 address_to out, p64 in)
+{
+        out[0] = (p8)in;
+        out[1] = (p8)(in >> 8);
+        out[2] = (p8)(in >> 16);
+        out[3] = (p8)(in >> 24);
+        out[4] = (p8)(in >> 32);
+        out[5] = (p8)(in >> 40);
+        out[6] = (p8)(in >> 48);
+        out[7] = (p8)(in >> 56);
+}
+
+static fn x25519_reference_copy(x25519_reference_fe o, x25519_reference_fe a)
+{
+        o[0] = a[0];
+        o[1] = a[1];
+        o[2] = a[2];
+        o[3] = a[3];
+        o[4] = a[4];
+}
+
+static fn x25519_reference_load(x25519_reference_fe out, p8 address_to in)
+{
+        out[0] = x25519_reference_load64(in) & 0x7ffffffffffffull;
+        out[1] = (x25519_reference_load64(in + 6) >> 3) & 0x7ffffffffffffull;
+        out[2] = (x25519_reference_load64(in + 12) >> 6) & 0x7ffffffffffffull;
+        out[3] = (x25519_reference_load64(in + 19) >> 1) & 0x7ffffffffffffull;
+        out[4] = (x25519_reference_load64(in + 24) >> 12) & 0x7ffffffffffffull;
+}
+
+/*
+        One pass of the 51 bit carry chain.
+
+        Each limb hands what will not fit to the one above it. wrap folds the
+        carry leaving the top limb back into the bottom one at the weight the
+        prime gives it -- 2^255 is 19 -- and is how the chain stays inside
+        the field. The pass that finishes a store is the one exception: there
+        the carry out of the top is the answer to the conditional
+        subtraction, and dropping it is what performs the subtraction.
+*/
+static fn x25519_reference_carry(x25519_reference_wide address_to t, bool wrap)
+{
+        for (positive i = 0; i < 4; i++)
+        {
+                t[i + 1] += t[i] >> 51;
+                t[i] &= 0x7ffffffffffffull;
+        }
+
+        if (wrap)
+                t[0] += 19 * (t[4] >> 51);
+        t[4] &= 0x7ffffffffffffull;
+}
+
+static fn x25519_reference_store(p8 address_to out, x25519_reference_fe in)
+{
+        x25519_reference_wide t[5];
+
+        for (positive i = 0; i < 5; i++)
+                t[i] = in[i];
+
+        x25519_reference_carry(t, true);
+        x25519_reference_carry(t, true);
+
+        //      Adding 19 and carrying turns a value in [p, 2p) into one in
+        //      [0, p) with the top limb's bit set, which the constants below
+        //      then clear; a value already below p is unchanged by the pair.
+        t[0] += 19;
+        x25519_reference_carry(t, true);
+
+        t[0] += 0x8000000000000ull - 19;
+        for (positive i = 1; i < 5; i++)
+                t[i] += 0x8000000000000ull - 1;
+        x25519_reference_carry(t, false);
+
+        x25519_reference_store64(out, (p64)(t[0] | (t[1] << 51)));
+        x25519_reference_store64(out + 8, (p64)((t[1] >> 13) | (t[2] << 38)));
+        x25519_reference_store64(out + 16, (p64)((t[2] >> 26) | (t[3] << 25)));
+        x25519_reference_store64(out + 24, (p64)((t[3] >> 39) | (t[4] << 12)));
+        x25519_reference_forget(t, sizeof t);
+}
+
+static fn x25519_reference_sum(x25519_reference_fe o, x25519_reference_fe in)
+{
+        o[0] += in[0];
+        o[1] += in[1];
+        o[2] += in[2];
+        o[3] += in[3];
+        o[4] += in[4];
+}
+
+static fn x25519_reference_diff(x25519_reference_fe o, x25519_reference_fe in)
+{
+        o[0] = in[0] + 0x3fffffffffff68ull - o[0];
+        o[1] = in[1] + 0x3ffffffffffff8ull - o[1];
+        o[2] = in[2] + 0x3ffffffffffff8ull - o[2];
+        o[3] = in[3] + 0x3ffffffffffff8ull - o[3];
+        o[4] = in[4] + 0x3ffffffffffff8ull - o[4];
+}
+
+static fn x25519_reference_mul(x25519_reference_fe o, x25519_reference_fe in2,
+                            x25519_reference_fe in)
+{
+        x25519_reference_wide t[5];
+        p64 r0, r1, r2, r3, r4, s0, s1, s2, s3, s4, c;
+
+        r0 = in[0];
+        r1 = in[1];
+        r2 = in[2];
+        r3 = in[3];
+        r4 = in[4];
+        s0 = in2[0];
+        s1 = in2[1];
+        s2 = in2[2];
+        s3 = in2[3];
+        s4 = in2[4];
+
+        t[0] = (x25519_reference_wide)r0 * s0;
+        t[1] = (x25519_reference_wide)r0 * s1 + (x25519_reference_wide)r1 * s0;
+        t[2] = (x25519_reference_wide)r0 * s2 + (x25519_reference_wide)r2 * s0 + (x25519_reference_wide)r1 * s1;
+        t[3] = (x25519_reference_wide)r0 * s3 + (x25519_reference_wide)r3 * s0 + (x25519_reference_wide)r1 * s2 +
+               (x25519_reference_wide)r2 * s1;
+        t[4] = (x25519_reference_wide)r0 * s4 + (x25519_reference_wide)r4 * s0 + (x25519_reference_wide)r3 * s1 +
+               (x25519_reference_wide)r1 * s3 + (x25519_reference_wide)r2 * s2;
+
+        //      Limbs stay below 2^55 (a difference is at most 2^52 + 8p's
+        //      2^54 limb), so nineteen of one fits a word and each wrapped
+        //      product is one 64 by 64 multiply rather than a 128 by 64.
+        r1 *= 19;
+        r2 *= 19;
+        r3 *= 19;
+        r4 *= 19;
+        t[0] += (x25519_reference_wide)r4 * s1 + (x25519_reference_wide)r1 * s4 +
+                (x25519_reference_wide)r2 * s3 + (x25519_reference_wide)r3 * s2;
+        t[1] += (x25519_reference_wide)r4 * s2 + (x25519_reference_wide)r2 * s4 +
+                (x25519_reference_wide)r3 * s3;
+        t[2] += (x25519_reference_wide)r4 * s3 + (x25519_reference_wide)r3 * s4;
+        t[3] += (x25519_reference_wide)r4 * s4;
+
+        r0 = (p64)t[0] & 0x7ffffffffffffull;
+        c = (p64)(t[0] >> 51);
+        t[1] += c;
+        r1 = (p64)t[1] & 0x7ffffffffffffull;
+        c = (p64)(t[1] >> 51);
+        t[2] += c;
+        r2 = (p64)t[2] & 0x7ffffffffffffull;
+        c = (p64)(t[2] >> 51);
+        t[3] += c;
+        r3 = (p64)t[3] & 0x7ffffffffffffull;
+        c = (p64)(t[3] >> 51);
+        t[4] += c;
+        r4 = (p64)t[4] & 0x7ffffffffffffull;
+        c = (p64)(t[4] >> 51);
+        r0 += c * 19;
+        c = r0 >> 51;
+        r0 &= 0x7ffffffffffffull;
+        r1 += c;
+        c = r1 >> 51;
+        r1 &= 0x7ffffffffffffull;
+        r2 += c;
+
+        o[0] = r0;
+        o[1] = r1;
+        o[2] = r2;
+        o[3] = r3;
+        o[4] = r4;
+        x25519_reference_forget(t, sizeof t);
+}
+
+/* o = a^(2^n), n at least one: each square makes each cross product once
+   and doubles it, fifteen multiplies where x25519_reference_mul makes
+   twenty five, with the same carry chain. */
+static fn x25519_reference_sqr_n(x25519_reference_fe o, x25519_reference_fe a, positive n)
+{
+        x25519_reference_wide t[5];
+        p64 r0 = a[0], r1 = a[1], r2 = a[2], r3 = a[3], r4 = a[4];
+
+        while (n--)
+        {
+                p64 d0 = r0 * 2;
+                p64 d1 = r1 * 2;
+                p64 d2 = r2 * 2 * 19;
+                p64 d419 = r4 * 19;
+                p64 d4 = d419 * 2;
+                p64 c;
+
+                t[0] = (x25519_reference_wide)r0 * r0 + (x25519_reference_wide)d4 * r1 +
+                       (x25519_reference_wide)d2 * r3;
+                t[1] = (x25519_reference_wide)d0 * r1 + (x25519_reference_wide)d4 * r2 +
+                       (x25519_reference_wide)r3 * (r3 * 19);
+                t[2] = (x25519_reference_wide)d0 * r2 + (x25519_reference_wide)r1 * r1 +
+                       (x25519_reference_wide)d4 * r3;
+                t[3] = (x25519_reference_wide)d0 * r3 + (x25519_reference_wide)d1 * r2 +
+                       (x25519_reference_wide)r4 * d419;
+                t[4] = (x25519_reference_wide)d0 * r4 + (x25519_reference_wide)d1 * r3 +
+                       (x25519_reference_wide)r2 * r2;
+
+                t[1] += (p64)(t[0] >> 51);
+                r0 = (p64)t[0] & 0x7ffffffffffffull;
+                t[2] += (p64)(t[1] >> 51);
+                r1 = (p64)t[1] & 0x7ffffffffffffull;
+                t[3] += (p64)(t[2] >> 51);
+                r2 = (p64)t[2] & 0x7ffffffffffffull;
+                t[4] += (p64)(t[3] >> 51);
+                r3 = (p64)t[3] & 0x7ffffffffffffull;
+                r4 = (p64)t[4] & 0x7ffffffffffffull;
+                r0 += 19 * (p64)(t[4] >> 51);
+                c = r0 >> 51;
+                r0 &= 0x7ffffffffffffull;
+                r1 += c;
+                c = r1 >> 51;
+                r1 &= 0x7ffffffffffffull;
+                r2 += c;
+        }
+
+        o[0] = r0;
+        o[1] = r1;
+        o[2] = r2;
+        o[3] = r3;
+        o[4] = r4;
+        x25519_reference_forget(t, sizeof t);
+}
+
+static fn x25519_reference_mul121665(x25519_reference_fe o, x25519_reference_fe a)
+{
+        x25519_reference_wide w;
+
+        w = (x25519_reference_wide)a[0] * 121665;
+        o[0] = (p64)w & 0x7ffffffffffffull;
+        w = (w >> 51) + (x25519_reference_wide)a[1] * 121665;
+        o[1] = (p64)w & 0x7ffffffffffffull;
+        w = (w >> 51) + (x25519_reference_wide)a[2] * 121665;
+        o[2] = (p64)w & 0x7ffffffffffffull;
+        w = (w >> 51) + (x25519_reference_wide)a[3] * 121665;
+        o[3] = (p64)w & 0x7ffffffffffffull;
+        w = (w >> 51) + (x25519_reference_wide)a[4] * 121665;
+        o[4] = (p64)w & 0x7ffffffffffffull;
+        o[0] += 19 * (p64)(w >> 51);
+        x25519_reference_forget(address_of w, sizeof w);
+}
+
+static fn x25519_reference_invert(x25519_reference_fe o, x25519_reference_fe z)
+{
+        x25519_reference_fe a, t0, b, c;
+
+        x25519_reference_sqr_n(a, z, 1);
+        x25519_reference_sqr_n(t0, a, 2);
+        x25519_reference_mul(b, t0, z);
+        x25519_reference_mul(a, b, a);
+        x25519_reference_sqr_n(t0, a, 1);
+        x25519_reference_mul(b, t0, b);
+        x25519_reference_sqr_n(t0, b, 5);
+        x25519_reference_mul(b, t0, b);
+        x25519_reference_sqr_n(t0, b, 10);
+        x25519_reference_mul(c, t0, b);
+        x25519_reference_sqr_n(t0, c, 20);
+        x25519_reference_mul(t0, t0, c);
+        x25519_reference_sqr_n(t0, t0, 10);
+        x25519_reference_mul(b, t0, b);
+        x25519_reference_sqr_n(t0, b, 50);
+        x25519_reference_mul(c, t0, b);
+        x25519_reference_sqr_n(t0, c, 100);
+        x25519_reference_mul(t0, t0, c);
+        x25519_reference_sqr_n(t0, t0, 50);
+        x25519_reference_mul(t0, t0, b);
+        x25519_reference_sqr_n(t0, t0, 5);
+        x25519_reference_mul(o, t0, a);
+
+        x25519_reference_forget(a, sizeof a);
+        x25519_reference_forget(t0, sizeof t0);
+        x25519_reference_forget(b, sizeof b);
+        x25519_reference_forget(c, sizeof c);
+}
+
+static fn x25519_reference_cswap(x25519_reference_fe a, x25519_reference_fe b, p64 swap)
+{
+        positive i;
+
+        swap = 0 - swap;
+        for (i = 0; i < 5; i++)
+        {
+                p64 t = swap & (a[i] ^ b[i]);
+                a[i] ^= t;
+                b[i] ^= t;
+        }
+}
+
+static fn x25519_reference(p8 address_to out, const p8 address_to scalar,
+                             const p8 address_to u)
+{
+        //      Everything the ladder derives from the scalar, wiped as one.
+        struct
+        {
+                p8 e[32];
+                x25519_reference_fe x1, x2, z2, x3, z3;
+                x25519_reference_fe a, b, c, d, aa, bb, ee, da, cb, t;
+                p64 bit;
+                p64 swap;
+        } w;
+        positive i;
+
+        memory_copy(w.e, scalar, 32);
+        w.swap = 0;
+        w.e[0] &= 248;
+        w.e[31] &= 127;
+        w.e[31] |= 64;
+
+        x25519_reference_load(w.x1, (p8 address_to)u);
+        memory_fill(w.x2, 0, sizeof(w.x2));
+        w.x2[0] = 1;
+        memory_fill(w.z2, 0, sizeof(w.z2));
+        x25519_reference_copy(w.x3, w.x1);
+        memory_fill(w.z3, 0, sizeof(w.z3));
+        w.z3[0] = 1;
+
+        for (i = 254; i < 256; i--)
+        {
+                w.bit = (w.e[i >> 3] >> (i & 7)) & 1;
+                w.swap ^= w.bit;
+                x25519_reference_cswap(w.x2, w.x3, w.swap);
+                x25519_reference_cswap(w.z2, w.z3, w.swap);
+                w.swap = w.bit;
+
+                x25519_reference_copy(w.a, w.x2);
+                x25519_reference_sum(w.a, w.z2);
+                x25519_reference_copy(w.b, w.z2);
+                x25519_reference_diff(w.b, w.x2);
+                x25519_reference_copy(w.c, w.x3);
+                x25519_reference_sum(w.c, w.z3);
+                x25519_reference_copy(w.d, w.z3);
+                x25519_reference_diff(w.d, w.x3);
+
+                x25519_reference_mul(w.da, w.d, w.a);
+                x25519_reference_mul(w.cb, w.c, w.b);
+                x25519_reference_sqr_n(w.aa, w.a, 1);
+                x25519_reference_sqr_n(w.bb, w.b, 1);
+
+                x25519_reference_copy(w.t, w.da);
+                x25519_reference_sum(w.t, w.cb);
+                x25519_reference_sqr_n(w.x3, w.t, 1);
+
+                x25519_reference_copy(w.t, w.cb);
+                x25519_reference_diff(w.t, w.da);
+                x25519_reference_sqr_n(w.t, w.t, 1);
+                x25519_reference_mul(w.z3, w.x1, w.t);
+
+                x25519_reference_mul(w.x2, w.aa, w.bb);
+
+                x25519_reference_copy(w.ee, w.bb);
+                x25519_reference_diff(w.ee, w.aa);
+                x25519_reference_mul121665(w.t, w.ee);
+                x25519_reference_sum(w.t, w.aa);
+                x25519_reference_mul(w.z2, w.ee, w.t);
+        }
+
+        x25519_reference_cswap(w.x2, w.x3, w.swap);
+        x25519_reference_cswap(w.z2, w.z3, w.swap);
+        x25519_reference_invert(w.z2, w.z2);
+        x25519_reference_mul(w.x2, w.x2, w.z2);
+        x25519_reference_store(out, w.x2);
+
+        x25519_reference_forget(address_of w, sizeof w);
+}
+
+#endif
 #elif defined(SHARED_number_stream)
 /*
         The float conversions over generated text, written once for two sides.
@@ -56852,6 +57247,592 @@ static fn aes_reference_encrypt(const p8 address_to round,
 
 #define AES_CHECK_BLOCKS 41
 
+#define SHARED_x25519_reference
+#include "checks.c"
+#undef SHARED_x25519_reference
+
+/*
+        lib.c's x25519, and the field operations it is made of, on operands
+        the ladder almost never meets.
+
+        A random key reaches the second fold after a carry out of the top,
+        or a carry that runs the length of the add chain, about once in 2^59
+        operations, so the vectors and the fuzzer cannot be what holds those
+        instructions. Here the X25519_ macros are expanded a second time
+        into test-only entry points -- the same text, frame slots and all --
+        and run on the ends of every range: zero, one, p and its
+        neighbours, 2^255 and 2^256 and theirs, limbs of all ones and of
+        zeros, then drawn values with such limbs sprinkled in. The four-limb
+        bodies (x86_64's mulx and mulq, arm64) are held to arithmetic mod p
+        done here in C, and riscv64's five-limb ones to the C they
+        transliterate (SHARED_x25519_reference), limb for limb, on operands
+        at the bounds the C was written for. Then x25519 itself against the
+        reference over drawn keys and edge u, each x86_64 body in turn.
+*/
+#if !defined(KERNEL_MODE) && (X64 || ARM64)
+static const p64 x25519_check_p[4] = {0xffffffffffffffedull, ~0ull, ~0ull,
+                                      0x7fffffffffffffffull};
+
+//      in mod p, below p. Any 256-bit number.
+static fn x25519_check_canonical(p64 address_to out, const p64 address_to in)
+{
+        p64 v[4], w[4];
+        crypto_wide carry = 19 * (in[3] >> 63);
+
+        memory_copy(v, in, 32);
+        v[3] &= 0x7fffffffffffffffull;
+        for (positive i = 0; i < 4; i++)
+        {
+                carry += v[i];
+                v[i] = (p64)carry;
+                carry >>= 64;
+        }
+        carry = 19;
+        for (positive i = 0; i < 4; i++)
+        {
+                carry += v[i];
+                w[i] = (p64)carry;
+                carry >>= 64;
+        }
+        if (w[3] >> 63)
+        {
+                w[3] &= 0x7fffffffffffffffull;
+                memory_copy(v, w, 32);
+        }
+        memory_copy(out, v, 32);
+}
+
+//      (low + 2^256 high) mod p, below p; high is up to four limbs.
+static fn x25519_check_fold(p64 address_to out, const p64 address_to low,
+                            const p64 address_to high)
+{
+        p64 v[4];
+        crypto_wide carry = 0;
+        p64 top;
+
+        for (positive i = 0; i < 4; i++)
+        {
+                carry += (crypto_wide)high[i] * 38 + low[i];
+                v[i] = (p64)carry;
+                carry >>= 64;
+        }
+        top = (p64)carry;
+        carry = (crypto_wide)top * 38;
+        for (positive i = 0; i < 4; i++)
+        {
+                carry += v[i];
+                v[i] = (p64)carry;
+                carry >>= 64;
+        }
+        //      A last carry of one is 38 more; there is room for it now.
+        v[0] += 38 * (p64)carry;
+        x25519_check_canonical(out, v);
+}
+
+static fn x25519_check_product(p64 address_to out, const p64 address_to a,
+                               const p64 address_to b)
+{
+        p64 wide[8] = {0};
+
+        for (positive i = 0; i < 4; i++)
+        {
+                crypto_wide carry = 0;
+
+                for (positive j = 0; j < 4; j++)
+                {
+                        carry += (crypto_wide)a[i] * b[j] + wide[i + j];
+                        wide[i + j] = (p64)carry;
+                        carry >>= 64;
+                }
+                wide[i + 4] = (p64)carry;
+        }
+        x25519_check_fold(out, wide, wide + 4);
+}
+
+//      a + b or a - b mod p, below p.
+static fn x25519_check_sum(p64 address_to out, const p64 address_to a,
+                           const p64 address_to b, bool subtract)
+{
+        p64 x[4], y[4], v[4];
+        crypto_wide carry = 0;
+
+        x25519_check_canonical(x, a);
+        x25519_check_canonical(y, b);
+        if (subtract)
+        {
+                //      p - y, which is below 2^255, then the sum.
+                bipolar borrow = 0;
+
+                for (positive i = 0; i < 4; i++)
+                {
+                        crypto_wide d = (crypto_wide)x25519_check_p[i] - y[i] - (p64)borrow;
+
+                        y[i] = (p64)d;
+                        borrow = (bipolar)((d >> 64) & 1);
+                }
+        }
+        for (positive i = 0; i < 4; i++)
+        {
+                carry += (crypto_wide)x[i] + y[i];
+                v[i] = (p64)carry;
+                carry >>= 64;
+        }
+        x25519_check_canonical(out, v);
+}
+
+static bool x25519_check_same(const p64 address_to got, const p64 address_to want)
+{
+        p64 canonical[4];
+
+        x25519_check_canonical(canonical, got);
+        return memory_compare(canonical, want, 32) == 0;
+}
+#endif
+
+#if !defined(KERNEL_MODE) && X64
+/*
+        Each operation as a function: rdi the output, rsi and rdx the
+        operands; the frame operations copy theirs into slots 0 and 32 and
+        the answers out of 64 and 96, which is where the macros look.
+*/
+fn x25519_check_multiply_mulx(p64 address_to d, const p64 address_to a,
+                              const p64 address_to b);
+fn x25519_check_square_mulx(p64 address_to d, const p64 address_to a);
+fn x25519_check_multiply_mulq(p64 address_to d, const p64 address_to a,
+                              const p64 address_to b);
+fn x25519_check_square_mulq(p64 address_to d, const p64 address_to a);
+fn x25519_check_add_sub(p64 address_to d, const p64 address_to a,
+                        const p64 address_to b);
+fn x25519_check_subtract(p64 address_to d, const p64 address_to a,
+                         const p64 address_to b);
+fn x25519_check_a24(p64 address_to d, const p64 address_to e,
+                    const p64 address_to a);
+fn x25519_check_fold_step(p64 address_to d, const p64 address_to five);
+
+#define X25519_CHECK_X64_SAVE                                                  \
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n"
+#define X25519_CHECK_X64_RESTORE                                               \
+    "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n   ret\n"
+#define X25519_CHECK_X64_FRAME_IN                                              \
+    X25519_CHECK_X64_SAVE "sub $136, %rsp\n   mov %rdi, 128(%rsp)\n"               \
+    "mov (%rsi), %rax\n   mov %rax, 0(%rsp)\n   mov 8(%rsi), %rax\n   mov %rax, 8(%rsp)\n" \
+    "mov 16(%rsi), %rax\n   mov %rax, 16(%rsp)\n   mov 24(%rsi), %rax\n   mov %rax, 24(%rsp)\n" \
+    "mov (%rdx), %rax\n   mov %rax, 32(%rsp)\n   mov 8(%rdx), %rax\n   mov %rax, 40(%rsp)\n" \
+    "mov 16(%rdx), %rax\n   mov %rax, 48(%rsp)\n   mov 24(%rdx), %rax\n   mov %rax, 56(%rsp)\n"
+#define X25519_CHECK_X64_FRAME_OUT                                             \
+    "mov 128(%rsp), %rdi\n"                                                      \
+    "mov 64(%rsp), %rax\n   mov %rax, (%rdi)\n   mov 72(%rsp), %rax\n   mov %rax, 8(%rdi)\n" \
+    "mov 80(%rsp), %rax\n   mov %rax, 16(%rdi)\n   mov 88(%rsp), %rax\n   mov %rax, 24(%rdi)\n" \
+    "mov 96(%rsp), %rax\n   mov %rax, 32(%rdi)\n   mov 104(%rsp), %rax\n   mov %rax, 40(%rdi)\n" \
+    "mov 112(%rsp), %rax\n   mov %rax, 48(%rdi)\n   mov 120(%rsp), %rax\n   mov %rax, 56(%rdi)\n" \
+    "add $136, %rsp\n" X25519_CHECK_X64_RESTORE
+
+__asm__(
+    ".text\n"
+    ".balign 16\n"
+    "x25519_check_multiply_mulx:\n" X25519_CHECK_X64_SAVE "mov %rdx, %rbp\n"
+    X25519_X64_MULTIPLY_MULX("0", "%rdi", "0", "%rsi", "0", "%rbp")
+    X25519_CHECK_X64_RESTORE
+    "x25519_check_square_mulx:\n" X25519_CHECK_X64_SAVE
+    X25519_X64_SQUARE_MULX("0", "%rdi", "0", "%rsi")
+    X25519_CHECK_X64_RESTORE
+    "x25519_check_multiply_mulq:\n" X25519_CHECK_X64_SAVE "mov %rdx, %rbp\n"
+    X25519_X64_MULTIPLY_MULQ("0", "%rdi", "0", "%rsi", "0", "%rbp")
+    X25519_CHECK_X64_RESTORE
+    "x25519_check_square_mulq:\n" X25519_CHECK_X64_SAVE
+    X25519_X64_SQUARE_MULQ("0", "%rdi", "0", "%rsi")
+    X25519_CHECK_X64_RESTORE
+    "x25519_check_add_sub:\n" X25519_CHECK_X64_FRAME_IN
+    X25519_X64_ADD_SUB("64", "96", "0", "32")
+    X25519_CHECK_X64_FRAME_OUT
+    "x25519_check_subtract:\n" X25519_CHECK_X64_FRAME_IN
+    X25519_X64_SUB("64", "0", "32")
+    X25519_CHECK_X64_FRAME_OUT
+    "x25519_check_a24:\n" X25519_CHECK_X64_FRAME_IN
+    X25519_X64_A24("64", "0", "32")
+    X25519_CHECK_X64_FRAME_OUT
+    "x25519_check_fold_step:\n" X25519_CHECK_X64_SAVE
+    "mov (%rsi), %r8\n   mov 8(%rsi), %r9\n   mov 16(%rsi), %r10\n   mov 24(%rsi), %r11\n"
+    "mov 32(%rsi), %rax\n   xor %ebx, %ebx\n"
+    X25519_X64_FOLD("%rax")
+    X25519_X64_STORE("0", "%rdi")
+    X25519_CHECK_X64_RESTORE
+);
+#elif !defined(KERNEL_MODE) && ARM64
+fn x25519_check_multiply_a64(p64 address_to d, const p64 address_to a,
+                             const p64 address_to b);
+fn x25519_check_square_a64(p64 address_to d, const p64 address_to a);
+fn x25519_check_add_sub(p64 address_to d, const p64 address_to a,
+                        const p64 address_to b);
+fn x25519_check_subtract(p64 address_to d, const p64 address_to a,
+                         const p64 address_to b);
+fn x25519_check_a24(p64 address_to d, const p64 address_to e,
+                    const p64 address_to a);
+fn x25519_check_fold_step(p64 address_to d, const p64 address_to five);
+
+#define X25519_CHECK_ARM64_SAVE                                                \
+    "stp x21, x22, [sp, #-64]!\n   stp x23, x24, [sp, #16]\n"                      \
+    "stp x25, x26, [sp, #32]\n   str x30, [sp, #48]\n"                              \
+    "mov x25, #38\n   movz x26, #0xdb41\n   movk x26, #1, lsl #16\n"
+#define X25519_CHECK_ARM64_RESTORE                                             \
+    "ldp x23, x24, [sp, #16]\n   ldp x25, x26, [sp, #32]\n   ldr x30, [sp, #48]\n" \
+    "ldp x21, x22, [sp], #64\n   ret\n"
+#define X25519_CHECK_ARM64_FRAME_IN                                            \
+    X25519_CHECK_ARM64_SAVE "sub sp, sp, #144\n   str x0, [sp, #128]\n"              \
+    "ldp x3, x4, [x1]\n   ldp x5, x6, [x1, #16]\n   stp x3, x4, [sp, #0]\n   stp x5, x6, [sp, #16]\n" \
+    "ldp x3, x4, [x2]\n   ldp x5, x6, [x2, #16]\n   stp x3, x4, [sp, #32]\n   stp x5, x6, [sp, #48]\n"
+#define X25519_CHECK_ARM64_FRAME_OUT                                           \
+    "ldr x0, [sp, #128]\n"                                                       \
+    "ldp x3, x4, [sp, #64]\n   ldp x5, x6, [sp, #80]\n   stp x3, x4, [x0]\n   stp x5, x6, [x0, #16]\n" \
+    "ldp x3, x4, [sp, #96]\n   ldp x5, x6, [sp, #112]\n   stp x3, x4, [x0, #32]\n   stp x5, x6, [x0, #48]\n" \
+    "add sp, sp, #144\n" X25519_CHECK_ARM64_RESTORE
+
+__asm__(
+    ".text\n"
+    ".balign 16\n"
+    "x25519_check_multiply_a64:\n" X25519_CHECK_ARM64_SAVE
+    X25519_ARM64_MULTIPLY("0", "x0", "0", "x1", "0", "x2")
+    X25519_CHECK_ARM64_RESTORE
+    "x25519_check_square_a64:\n" X25519_CHECK_ARM64_SAVE
+    X25519_ARM64_SQUARE("0", "x0", "0", "x1")
+    X25519_CHECK_ARM64_RESTORE
+    "x25519_check_add_sub:\n" X25519_CHECK_ARM64_FRAME_IN
+    X25519_ARM64_ADD_SUB("64", "96", "0", "32")
+    X25519_CHECK_ARM64_FRAME_OUT
+    "x25519_check_subtract:\n" X25519_CHECK_ARM64_FRAME_IN
+    X25519_ARM64_SUB("64", "0", "32")
+    X25519_CHECK_ARM64_FRAME_OUT
+    "x25519_check_a24:\n" X25519_CHECK_ARM64_FRAME_IN
+    X25519_ARM64_A24("64", "0", "32")
+    X25519_CHECK_ARM64_FRAME_OUT
+    "x25519_check_fold_step:\n" X25519_CHECK_ARM64_SAVE
+    "ldp x11, x12, [x1]\n   ldp x13, x14, [x1, #16]\n   ldr x15, [x1, #32]\n"
+    X25519_ARM64_FOLD_STORE("x15", "0", "x0")
+    X25519_CHECK_ARM64_RESTORE
+);
+#elif !defined(KERNEL_MODE) && RISCV64
+fn x25519_check_multiply_rv(p64 address_to d, const p64 address_to s,
+                            const p64 address_to r);
+fn x25519_check_square_rv(p64 address_to d, const p64 address_to a);
+//      d = a + b, a + 8p - b and 121665 a + b, fifteen limbs.
+fn x25519_check_frame_rv(p64 address_to d, const p64 address_to a,
+                         const p64 address_to b);
+
+#define X25519_CHECK_RV_SAVE                                                   \
+    "addi sp, sp, -112\n   sd s1, 0(sp)\n   sd s2, 8(sp)\n   sd s3, 16(sp)\n"        \
+    "sd s4, 24(sp)\n   sd s5, 32(sp)\n   sd s6, 40(sp)\n   sd s7, 48(sp)\n"          \
+    "sd s8, 56(sp)\n   sd s9, 64(sp)\n   sd s10, 72(sp)\n   sd s11, 80(sp)\n"        \
+    "li s10, 19\n   li s11, 0x7ffffffffffff\n"
+#define X25519_CHECK_RV_RESTORE                                                \
+    "ld s1, 0(sp)\n   ld s2, 8(sp)\n   ld s3, 16(sp)\n   ld s4, 24(sp)\n"           \
+    "ld s5, 32(sp)\n   ld s6, 40(sp)\n   ld s7, 48(sp)\n   ld s8, 56(sp)\n"          \
+    "ld s9, 64(sp)\n   ld s10, 72(sp)\n   ld s11, 80(sp)\n   addi sp, sp, 112\n   ret\n"
+#define X25519_CHECK_RV_COPY(from, fr, to, tr)                                 \
+    "ld t0, " from "(" fr ")\n   sd t0, " to "(" tr ")\n"                            \
+    "ld t0, " from "+8(" fr ")\n   sd t0, " to "+8(" tr ")\n"                        \
+    "ld t0, " from "+16(" fr ")\n   sd t0, " to "+16(" tr ")\n"                      \
+    "ld t0, " from "+24(" fr ")\n   sd t0, " to "+24(" tr ")\n"                      \
+    "ld t0, " from "+32(" fr ")\n   sd t0, " to "+32(" tr ")\n"
+
+__asm__(
+    ".text\n"
+    ".balign 16\n"
+    "x25519_check_multiply_rv:\n" X25519_CHECK_RV_SAVE
+    X25519_RV_MULTIPLY("0", "a0", "0", "a1", "0", "a2")
+    X25519_CHECK_RV_RESTORE
+    "x25519_check_square_rv:\n" X25519_CHECK_RV_SAVE
+    X25519_RV_SQUARE("0", "a0", "0", "a1")
+    X25519_CHECK_RV_RESTORE
+    "x25519_check_frame_rv:\n" X25519_CHECK_RV_SAVE
+    "addi sp, sp, -208\n   sd a0, 200(sp)\n"
+    X25519_CHECK_RV_COPY("0", "a1", "0", "sp")
+    X25519_CHECK_RV_COPY("0", "a2", "40", "sp")
+    "li a0, 0x3fffffffffff68\n   li a2, 0x3ffffffffffff8\n"
+    X25519_RV_ADD("80", "0", "40")
+    X25519_RV_SUB("120", "0", "40")
+    X25519_RV_A24("160", "0", "40")
+    "ld a0, 200(sp)\n"
+    X25519_CHECK_RV_COPY("80", "sp", "0", "a0")
+    X25519_CHECK_RV_COPY("120", "sp", "40", "a0")
+    X25519_CHECK_RV_COPY("160", "sp", "80", "a0")
+    "addi sp, sp, 208\n"
+    X25519_CHECK_RV_RESTORE
+);
+#endif
+
+#ifndef KERNEL_MODE
+static p64 x25519_check_seed = 0x6a09e667f3bcc909ull;
+
+static p64 x25519_check_next(void)
+{
+        x25519_check_seed ^= x25519_check_seed << 13;
+        x25519_check_seed ^= x25519_check_seed >> 7;
+        x25519_check_seed ^= x25519_check_seed << 17;
+        return x25519_check_seed;
+}
+
+//      The ends: 0, 1, 19, 38, p - 1, p, p + 1, 2^255 - 1, 2^255, 2^255 +
+//      18, 2^256 - 39, 2^256 - 38, 2^256 - 19, 2^256 - 1, alternating
+//      limbs, 2^192 and 2^128 - 1; then drawn values with all-ones and
+//      zero limbs sprinkled in.
+static fn x25519_check_operand(p64 address_to x, positive kind)
+{
+        static const p64 ends[][4] = {
+            {0, 0, 0, 0}, {1, 0, 0, 0}, {19, 0, 0, 0}, {38, 0, 0, 0},
+            {0xffffffffffffffecull, ~0ull, ~0ull, 0x7fffffffffffffffull},
+            {0xffffffffffffffedull, ~0ull, ~0ull, 0x7fffffffffffffffull},
+            {0xffffffffffffffeeull, ~0ull, ~0ull, 0x7fffffffffffffffull},
+            {~0ull, ~0ull, ~0ull, 0x7fffffffffffffffull},
+            {0, 0, 0, 0x8000000000000000ull},
+            {18, 0, 0, 0x8000000000000000ull},
+            {0xffffffffffffffd9ull, ~0ull, ~0ull, ~0ull},
+            {0xffffffffffffffdaull, ~0ull, ~0ull, ~0ull},
+            {0xffffffffffffffedull, ~0ull, ~0ull, ~0ull},
+            {~0ull, ~0ull, ~0ull, ~0ull},
+            {~0ull, 0, ~0ull, 0}, {0, ~0ull, 0, ~0ull},
+            {0, 0, 0, 1}, {~0ull, ~0ull, 0, 0}};
+
+        if (kind < array_count(ends))
+        {
+                memory_copy(x, ends[kind], 32);
+                return;
+        }
+        for (positive i = 0; i < 4; i++)
+        {
+                p64 pick = x25519_check_next() & 7;
+
+                x[i] = pick == 0 ? ~0ull : pick == 1 ? 0 : x25519_check_next();
+        }
+}
+
+#define X25519_CHECK_ENDS 18
+#endif
+
+#if !defined(KERNEL_MODE) && (X64 || ARM64)
+typedef fn (*x25519_check_binary)(p64 address_to, const p64 address_to,
+                                  const p64 address_to);
+typedef fn (*x25519_check_unary)(p64 address_to, const p64 address_to);
+
+//      Every operation of one four-limb body on one pair: the number wrong.
+static positive x25519_check_pair(x25519_check_binary product_body,
+                                  x25519_check_unary square_body,
+                                  const p64 address_to a, const p64 address_to b)
+{
+        static const p64 a24[4] = {121665};
+        p64 got[8], want[4], product[4];
+        positive wrong = 0;
+
+        product_body(got, a, b);
+        x25519_check_product(want, a, b);
+        wrong += !x25519_check_same(got, want);
+        memory_copy(got, a, 32);
+        product_body(got, got, b);
+        wrong += !x25519_check_same(got, want);
+        square_body(got, a);
+        x25519_check_product(want, a, a);
+        wrong += !x25519_check_same(got, want);
+        memory_copy(got, a, 32);
+        square_body(got, got);
+        wrong += !x25519_check_same(got, want);
+
+        x25519_check_add_sub(got, a, b);
+        x25519_check_sum(want, a, b, false);
+        wrong += !x25519_check_same(got, want);
+        x25519_check_sum(want, a, b, true);
+        wrong += !x25519_check_same(got + 4, want);
+        x25519_check_subtract(got, a, b);
+        wrong += !x25519_check_same(got, want);
+        x25519_check_a24(got, a, b);
+        x25519_check_product(product, a, a24);
+        x25519_check_sum(want, product, b, false);
+        wrong += !x25519_check_same(got, want);
+        return wrong;
+}
+
+static positive x25519_check_bodies(x25519_check_binary product_body,
+                                    x25519_check_unary square_body)
+{
+        positive wrong = 0;
+        p64 a[4], b[4];
+
+        for (positive i = 0; i < X25519_CHECK_ENDS; i++)
+                for (positive j = 0; j < X25519_CHECK_ENDS; j++)
+                {
+                        x25519_check_operand(a, i);
+                        x25519_check_operand(b, j);
+                        wrong += x25519_check_pair(product_body, square_body, a, b);
+                }
+        for (positive round = 0; round < 3000; round++)
+        {
+                x25519_check_operand(a, X25519_CHECK_ENDS);
+                x25519_check_operand(b, round % 3 ? X25519_CHECK_ENDS : round / 3 % X25519_CHECK_ENDS);
+                wrong += x25519_check_pair(product_body, square_body, a, b);
+        }
+        return wrong;
+}
+
+//      The single fold every product ends in, over the top word it can be
+//      handed -- a product leaves at most 40, a24 below 2^17 -- and limbs
+//      that make its carry run the length of the chain.
+static positive x25519_check_folds(void)
+{
+        static const p64 tops[] = {0, 1, 2, 3, 38, 39, 40, 63, 121664, 121665};
+        positive wrong = 0;
+
+        for (positive kind = 0; kind < X25519_CHECK_ENDS + 200; kind++)
+                for (positive t = 0; t < array_count(tops); t++)
+                {
+                        p64 five[5], got[4], want[4], high[4] = {0};
+
+                        x25519_check_operand(five, kind);
+                        five[4] = high[0] = tops[t];
+                        x25519_check_fold_step(got, five);
+                        x25519_check_fold(want, five, high);
+                        wrong += !x25519_check_same(got, want);
+                }
+        return wrong;
+}
+#endif
+
+#if !defined(KERNEL_MODE) && RISCV64
+/*
+        Five limbs below bound, a power of two at least 2^52. Beside the ends
+        and drawn limbs, limbs e with 121665 e just short of a multiple of
+        2^64: after a limb of all ones below them, the carry a24 hands up
+        pushes the low word over, which nothing drawn does.
+*/
+static fn x25519_check_limbs(p64 address_to x, positive kind, p64 bound)
+{
+        for (positive i = 0; i < 5; i++)
+        {
+                p64 pick = kind < 4 ? kind : x25519_check_next() & 7;
+                //      (k 2^64 - 1) / 121665 in words: 2^64 = q 121665 + r + 1.
+                p64 k = 1 + x25519_check_next() % 29;
+                p64 q = ~0ull / 121665, r = ~0ull - q * 121665;
+
+                x[i] = pick == 0 ? bound - 1 : pick == 1 ? 0 :
+                       pick == 2 ? 0x7ffffffffffffull : pick == 3 ? bound / 2 :
+                       pick == 4 ? k * q + (k * (r + 1) - 1) / 121665 :
+                       x25519_check_next() & (bound - 1);
+        }
+}
+
+//      Against the C, limb for limb, at the bounds the ladder keeps: sums
+//      below 2^53, differences below 2^54, products and squares a little
+//      over 2^51, in the places the ladder puts each.
+static positive x25519_check_bodies_rv(void)
+{
+        static const p64 bounds[][2] = {{1ull << 54, 1ull << 53}, {1ull << 53, 1ull << 54},
+                                        {1ull << 52, 1ull << 52}, {1ull << 54, 1ull << 52}};
+        positive wrong = 0;
+
+        for (positive round = 0; round < 4000; round++)
+        {
+                p64 s[5], r[5], got[15], want[5], other[5];
+                const p64 address_to bound = bounds[round % 4];
+
+                x25519_check_limbs(s, round < 64 ? round % 4 : 8, bound[0]);
+                x25519_check_limbs(r, round < 64 ? round / 4 % 4 : 8, bound[1]);
+                x25519_check_multiply_rv(got, s, r);
+                x25519_reference_mul(want, s, r);
+                wrong += memory_compare(got, want, 40) != 0;
+                x25519_check_square_rv(got, s);
+                x25519_reference_sqr_n(want, s, 1);
+                wrong += memory_compare(got, want, 40) != 0;
+                //      The frame operations take products' limbs, as the
+                //      ladder hands them.
+                x25519_check_limbs(s, round < 64 ? round % 4 : 8, 1ull << 52);
+                x25519_check_limbs(r, round < 64 ? round / 4 % 4 : 8, 1ull << 52);
+                x25519_check_frame_rv(got, s, r);
+                memory_copy(want, s, 40);
+                x25519_reference_sum(want, r);
+                wrong += memory_compare(got, want, 40) != 0;
+                memory_copy(want, r, 40);
+                x25519_reference_diff(want, s);
+                wrong += memory_compare(got + 5, want, 40) != 0;
+                x25519_reference_mul121665(other, s);
+                x25519_reference_sum(other, r);
+                wrong += memory_compare(got + 10, other, 40) != 0;
+        }
+        return wrong;
+}
+#endif
+
+#ifndef KERNEL_MODE
+//      x25519 against the C over drawn keys and edge u, every body.
+static positive x25519_check_whole(void)
+{
+        static const p8 edges[][32] = {
+            {0}, {1}, {9},
+            {0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f},
+            {0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+            {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}};
+        p8 scalar[32], u[32], got[32], want[32];
+        positive wrong = 0;
+        p8 mulx;
+
+        memory_fill(scalar, 7, 32);
+        x25519(got, scalar, edges[2]);
+        mulx = cpu_has_mulx;
+        for (positive round = 0; round < 60; round++)
+        {
+                for (positive i = 0; i < 32; i++)
+                {
+                        scalar[i] = (p8)x25519_check_next();
+                        u[i] = (p8)x25519_check_next();
+                }
+                if (round < array_count(edges))
+                        memory_copy(u, edges[round], 32);
+                x25519_reference(want, scalar, u);
+                for (positive body = 0; body < 2; body++)
+                {
+                        cpu_has_mulx = body ? 0 : mulx;
+                        memory_fill(got, 0x5a, 32);
+                        x25519(got, scalar, u);
+                        wrong += memory_compare(got, want, 32) != 0;
+                }
+        }
+        cpu_has_mulx = mulx;
+        return wrong;
+}
+#endif
+
+static fn crypto_floor_x25519(void)
+{
+#ifndef KERNEL_MODE
+#if X64
+        static const p8 nine[32] = {9};
+        p8 probe[32];
+        positive wrong = x25519_check_bodies(x25519_check_multiply_mulq,
+                                             x25519_check_square_mulq);
+
+        //      The first x25519 asks whether there is a mulx body to hold.
+        x25519(probe, nine, nine);
+        if (cpu_has_mulx)
+                wrong += x25519_check_bodies(x25519_check_multiply_mulx,
+                                             x25519_check_square_mulx);
+        wrong += x25519_check_folds();
+        check("x25519's x86_64 field operations agree with arithmetic mod p at the ends",
+              wrong == 0);
+#elif ARM64
+        check("x25519's arm64 field operations agree with arithmetic mod p at the ends",
+              x25519_check_bodies(x25519_check_multiply_a64, x25519_check_square_a64) +
+                      x25519_check_folds() ==
+                  0);
+#elif RISCV64
+        check("x25519's riscv64 field operations agree with the C limb for limb",
+              x25519_check_bodies_rv() == 0);
+#endif
+        check("x25519 agrees with the C it replaced, every body", x25519_check_whole() == 0);
+#endif
+}
+
 static fn crypto_floor_aes_ctr(void)
 {
         static p8 text[16 * AES_CHECK_BLOCKS + 1];
@@ -60182,6 +61163,7 @@ b32 main(void)
         crypto_floor_ghash();
         crypto_floor_field();
         crypto_floor_montgomery();
+        crypto_floor_x25519();
         crypto_floor_aes();
         crypto_rsa_served_sizes();
         tls_trust_anchor_chains();
@@ -60460,7 +61442,7 @@ static bool crypto_vector_run(p8 address_to kind, positive kind_length,
 //      The kinds whose routines have a body for each feature byte.
 static bool crypto_vector_tiered(p8 address_to kind, positive length)
 {
-        static const char tiered[] = "sha2 sha3 hmac hkdf pbkd gcm  pss ";
+        static const char tiered[] = "sha2 sha3 hmac hkdf pbkd gcm  pss  x255 ";
 
         for (positive at = 0; length >= 3 && at < sizeof tiered - 1; at += 5)
                 if (memory_compare(kind, tiered + at, min(length, 4)) == 0)
@@ -60474,7 +61456,7 @@ b32 main(void)
         bipolar got;
         p8 address_to at = crypto_vector_text;
         p8 digest[32];
-        p8 pclmul, aes, vpclmul, vaes, sha, sha512;
+        p8 pclmul, aes, vpclmul, vaes, sha, sha512, mulx;
 
         while (have + 1 < sizeof crypto_vector_text &&
                (got = (bipolar)system_call_3(
@@ -60491,6 +61473,8 @@ b32 main(void)
         vaes = cpu_has_vaes;
         sha = cpu_has_sha;
         sha512 = cpu_has_sha512;
+        //      And x25519 on x86_64 asks the same question: BMI2 and ADX.
+        mulx = cpu_has_mulx;
 
         while (*at)
         {
@@ -60536,6 +61520,7 @@ b32 main(void)
                         cpu_has_aes = body == 2 ? 0 : aes;
                         cpu_has_sha = body == 2 ? 0 : sha;
                         cpu_has_sha512 = body == 2 ? 0 : sha512;
+                        cpu_has_mulx = body == 2 ? 0 : mulx;
                         checks++;
                         if (!parsed ||
                             !crypto_vector_run(kind, kind_length, expect))
@@ -60565,6 +61550,7 @@ b32 main(void)
                 cpu_has_vaes = vaes;
                 cpu_has_sha = sha;
                 cpu_has_sha512 = sha512;
+                cpu_has_mulx = mulx;
         }
 
         crypto_forget(address_of crypto_vector_gcm, sizeof crypto_vector_gcm);
@@ -91650,8 +92636,9 @@ b32 main(void)
         prints nothing, which is what perf stat -e instructions:u,cycles:u
         is pointed at: multiply-c, multiply, square-c and square take a limb
         count, and ecdsa-p256, ecdsa-p384, rsa-2048, rsa-4096, x25519,
-        p256-public, p256-shared, p384-public, p384-shared and gcm take only
-        the rounds. The RSA rows are the public operation a verify runs,
+        x25519-c (the C crypto.c ran before lib.c's x25519, at the same
+        caller), x25519-mulq (x86_64's body without BMI2 and ADX), p256-public, p256-shared, p384-public, p384-shared and gcm
+        take only the rounds. The RSA rows are the public operation a verify runs,
         crypto_rsa_modexp with e = 65537, over a fixed odd modulus whose top
         bit is set; the ECDSA rows verify real signatures, RFC 6979's P-256
         "sample" and a P-384 one made once with openssl.
@@ -91664,6 +92651,9 @@ b32 main(void)
 #define SHARED_montgomery_reference
 #include "checks.c"
 #undef SHARED_montgomery_reference
+#define SHARED_x25519_reference
+#include "checks.c"
+#undef SHARED_x25519_reference
 
 #define MONTGOMERY_BENCH_TRIES 7
 
@@ -91864,6 +92854,25 @@ static fn montgomery_bench_x25519_row(void)
         }
 }
 
+//      The same through the C crypto.c ran before lib.c's x25519, and the
+//      same verdict over its answer, so the pair differs in the arithmetic
+//      alone.
+static fn montgomery_bench_x25519_c_row(void)
+{
+        static const p8 nine[32] = {9};
+        p8 out[32];
+
+        for (positive i = 0; i < montgomery_bench_rounds; i++)
+        {
+                p8 nonzero = 0;
+
+                x25519_reference(out, montgomery_bench_scalar, nine);
+                for (positive j = 0; j < 32; j++)
+                        nonzero |= out[j];
+                montgomery_bench_sink += out[0] + (nonzero != 0);
+        }
+}
+
 static fn montgomery_bench_p256_public_row(void)
 {
         p8 out[65];
@@ -91995,6 +93004,18 @@ b32 main(void)
                         work = montgomery_bench_ecdsa_p384_row;
                 else if (string_compare(row, (string_address)"x25519") == 0)
                         work = montgomery_bench_x25519_row;
+                else if (string_compare(row, (string_address)"x25519-c") == 0)
+                        work = montgomery_bench_x25519_c_row;
+                else if (string_compare(row, (string_address)"x25519-mulq") == 0)
+                {
+                        //      The body a processor without BMI2 and ADX runs,
+                        //      after one call has asked the processor.
+                        p8 probe[32];
+
+                        x25519(probe, montgomery_bench_scalar, montgomery_bench_scalar);
+                        cpu_has_mulx = 0;
+                        work = montgomery_bench_x25519_row;
+                }
                 else if (string_compare(row, (string_address)"p256-public") == 0)
                         work = montgomery_bench_p256_public_row;
                 else if (string_compare(row, (string_address)"p256-shared") == 0)
@@ -92058,6 +93079,9 @@ b32 main(void)
                                 montgomery_bench_ecdsa_p384_row, 32,
                                 (string_address)"verify");
         string_format(log, " key exchange and one record\n");
+        montgomery_bench_report((string_address)"X25519, C  ",
+                                montgomery_bench_x25519_c_row, 64,
+                                (string_address)"multiply");
         montgomery_bench_report((string_address)"X25519     ",
                                 montgomery_bench_x25519_row, 64,
                                 (string_address)"multiply");
