@@ -50848,6 +50848,40 @@ static fn fetching(void)
                       http_response_framing((p8 address_to)bad_name,
                                             sizeof bad_name - 1, address_of header,
                                             address_of response) == HTTP_MALFORMED);
+                /* RFC 9112 5: whitespace around a value is not the value, so
+                   a Location with trailing blanks still names "/next" (it
+                   named "/next \t", which the next hop refused for its
+                   space), and blanks after a length or a coding are
+                   ignored rather than read as part of it. */
+                {
+                        static const char padded[] =
+                            "HTTP/1.1 302 Found\r\nLocation: \t/next \t\r\n"
+                            "Content-Length: 0 \t\r\n\r\n";
+                        static const char coding[] =
+                            "HTTP/1.1 200 OK\r\nTransfer-Encoding:  chunked\t \r\n\r\n";
+                        static const char spaced_length[] =
+                            "HTTP/1.1 200 OK\r\nContent-Length: 1 2\r\n\r\n";
+
+                        check("a field value's surrounding blanks are not part of it",
+                              http_response_framing((p8 address_to)padded,
+                                                    sizeof padded - 1, address_of header,
+                                                    address_of response) == HTTP_OK &&
+                                  response.location_length == 5 &&
+                                  !memory_compare(response.location, "/next", 5) &&
+                                  response.body_kind == HTTP_BODY_LENGTH &&
+                                  !response.body_length &&
+                                  http_response_framing((p8 address_to)coding,
+                                                        sizeof coding - 1,
+                                                        address_of header,
+                                                        address_of response) == HTTP_OK &&
+                                  response.body_kind == HTTP_BODY_CHUNKED);
+                        check("a blank inside a Content-Length is still malformed",
+                              http_response_framing((p8 address_to)spaced_length,
+                                                    sizeof spaced_length - 1,
+                                                    address_of header,
+                                                    address_of response) ==
+                                  HTTP_MALFORMED);
+                }
         }
 
         /* Exercise every byte class, not only one example from each.  This
@@ -57991,13 +58025,83 @@ static fn redirect_urls(void)
               http_absolutize(false, "h", 80, "/dir/old?before#local",
                               "#new", into, sizeof into) == HTTP_OK &&
                   string_equals(into, "http://h/dir/old?before"));
+        /* One scheme rule for the parser and the redirect resolver: http and
+           https in any case (RFC 3986 3.1), and any other scheme refused by
+           both rather than read as a host or as a path on the current one.
+           split is the URL's verdict (1 plain, 2 TLS, 0 refused); location
+           is the Location's from https://h/dir/old, and 0 is refused. */
+        {
+                static const struct
+                {
+                        const char address_to text;
+                        p8 split;
+                        const char address_to location;
+                } schemes[] = {
+                    {"HTTP://h/x", 1, "HTTP://h/x"},
+                    {"Https://h/x", 2, "Https://h/x"},
+                    {"hTtPs://h:444/x", 2, "hTtPs://h:444/x"},
+                    {"ftp://h/x", 0, 0},
+                    {"httpx://h/x", 0, 0},
+                    {"web+x.y-z://h/x", 0, 0},
+                    {"javascript:alert(1)", 0, 0},
+                    {"http:x", 0, 0},
+                    {"h:81/x", 1, 0},
+                    {"1http://h/x", 0, "https://h/dir/1http://h/x"},
+                    {"//h2/x", 0, "https://h2/x"},
+                    {"h_x://y", 0, "https://h/dir/h_x://y"},
+                };
+
+                for (positive row = 0; row < sizeof schemes / sizeof schemes[0]; row++)
+                {
+                        bipolar split = http_split_into(
+                            (string_address)schemes[row].text, host, sizeof host,
+                            address_of port, address_of path, address_of tls);
+                        bipolar placed = http_absolutize(
+                            true, "h", 443, "/dir/old",
+                            (string_address)schemes[row].text, into, sizeof into);
+
+                        check("a URL scheme splits in any case, and no other scheme does",
+                              schemes[row].split
+                                  ? split == HTTP_OK && tls == (schemes[row].split == 2)
+                                  : split == HTTP_BAD_URL);
+                        check("a Location scheme resolves in any case, and no other scheme does",
+                              schemes[row].location
+                                  ? placed == HTTP_OK &&
+                                        string_equals(into, (string_address)schemes[row].location)
+                                  : placed == HTTP_BAD_URL);
+                }
+        }
         {
                 p8 leaf[32];
 
-                http_url_leaf((string_address)"/dir/archive#private", leaf,
-                              sizeof leaf);
-                check("a URL fragment is not part of wget's output name",
-                      string_equals(leaf, (string_address)"archive"));
+                /* wget's output name: the last path segment, never a
+                   directory name, never empty, never holding a slash. */
+                static const char address_to leaves[][2] = {
+                    {"/dir/archive#private", "archive"},
+                    {"/dir/b?c/d", "b"},
+                    {"/", "index.html"},
+                    {"?only", "index.html"},
+                    {"/a/..", "index.html"},
+                    {"/a/.", "index.html"},
+                    {"/..?x", "index.html"},
+                    {"/a/..x", "..x"},
+                    {"/a/...", "..."},
+                    {"/a/%2e%2e", "%2e%2e"},
+                };
+                p8 overlong[HTTP_URL_MAX + 8];
+
+                for (positive row = 0; row < sizeof leaves / sizeof leaves[0]; row++)
+                {
+                        http_url_leaf((string_address)leaves[row][0], leaf, sizeof leaf);
+                        check("wget's output name is the last segment, and a directory's is index.html",
+                              string_equals(leaf, (string_address)leaves[row][1]));
+                }
+                overlong[0] = '/';
+                memory_fill(overlong + 1, 'a', sizeof overlong - 2);
+                overlong[sizeof overlong - 1] = end;
+                http_url_leaf(overlong, leaf, sizeof leaf);
+                check("a path too long for a request still names index.html, not nothing",
+                      string_equals(leaf, (string_address)"index.html"));
         }
 
         check("a redirect chain may begin on HTTP",
@@ -58073,6 +58177,10 @@ static fn redirect_urls(void)
 
                 memory_fill(url + prefix, 'a', HTTP_URL_MAX - prefix);
                 url[HTTP_URL_MAX] = end;
+                check("a start URL at HTTP_URL_MAX is refused by the splitter",
+                      http_split_into(url, long_host, sizeof long_host,
+                                      address_of long_port, address_of long_path,
+                                      address_of long_tls) == HTTP_BAD_URL);
                 check("a start URL at HTTP_URL_MAX is refused before any hop",
                       string_length(url) == HTTP_URL_MAX &&
                           http_get(url, address_of body, address_of code) ==
@@ -58080,6 +58188,14 @@ static fn redirect_urls(void)
                 check("wget's start URL ceiling matches fetch",
                       http_fetch_to(url, -1, false, address_of code) ==
                           HTTP_BAD_URL);
+                /* A target the request builder refuses is refused before
+                   the connect: port 1 is closed, so a client that dials
+                   first answers HTTP_NO_ROUTE instead. */
+                check("a URL with no valid request is refused before any connection",
+                      http_get((string_address)"http://127.0.0.1:1/caf\xe9",
+                               address_of body, address_of code) == HTTP_BAD_URL &&
+                          http_fetch_to((string_address)"http://127.0.0.1:1/%0d",
+                                        -1, false, address_of code) == HTTP_BAD_URL);
 
                 /* Absolute Location that already fills the next-URL buffer. */
                 {

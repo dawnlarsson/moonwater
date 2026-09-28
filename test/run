@@ -3700,6 +3700,18 @@ lane_net()
         2) note "crypto_fuzz: skipped (soft) -- does not downgrade net" ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness http_urls
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
+        python3 test/differential.py --harness http_fuzz
+        case $? in
+        0) ;;
+        2) note "http_fuzz: skipped (soft) -- does not downgrade net" ;;
+        *) net_outcome=1 ;;
+        esac
         return "$net_outcome"
 }
 #       Every network fuzz target for longer than lane_net's smoke, an hour
@@ -6428,6 +6440,73 @@ Cannot write to 'out' (File too large)."
                 fi
         else
                 note "wget write failure against GNU wget: NOT RUN -- no GNU wget"
+        fi
+        #       -O onto a device or a FIFO writes into the node, as GNU wget
+        #       and every other staged output here do. The node was replaced
+        #       by a regular file instead -- /dev/null itself, run as root --
+        #       or refused outright when its directory was not writable.
+        #       wget_stream_run WGET DIR [OPTION...]: the /dev/null status,
+        #       the FIFO status, the bytes a reader drew through the FIFO,
+        #       and whether the FIFO is still one.
+        wget_stream_run()
+        {
+                wget_program=$1
+                wget_dir=$2
+                shift 2
+                mkdir -p "$wget_dir"
+                timeout 10 "$wget_program" -q "$@" -O /dev/null "$wget_url"
+                printf '%s ' "$?"
+                rm -f "$wget_dir/fifo"
+                mkfifo "$wget_dir/fifo" || { echo no-fifo; return; }
+                timeout 10 sh -c 'exec wc -c < "$1"' sh "$wget_dir/fifo" \
+                        > "$wget_dir/count" 2>/dev/null &
+                wget_reader=$!
+                timeout 10 "$wget_program" -q "$@" -O "$wget_dir/fifo" "$wget_url"
+                printf '%s ' "$?"
+                wait "$wget_reader"
+                printf '%s ' "$(tr -d ' ' < "$wget_dir/count")"
+                if [ -p "$wget_dir/fifo" ]; then echo fifo; else echo replaced; fi
+        }
+        if [ -s "$wget_place/port" ]; then
+                wget_stream_ours=$(wget_stream_run "$farm/wget" "$wget_place/stream-ours")
+        else
+                wget_stream_ours=server-failed
+        fi
+        if [ "$wget_stream_ours" = "0 0 1048576 fifo" ]; then
+                tally wget-into-device-and-fifo 1 1
+        else
+                tally wget-into-device-and-fifo 0 1
+                note "wget -O /dev/null, -O fifo said [$wget_stream_ours], want [0 0 1048576 fifo]"
+                builtins_failed=1
+        fi
+        #       A symlink planted at the -O name is replaced, never written
+        #       through (where GNU wget follows it): the download lands in a
+        #       regular file of that name and the link's target keeps its
+        #       bytes.
+        printf keep > "$wget_place/victim"
+        ln -sf "$wget_place/victim" "$wget_place/stream-ours/link"
+        timeout 10 "$farm/wget" -q -O "$wget_place/stream-ours/link" "$wget_url"
+        wget_link_status=$?
+        if [ "$wget_link_status" = 0 ] && [ ! -L "$wget_place/stream-ours/link" ] &&
+                [ "$(cat "$wget_place/victim")" = keep ] &&
+                [ "$(wc -c < "$wget_place/stream-ours/link")" -eq 1048576 ]; then
+                tally wget-output-link-replaced 1 1
+        else
+                tally wget-output-link-replaced 0 1
+                note "wget -O onto a symlink: status $wget_link_status, victim [$(cat "$wget_place/victim")]"
+                builtins_failed=1
+        fi
+        if [ -n "$wget_gnu" ] && [ -s "$wget_place/port" ] &&
+                "$wget_gnu" --version 2>/dev/null | head -n 1 | grep -q '^GNU Wget'; then
+                wget_stream_gnu=$(wget_stream_run "$wget_gnu" "$wget_place/stream-gnu" \
+                        --no-config --no-proxy --no-hsts)
+                if [ "$wget_stream_gnu" = "$wget_stream_ours" ]; then
+                        tally wget-into-device-and-fifo-matches-gnu 1 1
+                else
+                        tally wget-into-device-and-fifo-matches-gnu 0 1
+                        note "GNU wget said [$wget_stream_gnu] where ours said [$wget_stream_ours]"
+                        builtins_failed=1
+                fi
         fi
         kill "$wget_server" 2>/dev/null || :
         wait "$wget_server" 2>/dev/null || :

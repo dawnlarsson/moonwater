@@ -7083,13 +7083,48 @@ static bipolar tls_read_until(
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
 
+/* HTTP Host and DNS have narrower syntax than an arbitrary URI reg-name:
+   letters, digits and the unreserved '-', '.' and '_' (DNS carries the
+   underscore, and wget and curl reach such hosts).  The URL parser and the
+   request serializer hold a host to this one rule. */
+static bool http_host_byte(p8 byte)
+{
+        return byte_is_alnum(byte) || byte == '-' || byte == '.' || byte == '_';
+}
+
+/* The length of the scheme and its ':' in front of a URL or a reference --
+   a letter, then letters, digits, '+', '-' and '.' (RFC 3986 3.1) -- or 0
+   when there is none.  http_web_scheme says whether it is http or https, in
+   any case: the parser and the redirect resolver read "HTTP://" alike, where
+   one taking it for a scheme and the other for a relative path sent a
+   redirect somewhere neither the server nor a policy meant. */
+static positive http_scheme_length(string_address url)
+{
+        positive length = 0;
+
+        if (!byte_is_alpha(string_get(url)))
+                return 0;
+        while (byte_is_alnum(url[length]) || url[length] == '+' ||
+               url[length] == '-' || url[length] == '.')
+                length++;
+        return url[length] == ':' ? length + 1 : 0;
+}
+
+static bool http_web_scheme(string_address url, positive scheme)
+{
+        return (scheme == 5 || scheme == 6) &&
+               !memory_compare_ascii_case(url, "https", scheme - 1);
+}
+
 /*
         http://host[:port][/path] taken apart.
 
         Everything before the first slash after the authority is the host,
         everything from it is the path, and a missing path is "/". A colon in
         the authority is a port, which is how a test talks to a server on a
-        port the kernel picked.
+        port the kernel picked. A URL the client could not carry through
+        http_run -- HTTP_URL_MAX bytes or more -- is refused here too, so no
+        caller derives an output name or a message from one.
 */
 static bipolar http_split_into(string_address url, p8 address_to host, positive room,
                                p16 address_to port, string_address address_to path,
@@ -7097,37 +7132,30 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
 {
         string_address at = url;
         positive length;
-        p16 selected_port = HTTP_PORT;
+        positive scheme = http_scheme_length(url);
         bool selected_tls = false;
+        string_address scan = url;
 
-        for (string_address scan = url; *scan; scan++)
+        for (; *scan; scan++)
                 if (byte_is_control(*scan) || *scan == ' ' || *scan == '\\')
                         return HTTP_BAD_URL;
-
-        if (!string_compare_max(url, (string_address) "https://", 8))
-        {
-                selected_tls = true;
-                selected_port = HTTP_HTTPS_PORT;
-                at = url + 8;
-        }
-        else if (!string_compare_max(url, (string_address) "http://", 7))
-                at = url + 7;
+        if ((positive)(scan - url) >= HTTP_URL_MAX)
+                return HTTP_BAD_URL;
 
         /* A spelling with an explicit scheme is not a schemeless HTTP URL.
            Treating "gopher://host" as host "gopher" is a parser
            differential: a policy and this client can appear to approve the
-           same string while naming different destinations. */
-        else
+           same string while naming different destinations.  A scheme with
+           no "//" after it is read as host:port, which fails unless the
+           rest is a port. */
+        if (scheme && url[scheme] == '/' && url[scheme + 1] == '/')
         {
-                /* Only a colon ahead of the first '/', '?' or '#' can end a
-                   scheme: "host/?next=http://x" is a schemeless URL whose
-                   query holds another. */
-                string_address scheme = (string_address)memory_first_of(
-                    url, ':', string_span_without_set(url, "/?#"));
-
-                if (scheme && scheme[1] == '/' && scheme[2] == '/')
+                if (!http_web_scheme(url, scheme))
                         return HTTP_BAD_URL;
+                selected_tls = scheme == 6;
+                at = url + scheme + 2;
         }
+        p16 selected_port = selected_tls ? HTTP_HTTPS_PORT : HTTP_PORT;
 
         /* This client implements no userinfo.  Silently discarding it makes
            logs and allow-list checks easy to read as the text before '@'
@@ -7141,14 +7169,10 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
         if (length + 1 >= room)
                 return HTTP_BAD_URL;
 
-        /* HTTP Host and DNS have narrower syntax than an arbitrary URI
-           reg-name: letters, digits and the unreserved '-', '.' and '_'
-           (DNS carries the underscore, and wget and curl reach such hosts).
-           Validate before touching the caller's output so a rejected URL
+        /* Validate before touching the caller's output so a rejected URL
            cannot leave a plausible partial destination there. */
         for (positive byte = 0; byte < length; byte++)
-                if (!byte_is_alnum(at[byte]) && at[byte] != '-' &&
-                    at[byte] != '.' && at[byte] != '_')
+                if (!http_host_byte(at[byte]))
                         return HTTP_BAD_URL;
 
         if (!length)
@@ -7206,19 +7230,9 @@ static bipolar http_origin_form(string_address path, p8 address_to into,
 
         hash = string_first_of(path, '#');
         length = hash ? (positive)(hash - path) : string_length(path);
-        if (!length)
-        {
-                if (room < 2)
-                        return HTTP_BAD_URL;
-                into[0] = '/';
-                into[1] = end;
-                return HTTP_OK;
-        }
-
-        root = path[0] == '?';
-        if (path[0] != '/' && !root)
-                return HTTP_BAD_URL;
-        if (length > room || root >= room - length)
+        root = !length || path[0] == '?';
+        if ((path[0] != '/' && !root) || length > room ||
+            root >= room - length)
                 return HTTP_BAD_URL;
 
         if (root)
@@ -7272,6 +7286,27 @@ static bool http_token_byte(p8 byte)
                memory_first_of("!#$%&'*+-.^_`|~", byte, 15);
 }
 
+/* One line of a head or of a trailer, its line end gone.  A status line is
+   text with no control but tab; a field is a token, a colon, and a value
+   held to the same.  The token also refuses obs-fold, whitespace before the
+   colon, and an empty field name. */
+static bool http_line_valid(p8 address_to line, positive stop, bool field)
+{
+        positive at = 0;
+
+        if (field)
+        {
+                while (at < stop && http_token_byte(line[at]))
+                        at++;
+                if (!at || at == stop || line[at++] != ':')
+                        return false;
+        }
+        for (; at < stop; at++)
+                if (byte_is_control(line[at]) && line[at] != '\t')
+                        return false;
+        return true;
+}
+
 static bool http_header_block_valid(p8 address_to bytes, positive size)
 {
         positive at = 0;
@@ -7282,7 +7317,6 @@ static bool http_header_block_valid(p8 address_to bytes, positive size)
                 positive line = at;
                 positive stop = at + memory_span_without_byte(
                     bytes + at, '\n', size - at);
-                positive colon = line;
 
                 if (stop == size)
                         return false;
@@ -7292,28 +7326,9 @@ static bool http_header_block_valid(p8 address_to bytes, positive size)
 
                 if (stop == line)
                         return !status && at == size;
-
-                if (status)
-                {
-                        status = false;
-                        for (positive byte = line; byte < stop; byte++)
-                                if ((bytes[byte] < 0x20 && bytes[byte] != '\t') ||
-                                    bytes[byte] == 0x7f)
-                                        return false;
-                        continue;
-                }
-
-                /* A field begins with a token.  This also rejects obs-fold,
-                   whitespace before the colon, and an empty field name. */
-                while (colon < stop && http_token_byte(bytes[colon]))
-                        colon++;
-                if (colon == line || colon == stop || bytes[colon] != ':')
+                if (!http_line_valid(bytes + line, stop - line, !status))
                         return false;
-
-                for (positive byte = colon + 1; byte < stop; byte++)
-                        if ((bytes[byte] < 0x20 && bytes[byte] != '\t') ||
-                            bytes[byte] == 0x7f)
-                                return false;
+                status = false;
         }
 
         return false;
@@ -7362,8 +7377,13 @@ static string_address http_header(p8 address_to bytes, positive size,
                                 continue;
                         }
 
+                        /* RFC 9112 5: the optional whitespace around a
+                           value is not part of it, at either end. */
                         found = (string_address)(bytes + from);
                         found_length = stop - from;
+                        while (found_length &&
+                               byte_is_blank(found[found_length - 1]))
+                                found_length--;
                 }
         }
 
@@ -7395,29 +7415,14 @@ static bool http_chunk_extensions_valid(string_address at,
                                 return false;
                         if (*at == '"')
                         {
-                                bool closed = false;
-
-                                at++;
-                                while (at < stop)
-                                {
-                                        p8 byte = *at++;
-
-                                        if (byte == '"')
-                                        {
-                                                closed = true;
-                                                break;
-                                        }
-                                        if (byte == '\\')
-                                        {
-                                                if (at == stop)
-                                                        return false;
-                                                byte = *at++;
-                                        }
-                                        if (byte_is_control(byte) &&
-                                            byte != '\t')
+                                /* A quoted-string: an escape takes the next
+                                   byte whatever it is, and no byte in it is
+                                   a control but tab. */
+                                for (at++; at < stop && *at != '"'; at++)
+                                        if ((*at == '\\' && ++at == stop) ||
+                                            (byte_is_control(*at) && *at != '\t'))
                                                 return false;
-                                }
-                                if (!closed)
+                                if (at++ == stop)
                                         return false;
                         }
                         else
@@ -7456,11 +7461,8 @@ static bipolar http_chunk_line(p8 address_to line, positive line_length,
         if (number < stop && byte_is_blank(number[0]))
                 number += string_span_max(number, stop - number,
                                           string_set_blanks);
-        if (number < stop)
-        {
-                if (!http_chunk_extensions_valid(number, stop))
-                        return HTTP_MALFORMED;
-        }
+        if (number < stop && !http_chunk_extensions_valid(number, stop))
+                return HTTP_MALFORMED;
 
         address_to chunk_length = parsed;
         return HTTP_OK;
@@ -7471,7 +7473,6 @@ static bipolar http_chunk_line(p8 address_to line, positive line_length,
 static bipolar http_trailer_line(p8 address_to line, positive line_length)
 {
         positive stop = line_length;
-        positive colon = 0;
 
         if (!stop || line[stop - 1] != '\n')
                 return HTTP_MALFORMED;
@@ -7480,21 +7481,7 @@ static bipolar http_trailer_line(p8 address_to line, positive line_length)
                 stop--;
         if (!stop)
                 return 1;
-
-        while (colon < stop && line[colon] != ':')
-        {
-                if (!http_token_byte(line[colon]))
-                        return HTTP_MALFORMED;
-                colon++;
-        }
-        if (!colon || colon == stop)
-                return HTTP_MALFORMED;
-
-        for (positive at = colon + 1; at < stop; at++)
-                if (byte_is_control(line[at]) && line[at] != '\t')
-                        return HTTP_MALFORMED;
-
-        return 0;
+        return http_line_valid(line, stop, true) ? 0 : HTTP_MALFORMED;
 }
 
 static bipolar http_unchunk(p8 address_to bytes, positive size);
@@ -7595,28 +7582,20 @@ static bipolar http_response_framing_from(p8 address_to bytes, positive size,
 
                 if (transfer)
                 {
-                        if (value_length < 7 ||
-                            memory_compare_ascii_case(transfer, "chunked", 7) ||
-                            string_span_max(transfer + 7, value_length - 7,
-                                            string_set_blanks) !=
-                                value_length - 7)
+                        if (value_length != 7 ||
+                            memory_compare_ascii_case(transfer, "chunked", 7))
                                 return HTTP_MALFORMED;
                         response->body_kind = HTTP_BODY_CHUNKED;
                 }
                 else if (content_length)
                 {
                         string_address cursor = content_length;
-                        positive digits;
 
                         if (!string_digits_checked(
                                 address_of cursor, 10,
-                                address_of response->body_length))
-                                return HTTP_MALFORMED;
-                        digits = (positive)(cursor - content_length);
-                        digits += string_span_max(
-                            cursor, content_length_size - digits,
-                            string_set_blanks);
-                        if (digits != content_length_size)
+                                address_of response->body_length) ||
+                            (positive)(cursor - content_length) !=
+                                content_length_size)
                                 return HTTP_MALFORMED;
                         response->body_kind = HTTP_BODY_LENGTH;
                 }
@@ -7651,15 +7630,10 @@ static bipolar http_response_framing_from(p8 address_to bytes, positive size,
                             (string_address)"location",
                             address_of response->location_length,
                             address_of repeated);
+                        /* No control but tab reaches here, NUL included:
+                           http_header_block_valid refused the head. */
                         if (repeated)
                                 return HTTP_MALFORMED;
-                        /* Controls, NUL included, would silently cut the
-                           Location the string calls later copy. */
-                        for (positive byte = 0;
-                             byte < response->location_length; byte++)
-                                if (byte_is_control((p8)response->location[byte]) &&
-                                    response->location[byte] != '\t')
-                                        return HTTP_MALFORMED;
                 }
 
                 address_to header_length = at + (positive)header;
@@ -7770,10 +7744,9 @@ static bipolar http_link_read_until(
         return HTTP_OK;
 }
 
-/* The request built and put on the wire. Both clients send the same GET and
-   differ only in what they call themselves and which minor version they
-   claim, so the two words they disagree about are arguments and the wire
-   format is not written twice. */
+/* A request built and put on the wire in one step, for a caller that
+   already holds an open link (locale_auto_get in src/sh/host.c). http_run
+   builds its request before it connects instead. */
 static bipolar http_send_get(http_link address_to link, string_address host,
                              p16 port, string_address path, bool tls,
                              p8 version_minor, string_address agent)
@@ -7870,36 +7843,56 @@ static bipolar http_copy_body(http_body address_to body, bipolar dest,
                          exact ? response->body_length : positive_max, exact);
 }
 
+//      The wait one read may take: a test's shorter one, else HTTP's.
+static positive http_body_seconds(const http_body address_to body)
+{
+        return body->read_seconds || body->read_nanoseconds
+                   ? body->read_seconds : HTTP_IDLE_SECONDS;
+}
+
+static bipolar http_body_borrow(http_body address_to body, positive room,
+                                p8 address_to address_to data,
+                                positive address_to got);
+
+/* Payload copied into the caller's bytes: the stash's and TLS's through
+   http_body_borrow, a plaintext socket's by a read that asks the clock and
+   polls only when nothing is queued yet. */
 static bipolar http_body_read(http_body address_to body, p8 address_to into,
                               positive room, positive address_to got)
 {
-        if (body->stash_used)
+        bipolar n;
+
+        if (body->stash_used || (body->link && body->link->tls))
         {
-                positive take = body->stash_used;
-                if (take > room)
-                        take = room;
-                memory_copy(into, body->stash, take);
-                body->stash += take;
-                body->stash_used -= take;
-                address_to got = take;
+                p8 address_to data = null;
+                bipolar status = http_body_borrow(body, room, address_of data, got);
+
+                if (!status && address_to got)
+                        memory_copy(into, data, address_to got);
+                return status;
+        }
+        if (!body->link)
+        {
+                address_to got = 0;
                 return HTTP_OK;
         }
 
-        if (body->link)
+        n = socket_receive((b32)body->link->handle, into, room, MSG_DONTWAIT,
+                           null, 0);
+        if (n == NETWORK_TRY_AGAIN || n == NETWORK_INTERRUPTED)
         {
                 network_deadline deadline;
-                positive seconds = body->read_seconds;
-                positive nanoseconds = body->read_nanoseconds;
 
-                if (!seconds && !nanoseconds)
-                        seconds = HTTP_IDLE_SECONDS;
-                if (!network_deadline_begin(address_of deadline, seconds,
-                                            nanoseconds))
+                if (!network_deadline_begin(address_of deadline,
+                                            http_body_seconds(body),
+                                            body->read_nanoseconds))
                         return HTTP_NO_REPLY;
-                return http_link_read_until(body->link, into, room, got,
-                                            address_of deadline);
+                n = network_stream_read_some_until(body->link->handle, into,
+                                                   room, address_of deadline);
         }
-        *got = 0;
+        if (n < 0 || (positive)n > room)
+                return HTTP_NO_REPLY;
+        address_to got = (positive)n;
         return HTTP_OK;
 }
 
@@ -7923,16 +7916,10 @@ static bipolar http_body_borrow(http_body address_to body, positive room,
         }
 
         if (body->link && body->link->tls)
-        {
-                positive seconds = body->read_seconds;
-                positive nanoseconds = body->read_nanoseconds;
-
-                if (!seconds && !nanoseconds)
-                        seconds = HTTP_IDLE_SECONDS;
                 return tls_borrow(address_of body->link->session, room, data,
-                                  got, seconds, nanoseconds)
+                                  got, http_body_seconds(body),
+                                  body->read_nanoseconds)
                            ? HTTP_NO_REPLY : HTTP_OK;
-        }
 
         address_to data = body->scratch;
         return http_body_read(body, body->scratch,
@@ -8066,14 +8053,20 @@ static bipolar http_copy(http_body address_to body, bipolar dest, positive want,
 
 /* Borrow complete framing lines from the current span. Socket lines split
    across reads use the caller's scratch and retain the streaming line limit;
-   complete memory responses have their existing whole-response bound. */
+   complete memory responses have their existing whole-response bound. A
+   plaintext socket's reads fill the scratch, so what follows a line -- the
+   next chunk's data, usually -- is already in the stash for the copy after
+   it: one read where a chunk took three. TLS reads stop at the limit, since
+   its data is lent from where it was decrypted and reading on would copy
+   it. */
 static bipolar http_line(http_body address_to body, positive limit,
                           p8 address_to address_to line,
                           positive address_to length)
 {
         positive used = body->stash_used;
-        positive span = memory_span_without_byte(body->stash, '\n', used);
-        if (span < used && span < limit)
+        positive span = memory_span_without_byte(body->stash, '\n',
+                                                 min(used, limit));
+        if (span < min(used, limit))
         {
                 *line = body->stash;
                 *length = span + 1;
@@ -8085,18 +8078,21 @@ static bipolar http_line(http_body address_to body, positive limit,
                 return HTTP_MALFORMED;
 
         p8 address_to scratch = body->scratch;
+        positive reach = body->link->tls ? limit : HTTP_HEAD_MAX;
         memory_copy(scratch, body->stash, used);
         body->stash_used = 0;
         while (used < limit)
         {
                 positive got = 0;
-                if (http_body_read(body, scratch + used, limit - used,
+                positive seen;
+                if (http_body_read(body, scratch + used, reach - used,
                                    address_of got))
                         return HTTP_NO_REPLY;
                 if (!got)
                         return HTTP_MALFORMED;
-                span = memory_span_without_byte(scratch + used, '\n', got);
-                if (span < got)
+                seen = min(got, limit - used);
+                span = memory_span_without_byte(scratch + used, '\n', seen);
+                if (span < seen)
                 {
                         *line = scratch;
                         *length = used + span + 1;
@@ -8107,13 +8103,6 @@ static bipolar http_line(http_body address_to body, positive limit,
                 used += got;
         }
         return HTTP_MALFORMED;
-}
-
-static bipolar http_body_byte(http_body address_to body, p8 address_to byte)
-{
-        positive got = 0;
-        return http_body_read(body, byte, 1, address_of got) || !got
-                   ? HTTP_MALFORMED : HTTP_OK;
 }
 
 static bipolar http_copy_trailers(http_body address_to body)
@@ -8145,17 +8134,14 @@ static bipolar http_copy_trailers(http_body address_to body)
 static bipolar http_copy_chunked(http_body address_to body, bipolar dest)
 {
         p8 address_to line;
+        positive line_length = 0;
+        positive size = 0;
 
         for (;;)
         {
-                positive line_length = 0;
-                positive size = 0;
-                p8 delimiter;
-
                 if (http_line(body, 127, address_of line,
-                              address_of line_length))
-                        return HTTP_MALFORMED;
-                if (http_chunk_line(line, line_length, address_of size))
+                              address_of line_length) ||
+                    http_chunk_line(line, line_length, address_of size))
                         return HTTP_MALFORMED;
                 if (!size)
                         return http_copy_trailers(body);
@@ -8165,13 +8151,11 @@ static bipolar http_copy_chunked(http_body address_to body, bipolar dest)
                         if (copied)
                                 return copied;
                 }
-                if (http_body_byte(body, address_of delimiter))
-                        return HTTP_MALFORMED;
-                if (delimiter == '\n')
-                        continue;
-                if (delimiter != '\r' ||
-                    http_body_byte(body, address_of delimiter) ||
-                    delimiter != '\n')
+                /* The data ends in CRLF or a bare LF: a line of at most two
+                   bytes, borrowed like any other rather than read a byte
+                   at a time. */
+                if (http_line(body, 2, address_of line, address_of line_length) ||
+                    (line_length == 2 && line[0] != '\r'))
                         return HTTP_MALFORMED;
         }
 }
@@ -8216,7 +8200,7 @@ static bool http_request_component_valid(string_address text, p8 kind)
         {
                 p8 byte = string_get(text);
 
-                if (byte_is_control(byte) || byte == 0x7f ||
+                if (byte_is_control(byte) ||
                     (kind != HTTP_REQUEST_FIELD && byte == ' ') ||
                     (kind == HTTP_REQUEST_TARGET &&
                      (byte == '\\' || byte > 0x7f)))
@@ -8264,15 +8248,22 @@ static bool http_request_component_valid(string_address text, p8 kind)
                         }
                         peeled = at;
                 }
-                if (kind == HTTP_REQUEST_HOST &&
-                    !byte_is_alnum(byte) && byte != '-' && byte != '.' &&
-                    byte != '_')
+                if (kind == HTTP_REQUEST_HOST && !http_host_byte(byte))
                         return false;
         }
 
         return true;
 }
 
+
+/* ":port" into into[7] when the port is not the scheme's own; its length,
+   and zero when there is nothing to name. */
+static positive http_port_suffix(p8 address_to into, bool tls, p16 port)
+{
+        into[0] = ':';
+        return port == (tls ? HTTP_HTTPS_PORT : HTTP_PORT)
+                   ? 0 : 1 + positive_into(into + 1, port);
+}
 
 static bipolar http_get_request(p8 address_to request, positive room,
                                 string_address host, p16 port,
@@ -8281,10 +8272,8 @@ static bipolar http_get_request(p8 address_to request, positive room,
                                 positive address_to used)
 {
         p8 target[HTTP_URL_MAX];
-        p8 port_text[7] = {':'};
+        p8 port_text[7];
         byte_store out = {request, room, 0};
-        bool named_port = (tls && port != HTTP_HTTPS_PORT) ||
-                          (!tls && port != HTTP_PORT);
         bool ok;
 
         if (!http_request_component_valid(host, HTTP_REQUEST_HOST) ||
@@ -8300,9 +8289,8 @@ static bipolar http_get_request(p8 address_to request, positive room,
         ok &= byte_store_append_exact(address_of out, address_of version_minor, 1);
         ok &= byte_store_append_exact(address_of out, "\r\nHost: ", 8);
         ok &= byte_store_append_exact(address_of out, host, string_length(host));
-        ok &= byte_store_append_exact(
-            address_of out, port_text,
-            named_port ? 1 + positive_into(port_text + 1, port) : 0);
+        ok &= byte_store_append_exact(address_of out, port_text,
+                                      http_port_suffix(port_text, tls, port));
         ok &= byte_store_append_exact(address_of out, "\r\nUser-Agent: ", 14);
         ok &= byte_store_append_exact(address_of out, agent, string_length(agent));
         ok &= byte_store_append_exact(
@@ -8316,11 +8304,9 @@ static bipolar http_get_request(p8 address_to request, positive room,
 static bipolar http_put_url(p8 address_to into, positive room, bool tls,
                             string_address host, p16 port, string_address path)
 {
-        p8 port_text[7] = {':'};
+        p8 port_text[7];
         //      The last byte of the room is kept for the terminator.
         byte_store out = {into, room ? room - 1 : 0, 0};
-        bool named_port = (tls && port != HTTP_HTTPS_PORT) ||
-                          (!tls && port != HTTP_PORT);
         bool ok = room != 0;
 
         if (!string_get(path))
@@ -8328,9 +8314,8 @@ static bipolar http_put_url(p8 address_to into, positive room, bool tls,
         ok &= byte_store_append_exact(address_of out, tls ? "https://" : "http://",
                                       tls ? 8 : 7);
         ok &= byte_store_append_exact(address_of out, host, string_length(host));
-        ok &= byte_store_append_exact(
-            address_of out, port_text,
-            named_port ? 1 + positive_into(port_text + 1, port) : 0);
+        ok &= byte_store_append_exact(address_of out, port_text,
+                                      http_port_suffix(port_text, tls, port));
         ok &= byte_store_append_exact(address_of out, path, string_length(path));
         if (!ok)
                 return HTTP_BAD_URL;
@@ -8344,87 +8329,69 @@ static bipolar http_absolutize(bool tls, string_address host, p16 port,
 {
         p8 kept[HTTP_URL_MAX];
         p8 base[HTTP_URL_MAX];
+        p8 merged[HTTP_URL_MAX];
         positive length = string_length(location);
-        string_address hash;
+        positive scheme;
+        positive used;
+        string_address cut;
 
         if (length >= sizeof kept ||
             http_origin_form(path, base, sizeof base))
                 return HTTP_BAD_URL;
         memory_copy(kept, location, length + 1);
-        hash = string_first_of(kept, '#');
-        if (hash)
-                hash[0] = end;
-
-        /* A fragment-only reference identifies the current resource.  The
-           fragment itself was removed above; retain both path and query. */
-        if (!kept[0])
-                return http_put_url(into, room, tls, host, port, base);
-
-        if (!string_compare_max(kept, (string_address) "https://", 8) ||
-            !string_compare_max(kept, (string_address) "http://", 7))
+        cut = string_first_of(kept, '#');
+        if (cut)
         {
-                if (string_length(kept) >= room)
-                        return HTTP_BAD_URL;
-                string_copy(into, kept);
-                return HTTP_OK;
+                cut[0] = end;
+                length = (positive)(cut - kept);
         }
 
+        /* An absolute reference is http or https followed by "//", in any
+           case; http_split_into reads the rest.  Any other scheme -- ftp:,
+           javascript:, a bare "http:path" -- is refused rather than taken
+           for a relative path on the current host.  A network-path "//host"
+           keeps the current scheme. */
+        scheme = http_scheme_length(kept);
+        if (scheme)
+        {
+                if (!http_web_scheme(kept, scheme) || kept[scheme] != '/' ||
+                    kept[scheme + 1] != '/' || length >= room)
+                        return HTTP_BAD_URL;
+                memory_copy_apart_end(into, kept, length);
+                return HTTP_OK;
+        }
         if (kept[0] == '/' && kept[1] == '/')
         {
-                p8 address_to at = into;
                 positive scheme_length = tls ? 6 : 5;
-                positive rest = string_length(kept);
 
-                if (scheme_length + rest + 1 > room)
+                if (scheme_length + length + 1 > room)
                         return HTTP_BAD_URL;
-                at = memory_copy_apart_end(at, tls ? "https:" : "http:",
-                                           scheme_length);
-                at = memory_copy_apart_end(at, kept, rest);
-                at[0] = end;
+                memory_copy_apart_end(
+                    memory_copy_apart_end(into, tls ? "https:" : "http:",
+                                          scheme_length),
+                    kept, length);
                 return HTTP_OK;
         }
 
+        /* A fragment-only reference identifies the current resource: the
+           fragment went above, and path and query stay.  An absolute path
+           replaces both; a query replaces the query; anything else replaces
+           the last segment of the path, and the query goes with it. The base
+           is in origin form, so it starts with the '/' this finds. */
+        if (!kept[0])
+                return http_put_url(into, room, tls, host, port, base);
         if (kept[0] == '/')
                 return http_put_url(into, room, tls, host, port, kept);
-
-        if (kept[0] == '?')
-        {
-                p8 merged[HTTP_URL_MAX];
-                string_address query = string_first_of(base, '?');
-                positive used = query ? (positive)(query - base)
-                                      : string_length(base);
-                positive rest = string_length(kept);
-
-                if (used + rest + 1 > sizeof merged)
-                        return HTTP_BAD_URL;
-                memory_copy(merged, base, used);
-                memory_copy_apart_end(merged + used, kept, rest);
-                return http_put_url(into, room, tls, host, port, merged);
-        }
-
-        {
-                p8 merged[HTTP_URL_MAX];
-                string_address query = string_first_of(base, '?');
-                string_address slash;
-                positive dir;
-                positive used = 0;
-                positive rest = string_length(kept);
-
-                if (query)
-                        query[0] = end;
-                slash = string_last_of(base, '/');
-                dir = slash ? (positive)(slash - base) + 1 : 1;
-                if (dir >= sizeof merged)
-                        return HTTP_BAD_URL;
-                memory_copy(merged, base, dir);
-                used = dir;
-                if (used + rest + 1 > sizeof merged)
-                        return HTTP_BAD_URL;
-                memory_copy(merged + used, kept, rest);
-                used += rest;
-                merged[used] = end;
-                return http_put_url(into, room, tls, host, port, merged);
-        }
+        cut = string_first_of(base, '?');
+        if (cut)
+                cut[0] = end;
+        used = kept[0] == '?' ? string_length(base)
+                              : (positive)(string_last_of(base, '/') - base) + 1;
+        if (used + length + 1 > sizeof merged)
+                return HTTP_BAD_URL;
+        memory_copy_apart(merged, base, used);
+        memory_copy_apart_end(merged + used, kept, length);
+        return http_put_url(into, room, tls, host, port, merged);
 }
 
 /* Once a redirect chain has reached HTTPS, no later Location may discard
@@ -8477,18 +8444,18 @@ static fn http_url_leaf(string_address path, p8 address_to into, positive room)
         if (!room)
                 return;
         if (http_origin_form(path, target, sizeof target))
-        {
-                into[0] = end;
-                return;
-        }
+                target[0] = end;
 
         query = string_first_of(target, '?');
         if (query)
                 query[0] = end;
 
+        /* No last segment, ".", or "..": each names a directory, which a
+           file cannot replace, and GNU wget saves all three as index.html. */
         slash = string_last_of(target, '/');
         path = slash ? slash + 1 : target;
-        if (!string_get(path))
+        if (!string_get(path) || string_equals(path, (string_address) ".") ||
+            string_equals(path, (string_address) ".."))
                 path = (string_address) "index.html";
         string_copy_max_end(into, path, room - 1);
 }
@@ -8552,12 +8519,20 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                 positive header = 0;
                 positive used = 0;
 
+                /* The request is built before any name is looked up or any
+                   connection opened: a Location this client cannot put on
+                   the wire costs its target no connection and no handshake.
+                   It is the head buffer's first bytes until it is sent. */
                 status = http_split_into(url, host, sizeof host, address_of port,
                                          address_of path, address_of tls);
                 if (!status && tls && !how->allow_tls)
                         status = HTTP_TLS;
                 if (!status && !http_transport_allowed(address_of secure, tls))
                         status = HTTP_DOWNGRADE;
+                if (!status)
+                        status = http_get_request(
+                            head, sizeof head, host, port, path, tls,
+                            how->version_minor, how->agent, address_of used);
                 if (!status && !(ip = http_lookup(host)))
                         status = HTTP_NO_HOST;
                 if (status)
@@ -8568,8 +8543,9 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                 if (status)
                         goto done;
 
-                status = http_send_get(address_of link, host, port, path, tls,
-                                       how->version_minor, how->agent);
+                status = http_link_write(address_of link, head, used);
+                crypto_forget(head, used);
+                used = 0;
                 if (!status)
                         status = http_response_head(
                             address_of link, head, sizeof head, address_of used,
@@ -8632,10 +8608,9 @@ static bipolar http_run(string_address start, const http_manners address_to how,
         status = HTTP_REDIRECTS;
 
 done:
+        //      The store path of http_copy terminates what it appends.
         if (into && !status)
         {
-                if (whole.bytes)
-                        whole.bytes[whole.used] = end;
                 byte_store_release(into);
                 address_to into = whole;
                 memory_fill(address_of whole, 0, sizeof whole);

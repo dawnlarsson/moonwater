@@ -38137,17 +38137,18 @@ def harness_https_downgrade(argv):
             3,
             "HTTP Location after nested HTTPS hops is still refused")
 
-        # 5. Scheme case: uppercase HTTP:// is not the absolute-http path
-        #    (absolutize is case-sensitive on the scheme spelling); treated as
-        #    a same-origin relative target and followed over HTTPS.
-        expect_ok(
+        # 5. Scheme case: a scheme is case-insensitive (RFC 3986 3.1), so an
+        #    uppercase HTTP:// Location is plain HTTP and refused as a
+        #    downgrade. It was once read as a same-origin relative path
+        #    "/HTTP://127.0.0.1:9/" and followed, which no other client does.
+        expect_downgrade(
             "https://127.0.0.1:%d/",
             {
                 b"/": lambda p: redirect(b"HTTP://127.0.0.1:9/"),
                 b"/HTTP://127.0.0.1:9/": body_ok,
             },
-            2,
-            "uppercase HTTP:// Location stays on HTTPS as a relative path")
+            1,
+            "uppercase HTTP:// Location is plain HTTP and refused as a downgrade")
 
         # 6. Network-path //host keeps the current (HTTPS) scheme — not a
         #    downgrade; same-host follow still succeeds.
@@ -38404,12 +38405,22 @@ static bool network_deadline_begin(network_deadline *d, positive s, positive n)
         abort();
         return false;
 }
-static bipolar http_link_read_until(http_link *l, p8 *into, positive room,
-                                    positive *got, const network_deadline *d)
+#define MSG_DONTWAIT 0x40
+#define NETWORK_INTERRUPTED (-4)
+#define NETWORK_TRY_AGAIN (-11)
+static bipolar socket_receive(b32 h, p8 *into, positive room, int flags,
+                              void *from, positive size)
 {
-        (void)l; (void)into; (void)room; (void)got; (void)d;
+        (void)h; (void)into; (void)room; (void)flags; (void)from; (void)size;
         abort();
-        return -4;
+        return -1;
+}
+static bipolar network_stream_read_some_until(bipolar h, p8 *into, positive room,
+                                              const network_deadline *d)
+{
+        (void)h; (void)into; (void)room; (void)d;
+        abort();
+        return -1;
 }
 static bool byte_store_reserve(http_buffer *b, positive need, positive align)
 {
@@ -38813,6 +38824,1030 @@ int main(void)
     return checks.verdict("http response framing", "http-response-framing")
 
 
+def http_fuzz_source(net, util, driver):
+    """The whole HTTP section of net.c from "#define HTTP_PORT 80" to the
+    section's #endif, less http_lookup, over a hosted shim whose transport is
+    a script: each connection serves the next segment of the input, cut into
+    reads (and TLS records) whose sizes a seeded generator picks. Lent TLS
+    spans live in a buffer freed at the next receive, so a span kept past its
+    lifetime is a heap-use-after-free under ASan. memory_copy is memmove and
+    memory_copy_apart is memcpy, the contracts lib.c keeps, so ASan also
+    holds every copy to the overlap it declares. The byte predicates, the
+    checked digit scanner and the byte_store appends are lib.util.c's own."""
+    begin = net.index("#define HTTP_PORT 80")
+    lookup = net.index("static p32 http_lookup(string_address host)")
+    leaf = net.index("static fn http_url_leaf(")
+    finish = net.index("#endif // STANDARD_MODERN_C_NET_HTTP")
+    http = net[begin:lookup] + net[leaf:finish]
+    known = util[util.index("static inline INLINE b32 known_is_digit(b32 value)"):
+                 util.index("static inline INLINE b32 known_is_ascii(b32 value)")]
+    digits = util[util.index("static inline INLINE positive digit_known(p8 character, "
+                             "positive base)"):
+                  util.index("/* A whole numeric word with the checked scanner's range")]
+    appends = util[util.index("static inline bool byte_store_append_span("
+                              "byte_store address_to store,"):
+                   util.index("/* Stable storage owns its mapping outside")]
+    shim = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+typedef uint8_t p8;
+typedef uint8_t b8;
+typedef uint16_t p16;
+typedef uint32_t p32;
+typedef uint64_t p64;
+typedef int32_t b32;
+typedef unsigned long positive;
+typedef long bipolar;
+typedef void *address_any;
+typedef p8 *string_address;
+typedef const p8 *const_string;
+#define INLINE
+#define COLD
+#define CONST
+#define PURE
+#define fn void
+#define address_to *
+#define address_of &
+#define null NULL
+#define end ((p8)0)
+#define positive_max (~(positive)0)
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define memory_copy memmove
+#define memory_copy_apart memcpy
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define string_get(s) (*(const unsigned char *)(s))
+#define string_is(source, value) (*(source) == (value))
+#define string_set_blanks fuzz_blanks
+static const b8 fuzz_blanks[256] = {['\t'] = 1, [' '] = 1};
+""" + known + r"""
+#define byte_is_digit known_is_digit
+#define byte_is_alnum known_is_alnum
+#define byte_is_alpha known_is_alpha
+#define byte_is_control known_is_control
+#define byte_is_blank known_is_blank
+static p8 *memory_copy_end(p8 *into, const void *from, positive n)
+{
+        memmove(into, from, n);
+        into[n] = 0;
+        return into + n;
+}
+static p8 *memory_copy_apart_end(p8 *into, const void *from, positive n)
+{
+        memcpy(into, from, n);
+        into[n] = 0;
+        return into + n;
+}
+static positive string_length(const void *s) { return strlen(s); }
+static bool string_equals(const void *a, const void *b) { return !strcmp(a, b); }
+static b32 string_compare_max(const void *a, const void *b, positive n)
+{
+        return strncmp(a, b, n);
+}
+static string_address string_first_of(const void *s, int c)
+{
+        return (string_address)strchr(s, c);
+}
+static string_address string_last_of(const void *s, int c)
+{
+        return (string_address)strrchr(s, c);
+}
+static string_address string_copy(void *into, const void *from)
+{
+        return (string_address)strcpy(into, from);
+}
+static p8 *string_copy_max_end(p8 *into, const void *from, positive bound)
+{
+        positive n = strnlen(from, bound);
+        memcpy(into, from, n);
+        into[n] = 0;
+        return into + n;
+}
+static positive string_span_without_set(const void *s, const char *set)
+{
+        return strcspn(s, set);
+}
+static positive string_span_max(const void *s, positive bound, const b8 *set)
+{
+        const p8 *at = s;
+        positive n = 0;
+        while (n < bound && at[n] && set[at[n]])
+                n++;
+        return n;
+}
+static address_any memory_first_of(const void *block, int value, positive size)
+{
+        return memchr(block, value, size);
+}
+static positive memory_span_without_byte(const void *block, p8 byte, positive size)
+{
+        const p8 *hit = memchr(block, byte, size);
+        return hit ? (positive)(hit - (const p8 *)block) : size;
+}
+static address_any memory_search(const void *block, positive size,
+                                 const void *needle, positive needle_size)
+{
+        return memmem(block, size, needle, needle_size);
+}
+static b32 memory_compare_ascii_case(const void *one, const void *two, positive n)
+{
+        const p8 *a = one, *b = two;
+        for (positive i = 0; i < n; i++)
+                if ((a[i] | (known_is_alpha(a[i]) ? 32 : 0)) !=
+                    (b[i] | (known_is_alpha(b[i]) ? 32 : 0)))
+                        return 1;
+        return 0;
+}
+static positive positive_into(p8 *into, positive value)
+{
+        return (positive)sprintf((char *)into, "%lu", value);
+}
+static positive string_digits_max(string_address source, positive bound,
+                                  positive *used)
+{
+        positive got = 0, n = 0;
+        while (n < bound && source[n] >= '0' && source[n] <= '9')
+                got = got * 10 + (positive)(source[n++] - '0');
+        if (used)
+                *used = n;
+        return got;
+}
+static void crypto_forget(void *at, positive n) { memset(at, 0, n); }
+typedef struct { p8 *bytes; positive room; positive used; } byte_store;
+""" + digits + appends + r"""
+static bool fuzz_reserve(byte_store *store, positive wanted, positive step)
+{
+        (void)step;
+        if (wanted <= store->room)
+                return true;
+        p8 *grown = realloc(store->bytes, wanted);
+        if (!grown)
+                return false;
+        store->bytes = grown;
+        store->room = wanted;
+        return true;
+}
+static void fuzz_release(byte_store *store)
+{
+        free(store->bytes);
+        store->bytes = NULL;
+        store->room = store->used = 0;
+}
+#define byte_store_reserve(store, wanted, step) fuzz_reserve((store), (wanted), (step))
+#define byte_store_release(store) fuzz_release(store)
+
+/* The script. Connection n serves segment n of the input, segments cut at
+   FUZZ_HOP; reads come in sizes the generator picks. */
+#define FUZZ_HOP "\xffHOP"
+static const p8 *fuzz_input;
+static positive fuzz_input_size;
+static const p8 *fuzz_segment;
+static positive fuzz_segment_size;
+static positive fuzz_segment_at;
+static positive fuzz_opened;
+static positive fuzz_requests;
+static p64 fuzz_random;
+static positive fuzz_largest;
+static bool fuzz_write_faults;
+
+static positive fuzz_next(positive bound)
+{
+        fuzz_random = fuzz_random * 6364136223846793005ull + 1442695040888963407ull;
+        return bound ? (positive)(fuzz_random >> 33) % bound : 0;
+}
+
+static void fuzz_die(const char *why)
+{
+        fprintf(stderr, "ERROR: http fuzz invariant: %s\n", why);
+        abort();
+}
+
+static bool fuzz_segment_open(positive index)
+{
+        const p8 *at = fuzz_input;
+        positive left = fuzz_input_size;
+        for (;;) {
+                const p8 *cut = memmem(at, left, FUZZ_HOP, 4);
+                positive size = cut ? (positive)(cut - at) : left;
+                if (!index--) {
+                        fuzz_segment = at;
+                        fuzz_segment_size = size;
+                        fuzz_segment_at = 0;
+                        return true;
+                }
+                if (!cut)
+                        return false;
+                at = cut + 4;
+                left -= size + 4;
+        }
+}
+
+static positive fuzz_take(positive room)
+{
+        positive left = fuzz_segment_size - fuzz_segment_at;
+        positive take = 1 + fuzz_next(fuzz_largest);
+        return min(min(take, left), room);
+}
+
+typedef struct { p16 family; p16 port; p32 host; p64 pad; } socket_address_internet;
+typedef struct { int dummy; } network_deadline;
+#define AF_INET 2
+#define SOCK_STREAM 1
+#define SOCK_CLOEXEC 02000000
+#define ENOSPC 28
+#define network_order_16(v) (v)
+#define network_order_32(v) (v)
+#define FUZZ_SYS_writev 20
+#define syscall(name) FUZZ_SYS_##name
+static bipolar socket_new(int a, int b, int c)
+{
+        (void)a; (void)b; (void)c;
+        if (!fuzz_segment_open(fuzz_opened))
+                return -111;
+        fuzz_opened++;
+        return 1000;
+}
+static bool network_stream_timeout(bipolar h, positive s, positive n)
+{
+        (void)h; (void)s; (void)n;
+        return true;
+}
+static int socket_connect(b32 h, const void *where, positive size)
+{
+        (void)h; (void)where; (void)size;
+        return 0;
+}
+static int socket_close(b32 h) { (void)h; return 0; }
+static bool network_deadline_begin(network_deadline *d, positive s, positive n)
+{
+        (void)d; (void)s; (void)n;
+        return true;
+}
+
+/* Every request this client writes: one request line and four fields, each
+   ended by CRLF, a blank line, and no other CR, LF or control. */
+static void fuzz_request(const p8 *data, positive length)
+{
+        positive lines = 0;
+        fuzz_requests++;
+        if (length < 4 || memcmp(data + length - 4, "\r\n\r\n", 4) ||
+            memcmp(data, "GET /", 5))
+                fuzz_die("request framing");
+        for (positive at = 0; at < length; at++) {
+                p8 byte = data[at];
+                if (byte == '\r') {
+                        if (at + 1 == length || data[at + 1] != '\n')
+                                fuzz_die("bare CR in a request");
+                        lines++;
+                        at++;
+                } else if (byte == '\n' || byte == 0 ||
+                           (byte < 0x20 && byte != '\t') || byte == 0x7f)
+                        fuzz_die("control byte in a request");
+        }
+        if (lines != 6)
+                fuzz_die("request line count");
+        /* "GET " target " HTTP/1.x" CR: the target holds no space. */
+        positive line = (positive)((const p8 *)memchr(data, '\r', length) - data);
+        if (line < 14 || memchr(data + 4, ' ', line - 13))
+                fuzz_die("space inside the request target");
+}
+
+static bool network_stream_send_all(bipolar h, const p8 *data, positive length)
+{
+        (void)h;
+        fuzz_request(data, length);
+        return true;
+}
+
+static bipolar network_stream_read_some_until(bipolar h, p8 *into, positive room,
+                                              const network_deadline *d)
+{
+        (void)h; (void)d;
+        if (!room)
+                fuzz_die("a read of no room");
+        positive take = fuzz_take(room);
+        memcpy(into, fuzz_segment + fuzz_segment_at, take);
+        fuzz_segment_at += take;
+        return (bipolar)take;
+}
+
+/* A plaintext body read tries the socket without waiting first; now and
+   then nothing is queued, and it has to take the deadline path. */
+#define MSG_DONTWAIT 0x40
+#define NETWORK_INTERRUPTED (-4)
+#define NETWORK_TRY_AGAIN (-11)
+static bipolar socket_receive(b32 h, p8 *into, positive room, int flags,
+                              void *from, positive size)
+{
+        (void)flags; (void)from; (void)size;
+        if (!fuzz_next(4))
+                return fuzz_next(2) ? NETWORK_TRY_AGAIN : NETWORK_INTERRUPTED;
+        return network_stream_read_some_until(h, into, room, NULL);
+}
+
+/* TLS: the segment is cut into records; a receive pulls one to three of them
+   into a buffer of their exact size and frees the one before, which is when
+   the real record layer may overwrite what it lent. */
+#define TLS_OK 0
+#define TLS_FAIL (-1)
+#define TLS_AGAIN (-2)
+typedef struct
+{
+        p8 *receive;
+        positive record[4];
+        positive records;
+        positive record_at;
+        positive plain_at;
+        positive plain_used;
+        bool closed;
+} tls_conn;
+
+static bipolar tls_connect(tls_conn *tls, bipolar h, string_address host, bool check)
+{
+        (void)h; (void)host; (void)check;
+        memset(tls, 0, sizeof *tls);
+        return TLS_OK;
+}
+static void tls_forget(tls_conn *tls)
+{
+        free(tls->receive);
+        memset(tls, 0, sizeof *tls);
+}
+static bipolar tls_write(tls_conn *tls, const p8 *data, positive length)
+{
+        (void)tls;
+        fuzz_request(data, length);
+        return TLS_OK;
+}
+static bool fuzz_tls_receive(tls_conn *tls)
+{
+        positive records = 1 + fuzz_next(3);
+        positive sizes[4] = {0};
+        positive total = 0;
+
+        free(tls->receive);
+        tls->receive = NULL;
+        tls->records = tls->record_at = 0;
+        for (positive i = 0; i < records; i++) {
+                positive left = fuzz_segment_size - fuzz_segment_at - total;
+                positive size = 1 + fuzz_next(fuzz_largest * 4);
+                size = min(size, left);
+                if (!size)
+                        break;
+                sizes[tls->records++] = size;
+                total += size;
+        }
+        if (!total)
+                return false;
+        tls->receive = malloc(total);
+        memcpy(tls->receive, fuzz_segment + fuzz_segment_at, total);
+        fuzz_segment_at += total;
+        memcpy(tls->record, sizes, sizeof sizes);
+        tls->plain_at = 0;
+        tls->plain_used = 0;
+        return true;
+}
+static bipolar fuzz_tls_take(tls_conn *tls, positive room, p8 **span,
+                             positive *got, bool hold)
+{
+        for (;;) {
+                if (tls->plain_used) {
+                        positive take = min(room, tls->plain_used);
+                        *span = tls->receive + tls->plain_at;
+                        tls->plain_at += take;
+                        tls->plain_used -= take;
+                        *got = take;
+                        return TLS_OK;
+                }
+                if (tls->closed) {
+                        *got = 0;
+                        return TLS_OK;
+                }
+                if (tls->record_at < tls->records) {
+                        tls->plain_used = tls->record[tls->record_at++];
+                        continue;
+                }
+                if (hold)
+                        return TLS_AGAIN;
+                if (!fuzz_tls_receive(tls))
+                        tls->closed = true;
+        }
+}
+static bipolar tls_read_until(tls_conn *tls, p8 *into, positive room,
+                              positive *got, const network_deadline *d)
+{
+        p8 *span = NULL;
+        (void)d;
+        bipolar status = fuzz_tls_take(tls, room, &span, got, false);
+        if (!status && *got)
+                memcpy(into, span, *got);
+        return status;
+}
+static bipolar tls_borrow(tls_conn *tls, positive room, p8 **span,
+                          positive *got, positive s, positive n)
+{
+        (void)s; (void)n;
+        return fuzz_tls_take(tls, room, span, got, false);
+}
+static bipolar tls_lend(tls_conn *tls, positive room, p8 **span, positive *got)
+{
+        return fuzz_tls_take(tls, room, span, got, true);
+}
+
+/* writev into a growing sink, sometimes short, and when asked, sometimes a
+   failure. Every span is read whole, so ASan sees a stale one. */
+static p8 *fuzz_sink;
+static positive fuzz_sink_used;
+static bipolar system_call_3(positive number, positive fd, positive spans,
+                             positive count)
+{
+        const struct { void *base; positive length; } *iov = (void *)spans;
+        positive total = 0;
+        if (number != FUZZ_SYS_writev || fd != 7 || !count || count > 64)
+                fuzz_die("writev arguments");
+        for (positive i = 0; i < count; i++) {
+                volatile p8 sum = 0;
+                for (positive at = 0; at < iov[i].length; at++)
+                        sum ^= ((p8 *)iov[i].base)[at];
+                total += iov[i].length;
+        }
+        if (fuzz_write_faults && !fuzz_next(16))
+                return -ENOSPC;
+        positive wrote = fuzz_write_faults ? 1 + fuzz_next(total) : total;
+        fuzz_sink = realloc(fuzz_sink, fuzz_sink_used + wrote + 1);
+        for (positive i = 0, left = wrote; i < count && left; i++) {
+                positive take = min(left, iov[i].length);
+                memcpy(fuzz_sink + fuzz_sink_used, iov[i].base, take);
+                fuzz_sink_used += take;
+                left -= take;
+        }
+        return (bipolar)wrote;
+}
+
+static p32 http_lookup(string_address host)
+{
+        return strcmp(host, "unknown.invalid") ? 0x7f000001 : 0;
+}
+"""
+    return shim + http + driver
+
+
+def harness_http_fuzz(argv):
+    """Coverage-guided libFuzzer over the whole HTTP client in src/net/net.c.
+
+    http_fuzz_source lifts every function from http_split_into to the end of
+    the HTTP section (only http_lookup is shimmed) over a scripted transport.
+    The first input byte picks a lane and the second seeds the read sizes:
+
+      0/1  http_run under wget manners (to a writev sink, plaintext or TLS)
+      2    http_run under fetch manners (to a memory store)
+      3    URLs: split, request, leaf, put_url and absolutize, with
+           invariants on every product
+      4    chunked bodies decoded streaming, through fragmented reads, and in
+           memory; the two must agree
+
+    Every final response is also parsed whole, with http_response_framing
+    and http_unchunk, and a whole-buffer verdict of success must be the
+    streaming verdict with the same bytes. Every request the client writes is
+    held to one request line, four fields and CRLF only. Seeds are the
+    http_response_framing CASES plus URL and redirect shapes, written per
+    run. Bounded run in lane_net; `sh test/run fuzz` runs it longer.
+
+        python3 test/differential.py --harness http_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    util = (HARNESS_ROOT / "src/lib.util.c").read_text()
+    driver = r"""
+static void fuzz_expect_body(const p8 *got, positive got_size,
+                             const p8 *want, positive want_size)
+{
+        if (got_size != want_size || (want_size && memcmp(got, want, want_size)))
+                fuzz_die("streamed body differs from the whole-buffer body");
+}
+
+/* The whole-buffer reading of one segment: 1 and the body when the head is
+   a final 2xx whose body is whole, 0 when the streaming client must refuse
+   it, and -1 when this oracle cannot say (a redirect, or trailing bytes a
+   streaming reader stops before). */
+static int fuzz_whole(const p8 *segment, positive size, bool tls, bool follow,
+                      p8 **body, positive *body_size)
+{
+        http_response response;
+        positive header = 0;
+        p8 *copy = malloc(size + 1);
+        int verdict;
+
+        memcpy(copy, segment, size);
+        *body = copy;
+        *body_size = 0;
+        bipolar status = http_response_framing(copy, size, &header, &response);
+        if (status)
+                return size >= HTTP_HEAD_MAX ? -1 : 0;
+        if (follow && http_response_is_redirect(response.code))
+                return -1;
+        if (!http_response_is_success(response.code))
+                return 0;
+        if (http_response_has_no_body(response.code))
+                return 1;
+        switch (response.body_kind) {
+        case HTTP_BODY_LENGTH:
+                if (size - header < response.body_length)
+                        return 0;
+                memmove(copy, copy + header, response.body_length);
+                *body_size = response.body_length;
+                return 1;
+        case HTTP_BODY_CHUNKED:
+                memmove(copy, copy + header, size - header);
+                verdict = (int)http_unchunk(copy, size - header);
+                if (verdict < 0)
+                        return -1;
+                *body_size = (positive)verdict;
+                return 1;
+        default:
+                /* Close-delimited: plaintext EOF, or close_notify. */
+                memmove(copy, copy + header, size - header);
+                *body_size = size - header;
+                return 1;
+        }
+}
+
+static void fuzz_run(const p8 *data, positive size, int lane)
+{
+        bool tls = lane == 1;
+        bool fetch = lane == 2;
+        const char *start = tls ? "https://127.0.0.1:8443/dir/file.bin?q=1"
+                                : "http://127.0.0.1:8080/dir/file.bin?q=1";
+        http_buffer store = {0};
+        b32 code = 0;
+        bipolar status;
+
+        fuzz_input = data;
+        fuzz_input_size = size;
+        fuzz_opened = 0;
+        fuzz_requests = 0;
+        fuzz_sink_used = 0;
+        status = fetch ? http_get((string_address)start, &store, &code)
+                       : http_fetch_to((string_address)start, 7, true, &code);
+        if (fuzz_requests != fuzz_opened)
+                fuzz_die("a connection was opened with no request written on it");
+
+        if (fuzz_opened && !fuzz_write_faults && fuzz_segment_open(fuzz_opened - 1)) {
+                p8 *want = NULL;
+                positive want_size = 0;
+                int whole = fuzz_whole(fuzz_segment, fuzz_segment_size, tls, !fetch,
+                                       &want, &want_size);
+                if (whole == 1 && status)
+                        fuzz_die("the streaming client refused a response the "
+                                 "whole-buffer reading accepts");
+                if (whole == 0 && !status)
+                        fuzz_die("the streaming client accepted a response the "
+                                 "whole-buffer reading refuses");
+                if (whole == 1 && !fetch)
+                        fuzz_expect_body(fuzz_sink, fuzz_sink_used, want, want_size);
+                if (whole == 1 && fetch)
+                        fuzz_expect_body(store.bytes, store.used, want, want_size);
+                free(want);
+        }
+        if (!status && fetch && store.bytes && store.bytes[store.used])
+                fuzz_die("the fetched body is not terminated");
+        http_forget(&store);
+}
+
+static void fuzz_split_same(const p8 *url, const char *host, p16 port, bool tls)
+{
+        p8 again[256];
+        string_address path = NULL;
+        p16 port_again = 0;
+        bool tls_again = false;
+        if (http_split_into((string_address)url, again, sizeof again, &port_again,
+                            &path, &tls_again))
+                fuzz_die("put_url wrote a URL split refuses");
+        if (strcmp((char *)again, host) || port_again != port || tls_again != tls)
+                fuzz_die("put_url and split disagree on the authority");
+}
+
+static void fuzz_url(const p8 *data, positive size)
+{
+        char *url = malloc(size + 1);
+        memcpy(url, data, size);
+        url[size] = 0;
+        char *location = url + strlen(url) + (strlen(url) < size);
+        p8 host[256];
+        string_address path = NULL;
+        p16 port = 0;
+        bool tls = false;
+        p8 request[2048];
+        positive used = 0;
+        p8 leaf[256];
+        p8 next[HTTP_URL_MAX];
+
+        memset(host, 0xa5, sizeof host);
+        if (http_split_into(url, host, sizeof host, &port, &path, &tls)) {
+                if (host[0] != 0xa5)
+                        fuzz_die("a refused URL wrote the host");
+                free(url);
+                return;
+        }
+        if (!host[0] || !path || (path[0] != '/' && path[0] != '?'))
+                fuzz_die("split answered an empty host or a pathless path");
+        for (p8 *at = host; *at; at++)
+                if (!known_is_alnum(*at) && *at != '-' && *at != '.' && *at != '_')
+                        fuzz_die("split let a byte into the host");
+        if (!http_get_request(request, sizeof request, (string_address)host, port,
+                              path, tls, '1', (string_address)"Wget", &used))
+                fuzz_request(request, used);
+        http_url_leaf(path, leaf, sizeof leaf);
+        if (!leaf[0] || strchr((char *)leaf, '/'))
+                fuzz_die("the output name is empty or holds a slash");
+        if (!http_put_url(next, sizeof next, tls, (string_address)host, port, path))
+                fuzz_split_same(next, (char *)host, port, tls);
+        if (!http_absolutize(tls, (string_address)host, port, path,
+                             (string_address)location, next,
+                             sizeof next)) {
+                p8 again[256];
+                string_address again_path = NULL;
+                p16 again_port = 0;
+                bool again_tls = false;
+                if (strlen((char *)next) >= sizeof next)
+                        fuzz_die("absolutize overran");
+                if (location[0] != '/' && strncasecmp(location, "http", 4) &&
+                    !http_split_into((string_address)next, again, sizeof again,
+                                     &again_port, &again_path, &again_tls) &&
+                    (strcmp((char *)again, (char *)host) || again_port != port ||
+                     again_tls != tls))
+                        fuzz_die("a relative Location left the origin");
+        }
+        free(url);
+}
+
+/* Chunked framing decoded twice: streamed through fragmented reads into a
+   store and into the writev sink, and whole in memory. */
+static void fuzz_chunked(const p8 *data, positive size)
+{
+        p8 *whole = malloc(size + 1);
+        p8 *scratch = malloc(HTTP_HEAD_MAX);
+        memcpy(whole, data, size);
+        bipolar decoded = http_unchunk(whole, size);
+
+        for (int sink = 0; sink < 2; sink++) {
+                http_link link = {.handle = 1000};
+                http_buffer store = {0};
+                http_body body = {
+                    .link = &link,
+                    .stash = scratch,
+                    .stash_used = 0,
+                    .scratch = scratch,
+                    .store = sink ? &store : NULL,
+                    .store_limit = HTTP_FETCH_MAX,
+                };
+                fuzz_segment = data;
+                fuzz_segment_size = size;
+                fuzz_segment_at = 0;
+                fuzz_sink_used = 0;
+                bipolar streamed = http_copy_chunked(&body, 7);
+                if (decoded >= 0) {
+                        if (streamed)
+                                fuzz_die("streaming refused chunked framing the "
+                                         "memory decoder accepts");
+                        if (sink)
+                                fuzz_expect_body(store.bytes, store.used, whole,
+                                                 (positive)decoded);
+                        else
+                                fuzz_expect_body(fuzz_sink, fuzz_sink_used, whole,
+                                                 (positive)decoded);
+                }
+                http_forget(&store);
+        }
+        free(scratch);
+        free(whole);
+}
+
+int LLVMFuzzerTestOneInput(const p8 *data, positive size)
+{
+        if (size < 2)
+                return 0;
+        int lane = data[0] % 5;
+        fuzz_random = data[1] * 0x9e3779b97f4a7c15ull + 1;
+        fuzz_largest = (data[1] & 15) ? (positive)(data[1] & 15) * (data[1] >> 4 | 1)
+                                      : 65536;
+        fuzz_write_faults = lane < 2 && (data[0] & 0x80);
+        data += 2;
+        size -= 2;
+        if (lane < 3)
+                fuzz_run(data, size, lane);
+        else if (lane == 3)
+                fuzz_url(data, size);
+        else
+                fuzz_chunked(data, size);
+        return 0;
+}
+"""
+    return tls_fuzz_run("http", "http", http_fuzz_source(net, util, driver), 65536)
+
+
+def http_fuzz_seeds():
+    """http_fuzz's corpus: every http_response_framing CASES row as a wget,
+    TLS and fetch exchange (unchunk rows as chunked bodies), redirect chains
+    across hops, and URL/Location pairs."""
+    framing = inspect.getsource(harness_http_response_framing)
+    cases = eval(re.search(r"CASES = (\[.*?\n    \])", framing, re.S).group(1), {})
+    seeds = {}
+    for name, mode, wire, _ in cases:
+        if mode == "unchunk":
+            seeds["chunked_%s.bin" % name] = b"\x04\x00" + wire
+            wire = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + wire
+        for lane, split in ((0, 0x00), (1, 0x13), (2, 0x31)):
+            seeds["run%d_%s.bin" % (lane, name)] = bytes([lane, split]) + wire
+    hop = b"\xffHOP"
+    ok = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
+    for name, location in (("relative", b"next"), ("absolute_path", b"/a/b?c#d"),
+                           ("query", b"?x=1"), ("fragment", b"#top"),
+                           ("network_path", b"//127.0.0.1:8080/n"),
+                           ("upper_scheme", b"HTTP://127.0.0.1:8080/u"),
+                           ("other_scheme", b"ftp://127.0.0.1/f"),
+                           ("downgrade", b"http://127.0.0.1/p"),
+                           ("unknown_host", b"http://unknown.invalid/"),
+                           ("trailing_blank", b"/p \t"), ("dot_segments", b"../../x"),
+                           ("unbuildable", b"/caf\xe9"), ("percent_cr", b"/%0d")):
+        redirect = (b"HTTP/1.1 302 Found\r\nLocation: " + location +
+                    b"\r\nContent-Length: 0\r\n\r\n")
+        for lane in (0, 1):
+            seeds["hop%d_%s.bin" % (lane, name)] = bytes([lane, 7]) + redirect + hop + ok
+    seeds["hop0_eleven.bin"] = b"\x00\x05" + hop.join(
+        [b"HTTP/1.1 301 Moved\r\nLocation: /again\r\n\r\n"] * 11)
+    seeds["run1_chunked_split_records.bin"] = b"\x01\x11" + (
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" +
+        b"".join(b"%x\r\n%s\r\n" % (n, bytes([65 + n % 26]) * n) for n in range(1, 40)) +
+        b"0\r\nTrailer: x\r\n\r\n")
+    seeds["run0_faults_length.bin"] = b"\x80\x03" + (
+        b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n" + b"z" * 4096)
+    seeds["run1_close_notify.bin"] = b"\x01\x02HTTP/1.1 200 OK\r\n\r\n" + b"q" * 3000
+    seeds["run0_1xx_trickle.bin"] = b"\x00\x01" + (
+        b"HTTP/1.1 100 Continue\r\n\r\n" * 20 + ok)
+    for name, url, location in (
+            ("plain", b"http://example.com/a/b.iso", b"c"),
+            ("port_query", b"https://example.com:8443/a?x=/y#z", b"?q"),
+            ("bare_host", b"example.com", b"//other.example/p"),
+            ("query_only", b"http://h?x", b"#f"),
+            ("dotdot_leaf", b"http://h/a/..", b"../b"),
+            ("upper", b"HTTPS://Example.COM/", b"HTTPS://x/"),
+            ("percent", b"http://h/%250d%0a", b"/%25250a"),
+            ("userinfo", b"http://user@h/", b"http://u@h/"),
+            ("port_zero", b"http://h:0/", b"/"),
+            ("port_big", b"http://h:65536/", b"/"),
+            ("scheme_only", b"gopher://h/", b"mailto:x"),
+            ("long", b"http://h/" + b"a" * 2100, b"b" * 2100)):
+        seeds["url_%s.bin" % name] = b"\x03\x00" + url + b"\x00" + location
+    return seeds
+
+
+def harness_http_urls(argv):
+    """http_split_into and http_absolutize against Python's urllib.parse.
+
+    A seeded grammar writes URLs (schemes in any case, userinfo, hosts in
+    and out of the DNS alphabet, ports at and past the edges, paths, queries
+    and fragments) and relative references against a set of bases. The same
+    hosted lift http_fuzz builds answers each; where the URL is in the subset
+    this client implements -- an http or https scheme, no userinfo, a host of
+    letters, digits, '-', '.' and '_', a port 1..65535, no control, space or
+    backslash, under HTTP_URL_MAX -- urlsplit must name the same scheme,
+    host, port and origin-form target, and every URL urlsplit reads that way
+    must be accepted. A resolved Location must name what urljoin names, less
+    the fragment. DELIBERATE lists where this client refuses what urllib
+    takes; references with dot segments are not generated, since this client
+    sends them to the server as written and urljoin removes them.
+
+        python3 test/differential.py --harness http_urls
+    """
+    del argv
+    import binascii
+    import string
+    from urllib.parse import urljoin, urlsplit
+
+    DELIBERATE = {
+        "schemeless": "a URL without a scheme is read as http://; urllib as a path",
+        "other-scheme": "a Location in any scheme but http(s) is refused, not followed",
+        "no-slashes": "\"http:path\" is refused; urljoin reads it as a relative path",
+    }
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    util = (HARNESS_ROOT / "src/lib.util.c").read_text()
+    driver = r"""
+static void emit(const p8 *bytes)
+{
+        for (; *bytes; bytes++)
+                printf("%02x", *bytes);
+        printf("\t");
+}
+
+static p8 *unhex(const char *hex)
+{
+        positive size = strlen(hex) / 2;
+        p8 *out = malloc(size + 1);
+        for (positive at = 0; at < size; at++) {
+                unsigned value;
+                sscanf(hex + 2 * at, "%2x", &value);
+                out[at] = (p8)value;
+        }
+        out[size] = 0;
+        return out;
+}
+
+/* stdin: S HEXURL | A HEXBASE HEXREF (an empty field is "-")
+   stdout: OK host port tls origin-form (hex) | BAD */
+static void answer(const p8 *url)
+{
+        p8 host[256];
+        p8 target[HTTP_URL_MAX];
+        string_address path = NULL;
+        p16 port = 0;
+        bool tls = false;
+        if (http_split_into((string_address)url, host, sizeof host, &port, &path, &tls) ||
+            http_origin_form(path, target, sizeof target)) {
+                printf("BAD\n");
+                return;
+        }
+        printf("OK\t");
+        emit(host);
+        printf("%u\t%d\t", port, tls);
+        emit(target);
+        printf("\n");
+}
+
+int main(void)
+{
+        char mode[4], first[8192], second[8192];
+        while (scanf("%3s %8191s", mode, first) == 2) {
+                p8 *url = unhex(strcmp(first, "-") ? first : "");
+                if (mode[0] == 'S') {
+                        answer(url);
+                } else if (scanf("%8191s", second) == 1) {
+                        p8 *ref = unhex(strcmp(second, "-") ? second : "");
+                        p8 host[256];
+                        p8 next[HTTP_URL_MAX];
+                        string_address path = NULL;
+                        p16 port = 0;
+                        bool tls = false;
+                        if (http_split_into((string_address)url, host, sizeof host, &port,
+                                            &path, &tls) ||
+                            http_absolutize(tls, (string_address)host, port, path,
+                                            (string_address)ref, next, sizeof next))
+                                printf("BAD\n");
+                        else
+                                answer(next);
+                        free(ref);
+                }
+                free(url);
+                fflush(stdout);
+        }
+        return 0;
+}
+"""
+    source = http_fuzz_source(net, util, driver)
+    random_urls = random.Random(20260928)
+    schemes = ["http://", "https://", "HTTP://", "hTtPs://", "", "ftp://", "http:",
+               "web+x://", "https:/"]
+    #       Mostly well formed, so most URLs reach the comparison; each
+    #       refusal still turns up hundreds of times.
+    users = [""] * 12 + ["user@", "u:p@", "@"]
+    hosts = ["example.com", "Example.COM", "a-b.c_d", "127.0.0.1", "h", "x" * 254] * 3 + [
+        "", "bad!host", "h%41", "[::1]", "x" * 255, "\u00e9.test"]
+    ports = ["", "", "", ":80", ":443", ":8080", ":65535", ":08", ":1"] * 2 + [
+        ":0", ":65536", ":", ":+1", ":1x", ":99999999999999999999"]
+    paths = ["", "/", "/a/b", "/a%20b", "/a;b,c", "/\u00e9", "/a:b@c", "/%0d%0a"] * 2 + [
+        "/a b", "/a\\b", "/a\tb", "/" + "p" * 2100]
+    queries = ["", "", "?", "?x=1", "?a/b?c", "?#"]
+    fragments = ["", "", "#", "#f", "#a?b/c"]
+
+    def pick(choices):
+        return random_urls.choice(choices)
+
+    urls = set()
+    for _ in range(4000):
+        urls.add(pick(schemes) + pick(users) + pick(hosts) + pick(ports) +
+                 pick(paths) + pick(queries) + pick(fragments))
+    urls = sorted(urls)
+    bases = ["http://example.com/dir/old", "https://example.com:8443/a/b?q=1",
+             "http://h:80/", "https://h/x?y#z", "http://127.0.0.1:8080/d/e/f"]
+    segments = ["", "p", "p/q", "a%20b", "x;y", "\u00e9"]
+    references = set()
+    for _ in range(1500):
+        shape = random_urls.randrange(7)
+        tail = pick(segments) + pick(queries) + pick(fragments)
+        references.add([tail, "/" + tail, "//other.example" + pick(ports) + "/" + tail,
+                        pick(["HTTP://", "https://", "Https://"]) + "h2" + pick(ports) + "/" + tail,
+                        pick(["ftp://h/", "mailto:x", "a:b", "javascript:x"]) + tail,
+                        pick(["http:", "https:"]) + tail,
+                        pick(["?", "#"]) + tail][shape])
+    references = sorted(references)
+
+    def encode(text):
+        return text.encode("utf-8").hex() or "-"
+
+    scheme_shape = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):")
+
+    def subset(url):
+        """What this client must answer for url: a (tls, host, port, target)
+        tuple read with urlsplit, "refuse", or a DELIBERATE key."""
+        raw = url.encode("utf-8")
+        if any(b < 0x20 or b == 0x7f or b in b" \\" for b in raw) or len(raw) >= 2048:
+            return "refuse"
+        scheme = scheme_shape.match(url)
+        if not scheme or not url[scheme.end():].startswith("//"):
+            return "schemeless"
+        if scheme.group(1).lower() not in ("http", "https"):
+            return "refuse"
+        parts = urlsplit(url)
+        host, colon, port = parts.netloc.partition(":")
+        if ("@" in parts.netloc or not host or len(host) > 254 or
+                any(c not in string.ascii_letters + string.digits + "-._" for c in host) or
+                (colon and not (port.isascii() and port.isdigit() and
+                                1 <= int(port) <= 65535))):
+            return "refuse"
+        tls = scheme.group(1).lower() == "https"
+        target = (parts.path or "/") + ("?" + parts.query if "?" in url.split("#", 1)[0] else "")
+        return (tls, host, int(port) if colon else 443 if tls else 80, target)
+
+    def same(got, want):
+        """urljoin drops an empty query that RFC 3986 keeps; nothing else
+        is folded."""
+        def bare(target):
+            return target[:-1] if target.find("?") == len(target) - 1 else target
+        return got is not None and got[:3] == want[:3] and bare(got[3]) == bare(want[3])
+
+    checks = Checks()
+    compiler = "clang" if shutil.which("clang") else os.environ.get("CC", "cc")
+    with tempfile.TemporaryDirectory(prefix="http-urls-") as temporary:
+        work = Path(temporary)
+        unit = work / "http_urls.c"
+        unit.write_text(source)
+        flags = [compiler, "-O1", "-g", "-std=gnu11", "-w"]
+        if platform.system() == "Linux":
+            flags.append("-fsanitize=address,undefined")
+        built = subprocess.run(flags + [str(unit), "-o", str(work / "http_urls")],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print("  FAIL the URL lift did not build:\n" + built.stderr[-3000:])
+            write_tally("http-urls", 0, 1)
+            return 1
+        questions = ["S %s" % encode(url) for url in urls]
+        pairs = [(base, reference) for base in bases for reference in references]
+        questions += ["A %s %s" % (encode(base), encode(reference)) for base, reference in pairs]
+        ran = subprocess.run([str(work / "http_urls")], input="\n".join(questions) + "\n",
+                             capture_output=True, text=True, timeout=120,
+                             env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+        answers = ran.stdout.splitlines()
+        if ran.returncode or len(answers) != len(questions):
+            print("  FAIL the URL lift stopped:\n" + ran.stderr[-3000:])
+            write_tally("http-urls", 0, 1)
+            return 1
+
+        def ours(answer):
+            fields = answer.split("\t")
+            if fields[0] != "OK":
+                return None
+            return (fields[3] == "1", binascii.unhexlify(fields[1]).decode("utf-8", "replace"),
+                    int(fields[2]), binascii.unhexlify(fields[4]).decode("utf-8", "replace"))
+
+        seen = collections.Counter()
+        for url, answer in zip(urls, answers):
+            want = subset(url)
+            got = ours(answer)
+            if want == "refuse":
+                checks(got is None, "%r: accepted outside the implemented subset: %r" % (url, got))
+            elif isinstance(want, str):
+                seen[want] += 1
+            else:
+                checks(same(got, want), "%r: split %r, urllib %r" % (url, got, want))
+        for (base, reference), answer in zip(pairs, answers[len(urls):]):
+            got = ours(answer)
+            scheme = scheme_shape.match(reference)
+            if scheme and scheme.group(1).lower() not in ("http", "https"):
+                seen["other-scheme"] += 1
+                checks(got is None, "%r + %r: another scheme was followed: %r"
+                       % (base, reference, got))
+                continue
+            if scheme and not reference[scheme.end():].startswith("//"):
+                seen["no-slashes"] += 1
+                checks(got is None, "%r + %r: a scheme without // was followed: %r"
+                       % (base, reference, got))
+                continue
+            joined = urljoin(base, reference).split("#", 1)[0]
+            want = subset(joined)
+            if isinstance(want, tuple):
+                checks(same(got, want), "%r + %r: absolutize %r, urljoin %r"
+                       % (base, reference, got, joined))
+            else:
+                checks(got is None, "%r + %r: resolved to %r where urljoin's %r is refused"
+                       % (base, reference, got, joined))
+        for key, why in DELIBERATE.items():
+            checks(seen[key] > 0, "DELIBERATE %s never generated (%s)" % (key, why))
+    return checks.verdict("http urls", "http-urls")
+
+
 def tls_fuzz_budget(default_runs=20000, default_seconds=5):
     """Lane smoke defaults; longer local runs via MOONWATER_FUZZ_* env vars.
 
@@ -39110,6 +40145,8 @@ def tls_fuzz_seeds(corpus):
         return dns_fuzz_seeds() if corpus == "dns" else netlink_fuzz_seeds()
     if corpus == "crypto":
         return crypto_fuzz_seeds()
+    if corpus == "http":
+        return http_fuzz_seeds()
     seeds = {name + ".bin": bytes.fromhex(hx)
              for name, hx in TLS_FUZZ_SEED_HEX[corpus].items()}
     if corpus == "tls_hs":
@@ -44022,8 +45059,8 @@ def harness_crypto_fuzz(argv):
 
 def harness_tls_fuzz(argv):
     """tls_der_fuzz, tls_hs_fuzz, tls_verify_fuzz, waterlink_pre_fuzz,
-    waterlink_fuzz, dhcp_fuzz, sntp_fuzz, dns_fuzz, netlink_fuzz and
-    crypto_fuzz in turn: `sh test/run fuzz`.
+    waterlink_fuzz, dhcp_fuzz, sntp_fuzz, dns_fuzz, netlink_fuzz,
+    crypto_fuzz and http_fuzz in turn: `sh test/run fuzz`.
 
     Continuous by default, an hour a target with no run cap, unless
     MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise. With
@@ -44041,10 +45078,10 @@ def harness_tls_fuzz(argv):
     os.environ.setdefault("MOONWATER_FUZZ_RUNS", "20000" if report else "-1")
     os.environ.setdefault("MOONWATER_FUZZ_SECONDS", "5" if report else "3600")
     runs, seconds, _ = tls_fuzz_budget()
-    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp then sntp then dns then netlink then crypto "
+    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp then sntp then dns then netlink then crypto then http "
           "(runs=%d seconds=%d)" % (runs, seconds))
     seeds = {corpus: len(tls_fuzz_seeds(corpus))
-             for corpus in ("tls_der", "tls_hs", "waterlink", "dhcp", "sntp", "dns", "netlink", "crypto")}
+             for corpus in ("tls_der", "tls_hs", "waterlink", "dhcp", "sntp", "dns", "netlink", "crypto", "http")}
     seeds["waterlink_pre"] = len(waterlink_pre_seeds())
     targets = []
     for name, corpus, harness in (
@@ -44057,7 +45094,8 @@ def harness_tls_fuzz(argv):
             ("sntp_fuzz", "sntp", harness_sntp_fuzz),
             ("dns_fuzz", "dns", harness_dns_fuzz),
             ("netlink_fuzz", "netlink", harness_netlink_fuzz),
-            ("crypto_fuzz", "crypto", harness_crypto_fuzz)):
+            ("crypto_fuzz", "crypto", harness_crypto_fuzz),
+            ("http_fuzz", "http", harness_http_fuzz)):
         began = time.time()
         try:
             code = harness([])
@@ -45215,15 +46253,17 @@ int main(void)
         dns = harness_dns_fuzz([])
         netlink = harness_netlink_fuzz([])
         crypto = harness_crypto_fuzz([])
+        http = harness_http_fuzz([])
     finally:
         if prior is None:
             os.environ.pop("MOONWATER_MSAN", None)
         else:
             os.environ["MOONWATER_MSAN"] = prior
 
-    if 2 in (der, hs, sntp, dns, netlink):
+    if 2 in (der, hs, sntp, dns, netlink, http):
         print("msan net: NOT RUN -- fuzz under MSan unavailable "
-              "(der=%s hs=%s sntp=%s dns=%s netlink=%s)" % (der, hs, sntp, dns, netlink))
+              "(der=%s hs=%s sntp=%s dns=%s netlink=%s http=%s)"
+              % (der, hs, sntp, dns, netlink, http))
         return 2
     checks(der == 0, "tls_der_fuzz clean under MSan")
     checks(hs == 0, "tls_hs_fuzz clean under MSan")
@@ -45232,6 +46272,7 @@ int main(void)
     checks(dns == 0, "dns_fuzz clean under MSan")
     checks(netlink == 0, "netlink_fuzz clean under MSan")
     checks(crypto in (0, 2), "crypto_fuzz clean under MSan")
+    checks(http == 0, "http_fuzz clean under MSan")
     return checks.verdict("msan net", "msan-net")
 
 
@@ -45259,7 +46300,8 @@ def harness_security_hygiene(argv):
 
     security = ("tls_chains", "https_downgrade", "http_response_framing",
                 "tls_der_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
-                "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer")
+                "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
+                "http_fuzz", "http_urls")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -45269,12 +46311,12 @@ def harness_security_hygiene(argv):
     checks(not twice, "differential.py: registered twice: " + ", ".join(twice))
     for name in security:
         checks("--harness " + name in run, "test/run: no lane asks for --harness " + name)
-    for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race", "dhcp_fuzz", "sntp_fuzz",
-                 "dns_fuzz", "netlink_fuzz"):
+    for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race", "dhcp_fuzz",
+                 "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "http_fuzz"):
         checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
 
     names = set()
-    for corpus in ("tls_der", "tls_hs", "dhcp", "sntp", "dns", "netlink"):
+    for corpus in ("tls_der", "tls_hs", "dhcp", "sntp", "dns", "netlink", "http"):
         seeds = tls_fuzz_seeds(corpus)
         names.update(seeds)
         checks(bool(seeds), "tls_fuzz_seeds(%r) is empty" % corpus)
@@ -51577,6 +52619,8 @@ HARNESS_CHECKS = {
     "tls_peer": harness_tls_peer,
     "https_downgrade": harness_https_downgrade,
     "http_response_framing": harness_http_response_framing,
+    "http_fuzz": harness_http_fuzz,
+    "http_urls": harness_http_urls,
     "tls_der_fuzz": harness_tls_der_fuzz,
     "tls_hs_fuzz": harness_tls_hs_fuzz,
     "tls_verify_fuzz": harness_tls_verify_fuzz,

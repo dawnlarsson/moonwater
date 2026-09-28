@@ -684,8 +684,10 @@ static COLD bipolar net_staged_name_publish(file_staged_name address_to stage)
                 return directory;
         }
 
+        /* A device or FIFO written in place has no data of its own to
+           sync, and fsync on one answers EINVAL. */
         bipolar prepared = file_staged_name_prepare(stage);
-        bipolar synced = prepared < 0 ? prepared : system_call_1(
+        bipolar synced = prepared < 0 || stage->direct ? prepared : system_call_1(
             syscall(fsync), (positive)stage->handle);
 
         if (synced < 0)
@@ -785,8 +787,12 @@ static b32 net_wget(void)
                         http_url_leaf(path, leaf, sizeof leaf);
                         output = leaf;
                 }
+                /* A device or FIFO is written into, as GNU wget does, never
+                   replaced: as root, -O /dev/null would otherwise put a
+                   regular file where the device was. */
                 dest = file_staged_name_open(
-                    address_of staged, output, 0644 & ~file_umask(), 0);
+                    address_of staged, output, 0644 & ~file_umask(),
+                    FILE_STAGED_STREAM_SPECIAL);
                 if (dest < 0)
                 {
                         return string_report(log_error, 1, "wget: cannot write %w\n",
