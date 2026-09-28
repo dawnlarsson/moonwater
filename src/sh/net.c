@@ -1411,11 +1411,12 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
         }
 
         system_close(ends[1]);
-        //      dhcp_ask's schedule is 75 s of sends after a CSPRNG that
-        //      may take a second; a renewal is its own wait.
+        //      dhcp_ask's twenty attempts can each wait out a DISCOVER
+        //      and a REQUEST, 150 s in all, after a CSPRNG that may take
+        //      a second; a renewal is its own wait.
         heard = child > 0 &&
                 network_deadline_begin(address_of deadline,
-                                       renew ? wait + 5 : 120, 0) &&
+                                       renew ? wait + 5 : 180, 0) &&
                 network_wait_readable_until(ends[0], address_of deadline) > 0 &&
                 system_read_retry((positive)ends[0], address_of answer,
                                   sizeof answer) == (bipolar)sizeof answer;
