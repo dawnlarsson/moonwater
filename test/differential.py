@@ -15064,6 +15064,19 @@ def shell_lang_tilde_words(rng):
     return ("tilde-words", shell_ALL, shell_program("HOME=/h", line, 'echo "end=$?"'), ("command", "stdin", "file"))
 
 
+#       An assigned $@ or ${a[@]} is joined with blanks in bash, as "$@" is,
+#       and so are a slice, a substitution and a case change of one, while a
+#       trim or a transform of one is joined by IFS and an assigned $* under
+#       an empty IFS by nothing. These joined all of them by IFS, and $* and
+#       ${a[*]} under an empty IFS with blanks.
+def shell_lang_assigned_list_joins(rng):
+    form = rng.choice(("$@", "${@}", "$*", "a$@b", "${a[@]}", "${a[*]}", "${@:1}", "${a[@]:0}", "${a[@]^}", "${@#x}",
+                       "${a[@]@Q}", "${a[@]%q}", "${a[@]/p/r}", "${@@Q}", "${@^}", "${@-d}"))
+    ifs = rng.choice(("IFS=:", "IFS=", "IFS=' :'", ""))
+    return ("assigned-list-joins", shell_BASH, shell_program(
+        'set -- x "y z"; a=(p q)', ifs, "s=" + form + '; echo "[$s]"'), ("command", "stdin", "file"))
+
+
 #       bash's kill takes -n signum where it takes -s, and -L where it
 #       takes -l; both were unknown signals named n and L.
 def shell_lang_kill_bash_options(rng):
@@ -18043,6 +18056,7 @@ SHELL_FAMILIES = (
     shell_lang_bash_trapsig,
     shell_lang_kill_bash_options,
     shell_lang_tilde_words,
+    shell_lang_assigned_list_joins,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,

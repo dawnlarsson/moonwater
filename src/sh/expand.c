@@ -321,8 +321,23 @@ positive shell_substitution_generation;
 
 //      Set while an assignment's value is expanded: the word of a ${x-word}
 //      inside it takes the value's tilde rules, after each colon as well,
-//      as bash and dash both do: x=${u-~:~} is two home directories.
+//      as bash and dash both do: x=${u-~:~} is two home directories; and
+//      bash joins an unquoted $@ there with blanks, as it joins "$@".
 static bool expand_assigning;
+
+/*
+        Whether an unquoted list comes out as fields, which is how it is
+        joined with blanks, or joined by IFS. An assigned $@ and ${a[@]} is
+        joined with blanks in bash -- as a slice, a substitution and a case
+        change of one are -- while a trim or a transform of one is joined by
+        IFS, and an assigned $* with IFS empty is joined by nothing.
+*/
+#define expand_list_by_ifs(form, between)                                   \
+        (!(between) && !(expand_assigning && shell_bash_compat &&           \
+                         (form) == '*'))
+#define expand_list_blanks(form, between)                                   \
+        (expand_list_by_ifs(form, between) ||                               \
+         (expand_assigning && shell_bash_compat && (form) == '@'))
 
 //      One word being built, and what each of its bytes is allowed to become.
 //      "$@" against a directory's worth of parameters is a single word, so
@@ -1979,7 +1994,9 @@ static bool expand_push_parameter_as(expand_reference reference, bool quoted,
                    (string_is(name, '@') || string_is(name, '*'));
 
         if (!(mode & EXPAND_PARAMETER_MISSING) && all &&
-            (quoted ? string_is(name, '@') : !string_get(expand_ifs())))
+            (quoted ? string_is(name, '@')
+                    : expand_list_blanks(string_get(name),
+                                         string_get(expand_ifs()))))
         {
                 positive at;
 
@@ -5980,7 +5997,8 @@ static COLD fn expand_positional_slice(string_address name,
         p8 form = string_get(name);
         p8 mark = quoted ? MARK_QUOTED : MARK_FIELD;
         p8 between = string_get(expand_ifs());
-        bool fields = quoted ? form == '@' : !between;
+        bool fields = quoted ? form == '@'
+                             : expand_list_blanks(form, between);
         positive origin = shell_parameter_count + 1;
 
         if (!expand_slice_bounds((expand_reference){.name = name}, expression, origin, origin, SLICE_POSITIONAL,
@@ -6957,7 +6975,8 @@ static COLD fn expand_positional_transform(p8 which, p8 form, bool quoted)
 {
         p8 mark = quoted ? MARK_QUOTED : MARK_FIELD;
         p8 between = string_get(expand_ifs());
-        bool fields = quoted ? form == '@' : !between;
+        bool fields = quoted ? form == '@'
+                             : expand_list_by_ifs(form, between);
         positive at;
 
         if (!shell_parameter_count)
@@ -7463,7 +7482,8 @@ static COLD fn expand_bash_positional_trim(p8 form, string_address pattern,
 {
         p8 mark = quoted ? MARK_QUOTED : MARK_FIELD;
         p8 between = string_get(expand_ifs());
-        bool fields = quoted ? form == '@' : !between;
+        bool fields = quoted ? form == '@'
+                             : expand_list_by_ifs(form, between);
         positive at;
 
         if (!shell_parameter_count)
@@ -7607,7 +7627,8 @@ static COLD fn expand_positional_each(p8 form, p8 operation,
 {
         p8 mark = quoted ? MARK_QUOTED : MARK_FIELD;
         p8 between = string_get(expand_ifs());
-        bool fields = quoted ? form == '@' : !between;
+        bool fields = quoted ? form == '@'
+                             : expand_list_blanks(form, between);
         bool default_pattern = !string_get(word);
         string_address pattern;
         string_address replacement = null;
@@ -7770,7 +7791,10 @@ static COLD fn expand_array_sequence(string_address name, positive length,
 {
         p8 mark = quoted ? MARK_QUOTED : MARK_FIELD;
         p8 between = string_get(expand_ifs());
-        bool fields = quoted ? form == '@' : !between;
+        bool fields = quoted ? form == '@'
+                             : operation == '#' || operation == '%' || operation == '@'
+                                   ? expand_list_by_ifs(form, between)
+                                   : expand_list_blanks(form, between);
         bool slice = operation == ':';
         bool transform = operation && !slice;
         shell_mark held = shell_store_mark(address_of expand_store);
@@ -7930,7 +7954,8 @@ static COLD fn expand_array_whole_transform(string_address name, positive length
         p8 mark_join = (quoted && form == '*') ? MARK_QUOTED : MARK_FIELD;
         p8 mark_body = quoted ? MARK_QUOTED : MARK_FIELD;
         p8 between = string_get(expand_ifs());
-        bool fields = quoted ? form == '@' : !between;
+        bool fields = quoted ? form == '@'
+                             : expand_list_by_ifs(form, between);
         p8 attributes;
         bool exported;
         bool readonly;
