@@ -9812,6 +9812,8 @@ INPUTS.update({
     "misc_journal": b"MESSAGE=mw-differential journald entry\nPRIORITY=6\nSYSLOG_IDENTIFIER=mwtest\n",
     "misc_dd_case": b"AaZz09-abcdefghijklmnopqrstuvwxyz-ABCDEFGHIJKLMNOPQRSTUVWXYZ" * 3,
     "misc_dd_1000": b"q" * 1000,
+    #   A printable run longer than od -S held, ended by a NUL.
+    "misc_od_printable_run": b"a" * 70000 + b"\0tail\0",
     "misc_sums_malformed": b"not a checksum\n\n garbage line\n",
 })
 
@@ -10567,7 +10569,14 @@ MISC_UTILITIES = (
                    ("-", "7" * 255), ("-", "9" * 254 + "."), ("-", "0x" + "f" * 253), ("+" + "7" * 30,),
                    ("a.txt", "7" * 30 + "x"), ("++0",), ("+-0",), ("+ 0",), ("--", "-0"), ("a.txt", "0x"),
                    ("a.txt", "1.b"), ("a.txt", "1.B"), ("long", "1B"), ("a.txt", "12."), ("a.txt", "0x1b"),
-                   ("a.txt", "1a."), ("a.txt", "8"), ("+0x1",), ("+1..",))),
+                   ("a.txt", "1a."), ("a.txt", "8"), ("+0x1",), ("+1..",),
+                   #   -j, -N and -S stop at intmax_t and take R, Q and the
+                   #   old D; -w is plain decimal with no suffix at all.
+                   {"argv": ("-S3",), "stdin": "misc_od_printable_run"},
+                   {"argv": ("-S5", "-j69990"), "stdin": "misc_od_printable_run"},
+                   ("-j9223372036854775808", "a.txt"), ("-N8E", "a.txt"), ("-N1R", "a.txt"), ("-j0Q", "a.txt"),
+                   ("-j1KD", "long"), ("-S9223372036854775807", "a.txt"), ("-w0x10", "a.txt"), ("-w4x", "a.txt"),
+                   ("-w1k", "a.txt"), ("-w18446744073709551616", "a.txt"))),
 
     Utility("hexdump",
             options=(Option("-b"), Option("-c"), Option("-C"), Option("-d"), Option("-o"), Option("-x"),

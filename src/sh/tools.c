@@ -10474,10 +10474,13 @@ static fn dump_add_canonical()
 
 /*
         od's own numeric arguments -- -j, -N, -S -- are read by coreutils
-        with xstrtoumax and a suffix set of its own: b, then E, G, K, k, M,
-        m, P, T, Y and Z, each of which may be spelled out as B for the
-        decimal step or iB for the binary one. dd's parser is a different
-        one (its x is a product, and c and w are counts), so od gets this.
+        with xstrtoimax and a suffix set of its own: b, then E, G, K, k, M,
+        m, P, Q, R, T, Y and Z, each of which may be spelled out as B or D
+        for the decimal step or iB for the binary one, and a value past
+        intmax_t is too large -- except nought, which no unit makes larger.
+        -w is the same reader in base ten with no suffixes (decimal). dd's
+        parser is a different one (its x is a product, and c and w are
+        counts), so od gets this.
 
         The three ways a word can fail are three different sentences in the
         reference, so the kind is answered rather than a bare false.
@@ -10487,7 +10490,8 @@ static fn dump_add_canonical()
 #define DUMP_OD_NUMBER_SUFFIX 2
 #define DUMP_OD_NUMBER_LARGE 3
 
-static p8 dump_od_number(string_address text, positive address_to out)
+static p8 dump_od_number(string_address text, positive address_to out,
+                         bool decimal)
 {
         string_address at = text;
         positive value = 0;
@@ -10510,8 +10514,10 @@ static p8 dump_od_number(string_address text, positive address_to out)
            digit follows that -- so 0x on its own is the number zero with a
            stray x after it, which is a suffix complaint and not a bad
            number. */
-        if (string_get(at) == '0' && (at[1] == 'x' || at[1] == 'X') &&
-            byte_is_hexadecimal(at[2]))
+        if (decimal)
+                ;
+        else if (string_get(at) == '0' && (at[1] == 'x' || at[1] == 'X') &&
+                 byte_is_hexadecimal(at[2]))
         {
                 base = 16;
                 at += 2;
@@ -10536,10 +10542,10 @@ static p8 dump_od_number(string_address text, positive address_to out)
 
         p8 suffix = string_get(at);
         positive power = size_suffix_power(suffix, false);
-        /* b, or the shared exponent letters through Y with only k and m in
+        /* b, or the shared exponent letters through Q with only k and m in
            lower case. */
-        bool letter = suffix == 'b' ||
-                      (power && power <= 8 && (suffix < 'a' || power <= 2));
+        bool letter = !decimal &&
+                      (suffix == 'b' || (power && (suffix < 'a' || power <= 2)));
 
         /* A word that is only a suffix counts as one of that unit. */
         if (!digits)
@@ -10564,7 +10570,7 @@ static p8 dump_od_number(string_address text, positive address_to out)
 
                         if (string_get(at) == 'i' && at[1] == 'B')
                                 at += 2;
-                        else if (string_get(at) == 'B')
+                        else if (string_get(at) == 'B' || string_get(at) == 'D')
                         {
                                 step = 1000;
                                 at++;
@@ -10574,7 +10580,7 @@ static p8 dump_od_number(string_address text, positive address_to out)
                         if (!size_scale_power_checked(
                                 1, step, (p8)power, (p64)positive_max,
                                 address_of scaled))
-                                large = true;
+                                large |= value != 0;
                         else
                                 multiple = (positive)scaled;
                 }
@@ -10588,7 +10594,7 @@ static p8 dump_od_number(string_address text, positive address_to out)
                         value *= multiple;
         }
 
-        if (large)
+        if (large || value > (positive)bipolar_max)
                 return DUMP_OD_NUMBER_LARGE;
 
         address_to out = value;
@@ -11146,7 +11152,11 @@ static bool dump_od_seen(p8 letter, string_address value)
                         return true;
                 }
 
-                kind = dump_od_number(value, address_of read);
+                kind = dump_od_number(value, address_of read, false);
+                // GNU holds a string and its NUL, so -S stops one short.
+                if (letter == 'S' && kind == DUMP_OD_NUMBER_OK &&
+                    read == (positive)bipolar_max)
+                        kind = DUMP_OD_NUMBER_LARGE;
                 if (kind != DUMP_OD_NUMBER_OK)
                         return dump_od_number_refuse(
                             named[letter == 'j' ? 0 : letter == 'N' ? 1 : 2],
@@ -11164,14 +11174,11 @@ static bool dump_od_seen(p8 letter, string_address value)
 
         if (letter == 'w' && value)
         {
-                positive width;
+                positive width = 0;
+                p8 kind = dump_od_number(value, address_of width, true);
 
-                if (!dump_number(value, address_of width) || !width)
-                {
-                        text_flush();
-                        return string_report(writer_stderr, false, "od: invalid -w argument '%s'\n",
-                                      value);
-                }
+                if (kind != DUMP_OD_NUMBER_OK || !width)
+                        return dump_od_number_refuse("-w", value, kind);
         }
 
         //      The old letters for the floating types: -e and -F are
@@ -12385,7 +12392,9 @@ static b32 dump_run(positive first, positive count)
                                  : tools_text_done(text_status);
 }
 
-#define DUMP_STRING_MAX 65536
+/* A printable run is held until what ends it says whether it was a string,
+   so the store grows with the run, as GNU's buffer does; a step at a time. */
+#define DUMP_STRING_STEP 65536
 
 static fn dump_string_line(positive offset, p8 address_to bytes, positive length)
 {
@@ -12411,7 +12420,7 @@ static fn dump_string_line(positive offset, p8 address_to bytes, positive length
    Only 0x20 through 0x7e are printable in the C locale, so no escapes. */
 static b32 dump_strings(positive first, positive count, positive minimum)
 {
-        static p8 held[DUMP_STRING_MAX];
+        byte_store held = {null, 0, 0};
         positive have = 0;
         positive address = 0;
         positive skip = dump_arguments.skip;
@@ -12462,11 +12471,24 @@ static b32 dump_strings(positive first, positive count, positive minimum)
                                 if (limited)
                                         left--;
 
-                                if (byte >= ' ' && byte <= '~' && have < DUMP_STRING_MAX)
-                                        held[have++] = byte;
+                                if (byte >= ' ' && byte <= '~')
+                                {
+                                        held.used = have;
+                                        if (have == held.room &&
+                                            !byte_store_reserve(address_of held, have + 1,
+                                                                DUMP_STRING_STEP))
+                                        {
+                                                dump_close();
+                                                byte_store_release(address_of held);
+                                                string_diagnostic(&text_diagnostic, 0, null,
+                                                                  "memory exhausted");
+                                                return text_done(1);
+                                        }
+                                        held.bytes[have++] = byte;
+                                }
                                 else if (!byte && have >= minimum)
                                 {
-                                        dump_string_line(address - have - 1, held, have);
+                                        dump_string_line(address - have - 1, held.bytes, have);
                                         have = 0;
                                 }
                                 else
@@ -12475,7 +12497,7 @@ static b32 dump_strings(positive first, positive count, positive minimum)
                                 if (limited && !left)
                                 {
                                         if (have >= minimum)
-                                                dump_string_line(address - have, held, have);
+                                                dump_string_line(address - have, held.bytes, have);
                                         done = true;
                                 }
                         }
@@ -12483,6 +12505,8 @@ static b32 dump_strings(positive first, positive count, positive minimum)
 
                 dump_close();
         }
+
+        byte_store_release(address_of held);
 
         if (skip)
         {
@@ -12515,13 +12539,8 @@ static b32 tools_od(void)
                 dump_arguments.width_given = true;
                 if (!width)
                         dump_arguments.width = 32;
-                else if (!dump_number(width, address_of dump_arguments.width) ||
-                         !dump_arguments.width)
-                {
-                        string_format(writer_stderr, "od: invalid -w argument '%s'\n",
-                                      width);
-                        return text_done(1);
-                }
+                else
+                        dump_od_number(width, address_of dump_arguments.width, true);
         }
 
         /* A dump of strings takes no format, and the reference says so
