@@ -3817,25 +3817,30 @@ static string_address build_upper(string_address name)
         positive length = string_length(name);
         p8 address_to into = build_text_take(length + 1);
 
-        for (positive at = 0; at < length; at++)
-                into[at] = (p8)byte_to_upper((p8)name[at]);
-
-        into[length] = end;
+        memory_copy_end(into, name, length);
+        memory_to_upper_ascii(into, length);
 
         return (string_address)into;
+}
+
+//      The value the .config gives a switch, the last line naming it, or
+//      fallback when none does.
+static bool build_switch_find(string_address want, bool fallback)
+{
+        for (positive at = build_switch_count; at > 0; at--)
+                if (word_is(build_switch_name[at - 1], want))
+                        return build_switch_value[at - 1];
+
+        return fallback;
 }
 
 //      kind is "TOOL_" or "BUILTIN_", key the upper-case name.
 static bool build_switch_on(string_address kind, string_address key)
 {
-        string_address want = build_join(kind, key, null);
-
-        for (positive at = build_switch_count; at > 0; at--)
-                if (word_is(build_switch_name[at - 1], want))
-                        return build_switch_value[at - 1];
-
-        return word_is(kind, "TOOL_") ? build_moon_tools_all
-                                      : build_moon_builtins_all;
+        return build_switch_find(build_join(kind, key, null),
+                                 word_is(kind, "TOOL_")
+                                     ? build_moon_tools_all
+                                     : build_moon_builtins_all);
 }
 
 /*
@@ -3996,14 +4001,17 @@ static bool build_category_on(string_address category)
         return false;
 }
 
+//      Whether a tools.inc row's own switch leaves it built.
+static bool build_tool_switched(build_tool_entry address_to one)
+{
+        return build_tool_fixed(one->name) ||
+               build_switch_on("TOOL_", build_upper(one->name));
+}
+
 //      Whether a tools.inc row is in the program being built.
 static bool build_tool_on(build_tool_entry address_to one)
 {
-        if (!build_category_on(one->category))
-                return false;
-
-        return build_tool_fixed(one->name) ||
-               build_switch_on("TOOL_", build_upper(one->name));
+        return build_category_on(one->category) && build_tool_switched(one);
 }
 
 static string_address build_config_header(string_address from,
@@ -4037,8 +4045,7 @@ static string_address build_config_header(string_address from,
                 if (!system_row && !build_category_on(one->category))
                         continue;
 
-                on = build_tool_fixed(one->name) ||
-                     build_switch_on("TOOL_", build_upper(one->name));
+                on = build_tool_switched(one);
 
                 if (!on)
                         text = build_join(text, "#define MOONWATER_TOOL_OFF_",
@@ -4084,16 +4091,8 @@ static string_address build_config_header(string_address from,
                 {
                         string_address want = build_join(
                             "FLOODLIGHT_", build_floodlight_switches[at], null);
-                        bool on = true;
 
-                        for (positive seen = build_switch_count; seen > 0; seen--)
-                                if (word_is(build_switch_name[seen - 1], want))
-                                {
-                                        on = build_switch_value[seen - 1];
-                                        break;
-                                }
-
-                        if (on)
+                        if (build_switch_find(want, true))
                                 text = build_join(text, "#define CONFIG_MOONWATER_",
                                                   want, " 1\n", null);
                 }
