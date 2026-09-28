@@ -6421,6 +6421,23 @@ Cannot write to 'out' (File too large)."
                 note "wget -O /dev/null, -O fifo said [$wget_stream_ours], want [0 0 1048576 fifo]"
                 builtins_failed=1
         fi
+        #       A symlink planted at the -O name is replaced, never written
+        #       through (where GNU wget follows it): the download lands in a
+        #       regular file of that name and the link's target keeps its
+        #       bytes.
+        printf keep > "$wget_place/victim"
+        ln -sf "$wget_place/victim" "$wget_place/stream-ours/link"
+        timeout 10 "$farm/wget" -q -O "$wget_place/stream-ours/link" "$wget_url"
+        wget_link_status=$?
+        if [ "$wget_link_status" = 0 ] && [ ! -L "$wget_place/stream-ours/link" ] &&
+                [ "$(cat "$wget_place/victim")" = keep ] &&
+                [ "$(wc -c < "$wget_place/stream-ours/link")" -eq 1048576 ]; then
+                tally wget-output-link-replaced 1 1
+        else
+                tally wget-output-link-replaced 0 1
+                note "wget -O onto a symlink: status $wget_link_status, victim [$(cat "$wget_place/victim")]"
+                builtins_failed=1
+        fi
         if [ -n "$wget_gnu" ] && [ -s "$wget_place/port" ] &&
                 "$wget_gnu" --version 2>/dev/null | head -n 1 | grep -q '^GNU Wget'; then
                 wget_stream_gnu=$(wget_stream_run "$wget_gnu" "$wget_place/stream-gnu" \
