@@ -122,9 +122,9 @@ fn parse_nest_leave();
 
 /* Whether the physical line being fed ended with a newline. POSIX
    continuation is backslash-newline; a backslash that meets EOF with nothing
-   after it is a byte of the word. Bash synthesizes that newline for a script
-   or stdin, which the reader asks for by leaving this true. A -c string,
-   a sourced file, eval, and dash do not. */
+   after it is a byte of the word. Every reader says so -- a script, stdin,
+   a -c string, a sourced file and eval -- as bash 5.3 and dash do; bash 5.2
+   synthesized a newline for a script or stdin and dropped the backslash. */
 static bool lex_line_newline = true;
 static bool lex_scan_newline = true;
 

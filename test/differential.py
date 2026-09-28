@@ -15815,7 +15815,11 @@ def shell_lang_reader_boundaries(rng):
     elif shape == "many-redirects":
         script = "true" + "".join(" %d>o%d" % (3 + k % 7, k) for k in range(25)) + "; ls | wc -l"
     elif shape == "backslash-eof":
-        return "reader-backslash-eof", shell_ALL, "echo one\necho two \\"
+        #   A backslash at the very end is a byte of the word whichever
+        #   reader meets it; the stdin and file readers dropped it in bash.
+        return "reader-backslash-eof", shell_ALL + ("sh",), rng.choice(("echo one\necho two \\", "echo one\necho two\\",
+                                                              "printf '<%s>' a\\", "echo \"q\"\\")), \
+            ("command", "stdin", "file")
     elif shape == "quote-eof":
         return "reader-quote-eof", shell_ALL, "echo one\necho \"open"
     elif shape == "heredoc-eof":

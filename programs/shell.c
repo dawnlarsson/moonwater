@@ -1168,11 +1168,10 @@ b32 main()
                 {
                         shell_verbose_from_string = false;
                         shell_verbose_line(ready);
-                        // Bash treats EOF on a script or stdin as a newline,
-                        // so a trailing backslash is still a continuation.
-                        // dash leaves the backslash as a byte of the word.
-                        if (!shell_bash_compat)
-                                lex_physical_newline(false);
+                        // A backslash that meets the end of the input with
+                        // no newline after it is a byte of the word, in
+                        // bash 5.3 and dash alike: `echo a\` prints a\.
+                        lex_physical_newline(false);
                         shell_run_known_line(ready, true);
                 }
         }
