@@ -46573,6 +46573,21 @@ static fn xargs_item_put(p8 letter)
         xargs_item[xargs_item_length++] = letter;
 }
 
+// As many puts of a run of bytes: what fits is kept, and the rest marks the
+// item broken.
+static fn xargs_item_append(p8 address_to bytes, positive length)
+{
+        positive fits = xargs_item_room - 1 - xargs_item_length;
+
+        if (length > fits)
+        {
+                xargs_item_broken = true;
+                length = fits;
+        }
+        memory_copy_apart(xargs_item + xargs_item_length, bytes, length);
+        xargs_item_length += length;
+}
+
 /*
         The command, found and started.
 
@@ -47814,49 +47829,45 @@ static b32 file_xargs()
                 {
                         p8 letter = xargs_buffer[at];
 
-                        if (!letter && !xargs_null && !xargs_delimited &&
-                            !xargs_said_nul)
+                        /* -0 and -d: the item is everything up to the next
+                           separator, found with one scan and kept with one
+                           copy rather than a test and a store a byte. */
+                        if (xargs_delimited)
+                        {
+                                p8 address_to stop = memory_first_of(
+                                    xargs_buffer + at, xargs_delimiter,
+                                    (positive)got - at);
+                                positive run = stop
+                                                   ? (positive)(stop - (xargs_buffer + at))
+                                                   : (positive)got - at;
+
+                                if (run)
+                                {
+                                        xargs_item_append(xargs_buffer + at, run);
+                                        started = true;
+                                }
+                                at += run;
+                                if (!stop)
+                                {
+                                        at--;
+                                        continue;
+                                }
+
+                                xargs_item[xargs_item_length] = end;
+                                xargs_item_done();
+                                xargs_line_tick();
+                                xargs_item_length = 0;
+                                started = false;
+                                continue;
+                        }
+
+                        if (!letter && !xargs_said_nul)
                         {
                                 log_error("xargs: WARNING: a NUL character occurred in the "
                                           "input.  It cannot be passed through in the "
                                           "argument list.  Did you mean to use the --null "
                                           "option?\n", 0);
                                 xargs_said_nul = true;
-                        }
-
-                        if (xargs_delimited && !xargs_null)
-                        {
-                                if (letter != xargs_delimiter)
-                                {
-                                        xargs_item_put(letter);
-                                        started = true;
-                                        continue;
-                                }
-
-                                xargs_item[xargs_item_length] = end;
-                                xargs_item_done();
-                                xargs_line_tick();
-                                xargs_item_length = 0;
-                                started = false;
-                                continue;
-                        }
-
-                        if (xargs_null)
-                        {
-                                if (letter)
-                                {
-                                        xargs_item_put(letter);
-
-                                        started = true;
-                                        continue;
-                                }
-
-                                xargs_item[xargs_item_length] = end;
-                                xargs_item_done();
-                                xargs_line_tick();
-                                xargs_item_length = 0;
-                                started = false;
-                                continue;
                         }
 
                         if (escaped)
