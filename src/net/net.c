@@ -4381,6 +4381,7 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #define TLS_HS_NEW_SESSION_TICKET 4
 #define TLS_HS_ENCRYPTED_EXTS 8
 #define TLS_HS_CERTIFICATE 11
+#define TLS_HS_CERT_REQUEST 13
 #define TLS_HS_CERT_VERIFY 15
 #define TLS_HS_FINISHED 20
 #define TLS_HS_KEY_UPDATE 24
@@ -4435,6 +4436,7 @@ typedef struct
         p8 c_ap_traffic[32];
         p8 s_ap_traffic[32];
         bool update_asked;
+        bool cert_requested;
         p8 c_iv[12];
         p8 s_iv[12];
         crypto_aesgcm_key c_gcm;
@@ -6506,12 +6508,20 @@ static COLD bipolar tls_check_finished(tls_conn address_to tls, p8 address_to ve
 }
 
 /* Nothing reads the transcript after the client's Finished, so it is sent
-   without being added. */
+   without being added. A requested certificate goes first, empty, as
+   OpenSSL's and curl's clients answer when they hold none. */
 static COLD bipolar tls_send_finished(tls_conn address_to tls)
 {
         p8 msg[36] = {TLS_HS_FINISHED, 0, 0, 32};
+        p8 none[8] = {TLS_HS_CERTIFICATE, 0, 0, 4};
         bipolar status;
 
+        if (tls->cert_requested)
+        {
+                if (tls_send_enc(tls, TLS_CT_HANDSHAKE, none, sizeof none))
+                        return TLS_FAIL;
+                tls_transcript_add(tls, none, sizeof none);
+        }
         tls_finished_mac(tls, tls->c_hs_traffic, msg + 4);
         status = tls_send_enc(tls, TLS_CT_HANDSHAKE, msg, sizeof msg);
         crypto_forget(msg, sizeof msg);
@@ -6594,30 +6604,39 @@ static COLD bipolar tls_check_cert_verify(tls_conn address_to tls, p8 address_to
 }
 
 #define TLS_SERVER_FLIGHT_EE 0
-#define TLS_SERVER_FLIGHT_CERTIFICATE 1
-#define TLS_SERVER_FLIGHT_CERT_VERIFY 2
-#define TLS_SERVER_FLIGHT_FINISHED 3
-#define TLS_SERVER_FLIGHT_COMPLETE 4
+#define TLS_SERVER_FLIGHT_REQUEST 1
+#define TLS_SERVER_FLIGHT_CERTIFICATE 2
+#define TLS_SERVER_FLIGHT_CERT_VERIFY 3
+#define TLS_SERVER_FLIGHT_FINISHED 4
+#define TLS_SERVER_FLIGHT_COMPLETE 5
 
-/* This client offers neither PSK nor client authentication, so the server
-   flight has exactly one legal shape.  Keeping that shape in one transition
-   function prevents a duplicate message from overwriting parsed certificate
-   state or an early Finished from authenticating an incomplete transcript. */
+/* This client offers no PSK, so the server flight has one legal shape, in
+   which only a CertificateRequest is optional.  Keeping that shape in one
+   transition function prevents a duplicate message from overwriting parsed
+   certificate state or an early Finished from authenticating an incomplete
+   transcript. An optional step (the high bit) is passed over when the
+   message is the next one instead; a refused message leaves the state. */
 static COLD bool tls_server_flight_step(p8 address_to state, p8 type)
 {
         static const p8 expected[] = {
             TLS_HS_ENCRYPTED_EXTS,
+            TLS_HS_CERT_REQUEST | 0x80,
             TLS_HS_CERTIFICATE,
             TLS_HS_CERT_VERIFY,
             TLS_HS_FINISHED,
         };
 
-        if (*state >= TLS_SERVER_FLIGHT_COMPLETE ||
-            type != expected[*state])
-                return false;
-
-        (*state)++;
-        return true;
+        for (p8 at = *state; at < TLS_SERVER_FLIGHT_COMPLETE; at++)
+        {
+                if (type == (expected[at] & 0x7f))
+                {
+                        *state = at + 1;
+                        return true;
+                }
+                if (!(expected[at] & 0x80))
+                        break;
+        }
+        return false;
 }
 
 /* RFC 8446 forbids duplicate extensions.  Rescanning every earlier extension
@@ -6832,6 +6851,22 @@ static COLD bipolar tls_encrypted_flight_append(
                                         hs + msg_at + 4, hs_len,
                                         (positive)1 << 0x000a | tls->named))
                                         return TLS_FAIL;
+                                tls_transcript_add(tls, hs + msg_at,
+                                                   4 + hs_len);
+                        }
+                        else if (hs_type == TLS_HS_CERT_REQUEST)
+                        {
+                                /* An empty context during the handshake
+                                   (RFC 8446 4.3.2) and well-framed
+                                   extensions; with no certificate to offer,
+                                   the answer is an empty Certificate and
+                                   the server decides. */
+                                if (hs_len < 3 || hs[msg_at + 4] ||
+                                    !tls_encrypted_extensions_valid(
+                                        hs + msg_at + 5, hs_len - 1,
+                                        positive_max))
+                                        return TLS_FAIL;
+                                tls->cert_requested = true;
                                 tls_transcript_add(tls, hs + msg_at,
                                                    4 + hs_len);
                         }

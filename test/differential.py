@@ -37621,6 +37621,13 @@ def harness_tls_peer(argv):
          [app(length_head + body), close]),
         ("CertificateRequest in the flight", {"request": True},
          [app(length_head + body), close]),
+        ("CertificateRequest with a context", {"request": True,
+                                               "request_body": b"\2ab\0\x08\0\x0d\0\4\0\2\4\3"},
+         [app(length_head + body), close]),
+        ("CertificateRequest after the Certificate", {"request_late": True},
+         [app(length_head + body), close]),
+        ("two CertificateRequests", {"request": True, "request_late": True},
+         [app(length_head + body), close]),
         ("an empty handshake record in the flight", {"empty": True},
          [app(length_head + body), close]),
         ("a compatibility CCS inside a split flight message", {"ccs_inside": True},
@@ -37666,9 +37673,6 @@ def harness_tls_peer(argv):
             "Finished (D.4)",
     }
     DELIBERATE = {
-        "CertificateRequest in the flight":
-            "the flight's one legal shape has no CertificateRequest; this "
-            "client has no certificate to decline with",
     }
 
     def serve(listener, flight, steps, outcome):
@@ -37793,9 +37797,12 @@ def harness_tls_peer(argv):
         server_hs = Direction(expand_label(secret, b"s hs traffic", sha256(transcript), 32))
         answers = flight.get("ee", b"")
         messages = [message(8, len(answers).to_bytes(2, "big") + answers)]
+        request = message(13, flight.get("request_body", b"\0\0\x08\0\x0d\0\4\0\2\4\3"))
         if flight.get("request"):
-            messages.append(message(13, b"\0\0\x08\0\x0d\0\4\0\2\4\3"))
+            messages.append(request)
         messages.append(message(11, certificate))
+        if flight.get("request_late"):
+            messages.append(request)
         for part in messages:
             transcript += part
         signature = leaf_key.sign(b" " * 64 + b"TLS 1.3, server CertificateVerify\0" +
@@ -37832,8 +37839,24 @@ def harness_tls_peer(argv):
             if header[0] != 23:
                 raise ValueError("client sent record type %d" % header[0])
             inner = reading.open(header, payload).rstrip(b"\0")
-            if inner[-1] == 22 and inner[0] == 20:
-                reading = client_ap
+            if inner[-1] == 22 and reading is client_hs:
+                # The client's flight: an empty Certificate when one was
+                # requested, then a Finished over everything before it.
+                sent = inner[:-1]
+                while sent:
+                    kind, size = sent[0], int.from_bytes(sent[1:4], "big")
+                    part, sent = sent[:4 + size], sent[4 + size:]
+                    if kind == 11 and flight.get("request") and \
+                            part == message(11, b"\0\0\0\0"):
+                        transcript += part
+                    elif kind == 20:
+                        key = expand_label(client_hs.secret, b"finished", b"", 32)
+                        if part[4:] != hmac_module.new(key, sha256(transcript),
+                                                       hashlib.sha256).digest():
+                            raise ValueError("the client's Finished does not verify")
+                        reading = client_ap
+                    else:
+                        raise ValueError("client sent handshake type %d" % kind)
             elif inner[-1] == 23:
                 request += inner[:-1]
             elif inner[-1] == 21:

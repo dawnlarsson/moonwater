@@ -55856,6 +55856,20 @@ static fn tls_server_flight_validation(void)
         check("TLS server flight rejects duplicate EncryptedExtensions",
               !tls_server_flight_step(address_of state,
                                       TLS_HS_ENCRYPTED_EXTS));
+        check("TLS server flight takes a CertificateRequest after EncryptedExtensions",
+              tls_server_flight_step(address_of state, TLS_HS_CERT_REQUEST) &&
+                  state == TLS_SERVER_FLIGHT_CERTIFICATE);
+        check("TLS server flight rejects a second CertificateRequest",
+              !tls_server_flight_step(address_of state, TLS_HS_CERT_REQUEST) &&
+                  state == TLS_SERVER_FLIGHT_CERTIFICATE);
+        check("TLS server flight takes the Certificate after a request",
+              tls_server_flight_step(address_of state, TLS_HS_CERTIFICATE));
+        check("TLS server flight rejects a CertificateRequest after the Certificate",
+              !tls_server_flight_step(address_of state, TLS_HS_CERT_REQUEST));
+        state = TLS_SERVER_FLIGHT_EE;
+        check("TLS server flight rejects a CertificateRequest first",
+              !tls_server_flight_step(address_of state, TLS_HS_CERT_REQUEST) &&
+                  state == TLS_SERVER_FLIGHT_EE);
 
         {
                 p8 one = 1;
@@ -55943,7 +55957,7 @@ static fn tls_server_flight_validation(void)
                                                   address_of flight, asked,
                                                   sizeof asked, null) ==
                               TLS_OK &&
-                          flight == TLS_SERVER_FLIGHT_CERTIFICATE);
+                          flight == TLS_SERVER_FLIGHT_REQUEST);
                 used = 0;
                 flight = TLS_SERVER_FLIGHT_EE;
                 check("EncryptedExtensions answering what was never offered is refused",
@@ -56124,7 +56138,7 @@ static fn tls_encrypted_flight_hs_reassembly(void)
                       tls_flight_hs_append(address_of walk, record,
                                           sizeof record) == TLS_OK &&
                           walk.messages == 1 &&
-                          walk.flight == TLS_SERVER_FLIGHT_CERTIFICATE &&
+                          walk.flight == TLS_SERVER_FLIGHT_REQUEST &&
                           walk.used == 6 &&
                           walk.hs[0] == TLS_HS_CERTIFICATE &&
                           walk.hs[3] == 8 && walk.hs[4] == 0xaa &&
