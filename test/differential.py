@@ -39961,6 +39961,16 @@ def crypto_vectors_lines(seed):
                 q = crypto_ec_multiply(c, pow(x, -1, n), q)
                 add(digest, x, s, q, expect=True)
             break
+        #   Q = G with e = r and s = 2r/k makes u1 = u2 = k/2, so the two
+        #   wNAF chains add the same point at their first digit: the public
+        #   add's doubling case. Q = -G makes that first pair opposite, and
+        #   the sum infinity.
+        for _ in range(2):
+            k = rng.randrange(1, n)
+            r = crypto_ec_multiply(c, k, g)[0] % n
+            s = 2 * r * pow(k, -1, n) % n
+            add(be(r, size), r, s, g, expect=True)
+            add(be(r, size), r, s, (g[0], p - g[1]), expect=False)
         #   u1 G = -u2 Q: the sum is infinity and must be refused. u1 G = u2 Q:
         #   the sum is a doubling.
         for _ in range(3):
@@ -40191,7 +40201,10 @@ def harness_crypto_vectors(argv):
     vector through the production crypto_* routines over lib.c's assembly
     -- each hardware body in turn where the machine has more than one --
     and counts every verdict or output that differs. Nothing is read from
-    a vector file: the categories are generated here from a fixed seed.
+    a vector file: the categories are generated here from a fixed seed,
+    all but the RSA keys, which OpenSSL makes fresh each run (Python's own
+    arithmetic took seconds a 4096-bit key); a failing line's number
+    names it in $work/crypto_vectors.in.
 
     - SHA-256/384, HMAC-SHA256, HKDF-SHA256 (every length to 66 and the
       255-block ceiling), PBKDF2 over SHA-1 and SHA-256
@@ -41117,7 +41130,8 @@ def harness_crypto_fuzz(argv):
     libFuzzer keeps the input. MOONWATER_MSAN=1 builds without the oracle
     (libcrypto is not instrumented) and runs the same lanes for memory
     alone. Seeds come from crypto_fuzz_seeds. Returns 2 when clang,
-    libFuzzer or libcrypto is missing.
+    libFuzzer or OpenSSL's headers and libcrypto are missing
+    (MOONWATER_CRYPTO_FUZZ_LIBRARY names another link flag).
 
         python3 test/differential.py --harness crypto_fuzz
     """
@@ -41126,7 +41140,20 @@ def harness_crypto_fuzz(argv):
     checks = (HARNESS_ROOT / "test/checks.c").read_text()
     oracle = not moonwater_msan_requested()
     source = crypto_fuzz_source(net, checks, oracle)
-    extra = ["-Wno-deprecated-declarations", "-lcrypto"] if oracle else []
+    extra = ["-Wno-deprecated-declarations",
+             os.environ.get("MOONWATER_CRYPTO_FUZZ_LIBRARY", "-lcrypto")] if oracle else []
+    clang = shutil.which("clang")
+    #   A machine without OpenSSL's headers or library cannot build the
+    #   oracle, which is the machine's gap and not the lift's.
+    if clang and oracle:
+        with tempfile.TemporaryDirectory(prefix="crypto-fuzz-probe-") as temporary:
+            probe = Path(temporary) / "probe.c"
+            probe.write_text("#include <openssl/evp.h>\n"
+                             "int main(void) { return EVP_aes_128_gcm() == 0; }\n")
+            if subprocess.run([clang, str(probe), "-o", str(Path(temporary) / "probe")] + extra,
+                              capture_output=True).returncode:
+                print("crypto fuzz: NOT RUN -- no OpenSSL headers or libcrypto to link")
+                return 2
     return tls_fuzz_run("crypto", "crypto", source, 2048, extra)
 
 
