@@ -155,14 +155,103 @@ static const struct rule baseline[] = {
 	{ "setpriv", SPAWN, 1 },   /* NAMED */
 	{ "setsid", SPAWN, 1 },    /* NAMED */
 	{ "sort", SPAWN, 1 },      /* NAMED: --compress-program names it */
-	{ "split", SPAWN, 1 },     /* NAMED: --filter runs what the line named,
-				      through sh -c as GNU's split does */
+	{ "split", SPAWN, 1 },     /* SHELL: --filter hands the line's text to
+				      sh -c, as GNU's split does; a machine
+				      that refuses shells refuses --filter
+				      (SHELL_ESCAPES, SPLIT_FILTER) */
 	{ "stdbuf", SPAWN, 1 },    /* NAMED */
 	{ "taskset", SPAWN, 1 },   /* NAMED */
 	{ "timeout", SPAWN, 1 },   /* NAMED */
 	{ "uclampset", SPAWN, 1 }, /* NAMED */
 	{ "unshare", SPAWN, 1 },   /* NAMED */
 };
+
+/*
+ * The answers this kernel was configured with, on top of those.
+ *
+ * Two places in the kernel configuration say what a machine refuses beyond the
+ * array above. CONFIG_MOONWATER_FLOODLIGHT_POLICY is rows in the words a line
+ * written to the device takes, with semicolons between them:
+ *
+ *     awk spawn deny; tar flag --to-command deny; /usr/bin/curl network deny
+ *
+ * and each switch in the "Floodlight: dangerous flags" menu, turned off, adds
+ * the rows that close one dangerous shape. The string comes first, so a row it
+ * names wins over a switch naming the same thing; a row named twice is taken
+ * the first time. The switches are read only where a configuration is there to
+ * say so -- the string is always defined where Kconfig is -- so this file
+ * built with no configuration at all refuses nothing more than the array.
+ *
+ * Read once, at boot, into rows no more writable than the array (they are
+ * __ro_after_init, and summed with it), and reported as built in, which is
+ * what they are. A row that does not read is not skipped: skipping a refusal
+ * is an allowance nobody wrote, so the register refuses to answer at all and
+ * every launch is refused until the configuration is fixed.
+ *
+ * The shell carries this text byte for byte, for when the register cannot be
+ * read, and the floodlight harness fails the build if the two drift.
+ */
+static const char configured_text[] =
+#ifdef CONFIG_MOONWATER_FLOODLIGHT_POLICY
+	CONFIG_MOONWATER_FLOODLIGHT_POLICY ";"
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_AWK_SPAWN
+	"awk spawn deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_SHELL_ESCAPES
+	"script spawn deny; setarch spawn deny; split flag --filter deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_FIND_EXEC
+	"find flag -exec deny; find flag -execdir deny;"
+	"find flag -ok deny; find flag -okdir deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_FIND_DELETE
+	"find flag -delete deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_FIND_WRITE
+	"find flag -fprint deny; find flag -fprint0 deny; find flag -fprintf deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_XARGS
+	"xargs run deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_SPLIT_FILTER
+	"split flag --filter deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_SORT_COMPRESS
+	"sort flag --compress-program deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_ENV_SPLIT
+	"env flag -S deny; env flag --split-string deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_LAUNCHERS
+	"timeout run deny; nice run deny; nohup run deny; stdbuf run deny;"
+	"setsid run deny; flock run deny; chrt run deny; ionice run deny;"
+	"taskset run deny; prlimit run deny; choom run deny; uclampset run deny;"
+	"coresched run deny; setpgid run deny; pipesz run deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_NAMESPACES
+	"unshare run deny; nsenter run deny;"
+	"chroot run deny; pivot_root run deny; setpriv run deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_NETWORK_FETCH
+	"wget run deny; fetch run deny;"
+#endif
+#endif
+	"";
+
+/* Rows the configuration may add. Every one is a row of the report, and the
+ * shell's reader is sized from this, so it is a limit rather than a hint. */
+#define CONFIGURED 64
+
+struct configured {
+	char subject[SUBJECT];
+	char detail[DETAIL];
+	unsigned char setting;
+	unsigned char allowed;
+};
+
+static struct configured configured[CONFIGURED] __ro_after_init;
+static unsigned int configured_count __ro_after_init;
+static bool configured_invalid __ro_after_init;
 
 /*
  * Every deviation from those answers, and the only policy on this machine that
@@ -263,7 +352,12 @@ static u32 baseline_sum __ro_after_init;
 
 static u32 baseline_seal(void)
 {
-	return fold(secret ^ 2166136261u, baseline, sizeof(baseline));
+	u32 sum = fold(secret ^ 2166136261u, baseline, sizeof(baseline));
+
+	/* The configured rows are built-in answers too, and written once at
+	 * boot like the secret; the same sum covers them and how many there are. */
+	sum = fold(sum, configured, sizeof(configured));
+	return fold(sum, &configured_count, sizeof(configured_count));
 }
 
 /*
@@ -338,7 +432,7 @@ static bool intact(void)
 
 	lockdep_assert_held(&lock);
 
-	if (compromised)
+	if (compromised || configured_invalid)
 		return false;
 
 	if (baseline_seal() != baseline_sum) {
@@ -446,17 +540,45 @@ static struct light *find(const char *subject, unsigned int setting,
 	return NULL;
 }
 
-/* What this kernel was built believing about one subject, or nothing. */
-static const struct rule *builtin(const char *subject, unsigned int setting)
+/* The configured row for one subject, setting and flag, if there is one. */
+static const struct configured *configured_row(const char *subject,
+					       unsigned int setting,
+					       const char *detail)
 {
 	unsigned int i;
+
+	for (i = 0; i < configured_count; i++)
+		if (configured[i].setting == setting &&
+		    !strcmp(configured[i].subject, subject) &&
+		    !strcmp(configured[i].detail, detail))
+			return &configured[i];
+
+	return NULL;
+}
+
+/*
+ * What this kernel was built and configured believing about one subject,
+ * setting and flag: 1 allowed, 0 refused, and -1 for nothing at all. The
+ * configured rows are asked first, so a configuration can refuse what the
+ * array allows; the array has no flag rows, so a flag is only ever configured.
+ */
+static int built(const char *subject, unsigned int setting, const char *detail)
+{
+	const struct configured *row = configured_row(subject, setting, detail);
+	unsigned int i;
+
+	if (row)
+		return row->allowed;
+
+	if (setting == FLAG)
+		return -1;
 
 	for (i = 0; i < ARRAY_SIZE(baseline); i++)
 		if (baseline[i].setting == setting &&
 		    !strcmp(baseline[i].subject, subject))
-			return &baseline[i];
+			return baseline[i].allowed;
 
-	return NULL;
+	return -1;
 }
 
 /* One row of the report, however the answer was arrived at. */
@@ -501,6 +623,14 @@ static int floodlight_show(struct seq_file *seq, void *unused)
 
 	mutex_lock(&lock);
 
+	/* Nobody tampered with anything; the configuration said something that
+	 * does not read, and the only honest answer to that is none. */
+	if (configured_invalid) {
+		seq_puts(seq, "# floodlight: the configured policy does not read; refusing to answer until it is fixed\n");
+		mutex_unlock(&lock);
+		return 0;
+	}
+
 	if (!intact()) {
 		seq_puts(seq, "# floodlight: TAMPERED -- this register has been written to behind its own back and no longer answers\n");
 		mutex_unlock(&lock);
@@ -513,7 +643,20 @@ static int floodlight_show(struct seq_file *seq, void *unused)
 		const struct rule *rule = &baseline[i];
 		struct light *row = find(rule->subject, rule->setting, "");
 
+		/* A configured row says what this one would, once. */
+		if (configured_row(rule->subject, rule->setting, ""))
+			continue;
+
 		say(seq, rule->subject, rule->setting, "",
+		    row ? row->allowed : rule->allowed, row);
+	}
+
+	for (i = 0; i < configured_count; i++) {
+		const struct configured *rule = &configured[i];
+		struct light *row = find(rule->subject, rule->setting,
+					 rule->detail);
+
+		say(seq, rule->subject, rule->setting, rule->detail,
 		    row ? row->allowed : rule->allowed, row);
 	}
 
@@ -523,7 +666,7 @@ static int floodlight_show(struct seq_file *seq, void *unused)
 		if (!row->subject[0])
 			continue;
 		/* Already shown beside the built-in answer it deviates from. */
-		if (builtin(row->subject, row->setting))
+		if (built(row->subject, row->setting, row->detail) >= 0)
 			continue;
 
 		say(seq, row->subject, row->setting, row->detail,
@@ -554,12 +697,89 @@ static char *word(char **at)
 	return start;
 }
 
+/*
+ * The configured text, read into rows at boot.
+ *
+ * Each row is copied into the one parse buffer and taken apart by the same
+ * word() and plain() a written line is, and held to more: nothing may follow
+ * the state, and "seal" is not a row -- sealing at boot is its own switch.
+ * Answers false for a text any row of which does not read, having kept none
+ * of it: the caller refuses to answer rather than answer with part.
+ */
+static bool __init configure(const char *text)
+{
+	unsigned int count = 0;
+
+	while (*text) {
+		char *at = parse.line, *subject, *setting, *state, *detail = "";
+		unsigned int length = 0, i, j;
+
+		while (text[length] && text[length] != ';' && text[length] != '\n')
+			length++;
+		if (length >= LINE)
+			return false;
+		for (i = 0; i < length; i++)
+			parse.line[i] = text[i];
+		parse.line[length] = 0;
+		text += length + (text[length] != 0);
+
+		subject = word(&at);
+		if (!subject)
+			continue; /* nothing between two semicolons */
+
+		setting = word(&at);
+		state = word(&at);
+		if (!setting || !state)
+			return false;
+
+		for (i = 0; i < SETTINGS && strcmp(setting, setting_name[i]); i++)
+			;
+		if (i == SETTINGS)
+			return false;
+
+		if (i == FLAG) {
+			detail = state;
+			state = word(&at);
+			if (!state)
+				return false;
+		}
+
+		if (word(&at) || (strcmp(state, "allow") && strcmp(state, "deny")))
+			return false;
+		if (strlen(subject) >= SUBJECT || strlen(detail) >= DETAIL)
+			return false;
+		if (!strcmp(subject, "seal") || !plain(subject) ||
+		    (i == FLAG && !plain(detail)))
+			return false;
+
+		for (j = 0; j < count; j++)
+			if (configured[j].setting == i &&
+			    !strcmp(configured[j].subject, subject) &&
+			    !strcmp(configured[j].detail, detail))
+				break;
+		if (j < count)
+			continue; /* named before, and the first says it */
+
+		if (count == CONFIGURED)
+			return false;
+
+		strscpy(configured[count].subject, subject, SUBJECT);
+		strscpy(configured[count].detail, detail, DETAIL);
+		configured[count].setting = i;
+		configured[count].allowed = !strcmp(state, "allow");
+		count++;
+	}
+
+	configured_count = count;
+	return true;
+}
+
 static ssize_t floodlight_write(struct file *file, const char __user *from,
 				size_t count, loff_t *offset)
 {
 	char *line, *at, *subject, *setting, *state, *detail = "";
-	const struct rule *rule;
 	struct light *row;
+	int rule;
 	unsigned int i;
 	bool allow, was;
 	long answer;
@@ -689,7 +909,7 @@ static ssize_t floodlight_write(struct file *file, const char __user *from,
 		goto out;
 	}
 
-	rule = builtin(subject, i);
+	rule = built(subject, i, detail);
 	row = find(subject, i, detail);
 
 	/*
@@ -699,15 +919,15 @@ static ssize_t floodlight_write(struct file *file, const char __user *from,
 	 */
 	if (row)
 		was = row->allowed;
-	else if (rule)
-		was = rule->allowed;
+	else if (rule >= 0)
+		was = rule;
 	else
 		was = !allow;
 
 	/* Saying again what is already true is not a change, and a line that
 	 * can be repeated is a line that can be repeated until the record
 	 * above it has scrolled out of the log. */
-	if (was == allow && (row || rule))
+	if (was == allow && (row || rule >= 0))
 		goto out;
 
 	/*
@@ -715,7 +935,7 @@ static ssize_t floodlight_write(struct file *file, const char __user *from,
 	 * than kept saying the same thing the baseline already says. The report
 	 * then calls the row "built in" again, which is the truth.
 	 */
-	if (rule && allow == rule->allowed) {
+	if (rule >= 0 && allow == rule) {
 		if (row)
 			memset(row, 0, sizeof(*row));
 
@@ -832,8 +1052,31 @@ static int __init floodlight_start(void)
 	/* Before the device exists, so nothing can be answered or written
 	 * until the seals it will be checked against are in place. */
 	secret = get_random_u32();
-	baseline_sum = baseline_seal();
 	guard_arm();
+
+	configured_invalid = !configure(configured_text);
+	if (configured_invalid) {
+		memset(configured, 0, sizeof(configured));
+		configured_count = 0;
+		pr_alert("floodlight: the configured policy has a row this register cannot read; every launch is refused until CONFIG_MOONWATER_FLOODLIGHT_POLICY is fixed\n");
+	}
+	memset(parse.line, 0, LINE);
+	if (!guard_intact()) {
+		compromised = true;
+		pr_alert("floodlight: the parse buffer was overrun; refusing to answer further\n");
+	}
+
+	baseline_sum = baseline_seal();
+
+	/*
+	 * Sealed before the device exists, so there is no moment a write could
+	 * land first: the configuration is the whole policy until reboot, and
+	 * root can read it but not loosen it.
+	 */
+#ifdef CONFIG_MOONWATER_FLOODLIGHT_SEAL
+	sealed = true;
+	pr_warn("floodlight: sealed at boot by the kernel's configuration; no change until reboot\n");
+#endif
 
 	answer = misc_register(&floodlight_device);
 	if (answer)

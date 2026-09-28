@@ -28301,7 +28301,86 @@ def harness_floodlight(argv):
     subject = int(re.search(r'#define SUBJECT (\d+)', text).group(1))
     detail = int(re.search(r'#define DETAIL (\d+)', text).group(1))
     slots = int(re.search(r'#define CHANGES (\d+)', text).group(1))
-    rows = len(declared) + slots
+    configured_room = int(re.search(r'#define CONFIGURED (\d+)', text).group(1))
+    rows = len(declared) + configured_room + slots
+    shell_define = lambda name: int(re.search(r'#define %s (\d+)' % name,
+                                              shell).group(1))
+    check(shell_define('FLOODLIGHT_CONFIGURED') == configured_room and
+          shell_define('FLOODLIGHT_NAME') == subject and
+          shell_define('FLOODLIGHT_DETAIL') == detail and
+          '#define FLOODLIGHT_LINE (FLOODLIGHT_NAME + FLOODLIGHT_DETAIL + 32)'
+              in shell and
+          '#define LINE (SUBJECT + DETAIL + 32)' in text,
+          'the shell reads configured rows to the same limits floodlight.c '
+          'sets on them')
+    check(shell_define('FLOODLIGHT_ROWS') >= len(declared) + configured_room + slots,
+          'the reader can hold every refusing built-in, configured and '
+          'changed row a report can carry')
+
+    #   The configured text, twice: floodlight.c reads it at boot and the
+    #   shell reads the same text when the register cannot be read. Each
+    #   switch is a #ifndef around literal rows, and the two files must
+    #   carry the same switches around the same rows, in the same order,
+    #   inside the same guard on the policy string being defined at all.
+    def configured_composition(source, opener):
+        block = source[source.index(opener):]
+        block = block[:block.index('"";') + 3]
+        switches = re.findall(r'#ifndef (CONFIG_MOONWATER_FLOODLIGHT_\w+)\n(.*?)#endif',
+                              block, re.S)
+        return (block.split('\n', 1)[1].split('\n', 2)[:2],
+                [(name, ''.join(re.findall(r'"([^"]*)"', body)))
+                 for name, body in switches])
+
+    kernel_composition = configured_composition(
+        text, 'static const char configured_text[] =')
+    shell_composition = configured_composition(
+        shell, 'static const p8 floodlight_configured_text[] =')
+    check([line.strip() for line in kernel_composition[0]] ==
+              ['#ifdef CONFIG_MOONWATER_FLOODLIGHT_POLICY',
+               'CONFIG_MOONWATER_FLOODLIGHT_POLICY ";"'] and
+          [line.strip() for line in shell_composition[0]] ==
+              ['#ifdef CONFIG_MOONWATER_FLOODLIGHT_POLICY',
+               'CONFIG_MOONWATER_FLOODLIGHT_POLICY ";"'],
+          'both compositions read the switches only where a configuration '
+          'defines the policy string, so a build with none refuses nothing')
+    check(kernel_composition[1] == shell_composition[1] and
+          len(kernel_composition[1]) >= 8,
+          'the shell composes the configured text exactly as floodlight.c '
+          'does (%d switches)' % len(kernel_composition[1]))
+    kconfig = (ROOT / 'src/moonwater/Kconfig').read_text()
+    for name, _ in kernel_composition[1]:
+        symbol = name[len('CONFIG_'):]
+        entry = re.search(r'config %s\n\s+bool .*?\n\s+default y\n\s+help\n'
+                          % symbol, kconfig)
+        check(bool(entry),
+              '%s is a Kconfig bool that allows by default and says what it '
+              'closes' % symbol)
+    check(bool(re.search(r'config MOONWATER_FLOODLIGHT_POLICY\n\s+string .*?\n'
+                         r'\s+depends on MOONWATER_FLOODLIGHT\n\s+default ""',
+                         kconfig)) and
+          bool(re.search(r'config MOONWATER_FLOODLIGHT_SEAL\n\s+bool .*?\n'
+                         r'\s+depends on MOONWATER_FLOODLIGHT\n\s+default n',
+                         kconfig)),
+          'the policy string defaults empty and the boot seal defaults off')
+    check(bool(re.search(r'#ifdef CONFIG_MOONWATER_FLOODLIGHT_SEAL\n'
+                         r'\s*sealed = true;', text)) and
+          text.index('sealed = true;') < text.index('answer = misc_register('),
+          'the boot seal is set before the device exists, so no write can '
+          'land first')
+    switch_rows = ''.join(body for _, body in kernel_composition[1])
+    profile_policies = []
+    for profile in sorted((ROOT / 'kernel/profile').rglob('*')):
+        if not profile.is_file():
+            continue
+        for line in profile.read_text(errors='replace').splitlines():
+            found = re.match(r'CONFIG_MOONWATER_FLOODLIGHT_POLICY="(.*)"$', line)
+            if found:
+                profile_policies.append((profile.name, found.group(1)))
+            named = re.match(r'CONFIG_(MOONWATER_FLOODLIGHT\w*)=', line)
+            if named:
+                check(('config %s\n' % named.group(1)) in kconfig,
+                      'profile %s sets %s, which Kconfig defines'
+                      % (profile.name, named.group(1)))
     widest = (subject - 1) + 1 + 8 + 1 + (detail - 1) + 1 + 5 + 1 + \
         len('changed 18446744073709551615s ago by uid 4294967295\n')
     check(bool(room) and int(room.group(1)) > rows * widest,
@@ -28470,8 +28549,9 @@ def harness_floodlight(argv):
                    'FLOODLIGHT_LAUNCH_ALLOW', ';') and
              calls('shell_tail_command', '&', '&', '!', 'confined'),
              "an applet that must be confined never runs in the shell's own process"),
-            (calls('floodlight_row_count', '=', 'floodlight_compiled_rows',
-                   '(', 'floodlight_rows', ')', ';',
+            (calls('else', 'if', '(', 'floodlight_compiled_rows', '(',
+                   'parsed', ',', 'address_of', 'parsed_count', ')', ')') and
+             calls('floodlight_row_count', '=', 'parsed_count', ';',
                    'state', '=', 'FLOODLIGHT_REPORT_BUILTIN', ';'),
              'a register that cannot be read leaves the answers this shell '
              'was built with standing, so removing the device grants nothing '
@@ -28909,8 +28989,11 @@ def harness_floodlight(argv):
              'the register has a fixed minor, so it needs no devtmpfs'),
             (r'return fold\(secret \^ [0-9]+u, row,', text,
              'a row seal is folded with the boot secret'),
-            (r'return fold\(secret \^ [0-9]+u, baseline, sizeof\(baseline\)\);', text,
-             'the built-in answers are summed with the boot secret'),
+            (r'u32 sum = fold\(secret \^ [0-9]+u, baseline, sizeof\(baseline\)\);'
+             r'[^}]*sum = fold\(sum, configured, sizeof\(configured\)\);'
+             r'\s*return fold\(sum, &configured_count, sizeof\(configured_count\)\);',
+             text,
+             'the built-in and configured answers are summed with the boot secret'),
             (r'secret = get_random_u32\(\);', text,
              'the secret is drawn fresh at every boot'),
             (r'late_initcall\(floodlight_start\);', text,
@@ -30246,6 +30329,14 @@ static void seq_puts(struct seq_file *s, const char *text)
 
     bridge = r'''
 static bool intact_public(void) { mutex_lock(&lock); bool a = intact(); mutex_unlock(&lock); return a; }
+static int baseline_answer(const char *subject)
+{
+        unsigned i;
+        for (i = 0; i < ARRAY_SIZE(baseline); i++)
+                if (!strcmp(baseline[i].subject, subject))
+                        return baseline[i].allowed;
+        return -1;
+}
 '''
 
     driver = r'''
@@ -30284,8 +30375,43 @@ static void reset(u32 random)
         shell_parser_source_kind = SHELL_PARSER_SOURCE_MEMORY;
         mock_random = random;
         secret = get_random_u32();
+        memset(configured, 0, sizeof(configured));
+        configured_count = 0;
+        configured_invalid = false;
         baseline_sum = baseline_seal();
         guard_arm();
+}
+
+/* One text through both readers of it: floodlight.c's configure() and the
+   shell's floodlight_policy_take(). They must agree on whether it reads and,
+   when it does, on every row. */
+static bool configured_agree(const char *text, bool want, const char *what)
+{
+        floodlight_row rows[FLOODLIGHT_ROWS];
+        positive count = 0;
+        bool kernel, shell_ok, same;
+        unsigned i;
+
+        memset(configured, 0, sizeof(configured));
+        configured_count = 0;
+        kernel = configure(text);
+        shell_ok = floodlight_policy_take((string_address)text, rows, &count);
+        same = kernel == shell_ok;
+        if (kernel && shell_ok) {
+                same = same && count == configured_count;
+                for (i = 0; same && i < configured_count; i++)
+                        same = !strcmp((char *)rows[i].subject, configured[i].subject) &&
+                               !strcmp((char *)rows[i].detail, configured[i].detail) &&
+                               rows[i].setting == configured[i].setting &&
+                               rows[i].allowed == configured[i].allowed;
+        }
+        if (!same || kernel != want)
+                printf("  configured [%s]: kernel %d shell %d want %d\n",
+                       text, kernel, shell_ok, want);
+        check(same && kernel == want, what);
+        memset(configured, 0, sizeof(configured));
+        configured_count = 0;
+        return same;
 }
 
 /* One writer among several: adds, changes and gives back rows, and reads the
@@ -30872,6 +30998,100 @@ int main(void)
                 test_ptrace_scope_safe = true;
         }
 
+        /* --- the configured rows, read twice -------------------------------- */
+        {
+                char long_subject[128], long_row[160], many[4096];
+                unsigned i;
+
+                memset(long_subject, 'n', SUBJECT - 1);
+                strcpy(long_subject + SUBJECT - 1, " spawn deny");
+                configured_agree(long_subject, true, "the longest subject a row holds is read");
+                memset(long_subject, 'n', SUBJECT);
+                strcpy(long_subject + SUBJECT, " spawn deny");
+                configured_agree(long_subject, false, "a subject one past a row is not");
+                memset(long_row, ' ', LINE);
+                strcpy(long_row + LINE, "awk spawn deny");
+                configured_agree(long_row, false, "a row longer than a written line is not");
+                many[0] = 0;
+                for (i = 0; i <= CONFIGURED; i++)
+                        sprintf(many + strlen(many), "p%u run deny;", i);
+                configured_agree(many, false, "one row past the configured room is refused whole");
+                many[0] = 0;
+                for (i = 0; i < CONFIGURED; i++)
+                        sprintf(many + strlen(many), "p%u run deny;", i);
+                configured_agree(many, true, "the configured room is exactly what it says");
+                for (i = 0; i < ARRAY_SIZE(configured_corpus); i++)
+                        configured_agree(configured_corpus[i].text,
+                                         configured_corpus[i].reads,
+                                         configured_corpus[i].what);
+        }
+
+        /* --- configured rows are built-in answers ------------------------- */
+        reset(0x11223344);
+        {
+                char *xargs_tool[] = {"xargs", NULL};
+                char *awk_tool[] = {"awk", NULL};
+                bool said = true;
+                unsigned refused = 0, i;
+
+                for (i = 0; i < ARRAY_SIZE(baseline); i++)
+                        refused += !baseline[i].allowed &&
+                                   strcmp(baseline[i].subject, "find");
+
+                check(configure("find spawn deny; tar flag --to-command deny;"
+                                "xargs run deny; awk spawn allow; env flag -S deny"),
+                      "a configured text reads");
+                baseline_sum = baseline_seal();
+                check(intact_public(), "and is summed with the array");
+                check(shows("--to-command") && !shows("changed"),
+                      "configured rows are reported as built in");
+                reread();
+                check(floodlight_row_count ==
+                          refused + 4 - (baseline_answer("awk") == 0),
+                      "the reader carries each configured refusal once, "
+                      "and a configured allowance over the array's refusal "
+                      "not at all");
+                check(reader_says("find", FLOODLIGHT_SPAWN, "", &said) && !said,
+                      "a configured row wins over the array's allowance");
+                check(!reader_says("awk", FLOODLIGHT_SPAWN, "", &said),
+                      "and over the array's refusal");
+                check(reader_flag_refused("tar", "--to-command=x"),
+                      "a configured flag refusal reaches the reader");
+                check(reader_tool_launch(xargs_tool, false) == FLOODLIGHT_LAUNCH_REFUSE &&
+                      reader_tool_launch(awk_tool, false) == FLOODLIGHT_LAUNCH_ALLOW,
+                      "and decides launches");
+                check(reader_flag_refused("env", "-S") &&
+                      reader_flag_refused("env", "-iS") &&
+                      reader_flag_refused("env", "-Secho hi") &&
+                      reader_flag_refused("env", "-S echo hi") &&
+                      !reader_flag_refused("env", "-i") &&
+                      !reader_flag_refused("env", "--ignore-environment") &&
+                      !reader_flag_refused("env", "SOME=S"),
+                      "a one-letter refusal covers its clusters and attached "
+                      "values, and nothing that is not a single-dash word");
+
+                check(put("find spawn allow") > 0 && shows("changed"),
+                      "root can deviate from a configured row");
+                reread();
+                said = false;
+                check(reader_says("find", FLOODLIGHT_SPAWN, "", &said) && said,
+                      "and the reader sees the deviation");
+                check(put("find spawn deny") > 0 && !shows("changed"),
+                      "putting it back gives the row back");
+                check(put("tar flag --to-command allow") > 0 && shows("changed") &&
+                      put("tar flag --to-command deny") > 0 && !shows("changed"),
+                      "a configured flag row deviates and returns the same way");
+
+                configured_invalid = true;
+                check(shows("does not read") && !shows("find"),
+                      "a configuration that does not read answers nothing");
+                check(put("awk spawn allow") == -EPERM,
+                      "and takes no change");
+                check(!reader_accept(report(), strlen(report())),
+                      "and its banner is never policy input");
+                configured_invalid = false;
+        }
+
         /* --- the lock is balanced whatever happened ------------------------ */
         check(mock_lock_depth == 0, "every path leaves the lock as it found it");
 
@@ -30890,6 +31110,48 @@ int main(void)
     runnable = runnable.replace(
         "static const struct rule baseline[] = {",
         "static struct rule baseline[] = {")
+
+    #   Texts both readers of the configured policy are run over, with what
+    #   each should make of it: the grammar's edges, every switch turned off
+    #   at once, and the policy string of every shipped profile alone and
+    #   composed with every switch off -- so no image this tree can build
+    #   boots into a register that refuses to answer.
+    def c_string(value):
+        return '"%s"' % ''.join(
+            ch if ch.isalnum() or ch in ' ;:/._+-=' else '\\x%02x""' % ord(ch)
+            for ch in value)
+    corpus_rows = [
+        ('', True, 'an empty text is no rows'),
+        (' ; ;\t;', True, 'rows of nothing are skipped'),
+        ('awk spawn deny', True, 'one row reads'),
+        ('awk\tspawn\tdeny;', True, 'tabs part words as spaces do'),
+        ('awk spawn deny; awk spawn allow', True, 'a row named twice is taken the first time'),
+        ('find flag -exec deny\nxargs run deny', True, 'a newline parts rows'),
+        ('/usr/bin/curl network deny', True, 'a path is a subject'),
+        ('tar flag --to-command deny', True, 'a flag row reads'),
+        ('flag spawn deny; allow network deny', True, 'names that look like words are names'),
+        ('awk', False, 'a row with no setting does not read'),
+        ('awk spawn', False, 'nor one with no state'),
+        ('awk spawn maybe', False, 'nor a state that is not allow or deny'),
+        ('awk fly deny', False, 'nor a setting that does not exist'),
+        ('awk spawn deny extra', False, 'nor anything after the state'),
+        ('tar flag deny', False, 'nor a flag row with no state'),
+        ('seal', False, 'seal is its own switch, not a row'),
+        ('seal spawn deny', False, 'and not a subject either'),
+        ('a\x1bb spawn deny', False, 'an escape in a name does not read'),
+        ('tar flag --a"b deny', False, 'nor a quote in a flag'),
+        ('awk spawn deny; broken', False, 'one bad row refuses the whole text'),
+        (switch_rows, True, 'every switch off at once reads'),
+    ]
+    for name, policy in profile_policies:
+        corpus_rows.append((policy, True, 'profile %s policy reads' % name))
+        corpus_rows.append((policy + ';' + switch_rows, True,
+                            'profile %s policy reads beside every switch' % name))
+    corpus = ('struct configured_case { const char *text; bool reads; const char *what; };\n'
+              'static const struct configured_case configured_corpus[] = {\n' +
+              ''.join('        {%s, %s, %s},\n' % (c_string(t), 'true' if r else 'false',
+                                                     c_string(w))
+                      for t, r, w in corpus_rows) + '};\n')
 
     round_trip = r"""
 /* The report the module just wrote, handed to the shell's reader. */
@@ -30994,7 +31256,7 @@ static b32 reader_tool_launch(char **arguments, bool final)
             (work_path / executable).chmod(0o755)
         binary, _ = build_c(Path(work) / 'run.c',
                             mock + runnable + bridge + reader_mock + descriptor +
-                            reader + decision + round_trip + driver,
+                            reader + decision + round_trip + corpus + driver,
                             ('-std=gnu11', '-O1', '-g', '-w'))
         ran = subprocess.run([str(binary)], cwd=work, text=True,
                              capture_output=True)

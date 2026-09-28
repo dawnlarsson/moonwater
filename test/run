@@ -4502,6 +4502,94 @@ POLICY_UTILITIES
         fi
 }
 
+#       The shell as kernel/profile/sec_hardened configures it: its Floodlight
+#       policy string and dangerous-flag switches, handed to the compiler the
+#       way the kernel configuration hands them over, so the rows the shell
+#       carries for a missing register are the ones that profile ships. A
+#       switch the profile does not turn off keeps its Kconfig default, y.
+#       Another whole-shell build, so run -j makes it beside the others.
+need_hardened_shell()
+{
+        [ -x "$work/hardened-shell" ] && return 0
+        (
+                hardened_profile=kernel/profile/sec_hardened
+                set -- "-DCONFIG_MOONWATER_FLOODLIGHT_POLICY=$(sed -n \
+                        's/^CONFIG_MOONWATER_FLOODLIGHT_POLICY=//p' "$hardened_profile")"
+                for hardened_switch in $(sed -n '/^    menu "Floodlight: dangerous flags"/,/^    endmenu/s/^    config \(MOONWATER_FLOODLIGHT_[A-Z_]*\)$/\1/p' \
+                        src/moonwater/Kconfig); do
+                        grep -qx "CONFIG_$hardened_switch=n" "$hardened_profile" ||
+                                set -- "$@" "-DCONFIG_$hardened_switch=1"
+                done
+                freestanding programs/shell.c "$work/hardened-shell.building" \
+                        "$host_arch" "$@"
+        ) || return 1
+        mkdir -p "$work/hardened-bin" || return 1
+        for hardened_name in $utilities bash sh; do
+                ln -sf "$work/hardened-shell" "$work/hardened-bin/$hardened_name" ||
+                        return 1
+        done
+        mv "$work/hardened-shell.building" "$work/hardened-shell"
+}
+
+#       What sec_hardened refuses, refused, by the shell's own copy of it on a
+#       machine with no register; and what it does not name, still allowed.
+#       Flag and run rows need nothing of /proc, so they hold with it masked;
+#       awk's spawn denial needs confinement, which cannot be proved there,
+#       so awk is refused outright -- the policy failing closed. Each row is
+#       name, status, a word the output must hold, and the command.
+floodlight_hardened()
+{
+        need_hardened_shell || return 1
+        hardened_failed=0
+        hardened_masked=0
+        /usr/bin/unshare -rm true 2> /dev/null && hardened_masked=1
+        while IFS='|' read -r hardened_case hardened_want hardened_needle \
+                hardened_command; do
+                [ -n "$hardened_case" ] || continue
+                case $hardened_case in
+                masked-*) [ "$hardened_masked" = 1 ] || continue ;;
+                esac
+                PATH="$work/hardened-bin:/usr/bin:/bin" HB="$work/hardened-bin" \
+                        /bin/sh -c "$hardened_command" > "$work/hardened.out" 2>&1
+                hardened_got=$?
+                if [ "$hardened_got" = "$hardened_want" ] &&
+                        { [ -z "$hardened_needle" ] ||
+                          grep -q -- "$hardened_needle" "$work/hardened.out"; }; then
+                        tally "floodlight-hardened-$hardened_case" 1 1
+                else
+                        tally "floodlight-hardened-$hardened_case" 0 1
+                        note "floodlight hardened $hardened_case: status $hardened_got, want $hardened_want: $(head -c 200 "$work/hardened.out")"
+                        hardened_failed=1
+                fi
+        done <<'HARDENED'
+find-exec|126|flag refused|find /dev/null -exec true {} ';'
+find-execdir|126|flag refused|find /dev/null -execdir true {} ';'
+find-delete|126|flag refused|find /dev/null -delete
+find-fprint|126|flag refused|find /dev/null -fprint /dev/null
+find-print|0||find /dev/null -print
+env-split|126|flag refused|env -S true
+env-split-cluster|126|flag refused|env -iS true
+env-split-long|126|flag refused|env --split-string=true
+env-named|0||env true
+xargs|126|run refused|xargs < /dev/null
+split-filter|126|flag refused|split --filter=cat /dev/null
+split-filter-abbreviated|126|flag refused|split --fil=cat /dev/null
+sort-compress|126|flag refused|sort --compress-program=gzip /dev/null
+timeout|126|run refused|timeout 5 true
+nice|126|run refused|nice true
+unshare|126|run refused|unshare true
+chroot|126|run refused|chroot / true
+wget|126|run refused|wget
+shell-find-delete|126|flag refused|"$HB/sh" -c 'find /dev/null -delete'
+shell-xargs|126|run refused|"$HB/sh" -c 'xargs < /dev/null'
+cat|0||cat /dev/null
+masked-find-exec|126|flag refused|/usr/bin/unshare -rm /bin/sh -c 'mount -t tmpfs tmpfs /proc && "$HB/find" /dev/null -exec true {} ";"'
+masked-awk|126||/usr/bin/unshare -rm /bin/sh -c 'mount -t tmpfs tmpfs /proc && echo x | "$HB/awk" 1'
+masked-cat|0||/usr/bin/unshare -rm /bin/sh -c 'mount -t tmpfs tmpfs /proc && "$HB/cat" /dev/null'
+HARDENED
+        return "$hardened_failed"
+}
+
 #       The self-test drives the engine end to end on a farm of its own, and
 #       those inner runs write tally rows like any run does. Only the oracle's
 #       own verdict belongs in this tally, so it gets a file of its own and
@@ -5095,6 +5183,7 @@ lane_misc()
         fi
 
         floodlight_masked_proc || misc_failed=1
+        floodlight_hardened || misc_failed=1
 
         differential_domain misc "$policy_farm" || misc_failed=1
         return "$misc_failed"
@@ -16275,7 +16364,10 @@ if [ "$jobs" -gt 1 ]; then
                 shell_build=$!
                 need_policy_utilities > "$work/shared.policy.log" 2>&1 &
                 policy_build=$!
+                need_hardened_shell > "$work/shared.hardened.log" 2>&1 &
+                hardened_build=$!
                 wait "$shell_build" && wait "$policy_build" &&
+                        wait "$hardened_build" &&
                         need_policy_farm > "$work/shared.farm.log" 2>&1 ||
                         : > "$work/shared.failed"
                 : > "$work/shared.done"

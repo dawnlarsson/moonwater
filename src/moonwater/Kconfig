@@ -20,6 +20,173 @@ menu "Moonwater"
           is the whole thing it is built to avoid. The floodlight harness in
           test/differential.py fails the build if that separation ever slips.
 
+          Out of the box it refuses nothing: every tool behaves as its bash,
+          dash or GNU counterpart does. The options below are where a machine
+          says otherwise, and what they refuse stays refused -- a script that
+          breaks under them is the policy doing what it was asked to.
+
+    config MOONWATER_FLOODLIGHT_POLICY
+        string "Floodlight: built-in policy rows"
+        depends on MOONWATER_FLOODLIGHT
+        default ""
+        help
+          Rows compiled into the register as built-in answers, in the words a
+          line written to /dev/floodlight takes, separated by semicolons:
+
+            awk spawn deny; tar flag --to-command deny; /usr/bin/curl network deny
+
+          A row is SUBJECT SETTING STATE, or SUBJECT flag FLAG STATE. SUBJECT
+          is an applet name or an absolute path; SETTING is run (may it start
+          at all), flag (may it be given this argument), spawn (may it start
+          other programs) or network (may it open sockets); STATE is allow or
+          deny. The shell carries the same rows for when the register cannot
+          be read. Rows here win over the dangerous-flag switches below, and
+          a row named twice is taken the first time; at most 64 rows in all.
+
+          A row that does not read is not skipped, because skipping a refusal
+          is an allowance nobody wrote: the register then refuses to answer
+          and every launch is refused until this is fixed.
+
+    config MOONWATER_FLOODLIGHT_SEAL
+        bool "Floodlight: seal the policy at boot"
+        depends on MOONWATER_FLOODLIGHT
+        default n
+        help
+          Seal the register before it is registered, as `echo seal >
+          /dev/floodlight` would once the machine is up. The configured rows
+          are then the whole policy until reboot: root can read the register
+          and cannot loosen it. Leave this off to keep runtime changes.
+
+    menu "Floodlight: dangerous flags"
+        depends on MOONWATER_FLOODLIGHT
+
+    comment "Each switch, turned off, adds the deny rows that close one exploit class"
+
+    config MOONWATER_FLOODLIGHT_AWK_SPAWN
+        bool "awk may start programs: system(), print | cmd, cmd | getline"
+        default y
+        help
+          Off adds `awk spawn deny`. Closes data-driven command execution:
+          awk is the one common tool where the name of the program to run is
+          built out of its input, because awk program text arrives in files
+          and variables. With it off, awk still runs; its system() and pipes
+          fail under a seccomp filter installed before awk reads a byte.
+
+          Confinement needs the launching shell to prove things through /proc
+          (no inherited filter, a protected parent, a script it can freeze),
+          so awk refuses to start where it cannot: from a foreign shell, with
+          /proc masked, or while the shell reads its script from a pipe.
+
+    config MOONWATER_FLOODLIGHT_SHELL_ESCAPES
+        bool "script, setarch and split --filter may start a shell"
+        default y
+        help
+          Off adds `script spawn deny`, `setarch spawn deny` and `split flag
+          --filter deny`. Closes the shell escape: script's session and
+          setarch with no command are each a shell, and split --filter hands
+          its argument to sh -c, so any of them turns a restricted command
+          line into an unrestricted one.
+
+    config MOONWATER_FLOODLIGHT_FIND_EXEC
+        bool "find may run commands: -exec, -execdir, -ok, -okdir"
+        default y
+        help
+          Off refuses those four find flags. Closes command execution per
+          walked file, where the file names reaching the command are data an
+          attacker can plant in the tree.
+
+    config MOONWATER_FLOODLIGHT_FIND_DELETE
+        bool "find may delete: -delete"
+        default y
+        help
+          Off refuses find's -delete. Closes recursive destruction driven by
+          names in a walked tree.
+
+    config MOONWATER_FLOODLIGHT_FIND_WRITE
+        bool "find may write files it names: -fprint, -fprint0, -fprintf"
+        default y
+        help
+          Off refuses those find flags. Closes arbitrary file writes: each one
+          creates or truncates the file named after it, with contents a
+          format string controls.
+
+    config MOONWATER_FLOODLIGHT_XARGS
+        bool "xargs may run"
+        default y
+        help
+          Off adds `xargs run deny`. Closes command lines built from input
+          data: xargs has no use but running a command with what it read.
+
+    config MOONWATER_FLOODLIGHT_SPLIT_FILTER
+        bool "split may pipe each piece into a command: --filter"
+        default y
+        help
+          Off refuses split's --filter (and its abbreviations, --fil and
+          the like). Closes command execution per output chunk: --filter
+          hands every piece to `sh -c COMMAND`, so the command runs as many
+          times as the input has pieces, with the data on its stdin.
+
+    config MOONWATER_FLOODLIGHT_SORT_COMPRESS
+        bool "sort may run a compressor: --compress-program"
+        default y
+        help
+          Off refuses sort's --compress-program (and its abbreviations).
+          Closes running a program named on the command line with sort's
+          temporary data: sort starts it for every spill it writes and
+          reads back, as GNU's does.
+
+    config MOONWATER_FLOODLIGHT_ENV_SPLIT
+        bool "env may split a string into a command: -S, --split-string"
+        default y
+        help
+          Off refuses env's -S and --split-string, including -S clustered
+          with other short options or carrying its value (-iS, -S'cmd arg',
+          and the one argument a #!/usr/bin/env -S line passes). Closes a
+          command line derived from one string rather than typed as words.
+
+          Floodlight reads every word of env's command line, the command it
+          runs and that command's arguments included, and does not know
+          which of them are env's own. So with this off, env refuses any
+          single-dash word holding an S anywhere after it: `env sort -S 1G`,
+          `env ls -lhS`, and a script started through `#!/usr/bin/env bash`
+          whose own arguments carry one (`./script -lS`). env naming its
+          command with no such word, as that #! line does, still runs.
+
+    config MOONWATER_FLOODLIGHT_LAUNCHERS
+        bool "command launchers may run: timeout, nice, nohup, stdbuf and kin"
+        default y
+        help
+          Off adds run denials for timeout, nice, nohup, stdbuf, setsid,
+          flock, chrt, ionice, taskset, prlimit, choom, uclampset, coresched,
+          setpgid and pipesz. Closes the launcher shell escape: each one runs
+          whatever its arguments name, so any of them allowed where a shell
+          is not is a shell (`nice /bin/sh`).
+
+    config MOONWATER_FLOODLIGHT_NAMESPACES
+        bool "namespace, root and credential tools may run"
+        default y
+        help
+          Off adds run denials for unshare, nsenter, chroot, pivot_root and
+          setpriv. Closes entering or making namespaces, changing the root
+          and changing credentials -- the moves that take a process out from
+          under a policy scoped to it. mount and umount are not here: they
+          are shell builtins as well as applets, and floodlight decides what
+          a launch starts, not what the shell does itself.
+
+    config MOONWATER_FLOODLIGHT_NETWORK_FETCH
+        bool "wget and fetch may run"
+        default y
+        help
+          Off adds run denials for wget and fetch. Closes downloading a next
+          stage and sending files out with the tools this image carries.
+
+    comment "Not switches: tar has no --to-command, -I, --checkpoint-action or"
+    comment "--rsh-command and refuses --use-compress-program; sed has no e or"
+    comment "s///e; awk has no /inet/; sed w and dd of=DEVICE are file writes"
+    comment "floodlight cannot tell from any other. Name a policy row instead."
+
+    endmenu
+
     config MOONWATER_SHELL
         bool "Bundle the Moonwater shell in the initial filesystem"
         depends on MOONWATER_CORE=y

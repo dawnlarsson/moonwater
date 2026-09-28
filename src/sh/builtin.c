@@ -16163,10 +16163,14 @@ static string_address const floodlight_denied[] = {
         is the default. An applet then costs three comparisons against a count
         of zero rather than three walks over eight kilobytes of text.
 */
-#define FLOODLIGHT_REPORT 8192
+#define FLOODLIGHT_REPORT 20480
 #define FLOODLIGHT_NAME 64
 #define FLOODLIGHT_DETAIL 32
-#define FLOODLIGHT_ROWS 48
+/* floodlight.c's CONFIGURED and LINE: the rows a configuration may add, and
+   the longest one row may be. */
+#define FLOODLIGHT_CONFIGURED 64
+#define FLOODLIGHT_LINE (FLOODLIGHT_NAME + FLOODLIGHT_DETAIL + 32)
+#define FLOODLIGHT_ROWS 112
 
 /* The settings, in the order floodlight.c names them. */
 #define FLOODLIGHT_RUN 0
@@ -16606,26 +16610,225 @@ static bool floodlight_take(string_address text, positive length,
         return header;
 }
 
+/*
+        The configured answers, as floodlight.c carries them: the policy
+        string and the dangerous-flag switches of the kernel configuration,
+        composed into one text in the same order and the same bytes. The
+        floodlight harness fails the build when the two compositions differ.
+        Only where a configuration is there to say so -- the string is always
+        defined where Kconfig is -- so a shell built without one refuses
+        nothing it was not also built refusing.
+
+        The contract with whatever hands the configuration to this compile:
+        defining CONFIG_MOONWATER_FLOODLIGHT_POLICY says a configuration is
+        here, and every switch it does not also define reads as off, which
+        is a refusal. So a handoff that defines the string must define every
+        CONFIG_MOONWATER_FLOODLIGHT_* bool that is y, exactly as autoconf.h
+        does for the kernel; one that carries none of them must carry the
+        string neither. Until the build's configuration header carries them,
+        this text is empty in the image and a live register's report is what
+        brings the configured rows to the shell.
+*/
+static const p8 floodlight_configured_text[] =
+#ifdef CONFIG_MOONWATER_FLOODLIGHT_POLICY
+        CONFIG_MOONWATER_FLOODLIGHT_POLICY ";"
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_AWK_SPAWN
+        "awk spawn deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_SHELL_ESCAPES
+        "script spawn deny; setarch spawn deny; split flag --filter deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_FIND_EXEC
+        "find flag -exec deny; find flag -execdir deny;"
+        "find flag -ok deny; find flag -okdir deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_FIND_DELETE
+        "find flag -delete deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_FIND_WRITE
+        "find flag -fprint deny; find flag -fprint0 deny; find flag -fprintf deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_XARGS
+        "xargs run deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_SPLIT_FILTER
+        "split flag --filter deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_SORT_COMPRESS
+        "sort flag --compress-program deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_ENV_SPLIT
+        "env flag -S deny; env flag --split-string deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_LAUNCHERS
+        "timeout run deny; nice run deny; nohup run deny; stdbuf run deny;"
+        "setsid run deny; flock run deny; chrt run deny; ionice run deny;"
+        "taskset run deny; prlimit run deny; choom run deny; uclampset run deny;"
+        "coresched run deny; setpgid run deny; pipesz run deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_NAMESPACES
+        "unshare run deny; nsenter run deny;"
+        "chroot run deny; pivot_root run deny; setpriv run deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_NETWORK_FETCH
+        "wget run deny; fetch run deny;"
+#endif
+#endif
+        "";
+
+/* floodlight.c's plain(), over one token: the bytes a name, a path or a flag
+   is made of, and nothing that could print a row of its own. */
+static bool floodlight_plain(floodlight_token word)
+{
+        for (positive at = 0; at < word.length; at++)
+        {
+                p8 c = (p8)word.at[at];
+
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+                    c == '-' || c == '/' || c == '+' || c == ':')
+                        continue;
+
+                return false;
+        }
+
+        return word.length != 0;
+}
+
+/*
+        The configured text, read into rows as floodlight.c's configure()
+        reads it at boot -- a row there that does not read is one here that
+        does not, and the two are run against each other over the same texts
+        by the floodlight harness. Rows are split at semicolons and newlines,
+        words at spaces and tabs; nothing may follow the state; "seal" is not
+        a row; a row named twice is taken the first time. Answers false,
+        having published nothing, for a text any row of which does not read.
+*/
+static bool floodlight_policy_take(string_address text,
+                                   floodlight_row address_to rows,
+                                   positive address_to count_out)
+{
+        p8 line[FLOODLIGHT_LINE];
+        positive count = address_to count_out;
+
+        while (address_to text)
+        {
+                floodlight_token subject, said, state, detail = {null, 0};
+                string_address at = (string_address)line;
+                positive length = 0;
+                positive i, j;
+
+                while (text[length] && text[length] != ';' &&
+                       text[length] != '\n')
+                        length++;
+                if (length >= FLOODLIGHT_LINE)
+                        return false;
+                for (i = 0; i < length; i++)
+                        line[i] = text[i] == '\t' ? ' ' : (p8)text[i];
+                line[length] = 0;
+                text += length + (text[length] != 0);
+
+                subject = floodlight_word(&at);
+                if (!subject.length)
+                        continue;
+
+                said = floodlight_word(&at);
+                state = floodlight_word(&at);
+                if (!said.length || !state.length)
+                        return false;
+
+                for (i = 0; i < FLOODLIGHT_SETTINGS; i++)
+                        if (floodlight_is(said, floodlight_settings[i]))
+                                break;
+                if (i == FLOODLIGHT_SETTINGS)
+                        return false;
+
+                if (i == FLOODLIGHT_FLAG)
+                {
+                        detail = state;
+                        state = floodlight_word(&at);
+                        if (!state.length)
+                                return false;
+                }
+
+                if (floodlight_word(&at).length ||
+                    (!floodlight_is(state, "allow") &&
+                     !floodlight_is(state, "deny")))
+                        return false;
+                if (subject.length >= FLOODLIGHT_NAME ||
+                    detail.length >= FLOODLIGHT_DETAIL)
+                        return false;
+                if (floodlight_is(subject, "seal") ||
+                    !floodlight_plain(subject) ||
+                    (i == FLOODLIGHT_FLAG && !floodlight_plain(detail)))
+                        return false;
+
+                for (j = 0; j < count; j++)
+                        if (rows[j].setting == i &&
+                            floodlight_is(subject,
+                                          (string_address)rows[j].subject) &&
+                            floodlight_is(detail,
+                                          (string_address)rows[j].detail))
+                                break;
+                if (j < count)
+                        continue;
+
+                if (count == FLOODLIGHT_CONFIGURED)
+                        return false;
+
+                memory_copy_apart(rows[count].subject, subject.at,
+                                  subject.length);
+                rows[count].subject[subject.length] = 0;
+                if (detail.length)
+                        memory_copy_apart(rows[count].detail, detail.at,
+                                          detail.length);
+                rows[count].detail[detail.length] = 0;
+                rows[count].setting = (p8)i;
+                rows[count].allowed = (p8)floodlight_is(state, "allow");
+                count++;
+        }
+
+        address_to count_out = count;
+        return true;
+}
+
 /* The answers this shell was built with, as rows: what stands when no
-   register can be read. Answers how many it wrote. */
-static positive floodlight_compiled_rows(floodlight_row address_to rows)
+   register can be read. The configured rows first, as floodlight.c asks
+   them first, then the array's refusals it does not already answer. False
+   for a configured text that does not read. */
+static bool floodlight_compiled_rows(floodlight_row address_to rows,
+                                     positive address_to count_out)
 {
         positive count = 0;
 
-        for (positive i = 0; floodlight_denied[i] && count < FLOODLIGHT_ROWS;
-             i++)
-        {
-                floodlight_row address_to row = rows + count++;
-                positive length = string_length(floodlight_denied[i]);
+        if (!floodlight_policy_take(
+                (string_address)floodlight_configured_text, rows,
+                address_of count))
+                return false;
 
-                memory_copy_apart(row->subject, floodlight_denied[i],
-                                  length + 1);
-                row->detail[0] = 0;
-                row->setting = FLOODLIGHT_SPAWN;
-                row->allowed = 0;
+        for (positive i = 0; floodlight_denied[i]; i++)
+        {
+                floodlight_token name = {(string_address)floodlight_denied[i],
+                                         string_length(floodlight_denied[i])};
+                positive j;
+
+                for (j = 0; j < count; j++)
+                        if (rows[j].setting == FLOODLIGHT_SPAWN &&
+                            floodlight_is(name, (string_address)rows[j].subject))
+                                break;
+                if (j < count || count == FLOODLIGHT_ROWS)
+                        continue;
+
+                memory_copy_apart(rows[count].subject, name.at,
+                                  name.length + 1);
+                rows[count].detail[0] = 0;
+                rows[count].setting = FLOODLIGHT_SPAWN;
+                rows[count].allowed = 0;
+                count++;
         }
 
-        return count;
+        address_to count_out = count;
+        return true;
 }
 
 static fn floodlight_load()
@@ -16690,10 +16893,14 @@ static fn floodlight_load()
         {
                 if (floodlight_report_promised)
                         state = FLOODLIGHT_REPORT_VALID;
-                else
+                else if (floodlight_compiled_rows(parsed,
+                                                  address_of parsed_count))
                 {
-                        floodlight_row_count = floodlight_compiled_rows(
-                            floodlight_rows);
+                        if (parsed_count)
+                                memory_copy_apart(
+                                    floodlight_rows, parsed,
+                                    parsed_count * sizeof(parsed[0]));
+                        floodlight_row_count = parsed_count;
                         state = FLOODLIGHT_REPORT_BUILTIN;
                 }
                 goto publish;
@@ -17078,7 +17285,14 @@ static bool floodlight_says(string_address name, positive setting,
    ask for the bounded name before '='. GNU-style applet parsing also accepts
    unique long-option prefixes; a denied canonical spelling therefore covers
    its abbreviations, while an explicit row for the abbreviation still wins.
-   Short-option aliases and clusters remain distinct policy spellings. */
+
+   A short option can be clustered or carry its value in the same word:
+   -iS, -Sfoo, and the one argument a #!/usr/bin/env -S line passes. So a
+   denied one-letter row refuses that letter anywhere in a single-dash word.
+   Which letters take values is the tool's own knowledge, not the policy's,
+   so this also refuses a value that merely contains the letter -- the side
+   a refusal is allowed to err on. A different one-letter alias of the same
+   option is still its own spelling. */
 static bool floodlight_flag_refused(string_address name,
                                     string_address argument)
 {
@@ -17089,6 +17303,24 @@ static bool floodlight_flag_refused(string_address name,
         if (floodlight_says_length(name, FLOODLIGHT_FLAG, argument, length,
                                    address_of allowed))
                 return !allowed;
+
+        if (length >= 2 && argument[0] == '-' && argument[1] != '-')
+        {
+                floodlight_load();
+                for (positive at = 0; at < floodlight_row_count; at++)
+                {
+                        floodlight_row address_to row = floodlight_rows + at;
+
+                        if (row->setting == FLOODLIGHT_FLAG && !row->allowed &&
+                            row->detail[0] == '-' && row->detail[1] &&
+                            row->detail[1] != '-' && !row->detail[2] &&
+                            word_is((string_address)row->subject, name) &&
+                            memory_first_of(argument + 1, row->detail[1],
+                                            length - 1))
+                                return true;
+                }
+                return false;
+        }
 
         if (length < 3 || argument[0] != '-' || argument[1] != '-')
                 return false;
