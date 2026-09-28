@@ -6496,6 +6496,26 @@ Cannot write to 'out' (File too large)."
                 note "wget -O onto a symlink: status $wget_link_status, victim [$(cat "$wget_place/victim")]"
                 builtins_failed=1
         fi
+        #       A link to a FIFO -- /dev/stdout onto a pipe is one -- is
+        #       followed into the FIFO, as GNU wget follows it, and stays.
+        wget_fifo_dir=$wget_place/stream-ours
+        rm -f "$wget_fifo_dir/linked-fifo" "$wget_fifo_dir/fifo-link"
+        mkfifo "$wget_fifo_dir/linked-fifo"
+        ln -s linked-fifo "$wget_fifo_dir/fifo-link"
+        timeout 10 sh -c 'exec wc -c < "$1"' sh "$wget_fifo_dir/linked-fifo" \
+                > "$wget_fifo_dir/linked-count" 2>/dev/null &
+        wget_reader=$!
+        timeout 10 "$farm/wget" -q -O "$wget_fifo_dir/fifo-link" "$wget_url"
+        wget_link_status=$?
+        wait "$wget_reader"
+        if [ "$wget_link_status" = 0 ] && [ -L "$wget_fifo_dir/fifo-link" ] &&
+                [ "$(tr -d ' ' < "$wget_fifo_dir/linked-count")" = 1048576 ]; then
+                tally wget-output-link-to-fifo 1 1
+        else
+                tally wget-output-link-to-fifo 0 1
+                note "wget -O onto a link to a FIFO: status $wget_link_status, read [$(cat "$wget_fifo_dir/linked-count")]"
+                builtins_failed=1
+        fi
         if [ -n "$wget_gnu" ] && [ -s "$wget_place/port" ] &&
                 "$wget_gnu" --version 2>/dev/null | head -n 1 | grep -q '^GNU Wget'; then
                 wget_stream_gnu=$(wget_stream_run "$wget_gnu" "$wget_place/stream-gnu" \
@@ -6636,7 +6656,10 @@ umask-002|0|*|g:664:/g|umask 002|-q|URL/g
 umask-077|0|*|g:600:/g|umask 077|-q|URL/g
 replace-keeps-mode|0|*|h:640:/h|printf old > h; chmod 640 h|-q|-O|h|URL/h
 missing-directory|1|/nonexistent-wget-row/x: No such file or directory|||-q|-O|/nonexistent-wget-row/x|URL/x
-bad-option|2|*|||--wget-row-no-such-option|URL/x"
+bad-option|2|*|||--wget-row-no-such-option|URL/x
+stdout-file|0|*|(stdout):/s||-q|-O|/dev/stdout|URL/s
+link-to-device|0|*||ln -s /dev/null l|-q|-O|l|URL/x
+link-to-file=|0|*|l:644:/x v:644:keep|umask 022; printf keep > v; ln -s v l|-q|-O|l|URL/x"
         rows_failed=0
         rows_gnu_failed=0
         rows_count=0

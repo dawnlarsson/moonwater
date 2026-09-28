@@ -723,6 +723,43 @@ static COLD bipolar net_staged_name_publish(file_staged_name address_to stage)
 #define WGET_AUTH 6
 #define WGET_SERVER 8
 
+/* -O through a link: GNU wget writes wherever the link points, so -O
+   /dev/stdout reaches the terminal, pipe or file behind it. Here the link
+   is followed only where it and what it names belong to root or to the
+   caller, and only to a character device, a FIFO, or the file already open
+   as standard output -- which is then written through that descriptor, at
+   its offset. Any other link to a regular file stays replaced rather than
+   written through: planted in a shared directory it would aim a download
+   at somebody's file. */
+static COLD bipolar net_wget_stream_link(string_address output)
+{
+        file_facts link;
+        file_facts target;
+        file_facts standard;
+        p32 me;
+        positive kind;
+
+        if (file_look_code(AT_FDCWD, output, AT_SYMLINK_NOFOLLOW,
+                           address_of link) < 0 ||
+            (link.mode & MODE_FORMAT) != MODE_LINK)
+                return -1;
+        me = (p32)system_call(syscall(geteuid));
+        if ((link.owner && link.owner != me) ||
+            file_look_code(AT_FDCWD, output, 0, address_of target) < 0)
+                return -1;
+        kind = target.mode & MODE_FORMAT;
+        if (kind == MODE_FILE &&
+            file_look_code(1, (string_address) "", AT_EMPTY_PATH,
+                           address_of standard) >= 0 &&
+            file_same_identity(address_of target, address_of standard))
+                return 1;
+        if ((kind != MODE_CHARACTER && kind != MODE_PIPE) ||
+            (target.owner && target.owner != me))
+                return -1;
+        return file_open_same(AT_FDCWD, output, address_of target,
+                              O_WRONLY | O_NOCTTY);
+}
+
 //      Why a download failed, in GNU wget's words where it has them.
 static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
                                 string_address output)
@@ -823,6 +860,7 @@ static b32 net_wget(void)
         bipolar status;
         b32 code = 0;
         bool own_file = false;
+        bool own_stream = false;
         file_staged_name staged;
 
         if (!file_take(address_of taking))
@@ -864,6 +902,8 @@ static b32 net_wget(void)
 
         if (output && string_equals(output, (string_address) "-"))
                 dest = 1;
+        else if (output && (dest = net_wget_stream_link(output)) >= 0)
+                own_stream = dest != 1;
         else
         {
                 /* A device or FIFO is written into, as GNU wget does, never
@@ -921,6 +961,8 @@ static b32 net_wget(void)
 
         string_copy(where, url);
         status = http_fetch_to(url, dest, check_cert, address_of code, where);
+        if (own_stream)
+                system_close((positive)dest);
 
         if (status)
         {
