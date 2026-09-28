@@ -3659,10 +3659,16 @@ lane_net()
         2) note "tls_hs_fuzz: skipped (soft) -- does not downgrade net" ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness crypto_fuzz
+        case $? in
+        0) ;;
+        2) note "crypto_fuzz: skipped (soft) -- does not downgrade net" ;;
+        *) net_outcome=1 ;;
+        esac
         return "$net_outcome"
 }
 #       The TLS fuzz targets for longer than lane_net's smoke: tls_der_fuzz,
-#       tls_hs_fuzz and tls_verify_fuzz, an hour each with no run cap unless
+#       tls_hs_fuzz, tls_verify_fuzz and crypto_fuzz, an hour each with no run cap unless
 #       MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise.
 #       MOONWATER_FUZZ_REPORT=artifacts/fuzz-report.txt makes it the release
 #       attach instead: lane_net's budget unless the knobs are set, and a JSON

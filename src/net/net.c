@@ -4240,6 +4240,26 @@ static bool crypto_rsa_prepare(p8 address_to n_bytes, positive n_length,
         return crypto_fe_cmp(base, mod, address_to limbs) < 0;
 }
 
+/* s^e mod n, for both encodings to read: the n_length bytes of the encoded
+   message, big endian, at the address returned inside room, or null when
+   crypto_rsa_prepare refuses the key or the signature. */
+static p8 address_to crypto_rsa_open(p8 address_to room, p8 address_to n_bytes,
+                                     positive n_length, p64 exponent,
+                                     p8 address_to sig, positive sig_length)
+{
+        p64 mod[CRYPTO_RSA_LIMBS];
+        p64 base[CRYPTO_RSA_LIMBS];
+        p64 out[CRYPTO_RSA_LIMBS];
+        positive limbs;
+
+        if (!crypto_rsa_prepare(n_bytes, n_length, exponent, sig, sig_length,
+                                mod, base, address_of limbs))
+                return null;
+        crypto_rsa_modexp(out, base, exponent, mod, limbs);
+        crypto_fe_store_be(room, out, limbs);
+        return room + limbs * 8 - n_length;
+}
+
 /* EMSA-PKCS1-v1_5: 00 01 FF..FF 00 DigestInfo hash, at least eight FF
    bytes, the DigestInfo naming the hash exactly. */
 static bool crypto_rsa_pkcs1(p8 address_to n_bytes, positive n_length,
@@ -4249,41 +4269,22 @@ static bool crypto_rsa_pkcs1(p8 address_to n_bytes, positive n_length,
                              positive digestinfo_length, p8 address_to hash,
                              positive hash_length)
 {
-        p64 mod[CRYPTO_RSA_LIMBS];
-        p64 base[CRYPTO_RSA_LIMBS];
-        p64 out[CRYPTO_RSA_LIMBS];
-        p8 em[512];
-        positive limbs;
-        positive k;
+        p8 room[512];
+        p8 address_to em = crypto_rsa_open(room, n_bytes, n_length, exponent,
+                                           sig, sig_length);
         positive i;
 
-        if (!crypto_rsa_prepare(n_bytes, n_length, exponent, sig,
-                                sig_length, mod, base, address_of limbs))
+        if (!em || em[0] != 0x00 || em[1] != 0x01)
                 return false;
 
-        crypto_rsa_modexp(out, base, exponent, mod, limbs);
-        k = n_length;
-        memory_fill(em, 0, sizeof(em));
-        {
-                p8 full[512];
-                crypto_fe_store_be(full, out, limbs);
-                memory_copy(em, full + limbs * 8 - k, k);
-        }
-
-        if (em[0] != 0x00 || em[1] != 0x01)
-                return false;
-
-        i = 2;
-        i += memory_span_byte(em + i, 0xff, k - i);
-        if (i < 10 || i >= k || em[i] != 0x00)
+        i = 2 + memory_span_byte(em + 2, 0xff, n_length - 2);
+        if (i < 10 || i >= n_length || em[i] != 0x00 ||
+            i + 1 + digestinfo_length + hash_length != n_length)
                 return false;
         i++;
-        if (i + digestinfo_length + hash_length != k)
-                return false;
-        if (memory_compare(em + i, digestinfo, digestinfo_length))
-                return false;
-        return memory_compare(em + i + digestinfo_length, hash, hash_length) ==
-               0;
+        return memory_compare(em + i, digestinfo, digestinfo_length) == 0 &&
+               memory_compare(em + i + digestinfo_length, hash, hash_length) ==
+                   0;
 }
 
 static bool crypto_rsa_pkcs1_sha256(p8 address_to n_bytes, positive n_length,
@@ -4310,122 +4311,76 @@ static bool crypto_rsa_pkcs1_sha384(p8 address_to n_bytes, positive n_length,
                                 digestinfo, sizeof digestinfo, hash, 48);
 }
 
+/* MGF1-SHA-256 of seed, xored over the want bytes at into. */
 static fn crypto_mgf1_sha256(p8 address_to seed, positive seed_length,
                              p8 address_to into, positive want)
 {
-        positive offset = 0;
-        p32 counter = 0;
-
-        while (offset < want)
+        for (p32 counter = 0; want; counter++)
         {
                 crypto_sha256 hash;
                 p8 block[32];
                 p8 count[4];
-                positive take;
+                positive take = want < 32 ? want : 32;
 
                 network_store_32(count, counter);
                 crypto_sha256_open(address_of hash);
                 crypto_sha256_write(address_of hash, seed, seed_length);
                 crypto_sha256_write(address_of hash, count, 4);
                 crypto_sha256_close(address_of hash, block);
-                take = want - offset;
-                if (take > 32)
-                        take = 32;
-                memory_copy(into + offset, block, take);
-                offset += take;
-                counter++;
+                for (positive at = 0; at < take; at++)
+                        into[at] ^= block[at];
+                into += take;
+                want -= take;
         }
 }
 
-/* TLS 1.3 rsa_pss_rsae_sha256: EMSA-PSS with SHA-256, MGF1-SHA-256, salt 32. */
+/* TLS 1.3 rsa_pss_rsae_sha256: EMSA-PSS with SHA-256, MGF1-SHA-256, salt 32.
+   crypto_rsa_prepare has held n to 2048 bits or more with a nonzero first
+   byte, so the encoding is emBits = modBits - 1 bits in k = n_length or
+   n_length - 1 bytes, the latter when modBits is one more than a multiple
+   of eight and the block's first byte must then be zero. */
 static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
                                   p64 exponent, p8 address_to sig,
                                   positive sig_length, p8 address_to message,
                                   positive message_length)
 {
-        p64 mod[CRYPTO_RSA_LIMBS];
-        p64 base[CRYPTO_RSA_LIMBS];
-        p64 out[CRYPTO_RSA_LIMBS];
-        p8 em[512];
-        p8 mask[512];
+        p8 room[512];
+        p8 address_to em = crypto_rsa_open(room, n_bytes, n_length, exponent,
+                                           sig, sig_length);
         p8 mhash[32];
         p8 hcheck[32];
         p8 prefix[8];
         crypto_sha256 hash;
-        positive limbs;
+        positive em_bits = (n_length - 1) * 8 - 1;
         positive k;
-        positive mod_bits = 0;
-        positive em_bits;
         positive unused;
         positive masked;
         positive at;
-        positive i;
 
-        if (!crypto_rsa_prepare(n_bytes, n_length, exponent, sig,
-                                sig_length, mod, base, address_of limbs))
+        if (!em)
                 return false;
-
-        for (i = 0; i < n_length; i++)
-                if (n_bytes[i])
-                {
-                        p8 value = n_bytes[i];
-                        positive bits = 0;
-
-                        while (value)
-                        {
-                                bits++;
-                                value >>= 1;
-                        }
-                        mod_bits = (n_length - i - 1) * 8 + bits;
-                        break;
-                }
-
-        if (mod_bits < 8 * 64)
-                return false;
-
-        em_bits = mod_bits - 1;
+        for (p8 top = n_bytes[0]; top; top >>= 1)
+                em_bits++;
         k = (em_bits + 7) / 8;
-        if (k > n_length || k < 32 + 32 + 2)
-                return false;
-
-        crypto_rsa_modexp(out, base, exponent, mod, limbs);
+        if (k != n_length)
         {
-                p8 full[512];
-
-                crypto_fe_store_be(full, out, limbs);
-                memory_copy(em, full + limbs * 8 - n_length, n_length);
-        }
-
-        if (n_length != k)
-        {
-                if (n_length < k)
+                if (em[0])
                         return false;
-                for (i = 0; i < n_length - k; i++)
-                        if (em[i])
-                                return false;
-                memory_copy(em, em + n_length - k, k);
+                em++;
         }
 
         unused = 8 * k - em_bits;
-        if (unused && (em[0] >> (8 - unused)))
-                return false;
-        if (em[k - 1] != 0xbc)
+        if (em[0] >> (8 - unused) || em[k - 1] != 0xbc)
                 return false;
 
         masked = k - 32 - 1;
-        crypto_mgf1_sha256(em + masked, 32, mask, masked);
-        for (i = 0; i < masked; i++)
-                em[i] ^= mask[i];
-        if (unused)
-                em[0] &= (p8)(0xff >> unused);
+        crypto_mgf1_sha256(em + masked, 32, em, masked);
+        em[0] &= (p8)(0xff >> unused);
 
-        at = 0;
-        at += memory_span_byte(em + at, 0, masked - at);
-        if (at >= masked || em[at] != 0x01)
+        at = memory_span_byte(em, 0, masked);
+        if (at >= masked || em[at] != 0x01 || masked - at - 1 != 32)
                 return false;
         at++;
-        if (masked - at != 32)
-                return false;
 
         crypto_sha256_of(message, message_length, mhash);
         memory_fill(prefix, 0, sizeof(prefix));

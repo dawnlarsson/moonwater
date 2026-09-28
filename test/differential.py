@@ -38169,6 +38169,8 @@ def tls_fuzz_seeds(corpus):
     tls_der magic first bytes pick a lane: C1 list body, C2 EKU value, C3 SAN,
     C4 basicConstraints, C5 keyUsage, C6 cert+host, C7 extensions+host, C8
     ECDSA signature DER, C9 AlgorithmIdentifier."""
+    if corpus == "crypto":
+        return crypto_fuzz_seeds()
     seeds = {name + ".bin": bytes.fromhex(hx)
              for name, hx in TLS_FUZZ_SEED_HEX[corpus].items()}
     if corpus == "tls_hs":
@@ -38262,11 +38264,12 @@ def tls_fuzz_write_seeds(corpus, directory):
     return sorted(directory.iterdir())
 
 
-def tls_fuzz_run(label, corpus, source, max_len):
+def tls_fuzz_run(label, corpus, source, max_len, extra=()):
     """Build source as a libFuzzer target and run it over corpus's seeds.
 
     The bounded fixed-seed run the lanes use; MOONWATER_FUZZ_RUNS and
-    MOONWATER_FUZZ_SECONDS lengthen it. Returns 2 (NOT RUN) when clang,
+    MOONWATER_FUZZ_SECONDS lengthen it. extra follows the unit on the
+    compile line (libraries, say). Returns 2 (NOT RUN) when clang,
     libFuzzer or the asked-for sanitizer is missing; 1 on any sanitizer
     report; expected TLS_FAIL verdicts are ignored."""
     runs, seconds, timeout = tls_fuzz_budget()
@@ -38298,7 +38301,7 @@ def tls_fuzz_run(label, corpus, source, max_len):
                   "(need -fsanitize=%s)" % (label, need))
             return 2
         unit.write_text(source)
-        built = subprocess.run(flags + [str(unit), "-o", str(binary)],
+        built = subprocess.run(flags + [str(unit), "-o", str(binary)] + list(extra),
                                capture_output=True, text=True)
         if built.returncode:
             print("  FAIL %s fuzz lift does not build:\n" % label +
@@ -38372,7 +38375,7 @@ def tls_der_fuzz_lift_parts(net):
 #include <stdbool.h>
 #include <ctype.h>
 typedef uint8_t p8;
-typedef uint8_t b8;
+typedef int8_t b8;
 typedef uint16_t p16;
 typedef uint32_t p32;
 typedef uint64_t p64;
@@ -40203,8 +40206,888 @@ def harness_crypto_vectors(argv):
     return 0
 
 
+#       What crypto_fuzz puts under net.c's crypto so it links hosted: the
+#       streaming digests over a plain C SHA-1/256/384, GHASH bit by bit, and
+#       AES-128 from the S-box crypto_aes_substitute makes. None of it is
+#       what is under test -- lane_net's crypto_vectors holds lib.c's bodies
+#       to OpenSSL -- it is what lets libFuzzer, ASan and MSan read every
+#       byte net.c's own C touches.
+CRYPTO_FUZZ_HOSTED_C = r"""
+#define INLINE
+static void network_store_32(p8 *bytes, p32 value)
+{
+        bytes[0] = (p8)(value >> 24);
+        bytes[1] = (p8)(value >> 16);
+        bytes[2] = (p8)(value >> 8);
+        bytes[3] = (p8)value;
+}
+static positive memory_span_byte(const void *block, p8 byte, positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[i] == byte)
+                i++;
+        return i;
+}
+
+typedef struct { p32 state[5]; p8 block[64]; positive used; p64 total; } fuzz_sha1;
+static p32 fuzz_rol32(p32 x, int n) { return (x << n) | (x >> (32 - n)); }
+static void fuzz_sha1_block(fuzz_sha1 *h, const p8 *p)
+{
+        p32 w[80], a = h->state[0], b = h->state[1], c = h->state[2],
+            d = h->state[3], e = h->state[4];
+        for (int i = 0; i < 16; i++)
+                w[i] = (p32)p[4 * i] << 24 | (p32)p[4 * i + 1] << 16 |
+                       (p32)p[4 * i + 2] << 8 | p[4 * i + 3];
+        for (int i = 16; i < 80; i++)
+                w[i] = fuzz_rol32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+        for (int i = 0; i < 80; i++)
+        {
+                p32 f = i < 20 ? (b & c) | (~b & d) :
+                        i < 40 ? b ^ c ^ d :
+                        i < 60 ? (b & c) | (b & d) | (c & d) : b ^ c ^ d;
+                p32 k = i < 20 ? 0x5a827999 : i < 40 ? 0x6ed9eba1 :
+                        i < 60 ? 0x8f1bbcdc : 0xca62c1d6;
+                p32 t = fuzz_rol32(a, 5) + f + e + k + w[i];
+                e = d; d = c; c = fuzz_rol32(b, 30); b = a; a = t;
+        }
+        h->state[0] += a; h->state[1] += b; h->state[2] += c;
+        h->state[3] += d; h->state[4] += e;
+}
+static void fuzz_sha1_init(fuzz_sha1 *h)
+{
+        static const p32 start[5] = {0x67452301, 0xefcdab89, 0x98badcfe,
+                                     0x10325476, 0xc3d2e1f0};
+        memcpy(h->state, start, sizeof start);
+        h->used = 0;
+        h->total = 0;
+}
+static void fuzz_sha1_update(fuzz_sha1 *h, const p8 *d, positive n)
+{
+        h->total += n;
+        while (n--)
+        {
+                h->block[h->used++] = *d++;
+                if (h->used == 64)
+                {
+                        fuzz_sha1_block(h, h->block);
+                        h->used = 0;
+                }
+        }
+}
+static void fuzz_sha1_final(fuzz_sha1 *h, p8 *out)
+{
+        p64 bits = h->total * 8;
+        p8 pad = 0x80, zero = 0, length[8];
+        fuzz_sha1_update(h, &pad, 1);
+        while (h->used != 56)
+                fuzz_sha1_update(h, &zero, 1);
+        for (int i = 0; i < 8; i++)
+                length[i] = (p8)(bits >> (56 - 8 * i));
+        fuzz_sha1_update(h, length, 8);
+        for (int i = 0; i < 5; i++)
+                network_store_32(out + 4 * i, h->state[i]);
+}
+
+#define DIGEST_SHA1 1
+#define DIGEST_SHA256 3
+#define DIGEST_SHA384 4
+typedef struct
+{
+        positive algorithm;
+        positive size;
+        fuzz_sha1 one;
+        fuzz_sha256 two;
+        fuzz_sha512 five;
+} digest_state;
+static void digest_open(digest_state *d, positive algorithm, positive size)
+{
+        memset(d, 0, sizeof *d);
+        d->algorithm = algorithm;
+        d->size = size;
+        if (algorithm == DIGEST_SHA1)
+                fuzz_sha1_init(&d->one);
+        else if (algorithm == DIGEST_SHA256)
+                fuzz_sha256_init(&d->two);
+        else
+                fuzz_sha384_init(&d->five);
+}
+static void digest_write(digest_state *d, const void *data, positive n)
+{
+        if (d->algorithm == DIGEST_SHA1)
+                fuzz_sha1_update(&d->one, data, n);
+        else if (d->algorithm == DIGEST_SHA256)
+                fuzz_sha256_update(&d->two, (p8 *)data, n);
+        else
+                fuzz_sha512_update(&d->five, (p8 *)data, n);
+}
+static void digest_close(digest_state *d, p8 *out)
+{
+        if (d->algorithm == DIGEST_SHA1)
+                fuzz_sha1_final(&d->one, out);
+        else if (d->algorithm == DIGEST_SHA256)
+                fuzz_sha256_final(&d->two, out);
+        else
+                fuzz_sha384_final(&d->five, out);
+}
+
+/* GHASH: the table holds H, and each block is one bit-serial multiply. */
+#define GHASH_KEY_SIZE 16
+static void ghash_key(p8 *table, const p8 *h) { memcpy(table, h, 16); }
+static void ghash_blocks(p8 *state, const p8 *table, const p8 *data,
+                         positive blocks)
+{
+        for (positive b = 0; b < blocks; b++)
+        {
+                p8 x[16], z[16], v[16];
+                for (int i = 0; i < 16; i++)
+                        x[i] = state[i] ^ data[16 * b + i];
+                memset(z, 0, 16);
+                memcpy(v, table, 16);
+                for (int i = 0; i < 128; i++)
+                {
+                        p8 low = v[15] & 1;
+                        if ((x[i / 8] >> (7 - i % 8)) & 1)
+                                for (int k = 0; k < 16; k++)
+                                        z[k] ^= v[k];
+                        for (int k = 15; k > 0; k--)
+                                v[k] = (p8)((v[k] >> 1) | (v[k - 1] << 7));
+                        v[0] >>= 1;
+                        if (low)
+                                v[0] ^= 0xe1;
+                }
+                memcpy(state, z, 16);
+        }
+}
+"""
+
+#       AES-128 over the schedule, once crypto_aes_substitute exists.
+CRYPTO_FUZZ_AES_C = r"""
+static p8 fuzz_aes_sbox[256];
+static p8 fuzz_aes_xtime(p8 x) { return (p8)((x << 1) ^ ((x >> 7) * 0x1b)); }
+static void fuzz_aes_encrypt(const p8 *round, const p8 *in, p8 *out)
+{
+        p8 s[16], t[16];
+        if (!fuzz_aes_sbox[0])
+                for (int v = 0; v < 256; v++)
+                        fuzz_aes_sbox[v] = crypto_aes_substitute((p8)v);
+        for (int i = 0; i < 16; i++)
+                s[i] = in[i] ^ round[i];
+        for (int r = 1; r <= 10; r++)
+        {
+                for (int i = 0; i < 16; i++)
+                        t[i] = fuzz_aes_sbox[s[(i + 4 * (i % 4)) % 16]];
+                for (int c = 0; c < 4 && r < 10; c++)
+                {
+                        p8 *col = t + 4 * c, a0 = col[0], a1 = col[1],
+                           a2 = col[2], a3 = col[3], all = a0 ^ a1 ^ a2 ^ a3;
+                        col[0] ^= all ^ fuzz_aes_xtime(a0 ^ a1);
+                        col[1] ^= all ^ fuzz_aes_xtime(a1 ^ a2);
+                        col[2] ^= all ^ fuzz_aes_xtime(a2 ^ a3);
+                        col[3] ^= all ^ fuzz_aes_xtime(a3 ^ a0);
+                }
+                for (int i = 0; i < 16; i++)
+                        s[i] = t[i] ^ round[16 * r + i];
+        }
+        memcpy(out, s, 16);
+}
+static void aes128_ctr_blocks(const p8 *round, p8 *counter, const p8 *in,
+                              p8 *out, positive blocks)
+{
+        for (positive b = 0; b < blocks; b++)
+        {
+                p8 stream[16];
+                p32 low;
+                fuzz_aes_encrypt(round, counter, stream);
+                for (int i = 0; i < 16; i++)
+                        out[16 * b + i] = in[16 * b + i] ^ stream[i];
+                low = network_load_32(counter + 12) + 1;
+                network_store_32(counter + 12, low);
+        }
+}
+"""
+
+#       The oracle half of crypto_fuzz: OpenSSL answering the same inputs.
+#       An MSan build leaves it out, since libcrypto is not instrumented.
+CRYPTO_FUZZ_ORACLE_INCLUDES = r"""
+#include <openssl/bn.h>
+#include <openssl/ec.h>
+#include <openssl/ecdsa.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/kdf.h>
+#include <openssl/obj_mac.h>
+#include <openssl/rsa.h>
+#include <openssl/sha.h>
+"""
+
+CRYPTO_FUZZ_DRIVER_C = r"""
+/* The input, taken from the front a field at a time; what is missing
+   reads as zeros. */
+typedef struct { const p8 *at; positive left; } fuzz_take;
+static void take(fuzz_take *f, p8 *into, positive n)
+{
+        positive have = n < f->left ? n : f->left;
+        memcpy(into, f->at, have);
+        memset(into + have, 0, n - have);
+        f->at += have;
+        f->left -= have;
+}
+static p8 take_byte(fuzz_take *f)
+{
+        p8 b;
+        take(f, &b, 1);
+        return b;
+}
+
+static void disagree(const char *what)
+{
+        fprintf(stderr, "crypto_fuzz: ours and OpenSSL disagree on %s\n", what);
+        abort();
+}
+
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+static int oracle_curve(positive size) { return size == 32 ? NID_X9_62_prime256v1 : NID_secp384r1; }
+
+/* k G, or k Q from an uncompressed or compressed encoding; the x of the
+   product, or the encoding of k G. 0 when OpenSSL refuses. */
+static int oracle_multiply(positive size, const p8 *scalar, const p8 *peer,
+                           positive peer_length, p8 *out)
+{
+        EC_GROUP *group = EC_GROUP_new_by_curve_name(oracle_curve(size));
+        BN_CTX *ctx = BN_CTX_new();
+        BIGNUM *k = BN_bin2bn(scalar, (int)size, NULL);
+        EC_POINT *q = EC_POINT_new(group), *r = EC_POINT_new(group);
+        BIGNUM *x = BN_new();
+        int ok = !BN_is_zero(k) && BN_cmp(k, EC_GROUP_get0_order(group)) < 0;
+
+        if (ok && peer)
+                ok = EC_POINT_oct2point(group, q, peer, peer_length, ctx) &&
+                     EC_POINT_is_on_curve(group, q, ctx) == 1 &&
+                     EC_POINT_mul(group, r, NULL, q, k, ctx) &&
+                     !EC_POINT_is_at_infinity(group, r) &&
+                     EC_POINT_get_affine_coordinates(group, r, x, NULL, ctx) &&
+                     BN_bn2binpad(x, out, (int)size) == (int)size;
+        else if (ok)
+                ok = EC_POINT_mul(group, r, k, NULL, NULL, ctx) &&
+                     EC_POINT_point2oct(group, r, POINT_CONVERSION_UNCOMPRESSED,
+                                        out, 2 * size + 1, ctx) == 2 * size + 1;
+        BN_free(x);
+        EC_POINT_free(q);
+        EC_POINT_free(r);
+        BN_free(k);
+        BN_CTX_free(ctx);
+        EC_GROUP_free(group);
+        return ok;
+}
+
+/* ECDSA with the nonce named: r = (k G).x mod n, s = (e + r d) / k. */
+static int oracle_sign(positive size, const p8 *d_bytes, const p8 *k_bytes,
+                       const p8 *digest, positive digest_length, p8 *r_out,
+                       p8 *s_out, p8 *q_out)
+{
+        EC_GROUP *group = EC_GROUP_new_by_curve_name(oracle_curve(size));
+        const BIGNUM *n = EC_GROUP_get0_order(group);
+        BN_CTX *ctx = BN_CTX_new();
+        BIGNUM *d = BN_bin2bn(d_bytes, (int)size, NULL);
+        BIGNUM *k = BN_bin2bn(k_bytes, (int)size, NULL);
+        BIGNUM *e = BN_bin2bn(digest, (int)(digest_length < size ? digest_length : size), NULL);
+        BIGNUM *r = BN_new(), *s = BN_new(), *x = BN_new(), *y = BN_new();
+        EC_POINT *point = EC_POINT_new(group);
+        int ok;
+
+        BN_nnmod(d, d, n, ctx);
+        BN_nnmod(k, k, n, ctx);
+        if (BN_is_zero(d))
+                BN_one(d);
+        if (BN_is_zero(k))
+                BN_one(k);
+        ok = EC_POINT_mul(group, point, k, NULL, NULL, ctx) &&
+             EC_POINT_get_affine_coordinates(group, point, x, NULL, ctx) &&
+             BN_nnmod(r, x, n, ctx) && !BN_is_zero(r) &&
+             BN_mod_mul(s, r, d, n, ctx) && BN_mod_add(s, s, e, n, ctx) &&
+             BN_mod_inverse(k, k, n, ctx) && BN_mod_mul(s, s, k, n, ctx) &&
+             !BN_is_zero(s) &&
+             EC_POINT_mul(group, point, d, NULL, NULL, ctx) &&
+             EC_POINT_get_affine_coordinates(group, point, x, y, ctx) &&
+             BN_bn2binpad(r, r_out, (int)size) > 0 &&
+             BN_bn2binpad(s, s_out, (int)size) > 0 &&
+             BN_bn2binpad(x, q_out, (int)size) > 0 &&
+             BN_bn2binpad(y, q_out + size, (int)size) > 0;
+        BN_free(d); BN_free(k); BN_free(e); BN_free(r); BN_free(s);
+        BN_free(x); BN_free(y);
+        EC_POINT_free(point);
+        BN_CTX_free(ctx);
+        EC_GROUP_free(group);
+        return ok;
+}
+
+static int oracle_ecdsa(positive size, const p8 *digest, positive digest_length,
+                        const p8 *r_bytes, positive r_length, const p8 *s_bytes,
+                        positive s_length, const p8 *qx, const p8 *qy)
+{
+        EC_KEY *key = EC_KEY_new_by_curve_name(oracle_curve(size));
+        const EC_GROUP *group = EC_KEY_get0_group(key);
+        BIGNUM *x = BN_bin2bn(qx, (int)size, NULL), *y = BN_bin2bn(qy, (int)size, NULL);
+        BIGNUM *p = BN_new();
+        ECDSA_SIG *sig = ECDSA_SIG_new();
+        int ok;
+
+        EC_GROUP_get_curve(group, p, NULL, NULL, NULL);
+        /* The client takes r and s no longer than the order, the DER reader
+           having dropped a leading zero, and coordinates only below p. */
+        ok = r_length && s_length && r_length <= size && s_length <= size &&
+             BN_cmp(x, p) < 0 && BN_cmp(y, p) < 0 &&
+             EC_KEY_set_public_key_affine_coordinates(key, x, y) == 1 &&
+             ECDSA_SIG_set0(sig, BN_bin2bn(r_bytes, (int)r_length, NULL),
+                            BN_bin2bn(s_bytes, (int)s_length, NULL)) &&
+             ECDSA_do_verify(digest, (int)digest_length, sig, key) == 1;
+        ECDSA_SIG_free(sig);
+        BN_free(x); BN_free(y); BN_free(p);
+        EC_KEY_free(key);
+        return ok;
+}
+
+static RSA *oracle_rsa[2];
+
+/* A 2048-bit key and a 2049-bit one, whose PSS encoding is a byte shorter
+   than the modulus: primes of 1024 and 1025 bits with their top two bits
+   set multiply to exactly 2049. */
+static RSA *oracle_rsa_key(int bits)
+{
+        BIGNUM *p = BN_new(), *q = BN_new(), *n = BN_new(), *e = BN_new();
+        BIGNUM *d = BN_new(), *p1 = BN_new(), *q1 = BN_new(), *phi = BN_new();
+        BN_CTX *ctx = BN_CTX_new();
+        RSA *rsa = RSA_new();
+
+        BN_set_word(e, 65537);
+        do
+        {
+                BN_generate_prime_ex(p, (bits + 1) / 2, 0, NULL, NULL, NULL);
+                BN_generate_prime_ex(q, bits / 2, 0, NULL, NULL, NULL);
+                BN_mul(n, p, q, ctx);
+                BN_sub(p1, p, BN_value_one());
+                BN_sub(q1, q, BN_value_one());
+                BN_mul(phi, p1, q1, ctx);
+        } while (BN_num_bits(n) != bits || !BN_mod_inverse(d, e, phi, ctx));
+        RSA_set0_key(rsa, n, e, d);
+        RSA_set0_factors(rsa, p, q);
+        BN_free(p1); BN_free(q1); BN_free(phi);
+        BN_CTX_free(ctx);
+        return rsa;
+}
+#endif
+
+int LLVMFuzzerInitialize(int *argc, char ***argv)
+{
+        (void)argc;
+        (void)argv;
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+        oracle_rsa[0] = oracle_rsa_key(2048);
+        oracle_rsa[1] = oracle_rsa_key(2049);
+#endif
+        return 0;
+}
+
+static void fuzz_x25519(fuzz_take *f)
+{
+        p8 scalar[32], u[32], ours[32];
+        bool valid;
+
+        take(f, scalar, 32);
+        take(f, u, 32);
+        valid = crypto_x25519(ours, scalar, u);
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+        {
+                EVP_PKEY *mine = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, scalar, 32);
+                EVP_PKEY *peer = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL, u, 32);
+                EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(mine, NULL);
+                p8 theirs[32];
+                size_t length = 32;
+                int ok = EVP_PKEY_derive_init(ctx) == 1 &&
+                         EVP_PKEY_derive_set_peer(ctx, peer) == 1 &&
+                         EVP_PKEY_derive(ctx, theirs, &length) == 1 && length == 32;
+
+                EVP_PKEY_CTX_free(ctx);
+                EVP_PKEY_free(mine);
+                EVP_PKEY_free(peer);
+                if (ok != valid || (ok && memcmp(ours, theirs, 32)))
+                        disagree("X25519");
+        }
+#endif
+}
+
+static void fuzz_ecdh(fuzz_take *f, positive size, bool share)
+{
+        p8 scalar[48], peer[97], ours[97], theirs[97];
+        positive peer_length = 2 * size + 1;
+        bool valid;
+        p8 form = take_byte(f);
+
+        take(f, scalar, size);
+        take(f, peer, peer_length);
+        if (share)
+                valid = size == 32 ? crypto_ecdh_p256_public(ours, scalar)
+                                   : crypto_ecdh_p384_public(ours, scalar);
+        else
+                valid = size == 32 ? crypto_ecdh_p256_shared(ours, scalar, peer)
+                                   : crypto_ecdh_p384_shared(ours, scalar, peer);
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+        {
+                int ok;
+
+                /* A share made on the spot, so the peer is on the curve and
+                   the product is the case that matters, unless the form
+                   byte says to send the fuzzer's bytes as they are. */
+                if (!share && form & 1)
+                {
+                        p8 made[97];
+
+                        if (!oracle_multiply(size, peer, NULL, 0, made))
+                                return;
+                        memcpy(peer, made, peer_length);
+                        if (form & 2)
+                                peer[1 + (form >> 2) % (2 * size)] ^= (p8)(1 << (form % 8));
+                        valid = size == 32 ? crypto_ecdh_p256_shared(ours, scalar, peer)
+                                           : crypto_ecdh_p384_shared(ours, scalar, peer);
+                }
+                /* TLS 1.3 sends only the uncompressed form. */
+                ok = share ? oracle_multiply(size, scalar, NULL, 0, theirs)
+                           : peer[0] == 4 &&
+                             oracle_multiply(size, scalar, peer, peer_length, theirs);
+                if (ok != valid ||
+                    (ok && memcmp(ours, theirs, share ? peer_length : size)))
+                        disagree(share ? "a key share" : "ECDH");
+        }
+#else
+        (void)form;
+        (void)theirs;
+#endif
+}
+
+static void fuzz_ecdsa(fuzz_take *f, positive size)
+{
+        p8 mode = take_byte(f);
+        positive digest_length = 1 + take_byte(f) % 64;
+        positive r_length = 1 + take_byte(f) % (size + 1);
+        positive s_length = 1 + take_byte(f) % (size + 1);
+        p8 digest[64], r[49], s[49], q[96];
+        bool valid;
+
+        take(f, digest, digest_length);
+        take(f, r, r_length);
+        take(f, s, s_length);
+        take(f, q, 2 * size);
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+        /* Signed here, with the key and nonce from the input, then bent the
+           way the mode says: high S, r or s past n, a flipped bit. */
+        if (mode & 1)
+        {
+                p8 d[48], k[48];
+
+                memcpy(d, q, size);
+                memcpy(k, q + size, size);
+                if (!oracle_sign(size, d, k, digest, digest_length, r, s, q))
+                        return;
+                r_length = s_length = size;
+                switch ((mode >> 1) % 6)
+                {
+                case 1:
+                {
+                        EC_GROUP *group = EC_GROUP_new_by_curve_name(oracle_curve(size));
+                        BIGNUM *value = BN_bin2bn(s, (int)size, NULL);
+                        BN_sub(value, EC_GROUP_get0_order(group), value);
+                        BN_bn2binpad(value, s, (int)size);
+                        BN_free(value);
+                        EC_GROUP_free(group);
+                        break;
+                }
+                case 2:
+                        r[(mode >> 4) % size] ^= (p8)(1 << (mode % 8));
+                        break;
+                case 3:
+                        digest[(mode >> 4) % digest_length] ^= 1;
+                        break;
+                case 4:
+                        q[(mode >> 4) % (2 * size)] ^= 0x80;
+                        break;
+                case 5:
+                        /* A leading zero dropped from r, when there is one. */
+                        while (r_length > 1 && !r[0])
+                        {
+                                memmove(r, r + 1, --r_length);
+                        }
+                        break;
+                }
+        }
+#endif
+        valid = size == 32 ? crypto_ecdsa_p256(digest, digest_length, r, r_length,
+                                               s, s_length, q, q + size)
+                           : crypto_ecdsa_p384(digest, digest_length, r, r_length,
+                                               s, s_length, q, q + size);
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+        if (valid != oracle_ecdsa(size, digest, digest_length, r, r_length, s,
+                                  s_length, q, q + size))
+                disagree("ECDSA");
+#else
+        (void)valid;
+        (void)mode;
+#endif
+}
+
+/* An encoded message for the 2048- or 2049-bit key, signed, then checked.
+   A valid encoding first, when the mode says so, with the input's bytes
+   xored over it at the offsets they name. */
+static void fuzz_rsa(fuzz_take *f, int scheme)
+{
+        static const p8 info256[19] = {0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86,
+                                       0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05,
+                                       0x00, 0x04, 0x20};
+        static const p8 info384[19] = {0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86,
+                                       0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02, 0x05,
+                                       0x00, 0x04, 0x30};
+        p8 mode = take_byte(f);
+        p8 message[64], digest[48], em[512], sig[512], n_bytes[512];
+        positive message_length = take_byte(f) % 64;
+        positive digest_length = scheme == 1 ? 48 : 32;
+        bool valid;
+
+        take(f, message, message_length);
+        take(f, digest, digest_length);
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+        {
+                RSA *rsa = oracle_rsa[mode & 1];
+                positive k = (positive)RSA_size(rsa);
+                int ok;
+
+                BN_bn2binpad(RSA_get0_n(rsa), n_bytes, (int)k);
+                memset(em, 0, sizeof em);
+                if (mode & 2)
+                {
+                        if (scheme == 2)
+                        {
+                                p8 mhash[32];
+
+                                SHA256(message, message_length, mhash);
+                                /* The 2049-bit key's encoding is k - 1
+                                   bytes, after a zero. */
+                                RSA_padding_add_PKCS1_PSS_mgf1(rsa, em, mhash, EVP_sha256(),
+                                                               EVP_sha256(), 32);
+                        }
+                        else
+                        {
+                                const p8 *info = scheme ? info384 : info256;
+                                positive tail = 19 + digest_length;
+
+                                em[1] = 1;
+                                memset(em + 2, 0xff, k - 3 - tail);
+                                memcpy(em + k - tail, info, 19);
+                                memcpy(em + k - digest_length, digest, digest_length);
+                        }
+                        while (f->left >= 2)
+                        {
+                                positive at = take_byte(f) * 3u % k;
+                                em[at] ^= take_byte(f);
+                        }
+                }
+                else
+                        take(f, em, k);
+                if (RSA_private_encrypt((int)k, em, sig, rsa, RSA_NO_PADDING) != (int)k)
+                        memcpy(sig, em, k);
+                if (scheme == 2)
+                {
+                        p8 mhash[32], decoded[512];
+
+                        SHA256(message, message_length, mhash);
+                        ok = RSA_public_decrypt((int)k, sig, decoded, rsa, RSA_NO_PADDING) ==
+                                 (int)k &&
+                             RSA_verify_PKCS1_PSS_mgf1(rsa, mhash, EVP_sha256(), EVP_sha256(),
+                                                       decoded, 32) == 1;
+                        valid = crypto_rsa_pss_sha256(n_bytes, k, 65537, sig, k, message,
+                                                      message_length);
+                }
+                else
+                {
+                        ok = RSA_verify(scheme ? NID_sha384 : NID_sha256, digest,
+                                        (unsigned)digest_length, sig, (unsigned)k, rsa) == 1;
+                        valid = scheme ? crypto_rsa_pkcs1_sha384(n_bytes, k, 65537, sig, k, digest)
+                                       : crypto_rsa_pkcs1_sha256(n_bytes, k, 65537, sig, k, digest);
+                }
+                if (ok != valid)
+                        disagree(scheme == 2 ? "RSA-PSS" : "RSA PKCS#1");
+        }
+#else
+        {
+                /* No private key to sign with: the modulus and signature
+                   as the input gives them, for the memory the checks read. */
+                positive k = 256 + (mode & 1);
+                p64 exponent = 3 + 2 * (positive)take_byte(f);
+
+                take(f, n_bytes, k);
+                n_bytes[0] |= 0x80;
+                n_bytes[k - 1] |= 1;
+                take(f, sig, k);
+                if (scheme == 2)
+                        valid = crypto_rsa_pss_sha256(n_bytes, k, exponent, sig, k, message,
+                                                      message_length);
+                else
+                        valid = scheme ? crypto_rsa_pkcs1_sha384(n_bytes, k, exponent, sig, k, digest)
+                                       : crypto_rsa_pkcs1_sha256(n_bytes, k, exponent, sig, k, digest);
+                (void)valid;
+                (void)em;
+        }
+#endif
+}
+
+static void fuzz_gcm(fuzz_take *f)
+{
+        static crypto_aesgcm_key key;
+        p8 raw[16], iv[12], aad[80], tag[16], text[600], sealed[600];
+        positive aad_length = take_byte(f) % 80;
+        positive text_length;
+        p8 flip = take_byte(f);
+        bool opened;
+
+        take(f, raw, 16);
+        take(f, iv, 12);
+        take(f, aad, aad_length);
+        text_length = f->left < sizeof text ? f->left : sizeof text;
+        take(f, text, text_length);
+        crypto_aesgcm_prepare(&key, raw);
+        memcpy(sealed, text, text_length);
+        crypto_aesgcm_seal(&key, iv, aad, aad_length, sealed, text_length, tag);
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+        {
+                EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+                p8 theirs[600], their_tag[16];
+                int length = 0;
+                int ok = EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, raw, iv) &&
+                         EVP_EncryptUpdate(ctx, NULL, &length, aad, (int)aad_length) &&
+                         EVP_EncryptUpdate(ctx, theirs, &length, text, (int)text_length) &&
+                         EVP_EncryptFinal_ex(ctx, theirs + length, &length) &&
+                         EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, their_tag);
+                EVP_CIPHER_CTX_free(ctx);
+                if (!ok || memcmp(sealed, theirs, text_length) || memcmp(tag, their_tag, 16))
+                        disagree("AES-GCM seal");
+        }
+#endif
+        if (flip & 1)
+                tag[(flip >> 1) % 16] ^= (p8)(1 << (flip >> 5));
+        if (!text_length)
+                flip &= (p8)~2;
+        if (flip & 2)
+                sealed[(flip >> 2) % text_length] ^= 0x40;
+        opened = crypto_aesgcm_open(&key, iv, aad, aad_length, sealed, text_length, tag);
+        if (opened != !(flip & 3))
+                disagree("AES-GCM open");
+        if (opened && memcmp(sealed, text, text_length))
+                disagree("AES-GCM plaintext");
+        for (positive i = 0; !opened && i < text_length; i++)
+                if (sealed[i])
+                        disagree("AES-GCM refused text left behind");
+        crypto_forget(&key, sizeof key);
+}
+
+static void fuzz_kdf(fuzz_take *f)
+{
+        p8 which = take_byte(f);
+        positive salt_length = take_byte(f) % 100;
+        positive ikm_length = take_byte(f) % 100;
+        positive info_length = take_byte(f) % 100;
+        positive length = 1 + (take_byte(f) | (positive)take_byte(f) << 8) % (255 * 32);
+        p8 salt[100], ikm[100], info[100], prk[32];
+        static p8 ours[255 * 32], theirs[255 * 32];
+
+        take(f, salt, salt_length);
+        take(f, ikm, ikm_length);
+        take(f, info, info_length);
+        if (which & 1)
+        {
+                positive rounds = 1 + which % 9;
+                positive algorithm = which & 2 ? DIGEST_SHA1 : DIGEST_SHA256;
+
+                length %= 100;
+                crypto_pbkdf2(algorithm, algorithm == DIGEST_SHA1 ? 20 : 32, ikm, ikm_length,
+                              salt, salt_length, rounds, ours, length);
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+                if (length && (PKCS5_PBKDF2_HMAC((const char *)ikm, (int)ikm_length, salt,
+                                                 (int)salt_length, (int)rounds,
+                                                 algorithm == DIGEST_SHA1 ? EVP_sha1() : EVP_sha256(),
+                                                 (int)length, theirs) != 1 ||
+                               memcmp(ours, theirs, length)))
+                        disagree("PBKDF2");
+#endif
+                return;
+        }
+        crypto_hkdf_extract(salt, salt_length, ikm, ikm_length, prk);
+        crypto_hkdf_expand(prk, info, info_length, ours, length);
+#ifndef CRYPTO_FUZZ_NO_ORACLE
+        {
+                EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
+                size_t out = length;
+                int ok = EVP_PKEY_derive_init(ctx) == 1 &&
+                         EVP_PKEY_CTX_set_hkdf_md(ctx, EVP_sha256()) == 1 &&
+                         EVP_PKEY_CTX_set1_hkdf_salt(ctx, salt, (int)salt_length) == 1 &&
+                         EVP_PKEY_CTX_set1_hkdf_key(ctx, ikm, (int)ikm_length) == 1 &&
+                         EVP_PKEY_CTX_add1_hkdf_info(ctx, info, (int)info_length) == 1 &&
+                         EVP_PKEY_derive(ctx, theirs, &out) == 1 && out == length;
+                p8 mac[32];
+                unsigned mac_length = 32;
+
+                EVP_PKEY_CTX_free(ctx);
+                if (!ok || memcmp(ours, theirs, length))
+                        disagree("HKDF");
+                crypto_hmac_sha256(salt, salt_length, info, info_length, ours);
+                HMAC(EVP_sha256(), salt, (int)salt_length, info, info_length, mac, &mac_length);
+                if (memcmp(ours, mac, 32))
+                        disagree("HMAC-SHA256");
+        }
+#endif
+}
+
+int LLVMFuzzerTestOneInput(const p8 *data, size_t size)
+{
+        fuzz_take f = {data, size};
+
+        switch (take_byte(&f) % 10)
+        {
+        case 0: fuzz_x25519(&f); break;
+        case 1: fuzz_ecdh(&f, 32, false); break;
+        case 2: fuzz_ecdh(&f, 48, false); break;
+        case 3: fuzz_ecdh(&f, 32 + 16 * (take_byte(&f) & 1), true); break;
+        case 4: fuzz_ecdsa(&f, 32); break;
+        case 5: fuzz_ecdsa(&f, 48); break;
+        case 6: fuzz_rsa(&f, take_byte(&f) % 3); break;
+        case 7: fuzz_gcm(&f); break;
+        default: fuzz_kdf(&f); break;
+        }
+        return 0;
+}
+"""
+
+
+def crypto_fuzz_source(net, checks, oracle):
+    """crypto_fuzz's program: net.c's crypto section whole, from crypto_wide
+    to its #endif, with the p256_/p384_ fast paths cut so every field runs
+    the C montgomery from checks.c's SHARED_montgomery_reference, over the
+    hosted digests, GHASH and AES above; then the driver. Raises ValueError
+    when a slice is gone and RuntimeError when a lib.c call survives."""
+    crypto = tls_fuzz_sec(net, "typedef unsigned __int128 crypto_wide;",
+                          "#endif\n#include \"wait.c\"")
+    for field_op in ("add", "subtract"):
+        crypto = re.sub(
+            r"if \(f == address_of crypto_p256_field\)\s*\{\s*p256_%s\(d, a, b\);\s*return;\s*\}\s*"
+            r"if \(f == address_of crypto_p384_field\)\s*\{\s*p384_%s\(d, a, b\);\s*return;\s*\}"
+            % (field_op, field_op), "", crypto)
+    for field_op, args in (("multiply", "d, a, b"), ("square", "d, a")):
+        crypto = re.sub(
+            r"if \(f == address_of crypto_p256_field\)\s*p256_%s\(%s\);\s*"
+            r"else if \(f == address_of crypto_p384_field\)\s*p384_%s\(%s\);\s*"
+            r"else\s*" % (field_op, args, field_op, args), "", crypto)
+    montgomery = tls_fuzz_sec(checks, "#elif defined(SHARED_montgomery_reference)",
+                              "#elif defined(SHARED_unicode_width_reference)")
+    montgomery = montgomery.split("\n", 1)[1]
+    montgomery = montgomery[:montgomery.rfind("#endif") + len("#endif")].replace(
+        "montgomery_reference_multiply", "montgomery_multiply")
+    hosted = TLS_VERIFY_HOSTED_C
+    sha = hosted[hosted.index("typedef struct {"):hosted.index("typedef fuzz_sha256 crypto_sha256;")]
+    shim = tls_der_fuzz_lift_parts(net)[4]
+    # The AES shim needs crypto_aes_substitute, so it goes after the slice's
+    # S-box and before the first key expansion calls it.
+    at = crypto.index("static fn crypto_aes128_expand(")
+    crypto = crypto[:at] + CRYPTO_FUZZ_AES_C + crypto[at:]
+    #   OpenSSL's headers name parameters fn, which the shim defines.
+    source = "\n".join((CRYPTO_FUZZ_ORACLE_INCLUDES if oracle else
+                         "#define CRYPTO_FUZZ_NO_ORACLE",
+                        shim, "#include <stdlib.h>", sha, CRYPTO_FUZZ_HOSTED_C,
+                        montgomery, crypto, CRYPTO_FUZZ_DRIVER_C))
+    left = re.search(r"\b(?:p(?:256|384)_(?:multiply|add|square|subtract)|"
+                     r"sha256_blocks|sha512_blocks)\s*\(", source)
+    if left:
+        raise RuntimeError("hosted crypto lift still calls " + left.group(0))
+    return source
+
+
+def crypto_fuzz_seeds():
+    """crypto_fuzz's seeds, one or more a lane, from a fixed seed: the first
+    byte picks the lane (0 X25519, 1-2 ECDH, 3 shares, 4-5 ECDSA, 6 RSA,
+    7 AES-GCM, 8-9 HKDF/HMAC/PBKDF2)."""
+    rng = random.Random(1917)
+
+    def draw(size):
+        return bytes(rng.getrandbits(8) for _ in range(size))
+
+    seeds = {"empty.bin": b""}
+    low = bytes(32)
+    seeds["x25519_random.bin"] = b"\x00" + draw(64)
+    seeds["x25519_zero_u.bin"] = b"\x00" + draw(32) + low
+    seeds["x25519_one_u.bin"] = b"\x00" + draw(32) + b"\x01" + bytes(31)
+    seeds["x25519_high_u.bin"] = b"\x00" + draw(32) + b"\xff" * 32
+    for lane, size in ((1, 32), (2, 48)):
+        seeds["ecdh%d_made.bin" % size] = bytes((lane, 1)) + draw(size) + draw(2 * size + 1)
+        seeds["ecdh%d_bent.bin" % size] = bytes((lane, 0x13)) + draw(size) + draw(2 * size + 1)
+        seeds["ecdh%d_raw.bin" % size] = bytes((lane, 0, )) + draw(size) + b"\x04" + draw(2 * size)
+        seeds["ecdh%d_zero.bin" % size] = bytes((lane, 1)) + bytes(size) + draw(2 * size + 1)
+    seeds["share256.bin"] = b"\x03\x00" + draw(32)
+    seeds["share384.bin"] = b"\x03\x01" + draw(48)
+    seeds["share_high.bin"] = b"\x03\x00" + b"\xff" * 32
+    for lane, size in ((4, 32), (5, 48)):
+        for mode in range(12):
+            seeds["ecdsa%d_mode%d.bin" % (size, mode)] = bytes(
+                (lane, mode * 2 + 1 if mode < 6 else rng.getrandbits(8) | 1,
+                 31 if mode % 2 else 47, size - 1, size - 1)) + draw(64 + 2 * size + 2 * size)
+        seeds["ecdsa%d_raw.bin" % size] = bytes((lane, 0, 31, size - 1, size - 1)) + draw(
+            32 + 4 * size)
+    for scheme in range(3):
+        for mode in range(4):
+            seeds["rsa%d_mode%d.bin" % (scheme, mode)] = bytes(
+                (6, scheme, mode, 20)) + draw(20 + 48 + (8 if mode & 2 else 257))
+    for length in (0, 1, 15, 16, 17, 64, 200, 599):
+        seeds["gcm_%d.bin" % length] = bytes((7, 13, 0)) + draw(16 + 12 + 13 + length)
+    seeds["gcm_flip_tag.bin"] = bytes((7, 5, 0x21)) + draw(16 + 12 + 5 + 40)
+    seeds["gcm_flip_text.bin"] = bytes((7, 0, 0x0a)) + draw(16 + 12 + 40)
+    seeds["hkdf_short.bin"] = bytes((8, 0, 13, 22, 10, 42, 0)) + draw(45)
+    seeds["hkdf_ceiling.bin"] = bytes((8, 0, 0, 32, 99, 0xdf, 0x1f)) + draw(131)
+    seeds["pbkdf2_sha1.bin"] = bytes((9, 3, 8, 16, 0, 40, 0)) + draw(24)
+    seeds["pbkdf2_sha256.bin"] = bytes((9, 1, 8, 70, 0, 70, 0)) + draw(78)
+    return seeds
+
+
+def harness_crypto_fuzz(argv):
+    """libFuzzer over net.c's crypto, every verdict and output held to
+    OpenSSL's on the same input.
+
+    The whole crypto section of src/net/net.c is lifted hosted -- lib.c's
+    field, digest, GHASH and AES routines replaced by plain C (the stdin
+    lane crypto_vectors is what holds the assembly to OpenSSL) -- and
+    linked against libcrypto. Each input picks a lane by its first byte:
+    X25519, ECDH and key shares on P-256/P-384 (OpenSSL's share of the
+    input's scalar, then optionally a bit bent), ECDSA signed here with the
+    input's key and nonce and then bent (high S, r or s flipped, digest or
+    key bit flipped, leading zero dropped) or taken raw, RSA PKCS#1
+    SHA-256/384 and PSS over a 2048- and a 2049-bit key with the encoded
+    message either raw or a valid encoding xored at the input's offsets,
+    AES-GCM seal then open with the tag or text tampered, HKDF to the
+    255-block ceiling, HMAC-SHA256 and PBKDF2. A disagreement aborts, so
+    libFuzzer keeps the input. MOONWATER_MSAN=1 builds without the oracle
+    (libcrypto is not instrumented) and runs the same lanes for memory
+    alone. Seeds come from crypto_fuzz_seeds. Returns 2 when clang,
+    libFuzzer or libcrypto is missing.
+
+        python3 test/differential.py --harness crypto_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    checks = (HARNESS_ROOT / "test/checks.c").read_text()
+    oracle = not moonwater_msan_requested()
+    source = crypto_fuzz_source(net, checks, oracle)
+    extra = ["-Wno-deprecated-declarations", "-lcrypto"] if oracle else []
+    return tls_fuzz_run("crypto", "crypto", source, 2048, extra)
+
+
 def harness_tls_fuzz(argv):
-    """tls_der_fuzz, tls_hs_fuzz and tls_verify_fuzz in turn: `sh test/run fuzz`.
+    """tls_der_fuzz, tls_hs_fuzz, tls_verify_fuzz and crypto_fuzz in turn:
+    `sh test/run fuzz`.
 
     Continuous by default, an hour a target with no run cap, unless
     MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise. With
@@ -40222,12 +41105,14 @@ def harness_tls_fuzz(argv):
     os.environ.setdefault("MOONWATER_FUZZ_RUNS", "20000" if report else "-1")
     os.environ.setdefault("MOONWATER_FUZZ_SECONDS", "5" if report else "3600")
     runs, seconds, _ = tls_fuzz_budget()
-    print("tls fuzz: der then hs then verify (runs=%d seconds=%d)" % (runs, seconds))
-    seeds = {corpus: len(tls_fuzz_seeds(corpus)) for corpus in ("tls_der", "tls_hs")}
+    print("tls fuzz: der then hs then verify then crypto (runs=%d seconds=%d)" %
+          (runs, seconds))
+    seeds = {corpus: len(tls_fuzz_seeds(corpus)) for corpus in ("tls_der", "tls_hs", "crypto")}
     targets = []
     for name, corpus, harness in (("tls_der_fuzz", "tls_der", harness_tls_der_fuzz),
                                   ("tls_hs_fuzz", "tls_hs", harness_tls_hs_fuzz),
-                                  ("tls_verify_fuzz", "tls_der", harness_tls_verify_fuzz)):
+                                  ("tls_verify_fuzz", "tls_der", harness_tls_verify_fuzz),
+                                  ("crypto_fuzz", "crypto", harness_crypto_fuzz)):
         began = time.time()
         try:
             code = harness([])
@@ -41379,6 +42264,7 @@ int main(void)
     try:
         der = harness_tls_der_fuzz([])
         hs = harness_tls_hs_fuzz([])
+        crypto = harness_crypto_fuzz([])
     finally:
         if prior is None:
             os.environ.pop("MOONWATER_MSAN", None)
@@ -41391,6 +42277,7 @@ int main(void)
         return 2
     checks(der == 0, "tls_der_fuzz clean under MSan")
     checks(hs == 0, "tls_hs_fuzz clean under MSan")
+    checks(crypto in (0, 2), "crypto_fuzz clean under MSan")
     return checks.verdict("msan net", "msan-net")
 
 
@@ -45973,6 +46860,7 @@ HARNESS_CHECKS = {
     "tls_hs_fuzz": harness_tls_hs_fuzz,
     "tls_verify_fuzz": harness_tls_verify_fuzz,
     "crypto_vectors": harness_crypto_vectors,
+    "crypto_fuzz": harness_crypto_fuzz,
     "tls_fuzz": harness_tls_fuzz,
     "msan_net": harness_msan_net,
     "security_hygiene": harness_security_hygiene,
