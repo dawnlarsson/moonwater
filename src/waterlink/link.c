@@ -196,6 +196,7 @@ struct waterlink_link {
 #define WATERLINK_GRANULE 1000ull       // the least a timer means
 #define WATERLINK_RTO_MOST 2000000ull
 #define WATERLINK_PERSISTENT 3          // probe expiries, then the path is gone
+#define WATERLINK_HELD_MOST 60000000ull // the longest a held frame waits to be asked about
 
 /*      Acknowledgements are owed every second datagram that carried frames,
         and never later than this: at once when a frame arrived out of
@@ -1320,21 +1321,66 @@ __asm__(
 #endif
 
 /*
+        A key whose frames the far side holds, with none of its own in
+        flight, has no timer to ask again: the acknowledgement that frees
+        them -- sent when the far side took them, or when its reader came
+        back -- may be the one the network lost, and then the key waits for
+        ever, with everything queued behind it on its window. So its oldest
+        held frame goes back to its band once the probe timer, doubled for
+        each time the frame went out and at most a minute, runs out, and the
+        far side answers the copy with what it has taken: a reader that is
+        only slow costs a copy now and then, as TCP's persist timer does.
+        Answers when the next of these is due.
+*/
+static p64 waterlink_held_probes(struct waterlink_link address_to link,
+                                 p64 now)
+{
+        p64 due = ~0ull;
+
+        for (p32 key = 0; key < WATERLINK_KEYS &&
+                          link->free_count != WATERLINK_SLOTS;
+             key++)
+        {
+                p32 at = link->sending[key].first;
+                struct waterlink_slot address_to slot;
+                p64 wait;
+
+                if (at == WATERLINK_NONE || link->sending[key].flying ||
+                    link->slot[at].state != WATERLINK_SLOT_HELD)
+                        continue;
+                slot = link->slot + at;
+                wait = waterlink_timeout(link)
+                       << (slot->tries > 16 ? 15 : slot->tries ? slot->tries - 1 : 0);
+                if (wait > WATERLINK_HELD_MOST)
+                        wait = WATERLINK_HELD_MOST;
+                if (now >= slot->sent && now - slot->sent >= wait)
+                {
+                        waterlink_band_requeue(link, at);
+                        due = now;
+                }
+                else if (slot->sent + wait < due)
+                        due = slot->sent + wait;
+        }
+        return due;
+}
+
+/*
         When the caller should next call fill if nothing arrives first: now,
         when acknowledgements are owed or something may be sent; when the
         pacer next lets a datagram go; when the oldest frame in flight would
-        time out. ~0 when there is nothing to wait for.
+        time out, or a held one is due to be asked about. ~0 when there is
+        nothing to wait for.
 */
 p64 waterlink_wake(struct waterlink_link address_to link, p64 now)
 {
-        p64 wake = ~0ull;
+        p64 wake = waterlink_held_probes(link, now);
         bool sendable = false;
 
-        if (waterlink_ack_due(link, now) ||
+        if (wake <= now || waterlink_ack_due(link, now) ||
             link->head[WATERLINK_BAND_URGENT] != WATERLINK_NONE)
                 return now;
 
-        if (link->acking)
+        if (link->acking && link->owed + WATERLINK_ACK_DELAY < wake)
                 wake = link->owed + WATERLINK_ACK_DELAY;
 
         //      A frame waiting on its key's window is waiting for an
@@ -1541,8 +1587,11 @@ struct waterlink_part
         is refused. So every frame and acknowledgement is read and checked
         here, and nothing but zeros may follow the last: a zero flags byte is
         where the frames stop, and the padding is inside the tag, so this is
-        the sender's statement and not a guess. What is read is kept, so the
-        body is read once and applied from the parts.
+        the sender's statement and not a guess. A key is acknowledged once a
+        body, as fill writes it: each acknowledgement walks its key's slots,
+        and a body of one key's, over and over, was a peer buying the
+        listener's time at hundreds of times what it spent. What is read is
+        kept, so the body is read once and applied from the parts.
 
         One pass, in each machine's registers: a part is two stores, a number
         of one byte never leaves the line, and the zeros after the last part
@@ -1566,12 +1615,12 @@ _Static_assert(WATERLINK_PAYLOAD == 1168 && WATERLINK_FRAME_MAX == 1159 &&
 /*
         rdi the body, rsi its length, rdx the parts; r8 the offset, r9 sixteen
         times the parts written, ebx the flags and key as one word, r10 and
-        r11 the two numbers.
+        r11 the two numbers, r12 the keys acknowledged so far.
 */
 __asm__(
     ASM_FUNC(waterlink_judge)
     "cmp $1168, %rsi\n   ja 8f\n"
-    "push %rbx\n   xor %r8d, %r8d\n   xor %r9d, %r9d\n"
+    "push %rbx\n   push %r12\n   xor %r8d, %r8d\n   xor %r9d, %r9d\n   xor %r12d, %r12d\n"
     //  A part starts at a flags byte that is not zero, with its key after.
     "1:  lea 1(%r8), %rax\n   cmp %rsi, %rax\n   jae 6f\n"
     "movzwl (%rdi,%r8), %ebx\n   test %bl, %bl\n   jz 6f\n"
@@ -1586,8 +1635,9 @@ __asm__(
     "3:  mov %r8, %rax\n   shl $16, %rax\n   or %rbx, %rax\n"
     "mov %r10, %rcx\n   shl $32, %rcx\n   or %rcx, %rax\n"
     "mov %rax, (%rdx,%r9)\n   mov %r11, 8(%rdx,%r9)\n   add $16, %r9\n"
-    //  An acknowledgement names a sequence; its mask is any word.
+    //  An acknowledgement names a sequence, once a key; its mask is any word.
     "cmp $8, %bl\n   jne 4f\n"
+    "movzbl %bh, %ecx\n   bts %rcx, %r12\n   jc 9f\n"
     "mov $0xfffffffe, %eax\n   cmp %rax, %r10\n   jbe 1b\n   jmp 9f\n"
     //  A frame: a sequence, one class, no bit the wire does not know, and a
     //  length that is a frame's and is there.
@@ -1599,12 +1649,13 @@ __asm__(
     "add %r11, %r8\n   jmp 1b\n"
     //  Zeros to the end. rbx keeps sixteen times the count over the bytes
     //  left, both under 4096 times it, across the call.
-    "6:  sub %r8, %rsi\n   add %r8, %rdi\n   shl $12, %r9\n   lea (%r9,%rsi), %rbx\n"
+    "6:  pop %r12\n   sub %r8, %rsi\n   add %r8, %rdi\n   shl $12, %r9\n   lea (%r9,%rsi), %rbx\n"
     "mov %rsi, %rdx\n   xor %esi, %esi\n   call memory_span_byte\n"
-    "mov %ebx, %ecx\n   and $4095, %ecx\n   cmp %rcx, %rax\n   jne 9f\n"
+    "mov %ebx, %ecx\n   and $4095, %ecx\n   cmp %rcx, %rax\n   jne 7f\n"
     "mov %rbx, %rax\n   shr $16, %rax\n   pop %rbx\n"
     ASM_RET
-    "9:  pop %rbx\n"
+    "9:  pop %r12\n"
+    "7:  pop %rbx\n"
     "8:  mov $-1, %rax\n"
     ASM_RET
     //  The rest of a number that said more follows, seven bits a byte; a
@@ -1633,12 +1684,13 @@ __asm__(
 #elif ARM64
 /*
         x0 the body, x1 its length, x2 the parts; x8 the offset, x9 the parts
-        written, w11 the flags, w12 the key, x13 and x14 the two numbers.
+        written, w11 the flags, w12 the key, x13 and x14 the two numbers, x3
+        the keys acknowledged so far.
 */
 __asm__(
     ASM_FUNC(waterlink_judge)
     "cmp x1, #1168\n   b.hi 8f\n"
-    "mov x8, #0\n   mov x9, #0\n"
+    "mov x8, #0\n   mov x9, #0\n   mov x3, #0\n"
     "1:  add x10, x8, #1\n   cmp x10, x1\n   b.hs 6f\n"
     "ldrb w11, [x0, x8]\n   cbz w11, 6f\n"
     "ldrb w12, [x0, x10]\n   cmp w12, #63\n   b.hi 8f\n"
@@ -1651,6 +1703,8 @@ __asm__(
     "orr x15, x15, x13, lsl #32\n"
     "add x16, x2, x9, lsl #4\n   stp x15, x14, [x16]\n   add x9, x9, #1\n"
     "cmp w11, #8\n   b.ne 4f\n"
+    "lsr x16, x3, x12\n   tbnz x16, #0, 8f\n   mov x16, #1\n   lsl x16, x16, x12\n"
+    "orr x3, x3, x16\n"
     "mov w16, #0xfffffffe\n   cmp x13, x16\n   b.ls 1b\n   b 8f\n"
     "4:  sub x16, x13, #1\n   mov w17, #0xfffffffd\n   cmp x16, x17\n   b.hi 8f\n"
     "eor w16, w11, w11, lsr #1\n   tbz w16, #0, 8f\n"
@@ -1691,12 +1745,13 @@ __asm__(
 #elif RISCV64
 /*
         a0 the body, a1 its length, a2 the parts; t1 the offset, t2 the parts
-        written, t4 the flags, t5 the key, a3 and a4 the two numbers.
+        written, t4 the flags, t5 the key, a3 and a4 the two numbers, a6 the
+        keys acknowledged so far.
 */
 __asm__(
     ASM_FUNC(waterlink_judge)
     "li t0, 1168\n   bgtu a1, t0, 8f\n"
-    "li t1, 0\n   li t2, 0\n"
+    "li t1, 0\n   li t2, 0\n   li a6, 0\n"
     "1:  addi t0, t1, 1\n   bgeu t0, a1, 6f\n"
     "add t3, a0, t1\n   lbu t4, 0(t3)\n   beqz t4, 6f\n"
     "lbu t5, 1(t3)\n   li t0, 63\n   bgtu t5, t0, 8f\n"
@@ -1712,6 +1767,8 @@ __asm__(
     "slli t3, t2, 4\n   add t3, a2, t3\n   sd t0, 0(t3)\n   sd a4, 8(t3)\n"
     "addi t2, t2, 1\n"
     "li t0, 8\n   bne t4, t0, 4f\n"
+    "srl t0, a6, t5\n   andi t0, t0, 1\n   bnez t0, 8f\n"
+    "li t0, 1\n   sll t0, t0, t5\n   or a6, a6, t0\n"
     "li t0, 0xfffffffe\n   bleu a3, t0, 1b\n   j 8f\n"
     "4:  addi t0, a3, -1\n   li t3, 0xfffffffd\n   bgtu t0, t3, 8f\n"
     "srli t0, t4, 1\n   xor t0, t0, t4\n   andi t0, t0, 1\n   beqz t0, 8f\n"
@@ -1881,7 +1938,8 @@ __asm__(
     "41: cmp $-1, %eax\n   je 20b\n"
     "imul $1200, %rax, %rsi\n   add %rbx, %rsi\n   mov 28(%rsi), %r10d\n   mov 16(%rsi), %r11d\n"
     "cmp %edx, %r11d\n   jbe 42f\n"
-    "mov %r11d, %ecx\n   sub %edx, %ecx\n   dec %ecx\n   cmp $63, %ecx\n   ja 49f\n"
+    //  Past the mask: a key's slots are in sequence order, so the rest are.
+    "mov %r11d, %ecx\n   sub %edx, %ecx\n   dec %ecx\n   cmp $63, %ecx\n   ja 20b\n"
     "bt %rcx, %r8\n   jnc 49f\n"
     "42: movzbl 36(%rsi), %ecx\n   cmp $2, %ecx\n   jne 43f\n"
     //  In flight: what it carried is delivered and leaves the flight, and
@@ -2020,7 +2078,8 @@ __asm__(
     "41: cmn w9, #1\n   b.eq 20b\n"
     "mov w16, #1200\n   madd x12, x9, x16, x19\n   ldr w10, [x12, #28]\n   ldr w14, [x12, #16]\n"
     "cmp w14, w11\n   b.ls 42f\n"
-    "sub w16, w14, w11\n   sub w16, w16, #1\n   cmp w16, #63\n   b.hi 49f\n"
+    //  Past the mask: a key's slots are in sequence order, so the rest are.
+    "sub w16, w14, w11\n   sub w16, w16, #1\n   cmp w16, #63\n   b.hi 20b\n"
     "lsr x17, x13, x16\n   tbz x17, #0, 49f\n"
     "42: ldrb w16, [x12, #36]\n   cmp w16, #2\n   b.ne 43f\n"
     //  In flight: what it carried is delivered and leaves the flight, and
@@ -2158,7 +2217,8 @@ __asm__(
     "41: bltz t0, 20b\n"
     "li t5, 1200\n   mul a0, t0, t5\n   add a0, s0, a0\n   lw t1, 28(a0)\n   lwu t5, 16(a0)\n"
     "bgeu t2, t5, 42f\n"
-    "sub t6, t5, t2\n   addi t6, t6, -1\n   li a1, 64\n   bgeu t6, a1, 49f\n"
+    //  Past the mask: a key's slots are in sequence order, so the rest are.
+    "sub t6, t5, t2\n   addi t6, t6, -1\n   li a1, 64\n   bgeu t6, a1, 20b\n"
     "srl a1, t3, t6\n   andi a1, a1, 1\n   beqz a1, 49f\n"
     "42: lbu t6, 36(a0)\n   li a1, 2\n   bne t6, a1, 43f\n"
     //  In flight: what it carried is delivered and leaves the flight, and

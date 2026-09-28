@@ -59570,6 +59570,7 @@ static fn malformed_bodies(void)
                 {{2, 7, 1}, 3},                              // cut inside its header
                 {{2, 7, 1, 0x80}, 4},                        // cut inside a number
                 {{2}, 1},                                    // a flags byte alone
+                {{8, 7, 1, 0, 8, 7, 2, 0}, 8},               // one key acknowledged twice
         };
         static const p8 widest[] = {1, WATERLINK_KEYS - 1, 0xfe, 0xff, 0xff,
                                     0xff, 0x0f, 1, 'z'};
@@ -59600,9 +59601,17 @@ static fn malformed_bodies(void)
         }
         check("a second spelling, a sequence out of range, an unknown or mixed "
               "flag, a key past the last, a number past 64 bits, bytes after "
-              "the end, a length past the body and a cut header are each "
-              "refused",
+              "the end, a length past the body, a cut header and a key "
+              "acknowledged twice are each refused",
               refused == sizeof wrong / sizeof wrong[0]);
+        {
+                static const p8 two[] = {8, 7, 1, 0, 8, 9, 1, 0};
+
+                waterlink_link_reset(address_of one);
+                check("sec: two keys acknowledged in one body are taken",
+                      waterlink_deliver(address_of one, (p8 address_to)two,
+                                        sizeof two, one.clock, null, null));
+        }
 
         waterlink_link_reset(address_of one);
         heard = 0;
@@ -59753,6 +59762,7 @@ static bipolar judge_model(p8 address_to body, positive length,
 {
         positive at = 0;
         positive count = 0;
+        p64 acknowledged = 0;
 
         if (length > 1168)
                 return -1;
@@ -59778,8 +59788,9 @@ static bipolar judge_model(p8 address_to body, positive length,
                 count++;
                 if (flags == 8)
                 {
-                        if (first >= 0xffffffffu)
+                        if (first >= 0xffffffffu || (acknowledged >> key & 1))
                                 return -1;
+                        acknowledged |= 1ull << key;
                         continue;
                 }
                 if (replaceable == durable || (flags & ~0x17u) || !first ||
@@ -59801,7 +59812,7 @@ static bipolar judge_model(p8 address_to body, positive length,
 */
 enum {
         APPLY_ACK, APPLY_ACK_TAKEN, APPLY_ACK_HELD, APPLY_ACK_PASSED,
-        APPLY_ACK_FLIGHT, APPLY_ACK_QUEUED, APPLY_ACK_LATEST, APPLY_ACK_SAMPLE,
+        APPLY_ACK_BEYOND, APPLY_ACK_FLIGHT, APPLY_ACK_QUEUED, APPLY_ACK_LATEST, APPLY_ACK_SAMPLE,
         APPLY_ACK_UNSAMPLED, APPLY_FREE_HEAD, APPLY_FREE_WALK, APPLY_FREE_LAST,
         APPLY_LARGEST, APPLY_ESTIMATE_FIRST, APPLY_ESTIMATE, APPLY_GROW_SLOW,
         APPLY_GROW_AVOID, APPLY_GROW_CAP, APPLY_SETTLE_LOSSES, APPLY_FRAME,
@@ -59826,8 +59837,14 @@ static fn apply_walk_acknowledge(struct waterlink_link address_to link, p8 key,
                 p32 gap = slot->sequence - delivered - 1;
                 bool taken = slot->sequence <= delivered;
 
-                if (!taken && (gap >= WATERLINK_ACK_MASK ||
-                               !(mask & (1ull << gap))))
+                //      A key's slots are in sequence order: past the mask,
+                //      the rest are too.
+                if (!taken && gap >= WATERLINK_ACK_MASK)
+                {
+                        apply_seen[APPLY_ACK_BEYOND]++;
+                        break;
+                }
+                if (!taken && !(mask & (1ull << gap)))
                 {
                         apply_seen[APPLY_ACK_PASSED]++;
                         at = next;
@@ -61956,8 +61973,8 @@ static fn full_frame_beside_owed_ack(void)
 
 /*
         The acknowledgement is the credit. A reader that will not take a
-        frame keeps it held, the sender hears it is held and does not send
-        it again however long it waits, and a key runs no further than its
+        frame keeps it held, the sender hears it is held and its loss timer
+        does not send it again however long it waits, and a key runs no further than its
         window past what was taken -- then, taken, everything flows.
 */
 static bool refusing;
@@ -62028,6 +62045,62 @@ static fn reader_credit(void)
         check("and the rest follows, with the link left idle",
               one.delivered == 101 && waterlink_idle(address_of one) &&
                       one.retransmitted == 0);
+}
+
+/*      Two ends, and the one acknowledgement that would free what the far
+        side held lost on the way: the reader refuses three frames, the
+        sender hears they are held, the reader comes back and takes them,
+        and the network loses the answer. Nothing of the key is in flight,
+        so no loss timer runs; waterlink_wake has to be the one that asks. */
+static struct waterlink_link held_sender, held_reader;
+
+static fn held_answer_lost(void)
+{
+        p8 body[WATERLINK_PAYLOAD];
+        bool alone = false;
+        positive used;
+        p64 now = 1000;
+        p64 wake;
+
+        waterlink_link_reset(address_of held_sender);
+        waterlink_link_reset(address_of held_reader);
+        heard = 0;
+        refusing = true;
+        for (positive at = 0; at < 3; at++)
+                (void)waterlink_post(address_of held_sender, 5,
+                                     WATERLINK_FRAME_DURABLE,
+                                     (p8 address_to) "abc" + at, 1, now);
+        used = waterlink_fill(address_of held_sender, body, now, address_of alone);
+        (void)waterlink_deliver(address_of held_reader, body, used, now,
+                                hear_or_refuse, null);
+        used = waterlink_fill(address_of held_reader, body, now + 1, address_of alone);
+        (void)waterlink_deliver(address_of held_sender, body, used, now + 2,
+                                null, null);
+        refusing = false;
+        waterlink_resume(address_of held_reader, 5, hear_or_refuse, null);
+        (void)waterlink_fill(address_of held_reader, body, now + 3, address_of alone);
+        check("sec: a held key whose freeing acknowledgement was lost is due "
+              "to be asked about",
+              heard == 3 && held_sender.flight_head == WATERLINK_NONE &&
+                      (wake = waterlink_wake(address_of held_sender, now + 3)) >
+                              now + 3 &&
+                      wake != ~0ull);
+        now += 3000000;
+        used = waterlink_wake(address_of held_sender, now) == now
+                       ? waterlink_fill(address_of held_sender, body, now,
+                                        address_of alone)
+                       : 0;
+        if (used)
+                (void)waterlink_deliver(address_of held_reader, body, used, now,
+                                        hear_or_refuse, null);
+        used = waterlink_fill(address_of held_reader, body, now + 1, address_of alone);
+        if (used)
+                (void)waterlink_deliver(address_of held_sender, body, used,
+                                        now + 2, null, null);
+        check("sec: and the copy it sends is answered, freeing the key",
+              heard == 3 && waterlink_idle(address_of held_sender) &&
+                      held_sender.free_count == WATERLINK_SLOTS &&
+                      held_sender.retransmitted == 1);
 }
 
 /*      The wire judge already refuses channel bytes above 63.  The application
@@ -63704,6 +63777,7 @@ b32 main(void)
         superseded_in_flight();
         full_frame_beside_owed_ack();
         reader_credit();
+        held_answer_lost();
         invalid_application_keys();
         network_generated();
         handshake();

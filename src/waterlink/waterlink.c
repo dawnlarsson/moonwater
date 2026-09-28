@@ -75,7 +75,10 @@
         it is held and does not send it again, and a key may run only sixty
         four frames past what was taken, so the sender stops. There is no
         second flow control on top: the window the link keeps anyway is the
-        one the reader controls.
+        one the reader controls. The one copy a held key's sender does send
+        is its oldest frame, when none of the key is in flight, less and less
+        often up to a minute: the acknowledgement that the reader came back
+        can be lost too, and nothing else would ask.
 
         A receiver delivers a stream frame when it is the next and holds it
         when it is ahead; it takes a register frame when it is newer than
