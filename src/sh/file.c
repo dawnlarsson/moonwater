@@ -1355,9 +1355,13 @@ typedef struct file_codec_cli
         /* A codec's own options, asked before the shared ones: a whole
            --word, or the rest of a short cluster from one letter.  It
            answers how many characters it took (0: not its option), or a
-           negative exit status once it has said what it refused. */
+           negative exit status once it has said what it refused.  An
+           option whose value is the next argument reads next_argument (null
+           after the last) and sets took_next. */
         bipolar (*option)(struct file_codec_cli address_to codec,
                           string_address at, bool word);
+        string_address next_argument;
+        bool took_next;
 } file_codec_cli;
 
 /* One regular-file output transaction shared by utilities that must never
@@ -1499,6 +1503,10 @@ static bool file_codec_parse(file_codec_cli address_to codec,
                 }
                 if (word[0] != '-' || !word[1])
                         break;
+                codec->next_argument = *first + 1 < count
+                                           ? program_argument((b32)(*first + 1))
+                                           : null;
+                codec->took_next = false;
                 if (word[1] == '-')
                 {
                         bipolar taken = codec->option
@@ -1511,7 +1519,10 @@ static bool file_codec_parse(file_codec_cli address_to codec,
                                 return false;
                         }
                         if (taken)
+                        {
+                                *first += codec->took_next;
                                 continue;
+                        }
                         if (string_equals(word, "--decompress") ||
                             string_equals(word, "--uncompress"))
                                 codec->decompress = true;
@@ -1601,6 +1612,11 @@ static bool file_codec_parse(file_codec_cli address_to codec,
                         if (taken)
                         {
                                 letter += taken - 1;
+                                if (codec->took_next)
+                                {
+                                        (*first)++;
+                                        break;
+                                }
                                 continue;
                         }
                         if ((*letter >= '1' ||

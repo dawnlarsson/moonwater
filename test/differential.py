@@ -32234,6 +32234,36 @@ def harness_compression(argv):
                                               got.stdout == ref.stdout,
                                               '%d bytes, GNU %d; %s' % (len(got.stdout), len(ref.stdout),
                                                                         got.stderr.decode(errors='replace')))
+                        # -C and -e as xz spells them: each check word, the
+                        # default, and -e at a hash-chain and a binary-tree
+                        # preset. xz decodes ours, and the stream header and
+                        # footer name the check GNU's do. Refused words and a
+                        # missing value say what GNU says, with its status.
+                        exe = str(farms[label] / codec)
+                        body = data_sets[-1][1]
+                        for check_word in (None, 'none', 'crc32', 'crc64', 'sha256'):
+                            for preset in (['-0'], ['-6'], ['-0', '-e'], ['-e6']):
+                                args = preset + (['-C', check_word] if check_word else [])
+                                got = call(runner + [exe, '-c'] + args, body)
+                                ref = call([refs['xz'], '-c', '-T1'] + args, body)
+                                back = call([refs['xz'], '-dc'], got.stdout)
+                                check('%s/xz/check-%s%s' % (label, check_word or 'default', ''.join(preset)),
+                                      got.returncode == ref.returncode == back.returncode == 0 and
+                                      back.stdout == body and got.stdout[6:12] == ref.stdout[6:12] and
+                                      got.stdout[-4:] == ref.stdout[-4:],
+                                      got.stderr.decode(errors='replace') + back.stderr.decode(errors='replace'))
+                        for args in (['-C', 'bad'], ['--check='], ['--check=SHA256'], ['-Ccrc6'],
+                                     ['-C', '-c'], ['-C'], ['--check'], ['--check', 'none', '-e', '-1'],
+                                     ['-Csha256'], ['-9eCcrc32']):
+                            got = call(runner + [exe] + args, b'check words\n')
+                            ref = call([refs['xz']] + args, b'check words\n')
+                            back = call([refs['xz'], '-dc'], got.stdout) if got.returncode == 0 else ref
+                            check('%s/xz/cli%s' % (label, ''.join(args)),
+                                  got.returncode == ref.returncode and
+                                  got.stderr == ref.stderr.replace(refs['xz'].encode(), b'xz') and
+                                  (got.returncode != 0 or back.stdout == b'check words\n'),
+                                  'GNU %d %r, ours %d %r' % (ref.returncode, ref.stderr[:120],
+                                                             got.returncode, got.stderr[:120]))
 
                     # Damage, drawn: a stream the reference made, with a byte
                     # flipped, a run of bytes cut or inserted, or its tail cut,

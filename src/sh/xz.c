@@ -1419,9 +1419,13 @@ typedef struct
         p16 depth;
 } xz_preset;
 
-/* xz 5.8's -0 .. -9, all lc=3 lp=0 pb=2. Depth 0 means 16 + nice/2 for a
-   binary tree and 4 + nice/4 for a hash chain. */
-static const xz_preset xz_presets[10] = {
+/* xz 5.8's -0 .. -9, all lc=3 lp=0 pb=2, then -0e .. -9e: the normal parser
+   over bt4, nice 192 at -3e and -5e and 273 with depth 512 elsewhere. Depth
+   0 means 16 + nice/2 for a binary tree and 4 + nice/4 for a hash chain. A
+   level byte carries XZ_EXTREME beside the preset number. */
+#define XZ_EXTREME 0x10
+
+static const xz_preset xz_presets[20] = {
         {18, false, XZ_FINDER_HC3, 128, 4},
         {20, false, XZ_FINDER_HC4, 128, 8},
         {21, false, XZ_FINDER_HC4, 273, 24},
@@ -1431,7 +1435,24 @@ static const xz_preset xz_presets[10] = {
         {23, true, XZ_FINDER_BT4, 64, 0},
         {24, true, XZ_FINDER_BT4, 64, 0},
         {25, true, XZ_FINDER_BT4, 64, 0},
-        {26, true, XZ_FINDER_BT4, 64, 0}};
+        {26, true, XZ_FINDER_BT4, 64, 0},
+        {18, true, XZ_FINDER_BT4, 273, 512},
+        {20, true, XZ_FINDER_BT4, 273, 512},
+        {21, true, XZ_FINDER_BT4, 273, 512},
+        {22, true, XZ_FINDER_BT4, 192, 0},
+        {22, true, XZ_FINDER_BT4, 273, 512},
+        {23, true, XZ_FINDER_BT4, 192, 0},
+        {23, true, XZ_FINDER_BT4, 273, 512},
+        {24, true, XZ_FINDER_BT4, 273, 512},
+        {25, true, XZ_FINDER_BT4, 273, 512},
+        {26, true, XZ_FINDER_BT4, 273, 512}};
+
+static const xz_preset address_to xz_preset_of(p8 level)
+{
+        p8 number = level & 15;
+
+        return xz_presets + (number > 9 ? 9 : number) + (level & XZ_EXTREME ? 10 : 0);
+}
 
 typedef struct
 {
@@ -1517,6 +1538,7 @@ typedef struct
         positive out_at;
         positive out_n;
         p64 unpadded;
+        p8 check;
         p8 chunk[XZ_CHUNK_PACKED_MAX + 32768];
 } xz_encoder;
 
@@ -1545,7 +1567,8 @@ static xz_encoder address_to xz_encoder_open(p8 level)
 
         if (!e)
                 return null;
-        e->preset = xz_presets + (level > 9 ? 9 : level);
+        e->preset = xz_preset_of(level);
+        e->check = XZ_CHECK_CRC64;
         e->lc = 3;
         e->lp = 0;
         e->pb = 2;
@@ -3081,7 +3104,7 @@ static bool xz_block_prepare(xz_encoder address_to e, p32 n)
 }
 
 /* Encode input[0, n) as one complete block: header with both sizes, LZMA2
-   chunks and end marker, padding, CRC32. The input must stay readable for
+   chunks and end marker, padding, then the check e->check names. The input must stay readable for
    XZ_SLACK bytes past n; what those bytes hold never changes the output. */
 static bool xz_block_encode(xz_encoder address_to e, p8 address_to input, p32 n)
 {
@@ -3205,13 +3228,26 @@ static bool xz_block_encode(xz_encoder address_to e, p8 address_to input, p32 n)
         h += 4;
         memory_copy_apart(e->out + XZ_BLOCK_HEADER_MAX - h, header, h);
 
-        e->unpadded = h + at + 4;
+        positive sum = (positive)xz_check_size(e->check);
+
+        e->unpadded = h + at + sum;
         positive data_padding = (0 - at) & 3;
         memory_zero(out + at, data_padding);
         at += data_padding;
-        memory_store_unaligned(p32, out + at, ~hash_crc32(0xffffffffu, input, n));
+        if (e->check == XZ_CHECK_CRC32)
+                memory_store_unaligned(p32, out + at, ~hash_crc32(0xffffffffu, input, n));
+        else if (e->check == XZ_CHECK_CRC64)
+                memory_store_unaligned(p64, out + at, ~hash_crc64(~(p64)0, input, n));
+        else if (e->check == XZ_CHECK_SHA256)
+        {
+                digest_state digest;
+
+                digest_open(address_of digest, DIGEST_SHA256, 32);
+                digest_write(address_of digest, input, n);
+                digest_close(address_of digest, out + at);
+        }
         e->out_at = XZ_BLOCK_HEADER_MAX - h;
-        e->out_n = h + at + 4;
+        e->out_n = h + at + sum;
         return true;
 }
 
@@ -3241,12 +3277,20 @@ typedef struct
         positive index_room;
         positive index_n;
         p64 records;
+        p8 check;
         byte_store address_to store;
         bipolar fd;
         bool failed;
 } xz_stream_writer;
 
 static xz_stream_writer xz_writer;
+
+/* The check every block of the next stream carries: CRC64, as xz writes
+   by default, unless the command line's -C names another. */
+static p8 xz_encode_check = XZ_CHECK_CRC64;
+
+/* -e on the command line: the extreme form of the preset. */
+static bool xz_cli_extreme;
 
 /* 1 keeps encoding on the calling thread; set by the command line only. */
 static bool xz_serial;
@@ -3337,6 +3381,7 @@ static fn xz_batch_job(address_any context, positive index,
                         return;
                 w->slots[slot] = e;
         }
+        e->check = w->check;
         if (xz_block_encode(e, w->input + index * w->block, (p32)xz_batch_bytes(w, index)) &&
             parallel_write(output, e->out + e->out_at, e->out_n))
                 w->unpadded[index] = e->unpadded;
@@ -3393,13 +3438,14 @@ static positive xz_batch_room(positive block)
 
 static bool xz_encode_setup(p8 level)
 {
-        const xz_preset address_to p = xz_presets + (level > 9 ? 9 : level);
+        const xz_preset address_to p = xz_preset_of(level);
         positive dict = (positive)1 << p->dict_log;
-        p8 header[12] = {0xfd, 0x37, 0x7a, 0x58, 0x5a, 0, 0, XZ_CHECK_CRC32};
+        p8 header[12] = {0xfd, 0x37, 0x7a, 0x58, 0x5a, 0, 0, xz_encode_check};
 
         xz_writer_close();
         xz_why = null;
-        xz_writer.level = level > 9 ? 9 : level;
+        xz_writer.level = level;
+        xz_writer.check = xz_encode_check;
         xz_writer.block = 3 * dict > ((positive)1 << 20) ? 3 * dict : (positive)1 << 20;
         xz_writer.batch_blocks = xz_batch_room(xz_writer.block) / xz_writer.block;
         if (xz_writer.batch_blocks > XZ_BATCH_BLOCKS)
@@ -3454,7 +3500,7 @@ static bool xz_encode_end(void)
         {
                 p8 head[16];
                 p8 tail[8];
-                p8 footer[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, XZ_CHECK_CRC32, 'Y', 'Z'};
+                p8 footer[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, xz_writer.check, 'Y', 'Z'};
                 positive h = 1;
                 positive size;
                 p32 crc;
@@ -4107,7 +4153,7 @@ static b32 xz_stream_cli(bipolar in, bipolar out, bool decode, p8 level)
                 byte_input_open_fd(address_of xz_input, in, xz_in_buf, XZ_IN);
                 xz_out_fd = out;
                 xz_output.bytes = null;
-                ok = xz_stream_encode(level);
+                ok = xz_stream_encode(level | (xz_cli_extreme ? XZ_EXTREME : 0));
         }
         if (!ok)
         {
@@ -4122,6 +4168,70 @@ static b32 xz_stream_cli(bipolar in, bipolar out, bool decode, p8 level)
         return 0;
 }
 
+/* -e / --extreme, whatever order it takes with -0 .. -9, as xz keeps its
+   preset flag apart from the number; -C WORD / --check=WORD, the four names
+   xz spells, WORD being the rest of the cluster or the next argument. */
+
+static bool xz_cli_check(string_address word)
+{
+        static const string_address names[] = {"none", "crc32", "crc64", "sha256"};
+        static const p8 types[] = {XZ_CHECK_NONE, XZ_CHECK_CRC32, XZ_CHECK_CRC64,
+                                   XZ_CHECK_SHA256};
+
+        for (positive i = 0; i < array_count(names); i++)
+                if (string_equals(word, names[i]))
+                {
+                        xz_encode_check = types[i];
+                        return true;
+                }
+        string_format(log_error, "xz: %s: Unsupported integrity check type\n", word);
+        return false;
+}
+
+static bipolar xz_cli_option(file_codec_cli address_to codec, string_address at,
+                             bool word)
+{
+        if (!word)
+        {
+                if (*at == 'e')
+                {
+                        xz_cli_extreme = true;
+                        return 1;
+                }
+                if (*at != 'C')
+                        return 0;
+                if (at[1])
+                        return xz_cli_check(at + 1) ? (bipolar)string_length(at) : -1;
+                if (!codec->next_argument)
+                {
+                        string_format(log_error,
+                                      "xz: option requires an argument -- 'C'\n"
+                                      "xz: Try 'xz --help' for more information.\n");
+                        return -1;
+                }
+                codec->took_next = true;
+                return xz_cli_check(codec->next_argument) ? 1 : -1;
+        }
+        if (string_equals(at, "--extreme"))
+        {
+                xz_cli_extreme = true;
+                return 1;
+        }
+        if (string_has_prefix(at, "--check="))
+                return xz_cli_check(at + 8) ? 1 : -1;
+        if (!string_equals(at, "--check"))
+                return 0;
+        if (!codec->next_argument)
+        {
+                string_format(log_error,
+                              "xz: option '--check' requires an argument\n"
+                              "xz: Try 'xz --help' for more information.\n");
+                return -1;
+        }
+        codec->took_next = true;
+        return xz_cli_check(codec->next_argument) ? 1 : -1;
+}
+
 static const file_codec_suffix xz_suffixes[] = {
     {".xz", ""}, {".txz", ".tar"}};
 
@@ -4129,7 +4239,7 @@ static b32 file_xz(void)
 {
         file_codec_cli codec = {
             .name = "xz", .decode_name = "unxz", .cat_name = "xzcat",
-            .usage = "Usage: xz [-cdfkqt0123456789] [-T N] [FILE...]",
+            .usage = "Usage: xz [-cdefkqt0123456789] [-C CHECK] [-T N] [FILE...]",
             .version = "xz from moonwater",
             .status = address_of xz_status,
             .suffixes = xz_suffixes, .suffix_count = array_count(xz_suffixes),
@@ -4137,7 +4247,7 @@ static b32 file_xz(void)
             .encode_suffix_error = "cannot guess output name",
             .features = FILE_CODEC_LEVEL_ZERO | FILE_CODEC_THREADS,
             .remove_source = true, .level = 6,
-            .run = xz_stream_cli};
+            .run = xz_stream_cli, .option = xz_cli_option};
         return file_codec_main(address_of codec);
 }
 
