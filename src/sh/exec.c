@@ -9243,7 +9243,16 @@ typedef struct exec_compound_held
         positive key_length;
         string_address value;
         struct exec_compound_held address_to next;
+        string_address word;
+        p8 how;
 } exec_compound_held;
+
+//      How a held element finds its place when it is assigned: its key is
+//      an indexed subscript still to be counted, or it has none and takes
+//      the next index; [key]+=value adds to what the element holds then.
+#define EXEC_HELD_ARITH 1
+#define EXEC_HELD_NEXT 2
+#define EXEC_HELD_APPEND 4
 
 /*
         local and declare in a function make their name before they assign
@@ -9255,6 +9264,7 @@ static exec_compound_held address_to exec_compound_prepared;
 static string_address exec_compound_prepared_body;
 static bool exec_compound_preparing;
 static bool exec_compound_prepared_keyed;
+static bool exec_compound_prepared_refused;
 
 fn shell_compound_prepare_drop()
 {
@@ -9276,16 +9286,25 @@ bool shell_compound_prepare(string_address name, positive name_length,
         return answer;
 }
 
+//      The word an element was written as, for bash's diagnostics.
+static string_address exec_compound_piece;
+//      A refused list keeps what it assigned though the command is dropped.
+static bool exec_compound_kept;
+static COLD fn exec_assignment_discard();
+//      Set by declare and local around their compound values: bash quotes
+//      the word it refuses there and not in a plain assignment.
+static bool exec_compound_declaring;
+
 static bool exec_compound_put(string_address name, positive name_length,
                               string_address key, positive key_length,
-                              string_address value,
+                              string_address value, p8 how,
                               exec_compound_held address_to address_to tail)
 {
         exec_compound_held address_to held;
 
         if (!tail)
                 return shell_array_set(name, name_length, key, key_length,
-                                       value, false);
+                                       value, (how & EXEC_HELD_APPEND) != 0);
 
         held = (exec_compound_held address_to)shell_store_take(
             address_of exec_store, sizeof(*held));
@@ -9296,6 +9315,8 @@ static bool exec_compound_put(string_address name, positive name_length,
         held->value = shell_store_copy(address_of exec_store, value,
                                        string_length(value));
         held->next = null;
+        held->how = how;
+        held->word = exec_compound_piece;
         if (!held->key || !held->value)
                 return false;
         *tail = held;
@@ -9353,6 +9374,7 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
         exec_compound_held address_to address_to tail = address_of first;
         bool pairs_decided = false;
         bool pairs = false;
+        bool refused = false;
         string_address pending = null;
 
         //      The list was already read, before local made the name: take
@@ -9360,6 +9382,7 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
         if (exec_compound_prepared_body == body)
         {
                 first = exec_compound_prepared;
+                refused = exec_compound_prepared_refused;
                 exec_compound_prepared = null;
                 exec_compound_prepared_body = null;
                 at = stop;
@@ -9376,7 +9399,6 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                 string_address shut = null;
                 positive length;
                 positive key_length = 0;
-                p8 written[32];
 
                 while (at < stop && (string_is(at, ' ') || string_is(at, '\t') ||
                                      string_is(at, '\n')))
@@ -9401,6 +9423,7 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
 
                 length = (positive)(finish - at);
                 piece = shell_store_copy(address_of exec_store, at, length);
+                exec_compound_piece = piece;
 
                 if (!piece)
                 {
@@ -9412,6 +9435,14 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
 
                 if (string_is(piece, '['))
                         shut = expand_bracket_end(piece + 1, '[', ']');
+
+                //      [key]+=value adds to the element, in bash.
+                bool element_append = shut && shell_bash_compat &&
+                                      string_is(shut + 1, '+') &&
+                                      string_is(shut + 2, '=');
+
+                if (element_append)
+                        shut++;
 
                 /*
                         bash 5.1's other spelling of an associative list:
@@ -9448,7 +9479,7 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                         {
                                 answer = exec_compound_put(
                                     name, name_length, pending,
-                                    string_length(pending), value, tail);
+                                    string_length(pending), value, 0, tail);
                                 if (tail && *tail)
                                         tail = address_of (*tail)->next;
                         }
@@ -9465,11 +9496,16 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                         // The subscript is resolved against the array it is
                         // being written into, so a keyed one stays bytes and
                         // an indexed one is arithmetic, exactly as it would
-                        // be written on its own line.
-                        key = shell_expand_subscript(name, name_length,
-                                                     piece + 1,
-                                                     (positive)(shut - piece) - 1,
-                                                     address_of key_length);
+                        // be written on its own line. Its expansions are
+                        // made here with the rest of the word; bash does its
+                        // arithmetic only as it assigns, into the array the
+                        // earlier elements have already made.
+                        expand_subscript_deferred = !keyed;
+                        key = shell_expand_subscript(
+                            name, name_length, piece + 1,
+                            (positive)(shut - piece) - 1 - element_append,
+                            address_of key_length);
+                        expand_subscript_deferred = false;
 
                         if (!key)
                         {
@@ -9478,25 +9514,63 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                         }
 
                         value = shell_expand_assignment(piece, value_at);
-                        answer = exec_compound_put(name, name_length, key,
-                                                   key_length, value + value_at,
-                                                   tail);
+                        if (!value)
+                        {
+                                answer = false;
+                                break;
+                        }
+                        value += value_at;
+
+                        //      A keyed list that replaces the array adds
+                        //      to what the element held before it: bash
+                        //      reads the old table while filling a new one.
+                        if (keyed && element_append && !append)
+                        {
+                                positive had_length = 0;
+                                string_address had = shell_array_get(
+                                    name, name_length, key, key_length,
+                                    address_of had_length);
+                                positive more = string_length(value);
+                                p8 address_to both;
+
+                                element_append = false;
+                                if (had && had_length &&
+                                    (both = (p8 address_to)shell_store_take(
+                                         address_of exec_store,
+                                         had_length + more + 1)))
+                                {
+                                        memory_copy(both, had, had_length);
+                                        memory_copy_end(both + had_length,
+                                                        value, more);
+                                        value = both;
+                                }
+                        }
+                        answer = exec_compound_put(
+                            name, name_length, key, key_length, value,
+                            (p8)((keyed ? 0 : EXEC_HELD_ARITH) |
+                                 (element_append ? EXEC_HELD_APPEND : 0)),
+                            tail);
                         if (tail && *tail)
                                 tail = address_of (*tail)->next;
-
-                        if (!keyed)
-                                next = array_index_of(key, key_length) + 1;
 
                         continue;
                 }
 
+                //      Bash names the word, keeps the elements before it and
+                //      drops the rest of the command.
                 if (keyed)
                 {
+                        expand_where();
                         string_format(log_error,
-                                      "%s: must use subscript when assigning "
-                                      "associative array\n",
-                                      name);
-                        answer = false;
+                                      exec_compound_declaring
+                                          ? "%s: '%s': must use subscript "
+                                            "when assigning associative "
+                                            "array\n"
+                                          : "%s: %s: must use subscript "
+                                            "when assigning associative "
+                                            "array\n",
+                                      name, piece);
+                        refused = true;
                         break;
                 }
 
@@ -9513,11 +9587,10 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
 
                         for (positive one = 0; one < count && answer; one++)
                         {
-                                key_length = positive_into_string(written,
-                                                                  next++);
                                 answer = exec_compound_put(
-                                    name, name_length, written, key_length,
-                                    exec_compound_word[one], tail);
+                                    name, name_length, (string_address) "", 0,
+                                    exec_compound_word[one], EXEC_HELD_NEXT,
+                                    tail);
                                 if (tail && *tail)
                                         tail = address_of (*tail)->next;
                         }
@@ -9528,6 +9601,7 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
         {
                 exec_compound_prepared = answer ? first : null;
                 exec_compound_prepared_body = answer ? body : null;
+                exec_compound_prepared_refused = refused;
                 return answer;
         }
 
@@ -9539,7 +9613,7 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                 {
                         answer = exec_compound_put(name, name_length, pending,
                                                    string_length(pending), "",
-                                                   tail);
+                                                   0, tail);
                         if (tail && *tail)
                                 tail = address_of (*tail)->next;
                 }
@@ -9551,9 +9625,45 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                         answer = shell_array_clear(name, name_length);
                 for (exec_compound_held address_to one = first;
                      one && answer; one = one->next)
-                        answer = shell_array_set(name, name_length, one->key,
-                                                 one->key_length, one->value,
-                                                 false);
+                {
+                        string_address key = one->key;
+                        positive key_length = one->key_length;
+                        p8 written[32];
+
+                        if (one->how & EXEC_HELD_NEXT)
+                                key_length = positive_into_string(
+                                    written, next++);
+                        else if (one->how & EXEC_HELD_ARITH)
+                                key = shell_subscript_index(
+                                    name, name_length, one->key, written,
+                                    address_of key_length, one->word);
+                        //      A subscript that counts back past the
+                        //      start ends the assignment there, and bash
+                        //      drops the rest of the command with it.
+                        if (!key)
+                        {
+                                if (!expand_failed && shell_bash_compat)
+                                        refused = true;
+                                else
+                                        answer = false;
+                                break;
+                        }
+                        if (one->how & (EXEC_HELD_NEXT | EXEC_HELD_ARITH))
+                                key = written;
+                        answer = shell_array_set(
+                            name, name_length, key, key_length, one->value,
+                            (one->how & EXEC_HELD_APPEND) != 0);
+                        //      A placed element moves the running index to
+                        //      just after it; a bare one has already moved it.
+                        if (!keyed && (one->how & EXEC_HELD_ARITH))
+                                next = array_index_of(key, key_length) + 1;
+                }
+        }
+
+        if (answer && refused)
+        {
+                exec_compound_kept = true;
+                exec_assignment_discard();
         }
 
         shell_store_rewind(address_of exec_store, held);
@@ -9750,6 +9860,27 @@ static bool exec_assignment_promote(const_string name, positive length)
         return found;
 }
 
+/*
+        bash's answer to an assignment it cannot make: status 1 and the rest
+        of the line dropped, a -c string going on at its next line and eval
+        answering 1, where a function's caller loses its line too.
+*/
+static COLD fn exec_assignment_discard()
+{
+        //      An assignment statement's error ends a posix shell, as
+        //      exec_assignment_error_status says; declare's is still the
+        //      dropped line.
+        if (shell_posix_on() && !exec_compound_declaring)
+        {
+                expand_fatal_status(string_is(shell_option_flags, 'c') ? 127
+                                                                       : 1);
+                return;
+        }
+        shell_status = 1;
+        expand_failed = true;
+        exec_expand_input_error();
+}
+
 static COLD bool exec_keep_element(exec_kept_value address_to kept,
                                    string_address base, positive base_length,
                                    string_address subscript,
@@ -9760,8 +9891,26 @@ static COLD bool exec_keep_element(exec_kept_value address_to kept,
         if (!base)
                 return false;
         positive key_length;
+        //      bash names an assignment it refuses by the element it wrote,
+        //      a[-5], and drops the rest of the command.
+        p8 named[256];
+        positive named_length = base_length + subscript_length + 2;
+
+        if (named_length < sizeof(named))
+        {
+                memory_copy(named, base, base_length);
+                named[base_length] = '[';
+                memory_copy(named + base_length + 1, subscript,
+                            subscript_length);
+                named[named_length - 1] = ']';
+                named[named_length] = end;
+                expand_subscript_named = named;
+        }
         string_address key = shell_expand_subscript(base, base_length,
             subscript, subscript_length, &key_length);
+        expand_subscript_named = null;
+        if (!key && !expand_failed && shell_bash_compat)
+                exec_assignment_discard();
         if (!key || key_length == positive_max)
                 return false;
         string_address value = shell_array_get(base, base_length, key, key_length, null);
@@ -11098,6 +11247,7 @@ static b32 exec_simple(b32 index)
 
                                 memory_copy_apart(shown, (address_any)word, kept);
                                 shown[kept] = 0;
+                                shell_diagnostic_where();
                                 string_format(log_error,
                                     "`%s': not a valid identifier\n", shown);
                         }
@@ -11172,7 +11322,7 @@ static b32 exec_simple(b32 index)
                     !exec_keep_value(expanded_kept + expanded_count, trial,
                         parse_word_name_lengths[word_index], assignments_only ? EXEC_KEEP_TARGET : EXEC_KEEP_PREFIX))
                 {
-                        status = 2;
+                        status = exec_line_aborted() ? shell_status : 2;
                         goto fail;
                 }
                 expanded_count++;
@@ -11197,6 +11347,14 @@ static b32 exec_simple(b32 index)
 
         if (exec_line_aborted())
         {
+                //      What a refused compound list assigned before the
+                //      word it stopped at stays, in bash.
+                if (exec_compound_kept && assignments_only)
+                {
+                        exec_put_back(expanded_kept, expanded_count, false);
+                        expanded_count = 0;
+                }
+                exec_compound_kept = false;
                 status = shell_status;
                 goto fail;
         }

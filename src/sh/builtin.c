@@ -9488,6 +9488,8 @@ bool shell_compound_prepare(string_address name, positive name_length,
                             string_address body, positive body_length,
                             bool keyed);
 fn shell_compound_prepare_drop();
+static bool exec_compound_declaring;
+static bool exec_compound_kept;
 static b32 shell_declare_value(string_address name, positive length,
                                string_address mark, bool append,
                                bool bind_reference, bool declare_empty,
@@ -9506,10 +9508,14 @@ static b32 shell_declare_value(string_address name, positive length,
         {
                 positive body = string_length(mark + 1);
 
-                return shell_compound_assign(name, length, mark + 2,
-                                             body > 2 ? body - 2 : 0,
-                                             append)
-                           ? 1 : -1;
+                bool assigned;
+
+                exec_compound_declaring = true;
+                assigned = shell_compound_assign(name, length, mark + 2,
+                                                 body > 2 ? body - 2 : 0,
+                                                 append);
+                exec_compound_declaring = false;
+                return assigned ? 1 : -1;
         }
 
         if (destination)
@@ -10080,7 +10086,9 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                 return shell_answered(2, "%s: no room\n", local_mode ? (string_address)"local" : (string_address)"declare");
         }
 
-        shell_answer(failed ? 1 : 0);
+        //      A compound list refused part way answers 1, as bash does.
+        shell_answer(failed || exec_compound_kept ? 1 : 0);
+        exec_compound_kept = false;
 }
 
 COLD fn shell_local(writer write, string_address input)

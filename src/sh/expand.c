@@ -7084,6 +7084,18 @@ static fn expand_push_names(string_address prefix, positive prefix_length,
         The resolved key is retained separately from the base name, so every
         operator can read or write it without evaluating its subscript again.
 */
+//      Set while a compound assignment reads its words: an indexed
+//      subscript comes back as its expanded text, for arithmetic later.
+static bool expand_subscript_deferred;
+//      What a refused subscript is called, when not its array's name.
+static string_address expand_subscript_named;
+COLD string_address shell_subscript_index(string_address base,
+                                          positive base_length,
+                                          string_address key,
+                                          p8 address_to written,
+                                          positive address_to key_length,
+                                          string_address named);
+
 static COLD string_address expand_subscript_key(string_address base,
                                            positive base_length,
                                            string_address subscript,
@@ -7108,17 +7120,40 @@ static COLD string_address expand_subscript_key(string_address base,
         if (expand_failed || !key)
                 return null;
 
-        if (shell_array_attributes(base, base_length) &
-            SHELL_ARRAY_ASSOCIATIVE)
+        if (expand_subscript_deferred ||
+            (shell_array_attributes(base, base_length) &
+             SHELL_ARRAY_ASSOCIATIVE))
         {
                 address_to key_length = string_length(key);
                 return key;
         }
 
+        return shell_subscript_index(
+            base, base_length, key, written, key_length,
+            expand_subscript_named ? expand_subscript_named : base);
+}
+
+/*
+        An indexed subscript's text, expanded, made a number: arithmetic,
+        and a negative one counted back from the end of the array as it is
+        now. Apart from its expansion so that a compound assignment can
+        expand every word first and do the arithmetic as it assigns, the way
+        bash does: a=([0]=1+2+3 [a[0]]=10) puts 10 at 6.
+*/
+COLD string_address shell_subscript_index(string_address base,
+                                          positive base_length,
+                                          string_address key,
+                                          p8 address_to written,
+                                          positive address_to key_length,
+                                          string_address named)
+{
         {
                 bipolar index = arith_evaluate(key);
 
-                if (!arith_bad && index < 0)
+                //      Counted back from the end of an array that has
+                //      one: an empty array has no end, and bash refuses it.
+                if (!arith_bad && index < 0 &&
+                    shell_array_length(base, base_length))
                         index += (bipolar)shell_array_highest(base,
                                                               base_length) + 1;
 
@@ -7141,7 +7176,7 @@ static COLD string_address expand_subscript_key(string_address base,
                         //      the array and the next command still runs.
                         expand_where();
                         string_format(writer_stderr_once,
-                                      "%s: bad array subscript\n", base);
+                                      "%s: bad array subscript\n", named);
                         if (!shell_bash_compat)
                                 expand_fatal_status(2);
                         return null;
@@ -8230,6 +8265,7 @@ static string_address expand_braced_body(string_address step,
         p8 name_list = 0;
         p8 operation = 0;
         p8 seen;
+        bool element_refused = false;
 
         step += 2;
 
@@ -8322,7 +8358,16 @@ static string_address expand_braced_body(string_address step,
                 {
                         reference.key = shell_expand_subscript(name, length, step + 1,
                                                                inner, &reference.key_length);
-                        if (!reference.key)
+                        //      A subscript counting back past the start is
+                        //      said and then read as an unset element, so
+                        //      ${a[-9]-none} is none in bash.
+                        if (!reference.key && shell_bash_compat &&
+                            !expand_failed)
+                        {
+                                parameter_mode |= EXPAND_PARAMETER_MISSING;
+                                element_refused = true;
+                        }
+                        else if (!reference.key)
                                 return close + 1;
                 }
 
@@ -8447,6 +8492,10 @@ static string_address expand_braced_body(string_address step,
                 if (!word)
                         return close + 1;
         }
+
+        //      A refused element has no length and nothing to transform.
+        if (element_refused && (want_length || operation == '@'))
+                return close + 1;
 
         /*
                 ${name@X} names one transformation. An unknown letter is a
