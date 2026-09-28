@@ -9409,6 +9409,126 @@ static bool glob_exists(string_address path)
         really there come back, which is what makes a pattern that matches
         nothing stay a pattern.
 */
+/*
+        GLOBIGNORE, bash's list of patterns a pathname expansion leaves out.
+
+        While it is set and not empty, a leading dot needs no dot in the
+        pattern, as under dotglob; . and .. are never answers; and each name
+        the walk found is dropped when a pattern of the list matches it whole,
+        a component at a time so that a * does not reach across a slash.
+        What is left empty is no match, so the word stays as it was written.
+*/
+static string_address glob_ignoring;
+
+static bool glob_ignore_component(string_address pattern, positive pattern_length,
+                                  string_address name, positive name_length)
+{
+        p8 one[GLOB_PATH];
+        p8 two[GLOB_PATH];
+
+        if (pattern_length >= GLOB_PATH || name_length >= GLOB_PATH)
+                return false;
+        memory_copy_end(one, pattern, pattern_length);
+        memory_copy_end(two, name, name_length);
+        return shell_match(one, two);
+}
+
+static bool glob_ignored_whole(string_address list, string_address path);
+
+/*
+        bash tests each directory on the way to a name as well as the name:
+        GLOBIGNORE='d*' leaves d/* standing as written, where '*.md' does not
+        reach d/two.md across its slash.
+*/
+static bool glob_ignored(string_address list, string_address path)
+{
+        string_address last = string_last_of(path, '/');
+        string_address base = last ? last + 1 : path;
+        p8 prefix[GLOB_PATH];
+
+        if (string_is(base, '.') &&
+            (!string_get(base + 1) ||
+             (string_is(base + 1, '.') && !string_get(base + 2))))
+                return true;
+
+        for (string_address at = path; last && at <= last; at++)
+        {
+                positive length = (positive)(at - path);
+
+                if (!string_is(at, '/') || !length || length >= GLOB_PATH)
+                        continue;
+                memory_copy_end(prefix, path, length);
+                if (glob_ignored_whole(list, prefix))
+                        return true;
+        }
+        return glob_ignored_whole(list, path);
+}
+
+static bool glob_ignored_whole(string_address list, string_address path)
+{
+        while (string_get(list))
+        {
+                //      A colon inside a bracket expression, [[:alpha:]], is
+                //      a byte of the pattern and not a separator.
+                string_address stop = list;
+                positive bracket = 0;
+
+                while (string_get(stop) && (bracket || !string_is(stop, ':')))
+                {
+                        if (string_is(stop, '\\') && string_get(stop + 1))
+                                stop++;
+                        else if (string_is(stop, '['))
+                                bracket++;
+                        else if (string_is(stop, ']') && bracket)
+                                bracket--;
+                        stop++;
+                }
+                string_address pattern = list;
+                string_address name = path;
+                bool matched = stop > list;
+
+                while (matched)
+                {
+                        string_address pattern_stop =
+                            memory_first_of(pattern, '/', (positive)(stop - pattern));
+                        string_address name_stop = string_first_of_or_end(name, '/');
+
+                        if (!pattern_stop)
+                                pattern_stop = stop;
+                        if (!glob_ignore_component(pattern,
+                                                   (positive)(pattern_stop - pattern),
+                                                   name,
+                                                   (positive)(name_stop - name)))
+                                matched = false;
+                        else if (pattern_stop == stop || !string_get(name_stop))
+                        {
+                                matched = pattern_stop == stop &&
+                                          !string_get(name_stop);
+                                break;
+                        }
+                        else
+                        {
+                                pattern = pattern_stop + 1;
+                                name = name_stop + 1;
+                        }
+                }
+                if (matched)
+                        return true;
+                list = string_get(stop) ? stop + 1 : stop;
+        }
+        return false;
+}
+
+static positive glob_ignore_filter(string_address list)
+{
+        positive kept = 0;
+
+        for (positive at = 0; at < glob_count; at++)
+                if (!glob_ignored(list, glob_result[at]))
+                        glob_result[kept++] = glob_result[at];
+        return kept;
+}
+
 static fn glob_walk(p8 address_to prefix, positive used, string_address pattern,
                     positive depth, bool from_star)
 {
@@ -9416,7 +9536,7 @@ static fn glob_walk(p8 address_to prefix, positive used, string_address pattern,
         positive length = 0;
         string_address rest;
         string_address whole;
-        bool dotted = shell_shopt_on(DOTGLOB);
+        bool dotted = shell_shopt_on(DOTGLOB) || glob_ignoring;
         bool folded = shell_shopt_on(NOCASEGLOB);
 
         if (depth >= GLOB_DEPTH)
@@ -9576,7 +9696,18 @@ static fn glob_walk(p8 address_to prefix, positive used, string_address pattern,
                 }
 
                 if (!star)
+                {
+                        //      A directory GLOBIGNORE names is left out on
+                        //      the way down as well: GLOBIGNORE=* leaves
+                        //      nothing for */* to find.
+                        if (glob_ignoring)
+                        {
+                                prefix[out] = end;
+                                if (glob_ignored(glob_ignoring, prefix))
+                                        continue;
+                        }
                         glob_walk(prefix, out, rest, depth + 1, false);
+                }
                 else
                 {
                         // Unknown directory types are resolved by
@@ -9773,16 +9904,24 @@ static bool expand_emit(positive at, positive stop, shell_words address_to out)
         {
                 p8 built[GLOB_PATH];
 
+                string_address ignore = shell_bash_compat
+                                            ? env_get("GLOBIGNORE") : null;
+
                 glob_count = 0;
                 glob_failed = false;
+                glob_ignoring = ignore && string_get(ignore) ? ignore : null;
                 shell_store_reset(address_of glob_store);
                 glob_walk(built, 0, pattern, 0, false);
+                glob_ignoring = null;
 
                 if (glob_failed)
                 {
                         expand_fail_state();
                         return false;
                 }
+
+                if (glob_count && ignore && string_get(ignore))
+                        glob_count = glob_ignore_filter(ignore);
 
                 if (glob_count)
                 {

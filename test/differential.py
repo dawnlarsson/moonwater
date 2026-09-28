@@ -14719,6 +14719,18 @@ def shell_lang_debug_trap_places(rng):
         ("command", "stdin", "file"))
 
 
+#       GLOBIGNORE takes names out of a pathname expansion, and . and ..,
+#       and lets a * find dotted names; it was not read at all.
+def shell_lang_globignore(rng):
+    setup = "mkdir -p d dist; : > one.md; : > one.txt; : > .env; : > d/two.txt; : > d/two.md; : > dist/x.js"
+    ignore = rng.choice(("'*.txt'", "'*.txt:*.md'", "'*'", "'d/*'", "'*/two*'", "'[[:alpha:]]*'", "''",
+                         "'.:..'", "'escape\\*.txt'", "'?ne.*'"))
+    line = "GLOBIGNORE=" + ignore + "; " + rng.choice(("echo *", "echo *.*", "echo .*", "echo */*", "echo d/*",
+                                                     "shopt -s nullglob; echo n *.txt"))
+    return ("globignore", shell_BASH, shell_program(setup, line, "unset GLOBIGNORE; echo *", 'echo "end=$?"'),
+            ("command", "stdin", "file"))
+
+
 #       Digits in front of > are a descriptor only while they fit one: bash
 #       reads a number past INT_MAX there as an ordinary word, so `echo a
 #       2147483648>f` writes "a 2147483648" to f. This called it a syntax
@@ -17584,6 +17596,7 @@ SHELL_FAMILIES = (
     shell_lang_fd_prefix_range,
     shell_lang_case_substitution_lines,
     shell_lang_debug_trap_places,
+    shell_lang_globignore,
     shell_lang_readonly_arrays,
     shell_lang_legacy_arithmetic,
     shell_lang_case_toggle,
