@@ -19719,6 +19719,13 @@ fn shell_help(writer write, string_address input);
 COLD fn shell_builtin_run(writer write, string_address input);
 COLD fn shell_compgen(writer write, string_address input);
 COLD fn shell_enable(writer write, string_address input);
+
+//      The POSIX special builtins and bash's source, in bash's own order,
+//      which is how enable -s lists them; exec_special_kind asks it too.
+static const string_address shell_special_names[] = {
+    ".", ":", "break", "continue", "eval", "exec", "exit", "export",
+    "readonly", "return", "set", "shift", "source", "times", "trap", "unset"};
+#define SHELL_SPECIAL_SOURCE 12
 COLD fn shell_which(writer write, string_address input);
 fn shell_type(writer write, string_address input);
 COLD fn shell_command_builtin(writer write, string_address input);
@@ -21825,21 +21832,18 @@ fn shell_enable(writer write, string_address input)
         */
         if (special && index >= shell_argc)
         {
-                static const string_address specials[] = {
-                    ".", ":", "break", "continue", "eval", "exec", "exit",
-                    "export", "readonly", "return", "set", "shift", "source",
-                    "times", "trap", "unset"};
-
-                for (positive at = 0; at < array_count(specials); at++)
+                for (positive at = 0; at < array_count(shell_special_names);
+                     at++)
                 {
+                        string_address one = shell_special_names[at];
                         positive found = shell_command_index_hashed(
-                            specials[at], string_hash_33_length(specials[at]));
+                            one, string_hash_33_length(one));
                         bool here = found >= SHELL_COMMAND_COUNT ||
                                     !shell_disabled[found];
 
                         if (here == !off || every)
                                 string_format(write, "enable %s%s\n",
-                                              here ? "" : "-n ", specials[at]);
+                                              here ? "" : "-n ", one);
                 }
                 return shell_answer(0);
         }

@@ -9887,18 +9887,12 @@ static bool exec_assign_value(string_address word, positive name_length,
    personality can all change after a function is defined. */
 static PURE p8 exec_special_kind(string_address name)
 {
-        static string_address names[] = {
-            ":", ".", "break", "continue", "eval", "exec", "exit", "export",
-            "readonly", "return", "set", "shift", "times", "trap", "unset",
-        };
-        positive which = string_table_find(name, names, sizeof(names[0]),
-                                           array_count(names));
+        positive which = string_table_find(
+            name, shell_special_names, sizeof(shell_special_names[0]),
+            array_count(shell_special_names));
 
-        if (which < array_count(names))
-                return 1;
-
-        if (word_is(name, "source"))
-                return 2;
+        if (which < array_count(shell_special_names))
+                return which == SHELL_SPECIAL_SOURCE ? 2 : 1;
 
         /* Dash treats local as special; POSIX does not name it. */
         if (!shell_bash_compat && word_is(name, "local"))
