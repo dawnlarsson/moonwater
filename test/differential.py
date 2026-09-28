@@ -39720,10 +39720,25 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         heard_count++;
         }
         (void)sntp_pick(heard, heard_count);
-        if (heard_count)
+        if (heard_count && sntp_choose(heard, heard_count) >= 0)
         {
                 bipolar chosen = sntp_choose(heard, heard_count);
                 bipolar offset = heard[chosen].offset_ns;
+
+                /* what sntp_choose promises: past 2 s, never one word */
+                if (!sntp_within(offset, SNTP_OFFSET_SYNCED_NS))
+                {
+                        positive agreeing = 0;
+
+                        for (positive at = 0; at < heard_count; at++)
+                                agreeing += at != (positive)chosen && heard[at].ok &&
+                                            heard[at].offset_ns - heard[at].distance_ns <=
+                                                offset + heard[chosen].distance_ns &&
+                                            offset - heard[chosen].distance_ns <=
+                                                heard[at].offset_ns + heard[at].distance_ns;
+                        if (!agreeing)
+                                abort();
+                }
                 bipolar now = t4 < 0 ? 0 : t4;
                 bipolar target = 0;
                 bipolar sec = 0;
@@ -39782,6 +39797,8 @@ def sntp_fuzz_seeds():
         "first_step.bin": head(9, now - 3600, now - 3599) + good * 3,
         "falseticker.bin": head(1, now, now + 1) + good * 2 +
             reply(receive=now + 50, transmit=now + 50),
+        "one_far.bin": head(1, now - 7200, now - 7199) + good + reply(first=0x23) * 2,
+        "two_far_agree.bin": head(1, now - 7200, now - 7199) + good * 2 + reply(first=0x23),
         "two_disagree.bin": head(1, now, now + 1) + good +
             reply(delay=0, dispersion=0, receive=now + 7200, transmit=now + 7200) +
             reply(first=0x23),

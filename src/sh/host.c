@@ -7005,9 +7005,17 @@ static b32 host_radio(string_address address_to arguments, positive count)
         is still at the epoch must be allowed a decades-long first step; one
         whose clock already looks like a civil date may not jump more than a
         day, and a refresh of a synchronised clock may not jump more than
-        two seconds. A kiss-o-death, a stratum 0, or a root delay/dispersion
-        worse than a second abandons that server rather than collecting more
-        samples from it.
+        two seconds. Past two seconds no single server is believed: another
+        answer has to agree (sntp_choose). A kiss-o-death, a stratum 0, or a
+        root delay/dispersion worse than a second abandons that server
+        rather than collecting more samples from it.
+
+        No step lands before SNTP_WALL_LEAST, which is not a guess at what
+        clocks read but the date of this source: a clock set earlier than
+        the code that set it is wrong by construction, which is systemd's
+        TIME_EPOCH rule. Moving it forward with each release is what keeps
+        an answer from taking the clock back to when a revoked or expired
+        certificate was still good.
 
         SNTP_WALL_MOST ends that window at 2036-01-01, which is before the
         NTP era rolls over rather than because of it: sntp_load_stamp reads
@@ -7075,13 +7083,14 @@ static b32 host_radio(string_address address_to arguments, positive count)
 #define SNTP_MALFORMED (-3)
 #define SNTP_BAD_SERVER (-4)
 #define SNTP_RATE_LIMITED (-5)
+#define SNTP_UNCONFIRMED (-6)
 #define SNTP_KISS_RATE 0x52415445u /* "RATE" */
 #define SNTP_KISS_DENY 0x44454e59u /* "DENY" */
 #define SNTP_KISS_RSTR 0x52535452u /* "RSTR" */
 #define SNTP_DELAY_MOST_NS ((bipolar)2 * (bipolar)SNTP_NANOSECONDS)
 #define SNTP_OFFSET_MOST_NS ((bipolar)24 * 3600 * (bipolar)SNTP_NANOSECONDS)
 #define SNTP_OFFSET_SYNCED_NS ((bipolar)2 * (bipolar)SNTP_NANOSECONDS)
-#define SNTP_WALL_LEAST 1577836800ll /* 2020-01-01 */
+#define SNTP_WALL_LEAST 1788220800ll /* 2026-09-01 */
 #define SNTP_WALL_MOST 2082758400ll  /* 2036-01-01 */
 #define SNTP_WALL_LEAST_NS \
         ((bipolar)SNTP_WALL_LEAST * (bipolar)SNTP_NANOSECONDS)
@@ -7109,7 +7118,7 @@ static b32 host_radio(string_address address_to arguments, positive count)
         ((SNTP_CONTROL_HEAD + sizeof(positive) - 1) & \
          ~(sizeof(positive) - 1))
 #define SNTP_TEST_NOW \
-        ((bipolar)1700000000 * (bipolar)SNTP_NANOSECONDS)
+        ((bipolar)1800000000 * (bipolar)SNTP_NANOSECONDS)
 
 typedef struct
 {
@@ -7122,6 +7131,11 @@ typedef struct
 static inline INLINE CONST bool sntp_wall_ok(bipolar ns)
 {
         return ns >= SNTP_WALL_LEAST_NS && ns <= SNTP_WALL_MOST_NS;
+}
+
+static inline INLINE CONST bool sntp_within(bipolar ns, bipolar most)
+{
+        return ns >= -most && ns <= most;
 }
 
 /*
@@ -7252,18 +7266,8 @@ static CONST COLD bool sntp_sample_sane(bipolar t1, bipolar t2, bipolar t3,
         if (delay_ns < 0 || delay_ns > SNTP_DELAY_MOST_NS)
                 return false;
         if (tight)
-        {
-                if (offset_ns < -SNTP_OFFSET_SYNCED_NS ||
-                    offset_ns > SNTP_OFFSET_SYNCED_NS)
-                        return false;
-        }
-        else if (sntp_wall_ok(t1))
-        {
-                if (offset_ns < -SNTP_OFFSET_MOST_NS ||
-                    offset_ns > SNTP_OFFSET_MOST_NS)
-                        return false;
-        }
-        return true;
+                return sntp_within(offset_ns, SNTP_OFFSET_SYNCED_NS);
+        return !sntp_wall_ok(t1) || sntp_within(offset_ns, SNTP_OFFSET_MOST_NS);
 }
 
 static COLD bool sntp_target_ok(bipolar now, bipolar offset_ns,
@@ -7298,23 +7302,32 @@ static PURE COLD bipolar sntp_pick(sntp_sample address_to row, positive count)
         meets fewer than half of the others' is a falseticker -- its clock is
         wrong, or its path is lopsided past what its round trip admits -- and
         is set aside; of the rest the least root distance wins, which is RFC
-        5905's rule for the system peer. Two that disagree cannot say which
-        is wrong, and one cannot disagree with anything, so then every
-        answer stands. Taking the first server that answered, which is what
-        was done, believed a falseticker whenever one answered first.
+        5905's rule for the system peer. Taking the first server that
+        answered, which is what was done, believed a falseticker whenever one
+        answered first.
+
+        Two that disagree cannot say which is wrong, and one cannot disagree
+        with anything. They used to all stand, so the least root distance
+        won -- a number the answer states about itself, which a forger sets
+        to nothing: one on-path answer 2 h out beat the honest server it
+        contradicted. Now no answer moves the clock past SNTP_OFFSET_SYNCED_NS
+        unless another answer's interval meets it, and one that leaves the
+        clock within that needs no second word. -1 when nothing may be
+        believed.
 */
 static PURE COLD bipolar sntp_choose(sntp_sample address_to row, positive count)
 {
         bipolar best = -1;
         bool any_kept = false;
         bool kept[SNTP_SERVERS];
+        positive meets[SNTP_SERVERS];
 
         for (positive at = 0; at < count; at++)
         {
-                positive meets = 0;
                 positive others = 0;
 
                 kept[at] = false;
+                meets[at] = 0;
                 if (!row[at].ok)
                         continue;
                 for (positive other = 0; other < count; other++)
@@ -7326,14 +7339,16 @@ static PURE COLD bipolar sntp_choose(sntp_sample address_to row, positive count)
                                 row[other].offset_ns + row[other].distance_ns &&
                             row[other].offset_ns - row[other].distance_ns <=
                                 row[at].offset_ns + row[at].distance_ns)
-                                meets++;
+                                meets[at]++;
                 }
-                kept[at] = others < 2 || meets * 2 >= others;
+                kept[at] = others < 2 || meets[at] * 2 >= others;
                 any_kept |= kept[at];
         }
 
         for (positive at = 0; at < count; at++)
                 if (row[at].ok && (kept[at] || !any_kept) &&
+                    (meets[at] ||
+                     sntp_within(row[at].offset_ns, SNTP_OFFSET_SYNCED_NS)) &&
                     (best < 0 || row[at].distance_ns < row[best].distance_ns))
                         best = (bipolar)at;
         return best;
@@ -8063,11 +8078,24 @@ static COLD bool sntp_math_ok(void)
                     {20000000, 0, 500000, true},
                 };
 
+                /* an answer 2 h out claiming half a millisecond, against
+                   an honest 10 ms one: its own word is not enough, alone
+                   or against that one, and two that agree are */
+                sntp_sample far[2] = {
+                    {(bipolar)7200 * 1000000000, 0, 500000, true},
+                    {0, 0, 10000000, true},
+                };
+
                 if (sntp_choose(three, 3) != 1 || sntp_choose(three + 1, 2) != 1 ||
                     sntp_choose(three + 2, 1) != 0 || sntp_choose(apart, 3) != 2)
                         return false;
                 three[1].ok = false;
                 if (sntp_choose(three, 3) != 2)
+                        return false;
+                if (sntp_choose(far, 2) != 1 || sntp_choose(far, 1) != -1)
+                        return false;
+                far[1].offset_ns = far[0].offset_ns + 1000000;
+                if (sntp_choose(far, 2) != 0)
                         return false;
         }
 
@@ -9337,6 +9365,10 @@ static b32 locale_time_sync(void)
                 string_format(log, host_label "time: %s answered, but the "
                                    "clock could not be set: %s\n",
                               locale_ntp_answered, file_reason(failed));
+        else if (failed == SNTP_UNCONFIRMED)
+                string_format(log, host_label "time: no second server agreed "
+                                   "with a step past 2 s, so the clock was "
+                                   "left alone\n");
         else if (failed < 0)
                 string_format(log, host_label "time: no server answered%s\n",
                               failed == SNTP_RATE_LIMITED
@@ -9768,7 +9800,9 @@ static bipolar locale_ntp_take(string_address server,
         on after the first answer until SNTP_SERVERS have answered, and
         sntp_choose picks which to believe; a server named in
         /root/ntp.server is believed on its own, as before, and sampling off
-        takes the first answer, as before.
+        takes the first answer -- unless it would step the clock more than
+        two seconds, when a second is asked for, since sntp_choose believes
+        no such step on one word.
 */
 static bipolar locale_ntp_apply(void)
 {
@@ -9807,12 +9841,18 @@ static bipolar locale_ntp_apply(void)
                         heard_from[heard_count++] = (b32)at;
                 else if (failed == SNTP_RATE_LIMITED)
                         rated = true;
+                //      A far step is not taken on one server's word.
+                if (heard_count == 1 && wanted < 2 &&
+                    !sntp_within(heard[0].offset_ns, SNTP_OFFSET_SYNCED_NS))
+                        wanted = 2;
         }
 
         if (heard_count)
         {
                 bipolar chosen = sntp_choose(heard, heard_count);
 
+                if (chosen < 0)
+                        return SNTP_UNCONFIRMED;
                 return locale_ntp_take(
                     (string_address)locale_ntp_fallback[heard_from[chosen]],
                     heard + chosen);
