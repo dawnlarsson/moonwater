@@ -3594,9 +3594,12 @@ lane_socket() { freestanding_checks_lane socket socket; }
 #       http_response_framing holds the response parser to a written
 #       accept/refuse matrix (and names deliberate disagreements with
 #       Python's http.client).
-#       tls_der_fuzz / tls_hs_fuzz are bounded libFuzzer ASan/UBSan runs
-#       over seeds differential.py writes into each run's temporary
-#       directory. NOT RUN (2) when clang/libFuzzer is absent.
+#       http_urls holds the URL parser and the redirect resolver to
+#       urllib.parse over a generated grammar of URLs and references.
+#       tls_der_fuzz / tls_hs_fuzz / http_fuzz are bounded libFuzzer
+#       ASan/UBSan runs over seeds differential.py writes into each run's
+#       temporary directory; http_fuzz drives the whole HTTP client over a
+#       scripted transport. NOT RUN (2) when clang/libFuzzer is absent.
 #       Longer fuzzing is lane_fuzz and MSan is lane_msan, both run only when
 #       named; neither is part of lane_net or a CI push job.
 #       Fuzz exit 2 is soft: missing clang must not turn a green freestanding+
@@ -3640,10 +3643,22 @@ lane_net()
         2) note "tls_hs_fuzz: skipped (soft) -- does not downgrade net" ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness http_urls
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
+        python3 test/differential.py --harness http_fuzz
+        case $? in
+        0) ;;
+        2) note "http_fuzz: skipped (soft) -- does not downgrade net" ;;
+        *) net_outcome=1 ;;
+        esac
         return "$net_outcome"
 }
 #       The TLS fuzz targets for longer than lane_net's smoke: tls_der_fuzz,
-#       tls_hs_fuzz and tls_verify_fuzz, an hour each with no run cap unless
+#       tls_hs_fuzz, http_fuzz and tls_verify_fuzz, an hour each with no run cap unless
 #       MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise.
 #       MOONWATER_FUZZ_REPORT=artifacts/fuzz-report.txt makes it the release
 #       attach instead: lane_net's budget unless the knobs are set, and a JSON
