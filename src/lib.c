@@ -49339,6 +49339,12 @@ extern p8 address_to program_stack_base;
 extern positive program_entry_identity;
 // SPARK_ENTRY_* bits the loader handed over, zero unless it spoke version 3.
 extern p8 program_entry_facts;
+/* The vDSO's clock, as lib.util.c's clock_gettime finds it: 0 while nothing
+   says there is an auxiliary vector to look in -- a Spark stack has none,
+   and past its environment's null lie the strings, not auxv -- 1 once the
+   ELF path of _start has said there is, then 2 when the lookup found no
+   clock, or the entry's address. */
+extern positive program_vdso_clock;
 
 __asm__(
     ASM_BSS_OBJECT_BEGIN(program_stack_base, 8)
@@ -49350,6 +49356,9 @@ __asm__(
     ASM_HIDDEN_BSS_OBJECT_BEGIN(program_entry_facts, 1)
     ".zero 1\n"
     ASM_OBJECT_END(program_entry_facts)
+    ASM_HIDDEN_BSS_OBJECT_BEGIN(program_vdso_clock, 8)
+    ".zero 8\n"
+    ASM_OBJECT_END(program_vdso_clock)
 );
 
 /*
@@ -52892,6 +52901,7 @@ __asm__(
        Spark now falls straight into main; an ordinary ELF pays one jump after
        the much more expensive CPUID/XGETBV fallback. */
     ".Lstart_x64_detect:\n   call moonwater_cpu_detect\n"
+    "movq $1, program_vdso_clock(%rip)  # an ELF stack: auxv follows envp\n"
     "jmp .Lstart_x64_ready\n"
     ASM_END(_start)
 );
@@ -53036,6 +53046,7 @@ __asm__(
     /* An ordinary ELF asks the auxiliary vector, from the stack base kept
        above; the call spends x0, which is reloaded. */
     ".Lstart_arm64_detect:\n   bl moonwater_cpu_detect\n"
+    "mov x1, #1\n   adrp x2, program_vdso_clock\n   str x1, [x2, :lo12:program_vdso_clock]\n"
     "adrp x1, program_stack_base\n   ldr x0, [x1, :lo12:program_stack_base]\n"
     "b .Lstart_arm64_ready\n"
     ASM_END(_start)
@@ -53177,6 +53188,7 @@ __asm__(
     "call exit\n   ebreak\n"
     /* An ordinary ELF asks riscv_hwprobe. */
     ".Lstart_riscv64_detect:\n   call moonwater_cpu_detect\n"
+    "li t1, 1\n   lla t0, program_vdso_clock\n   sd t1, 0(t0)\n"
     "j .Lstart_riscv64_ready\n"
     ASM_END(_start)
 );

@@ -40799,6 +40799,62 @@ static fn check_live(void)
                     (bipolar)difftime((time_t)3, (time_t)1000000), -999997);
 }
 
+/*
+        The vDSO clock against the trap it replaces.
+
+        An ELF _start marks program_vdso_clock 1, and the first read looks
+        the entry up. Wherever the auxiliary vector names a vDSO -- the host
+        kernel, and qemu-user where it maps one -- the lookup must find the
+        clock, and its readings must sit between two trapped readings of the
+        same clock. Marked as having none, the reads fall back to the trap;
+        marked unresolved again, the lookup finds the same entry.
+*/
+static fn check_vdso_clock(void)
+{
+        string_address address_to walk = program_environment_list();
+        positive named = 0;
+        positive entry;
+        bool ordered = true;
+
+        good((string_address) "_start marked an auxiliary vector",
+             program_vdso_clock != 0);
+        while (!is_null(walk) && !is_null(address_to walk))
+                walk++;
+        if (!is_null(walk))
+                for (const p64 address_to aux = (const p64 address_to)(walk + 1);
+                     aux[0]; aux += 2)
+                        named += aux[0] == 33;
+
+        timespec first = {0, 0}, middle = {0, 0}, last = {0, 0};
+        clock_gettime(CLOCK_MONOTONIC, address_of middle);
+        entry = program_vdso_clock;
+        good((string_address) "the vDSO the auxiliary vector names is found",
+             named ? entry > 2 : entry == 2);
+        for (positive round = 0; round < 1000; round++)
+        {
+                system_call_2(syscall(clock_gettime), CLOCK_MONOTONIC,
+                              (positive)address_of first);
+                clock_gettime(CLOCK_MONOTONIC, address_of middle);
+                system_call_2(syscall(clock_gettime), CLOCK_MONOTONIC,
+                              (positive)address_of last);
+                positive a = first.tv_sec * 1000000000 + first.tv_nsec;
+                positive b = middle.tv_sec * 1000000000 + middle.tv_nsec;
+                positive c = last.tv_sec * 1000000000 + last.tv_nsec;
+                ordered = ordered && a <= b && b <= c;
+        }
+        good((string_address) "vDSO monotonic readings sit between trapped ones",
+             ordered);
+
+        program_vdso_clock = 2;
+        good((string_address) "marked without a vDSO, the trap answers",
+             clock_gettime(CLOCK_MONOTONIC, address_of middle) == 0 &&
+                 program_vdso_clock == 2 && middle.tv_nsec < 1000000000);
+        program_vdso_clock = 1;
+        clock_gettime(CLOCK_REALTIME, address_of middle);
+        good((string_address) "marked unresolved, the lookup finds the same entry",
+             program_vdso_clock == entry);
+}
+
 static fn check_failure_and_precision(void)
 {
         timespec reading;
@@ -40865,6 +40921,7 @@ b32 main(void)
         check_scan();
         check_asctime();
         check_live();
+        check_vdso_clock();
         check_failure_and_precision();
 
         same((string_address) "every day from 1900 to 2100", clock_test_dense(),
