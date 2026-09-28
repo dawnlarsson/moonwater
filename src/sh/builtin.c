@@ -8764,6 +8764,11 @@ COLD fn shell_unset(writer write, string_address input)
                                 string_format(log_error,
                                               "unset: %s: cannot unset: readonly function\n",
                                               word);
+                                //      Under posix it is a special
+                                //      builtin's error and the script
+                                //      ends there.
+                                if (shell_posix_on())
+                                        exec_special_error_note();
                                 shell_answer(1);
                                 return;
                         }
@@ -8777,6 +8782,28 @@ COLD fn shell_unset(writer write, string_address input)
                         {
                                 shell_answer(1);
                                 return;
+                        }
+
+                        //      Neither -f nor -v, and no variable of the
+                        //      name: bash unsets the function instead.
+                        if (shell_bash_compat && !variables &&
+                            !resolved.element &&
+                            resolved.index >= shell_var_count &&
+                            exec_function_here_hashed(
+                                word, string_hash_33_length(word)))
+                        {
+                                if (exec_function_unset(word) < 0)
+                                {
+                                        string_format(log_error,
+                                                      "unset: %s: cannot unset: readonly function\n",
+                                                      word);
+                                        if (shell_posix_on())
+                                                exec_special_error_note();
+                                        shell_answer(1);
+                                        return;
+                                }
+                                index++;
+                                continue;
                         }
 
                         if (!resolved.element &&
