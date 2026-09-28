@@ -37272,6 +37272,12 @@ def harness_tls_peer(argv):
          [app(length_head + body), close]),
         ("an empty handshake record in the flight", {"empty": True},
          [app(length_head + body), close]),
+        ("a compatibility CCS inside a split flight message", {"ccs_inside": True},
+         [app(length_head + body), close]),
+        ("user_canceled then close_notify", {},
+         [app(close_head + body), ("inner", b"\1\x5a\x15"), close]),
+        ("a warning-level unknown alert", {},
+         [app(close_head + body), ("inner", b"\1\xfe\x15"), close]),
     ]
     MUST_ACCEPT = {
         "length body, close_notify", "length body, bare FIN",
@@ -37293,12 +37299,19 @@ def harness_tls_peer(argv):
         "a plaintext change_cipher_spec after Finished":
             "5 makes a CCS after the peer's Finished unexpected_message; "
             "OpenSSL's client still discards it",
+        "a compatibility CCS inside a split flight message":
+            "D.4 lets the compatibility CCS arrive at any time before "
+            "Finished, which both clients read as outranking 5.1's rule "
+            "against interleaving it within a handshake message",
     }
     # Where wget accepts what the RFC says to refuse, and why that stays.
     WGET_LENIENT = {
         "EncryptedExtensions answering server_name no SNI asked":
             "an empty server_name answer carries nothing; server_name is "
             "allowed back whether or not the host was a name",
+        "a compatibility CCS inside a split flight message":
+            "as OpenSSL: the one compatibility CCS may fall anywhere before "
+            "Finished (D.4)",
     }
     DELIBERATE = {
         "KeyUpdate, no update requested":
@@ -37409,6 +37422,11 @@ def harness_tls_peer(argv):
         if flight.get("split"):
             for part in messages:
                 sock.sendall(server_hs.seal(part + b"\x16"))
+        elif flight.get("ccs_inside"):
+            joined = b"".join(messages)
+            sock.sendall(server_hs.seal(joined[:3] + b"\x16"))
+            sock.sendall(record(20, b"\1"))
+            sock.sendall(server_hs.seal(joined[3:] + b"\x16"))
         else:
             sock.sendall(server_hs.seal(b"".join(messages) + b"\x16"))
         master = extract(expand_label(secret, b"derived", sha256(b""), 32), b"\0" * 32)
