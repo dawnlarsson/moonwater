@@ -14970,13 +14970,19 @@ def shell_lang_funcnest(rng):
 
 #       A function called command_not_found_handle answers, in a subshell,
 #       for a command without a slash that is not found; this never called it.
+#       The subshell is a child like any other: it runs no EXIT trap of the
+#       shell's, and an external it runs first is not the last thing it
+#       does, which in a pipeline stage it was.
 def shell_lang_not_found_handle(rng):
     handler = rng.choice(("command_not_found_handle() { echo \"missing: $*\"; return 7; }",
                           "command_not_found_handle() { x=inner; echo \"x=$x\"; }",
-                          "command_not_found_handle() { echo \"$#:$1\"; exit 3; }", ":"))
+                          "command_not_found_handle() { echo \"$#:$1\"; exit 3; }", ":",
+                          "command_not_found_handle() { /bin/echo \"ext $1\"; echo \"then $2\"; }"))
+    call = rng.choice(("nosuch a 'b c'", "nosuch a 'b c' | cat", "{ nosuch a 'b c' & wait $!; }"))
+    trap = rng.choice(("", "trap 'echo bye' EXIT"))
     return ("not-found-handle", shell_BASH, shell_program(
-        handler, "x=outer", "nosuch a 'b c'; echo \"s=$?\" \"x=$x\"", "./nosuch; echo \"slash=$?\"", 'echo "end=$?"'),
-        ("command", "stdin", "file"))
+        trap, handler, "x=outer", call + "; echo \"s=$?\" \"x=$x\"", "./nosuch; echo \"slash=$?\"",
+        'echo "end=$?"'), ("command", "stdin", "file"))
 
 
 #       The last name read takes the rest of the line, less a delimiter that

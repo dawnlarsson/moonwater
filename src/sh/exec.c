@@ -8631,6 +8631,8 @@ static b32 exec_call(positive slot);
 static bool exec_not_found_inside;
 positive shell_function_slot(string_address name);
 
+static bool exec_child_signals(bool detached, bool null_input);
+
 static COLD bool exec_not_found_handled()
 {
         positive slot;
@@ -8652,12 +8654,19 @@ static COLD bool exec_not_found_handled()
                 string_address address_to words = null;
                 positive room = 0;
 
-                exec_forked = true;
+                //      A child like any subshell's: its traps are reset and
+                //      it is no command's last process, or an external the
+                //      handler ran first replaced it and the rest never ran.
+                //      Bash keeps $BASH_SUBSHELL where it was.
+                trap_default_all();
+                if (!exec_child_signals(false, false))
+                        system_call_1(syscall(exit_group), 126);
+                exec_child_began();
+                shell_subshell_depth--;
                 exec_not_found_inside = true;
                 job_forget();
                 exec_loop_depth = 0;
-                if (!shell_array_room(words, room,
-                                      (shell_argc + 2) * sizeof(*words)))
+                if (!shell_array_room(words, room, shell_argc + 2))
                         exec_child_leave(127);
                 words[0] = (string_address) "command_not_found_handle";
                 memory_copy(words + 1, shell_argv,
