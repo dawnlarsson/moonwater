@@ -37005,6 +37005,68 @@ def harness_tls_chains(argv):
          {"first_extra": "nameConstraints=critical,permitted;IP:127.0.0.0/255.0.0.0\n"}),
         ("intermediate carries name constraints", 2, good_leaf,
          {"second_extra": "nameConstraints=critical,permitted;IP:127.0.0.0/255.0.0.0\n"}),
+        # RFC 5280 4.2.1.10 name constraints, one key type each (the
+        # evaluation is key-blind): every form the leaf or a lower CA
+        # carries against permitted and excluded subtrees of that form.
+        ("intermediate permits another range", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;IP:10.0.0.0/255.0.0.0\n",
+          "keys": ("P-256",)}),
+        ("intermediate excludes the leaf's address", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,excluded;IP:127.0.0.1/255.255.255.255\n",
+          "keys": ("P-256",)}),
+        ("noncritical name constraints still bind", 2, good_leaf,
+         {"second_extra": "nameConstraints=permitted;IP:10.0.0.0/255.0.0.0\n",
+          "keys": ("P-256",)}),
+        ("an IPv6-only range leaves the IPv4 leaf outside", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;IP:2001:db8::/ffff:ffff::\n",
+          "keys": ("P-256",)}),
+        ("intermediate permits the leaf's DNS name", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.example.com"),
+         {"second_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "keys": ("P-256",)}),
+        ("leaf DNS name outside the permitted names", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.evil.test"),
+         {"second_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "keys": ("P-256",)}),
+        ("leaf DNS name under an excluded name", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:a.evil.test"),
+         {"second_extra": "nameConstraints=critical,excluded;DNS:evil.test\n",
+          "keys": ("P-256",)}),
+        ("leaf wildcard whose star can be an excluded label", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:*.example.com"),
+         {"second_extra": "nameConstraints=critical,excluded;DNS:bad.example.com\n",
+          "keys": ("P-256",)}),
+        ("intermediate permits the leaf's subject", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;dirName:subtree\n"
+                          "[subtree]\nCN=127.0.0.1\n", "keys": ("P-256",)}),
+        ("intermediate permits another subject", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;dirName:subtree\n"
+                          "[subtree]\nCN=127.0.0.2\n", "keys": ("P-256",)}),
+        ("intermediate excludes the leaf's subject", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,excluded;dirName:subtree\n"
+                          "[subtree]\nCN=127.0.0.1\n", "keys": ("P-256",)}),
+        ("a permitted subject compared case-folded", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;dirName:subtree\n"
+                          "[subtree]\nO=EXAMPLE  ORG\n",
+          "leaf_subject": "/O=Example Org/CN=127.0.0.1", "keys": ("P-256",)}),
+        ("leaf mailbox on a permitted host", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,email:a@example.com"),
+         {"second_extra": "nameConstraints=critical,permitted;email:example.com\n",
+          "keys": ("P-256",)}),
+        ("leaf mailbox outside the permitted hosts", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,email:a@evil.test"),
+         {"second_extra": "nameConstraints=critical,permitted;email:example.com\n",
+          "keys": ("P-256",)}),
+        ("leaf URI under URI constraints", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,URI:https://a.example.com/"),
+         {"second_extra": "nameConstraints=critical,permitted;URI:.example.com\n",
+          "keys": ("P-256",)}),
+        ("first intermediate's range leaves the leaf outside", 2, good_leaf,
+         {"first_extra": "nameConstraints=critical,permitted;IP:10.0.0.0/255.0.0.0\n",
+          "keys": ("P-256",)}),
+        ("first intermediate excludes the second's subject", 2, good_leaf,
+         {"first_extra": "nameConstraints=critical,excluded;dirName:subtree\n"
+                         "[subtree]\nCN=tls chains second\n", "keys": ("P-256",)}),
         ("path length exceeded", 2, good_leaf, {"first_pathlen": 0}),
         ("leaf for clients only", 2, good_leaf.replace("serverAuth", "clientAuth"), {}),
         ("leaf may only sign certificates", 2, good_leaf.replace("digitalSignature", "keyCertSign"), {}),
@@ -37064,8 +37126,9 @@ def harness_tls_chains(argv):
     DELIBERATE = {
         "no subject alternative name": "a name is taken from subjectAltName only, never the CN",
         "leaf is a CA": "a certificate that says CA:TRUE is not an end entity (tls_leaf_authorized)",
-        "intermediate carries name constraints": "name constraints fail closed until implemented",
-        "first intermediate carries name constraints": "name constraints fail closed until implemented",
+        "leaf wildcard whose star can be an excluded label":
+            "a wildcard falls in an excluded subtree its star can name, as Chrome reads it",
+        "leaf URI under URI constraints": "a name form under constraints it cannot evaluate fails closed",
         "duplicate subjectAltName leaf extension": "RFC 5280 one-instance rule; OpenSSL may still accept",
         "leaf duplicate unknown extension": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
         "leaf nonadjacent duplicate unknown": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
@@ -37089,6 +37152,9 @@ def harness_tls_chains(argv):
         "intermediates served out of order", "root served before the intermediates",
         "an unrelated root served too", "a SHA-1 legacy root served too",
         "an impostor intermediate served first",
+        "first intermediate carries name constraints", "intermediate carries name constraints",
+        "intermediate permits the leaf's DNS name", "intermediate permits the leaf's subject",
+        "a permitted subject compared case-folded", "leaf mailbox on a permitted host",
     }
 
     checks = Checks()
@@ -37255,6 +37321,8 @@ def harness_tls_chains(argv):
 
         for mutation, depth, leaf_ext, change in mutations:
             for key_name, key in keys:
+                if key_name not in change.get("keys", (key_name,)):
+                    continue
                 top = "stranger" if change.get("stranger") else "root"
                 chain = []
                 issuer = top
@@ -37293,7 +37361,7 @@ def harness_tls_chains(argv):
                     if change.get("impostor"):
                         issue("impostor", p384, "/CN=tls chains second", "first",
                               second_extensions)
-                issue("leaf", key, "/CN=127.0.0.1", issuer, leaf_ext,
+                issue("leaf", key, change.get("leaf_subject", "/CN=127.0.0.1"), issuer, leaf_ext,
                       change.get("leaf_dates", (-1, 90)),
                       change.get("leaf_digest", "sha384"))
                 if change.get("der_rewrite_oids") or change.get("der_dup_unknown"):
@@ -40131,7 +40199,8 @@ def tls_fuzz_seeds(corpus):
     hostile NC/EKU/SAN/ceiling/alg-id/BMPString/chain shapes built here. The
     tls_der magic first bytes pick a lane: C1 list body, C2 EKU value, C3 SAN,
     C4 basicConstraints, C5 keyUsage, C6 cert+host, C7 extensions+host, C8
-    ECDSA signature DER, C9 AlgorithmIdentifier."""
+    ECDSA signature DER, C9 AlgorithmIdentifier, CC NameConstraints and a
+    name."""
     if corpus == "waterlink":
         return waterlink_fuzz_seeds()
     if corpus == "dhcp":
@@ -40168,6 +40237,33 @@ def tls_fuzz_seeds(corpus):
     nc_excl = tls_seed_tlv(0x30, tls_seed_tlv(0xa1, tls_seed_tlv(0x30, b"\x82\x07bad.com")))
     nc_both = tls_seed_tlv(0x30, tls_seed_tlv(0xa0, tls_seed_tlv(0x30, b"\x82\x03a.b")),
                            tls_seed_tlv(0xa1, tls_seed_tlv(0x30, b"\x82\x03x.y")))
+    #   Magic CC: form, constraint length, NameConstraints, then a name.
+    def nc_seed(form, constraints, name):
+        return b"\xcc" + bytes([form, len(constraints)]) + constraints + name
+    us = tls_seed_tlv(0x31, tls_seed_tlv(0x30, b"\x06\x03\x55\x04\x06",
+                                         tls_seed_tlv(0x13, b"US")))
+    org = tls_seed_tlv(0x31, tls_seed_tlv(0x30, b"\x06\x03\x55\x04\x0a",
+                                          tls_seed_tlv(0x0c, b" Ex  ample ")))
+    nc_dir = tls_seed_tlv(0x30, tls_seed_tlv(0xa1, tls_seed_tlv(0x30, tls_seed_tlv(
+        0xa4, tls_seed_tlv(0x30, us, org)))))
+    nc_ip = tls_seed_tlv(0x30, tls_seed_tlv(0xa0, tls_seed_tlv(
+        0x30, tls_seed_tlv(0x87, b"\x0a\0\0\0\xff\0\0\0")), tls_seed_tlv(
+        0x30, tls_seed_tlv(0x87, b"\x20\x01\x0d\xb8" + b"\0" * 12 +
+                           b"\xff" * 4 + b"\0" * 12))))
+    nc_mail = tls_seed_tlv(0x30, tls_seed_tlv(0xa0, tls_seed_tlv(
+        0x30, tls_seed_tlv(0x81, b".example.com")), tls_seed_tlv(
+        0x30, tls_seed_tlv(0x86, b"x"))))
+    nc_seeds = {
+        "magic_nc_dns_wildcard.bin": nc_seed(0x82, nc_excl, b"*.com"),
+        "magic_nc_dns_under.bin": nc_seed(0x82, nc_both, b"q.a.b."),
+        "magic_nc_ip_v6.bin": nc_seed(0x87, nc_ip, b"\x20\x01\x0d\xb8" + b"\0" * 11 + b"\x01"),
+        "magic_nc_ip_v4.bin": nc_seed(0x87, nc_ip, b"\x0a\x01\x02\x03"),
+        "magic_nc_dir_folded.bin": nc_seed(0xa4, nc_dir, tls_seed_tlv(0x30, us, tls_seed_tlv(
+            0x31, tls_seed_tlv(0x30, b"\x06\x03\x55\x04\x0a", tls_seed_tlv(0x13, b"EX AMPLE"))))),
+        "magic_nc_mail.bin": nc_seed(0x81, nc_mail, b"a@b.example.com"),
+        "magic_nc_san_list.bin": nc_seed(0x82, nc_mail, tls_seed_tlv(
+            0x30, b"\x81\x03a@b", b"\x86\x01x", b"\x82\x03a.b")),
+    }
     #   The wildcard and URI names claim fewer bytes than follow them (11 of
     #   13, 15 of 17); they are kept as they were seeded.
     san_dns = tls_seed_tlv(0x30, b"\x82\x0bexample.com")
@@ -40195,6 +40291,9 @@ def tls_fuzz_seeds(corpus):
         "ext_nc_excluded_dns.bin": one(nc, nc_excl),
         "ext_nc_both.bin": one(nc, nc_both),
         "ext_nc_critical.bin": one(nc, nc_perm, True),
+        "ext_nc_ip.bin": one(nc, nc_ip),
+        "ext_nc_directory.bin": one(nc, nc_dir, True),
+        **nc_seeds,
         "ext_san_dns.bin": one(san, san_dns),
         "ext_san_wildcard.bin": one(san, tls_seed_tlv(0x30, b"\x82\x0b*.example.com")),
         "ext_san_ipv4.bin": one(san, tls_seed_tlv(0x30, b"\x87\x04\xc0\x00\x02\x01")),
@@ -40883,7 +40982,10 @@ def tls_verify_ecdsa_chain():
     """C arrays of a fresh chain, leaf first, whose links are ECDSA P-256
     under SHA-256, P-384 under SHA-384, P-384 under SHA-512 and RSA-2048
     under SHA-512: the kinds WR2 under GTS Root R1 (RSA SHA-256) leaves.
-    The leaf names example.com and 192.0.2.1; the rest say CA:TRUE."""
+    The leaf names example.com and 192.0.2.1; the rest say CA:TRUE. Link 2
+    permits example.com and 192.0.2.0/24, and a sixth certificate is link 2
+    again -- its name and key, under link 3 -- excluding example.com, the
+    constrained impostor a path must pass over."""
     import datetime
     import ipaddress
     from cryptography import x509
@@ -40903,6 +41005,11 @@ def tls_verify_ecdsa_chain():
             x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "link %d" % signer)])).public_key(
             key.public_key()).serial_number(at + 1).not_valid_before(
             datetime.datetime(2020, 1, 1)).not_valid_after(datetime.datetime(2040, 1, 1))
+        if at == 2:
+            signed = signed.add_extension(x509.NameConstraints(
+                permitted_subtrees=[x509.DNSName("example.com"), x509.IPAddress(
+                    ipaddress.ip_network("192.0.2.0/24"))], excluded_subtrees=None),
+                critical=True)
         if at:
             signed = signed.add_extension(x509.BasicConstraints(ca=True, path_length=None),
                                           critical=True)
@@ -40912,10 +41019,20 @@ def tls_verify_ecdsa_chain():
                 x509.IPAddress(ipaddress.ip_address("192.0.2.1"))]), critical=False)
         ders.append(signed.sign(keys[signer], digests[at]).public_bytes(
             serialization.Encoding.DER))
-    return ("enum { FUZZ_ECDSA_CHAIN = %d };\n"
+    ders.append(x509.CertificateBuilder().subject_name(
+        x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "link 2")])).issuer_name(
+        x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "link 3")])).public_key(
+        keys[2].public_key()).serial_number(len(keys) + 1).not_valid_before(
+        datetime.datetime(2020, 1, 1)).not_valid_after(datetime.datetime(2040, 1, 1)).add_extension(
+        x509.NameConstraints(permitted_subtrees=None,
+                             excluded_subtrees=[x509.DNSName("example.com")]),
+        critical=True).add_extension(x509.BasicConstraints(ca=True, path_length=None),
+                                     critical=True).sign(keys[3], hashes.SHA512()).public_bytes(
+        serialization.Encoding.DER))
+    return ("enum { FUZZ_ECDSA_CHAIN = %d, FUZZ_ECDSA_LINKS = %d };\n"
             "static const positive fuzz_ecdsa_length[] = { %s };\n"
             "static const p8 fuzz_ecdsa_der[][1024] = { %s };\n" %
-            (len(ders), ", ".join(str(len(d)) for d in ders),
+            (len(ders), len(keys), ", ".join(str(len(d)) for d in ders),
              ", ".join("{ %s }" % ", ".join("0x%02x" % b for b in d) for d in ders)))
 
 
@@ -40992,7 +41109,7 @@ static bool fuzz_prove_wr2_gts(void)
         /* Each generated link accepts, and refuses one flipped signature
            bit: a verify that is never seen to pass proves nothing when it
            refuses. */
-        for (positive link = 0; link + 1 < FUZZ_ECDSA_CHAIN; link++)
+        for (positive link = 0; link + 1 < FUZZ_ECDSA_LINKS; link++)
         {
                 p8 child_buf[1024];
                 p8 issuer_buf[1024];
@@ -41101,9 +41218,9 @@ static void fuzz_certificate_list(p8 *body, positive body_length,
 
 /* Magic-prefix lanes deepen pure parsers the list walk alone under-hits:
    EKU OID walks, SAN GeneralNames, BC/KU values, host-aware SAN, ECDSA
-   signature DER, AlgorithmIdentifier junk. Prefixes: C1 list, C2 EKU,
-   C3 SAN+host, C4 BC, C5 KU, C6 cert+host, C7 exts+host, C8 ECDSA sig,
-   C9 AlgorithmIdentifier. */
+   signature DER, AlgorithmIdentifier junk, name constraints. Prefixes: C1
+   list, C2 EKU, C3 SAN+host, C4 BC, C5 KU, C6 cert+host, C7 exts+host, C8
+   ECDSA sig, C9 AlgorithmIdentifier, CC NameConstraints and a name. */
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         tls_cert cert;
@@ -41191,6 +41308,41 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         (void)tls_parse_ecdsa_sig(rest, rest_len, r,
                                                   address_of r_length, s,
                                                   address_of s_length);
+                        break;
+                case 0xcc:
+                        /* A form, a NameConstraints length, the value, and
+                           a name: the value checked as the parser does,
+                           then walked for the name in every form, and as a
+                           certificate's subject and SAN list. */
+                        if (rest_len >= 2 && rest[1] <= rest_len - 2)
+                        {
+                                static const p8 forms[] = {
+                                    0x81, 0x82, 0x86, 0x87, 0xa0, 0xa4};
+                                p8 *constraints = rest + 2;
+                                positive constraints_length = rest[1];
+                                p8 *name = constraints + constraints_length;
+                                positive name_length =
+                                    rest_len - 2 - constraints_length;
+
+                                (void)tls_name_allowed(constraints,
+                                                       constraints_length, 0,
+                                                       null, 0);
+                                (void)tls_name_allowed(constraints,
+                                                       constraints_length, rest[0],
+                                                       name, name_length);
+                                for (positive k = 0; k < sizeof forms; k++)
+                                        (void)tls_name_allowed(
+                                            constraints, constraints_length,
+                                            forms[k], name, name_length);
+                                memory_fill(address_of cert, 0, sizeof cert);
+                                cert.subject = name;
+                                cert.subject_length = name_length;
+                                cert.san = name;
+                                cert.san_length = name_length;
+                                (void)tls_cert_names_permitted(
+                                    constraints, constraints_length,
+                                    address_of cert);
+                        }
                         break;
                 case 0xc9:
                         alg_at = 0;
@@ -42337,6 +42489,7 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 {
         static const p8 good[3] = {0, 1, 2};
         static const p8 shuffled[4] = {0, 4, 2, 1};
+        static const p8 impostor[4] = {0, 1, 5, 2};
         tls_cert anchor;
         positive length;
         bool proved;
@@ -42360,6 +42513,16 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
                  !fuzz_verify(fuzz_body, length, (string_address)"example.com");
         /* Served out of order with an unneeded root first: still a path. */
         length = fuzz_chain_body(shuffled, 4);
+        proved = proved &&
+                 fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        /* Link 2's twin excludes example.com, a name the leaf carries
+           whichever host is asked for: alone it refuses, and served first
+           it is passed over for link 2, whose subtrees hold the leaf. */
+        length = fuzz_chain_body(impostor, 3);
+        proved = proved &&
+                 !fuzz_verify(fuzz_body, length, (string_address)"example.com") &&
+                 !fuzz_verify(fuzz_body, length, (string_address)"192.0.2.1");
+        length = fuzz_chain_body(impostor, 4);
         proved = proved &&
                  fuzz_verify(fuzz_body, length, (string_address)"example.com");
         if (!proved)
@@ -42402,10 +42565,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         }
         if (length > 1 && buf[0] == 0xcb)
         {
-                /* The verdict is known exactly: every generated subject is
-                   distinct and key 3 is the anchor, so a path needs the
-                   leaf first, the first and second intermediates anywhere
-                   after it, and no more than eight entries. */
+                /* The verdict is known exactly: key 3 is the anchor and
+                   every generated subject but link 2's twin is distinct,
+                   so a path needs the leaf first, the first and second
+                   intermediates anywhere after it, and no more than eight
+                   entries; the twin, whose subtrees exclude the leaf's
+                   name, never stands in for link 2. */
                 positive n = min(length - 1, (positive)9);
                 positive body = fuzz_chain_body(buf + 1, n);
                 bool served[FUZZ_ECDSA_CHAIN] = {false};
