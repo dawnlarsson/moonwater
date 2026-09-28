@@ -50,6 +50,7 @@
 #define LINK_ANNOUNCE_EVERY 60000000ull  // after the first three
 #define LINK_ASK_EVERY 30000000ull
 #define LINK_GREET_AGAIN 10000000ull     // the same place, not sooner
+#define LINK_ANSWER_AGAIN 100000ull      // a one-shot asker's answer, not sooner
 
 struct link_group_record {
         char namespace[WATERLINK_NAMESPACE_MAX];
@@ -223,6 +224,7 @@ typedef struct
         positive announced;
         positive asked;
         p64 last_answer;
+        p64 last_reply;
         p64 interfaces_looked;
         bool labels_ready;
         struct link_greeted greeted[LINK_GREETED];
@@ -579,6 +581,10 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
 
         if (found.asked && link_nearby.groups.count)
         {
+                //      Unicast to wherever the packet says it came from, which
+                //      nobody checked: a few a second, or a stream of spoofed
+                //      questions is a stream of answers four times their size
+                //      at somebody else.
                 if (source_port != WATERLINK_MDNS_PORT && found.question_length)
                 {
                         //      A one-shot asker gets the answer back to
@@ -597,10 +603,14 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                             .port = network_order_16(source_port),
                             .host = network_order_32(network_load_32(address + 12))};
 
-                        if (reply_length)
+                        if (reply_length &&
+                            link_age(now, link_nearby.last_reply) >= LINK_ANSWER_AGAIN)
+                        {
+                                link_nearby.last_reply = now;
                                 (void)socket_send((b32)link_nearby.socket, reply,
                                                   reply_length, MSG_NOSIGNAL,
                                                   address_of to, sizeof to);
+                        }
                 }
                 else if (now - link_nearby.last_answer > 1000000)
                 {
@@ -628,6 +638,7 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                 for (positive group = 0; group < link_nearby.groups.count; group++)
                 {
                         bool known = false;
+                        p64 oldest = link_nearby.greeted[link_nearby.greeted_next].at;
 
                         for (positive p = 0; p < peers.count && !known; p++)
                                 known = peers.peer[p].group ==
@@ -635,7 +646,15 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                                         peers.peer[p].port == instance->port &&
                                         !memory_compare(peers.peer[p].address,
                                                         address, 16);
-                        if (!known)
+                        //      Anyone may announce, naming any port, as many as
+                        //      a packet holds: the ring of places greeted is
+                        //      also the budget, LINK_GREETED greetings in
+                        //      LINK_GREET_AGAIN, so a made-up announcement
+                        //      cannot turn this machine into a sprayer of
+                        //      handshakes. A greeting back to a member whose
+                        //      own greeting opened is not held to it.
+                        if (!known && (!oldest || link_age(now, oldest) >=
+                                                          LINK_GREET_AGAIN))
                                 link_pair_begin(group, address, instance->port,
                                                 now);
                 }

@@ -64941,6 +64941,83 @@ static fn greetings(bipolar listener, p16 port)
         (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
 }
 
+/*
+        mDNS is anyone's to send and names any place. Announcements made up
+        by one sender, each naming a new port, are greeted no more than
+        LINK_GREETED times in LINK_GREET_AGAIN; and a one-shot question,
+        answered to wherever it says it came from, is answered a few times a
+        second at most -- neither may turn this machine into an amplifier.
+*/
+static fn mdns_amplification(void)
+{
+        bipolar socket[LINK_GREETED + 8];
+        p16 port[LINK_GREETED + 8];
+        positive greeted = 0;
+        positive answers = 0;
+        p8 packet[WATERLINK_MDNS_MAX], back[WATERLINK_DATAGRAM + 16];
+        p8 loopback4[16];
+        socket_address_internet where;
+        p32 size = sizeof where;
+        bipolar asker;
+        positive length;
+
+        wls_group();
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        for (positive at = 0; at < array_count(socket); at++)
+        {
+                p8 instance[10], host[6];
+
+                socket[at] = wls_listener(port + at);
+                wls_seeded(instance, 10, (p8)(at + 1));
+                wls_seeded(host, 6, (p8)at);
+                length = waterlink_mdns_announce(packet, sizeof packet, instance,
+                                                 host, port[at], 0, 4500, 0,
+                                                 null, 0);
+                link_nearby_heard(packet, length, wls_loopback,
+                                  WATERLINK_MDNS_PORT, 2000000 + at);
+        }
+        for (positive at = 0; at < array_count(socket); at++)
+        {
+                greeted += socket[at] >= 0 &&
+                           wls_heard(socket[at], back) == WATERLINK_DATAGRAM;
+                if (socket[at] >= 0)
+                        system_close(socket[at]);
+        }
+        check("sec: made-up announcements are greeted at most LINK_GREETED "
+              "times in LINK_GREET_AGAIN",
+              greeted == LINK_GREETED);
+
+        link_nearby.socket = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC |
+                                                         SOCK_NONBLOCK, 0);
+        asker = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK,
+                           0);
+        memory_zero(address_of where, sizeof where);
+        where.family = AF_INET;
+        where.host = network_order_32(HOST_LOOPBACK);
+        if (link_nearby.socket < 0 || asker < 0 ||
+            socket_bind((b32)asker, address_of where, sizeof where) < 0 ||
+            socket_name((b32)asker, address_of where, address_of size) < 0)
+        {
+                check("an IPv4 loopback socket for the one-shot asker", false);
+                return;
+        }
+        link_address_v4(loopback4, HOST_LOOPBACK);
+        length = waterlink_mdns_query(packet, sizeof packet);
+        for (positive at = 0; at < 8; at++)
+                link_nearby_heard(packet, length, loopback4,
+                                  network_order_16(where.port), 3000000 + at);
+        link_nearby_heard(packet, length, loopback4, network_order_16(where.port),
+                          3000000 + LINK_ANSWER_AGAIN);
+        while (wls_heard(asker, back) > 0)
+                answers++;
+        check("sec: a one-shot question is answered unicast, a few times a "
+              "second at most",
+              answers == 2);
+        system_close(asker);
+        socket_close((b32)link_nearby.socket);
+        link_nearby.socket = -1;
+}
+
 //      Discovery labels are published only when every one was drawn.
 static fn labels(void)
 {
@@ -65315,6 +65392,7 @@ b32 main(void)
         quiet_streams();
         control_records_are_canonical();
         greetings(listener, port);
+        mdns_amplification();
         labels();
         wpa_key();
         key_text();
