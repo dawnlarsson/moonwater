@@ -7298,6 +7298,30 @@ static bipolar tls_read(tls_conn address_to tls, p8 address_to into,
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
 
+/* The length of the scheme and its ':' in front of a URL or a reference --
+   a letter, then letters, digits, '+', '-' and '.' (RFC 3986 3.1) -- or 0
+   when there is none.  http_web_scheme says whether it is http or https, in
+   any case: the parser and the redirect resolver read "HTTP://" alike, where
+   one taking it for a scheme and the other for a relative path sent a
+   redirect somewhere neither the server nor a policy meant. */
+static positive http_scheme_length(string_address url)
+{
+        positive length = 0;
+
+        if (!byte_is_alpha(string_get(url)))
+                return 0;
+        while (byte_is_alnum(url[length]) || url[length] == '+' ||
+               url[length] == '-' || url[length] == '.')
+                length++;
+        return url[length] == ':' ? length + 1 : 0;
+}
+
+static bool http_web_scheme(string_address url, positive scheme)
+{
+        return (scheme == 5 || scheme == 6) &&
+               !memory_compare_ascii_case(url, "https", scheme - 1);
+}
+
 /*
         http://host[:port][/path] taken apart.
 
@@ -7312,37 +7336,27 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
 {
         string_address at = url;
         positive length;
-        p16 selected_port = HTTP_PORT;
+        positive scheme = http_scheme_length(url);
         bool selected_tls = false;
 
         for (string_address scan = url; *scan; scan++)
                 if (byte_is_control(*scan) || *scan == ' ' || *scan == '\\')
                         return HTTP_BAD_URL;
 
-        if (!string_compare_max(url, (string_address) "https://", 8))
-        {
-                selected_tls = true;
-                selected_port = HTTP_HTTPS_PORT;
-                at = url + 8;
-        }
-        else if (!string_compare_max(url, (string_address) "http://", 7))
-                at = url + 7;
-
         /* A spelling with an explicit scheme is not a schemeless HTTP URL.
            Treating "gopher://host" as host "gopher" is a parser
            differential: a policy and this client can appear to approve the
-           same string while naming different destinations. */
-        else
+           same string while naming different destinations.  A scheme with
+           no "//" after it is read as host:port, which fails unless the
+           rest is a port. */
+        if (scheme && url[scheme] == '/' && url[scheme + 1] == '/')
         {
-                /* Only a colon ahead of the first '/', '?' or '#' can end a
-                   scheme: "host/?next=http://x" is a schemeless URL whose
-                   query holds another. */
-                string_address scheme = (string_address)memory_first_of(
-                    url, ':', string_span_without_set(url, "/?#"));
-
-                if (scheme && scheme[1] == '/' && scheme[2] == '/')
+                if (!http_web_scheme(url, scheme))
                         return HTTP_BAD_URL;
+                selected_tls = scheme == 6;
+                at = url + scheme + 2;
         }
+        p16 selected_port = selected_tls ? HTTP_HTTPS_PORT : HTTP_PORT;
 
         /* This client implements no userinfo.  Silently discarding it makes
            logs and allow-list checks easy to read as the text before '@'
@@ -8559,87 +8573,69 @@ static bipolar http_absolutize(bool tls, string_address host, p16 port,
 {
         p8 kept[HTTP_URL_MAX];
         p8 base[HTTP_URL_MAX];
+        p8 merged[HTTP_URL_MAX];
         positive length = string_length(location);
-        string_address hash;
+        positive scheme;
+        positive used;
+        string_address cut;
 
         if (length >= sizeof kept ||
             http_origin_form(path, base, sizeof base))
                 return HTTP_BAD_URL;
         memory_copy(kept, location, length + 1);
-        hash = string_first_of(kept, '#');
-        if (hash)
-                hash[0] = end;
-
-        /* A fragment-only reference identifies the current resource.  The
-           fragment itself was removed above; retain both path and query. */
-        if (!kept[0])
-                return http_put_url(into, room, tls, host, port, base);
-
-        if (!string_compare_max(kept, (string_address) "https://", 8) ||
-            !string_compare_max(kept, (string_address) "http://", 7))
+        cut = string_first_of(kept, '#');
+        if (cut)
         {
-                if (string_length(kept) >= room)
-                        return HTTP_BAD_URL;
-                string_copy(into, kept);
-                return HTTP_OK;
+                cut[0] = end;
+                length = (positive)(cut - kept);
         }
 
+        /* An absolute reference is http or https followed by "//", in any
+           case; http_split_into reads the rest.  Any other scheme -- ftp:,
+           javascript:, a bare "http:path" -- is refused rather than taken
+           for a relative path on the current host.  A network-path "//host"
+           keeps the current scheme. */
+        scheme = http_scheme_length(kept);
+        if (scheme)
+        {
+                if (!http_web_scheme(kept, scheme) || kept[scheme] != '/' ||
+                    kept[scheme + 1] != '/' || length >= room)
+                        return HTTP_BAD_URL;
+                memory_copy_apart_end(into, kept, length);
+                return HTTP_OK;
+        }
         if (kept[0] == '/' && kept[1] == '/')
         {
-                p8 address_to at = into;
                 positive scheme_length = tls ? 6 : 5;
-                positive rest = string_length(kept);
 
-                if (scheme_length + rest + 1 > room)
+                if (scheme_length + length + 1 > room)
                         return HTTP_BAD_URL;
-                at = memory_copy_apart_end(at, tls ? "https:" : "http:",
-                                           scheme_length);
-                at = memory_copy_apart_end(at, kept, rest);
-                at[0] = end;
+                memory_copy_apart_end(
+                    memory_copy_apart_end(into, tls ? "https:" : "http:",
+                                          scheme_length),
+                    kept, length);
                 return HTTP_OK;
         }
 
+        /* A fragment-only reference identifies the current resource: the
+           fragment went above, and path and query stay.  An absolute path
+           replaces both; a query replaces the query; anything else replaces
+           the last segment of the path, and the query goes with it. The base
+           is in origin form, so it starts with the '/' this finds. */
+        if (!kept[0])
+                return http_put_url(into, room, tls, host, port, base);
         if (kept[0] == '/')
                 return http_put_url(into, room, tls, host, port, kept);
-
-        if (kept[0] == '?')
-        {
-                p8 merged[HTTP_URL_MAX];
-                string_address query = string_first_of(base, '?');
-                positive used = query ? (positive)(query - base)
-                                      : string_length(base);
-                positive rest = string_length(kept);
-
-                if (used + rest + 1 > sizeof merged)
-                        return HTTP_BAD_URL;
-                memory_copy(merged, base, used);
-                memory_copy_apart_end(merged + used, kept, rest);
-                return http_put_url(into, room, tls, host, port, merged);
-        }
-
-        {
-                p8 merged[HTTP_URL_MAX];
-                string_address query = string_first_of(base, '?');
-                string_address slash;
-                positive dir;
-                positive used = 0;
-                positive rest = string_length(kept);
-
-                if (query)
-                        query[0] = end;
-                slash = string_last_of(base, '/');
-                dir = slash ? (positive)(slash - base) + 1 : 1;
-                if (dir >= sizeof merged)
-                        return HTTP_BAD_URL;
-                memory_copy(merged, base, dir);
-                used = dir;
-                if (used + rest + 1 > sizeof merged)
-                        return HTTP_BAD_URL;
-                memory_copy(merged + used, kept, rest);
-                used += rest;
-                merged[used] = end;
-                return http_put_url(into, room, tls, host, port, merged);
-        }
+        cut = string_first_of(base, '?');
+        if (cut)
+                cut[0] = end;
+        used = kept[0] == '?' ? string_length(base)
+                              : (positive)(string_last_of(base, '/') - base) + 1;
+        if (used + length + 1 > sizeof merged)
+                return HTTP_BAD_URL;
+        memory_copy_apart(merged, base, used);
+        memory_copy_apart_end(merged + used, kept, length);
+        return http_put_url(into, room, tls, host, port, merged);
 }
 
 /* Once a redirect chain has reached HTTPS, no later Location may discard

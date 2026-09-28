@@ -37335,17 +37335,18 @@ def harness_https_downgrade(argv):
             3,
             "HTTP Location after nested HTTPS hops is still refused")
 
-        # 5. Scheme case: uppercase HTTP:// is not the absolute-http path
-        #    (absolutize is case-sensitive on the scheme spelling); treated as
-        #    a same-origin relative target and followed over HTTPS.
-        expect_ok(
+        # 5. Scheme case: a scheme is case-insensitive (RFC 3986 3.1), so an
+        #    uppercase HTTP:// Location is plain HTTP and refused as a
+        #    downgrade. It was once read as a same-origin relative path
+        #    "/HTTP://127.0.0.1:9/" and followed, which no other client does.
+        expect_downgrade(
             "https://127.0.0.1:%d/",
             {
                 b"/": lambda p: redirect(b"HTTP://127.0.0.1:9/"),
                 b"/HTTP://127.0.0.1:9/": body_ok,
             },
-            2,
-            "uppercase HTTP:// Location stays on HTTPS as a relative path")
+            1,
+            "uppercase HTTP:// Location is plain HTTP and refused as a downgrade")
 
         # 6. Network-path //host keeps the current (HTTPS) scheme — not a
         #    downgrade; same-host follow still succeeds.

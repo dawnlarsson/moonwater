@@ -57551,6 +57551,52 @@ static fn redirect_urls(void)
               http_absolutize(false, "h", 80, "/dir/old?before#local",
                               "#new", into, sizeof into) == HTTP_OK &&
                   string_equals(into, "http://h/dir/old?before"));
+        /* One scheme rule for the parser and the redirect resolver: http and
+           https in any case (RFC 3986 3.1), and any other scheme refused by
+           both rather than read as a host or as a path on the current one.
+           split is the URL's verdict (1 plain, 2 TLS, 0 refused); location
+           is the Location's from https://h/dir/old, and 0 is refused. */
+        {
+                static const struct
+                {
+                        const char address_to text;
+                        p8 split;
+                        const char address_to location;
+                } schemes[] = {
+                    {"HTTP://h/x", 1, "HTTP://h/x"},
+                    {"Https://h/x", 2, "Https://h/x"},
+                    {"hTtPs://h:444/x", 2, "hTtPs://h:444/x"},
+                    {"ftp://h/x", 0, 0},
+                    {"httpx://h/x", 0, 0},
+                    {"web+x.y-z://h/x", 0, 0},
+                    {"javascript:alert(1)", 0, 0},
+                    {"http:x", 0, 0},
+                    {"h:81/x", 1, 0},
+                    {"1http://h/x", 0, "https://h/dir/1http://h/x"},
+                    {"//h2/x", 0, "https://h2/x"},
+                    {"h_x://y", 0, "https://h/dir/h_x://y"},
+                };
+
+                for (positive row = 0; row < sizeof schemes / sizeof schemes[0]; row++)
+                {
+                        bipolar split = http_split_into(
+                            (string_address)schemes[row].text, host, sizeof host,
+                            address_of port, address_of path, address_of tls);
+                        bipolar placed = http_absolutize(
+                            true, "h", 443, "/dir/old",
+                            (string_address)schemes[row].text, into, sizeof into);
+
+                        check("a URL scheme splits in any case, and no other scheme does",
+                              schemes[row].split
+                                  ? split == HTTP_OK && tls == (schemes[row].split == 2)
+                                  : split == HTTP_BAD_URL);
+                        check("a Location scheme resolves in any case, and no other scheme does",
+                              schemes[row].location
+                                  ? placed == HTTP_OK &&
+                                        string_equals(into, (string_address)schemes[row].location)
+                                  : placed == HTTP_BAD_URL);
+                }
+        }
         {
                 p8 leaf[32];
 
