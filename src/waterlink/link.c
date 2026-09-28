@@ -1332,50 +1332,6 @@ __asm__(
         each time the frame went out and at most a minute, runs out, and the
         far side answers the copy with what it has taken: a reader that is
         only slow costs a copy now and then, as TCP's persist timer does.
-        Answers when the next of these is due.
-*/
-static p64 waterlink_held_probes(struct waterlink_link address_to link,
-                                 p64 now)
-{
-        p64 due = ~0ull;
-
-        for (p32 key = 0; key < WATERLINK_KEYS &&
-                          link->free_count != WATERLINK_SLOTS;
-             key++)
-        {
-                p32 at = link->sending[key].first;
-                struct waterlink_slot address_to slot;
-                p64 wait;
-
-                if (at == WATERLINK_NONE || link->sending[key].flying ||
-                    link->slot[at].state != WATERLINK_SLOT_HELD)
-                        continue;
-                slot = link->slot + at;
-                wait = waterlink_timeout(link)
-                       << (slot->tries > 16 ? 15 : slot->tries ? slot->tries - 1 : 0);
-                if (wait > WATERLINK_HELD_MOST)
-                        wait = WATERLINK_HELD_MOST;
-                if (now >= slot->sent && now - slot->sent >= wait)
-                {
-                        waterlink_band_requeue(link, at);
-                        due = now;
-                }
-                else if (slot->sent + wait < due)
-                        due = slot->sent + wait;
-        }
-        return due;
-}
-
-/*
-        A key whose frames the far side holds, with none of its own in
-        flight, has no timer to ask again: the acknowledgement that frees
-        them -- sent when the far side took them, or when its reader came
-        back -- may be the one the network lost, and then the key waits for
-        ever, with everything queued behind it on its window. So its oldest
-        held frame goes back to its band once the probe timer, doubled for
-        each time the frame went out and at most a minute, runs out, and the
-        far side answers the copy with what it has taken: a reader that is
-        only slow costs a copy now and then, as TCP's persist timer does.
         Looking over the keys is sixty four steps, so it is done when one of
         them is due, and at least every RTO_MOST while any slot is taken,
         never on every wake. Answers when to look next.
