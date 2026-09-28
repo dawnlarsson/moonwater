@@ -37621,9 +37621,6 @@ def harness_tls_peer(argv):
     }
     # Where wget accepts what the RFC says to refuse, and why that stays.
     WGET_LENIENT = {
-        "EncryptedExtensions answering server_name no SNI asked":
-            "an empty server_name answer carries nothing; server_name is "
-            "allowed back whether or not the host was a name",
         "a compatibility CCS inside a split flight message":
             "as OpenSSL: the one compatibility CCS may fall anywhere before "
             "Finished (D.4)",

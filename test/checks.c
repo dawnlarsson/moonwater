@@ -53493,6 +53493,45 @@ static fn tls_closure_boundaries(void)
                 }
         }
 
+        //      The same after a plaintext record the keys forbid: a
+        //      compatibility CCS once the application keys are in.
+        {
+                b32 pair[2];
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_STREAM, 0,
+                                                (positive)pair);
+                check("TLS forged-CCS socket pair opens", opened == 0);
+                if (!opened)
+                {
+                        static p8 forged[] = {TLS_CT_CCS, 0x03, 0x03, 0, 1, 1};
+                        tls_conn sender = {0};
+                        tls_conn receiver = {0};
+                        p8 data[] = {'o', 'k'};
+                        p8 received[2] = {0};
+                        positive got = 0;
+
+                        sender.handle = pair[1];
+                        receiver.handle = pair[0];
+                        receiver.encrypted = true;
+                        receiver.application = true;
+                        check("TLS forged CCS and genuine record queue",
+                              network_stream_send_all(pair[1], forged,
+                                                      sizeof forged) &&
+                                  tls_send_enc(address_of sender, TLS_CT_APP,
+                                               data, sizeof data) == TLS_OK);
+                        check("TLS CCS after the application keys is refused",
+                              tls_read(address_of receiver, received,
+                                       sizeof received, address_of got) ==
+                                  TLS_FAIL);
+                        check("TLS opens nothing after a refused plaintext record",
+                              tls_read(address_of receiver, received,
+                                       sizeof received, address_of got) ==
+                                  TLS_FAIL);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                }
+        }
+
         /*
                 RFC 8446 5: a change_cipher_spec record that arrives
                 protected is unexpected_message. Only the plaintext one-byte
@@ -55712,26 +55751,30 @@ static fn tls_server_flight_validation(void)
                 static p8 overrun[] = {0, 4, 0, 10, 0, 1};
 
                 check("empty TLS encrypted extensions are framed",
-                      tls_encrypted_extensions_valid(empty, sizeof empty, true));
+                      tls_encrypted_extensions_valid(empty, sizeof empty,
+                                                     positive_max));
                 check("one TLS encrypted extension is framed",
-                      tls_encrypted_extensions_valid(one, sizeof one, true));
+                      tls_encrypted_extensions_valid(one, sizeof one,
+                                                     positive_max));
                 check("duplicate TLS encrypted extensions are refused",
                       !tls_encrypted_extensions_valid(duplicate,
-                                                      sizeof duplicate, false));
+                                                      sizeof duplicate,
+                                                      positive_max));
                 check("TLS encrypted extension vector length is exact",
                       !tls_encrypted_extensions_valid(short_vector,
                                                       sizeof short_vector,
-                                                      false));
+                                                      positive_max));
                 check("TLS encrypted extension payload cannot overrun",
                       !tls_encrypted_extensions_valid(overrun,
-                                                      sizeof overrun, false));
+                                                      sizeof overrun,
+                                                      positive_max));
         }
 
         /*
                 RFC 8446 4.2: an extension in EncryptedExtensions that the
                 ClientHello never asked for is unsupported_extension. ALPN
-                (16) was never offered; server_name (0) and supported_groups
-                (10) were.
+                (16) is never offered; supported_groups (10) always is, and
+                server_name (0) only when the host was a name.
         */
         {
                 static tls_conn tls;
@@ -55745,6 +55788,7 @@ static fn tls_server_flight_validation(void)
                 p8 flight = TLS_SERVER_FLIGHT_EE;
 
                 crypto_sha256_open(address_of tls.transcript);
+                tls.named = true;
                 check("EncryptedExtensions may answer server_name and supported_groups",
                       tls_encrypted_flight_append(address_of tls, hs, sizeof hs,
                                                   address_of used,
@@ -55759,6 +55803,15 @@ static fn tls_server_flight_validation(void)
                                                   address_of used,
                                                   address_of flight, unasked,
                                                   sizeof unasked, null) ==
+                          TLS_FAIL);
+                used = 0;
+                flight = TLS_SERVER_FLIGHT_EE;
+                tls.named = false;
+                check("EncryptedExtensions answering server_name without SNI is refused",
+                      tls_encrypted_flight_append(address_of tls, hs, sizeof hs,
+                                                  address_of used,
+                                                  address_of flight, asked,
+                                                  sizeof asked, null) ==
                           TLS_FAIL);
         }
 }
