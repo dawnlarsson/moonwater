@@ -37067,6 +37067,10 @@ def harness_tls_chains(argv):
         ("first intermediate excludes the second's subject", 2, good_leaf,
          {"first_extra": "nameConstraints=critical,excluded;dirName:subtree\n"
                          "[subtree]\nCN=tls chains second\n", "keys": ("P-256",)}),
+        # rsa8192.badssl.com's shape, the largest key browsers take: the
+        # leaf and the intermediate that signs it both RSA-8192.
+        ("RSA-8192 leaf under an RSA-8192 intermediate", 2, good_leaf,
+         {"keys": ("RSA-8192",), "second_key": "RSA-8192"}),
         ("path length exceeded", 2, good_leaf, {"first_pathlen": 0}),
         ("leaf for clients only", 2, good_leaf.replace("serverAuth", "clientAuth"), {}),
         ("leaf may only sign certificates", 2, good_leaf.replace("digitalSignature", "keyCertSign"), {}),
@@ -37121,7 +37125,11 @@ def harness_tls_chains(argv):
     )
     keys = (("P-256", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"]),
             ("P-384", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]),
-            ("RSA-2048", ["-newkey", "rsa:2048"]))
+            ("RSA-2048", ["-newkey", "rsa:2048"]),
+            ("RSA-8192", ["-newkey", "rsa:8192"]))
+    #   Every row runs under these unless it names its own; an 8,192-bit key
+    #   takes seconds to make, so only the row about it pays for one.
+    every_key = ("P-256", "P-384", "RSA-2048")
     #       This tree's policy where it is stricter than openssl, on purpose.
     DELIBERATE = {
         "no subject alternative name": "a name is taken from subjectAltName only, never the CN",
@@ -37155,6 +37163,7 @@ def harness_tls_chains(argv):
         "first intermediate carries name constraints", "intermediate carries name constraints",
         "intermediate permits the leaf's DNS name", "intermediate permits the leaf's subject",
         "a permitted subject compared case-folded", "leaf mailbox on a permitted host",
+        "RSA-8192 leaf under an RSA-8192 intermediate",
     }
 
     checks = Checks()
@@ -37321,7 +37330,7 @@ def harness_tls_chains(argv):
 
         for mutation, depth, leaf_ext, change in mutations:
             for key_name, key in keys:
-                if key_name not in change.get("keys", (key_name,)):
+                if key_name not in change.get("keys", every_key):
                     continue
                 top = "stranger" if change.get("stranger") else "root"
                 chain = []
@@ -37350,7 +37359,8 @@ def harness_tls_chains(argv):
                         (change.get("second_ca", "CA:TRUE,pathlen:0"),
                          change.get("second_key_usage", "keyCertSign,cRLSign")))
                     second_extensions += change.get("second_extra", "")
-                    issue("second", p384, "/CN=tls chains second", "first",
+                    issue("second", dict(keys).get(change.get("second_key"), p384),
+                          "/CN=tls chains second", "first",
                           second_extensions,
                           change.get("second_dates", (-1, 90)))
                     if change.get("der_rewrite_oids_second") or change.get("der_dup_unknown_second"):
@@ -40430,8 +40440,14 @@ def tls_der_fuzz_lift_parts(net):
     oids = tls_fuzz_sec(net, "static const p8 tls_oid_ec[7] = {",
                         "typedef struct\n{\n        bipolar handle;")
     #   net.c includes suffixes.inc beside anchors.inc; the lift has no
-    #   include path, so the table comes in as text.
-    oids = (HARNESS_ROOT / "src/net/suffixes.inc").read_text() + oids[:oids.rfind("};\n") + 3]
+    #   include path, so the table comes in as text, and so do the RSA
+    #   limits tls_cert is sized by (the verify lift's crypto slice repeats
+    #   them word for word, which C allows).
+    limits = re.search(r"#define CRYPTO_RSA_LIMBS .*\n#define CRYPTO_RSA_BYTES .*\n", net)
+    if not limits:
+        raise ValueError("CRYPTO_RSA_LIMBS / CRYPTO_RSA_BYTES")
+    oids = limits.group(0) + (HARNESS_ROOT / "src/net/suffixes.inc").read_text() + \
+        oids[:oids.rfind("};\n") + 3]
     parsers = tls_fuzz_sec(
         net,
         "static COLD bipolar tls_asn1_length(p8 address_to bytes, positive size,",
@@ -41417,6 +41433,9 @@ def harness_tls_hs_fuzz(argv):
                   "/* One trust anchor from anchors.inc")
     connection = sec(net, "typedef struct\n{\n        bipolar handle;\n"
                      "        bool check_cert;", "static fn tls_forget(")
+    #   The leaf modulus room is sized in the crypto section.
+    connection = re.search(r"#define CRYPTO_RSA_LIMBS .*\n#define CRYPTO_RSA_BYTES .*\n",
+                           net).group(0) + connection
     record = sec(net, "static fn tls_forget(",
                  "static COLD bipolar tls_asn1_length(")
     load24 = sec(
@@ -42182,7 +42201,7 @@ typedef struct
         bool check_cert;
         p8 leaf_qx[48];
         p8 leaf_qy[48];
-        p8 leaf_n[512];
+        p8 leaf_n[CRYPTO_RSA_BYTES];
         positive leaf_n_length;
         p64 leaf_e;
         p8 leaf_curve;
@@ -44418,10 +44437,11 @@ def crypto_vectors_lines(seed):
              message if scheme == "pss" else digest)
 
     for bits, e in ((2048, 65537), (2049, 65537), (2055, 3), (3072, 65537),
-                    (4096, 65537), (2047, 65537), (2048, 3)):
+                    (4096, 65537), (8192, 65537), (8200, 65537), (2047, 65537),
+                    (2048, 3)):
         n, (one, two, d) = rsa_key(bits, e)
         k = (bits + 7) // 8
-        policy = bits >= 2048
+        policy = 2048 <= bits <= 8192
 
         def raw(em):
             m = int.from_bytes(em, "big")
@@ -44577,17 +44597,18 @@ def harness_crypto_vectors(argv):
       the curve, and constructed keys whose R has x above n, whose r and s
       are short, whose u1 G + u2 Q is infinity or a doubling
     - RSA PKCS#1 v1.5 (SHA-256/384) and PSS-SHA256 at 2048, 2049, 2055,
-      3072 and 4096 bits: malformed padding, the wrong DigestInfo, a
+      3072, 4096 and 8192 bits: malformed padding, the wrong DigestInfo, a
       missing NULL, trailing bytes, short padding, s at 0/1/n-1/n, e = 3's
       cube-root forgery, PSS trailers, top bits and salt lengths; moduli
-      under 2048 bits, even moduli and exponents refused by policy
+      under 2048 or over 8192 bits, even moduli and exponents refused by
+      policy
 
     First, the P-256 and P-384 field bodies in lib.c -- all eight on all
     three machines, the arithmetic ECDH's secret scalar runs through --
     must hold no conditional branch; any other exit is a failure.
 
     Verdicts are OpenSSL's, except where this client is stricter on
-    purpose (RSA under 2048 bits, an even or unit exponent, a compressed
+    purpose (RSA under 2048 or over 8192 bits, an even or unit exponent, a compressed
     ECDH share, a signature not exactly the modulus' length); the
     generator raises if OpenSSL disagrees with a verdict a vector was built
     to have. Returns 2 when cryptography is missing.

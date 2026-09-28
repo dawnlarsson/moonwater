@@ -2699,7 +2699,11 @@ static bool crypto_x25519(p8 address_to out, p8 address_to scalar, p8 address_to
 }
 
 #define CRYPTO_FE_MAX 6
-#define CRYPTO_RSA_LIMBS 64
+/* RSA moduli to 8,192 bits, as browsers take them (rsa8192.badssl.com).
+   lib.c's montgomery_multiply stops at 64 limbs; crypto_rsa_multiply
+   carries the rest. */
+#define CRYPTO_RSA_LIMBS 128
+#define CRYPTO_RSA_BYTES (CRYPTO_RSA_LIMBS * 8)
 
 /* One, whose Montgomery product with an element in Montgomery form is the
    element as a plain integer. */
@@ -4120,6 +4124,54 @@ static fn crypto_rsa_double(p64 address_to x, const p64 address_to m, positive n
                 crypto_fe_subtract_raw(x, x, m, n);
 }
 
+/* montgomery_multiply for any n to CRYPTO_RSA_LIMBS: the assembly to its 64
+   limbs, and above that the same row-by-row product and reduction in C
+   (CIOS: row i adds a b_i and q m, q = t0 (-1/m0) mod 2^64, and shifts
+   one limb down), finished by one subtraction of m. Public moduli only:
+   the final subtraction branches. */
+static fn crypto_rsa_multiply(p64 address_to d, const p64 address_to a,
+                              const p64 address_to b, const p64 address_to m,
+                              p64 inverse, positive n)
+{
+        p64 t[CRYPTO_RSA_LIMBS + 2];
+
+        if (n <= 64)
+        {
+                montgomery_multiply(d, a, b, m, inverse, n);
+                return;
+        }
+        memory_fill(t, 0, (n + 2) * sizeof(p64));
+        for (positive i = 0; i < n; i++)
+        {
+                crypto_wide carry = 0;
+                p64 q;
+
+                for (positive j = 0; j < n; j++)
+                {
+                        carry += (crypto_wide)a[j] * b[i] + t[j];
+                        t[j] = (p64)carry;
+                        carry >>= 64;
+                }
+                carry += t[n];
+                t[n] = (p64)carry;
+                t[n + 1] = (p64)(carry >> 64);
+                q = t[0] * inverse;
+                carry = ((crypto_wide)q * m[0] + t[0]) >> 64;
+                for (positive j = 1; j < n; j++)
+                {
+                        carry += (crypto_wide)q * m[j] + t[j];
+                        t[j - 1] = (p64)carry;
+                        carry >>= 64;
+                }
+                carry += t[n];
+                t[n - 1] = (p64)carry;
+                t[n] = t[n + 1] + (p64)(carry >> 64);
+        }
+        if (t[n] || crypto_fe_cmp(t, m, n) >= 0)
+                crypto_fe_subtract_raw(t, t, m, n);
+        memory_copy(d, t, n * sizeof(p64));
+}
+
 /* out = base^exp mod m, for a public odd m of n limbs whose top limb is
    nonzero and base below m, in Montgomery form throughout.  -1/m mod 2^64
    comes by Newton's iteration: an odd m0 is its own inverse to three bits
@@ -4168,9 +4220,9 @@ static fn crypto_rsa_modexp(p64 address_to out, p64 address_to base, p64 exp,
         for (at = 0; at < k; at++)
                 crypto_rsa_double(square, mod, n);
         for (at = 0; at < s; at++)
-                montgomery_multiply(square, square, square, mod, inverse, n);
+                crypto_rsa_multiply(square, square, square, mod, inverse, n);
 
-        montgomery_multiply(b, base, square, mod, inverse, n);
+        crypto_rsa_multiply(b, base, square, mod, inverse, n);
         top = 63;
         while (!((exp >> top) & 1))
                 top--;
@@ -4178,12 +4230,12 @@ static fn crypto_rsa_modexp(p64 address_to out, p64 address_to base, p64 exp,
         while (top)
         {
                 top--;
-                montgomery_multiply(result, result, result, mod, inverse, n);
+                crypto_rsa_multiply(result, result, result, mod, inverse, n);
                 if ((exp >> top) & 1)
-                        montgomery_multiply(result, result, b, mod, inverse, n);
+                        crypto_rsa_multiply(result, result, b, mod, inverse, n);
         }
 
-        montgomery_multiply(out, result, crypto_unit, mod, inverse, n);
+        crypto_rsa_multiply(out, result, crypto_unit, mod, inverse, n);
 }
 
 /* Decode the public operation once for both RSA signature encodings.  The
@@ -4196,7 +4248,7 @@ static bool crypto_rsa_prepare(p8 address_to n_bytes, positive n_length,
                                p64 address_to base,
                                positive address_to limbs)
 {
-        p8 padded[512];
+        p8 padded[CRYPTO_RSA_BYTES];
 
         if (n_length > sizeof(padded) || n_length < 256 ||
             sig_length != n_length || !n_bytes[0] ||
@@ -4249,7 +4301,7 @@ static bool crypto_rsa_pkcs1(p8 address_to n_bytes, positive n_length,
                              positive digestinfo_length, p8 address_to hash,
                              positive hash_length)
 {
-        p8 room[512];
+        p8 room[CRYPTO_RSA_BYTES];
         p8 address_to em = crypto_rsa_open(room, n_bytes, n_length, exponent,
                                            sig, sig_length);
         positive i;
@@ -4300,7 +4352,7 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
                                   positive sig_length, p8 address_to message,
                                   positive message_length)
 {
-        p8 room[512];
+        p8 room[CRYPTO_RSA_BYTES];
         p8 address_to em = crypto_rsa_open(room, n_bytes, n_length, exponent,
                                            sig, sig_length);
         p8 mhash[32];
@@ -4438,7 +4490,7 @@ typedef struct
         p64 seq_write;
         p8 leaf_qx[48];
         p8 leaf_qy[48];
-        p8 leaf_n[512];
+        p8 leaf_n[CRYPTO_RSA_BYTES];
         positive leaf_n_length;
         p64 leaf_e;
         p8 leaf_curve;
@@ -5775,7 +5827,7 @@ typedef struct
         p8 curve;
         p8 qx[48];
         p8 qy[48];
-        p8 modulus[512];
+        p8 modulus[CRYPTO_RSA_BYTES];
         positive modulus_length;
         p64 exponent;
         p64 not_before;
