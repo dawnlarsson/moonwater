@@ -14364,9 +14364,9 @@ def shell_lang_array_literal_lines(rng):
     body = rng.choice(("", "\n")) + joiner.join(elements) + rng.choice(("", "\n", " # end\n"))
     op = rng.choice(("=", "=", "+="))
     old = "declare -A old=([k0]=p [k1]=q)" if keyed else "old=(p q)"
-    #   local old=(... "${old[@]}") reads the caller's old in bash and the
-    #   new empty local here; that one is left open.
-    target = "arr" if declare == "local " else rng.choice(("arr", "old"))
+    #   local old=(... "${old[@]}") reads the caller's old, as bash expands
+    #   the list before local makes the name.
+    target = rng.choice(("arr", "old"))
     line = declare + target + op + "(" + body + ")"
     report = "declare -p " + target + " | sed 's/^declare -[a-zA-Z-]* //'"
     if declare == "local ":

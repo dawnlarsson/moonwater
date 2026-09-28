@@ -9218,6 +9218,37 @@ typedef struct exec_compound_held
         struct exec_compound_held address_to next;
 } exec_compound_held;
 
+/*
+        local and declare in a function make their name before they assign
+        it, so local old=(x "${old[@]}") read the new empty local where bash
+        reads the caller's old: bash expands the list first. The list is read
+        here ahead of the local, and the assignment that follows takes it.
+*/
+static exec_compound_held address_to exec_compound_prepared;
+static string_address exec_compound_prepared_body;
+static bool exec_compound_preparing;
+static bool exec_compound_prepared_keyed;
+
+fn shell_compound_prepare_drop()
+{
+        exec_compound_prepared = null;
+        exec_compound_prepared_body = null;
+}
+
+bool shell_compound_prepare(string_address name, positive name_length,
+                            string_address body, positive body_length,
+                            bool keyed)
+{
+        bool answer;
+
+        exec_compound_preparing = true;
+        exec_compound_prepared_keyed = keyed;
+        answer = shell_compound_assign(name, name_length, body, body_length,
+                                       false);
+        exec_compound_preparing = false;
+        return answer;
+}
+
 static bool exec_compound_put(string_address name, positive name_length,
                               string_address key, positive key_length,
                               string_address value,
@@ -9275,10 +9306,13 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
 
         name = (string_address)resolved_name;
         name_length = resolved_length;
-        keyed = (shell_array_attributes(name, name_length) &
-                      SHELL_ARRAY_ASSOCIATIVE) != 0;
+        keyed = exec_compound_preparing
+                    ? exec_compound_prepared_keyed
+                    : (shell_array_attributes(name, name_length) &
+                       SHELL_ARRAY_ASSOCIATIVE) != 0;
 
-        if (!shell_variable_attribute_set(
+        if (!exec_compound_preparing &&
+            !shell_variable_attribute_set(
                 name, name_length,
                 (p8)((keyed ? SHELL_ARRAY_ASSOCIATIVE : SHELL_ARRAY_INDEXED) |
                      SHELL_ARRAY_ASSIGNED),
@@ -9293,6 +9327,16 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
         bool pairs_decided = false;
         bool pairs = false;
         string_address pending = null;
+
+        //      The list was already read, before local made the name: take
+        //      what it held rather than read it again.
+        if (exec_compound_prepared_body == body)
+        {
+                first = exec_compound_prepared;
+                exec_compound_prepared = null;
+                exec_compound_prepared_body = null;
+                at = stop;
+        }
 
         if (append && shell_array_length(name, name_length))
                 next = shell_array_highest(name, name_length) + 1;
@@ -9451,6 +9495,13 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                                         tail = address_of (*tail)->next;
                         }
                 }
+        }
+
+        if (exec_compound_preparing)
+        {
+                exec_compound_prepared = answer ? first : null;
+                exec_compound_prepared_body = answer ? body : null;
+                return answer;
         }
 
         if (answer && pending)

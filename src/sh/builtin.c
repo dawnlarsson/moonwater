@@ -9481,6 +9481,10 @@ static COLD fn shell_declare_listed(writer write, string_address name,
 // value with the same scalar/compound/append machinery once that policy has
 // accepted the name.
 static bool exec_declaration_compound(string_address word);
+bool shell_compound_prepare(string_address name, positive name_length,
+                            string_address body, positive body_length,
+                            bool keyed);
+fn shell_compound_prepare_drop();
 static b32 shell_declare_value(string_address name, positive length,
                                string_address mark, bool append,
                                bool bind_reference, bool declare_empty,
@@ -9681,6 +9685,23 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                         }
                         failed = true;
                         goto next;
+                }
+
+                //      A list read before the name is made local, so
+                //      that it reads the caller's variable of the name.
+                //      An associative list keeps its old order: its keys
+                //      are read against the local it makes.
+                if (scoped && mark && !append && shell_bash_compat &&
+                    !subscript && exec_declaration_compound(word) &&
+                    string_is(mark + 1, '(') &&
+                    !(state->attributes_set & SHELL_ARRAY_ASSOCIATIVE))
+                {
+                        positive body = string_length(mark + 1);
+
+                        if (!shell_compound_prepare(word, length, mark + 2,
+                                                    body > 2 ? body - 2 : 0,
+                                                    false))
+                                shell_compound_prepare_drop();
                 }
 
                 if (scoped)
@@ -9969,6 +9990,7 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                 else
                         stored = shell_declare_value(word, length, mark, append,
                             (state->attributes_set & SHELL_ARRAY_NAMEREF) != 0, !local_mode, global_scope);
+                shell_compound_prepare_drop();
                 if (stored <= 0)
                 {
                         if (saved_scalar)
