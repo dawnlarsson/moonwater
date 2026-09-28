@@ -2510,16 +2510,37 @@ static fn link_stamps_save(void)
                                 false);
 }
 
+/*      A stamp is the peer's own clock. One dated past a day ahead of this
+        machine's -- a peer that booted with its clock in 2099, before NTP
+        -- would lock it out for good once its clock was put right, where a
+        restart used to forget it; so such a marker is not read back. A
+        replay was recorded in the past and is still refused; a machine
+        whose own clock is behind at start forgets markers, as before. */
+#define LINK_STAMP_AHEAD 86400
+
 static fn link_stamps_load(void)
 {
         positive got = 0;
+        p64 wall = system_clock_ns(0) / 1000000000ull + (1ull << 62) +
+                   LINK_STAMP_AHEAD;
 
         (void)link_read_private_records(LINK_STAMPS_PATH,
                                         (p8 address_to)link_self.stamp,
                                         sizeof link_self.stamp,
                                         sizeof(link_stamp_entry),
                                         address_of got);
-        link_self.stamps = got / sizeof(link_stamp_entry);
+        link_self.stamps = 0;
+        for (positive at = 0; at < got / sizeof(link_stamp_entry); at++)
+        {
+                p8 address_to stamp = link_self.stamp[at].stamp;
+                p64 seconds = (p64)network_load_32(stamp) << 32 |
+                              network_load_32(stamp + 4);
+
+                if (seconds <= wall)
+                        link_self.stamp[link_self.stamps++] =
+                                link_self.stamp[at];
+        }
+        link_self.stamps_dirty = link_self.stamps != got / sizeof(link_stamp_entry);
 }
 
 

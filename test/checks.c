@@ -68149,6 +68149,33 @@ static fn stamps_outlive(bipolar listener, p16 port)
         check("and a newer one from the same peer is answered",
               wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
                       wls_sessions_used() == 1);
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used)
+                        link_session_close(link_self.session + at);
+
+        //      A peer whose clock once ran a century ahead, now put right.
+        {
+                p8 future[WATERLINK_STAMP_BYTES];
+                p64 wall = system_clock_ns(0) / 1000000000ull;
+
+                waterlink_stamp(future, wall + 100ull * 365 * 86400, 0);
+                link_stamp_keep(wls_client.public, future);
+                link_stamps_save();
+                crypto_forget(link_self.stamp, sizeof link_self.stamp);
+                link_self.stamps = 0;
+                link_stamps_load();
+                wls_initiation(datagram, 33, wall, 0x33333333);
+                link_server_initiation(datagram, WATERLINK_DATAGRAM,
+                                       wls_loopback, port, now + 3000000);
+                check("sec: a marker dated far ahead of this machine's clock "
+                      "is not read back to lock its peer out",
+                      wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
+                              wls_sessions_used() == 1);
+                link_server_initiation(newer, WATERLINK_DATAGRAM, wls_loopback,
+                                       port, now + 4000000);
+                check("while a replay from the past stays refused",
+                      wls_heard(listener, heard) <= 0);
+        }
         link_stamps_save();
         for (positive at = 0; at < LINK_SESSIONS; at++)
                 if (link_self.session[at].used)
