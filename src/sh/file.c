@@ -10774,7 +10774,10 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                 }
         }
 
-        if (ls_kibibytes)
+        //      -k counts -s's blocks in kibibytes only where no -h, --si or
+        //      --block-size said otherwise, before it or after: GNU applies it
+        //      only while no block size has been chosen.
+        if (ls_kibibytes && !ls_selected.size)
         {
                 ls_block_unit = 1024;
                 ls_block_human = false;

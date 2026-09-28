@@ -7344,7 +7344,10 @@ FILES_UTILITIES = (
                          (("--color=always", "-1"), "xx=1:di=31", ()),
                          (("--color=always", "-l"), "", (("TERM", "xterm"),)),
                          (("--color=always", "-C", "-w", "30"), "di=44", ()))),
-                   ("-L", "-1"), ("-L", "-C"), ("-FL", "-1"))),
+                   ("-L", "-1"), ("-L", "-C"), ("-FL", "-1"),
+                   # -k only while nothing else chose a block size.
+                   ("-sd", "-k", "--block-size=512", "dir"), ("-sd", "--block-size=512", "-k", "dir"),
+                   ("-sdk", "-h", "dir"), ("-sd", "--si", "-k", "dir"))),
     #       dir and vdir are ls with a different default format, so they
     #       answer for the same surface and are walked over it. A shorter
     #       list of their own left sixty-nine of ls's options untouched in
