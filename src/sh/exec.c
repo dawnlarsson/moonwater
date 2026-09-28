@@ -9882,7 +9882,8 @@ static COLD fn exec_assignment_discard()
         //      dropped line.
         if (shell_posix_on() && !exec_compound_declaring)
         {
-                expand_fatal_status(string_is(shell_option_flags, 'c') ? 127
+                expand_fatal_status(
+                    string_is(shell_option_flags, 'c') && !exec_forked ? 127
                                                                        : 1);
                 return;
         }
@@ -10973,8 +10974,12 @@ static PURE b32 exec_assignment_error_status(bool assignments_only,
         if (!shell_posix_on())
                 return assignments_only ? EXEC_ASSIGNMENT_LINE_ABORT : 0;
 
+        //      127 is the -c string's own answer; a subshell of it that
+        //      ends on the error answers 1, as bash's does.
         if (assignments_only || exec_special_builtin(command))
-                return string_is(shell_option_flags, 'c') ? 127 : 1;
+                return string_is(shell_option_flags, 'c') && !exec_forked
+                           ? 127
+                           : 1;
 
         return EXEC_ASSIGNMENT_LINE_ABORT;
 }
