@@ -6502,6 +6502,16 @@ static bool shell_bytes_unshown(const p8 address_to value, positive length)
         return false;
 }
 
+//      Whether bash writes a value in $'...': a control byte, or a high
+//      byte that is no character of the locale.
+static inline INLINE bool shell_bytes_awkward(string_address value,
+                                              positive length)
+{
+        return memory_escape_index(value, length, HEX_CONTROL | HEX_TAB) <
+                   length ||
+               shell_bytes_unshown((const p8 address_to)value, length);
+}
+
 /*
         The value as bytes the shell would read back as itself.
 

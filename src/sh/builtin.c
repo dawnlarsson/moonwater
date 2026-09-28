@@ -9262,9 +9262,7 @@ static fn shell_declare_quoted(writer write, string_address value)
         //      that is no character.
         if (shell_bash_compat)
         {
-                if (string_get(value + memory_escape_index(value, length,
-                                                      HEX_CONTROL | HEX_TAB)) ||
-                    shell_bytes_unshown((const p8 address_to)value, length))
+                if (shell_bytes_awkward(value, length))
                         return shell_ansi_quoted_shown(write, value, length);
         }
         else if (string_get(value + memory_escape_index(value, length,
@@ -9315,10 +9313,7 @@ static COLD fn shell_declare_key(writer write, string_address key, positive leng
                         if (shell_bash_compat &&
                             !(length == 1 && key[0] == '@') &&
                             !shell_listing_quoted(kept) &&
-                            memory_escape_index(key, length,
-                                                HEX_CONTROL | HEX_TAB) >= length &&
-                            !shell_bytes_unshown((const p8 address_to)key,
-                                                 length))
+                            !shell_bytes_awkward(key, length))
                                 write(key, length);
                         else
                                 shell_declare_quoted(write, kept);
@@ -9575,9 +9570,7 @@ static COLD fn shell_listing_value(writer write, string_address value)
         //      $'...' is for a control byte or a byte that is none.
         if (!shell_posix_on() &&
             (shell_bash_compat
-                 ? string_get(value + memory_escape_index(value, length,
-                                                     HEX_CONTROL | HEX_TAB)) ||
-                       shell_bytes_unshown((const p8 address_to)value, length)
+                 ? shell_bytes_awkward(value, length)
                  : string_get(value + memory_escape_index(
                        value, length, HEX_CONTROL | HEX_TAB | HEX_HIGH))))
                 shell_declare_quoted(write, value);
@@ -12110,20 +12103,19 @@ COLD fn printf_reusable(writer write, string_address text)
 {
         string_address step = text;
         positive length = string_length(text);
-        bool control = string_get(text + memory_escape_index(
-            text, length, HEX_CONTROL | HEX_TAB));
 
         if (!string_get(text))
                 return write("''", 2);
 
         //      bash spells a byte that is no character in its locale in
         //      octal inside $'...' and keeps a whole character as itself.
-        if (shell_bash_compat &&
-            (control ||
-             shell_bytes_unshown((const p8 address_to)text, length)))
-                return shell_ansi_quoted_shown(write, text, length);
-
-        if (control)
+        if (shell_bash_compat)
+        {
+                if (shell_bytes_awkward(text, length))
+                        return shell_ansi_quoted_shown(write, text, length);
+        }
+        else if (string_get(text + memory_escape_index(text, length,
+                                                       HEX_CONTROL | HEX_TAB)))
                 return shell_ansi_quoted(write, text, false);
 
         for (step = text; string_get(step); step++)
