@@ -19789,8 +19789,40 @@ static bipolar shell_find_in_path_alloc_mode(string_address name,
                 and a name remembered from a query put a file nobody could
                 run in front of the one that would have.
         */
-        if (shell_find_in_path_mode(name, *into, *room, query ? 0 : access,
-                                    !fixed_path, fixed_path))
+        /*
+                A query names what could run. dash reports an executable
+                file and nothing else; bash does too for a name with a slash,
+                and along PATH falls back to the first file of the name when
+                none can run -- unless a directory of the name stood first.
+        */
+        if (query)
+        {
+                file_facts facts;
+
+                if (shell_find_in_path_mode(name, *into, *room, ACCESS_EXECUTE,
+                                            !fixed_path, fixed_path) &&
+                    !(string_first_of(name, '/') &&
+                      test_facts(*into, address_of facts, true) &&
+                      (facts.mode & MODE_FORMAT) == MODE_DIRECTORY))
+                        return 1;
+
+                if (shell_bash_compat && !shell_posix_on() &&
+                    !string_first_of(name, '/'))
+                {
+                        bool found;
+
+                        shell_find_directories = true;
+                        found = shell_find_in_path_mode(name, *into, *room, 0,
+                                                        false, fixed_path);
+                        shell_find_directories = false;
+                        if (found &&
+                            !(test_facts(*into, address_of facts, true) &&
+                              (facts.mode & MODE_FORMAT) == MODE_DIRECTORY))
+                                return 1;
+                }
+        }
+        else if (shell_find_in_path_mode(name, *into, *room, access,
+                                         !fixed_path, fixed_path))
                 return 1;
 
         if (!query)

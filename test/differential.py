@@ -14685,6 +14685,22 @@ def shell_lang_unset_function(rng):
         'echo "var=${f-unset}"'))
 
 
+#       command -v and type name what could run: dash names only an
+#       executable file, bash too for a name with a slash, and along PATH
+#       bash falls back to a file that cannot run unless a directory of the
+#       name came first. Both reported a directory or any file at all.
+def shell_lang_command_lookup_kinds(rng):
+    setup = ("mkdir -p pd/tool pf px; : > pf/tool; : > pf/plain; printf '#!/bin/sh\\n' > px/tool; "
+             "chmod +x px/tool; mkdir -p pd/plain")
+    path = rng.choice(("pf:px", "pd:pf:px", "pd:px", "pf", "pd:pf", "px:pf"))
+    name = rng.choice(("tool", "plain", "pf/plain", "pd/tool", "px/tool", "./pf/plain"))
+    query = rng.choice(("command -v", "type", "command -V"))
+    return ("command-lookup-kinds", shell_ALL, shell_program(
+        setup, "PATH=\"" + ":".join("$PWD/" + p for p in path.split(":")) + ":$PATH\"",
+        "out=$(" + query + " " + name + " 2>&1); s=$?",
+        "printf '%s\\n' \"$out\" | sed \"s|$PWD/||g; s/^.*: //\"", 'echo "s=$s"'))
+
+
 #       Digits in front of > are a descriptor only while they fit one: bash
 #       reads a number past INT_MAX there as an ordinary word, so `echo a
 #       2147483648>f` writes "a 2147483648" to f. This called it a syntax
@@ -17555,6 +17571,7 @@ SHELL_FAMILIES = (
     shell_lang_assoc_pairs,
     shell_lang_descriptor_moves,
     shell_lang_unset_function,
+    shell_lang_command_lookup_kinds,
     shell_lang_set_lone_plus,
     shell_lang_directory_state,
     shell_lang_builtin_refusals,
