@@ -940,19 +940,15 @@ typedef struct
         bool lost;
 } net_holding;
 
-#define NET_CLOCK_MONOTONIC 1
-
 static positive net_seconds(void)
 {
-        timespec now = {0, 0};
+        positive now = clock_monotonic_nanoseconds();
 
         //      A clock that will not answer leaves every lease looking
-        //      expired, so an address is never kept beyond an unknown deadline.
-        if (system_call_2(syscall(clock_gettime), NET_CLOCK_MONOTONIC,
-                          (positive)address_of now))
-                return 0;
-
-        return (positive)now.tv_sec;
+        //      expired, so an address is never kept beyond an unknown
+        //      deadline. Zero is that answer, and the monotonic clock's
+        //      first second is when a boot takes its lease, so it reads 1.
+        return now ? now / NETWORK_NANOSECONDS + 1 : 0;
 }
 
 /* Deleting state which the kernel already discarded is the same outcome as
@@ -1226,12 +1222,15 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
                              : netlink_address_acquire(
                                    handle, index, lease->address,
                                    dhcp_prefix_of(lease->mask));
-                if (status < 0)
+                /* EEXIST from the exclusive create is the address already
+                   there -- an operator's, or this watcher's before init
+                   restarted it -- which stays theirs: present, not owned. */
+                address_applied = status >= 0;
+                if (status < 0 && status != -EEXIST)
                 {
                         doing = (string_address) "addr add";
                         goto failed;
                 }
-                address_applied = true;
         }
 
         if (route_changed && lease->router)
@@ -1241,12 +1240,12 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
                                                  index)
                              : netlink_route_acquire(handle, 0, 0,
                                                      lease->router, index);
-                if (status < 0)
+                route_applied = status >= 0;
+                if (status < 0 && status != -EEXIST)
                 {
                         doing = (string_address) "route add";
                         goto failed;
                 }
-                route_applied = true;
         }
 
         if (route_changed && net_owns_route(previous))
@@ -1364,6 +1363,81 @@ static COLD p8 net_internet_prefer(void)
                                            : NETLINK_PREFER_WIRED;
 }
 
+/*
+        A lease exchange, apart from the process that applies it.
+
+        The child confines itself once its socket is open (dhcp_confine) and
+        hands back one fixed-size answer. That answer is judged here the way
+        a reply is: a usable lease with its timers in RFC 2131's order, and on
+        renewal the address already held -- the child can say only what a
+        server could have. A child that says nothing within the exchange's
+        own schedule is killed rather than waited for.
+*/
+typedef struct
+{
+        bipolar status;
+        dhcp_lease lease;
+} net_dhcp_answer;
+
+static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware,
+                                   dhcp_lease address_to lease, bool renew,
+                                   bool rebinding, positive wait)
+{
+        b32 ends[2];
+        net_dhcp_answer answer = {DHCP_NO_SOCKET, *lease};
+        network_deadline deadline;
+        bool heard;
+
+        if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) < 0)
+                return DHCP_NO_SOCKET;
+
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                dhcp_apart = ends[1];
+                answer.status = renew ? dhcp_reacquire(device, hardware,
+                                                       address_of answer.lease,
+                                                       rebinding, wait)
+                                      : dhcp_ask(device, hardware,
+                                                 address_of answer.lease);
+                system_write_all((positive)dhcp_apart, address_of answer,
+                                 sizeof answer);
+                system_call_1(syscall(exit_group), 0);
+        }
+
+        system_close(ends[1]);
+        //      dhcp_ask's schedule is 75 s of sends after a CSPRNG that
+        //      may take a second; a renewal is its own wait.
+        heard = child > 0 &&
+                network_deadline_begin(address_of deadline,
+                                       renew ? wait + 5 : 120, 0) &&
+                network_wait_readable_until(ends[0], address_of deadline) > 0 &&
+                system_read_retry((positive)ends[0], address_of answer,
+                                  sizeof answer) == (bipolar)sizeof answer;
+        if (child > 0)
+        {
+                system_call_2(syscall(kill), (positive)child, SIGKILL);
+                system_call_4(syscall(wait4), (positive)child, 0, 0, 0);
+        }
+        system_close(ends[0]);
+
+        if (!heard)
+                return DHCP_NO_SOCKET;
+        if (answer.status != DHCP_OK)
+                return answer.status == DHCP_NO_OFFER ||
+                               answer.status == DHCP_REFUSED ||
+                               answer.status == DHCP_NO_RANDOM
+                           ? answer.status
+                           : DHCP_NO_SOCKET;
+        if (!dhcp_lease_usable(address_of answer.lease) ||
+            !dhcp_lease_timers(address_of answer.lease) ||
+            (renew && answer.lease.address != lease->address))
+                return DHCP_NO_OFFER;
+        *lease = answer.lease;
+        return DHCP_OK;
+}
+
 static COLD b32 net_auto(b32 handle, net_holding address_to held)
 {
         netlink_search search;
@@ -1405,7 +1479,8 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         string_format(net_out, "ip: asking for a lease\n");
         net_flush();
 
-        status = dhcp_ask(search.name, search.hardware, address_of lease);
+        status = net_dhcp_apart(search.name, search.hardware, address_of lease,
+                                false, false, 0);
 
         if (status != DHCP_OK)
         {
@@ -1487,6 +1562,37 @@ typedef struct
 
 static netlink_buffer net_states;
 
+static COLD net_state address_to net_state_of(p32 index)
+{
+        net_state address_to states = (net_state address_to)net_states.bytes;
+
+        for (positive at = 0; at < net_states.used / sizeof(net_state); at++)
+                if (states[at].index == index)
+                        return states + at;
+        return null;
+}
+
+/* News without IFF_RUNNING is also what the kernel sends the moment a link
+   is brought up; linkwatch says RUNNING up to a second later, and the lease
+   is taken between the two, so every boot released a lease a millisecond
+   old and asked again. The held link is asked as it is now, and carrier
+   (IFF_LOWER_UP) counts. */
+#define NET_LOWER_UP 0x10000
+
+static COLD bool net_link_carrier_now(const net_holding address_to held)
+{
+        netlink_search now = {.wanted = (string_address)held->name};
+        bipolar handle = netlink_open_groups(0);
+        bool carrier = handle >= 0 &&
+                       netlink_link_find((b32)handle, address_of now) >= 0 &&
+                       now.index == held->index &&
+                       (now.flags & (IFF_RUNNING | NET_LOWER_UP));
+
+        if (handle >= 0)
+                socket_close((b32)handle);
+        return carrier;
+}
+
 /* Remember every carrier transition, and reconfigure when no lease is
    active, when its interface loses carrier, or when another link gains it:
    the preference may favour that one, and auto keeps the lease when the
@@ -1494,37 +1600,26 @@ static netlink_buffer net_states;
    actionable while unconfigured. */
 static COLD bool net_link_news(p32 index, p32 flags, net_holding address_to held)
 {
-        net_state address_to entry;
-        positive count = net_states.used / sizeof(net_state);
-        positive at;
+        net_state address_to entry = net_state_of(index);
 
-        for (at = 0; at < count; at++)
-        {
-                entry = ((net_state address_to)net_states.bytes) + at;
-
-                if (entry->index != index)
-                        continue;
-
-                if (((entry->flags ^ flags) & IFF_RUNNING) == 0)
-                        return false;
-
-                entry->flags = flags;
-
-                goto changed;
-        }
-
-        if (net_states.used > positive_max - sizeof(net_state) ||
-            !net_room(address_of net_states,
-                      net_states.used + sizeof(net_state)))
+        if (entry && ((entry->flags ^ flags) & IFF_RUNNING) == 0)
                 return false;
 
-        entry = ((net_state address_to)net_states.bytes) + count;
-        entry->index = index;
+        if (!entry)
+        {
+                if (net_states.used > positive_max - sizeof(net_state) ||
+                    !net_room(address_of net_states,
+                              net_states.used + sizeof(net_state)))
+                        return false;
+                entry = (net_state address_to)(net_states.bytes +
+                                               net_states.used);
+                entry->index = index;
+                net_states.used += sizeof(net_state);
+        }
         entry->flags = flags;
-        net_states.used += sizeof(net_state);
 
-changed:
-        if (held && held->index == index && !(flags & IFF_RUNNING))
+        if (held && held->index == index && !(flags & IFF_RUNNING) &&
+            !net_link_carrier_now(held))
                 held->lost = true;
         if (!held || held->index == 0 || held->lost)
                 return true;
@@ -1533,21 +1628,17 @@ changed:
 
 static COLD bool net_link_removed(p32 index, net_holding address_to held)
 {
-        net_state address_to states = (net_state address_to)net_states.bytes;
-        positive count = net_states.used / sizeof(net_state);
+        net_state address_to state = net_state_of(index);
 
         /* Forget the carrier snapshot as well as the lease.  Interface
            indexes may be reused, and retaining the deleted device's flags
            could suppress the replacement device's first event. */
-        for (positive at = 0; at < count; at++)
-                if (states[at].index == index)
-                {
-                        count--;
-                        if (at != count)
-                                states[at] = states[count];
-                        net_states.used = count * sizeof(net_state);
-                        break;
-                }
+        if (state)
+        {
+                net_states.used -= sizeof(net_state);
+                *state = *(net_state address_to)(net_states.bytes +
+                                                 net_states.used);
+        }
 
         if (!held || held->index != index)
                 return false;
@@ -1772,9 +1863,10 @@ static COLD b32 net_watch(void)
                                 positive attempt = net_lease_attempt_time(
                                     address_of held, now, rebinding);
                                 dhcp_lease renewed = held.lease;
-                                bipolar renewal = dhcp_reacquire(
+                                bipolar renewal = net_dhcp_apart(
                                     held.name, held.hardware,
-                                    address_of renewed, rebinding, attempt);
+                                    address_of renewed, true, rebinding,
+                                    attempt);
 
                                 if (renewal == DHCP_OK)
                                 {

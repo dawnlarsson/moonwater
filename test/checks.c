@@ -58426,6 +58426,58 @@ static fn fetching_for_real(void)
 }
 
 /*
+        The exchange's confinement, as net_dhcp_apart's child meets it: the
+        socket and the answer's pipe stay open and nothing else does, the
+        answer's write is allowed, and a call beyond the exchange's own kills
+        the child with SIGSYS. qemu-user cannot filter itself, so there the
+        last step is NOT RUN rather than a pass.
+*/
+static fn dhcp_confinement(void)
+{
+        b32 ends[2];
+        b32 status = 0;
+        p8 byte = 0;
+        bipolar spare = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+
+        check("DHCP confinement fixture opens",
+              spare >= 0 &&
+                  system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) == 0);
+        if (spare < 0)
+                return;
+        bipolar child = system_fork();
+        if (child == 0)
+        {
+                bipolar handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+
+                dhcp_apart = ends[1];
+                if (handle < 0 || !dhcp_confine((b32)handle))
+                        system_call_1(syscall(exit_group), 3);
+                if (system_call_1(syscall(close), (positive)spare) != -EBADF ||
+                    system_call_1(syscall(close), (positive)ends[0]) != -EBADF)
+                        system_call_1(syscall(exit_group), 4);
+                byte = 1;
+                system_call_3(syscall(write), (positive)ends[1],
+                              (positive)address_of byte, 1);
+                system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+                system_call_1(syscall(exit_group), 5);
+        }
+        system_close(ends[1]);
+        system_read_retry((positive)ends[0], address_of byte, 1);
+        if (child > 0)
+                system_call_4(syscall(wait4), (positive)child,
+                              (positive)address_of status, 0, 0);
+        system_close(ends[0]);
+        system_close(spare);
+        check("the confined exchange keeps only its socket and pipe, and may answer",
+              child > 0 && byte == 1);
+        if (net_as_emulated() && status == 5 << 8)
+                log_direct(str("net: DHCP seccomp filter NOT RUN -- qemu-user\n"));
+        else
+                check("the confined exchange dies on a call outside its own",
+                      (status & 0x7f) == 31);
+}
+
+/*
         The lease, built and read, without a server.
 
         The socket dance -- broadcast from an address we do not have yet, out
@@ -59278,6 +59330,7 @@ b32 main(void)
         redirect_urls();
         fetching_for_real();
         leasing();
+        dhcp_confinement();
         dhcp_reacquisition_state_matrix();
         leasing_datagrams();
         dhcp_transaction_randomness();
@@ -72049,6 +72102,30 @@ static fn storage_test_link_state(void)
         netlink_forget(address_of net_states);
         memory_fill(address_of held, 0, sizeof held);
 
+        /* Link up sends news without IFF_RUNNING at once and RUNNING up to a
+           second later; a lease taken between them must survive the first.
+           The loopback link stands in: news says down, the link says up. */
+        {
+                netlink_search loopback = {.wanted = (string_address)"lo"};
+                bipolar handle = netlink_open_groups(0);
+                bool found = handle >= 0 &&
+                             netlink_link_find((b32)handle, address_of loopback) >= 0;
+
+                if (handle >= 0)
+                        socket_close((b32)handle);
+                held.index = loopback.index;
+                held.lease.address = 0x7f000002;
+                string_copy_max_end(held.name, (string_address)"lo", IFNAME_SIZE - 1);
+                if (!found)
+                        log_direct(str("storage_io: link news against lo NOT RUN -- no routing socket\n"));
+                else
+                        check("news without RUNNING is judged by the link as it is now",
+                              !net_link_news(loopback.index, IFF_UP, address_of held) &&
+                                  !held.lost);
+        }
+        netlink_forget(address_of net_states);
+        memory_fill(address_of held, 0, sizeof held);
+
         {
                 p8 record[NETLINK_HEADER + sizeof(netlink_link)] = {0};
                 netlink_header address_to header =
@@ -72207,6 +72284,84 @@ static fn storage_test_link_state(void)
         }
 
         netlink_forget(address_of net_states);
+}
+
+/* The lease clock's first second.  A boot takes its lease there, and zero is
+   what net_seconds says for a clock that failed -- which expires every lease
+   at once.  A time namespace whose monotonic clock starts about now puts a
+   grandchild in that second (NOT RUN without unprivileged user namespaces). */
+static fn storage_test_lease_clock_origin(void)
+{
+        b32 status = 0;
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                p8 offsets[48] = "monotonic -";
+                p8 digits[24];
+                positive at = 11;
+                positive count = 0;
+                positive now = clock_monotonic_nanoseconds();
+                timespec pause = {0, 250000000};
+                b32 inner = 0;
+
+                if (now % NETWORK_NANOSECONDS > 700000000)
+                {
+                        system_call_2(syscall(nanosleep), (positive)address_of pause, 0);
+                        now = clock_monotonic_nanoseconds();
+                }
+                if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWTIME) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                now /= NETWORK_NANOSECONDS;
+                do
+                        digits[count++] = (p8)('0' + now % 10);
+                while (now /= 10);
+                while (count)
+                        offsets[at++] = digits[--count];
+                memory_copy(offsets + at, " 0\n", 3);
+                at += 3;
+                bipolar handle = system_open_at(AT_FDCWD, "/proc/self/timens_offsets",
+                                                1 | O_CLOEXEC);
+                if (handle < 0 || system_write_all((positive)handle, offsets, at) != at)
+                        system_call_1(syscall(exit_group), 2);
+                bipolar grandchild = system_fork();
+                if (grandchild == 0)
+                        system_call_1(syscall(exit_group), net_seconds() == 1 ? 0 : 1);
+                system_call_4(syscall(wait4), (positive)grandchild,
+                              (positive)address_of inner, 0, 0);
+                system_call_1(syscall(exit_group), (inner >> 8) & 0xff);
+        }
+        if (child > 0)
+                system_call_4(syscall(wait4), (positive)child,
+                              (positive)address_of status, 0, 0);
+        if (child > 0 && (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 2)
+                log_direct(str("storage_io: lease clock origin NOT RUN -- no time namespace\n"));
+        else
+                check("a lease taken in the clock's first second is not a failed clock",
+                      child > 0 && status == 0);
+}
+
+/* A renewal with nothing to renew answers DHCP_NO_OFFER from inside the
+   child, so the status crossed the pipe; the child is reaped and no
+   descriptor is left behind. */
+static fn storage_test_dhcp_apart(void)
+{
+        p8 hardware[6] = {2, 0, 0, 0, 0, 1};
+        dhcp_lease lease = {0};
+        bipolar before = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+
+        if (before >= 0)
+                system_close(before);
+        bipolar status = net_dhcp_apart("moonwater-no-interface", hardware,
+                                        address_of lease, true, false, 1);
+        bipolar after = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+
+        if (after >= 0)
+                system_close(after);
+        check("a lease exchange apart hands its answer back and leaves nothing",
+              status == DHCP_NO_OFFER && before >= 0 && after == before &&
+                  system_call_4(syscall(wait4), (positive)-1, 0, 1, 0) ==
+                      -ECHILD);
 }
 
 static fn storage_test_netlink_output(void)
@@ -72852,6 +73007,8 @@ b32 main(void)
         storage_test_findmnt();
         storage_test_script_rollback();
         storage_test_link_state();
+        storage_test_lease_clock_origin();
+        storage_test_dhcp_apart();
         storage_test_netlink_output();
         storage_test_net_files();
         return test_report(null);

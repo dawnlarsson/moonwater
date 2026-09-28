@@ -165,7 +165,7 @@ describe()
         install)  echo "Moonwater installed to a disk, started from it, asked about and updated from a stick" ;;
         canvas)   echo "what is actually on the screen, read back a pixel at a time" ;;
         wifi)     echo "networks in the air of a machine with simulated radios, joined and listed" ;;
-        fuzz)     echo "the TLS DER, handshake and verify fuzz targets and waterlink's pre-auth surface and core, for an hour each, or a release report" ;;
+        fuzz)     echo "every network libFuzzer target for an hour each, or a release report" ;;
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
         esac
 }
@@ -3601,7 +3601,7 @@ lane_socket() { freestanding_checks_lane socket socket; }
 #       http_response_framing holds the response parser to a written
 #       accept/refuse matrix (and names deliberate disagreements with
 #       Python's http.client).
-#       tls_der_fuzz / tls_hs_fuzz are bounded libFuzzer ASan/UBSan runs
+#       tls_der_fuzz / tls_hs_fuzz / dhcp_fuzz are bounded libFuzzer ASan/UBSan runs
 #       over seeds differential.py writes into each run's temporary
 #       directory. NOT RUN (2) when clang/libFuzzer is absent.
 #       Longer fuzzing is lane_fuzz and MSan is lane_msan, both run only when
@@ -3647,6 +3647,7 @@ lane_net()
         2) note "tls_hs_fuzz: skipped (soft) -- does not downgrade net" ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness dhcp_fuzz; case $? in 0) ;; 2) note "dhcp_fuzz: skipped (soft) -- does not downgrade net" ;; *) net_outcome=1 ;; esac
         return "$net_outcome"
 }
 #       The TLS fuzz targets for longer than lane_net's smoke: tls_der_fuzz,

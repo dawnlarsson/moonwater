@@ -35565,39 +35565,16 @@ def harness_term_streams(argv):
     return 1 if failures else 0
 
 
-def harness_dhcp_packets(argv):
-    """DHCP replies from a grammar, through the parser ip watch runs as root.
+def dhcp_lift():
+    """src/net/net.c's DHCP reply side for a hosted build: (shim, head, walk).
 
-    dhcp_read walks a reply's options -- a packet from the network, read
-    by a process with every privilege -- so a length it trusted would be a
-    read past the datagram. The walk is cut out of src/net/net.c and built
-    with the host compiler under AddressSanitizer and UBSan, and fed 200,000
-    seeded replies each in a heap block exactly its length: the fixed BOOTP
-    head with a field now and then wrong (op, hardware type and length,
-    transaction, client address, cookie), then options drawn from PAD, END,
-    the eight the lease reads at their own length and at 0, 3, 5 and 8 bytes,
-    the message type at 0, 1 and 2, unknown options, repeats, masks of every
-    shape, and the datagram cut anywhere from nothing to all of it. Values
-    are cut into pieces now and then, each piece its own option, and option
-    52 now and then says the file and sname fields carry options too, which
-    they sometimes do whether it says so or not. A reply that is whole and
-    well formed has to give the lease a model of the options the generator
-    wrote says it gives -- every piece of a code joined in wire order,
-    options then file then sname, as RFC 2131 and 3396 read it -- and every
-    reply has to be read without the sanitizers saying a word. Well formed
-    includes the framing RFC 2131 and 2132 ask for: the options field and
-    each field option 52 names end in END, and option 52 is one byte.
-
-        dhcp_packets [COUNT [SEED]]
-    """
-    import subprocess
-    import tempfile
-    count = int(argv[0]) if argv else 200000
-    seed = int(argv[1], 0) if len(argv) > 1 else 0xd4c9
+    head runs from the DHCP defines through dhcp_lease_timers; walk from
+    dhcp_walk through dhcp_reacquisition_answer_matches. dhcp_packets and
+    dhcp_fuzz share it, so a moved anchor breaks both."""
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     head = net[net.index("#define DHCP_HEAD 236"):net.index("static COLD positive dhcp_build(")]
     walk = net[net.index("/*\n        A reply read for what it says."):
-               net.index("//      A mask of n leading bits")]
+               net.index("/*\n        The exchange, confined.")]
     shim = r'''
 #include <stdio.h>
 #include <stdlib.h>
@@ -35634,6 +35611,39 @@ static bipolar system_random_fill(void *into, positive size, positive flags) {
         (void)into; (void)size; (void)flags; return 0;
 }
 '''
+    return shim, head, walk
+
+
+def harness_dhcp_packets(argv):
+    """DHCP replies from a grammar, through the parser ip watch runs as root.
+
+    dhcp_read walks a reply's options -- a packet from the network, read
+    by a process with every privilege -- so a length it trusted would be a
+    read past the datagram. The walk is cut out of src/net/net.c and built
+    with the host compiler under AddressSanitizer and UBSan, and fed 200,000
+    seeded replies each in a heap block exactly its length: the fixed BOOTP
+    head with a field now and then wrong (op, hardware type and length,
+    transaction, client address, cookie), then options drawn from PAD, END,
+    the eight the lease reads at their own length and at 0, 3, 5 and 8 bytes,
+    the message type at 0, 1 and 2, unknown options, repeats, masks of every
+    shape, and the datagram cut anywhere from nothing to all of it. Values
+    are cut into pieces now and then, each piece its own option, and option
+    52 now and then says the file and sname fields carry options too, which
+    they sometimes do whether it says so or not. A reply that is whole and
+    well formed has to give the lease a model of the options the generator
+    wrote says it gives -- every piece of a code joined in wire order,
+    options then file then sname, as RFC 2131 and 3396 read it -- and every
+    reply has to be read without the sanitizers saying a word. Well formed
+    includes the framing RFC 2131 and 2132 ask for: the options field and
+    each field option 52 names end in END, and option 52 is one byte.
+
+        dhcp_packets [COUNT [SEED]]
+    """
+    import subprocess
+    import tempfile
+    count = int(argv[0]) if argv else 200000
+    seed = int(argv[1], 0) if len(argv) > 1 else 0xd4c9
+    shim, head, walk = dhcp_lift()
     driver = r'''
 static uint64_t draws;
 static p32 draw(p32 below) {
@@ -35856,6 +35866,271 @@ int main(int argc, char **argv) {
           % (total, parsed, agreed, whole))
     write_tally("dhcp-packets", agreed, whole)
     return 0
+
+
+def dhcp_fuzz_seeds():
+    """Name to bytes for dhcp_fuzz: replies in dhcp_packets' shapes.
+
+    Byte 0 is control (bit 0 set: the header is taken as it is rather than
+    given this client's identity; bit 1: the clock reading is absolute rather
+    than past the lease start), bytes 1-8 are two 32-bit clock values, and
+    the rest is the reply."""
+    def option(code, value):
+        return bytes([code, len(value)]) + value
+
+    def reply(options, kind=0, file=b"", sname=b"", control=0, clock=b"\0" * 8):
+        head = bytearray(236)
+        head[0:3] = b"\x02\x01\x06"
+        head[4:8] = (0xdeadbeef).to_bytes(4, "big")
+        head[16:20] = bytes([10, 0, 2, 15])
+        head[28:34] = bytes([2, 0, 0, 0, 0, 1])
+        head[44:44 + len(sname)] = sname
+        head[108:108 + len(file)] = file
+        body = (option(53, bytes([kind])) if kind else b"") + options
+        return bytes([control]) + clock + bytes(head) + b"\x63\x82\x53\x63" + body
+
+    four = lambda value: value.to_bytes(4, "big")
+    lease = (option(1, four(0xffffff00)) + option(3, bytes([10, 0, 2, 2])) +
+             option(6, bytes([10, 0, 2, 3])) + option(54, bytes([10, 0, 2, 2])) +
+             option(51, four(86400)))
+    timers = option(58, four(100)) + option(59, four(200))
+    clock = four(1000) + four(150)
+    seeds = {
+        "offer": reply(lease + b"\xff", 2),
+        "ack": reply(lease + timers + b"\xff", 5, clock=clock),
+        "nak": reply(option(54, bytes([10, 0, 2, 2])) + b"\xff", 6),
+        "ack_pad_tail": reply(lease + b"\xff" + b"\0" * 60, 5),
+        "ack_junk_after_end": reply(lease + b"\xff\x03\x04\x0a\0\0\x01", 5),
+        "no_end": reply(lease, 5),
+        "pad_only": reply(b"\0" * 32, 5),
+        "empty_options": reply(b"", 0),
+        "short_head": reply(b"")[:200],
+        "length_off_end": reply(lease + b"\x06\x40\x0a\0", 5),
+        "split_lease_time": reply(option(51, four(3600)[:2]) + option(51, four(3600)[2:]) +
+                                  option(54, bytes([10, 0, 2, 2])) + b"\xff", 5),
+        "split_router_list": reply(option(3, bytes([10, 0, 2, 2, 10])) + option(3, b"\0\2\3") +
+                                   b"\xff", 2),
+        "router_list_long": reply(option(3, bytes(range(252))) + b"\xff", 2),
+        "mask_holey": reply(option(1, four(0xff00ff00)) + b"\xff", 2),
+        "mask_five_bytes": reply(option(1, b"\xff\xff\xff\0\0") + b"\xff", 2),
+        "type_twice": reply(option(53, b"\x05") + option(53, b"\x05") + b"\xff", 0),
+        "type_empty": reply(option(53, b"") + b"\xff", 0),
+        "overload_file": reply(option(52, b"\x01") + b"\xff", 5,
+                               file=lease + b"\xff"),
+        "overload_sname": reply(option(52, b"\x02") + b"\xff", 5,
+                                sname=option(51, four(60)) + b"\xff"),
+        "overload_both_split": reply(option(52, b"\x03") + option(51, b"\0\0") + b"\xff", 5,
+                                     file=option(51, b"\x0e\x10") + b"\xff",
+                                     sname=option(54, bytes([10, 0, 2, 2])) + b"\xff"),
+        "overload_file_no_end": reply(option(52, b"\x01") + b"\xff", 5, file=lease),
+        "overload_value_four": reply(option(52, b"\x04") + b"\xff", 5),
+        "overload_length_two": reply(option(52, b"\x01\x02") + b"\xff", 5),
+        "overload_twice": reply(option(52, b"\x01") + option(52, b"\x01") + b"\xff", 5,
+                                file=b"\xff"),
+        "overload_in_file": reply(option(52, b"\x01") + b"\xff", 5,
+                                  file=option(52, b"\x02") + b"\xff"),
+        "file_runs_past": reply(option(52, b"\x01") + b"\xff", 5,
+                                file=b"\0" * 124 + b"\x03\x09"),
+        "timers_inverted": reply(lease + option(58, four(300)) + option(59, four(200)) +
+                                 b"\xff", 5, clock=clock),
+        "lease_one_second": reply(option(51, four(1)) + option(54, b"\x0a\0\2\2") + b"\xff",
+                                  5, clock=four(7) + four(1)),
+        "lease_three_seconds": reply(option(51, four(3)) + option(54, b"\x0a\0\2\2") + b"\xff",
+                                     5, clock=four(7) + four(2)),
+        "lease_infinite": reply(option(51, four(0xffffffff)) + option(54, b"\x0a\0\2\2") +
+                                b"\xff", 5, clock=four(0xfffffff0) + four(0xffffffff)),
+        "clock_regressed": reply(lease + b"\xff", 5, control=2, clock=four(1000) + four(10)),
+        "raw_wrong_xid": reply(lease + b"\xff", 5, control=1)[:9] + b"\x02\x01\x06\0\1\2\3\4" +
+                         reply(lease + b"\xff", 5)[17:],
+        "raw_bootp_request": bytes([1]) + b"\0" * 8 + b"\x01" + reply(lease + b"\xff", 5)[10:],
+    }
+    return {name + ".bin": data for name, data in seeds.items()}
+
+
+def harness_dhcp_fuzz(argv):
+    """Coverage-guided libFuzzer over the DHCP reply parser and lease clock.
+
+    dhcp_read, dhcp_walk and the lease helpers after them are lifted from
+    src/net/net.c (dhcp_lift, shared with dhcp_packets), and the lease
+    timing functions net_lease_expired_at through net_lease_retry_after from
+    src/sh/net.c. Each input is copied into a heap block exactly its length
+    and read twice: by dhcp_read, and by an independent RFC 2131/2132/3396
+    reference here (options, then file, then sname when option 52 names
+    them, each ending in END and padding, 52 once, one byte, 1..3, in the
+    options field only; pieces of a code joined). The two must agree on the
+    verdict, the message type and all eight lease words, and a refused reply
+    must leave the caller's lease untouched. An accepted lease then goes
+    through dhcp_lease_timers (T1 < T2 < expiry, or both zero under three
+    seconds), dhcp_prefix_of (the mask's population count, 24 for none),
+    dhcp_lease_acknowledge over a held lease (still usable), and the watcher's
+    clock arithmetic at a fuzzed start and now (a wake within the lease, a
+    request never past its boundary, a retry never past expiry). Seeds from
+    dhcp_fuzz_seeds; ASan/UBSan, or MSan with MOONWATER_MSAN=1; NOT RUN (2)
+    without clang/libFuzzer.
+
+        python3 test/differential.py --harness dhcp_fuzz
+    """
+    del argv
+    shim, head, walk = dhcp_lift()
+    shell = (HARNESS_ROOT / "src/sh/net.c").read_text()
+    clock = tls_fuzz_sec(shell, "/*\n        What this machine is holding, and since when.",
+                         "static COLD fn net_rollback_record(")
+    source = shim + r"""
+#define IFNAME_SIZE 16
+#define ERROR_NO_ENTRY 2
+#define ERROR_NO_PROCESS 3
+#define ERROR_NO_DEVICE 19
+#define NETWORK_NANOSECONDS 1000000000
+static positive clock_monotonic_nanoseconds(void) { return 0; }
+""" + head + walk + clock + r"""
+static const p8 fuzz_hardware[6] = {2, 0, 0, 0, 0, 1};
+
+#define FUZZ_REQUIRE(condition, what)                                         \
+        do { if (!(condition)) { fprintf(stderr, "dhcp fuzz: %s\n", what);  \
+                                 __builtin_trap(); } } while (0)
+
+/* The reference: one region's options, RFC 2132 framing, pieces joined. */
+static int reference_region(const p8 *region, long size, int primary, int *overload,
+                            long total[256], p8 first[256][4])
+{
+        for (long at = 0; at < size;) {
+                int code = region[at];
+                if (code == 0) { at++; continue; }
+                if (code == 255) {
+                        for (long rest = at + 1; rest < size; rest++)
+                                if (region[rest]) return 0;
+                        return 1;
+                }
+                if (size - at < 2) return 0;
+                long length = region[at + 1];
+                if (size - at - 2 < length) return 0;
+                if (code == 52) {
+                        int value = length == 1 ? region[at + 2] : 0;
+                        if (!primary || *overload || value < 1 || value > 3) return 0;
+                        *overload = value;
+                }
+                for (long i = 0; i < length; i++)
+                        if (total[code] + i < 4) first[code][total[code] + i] = region[at + 2 + i];
+                total[code] += length;
+                at += 2 + length;
+        }
+        return 0;
+}
+
+static int reference_read(const p8 *packet, long size, p32 lease[8], p8 *kind)
+{
+        static const p8 codes[7] = {1, 3, 6, 54, 51, 58, 59};
+        long total[256] = {0};
+        p8 first[256][4];
+        int overload = 0;
+
+        memset(first, 0, sizeof first);
+        if (size < 240 || packet[0] != 2 || packet[1] != 1 || packet[2] != 6 ||
+            network_load_32(packet + 4) != 0xdeadbeef ||
+            memcmp(packet + 28, fuzz_hardware, 6) ||
+            network_load_32(packet + 236) != 0x63825363)
+                return 0;
+        if (!reference_region(packet + 240, size - 240, 1, &overload, total, first) ||
+            ((overload & 1) && !reference_region(packet + 108, 128, 0, &overload, total, first)) ||
+            ((overload & 2) && !reference_region(packet + 44, 64, 0, &overload, total, first)))
+                return 0;
+        memset(lease, 0, 8 * sizeof(p32));
+        lease[0] = network_load_32(packet + 16);
+        for (int i = 0; i < 7; i++)
+                if (total[codes[i]] == 4 || (total[codes[i]] > 4 && (i == 1 || i == 2)))
+                        lease[i + 1] = network_load_32(first[codes[i]]);
+        /* A mask is ones then zeros: no one bit below the first zero. */
+        for (int bit = 31, zero = 0; bit >= 0; bit--) {
+                if (!(lease[1] >> bit & 1)) zero = 1;
+                else if (zero) return 0;
+        }
+        if (total[53] != 1 || !first[53][0])
+                return 0;
+        *kind = first[53][0];
+        return 1;
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        if (size < 9)
+                return 0;
+        positive length = size - 9;
+        p8 *packet = malloc(length ? length : 1);
+        memcpy(packet, data + 9, length);
+        if (!(data[0] & 1)) {
+                if (length > 2) { packet[0] = 2; packet[1] = 1; packet[2] = 6; }
+                if (length >= 8) memcpy(packet + 4, "\xde\xad\xbe\xef", 4);
+                if (length >= 34) memcpy(packet + 28, fuzz_hardware, 6);
+                if (length >= 240) memcpy(packet + 236, "\x63\x82\x53\x63", 4);
+        }
+
+        dhcp_lease lease;
+        p8 kind = 0xee, want_kind = 0;
+        p32 want[8];
+        memset(&lease, 0xa5, sizeof lease);
+        dhcp_lease untouched = lease;
+        bipolar got = dhcp_read(packet, length, 0xdeadbeef, (p8 *)fuzz_hardware,
+                                &lease, &kind);
+        int accepted = reference_read(packet, (long)length, want, &want_kind);
+        free(packet);
+
+        FUZZ_REQUIRE((got == 0) == (accepted == 1), "dhcp_read and the reference disagree on the verdict");
+        if (got) {
+                FUZZ_REQUIRE(got == -1 && kind == 0xee &&
+                             !memcmp(&lease, &untouched, sizeof lease),
+                             "a refused reply wrote the caller's lease");
+                return 0;
+        }
+        FUZZ_REQUIRE(kind == want_kind && !memcmp(&lease, want, sizeof want),
+                     "dhcp_read and the reference read different values");
+
+        dhcp_lease timed = lease;
+        bool ordered = dhcp_lease_timers(&timed);
+        FUZZ_REQUIRE(ordered == (lease.seconds != 0), "timers refused a lease with a lifetime");
+        if (ordered && timed.seconds < 3)
+                FUZZ_REQUIRE(!timed.renewal && !timed.rebinding, "a short lease kept timers");
+        else if (ordered)
+                FUZZ_REQUIRE(timed.renewal && timed.renewal < timed.rebinding &&
+                             timed.rebinding < timed.seconds, "timers out of order");
+
+        p8 prefix = dhcp_prefix_of(lease.mask);
+        FUZZ_REQUIRE(prefix == (lease.mask ? __builtin_popcount(lease.mask) : 24),
+                     "a prefix that is not the mask's");
+
+        dhcp_lease held = {0x0a00020f, 0xffffff00, 0x0a000202, 0x0a000203,
+                           0x0a000202, 3600, 1800, 3150};
+        FUZZ_REQUIRE(dhcp_lease_acknowledge(&held, &lease) && dhcp_lease_usable(&held),
+                     "an acknowledgement made a held lease unusable");
+
+        if (!ordered)
+                return 0;
+        positive start = network_load_32(data + 1);
+        positive later = network_load_32(data + 5);
+        positive now = data[0] & 2 ? later : start + later;
+        net_holding holding;
+        memset(&holding, 0, sizeof holding);
+        holding.index = 1;
+        holding.lease = timed;
+        holding.taken = start;
+        holding.retry = timed.renewal;
+        bool expired = net_lease_expired_at(&holding, now);
+        positive due = net_lease_due_in(&holding, now);
+        FUZZ_REQUIRE(due >= 1 && due <= timed.seconds, "a wake outside the lease");
+        FUZZ_REQUIRE(expired || (now >= start && now - start < timed.seconds),
+                     "a lease kept past its lifetime");
+        bool rebinding = net_lease_rebinding_at(&holding, now);
+        positive attempt = net_lease_attempt_time(&holding, now, rebinding);
+        FUZZ_REQUIRE(attempt <= 4 && (!attempt ||
+                     now - start + attempt <= (rebinding ? timed.seconds : timed.rebinding)),
+                     "a request allowed past its state boundary");
+        net_lease_retry_after(&holding, now, rebinding);
+        FUZZ_REQUIRE(expired || (holding.retry <= timed.seconds &&
+                                 holding.retry >= now - start),
+                     "a retry scheduled outside the lease");
+        return 0;
+}
+"""
+    return tls_fuzz_run("dhcp", "dhcp", source, 1500)
 
 
 def harness_terminfo_install(argv):
@@ -38171,6 +38446,8 @@ def tls_fuzz_seeds(corpus):
     ECDSA signature DER, C9 AlgorithmIdentifier."""
     if corpus == "waterlink":
         return waterlink_fuzz_seeds()
+    if corpus == "dhcp":
+        return dhcp_fuzz_seeds()
     seeds = {name + ".bin": bytes.fromhex(hx)
              for name, hx in TLS_FUZZ_SEED_HEX[corpus].items()}
     if corpus == "tls_hs":
@@ -39598,8 +39875,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
 
 def harness_tls_fuzz(argv):
-    """tls_der_fuzz, tls_hs_fuzz, tls_verify_fuzz, waterlink_pre_fuzz and
-    waterlink_fuzz in turn: `sh test/run fuzz`.
+    """tls_der_fuzz, tls_hs_fuzz, tls_verify_fuzz, waterlink_pre_fuzz,
+    waterlink_fuzz and dhcp_fuzz in turn: `sh test/run fuzz`.
 
     Continuous by default, an hour a target with no run cap, unless
     MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise. With
@@ -39617,19 +39894,19 @@ def harness_tls_fuzz(argv):
     os.environ.setdefault("MOONWATER_FUZZ_RUNS", "20000" if report else "-1")
     os.environ.setdefault("MOONWATER_FUZZ_SECONDS", "5" if report else "3600")
     runs, seconds, _ = tls_fuzz_budget()
-    print("tls fuzz: der then hs then verify then waterlink pre and core "
+    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp "
           "(runs=%d seconds=%d)" % (runs, seconds))
     seeds = {corpus: len(tls_fuzz_seeds(corpus))
-             for corpus in ("tls_der", "tls_hs", "waterlink")}
-    seeds["waterlink_pre"] = len(waterlink_pre_seeds())
+             for corpus in ("tls_der", "tls_hs", "waterlink", "dhcp")}
     seeds["waterlink_pre"] = len(waterlink_pre_seeds())
     targets = []
-    for name, corpus, harness in (("tls_der_fuzz", "tls_der", harness_tls_der_fuzz),
-                                  ("tls_hs_fuzz", "tls_hs", harness_tls_hs_fuzz),
-                                  ("tls_verify_fuzz", "tls_der", harness_tls_verify_fuzz),
-                                  ("waterlink_pre_fuzz", "waterlink_pre",
-                                   harness_waterlink_pre_fuzz),
-                                  ("waterlink_fuzz", "waterlink", harness_waterlink_fuzz)):
+    for name, corpus, harness in (
+            ("tls_der_fuzz", "tls_der", harness_tls_der_fuzz),
+            ("tls_hs_fuzz", "tls_hs", harness_tls_hs_fuzz),
+            ("tls_verify_fuzz", "tls_der", harness_tls_verify_fuzz),
+            ("waterlink_pre_fuzz", "waterlink_pre", harness_waterlink_pre_fuzz),
+            ("waterlink_fuzz", "waterlink", harness_waterlink_fuzz),
+            ("dhcp_fuzz", "dhcp", harness_dhcp_fuzz)):
         began = time.time()
         try:
             code = harness([])
@@ -40781,6 +41058,7 @@ int main(void)
     try:
         der = harness_tls_der_fuzz([])
         hs = harness_tls_hs_fuzz([])
+        dhcp = harness_dhcp_fuzz([])
     finally:
         if prior is None:
             os.environ.pop("MOONWATER_MSAN", None)
@@ -40793,6 +41071,7 @@ int main(void)
         return 2
     checks(der == 0, "tls_der_fuzz clean under MSan")
     checks(hs == 0, "tls_hs_fuzz clean under MSan")
+    checks(dhcp == 0, "dhcp_fuzz clean under MSan")
     return checks.verdict("msan net", "msan-net")
 
 
@@ -40819,7 +41098,7 @@ def harness_security_hygiene(argv):
     source = Path(__file__).resolve().read_text()
 
     security = ("tls_chains", "https_downgrade", "http_response_framing", "tls_der_fuzz",
-                "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race")
+                "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race", "dhcp_fuzz")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -40829,11 +41108,11 @@ def harness_security_hygiene(argv):
     checks(not twice, "differential.py: registered twice: " + ", ".join(twice))
     for name in security:
         checks("--harness " + name in run, "test/run: no lane asks for --harness " + name)
-    for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race"):
+    for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race", "dhcp_fuzz"):
         checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
 
     names = set()
-    for corpus in ("tls_der", "tls_hs"):
+    for corpus in ("tls_der", "tls_hs", "dhcp"):
         seeds = tls_fuzz_seeds(corpus)
         names.update(seeds)
         checks(bool(seeds), "tls_fuzz_seeds(%r) is empty" % corpus)
@@ -47123,6 +47402,7 @@ HARNESS_CHECKS = {
     "inventory_mutations": harness_inventory_mutations,
     "terminfo_install": harness_terminfo_install,
     "dhcp_packets": harness_dhcp_packets,
+    "dhcp_fuzz": harness_dhcp_fuzz,
     "term_streams": harness_term_streams,
     "console_queue": harness_console_queue,
     "sort_spill_names": harness_sort_spill_names,
