@@ -36770,6 +36770,13 @@ def harness_tls_chains(argv):
         ("leaf is a CA", 2, good_leaf.replace("CA:FALSE", "CA:TRUE"), {}),
         ("leaf signed with SHA-512", 2, good_leaf, {"leaf_digest": "sha512"}),
         ("first intermediate signed with SHA-512", 2, good_leaf, {"first_digest": "sha512"}),
+        # The served list past the leaf is a pool (RFC 8446 4.4.2): order,
+        # extras nobody needs, and a same-named impostor must not matter.
+        ("intermediates served out of order", 2, good_leaf, {"reverse": True}),
+        ("root served before the intermediates", 2, good_leaf, {"root_first": True}),
+        ("an unrelated root served too", 2, good_leaf, {"extra": "stranger"}),
+        ("a SHA-1 legacy root served too", 2, good_leaf, {"extra": "legacy"}),
+        ("an impostor intermediate served first", 2, good_leaf, {"impostor": True}),
     )
     keys = (("P-256", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"]),
             ("P-384", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]),
@@ -36800,6 +36807,9 @@ def harness_tls_chains(argv):
         "first intermediate unknown noncritical extension",
         "first intermediate sixty-four extensions",
         "leaf signed with SHA-512", "first intermediate signed with SHA-512",
+        "intermediates served out of order", "root served before the intermediates",
+        "an unrelated root served too", "a SHA-1 legacy root served too",
+        "an impostor intermediate served first",
     }
 
     checks = Checks()
@@ -36923,6 +36933,9 @@ def harness_tls_chains(argv):
                     root + ".pem", "-days", "3650", "-sha384", "-subj", "/CN=tls chains root",
                     "-addext", "basicConstraints=critical,CA:TRUE",
                     "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+        openssl("req", "-x509", *p384, "-nodes", "-keyout", "legacy.key", "-out",
+                "legacy.pem", "-days", "3650", "-sha1", "-subj", "/CN=tls chains legacy",
+                "-addext", "basicConstraints=critical,CA:TRUE")
         spki = subprocess.run(["openssl", "pkey", "-in", str(work / "root.key"), "-pubout",
                                "-outform", "DER"], check=True, capture_output=True).stdout
         point = spki[-97:]
@@ -36991,6 +37004,9 @@ def harness_tls_chains(argv):
                                         "der_rewrite_oids_second", "der_dup_unknown_second")
                     chain.insert(0, "second")
                     issuer = "second"
+                    if change.get("impostor"):
+                        issue("impostor", p384, "/CN=tls chains second", "first",
+                              second_extensions)
                 issue("leaf", key, "/CN=127.0.0.1", issuer, leaf_ext,
                       change.get("leaf_dates", (-1, 90)),
                       change.get("leaf_digest", "sha384"))
@@ -37000,6 +37016,14 @@ def harness_tls_chains(argv):
                 served = [c for c in chain if not (change.get("skip_second") and c == "second")]
                 if change.get("serve_root"):
                     served.append(top)
+                if change.get("reverse"):
+                    served.reverse()
+                if change.get("root_first"):
+                    served.insert(0, top)
+                if change.get("extra"):
+                    served.append(change["extra"])
+                if change.get("impostor"):
+                    served.insert(0, "impostor")
                 (work / "chain.pem").write_text("".join(
                     (work / (n + ".pem")).read_text() for n in ["leaf"] + served))
                 (work / "untrusted.pem").write_text("".join(
@@ -38902,8 +38926,10 @@ static void crypto_sha384(p8 *d, positive n, p8 *out)
 def tls_verify_ecdsa_chain():
     """C arrays of a fresh chain, leaf first, whose links are ECDSA P-256
     under SHA-256, P-384 under SHA-384, P-384 under SHA-512 and RSA-2048
-    under SHA-512: the kinds WR2 under GTS Root R1 (RSA SHA-256) leaves."""
+    under SHA-512: the kinds WR2 under GTS Root R1 (RSA SHA-256) leaves.
+    The leaf names example.com and 192.0.2.1; the rest say CA:TRUE."""
     import datetime
+    import ipaddress
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec, rsa
@@ -38921,6 +38947,13 @@ def tls_verify_ecdsa_chain():
             x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "link %d" % signer)])).public_key(
             key.public_key()).serial_number(at + 1).not_valid_before(
             datetime.datetime(2020, 1, 1)).not_valid_after(datetime.datetime(2040, 1, 1))
+        if at:
+            signed = signed.add_extension(x509.BasicConstraints(ca=True, path_length=None),
+                                          critical=True)
+        else:
+            signed = signed.add_extension(x509.SubjectAlternativeName([
+                x509.DNSName("example.com"),
+                x509.IPAddress(ipaddress.ip_address("192.0.2.1"))]), critical=False)
         ders.append(signed.sign(keys[signer], digests[at]).public_bytes(
             serialization.Encoding.DER))
     return ("enum { FUZZ_ECDSA_CHAIN = %d };\n"
@@ -39567,97 +39600,136 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
 
 def harness_tls_verify_fuzz(argv):
-    """libFuzzer over tls_verify_chain with production tls_verify_one.
+    """libFuzzer over production tls_verify_chain, anchors and path building.
 
-    Lifts the same DER parsers and path-policy helpers as tls_der_fuzz, plus
+    Lifts the same DER parsers and path-policy helpers as tls_der_fuzz, the
     hosted ECDSA/RSA verify (C montgomery from SHARED_montgomery_reference,
-    pure SHA-256/384) so each Certificate-list link calls production
-    ``tls_verify_one``. LLVMFuzzerInitialize proves WR2→GTS accept and a
-    flipped-signature refuse before fuzzing. Seeds are tls_der's. Not in
-    lane_net smoke; `sh test/run fuzz` runs it through tls_fuzz. Bounded
-    fixed-seed; return 2 when clang/libFuzzer is unavailable.
+    compact SHA-2) so every link goes through production
+    ``tls_verify_one(child, issuer)``, and tls_verify_chain itself with
+    anchors.inc, tls_anchor_verifies and tls_spki_is_anchor. The P-384 key
+    of tls_verify_ecdsa_chain's fourth certificate stands in as the
+    TLS_BENCH_ANCHOR, so its leaf and two intermediates verify all the way.
+    LLVMFuzzerInitialize runs fuzz_prove_wr2_gts() and proves that chain
+    accepts, then refuses with one signature bit flipped. Input lanes: the
+    raw Certificate body; 0xC1 the body after one byte; 0xCA overwrite the
+    good chain at an input-chosen offset; 0xCB serve the generated
+    certificates in an input-chosen order, repeats and omissions included,
+    which is path building's whole input space. Not in lane_net's smoke;
+    `sh test/run fuzz` runs it through tls_fuzz. Bounded fixed-seed; returns
+    2 when clang/libFuzzer is unavailable.
 
         python3 test/differential.py --harness tls_verify_fuzz
     """
     del argv
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     checks = (HARNESS_ROOT / "test/checks.c").read_text()
+    anchors = (HARNESS_ROOT / "src/net/anchors.inc").read_text()
+    try:
+        anchor_types = tls_fuzz_sec(net, "typedef struct\n{\n        p8 name[8];",
+                                    '#include "anchors.inc"')
+        anchor_code = tls_fuzz_sec(
+            net, "/* An anchor's key laid out the way tls_parse_cert lays out a served one. */",
+            "static COLD bool tls_certificate_names_chain(").replace(
+            "#include TLS_BENCH_ANCHOR\n", "")
+        anchor_code += tls_fuzz_sec(net, "/* The last certificate served names its issuer.",
+                                    "static COLD bool tls_date_now(p64 address_to value)")
+        chain = tls_fuzz_sec(net, "static COLD bool tls_verify_chain(p8 address_to body",
+                             "static COLD bool tls_hello_append(")
+    except ValueError as exc:
+        print("tls verify fuzz: FAIL -- net.c slice anchor moved: %s" % exc)
+        return 1
 
     driver = r"""
+#define array_count(a) (sizeof(a) / sizeof((a)[0]))
+#define TLS_BENCH_ANCHOR 1
 enum { FUZZ_TLS_NOW = 20200101000000ull };
-
-/* Mirror tls_verify_chain through parse + path policy + production
-   tls_verify_one on each served link. Hosted lift has no anchor table, so a
-   sole leaf (or final link that would need tls_anchor_verifies) refuses. */
-static bool fuzz_verify_chain(p8 *body, positive body_length,
-                              string_address host, bool check_cert)
+static p8 tls_bench_anchor_x[48];
+static p8 tls_bench_anchor_y[48];
+typedef struct
 {
-        tls_cert certs[8];
-        positive count = 0;
-        positive at;
-        positive list_end;
-        positive i;
+        bool check_cert;
+        p8 leaf_qx[48];
+        p8 leaf_qy[48];
+        p8 leaf_n[512];
+        positive leaf_n_length;
+        p64 leaf_e;
+        p8 leaf_curve;
+} tls_conn;
+""" + anchor_types + anchors + anchor_code + r"""
+static bool tls_date_now(p64 address_to value)
+{
+        address_to value = FUZZ_TLS_NOW;
+        return true;
+}
+""" + chain + r"""
+static p8 fuzz_body[9 * (1024 + 5) + 4];
 
-        if (!tls_certificate_body_open(body, body_length,
-                                       address_of at, address_of list_end))
-                return false;
+/* A Certificate body serving fuzz_ecdsa_der[picks[i] % FUZZ_ECDSA_CHAIN]. */
+static positive fuzz_chain_body(const p8 *picks, positive count)
+{
+        positive at = 4;
 
-        while (at + 3 <= list_end && count < 8)
+        fuzz_body[0] = 0;
+        for (positive i = 0; i < count; i++)
         {
-                positive cert_length = tls_load_24(body + at);
-                positive ext_length;
+                positive which = picks[i] % FUZZ_ECDSA_CHAIN;
+                positive length = fuzz_ecdsa_length[which];
 
-                at += 3;
-                if (at + cert_length + 2 > list_end)
-                        return false;
-                memory_fill(address_of certs[count], 0, sizeof(certs[0]));
-                if (tls_parse_cert(body + at, cert_length,
-                                   address_of certs[count],
-                                   count ? null : host))
-                        return false;
-                at += cert_length;
-                ext_length = network_load_16(body + at);
-                at += 2;
-                if (at + ext_length > list_end)
-                        return false;
-                at += ext_length;
-                count++;
+                fuzz_body[at++] = 0;
+                fuzz_body[at++] = (p8)(length >> 8);
+                fuzz_body[at++] = (p8)length;
+                memory_copy(fuzz_body + at, fuzz_ecdsa_der[which], length);
+                at += length;
+                fuzz_body[at++] = 0;
+                fuzz_body[at++] = 0;
         }
+        fuzz_body[1] = (p8)((at - 4) >> 16);
+        fuzz_body[2] = (p8)((at - 4) >> 8);
+        fuzz_body[3] = (p8)(at - 4);
+        return at;
+}
 
-        if (!count || at != list_end)
-                return false;
+static bool fuzz_verify(p8 *body, positive length, string_address host)
+{
+        tls_conn tls;
 
-        if (check_cert && (!certs[0].san || !certs[0].san_match))
-                return false;
-        if (!check_cert)
-                return true;
-
-        if (!tls_leaf_authorized(address_of certs[0], FUZZ_TLS_NOW))
-                return false;
-        for (i = 1; i < count; i++)
-        {
-                if (!tls_issuer_authorized(address_of certs[i], i - 1,
-                                           FUZZ_TLS_NOW))
-                        return false;
-        }
-        for (i = 0; i + 1 < count; i++)
-        {
-                if (!tls_certificate_names_chain(address_of certs[i],
-                                                 address_of certs[i + 1]) ||
-                    !tls_verify_one(address_of certs[i],
-                                    address_of certs[i + 1]))
-                        return false;
-        }
-        return count > 1;
+        memory_fill(address_of tls, 0, sizeof tls);
+        tls.check_cert = host != null;
+        return tls_verify_chain(body, length, host, address_of tls);
 }
 
 int LLVMFuzzerInitialize(int *argc, char ***argv)
 {
+        static const p8 good[3] = {0, 1, 2};
+        static const p8 shuffled[4] = {0, 4, 2, 1};
+        tls_cert anchor;
+        positive length;
+        bool proved;
+
         (void)argc;
         (void)argv;
-        if (!fuzz_prove_wr2_gts())
+        memory_fill(address_of anchor, 0, sizeof anchor);
+        proved = fuzz_prove_wr2_gts() &&
+                 !tls_parse_cert((p8 *)fuzz_ecdsa_der[3], fuzz_ecdsa_length[3],
+                                 address_of anchor, null) &&
+                 anchor.curve == 2;
+        memory_copy(tls_bench_anchor_x, anchor.qx, 48);
+        memory_copy(tls_bench_anchor_y, anchor.qy, 48);
+        length = fuzz_chain_body(good, 3);
+        proved = proved &&
+                 fuzz_verify(fuzz_body, length, (string_address)"example.com") &&
+                 fuzz_verify(fuzz_body, length, (string_address)"192.0.2.1") &&
+                 !fuzz_verify(fuzz_body, length, (string_address)"example.org");
+        fuzz_body[length - 10] ^= 1;
+        proved = proved &&
+                 !fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        /* Served out of order with an unneeded root first: still a path. */
+        length = fuzz_chain_body(shuffled, 4);
+        proved = proved &&
+                 fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        if (!proved)
         {
-                fprintf(stderr, "tls_verify_fuzz: WR2/GTS tls_verify_one prove failed\n");
+                fprintf(stderr, "tls_verify_fuzz: WR2/GTS or generated-chain prove failed\n");
                 exit(1);
         }
         return 0;
@@ -39677,18 +39749,27 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         if (length)
                 memcpy(buf, data, length);
 
-        (void)fuzz_verify_chain(buf, length, null, false);
-        (void)fuzz_verify_chain(buf, length, (string_address)"example.com",
-                                true);
-        (void)fuzz_verify_chain(buf, length, (string_address)"192.0.2.1",
-                                true);
+        (void)fuzz_verify(buf, length, null);
+        (void)fuzz_verify(buf, length, (string_address)"example.com");
+        (void)fuzz_verify(buf, length, (string_address)"192.0.2.1");
 
-        /* 0xC1: remainder is Certificate HS body only. */
         if (length > 1 && buf[0] == 0xc1)
+                (void)fuzz_verify(buf + 1, length - 1, (string_address)"example.com");
+        if (length > 3 && buf[0] == 0xca)
         {
-                (void)fuzz_verify_chain(buf + 1, length - 1, null, false);
-                (void)fuzz_verify_chain(buf + 1, length - 1,
-                                        (string_address)"example.com", true);
+                static const p8 good[3] = {0, 1, 2};
+                positive body = fuzz_chain_body(good, 3);
+                positive at = ((positive)buf[1] << 8 | buf[2]) % body;
+                positive n = min(length - 3, body - at);
+
+                memory_copy(fuzz_body + at, buf + 3, n);
+                (void)fuzz_verify(fuzz_body, body, (string_address)"example.com");
+        }
+        if (length > 1 && buf[0] == 0xcb)
+        {
+                positive body = fuzz_chain_body(buf + 1, min(length - 1, (positive)9));
+
+                (void)fuzz_verify(fuzz_body, body, (string_address)"example.com");
         }
 
         free(buf);

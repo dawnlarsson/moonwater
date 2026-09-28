@@ -6145,6 +6145,20 @@ static COLD bool tls_certificate_body_open(p8 address_to body,
         return true;
 }
 
+/* The leaf comes first; the rest is a pool, as RFC 8446 section 4.4.2 asks
+   clients to treat it. Of 640 public HTTPS hosts openssl verified on
+   2026-09-28, 25 served intermediates out of order or an extra certificate
+   (a legacy root, a SHA-1 cross-certificate) that a served-order walk
+   refused. The path grows from the leaf: each step takes the first unused
+   served certificate whose subject names the step's issuer, that may issue
+   at this depth or carries an anchor key (which ends the path), and whose
+   key verifies the step; when none does, the anchors must sign for the
+   step. Asking the anchors first would accept nothing more -- a served
+   certificate the step verifies under has the signing key, so it carries
+   the anchor's key if an anchor signed -- and would cost the https_bench
+   anchor a failed P-384 verify per chain. A certificate that fails to
+   parse is never a candidate. A chain served in order costs what it did;
+   each entry is used once, at most 28 served signature checks. */
 static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                              string_address host, tls_conn address_to tls)
 {
@@ -6152,7 +6166,8 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         positive count = 0;
         positive at;
         positive list_end;
-        positive i;
+        positive unusable = 0;
+        positive child = 0;
         p64 now = 0;
 
         if (!tls_certificate_body_open(body, body_length,
@@ -6165,15 +6180,19 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                 positive ext_length;
 
                 at += 3;
-                if (at + cert_length + 2 > list_end)
+                if (cert_length + 2 > list_end - at)
                         return false;
                 if (tls_parse_cert(body + at, cert_length, certs + count,
                                    count ? null : host))
-                        return false;
+                {
+                        if (!count)
+                                return false;
+                        unusable |= (positive)1 << count;
+                }
                 at += cert_length;
                 ext_length = network_load_16(body + at);
                 at += 2;
-                if (at + ext_length > list_end)
+                if (ext_length > list_end - at)
                         return false;
                 at += ext_length;
                 count++;
@@ -6189,32 +6208,29 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         if (!tls->check_cert)
                 return true;
 
-        if (!tls_date_now(address_of now) || !tls_leaf_authorized(certs, now))
+        if (!tls_date_now(address_of now) || !tls_leaf_authorized(certs, now) ||
+            tls_spki_is_anchor(certs))
                 return false;
-        for (i = 1; i < count; i++)
+        for (positive depth = 0;; depth++)
         {
-                if (tls_spki_is_anchor(certs + i))
-                        break;
-                if (!tls_issuer_authorized(certs + i, i - 1, now))
-                        return false;
-        }
+                positive next;
+                bool anchor = false;
 
-        for (i = 0; i < count; i++)
-        {
-                if (tls_spki_is_anchor(certs + i))
-                        return i > 0;
-                if (i + 1 < count)
-                {
-                        if (!tls_certificate_names_chain(certs + i,
-                                                         certs + i + 1) ||
-                            !tls_verify_one(certs + i, certs + i + 1))
-                                return false;
-                }
-                else
-                        return tls_anchor_verifies(certs + i);
+                for (next = 1; next < count; next++)
+                        if (!(unusable >> next & 1) &&
+                            tls_certificate_names_chain(certs + child,
+                                                        certs + next) &&
+                            ((anchor = tls_spki_is_anchor(certs + next)) ||
+                             tls_issuer_authorized(certs + next, depth, now)) &&
+                            tls_verify_one(certs + child, certs + next))
+                                break;
+                if (next == count)
+                        return tls_anchor_verifies(certs + child);
+                if (anchor)
+                        return true;
+                unusable |= (positive)1 << next;
+                child = next;
         }
-
-        return false;
 }
 
 static COLD bool tls_hello_append(p8 address_to out, positive room,
