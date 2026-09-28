@@ -2055,6 +2055,17 @@ static COLD bool shell_substitutions_parse_word(string_address text,
                         at += 2;
                         continue;
                 }
+                //      $'...' ends where the lexer says, past any \' in it:
+                //      read as a plain quote it ended early, and a $( after
+                //      it was parsed as a command that was only text.
+                if (value == '$' && !quoted && at + 1 < length &&
+                    text[at + 1] == '\'')
+                {
+                        string_address shut = lex_dollar_quote_end(text + at + 2);
+
+                        at = (positive)(shut - text) + 1;
+                        continue;
+                }
                 if (value == '\'' && !quoted)
                 {
                         string_address shut = memory_first_of(

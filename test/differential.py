@@ -14845,6 +14845,16 @@ def shell_lang_substitution_syntax(rng):
         "echo before", line, 'echo "reached=$?"'), ("command", "stdin", "file"))
 
 
+#       That check walks each word for $( and backquotes. A $( inside $'...'
+#       is text, and \' does not end that quote: read as a plain quote it
+#       ended early, and valid text after it was parsed as a command.
+def shell_lang_substitution_dollar_quote(rng):
+    body = rng.choice(("fi", "if true", "echo )", "echo ok", "done"))
+    word = rng.choice(("$'it\\'s $(%s)'", "$'\\'' $(%s)", "$'a\\'b' \"$(%s)\"", "\"$'\" $(%s)", "$'\\\\' $(%s)"))
+    return ("substitution-dollar-quote", shell_ALL, shell_program(
+        "echo before", "printf '<%s>' " + word % body + "; echo", 'echo "reached=$?"'), ("command", "stdin", "file"))
+
+
 #       readonly -a, readonly -A and readonly name=(...), which bash takes;
 #       this refused both letters as invalid options, made name=(1 2) the
 #       scalar "(1 2)", and so left a "readonly" array open to a+=(4).
@@ -18378,6 +18388,7 @@ SHELL_FAMILIES = (
     shell_lang_background_reap,
     shell_lang_interactive_pipe,
     shell_lang_substitution_syntax,
+    shell_lang_substitution_dollar_quote,
     shell_lang_count_operators,
     shell_lang_brace_continuation,
     shell_lang_trap_return,
