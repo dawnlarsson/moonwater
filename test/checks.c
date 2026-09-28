@@ -89850,7 +89850,8 @@ b32 main(void)
         A row named on the command line runs alone for that many rounds and
         prints nothing, which is what perf stat -e instructions:u,cycles:u
         is pointed at: multiply-c, multiply, square-c and square take a limb
-        count, and ecdsa-p256, ecdsa-p384, rsa-2048 and rsa-4096 take only
+        count, and ecdsa-p256, ecdsa-p384, rsa-2048, rsa-4096, x25519,
+        p256-public, p256-shared, p384-public, p384-shared and gcm take only
         the rounds. The RSA rows are the public operation a verify runs,
         crypto_rsa_modexp with e = 65537, over a fixed odd modulus whose top
         bit is set; the ECDSA rows verify real signatures, RFC 6979's P-256
@@ -90042,6 +90043,82 @@ static fn montgomery_bench_rsa_row(void)
         }
 }
 
+//      The key exchange a handshake runs: one X25519 and the P-256 and
+//      P-384 key shares made, then one shared secret on each curve. The
+//      peer point is the share made from the same fixed scalar, so the
+//      shared rows multiply a real curve point. gcm seals one 16 KiB
+//      record in place.
+static p8 montgomery_bench_scalar[48];
+static p8 montgomery_bench_peer[97];
+static p8 montgomery_bench_record[16384];
+static crypto_aesgcm_key montgomery_bench_gcm;
+
+static fn montgomery_bench_x25519_row(void)
+{
+        static const p8 nine[32] = {9};
+        p8 out[32];
+
+        for (positive i = 0; i < montgomery_bench_rounds; i++)
+        {
+                crypto_x25519(out, montgomery_bench_scalar, (p8 address_to)nine);
+                montgomery_bench_sink += out[0];
+        }
+}
+
+static fn montgomery_bench_p256_public_row(void)
+{
+        p8 out[65];
+
+        for (positive i = 0; i < montgomery_bench_rounds; i++)
+                montgomery_bench_sink += crypto_ecdh_p256_public(
+                    out, montgomery_bench_scalar);
+}
+
+static fn montgomery_bench_p384_public_row(void)
+{
+        p8 out[97];
+
+        for (positive i = 0; i < montgomery_bench_rounds; i++)
+                montgomery_bench_sink += crypto_ecdh_p384_public(
+                    out, montgomery_bench_scalar);
+}
+
+static fn montgomery_bench_p256_shared_row(void)
+{
+        p8 out[32];
+
+        crypto_ecdh_p256_public(montgomery_bench_peer, montgomery_bench_scalar);
+        for (positive i = 0; i < montgomery_bench_rounds; i++)
+                montgomery_bench_sink += crypto_ecdh_p256_shared(
+                    out, montgomery_bench_scalar, montgomery_bench_peer);
+}
+
+static fn montgomery_bench_p384_shared_row(void)
+{
+        p8 out[48];
+
+        crypto_ecdh_p384_public(montgomery_bench_peer, montgomery_bench_scalar);
+        for (positive i = 0; i < montgomery_bench_rounds; i++)
+                montgomery_bench_sink += crypto_ecdh_p384_shared(
+                    out, montgomery_bench_scalar, montgomery_bench_peer);
+}
+
+static fn montgomery_bench_gcm_row(void)
+{
+        static const p8 iv[12] = {1, 2, 3};
+        static const p8 aad[5] = {23, 3, 3, 0x40, 0x11};
+        p8 tag[16];
+
+        for (positive i = 0; i < montgomery_bench_rounds; i++)
+        {
+                crypto_aesgcm_seal(address_of montgomery_bench_gcm,
+                                   (p8 address_to)iv, (p8 address_to)aad, 5,
+                                   montgomery_bench_record,
+                                   sizeof montgomery_bench_record, tag);
+                montgomery_bench_sink += tag[0];
+        }
+}
+
 static positive montgomery_bench_number(string_address text)
 {
         positive value = 0;
@@ -90075,6 +90152,11 @@ b32 main(void)
                 montgomery_bench_p384[i] = (p8)(high << 4 | low);
         }
         montgomery_bench_operands(4);
+        for (positive i = 0; i < sizeof montgomery_bench_scalar; i++)
+                montgomery_bench_scalar[i] = (p8)(0x5a ^ (i * 29));
+        montgomery_bench_scalar[0] = 0x1f;
+        crypto_aesgcm_prepare(address_of montgomery_bench_gcm,
+                              montgomery_bench_scalar);
 
         if (arguments > 1)
         {
@@ -90112,6 +90194,18 @@ b32 main(void)
                         work = montgomery_bench_ecdsa_p256_row;
                 else if (string_compare(row, (string_address)"ecdsa-p384") == 0)
                         work = montgomery_bench_ecdsa_p384_row;
+                else if (string_compare(row, (string_address)"x25519") == 0)
+                        work = montgomery_bench_x25519_row;
+                else if (string_compare(row, (string_address)"p256-public") == 0)
+                        work = montgomery_bench_p256_public_row;
+                else if (string_compare(row, (string_address)"p256-shared") == 0)
+                        work = montgomery_bench_p256_shared_row;
+                else if (string_compare(row, (string_address)"p384-public") == 0)
+                        work = montgomery_bench_p384_public_row;
+                else if (string_compare(row, (string_address)"p384-shared") == 0)
+                        work = montgomery_bench_p384_shared_row;
+                else if (string_compare(row, (string_address)"gcm") == 0)
+                        work = montgomery_bench_gcm_row;
                 else if (string_compare(row, (string_address)"rsa-2048") == 0)
                 {
                         montgomery_bench_operands(32);
@@ -90164,6 +90258,25 @@ b32 main(void)
         montgomery_bench_report((string_address)"ECDSA P-384",
                                 montgomery_bench_ecdsa_p384_row, 32,
                                 (string_address)"verify");
+        string_format(log, " key exchange and one record\n");
+        montgomery_bench_report((string_address)"X25519     ",
+                                montgomery_bench_x25519_row, 64,
+                                (string_address)"multiply");
+        montgomery_bench_report((string_address)"P-256 share",
+                                montgomery_bench_p256_public_row, 64,
+                                (string_address)"share");
+        montgomery_bench_report((string_address)"P-256 ECDH ",
+                                montgomery_bench_p256_shared_row, 32,
+                                (string_address)"secret");
+        montgomery_bench_report((string_address)"P-384 share",
+                                montgomery_bench_p384_public_row, 32,
+                                (string_address)"share");
+        montgomery_bench_report((string_address)"P-384 ECDH ",
+                                montgomery_bench_p384_shared_row, 16,
+                                (string_address)"secret");
+        montgomery_bench_report((string_address)"AES-GCM 16K",
+                                montgomery_bench_gcm_row, 64,
+                                (string_address)"record");
         montgomery_bench_operands(32);
         montgomery_bench_report((string_address)"RSA-2048 public",
                                 montgomery_bench_rsa_row, 256,
