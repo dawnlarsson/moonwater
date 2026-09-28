@@ -14798,6 +14798,16 @@ def shell_lang_globstar_exists(rng):
         "printf '<%s>' " + rng.choice(("c/a/**", "c/**", "a/**", "nope/**", "b/a/**", "a/a/a/a/**")) + "; echo"))
 
 
+#       bash's $'\x{H...}': every hex digit up to the brace and the low byte
+#       of their value, the brace taken when it is there; no digits is a zero,
+#       which ends the string. This kept \x{ as it was written.
+def shell_lang_dollar_hex_brace(rng):
+    body = rng.choice(("ab\\x{}cd", "ab\\x{41}cd", "ab\\x{4}cd", "ab\\x{cde", "ab\\x{cd}e", "\\x{abcX", "\\x{01234567X",
+                       "\\x{41}b", "\\x{1}bcd", "\\x41\\x{42}", "\\x{g}"))
+    return ("dollar-hex-brace", shell_BASH, shell_program(
+        "printf '<%s>' $'" + body + "' | od -An -c", 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
 #       Digits in front of > are a descriptor only while they fit one: bash
 #       reads a number past INT_MAX there as an ordinary word, so `echo a
 #       2147483648>f` writes "a 2147483648" to f. This called it a syntax
@@ -17662,6 +17672,7 @@ SHELL_FAMILIES = (
     shell_lang_builtin_discard,
     shell_lang_fd_prefix_range,
     shell_lang_case_substitution_lines,
+    shell_lang_dollar_hex_brace,
     shell_lang_source_path,
     shell_lang_enable_special,
     shell_lang_test_set_all,

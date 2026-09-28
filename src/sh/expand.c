@@ -6479,6 +6479,23 @@ static string_address expand_ansi(string_address at, p8 mark, bool source)
                             at, 3, address_of used);
                         at += used;
                 }
+                /*
+                        bash's \x{H...}: every hex digit up to the brace,
+                        which is taken too when it is there, and the value's
+                        low byte. No digits is a zero, which ends the string.
+                */
+                else if (value == 'x' && string_is(at + 1, '{') &&
+                         shell_bash_compat)
+                {
+                        positive used;
+                        positive number = string_digits_hexadecimal_escape_max(
+                            at + 2, positive_max, address_of used);
+
+                        at += used + 2;
+                        if (string_is(at, '}'))
+                                at++;
+                        value = (p8)(number & 0xff);
+                }
                 else if (value == 'x')
                 {
                         positive used;
