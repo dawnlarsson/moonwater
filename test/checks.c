@@ -57080,8 +57080,139 @@ static positive field_residue(fn (*body)(p64 address_to, const p64 address_to),
         return field_residue_scan(wide, 2 * n);
 }
 
+/*
+        The same for the hash cores HMAC, HKDF and PBKDF2 run keys through.
+        A block of key ^ ipad is as secret as the key, and so is its
+        schedule: the last sixteen words of one determine every word before
+        them. Each core runs one block, floor and extension body both where
+        the machine has an extension, and the stack under the call is
+        searched for any 32-bit word of the message schedule (sha1, sha256,
+        sha512 by halves) or of the message (blake2b).
+*/
+static __attribute__((noinline, noclone)) fn hash_residue_call(
+    positive which, p64 address_to state, const p8 address_to block)
+{
+        if (which == 0)
+                sha1_blocks((p32 address_to)state, block, 1);
+        else if (which == 1)
+                sha256_blocks((p32 address_to)state, block, 1);
+        else if (which == 2)
+                sha512_blocks(state, block, 1);
+        else
+                blake2b_blocks(state, block, 1, 128);
+}
+
+static __attribute__((noinline, noclone)) positive hash_residue_scan(
+    const p32 address_to words, positive count)
+{
+        volatile p32 window[512];
+        positive found = 0;
+
+        for (positive i = 0; i < array_count(window); i++)
+                for (positive j = 0; j < count; j++)
+                        found += window[i] == words[j];
+        return found;
+}
+
+static p32 hash_residue_rotate(p32 x, positive n)
+{
+        return x >> n | x << (32 - n);
+}
+
+static p64 hash_residue_rotate64(p64 x, positive n)
+{
+        return x >> n | x << (64 - n);
+}
+
+static positive hash_residue(positive which, p8 address_to block)
+{
+        p64 state[11];
+        p64 wide[80];
+        p32 words[160];
+        positive count = 0;
+
+        memory_fill(state, 0, sizeof state);
+        if (which <= 1)
+        {
+                p32 w[80];
+                positive rounds = which ? 64 : 80;
+
+                for (positive t = 0; t < 16; t++)
+                        w[t] = (p32)block[4 * t] << 24 | (p32)block[4 * t + 1] << 16 |
+                               (p32)block[4 * t + 2] << 8 | block[4 * t + 3];
+                for (positive t = 16; t < rounds; t++)
+                        w[t] = which ? (hash_residue_rotate(w[t - 2], 17) ^
+                                        hash_residue_rotate(w[t - 2], 19) ^ w[t - 2] >> 10) +
+                                           w[t - 7] +
+                                           (hash_residue_rotate(w[t - 15], 7) ^
+                                            hash_residue_rotate(w[t - 15], 18) ^ w[t - 15] >> 3) +
+                                           w[t - 16]
+                                     : hash_residue_rotate(w[t - 3] ^ w[t - 8] ^ w[t - 14] ^
+                                                               w[t - 16], 31);
+                for (positive t = 0; t < rounds; t++)
+                        words[count++] = w[t];
+        }
+        else
+        {
+                positive rounds = which == 2 ? 80 : 16;
+
+                for (positive t = 0; t < 16; t++)
+                {
+                        p64 v = 0;
+
+                        for (positive k = 0; k < 8; k++)
+                                v = which == 2 ? v << 8 | block[8 * t + k]
+                                               : v | (p64)block[8 * t + k] << (8 * k);
+                        wide[t] = v;
+                }
+                for (positive t = 16; t < rounds; t++)
+                        wide[t] = (hash_residue_rotate64(wide[t - 2], 19) ^
+                                   hash_residue_rotate64(wide[t - 2], 61) ^ wide[t - 2] >> 6) +
+                                  wide[t - 7] +
+                                  (hash_residue_rotate64(wide[t - 15], 1) ^
+                                   hash_residue_rotate64(wide[t - 15], 8) ^ wide[t - 15] >> 7) +
+                                  wide[t - 16];
+                for (positive t = 0; t < rounds; t++)
+                {
+                        words[count++] = (p32)wide[t];
+                        words[count++] = (p32)(wide[t] >> 32);
+                }
+        }
+        hash_residue_call(which, state, block);
+        return hash_residue_scan(words, count);
+}
+
+static fn crypto_floor_hash_residue(void)
+{
+        p8 block[128];
+        p32 scratch[8] = {0};
+        positive found = 0;
+
+        for (positive i = 0; i < sizeof block; i++)
+                block[i] = (p8)(i * 167 + 29 ^ (i >> 3) * 91);
+        //      One dispatching call writes the bytes this machine has; the
+        //      floor pass then takes the extensions away.
+        sha256_blocks(scratch, block, 1);
+        p8 sha = cpu_has_sha;
+        p8 sha512 = cpu_has_sha512;
+
+        for (positive pass = 0; pass < 2; pass++)
+        {
+                cpu_has_sha = pass ? sha : 0;
+                cpu_has_sha512 = pass ? sha512 : 0;
+                for (positive which = 0; which < 4; which++)
+                        found += hash_residue(which, block);
+        }
+        cpu_has_sha = sha;
+        cpu_has_sha512 = sha512;
+        check("sha1, sha256, sha512 and blake2b cores leave no schedule word "
+              "on the stack",
+              found == 0);
+}
+
 static fn crypto_floor_field(void)
 {
+        crypto_floor_hash_residue();
         check("p256_ field routines agree with the C Montgomery arithmetic",
               field_check_wrong(address_of crypto_p256_field, 3000) == 0);
         check("p384_ field routines agree with the C Montgomery arithmetic",
