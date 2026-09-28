@@ -1881,7 +1881,8 @@ __asm__(
     "41: cmp $-1, %eax\n   je 20b\n"
     "imul $1200, %rax, %rsi\n   add %rbx, %rsi\n   mov 28(%rsi), %r10d\n   mov 16(%rsi), %r11d\n"
     "cmp %edx, %r11d\n   jbe 42f\n"
-    "mov %r11d, %ecx\n   sub %edx, %ecx\n   dec %ecx\n   cmp $63, %ecx\n   ja 49f\n"
+    //  Past the mask: a key's slots are in sequence order, so the rest are.
+    "mov %r11d, %ecx\n   sub %edx, %ecx\n   dec %ecx\n   cmp $63, %ecx\n   ja 20b\n"
     "bt %rcx, %r8\n   jnc 49f\n"
     "42: movzbl 36(%rsi), %ecx\n   cmp $2, %ecx\n   jne 43f\n"
     //  In flight: what it carried is delivered and leaves the flight, and
@@ -2020,7 +2021,8 @@ __asm__(
     "41: cmn w9, #1\n   b.eq 20b\n"
     "mov w16, #1200\n   madd x12, x9, x16, x19\n   ldr w10, [x12, #28]\n   ldr w14, [x12, #16]\n"
     "cmp w14, w11\n   b.ls 42f\n"
-    "sub w16, w14, w11\n   sub w16, w16, #1\n   cmp w16, #63\n   b.hi 49f\n"
+    //  Past the mask: a key's slots are in sequence order, so the rest are.
+    "sub w16, w14, w11\n   sub w16, w16, #1\n   cmp w16, #63\n   b.hi 20b\n"
     "lsr x17, x13, x16\n   tbz x17, #0, 49f\n"
     "42: ldrb w16, [x12, #36]\n   cmp w16, #2\n   b.ne 43f\n"
     //  In flight: what it carried is delivered and leaves the flight, and
@@ -2158,7 +2160,8 @@ __asm__(
     "41: bltz t0, 20b\n"
     "li t5, 1200\n   mul a0, t0, t5\n   add a0, s0, a0\n   lw t1, 28(a0)\n   lwu t5, 16(a0)\n"
     "bgeu t2, t5, 42f\n"
-    "sub t6, t5, t2\n   addi t6, t6, -1\n   li a1, 64\n   bgeu t6, a1, 49f\n"
+    //  Past the mask: a key's slots are in sequence order, so the rest are.
+    "sub t6, t5, t2\n   addi t6, t6, -1\n   li a1, 64\n   bgeu t6, a1, 20b\n"
     "srl a1, t3, t6\n   andi a1, a1, 1\n   beqz a1, 49f\n"
     "42: lbu t6, 36(a0)\n   li a1, 2\n   bne t6, a1, 43f\n"
     //  In flight: what it carried is delivered and leaves the flight, and

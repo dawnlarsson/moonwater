@@ -59801,7 +59801,7 @@ static bipolar judge_model(p8 address_to body, positive length,
 */
 enum {
         APPLY_ACK, APPLY_ACK_TAKEN, APPLY_ACK_HELD, APPLY_ACK_PASSED,
-        APPLY_ACK_FLIGHT, APPLY_ACK_QUEUED, APPLY_ACK_LATEST, APPLY_ACK_SAMPLE,
+        APPLY_ACK_BEYOND, APPLY_ACK_FLIGHT, APPLY_ACK_QUEUED, APPLY_ACK_LATEST, APPLY_ACK_SAMPLE,
         APPLY_ACK_UNSAMPLED, APPLY_FREE_HEAD, APPLY_FREE_WALK, APPLY_FREE_LAST,
         APPLY_LARGEST, APPLY_ESTIMATE_FIRST, APPLY_ESTIMATE, APPLY_GROW_SLOW,
         APPLY_GROW_AVOID, APPLY_GROW_CAP, APPLY_SETTLE_LOSSES, APPLY_FRAME,
@@ -59826,8 +59826,14 @@ static fn apply_walk_acknowledge(struct waterlink_link address_to link, p8 key,
                 p32 gap = slot->sequence - delivered - 1;
                 bool taken = slot->sequence <= delivered;
 
-                if (!taken && (gap >= WATERLINK_ACK_MASK ||
-                               !(mask & (1ull << gap))))
+                //      A key's slots are in sequence order: past the mask,
+                //      the rest are too.
+                if (!taken && gap >= WATERLINK_ACK_MASK)
+                {
+                        apply_seen[APPLY_ACK_BEYOND]++;
+                        break;
+                }
+                if (!taken && !(mask & (1ull << gap)))
                 {
                         apply_seen[APPLY_ACK_PASSED]++;
                         at = next;
