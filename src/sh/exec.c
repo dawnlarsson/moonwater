@@ -9423,6 +9423,23 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                 at = stop;
         }
 
+        /*
+                A list of plain words -- no expansion that could read the
+                array being replaced or fail part way, no subscript -- is
+                assigned as it is read, as it was before lists were held.
+                The body is followed by its ')' and the word's end, so the
+                span can stop at the terminator.
+        */
+        bool direct = !exec_compound_preparing && !keyed && !first &&
+                      string_span_without_set(at, "$`[~*?(") >=
+                          body_length;
+
+        if (direct && !append && !shell_array_clear(name, name_length))
+        {
+                shell_store_rewind(address_of exec_store, held);
+                return false;
+        }
+
         if (append && shell_array_length(name, name_length))
                 next = shell_array_highest(name, name_length) + 1;
 
@@ -9624,6 +9641,18 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
 
                         for (positive one = 0; one < count && answer; one++)
                         {
+                                if (direct)
+                                {
+                                        p8 written[32];
+                                        positive written_length =
+                                            positive_into_string(written, next++);
+
+                                        answer = shell_array_set(
+                                            name, name_length, written,
+                                            written_length,
+                                            exec_compound_word[one], false);
+                                        continue;
+                                }
                                 answer = exec_compound_put(
                                     name, name_length, (string_address) "", 0,
                                     exec_compound_word[one], EXEC_HELD_NEXT,
@@ -9656,7 +9685,7 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                 }
         }
 
-        if (answer)
+        if (answer && !direct)
         {
                 if (!append)
                         answer = shell_array_clear(name, name_length);
