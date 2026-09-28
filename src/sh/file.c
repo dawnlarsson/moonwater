@@ -2396,16 +2396,32 @@ static bool file_account_cached_name(positive which, positive id,
 /* Ownership syscalls narrow IDs to 32 bits; UINT32_MAX means unchanged.
    Reject numeric operands outside that range before they can name root or
    silently suppress an ownership change. Names keep the shared lookup. */
-static bipolar file_identity_of(string_address text, bool group)
+/* An ID that is not a name, read as xstrtoumax reads one: blanks, a plus,
+   then digits and nothing after them, so chgrp +1000 and chown ' 1000' are
+   numbers as they are to GNU. -1 when it is not one. */
+static bipolar file_identity_number(string_address text)
 {
         positive number;
+
+        while (byte_is_space(string_get(text)))
+                text++;
+        if (string_is(text, '+'))
+                text++;
+        return string_digits_checked_exact(text, 10, address_of number) &&
+                       number < p32_max
+                   ? (bipolar)number : -1;
+}
+
+static bipolar file_identity_of(string_address text, bool group)
+{
         if (string_digits_exact(text, null))
-                return string_digits_checked_exact(text, 10, address_of number) &&
-                               number < p32_max
-                           ? (bipolar)number : -1;
+                return file_identity_number(text);
 
         bipolar found = group ? file_group_id(text) : file_user_id(text);
-        return found >= 0 && (positive)found < p32_max ? found : -1;
+
+        if (found >= 0)
+                return (positive)found < p32_max ? found : -1;
+        return file_identity_number(text);
 }
 
 // A user or group the way every listing says one: the name when there is
@@ -20845,12 +20861,6 @@ static const argument_option chown_options[] = {
 };
 
 /*
-        A USER[:GROUP] spec, read the way chown reads its operand: an empty
-        half means "leave this one alone", "user:" is a spec this image
-        cannot complete, and a half that names nobody is refused with the
-        whole spec quoted, which is how the reference quotes it.
-*/
-/*
         gnulib's parse_with_separator: the user before the separator, looked
         up by name first and as a number after; the group after it. A
         separator with no group after it names the user's login group, which
@@ -20894,13 +20904,9 @@ static string_address chown_spec_try(string_address who, positive split,
                 {
                         if (separated && !after)
                                 return (string_address) "invalid spec";
-                        positive number;
-                        string_address digits = name[0] == '+' ? name + 1 : name;
-                        if (!string_digits_exact(digits, null) ||
-                            !string_digits_checked_exact(digits, 10, address_of number) ||
-                            number >= p32_max)
+                        id = file_identity_number(name);
+                        if (id < 0)
                                 return (string_address) "invalid user";
-                        id = (bipolar)number;
                 }
                 address_to user = id;
         }

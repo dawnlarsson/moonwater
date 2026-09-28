@@ -7049,11 +7049,17 @@ def files_owner_word_cases(group_only=False):
     import pwd
     user = pwd.getpwuid(os.getuid()).pw_name
     group = grp.getgrgid(os.getgid()).gr_name
+    #   A number as xstrtoumax reads one: blanks, then a plus, then
+    #   digits and nothing else, in either half.
+    numbers = tuple(lead + files_GID + tail for lead in ("", " ", "\t", "+", " +", "+ ", "++", "-")
+                    for tail in ("", " "))
     if group_only:
         return tuple(shape for spec in (group, group + ".", "." + group, ":" + group, files_GID)
                      for shape in ((spec, "a.txt"), ("-v", spec, "a.txt"), (spec, "a.txt", "-v"),
-                                   ("--", spec, "a.txt"), ("-v", "--", spec, "--", "a.txt"), (spec, "-R", "dir")))
-    cases = []
+                                   ("--", spec, "a.txt"), ("-v", "--", spec, "--", "a.txt"), (spec, "-R", "dir"))) + \
+            tuple(("-v", number, "a.txt") for number in numbers)
+    cases = [("-v", number.replace(files_GID, files_UID) + ":" + number, "a.txt") for number in numbers]
+    cases += [("-v", number.replace(files_GID, files_UID), "a.txt") for number in numbers]
     for spec in (user + ":", user + ".", user + "." + group, user + ":" + group, files_UID + ":", files_UID + ".",
                  files_UID + "." + files_GID, "nosuchuser.", "nosuchuser." + group, user + ".nosuchgroup",
                  user, "root.", "0.", user + "..", user + ":.", "+" + files_UID, "+" + files_UID + ":",
