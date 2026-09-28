@@ -16710,6 +16710,11 @@ fn check_diagnostic()
                 writer_stderr("refused", 0);
                 same("stderr writers", "refused span marks", writer_stderr_failed, 1);
                 writer_stderr_failed = 0;
+                /* log_error, the raw writer most diagnostics go through,
+                   marks a refusal too: du's warning into /dev/full is 1. */
+                log_error("refused", 0);
+                same("stderr writers", "log_error marks a refusal", writer_stderr_failed, 1);
+                writer_stderr_failed = 0;
         }
         if (saved >= 0)
         {

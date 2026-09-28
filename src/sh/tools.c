@@ -28240,6 +28240,45 @@ static const tools_meta_rule tools_meta_rules[] = {
     {null},
 };
 
+/*
+        GNU's coreutils close standard error at exit and end with their failure
+        status when it refused what they wrote there -- a warning into
+        /dev/full turns du -s --max-depth=0's 0 into 1. The mark is the one
+        writer_stderr keeps; the dispatcher clears it before a tool runs and
+        asks this after, for the programs coreutils ships.
+*/
+static const string_address tools_coreutils[] = {
+    "b2sum", "base32", "base64", "basename", "basenc", "cat", "chcon", "chgrp",
+    "chmod", "chown", "chroot", "cksum", "comm", "cp", "csplit", "cut", "date",
+    "dd", "df", "dir", "dircolors", "dirname", "du", "echo", "env", "expand",
+    "expr", "factor", "false", "fmt", "fold", "groups", "head", "hostid",
+    "hostname", "id", "install", "join", "kill", "link", "ln", "logname", "ls",
+    "md5sum", "mkdir", "mkfifo", "mknod", "mktemp", "mv", "nice", "nl", "nohup",
+    "nproc", "numfmt", "od", "paste", "pathchk", "pinky", "pr", "printenv",
+    "printf", "ptx", "pwd", "readlink", "realpath", "rm", "rmdir", "runcon",
+    "seq", "sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum",
+    "shred", "shuf", "sleep", "sort", "split", "stat", "stdbuf", "stty", "sum",
+    "sync", "tac", "tail", "tee", "test", "timeout", "touch", "tr", "true",
+    "truncate", "tsort", "tty", "uname", "unexpand", "uniq", "unlink",
+    "uptime", "users", "vdir", "wc", "who", "whoami", "yes", null};
+
+static b32 tools_stderr_status(string_address name, b32 answered)
+{
+        if (answered || !writer_stderr_failed)
+                return answered;
+
+        for (positive at = 0; tools_coreutils[at]; at++)
+                if (string_equals(name, tools_coreutils[at]))
+                {
+                        for (const tools_meta_rule address_to rule = tools_meta_rules;
+                             rule->name; rule++)
+                                if (string_equals(name, rule->name))
+                                        return rule->failure;
+                        return 1;
+                }
+        return answered;
+}
+
 // Whether any word before a -- could be one of the two: most starts carry
 // neither, and this is a byte or three per operand.
 static bool tools_meta_asked(string_address address_to arguments, positive count)

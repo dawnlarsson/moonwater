@@ -17737,13 +17737,14 @@ static b32 shell_tool_call_in(positive which, bool own_process)
                 return meta;
 
         log_failure_reset();
+        writer_stderr_failed = 0;
         answered = shell_tools[which].function() & 0xff;
         log_flush();
 
         if (log_failed() && !answered)
                 answered = 1;
 
-        return answered;
+        return tools_stderr_status(shell_tools[which].name, answered);
 }
 
 /* The ordinary way in: this process goes on to do other things. */

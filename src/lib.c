@@ -51260,6 +51260,9 @@ __asm__(
     "call log_flush\n"
     "mov %r13, %rdx\n   mov %r12, %rsi\n   mov $2, %edi\n"
     "mov $" RUNTIME_TEXT(syscall(write)) ", %eax\n   syscall\n"
+    "cmp %r13, %rax\n   je .Llog_error_x64_written\n"
+    "movb $1, writer_stderr_failed(%rip)\n"
+    ".Llog_error_x64_written:\n"
     "add $8, %rsp\n   pop %r13\n   pop %r12\n"
     ASM_RET
     ASM_END(log_error)
@@ -51425,6 +51428,10 @@ __asm__(
     "movz " SYSCALL_NUMBER_REGISTER ", #((" RUNTIME_TEXT(syscall(write)) ") & 0xffff)\n"
     "movk " SYSCALL_NUMBER_REGISTER ", #(((" RUNTIME_TEXT(syscall(write)) ") >> 16) & 0xffff), lsl #16\n"
     SYSCALL_INSTRUCTION "\n"
+    "cmp x0, x20\n   b.eq .Llog_error_arm64_written\n"
+    "adrp x9, writer_stderr_failed\n   add x9, x9, :lo12:writer_stderr_failed\n"
+    "mov w10, #1\n   strb w10, [x9]\n"
+    ".Llog_error_arm64_written:\n"
     "ldr x30, [sp, #16]\n   ldp x19, x20, [sp], #32\n"
     ASM_RET
     ASM_END(log_error)
@@ -51587,6 +51594,9 @@ __asm__(
     "call log_flush\n"
     "mv a2, s1\n   mv a1, s0\n   li a0, 2\n"
     "li a7, " RUNTIME_TEXT(syscall(write)) "\n   ecall\n"
+    "beq a0, s1, .Llog_error_riscv64_written\n"
+    "lla t1, writer_stderr_failed\n   li t2, 1\n   sb t2, 0(t1)\n"
+    ".Llog_error_riscv64_written:\n"
     "ld s1, 8(sp)\n   ld s0, 16(sp)\n   ld ra, 24(sp)\n"
     "addi sp, sp, 32\n"
     ASM_RET
