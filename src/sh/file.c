@@ -18788,8 +18788,12 @@ static b32 file_du()
                 return string_report(log_error, 1, "Try 'du --help' for more information.\n");
         }
 
-        //      The style is read after the depth is settled, as the
-        //      reference reads it.
+        if (du_inodes && du_apparent)
+                log_error("du: warning: options --apparent-size and -b are ineffective with --inodes\n",
+                          0);
+
+        //      The style is read after the depth is settled and after that
+        //      warning, as the reference reads it.
         if (du_time_kind)
         {
                 string_address style = (flags & FILE_FLAG('Y'))
@@ -18804,10 +18808,6 @@ static b32 file_du()
         // switch here so that giving both cannot mean two things.
         if (du_summary)
                 du_maximum = 0;
-
-        if (du_inodes && du_apparent)
-                log_error("du: warning: options --apparent-size and -b are ineffective with --inodes\n",
-                          0);
 
         if (files_from)
         {

@@ -7415,7 +7415,8 @@ FILES_UTILITIES = (
                    ("-B", "si", "dir"), ("--block-size=human-readable", "-a", "dir"), ("-t", "5X", "dir"),
                    ("--th=K", "-a", "dir"), ("-t", "-0", "dir"), ("-t", "99999999999999999999", "dir"),
                    ("-t", "2KB", "-a", "dir"), ("--inodes", "-b", "dir"), ("--inodes", "-h", "-c", "."),
-                   ("--files0-from=-", "dir"), ("-0", "-a", "dir"), ("-D", "-P", "dirlink"), ("-P", "-H", "dirlink"))
+                   ("--files0-from=-", "dir"), ("-0", "-a", "dir"), ("-D", "-P", "dirlink"), ("-P", "-H", "dirlink"),
+                   ("--inodes", "-b", "--time", "--time-style=bogus", "dir"))
                   #   Patterns read from a file, a line each: every file in
                   #   the fixture that holds lines, holds none, holds no
                   #   newline at its end, or cannot be read, over each root
