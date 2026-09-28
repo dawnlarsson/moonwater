@@ -77,6 +77,7 @@ struct waterlink_slot {
         p8 state;
         p8 tries;
         p8 payload[WATERLINK_FRAME_MAX];
+        p8 probed; // times asked about since the far side began to hold it
 };
 
 /*
@@ -505,6 +506,7 @@ bool waterlink_post(struct waterlink_link address_to link, p8 key, p8 flags,
         slot->serial = 0;
         slot->prior = WATERLINK_NONE;
         slot->tries = 0;
+        slot->probed = 0;
         slot->length = length;
         slot->flags = flags;
         if (length)
@@ -711,7 +713,8 @@ _Static_assert(sizeof(struct waterlink_slot) == 1200 &&
                        __builtin_offsetof(struct waterlink_slot, flags) == 35 &&
                        __builtin_offsetof(struct waterlink_slot, state) == 36 &&
                        __builtin_offsetof(struct waterlink_slot, tries) == 37 &&
-                       __builtin_offsetof(struct waterlink_slot, payload) == 38,
+                       __builtin_offsetof(struct waterlink_slot, payload) == 38 &&
+                       __builtin_offsetof(struct waterlink_slot, probed) == 1197,
                "fill reads a slot at these places");
 _Static_assert(sizeof(struct waterlink_held) == 1172 &&
                        __builtin_offsetof(struct waterlink_held, next) == 8 &&
@@ -1329,9 +1332,12 @@ __asm__(
         back -- may be the one the network lost, and then the key waits for
         ever, with everything queued behind it on its window. So its oldest
         held frame goes back to its band once the probe timer, doubled for
-        each time the frame went out and at most a minute, runs out, and the
-        far side answers the copy with what it has taken: a reader that is
-        only slow costs a copy now and then, as TCP's persist timer does.
+        each time it was asked about already and at most a minute, runs out,
+        and the far side answers the copy with what it has taken: a reader
+        that is only slow costs a copy now and then, as TCP's persist timer
+        does. Doubled per question and not per transmission: a frame sent
+        eight times on a lossy path before it was held would otherwise wait
+        the whole minute for its first.
         Looking over the keys is sixty four steps, so it is done when one of
         them is due, and at least every RTO_MOST while any slot is taken,
         never on every wake. Answers when to look next.
@@ -1356,11 +1362,12 @@ static p64 waterlink_held_probes(struct waterlink_link address_to link,
                         continue;
                 slot = link->slot + at;
                 wait = waterlink_timeout(link)
-                       << (slot->tries > 16 ? 15 : slot->tries ? slot->tries - 1 : 0);
+                       << (slot->probed < 15 ? slot->probed : 15);
                 if (wait > WATERLINK_HELD_MOST)
                         wait = WATERLINK_HELD_MOST;
                 if (now >= slot->sent && now - slot->sent >= wait)
                 {
+                        slot->probed += slot->probed < 255;
                         waterlink_band_requeue(link, at);
                         due = now;
                 }

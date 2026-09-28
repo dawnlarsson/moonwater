@@ -63144,6 +63144,55 @@ static fn held_answer_lost(void)
                       held_sender.retransmitted == 1);
 }
 
+/*      A frame the path lost several times before it arrived and was held:
+        its first question is one probe timer away, not one doubled for
+        every time it went out. */
+static fn held_after_losses(void)
+{
+        p8 body[WATERLINK_PAYLOAD];
+        bool alone = false;
+        positive used = 0;
+        p64 now = 1000;
+        p64 wake;
+        p32 at;
+
+        waterlink_link_reset(address_of held_sender);
+        waterlink_link_reset(address_of held_reader);
+        heard = 0;
+        refusing = true;
+        for (positive at = 0; at < 2; at++)
+                (void)waterlink_post(address_of held_sender, 5,
+                                     WATERLINK_FRAME_DURABLE,
+                                     (p8 address_to) "ab" + at, 1, now);
+        //      Sent, lost, and sent again at each expiry.
+        for (positive round = 0; round < 6; round++)
+        {
+                used = waterlink_fill(address_of held_sender, body, now,
+                                      address_of alone);
+                now += 3000000;
+        }
+        now -= 3000000 - 10;
+        at = held_sender.sending[5].first;
+        (void)waterlink_deliver(address_of held_reader, body, used, now,
+                                hear_or_refuse, null);
+        now += WATERLINK_ACK_DELAY;
+        used = waterlink_fill(address_of held_reader, body, now, address_of alone);
+        (void)waterlink_deliver(address_of held_sender, body, used, now, null,
+                                null);
+        check("frames lost again and again, then held, went out five times",
+              held_sender.slot[at].tries == 5 &&
+                      held_sender.slot[at].state == WATERLINK_SLOT_HELD);
+        wake = waterlink_wake(address_of held_sender, now);
+        check("sec: its first question is one probe timer after it was sent",
+              wake > now &&
+                      wake <= held_sender.slot[at].sent +
+                                      waterlink_timeout(address_of held_sender));
+        check("and at it the frame goes back to be sent, its question counted",
+              waterlink_wake(address_of held_sender, wake) == wake &&
+                      held_sender.slot[at].state == WATERLINK_SLOT_QUEUED &&
+                      held_sender.slot[at].probed == 1);
+}
+
 /*      The wire judge already refuses channel bytes above 63.  The application
         entry points are also called by the service, though, so their own
         boundary is a fuse: a bad channel cannot index past a table, and a
@@ -64819,6 +64868,7 @@ b32 main(void)
         full_frame_beside_owed_ack();
         reader_credit();
         held_answer_lost();
+        held_after_losses();
         invalid_application_keys();
         network_generated();
         handshake();
