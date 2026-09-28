@@ -3566,7 +3566,9 @@ static b32 host_canvas(string_address address_to arguments, positive count)
 #define NL80211_ATTR_EXT_FEATURES 217
 #define NL80211_ATTR_PMK 254
 
+#define NL80211_IFTYPE_ADHOC 1
 #define NL80211_IFTYPE_STATION 2
+#define NL80211_IFTYPE_P2P_CLIENT 8
 #define NL80211_AUTHTYPE_OPEN 0
 #define NL80211_WPA_VERSION_2 2
 #define NL80211_KEYTYPE_GROUP 0
@@ -3597,6 +3599,8 @@ typedef struct
         bool has_mac;
         p8 mac[6];
         p8 name[IFNAME_SIZE];
+        p8 others;
+        p32 other[8];
 } nl80211_iface;
 
 typedef struct
@@ -3786,13 +3790,13 @@ static COLD bool nl80211_iface_seen(netlink_header address_to header,
         /* A station, and only a station: an access point, a monitor or a
            P2P device on the same machine is not one to join from, and the
            first of those in the dump used to be taken when no station
-           followed it. */
+           followed it. The rest that no lease is for are counted too. */
         type = nl80211_find_u32(header, NL80211_ATTR_IFTYPE, 0);
-        if (type != NL80211_IFTYPE_STATION)
-                return true;
-
         index = nl80211_find_u32(header, NL80211_ATTR_IFINDEX, 0);
-        if (!index)
+        if (index && type != NL80211_IFTYPE_STATION && type != NL80211_IFTYPE_ADHOC &&
+            type != NL80211_IFTYPE_P2P_CLIENT && found->others < 8)
+                found->other[found->others++] = index;
+        if (type != NL80211_IFTYPE_STATION || !index || found->found)
                 return true;
 
         name = (string_address)netlink_find(header, GENL_HEADER,
@@ -3822,7 +3826,7 @@ static COLD bool nl80211_iface_seen(netlink_header address_to header,
                 }
         }
 
-        return type != NL80211_IFTYPE_STATION;
+        return true;
 }
 
 static COLD bipolar nl80211_interface(nl80211 address_to session,
@@ -3841,6 +3845,21 @@ static COLD bipolar nl80211_interface(nl80211 address_to session,
                                 nl80211_iface_seen, found) < 0
                    ? -1
                    : (found->found ? 0 : -19);
+}
+
+/* The wifi links the watcher takes no lease on: access points, monitors,
+   anything that is not a station. */
+static COLD fn radio_links_unleased(netlink_search address_to search)
+{
+        nl80211 session;
+        nl80211_iface iface;
+
+        if (nl80211_open(address_of session) < 0)
+                return;
+        nl80211_interface(address_of session, address_of iface);
+        memory_copy(search->skip, iface.other, sizeof(search->skip));
+        search->skip_count = iface.others;
+        nl80211_close(address_of session);
 }
 
 /* WPA's PBKDF2 and PRF are HMAC-SHA-1, which is net.c's HMAC under a

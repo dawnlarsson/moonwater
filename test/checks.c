@@ -49422,6 +49422,7 @@ static fn link_candidates(void)
                         break;
                 netlink_link address_to link = netlink_body(&message);
                 link->index = step + 1;
+                link->kind = NETLINK_LINK_ETHER;
                 link->flags = step ? IFF_RUNNING : 0;
                 if (step == 2)
                         search.found = false;
@@ -49433,6 +49434,43 @@ static fn link_candidates(void)
                 netlink_forget(&message);
         }
         netlink_forget(&message);
+
+        /*      Discovery takes a link a lease can be had on and nothing
+                else: not a radio's monitor (ARPHRD_IEEE80211_RADIOTAP, as
+                hwsim0 is), not a tunnel with no framing, and not a wifi
+                link its caller names as no station -- each of those,
+                running, beside a wired link that is not. */
+        static const struct
+        {
+                p16 kind;
+                bool skipped;
+        } kinds[] = {{NETLINK_LINK_ETHER, false}, {803, true}, {801, true},
+                     {65534, true}, {NETLINK_LINK_ETHER, true}};
+
+        for (positive at = 0; at < sizeof(kinds) / sizeof(kinds[0]); at++)
+        {
+                netlink_search look = {.skip_loopback = true, .skip_count = 1,
+                                       .skip = {40}};
+                bool built = netlink_begin(&message, RTM_NEWLINK, 0, 1,
+                                           sizeof(netlink_link)) &&
+                             netlink_attribute_add(&message, IFLA_IFNAME, "eth0", 5) &&
+                             netlink_attribute_add(&message, IFLA_ADDRESS, hardware,
+                                                   sizeof hardware);
+
+                check("synthetic link builds", built);
+                if (!built)
+                        break;
+                netlink_link address_to link = netlink_body(&message);
+
+                link->index = at == 4 ? 40 : 30 + (p32)at;
+                link->kind = kinds[at].kind;
+                link->flags = IFF_RUNNING;
+                netlink_link_seen((netlink_header address_to)message.bytes, &look);
+                check("a lease is looked for only on an Ethernet link that is no "
+                      "access point",
+                      look.found != kinds[at].skipped);
+                netlink_forget(&message);
+        }
 }
 
 static fn talking(void)
