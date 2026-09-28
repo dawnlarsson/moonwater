@@ -14005,6 +14005,10 @@ static bool ptx_custom_sentence;
 static bool ptx_custom_word;
 static bool ptx_lower_word;
 static bool ptx_alpha_word;
+// -G: no GNU extensions -- words are runs of anything but blanks, a line
+// is a context, the output is roff unless -T says TeX, and a second operand
+// is the file the index goes to.
+static bool ptx_traditional;
 static bool ptx_failed;
 
 /* A whole-input view in the shared record arena.  ptx and column both need
@@ -14093,9 +14097,9 @@ static positive ptx_context_next(ptx_file address_to file, positive from,
 {
         positive after;
 
-        if (ptx_input_reference && !ptx_custom_sentence)
+        if ((ptx_input_reference || ptx_traditional) && !ptx_custom_sentence)
         {
-                // With -r the sentence expression is a newline, and one at
+                // With -r (or -G) the sentence expression is a newline, and one at
                 // the very place the scan stands -- an empty line -- is a
                 // match at the start, which GNU refuses.
                 if (file->text.bytes[from] == '\n')
@@ -14570,6 +14574,7 @@ static fn ptx_put_reference(ptx_occurrence address_to occurrence)
 */
 static p8 ptx_format;
 static string_address ptx_macro;
+
 
 static fn ptx_put_edited(p8 address_to bytes, positive length)
 {
@@ -15117,6 +15122,9 @@ static bool ptx_option_seen(p8 letter, string_address value)
         return true;
 }
 
+// The status, with a -G output file closed after the last write to it.
+#define text_done_closing_ptx(code) text_done_closing((code), ptx_output)
+
 static b32 text_ptx()
 {
         file_taking taking = {
@@ -15138,8 +15146,28 @@ static b32 text_ptx()
 
         positive flags = taking.flags;
 
-        if (flags & FILE_FLAG('G'))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "traditional format is unsupported"));
+        ptx_traditional = (flags & FILE_FLAG('G')) != 0;
+        if (ptx_traditional && ptx_format == 'd')
+                ptx_format = 'r';
+
+        bipolar ptx_output = -1;
+
+        // The output file is opened (and emptied) before a third operand
+        // is refused, as GNU's freopen comes first.
+        if (ptx_traditional && text_files_count > 1)
+        {
+                string_address name = text_file_name(1);
+
+                ptx_output = text_open_handle(name, TEXT_WRITE, 0666);
+                if (ptx_output < 0)
+                        return text_done_closing_ptx(string_diagnostic(&text_diagnostic, 1, name,
+                                                           file_reason(ptx_output)));
+                if (text_files_count > 2)
+                        return text_done_closing_ptx(text_operand_trouble("extra operand",
+                                                                        text_file_name(2), null));
+                text_out_handle = (positive)ptx_output;
+                text_files_count = 1;
+        }
 
         ptx_macro = (flags & FILE_FLAG('M')) ? file_option_value(address_of taking, 'M')
                                              : (string_address) "xx";
@@ -15194,30 +15222,31 @@ static b32 text_ptx()
                 ptx_alpha_word = true;
         }
 
-        if ((flags & FILE_FLAG('i')) &&
-            !text_blob_read(file_option_value(address_of taking, 'i'),
-                           address_of ptx_ignore))
-                return text_done(1);
-
-        if ((flags & FILE_FLAG('o')) &&
-            !text_blob_read(file_option_value(address_of taking, 'o'),
-                           address_of ptx_only))
-                return text_done(1);
-
-        // A break file is read whatever else says what a word is, as GNU
-        // reads it, so one that is not there is refused either way.
+        // A break file is read first and whatever else says what a word
+        // is, as GNU reads it, so one that is not there is refused either
+        // way; then the ignore and only lists.
         byte_span breaks = {null, 0};
 
         if ((flags & FILE_FLAG('b')) &&
             !text_blob_read(file_option_value(address_of taking, 'b'),
                            address_of breaks))
-                return text_done(1);
+                return text_done_closing(1, ptx_output);
+
+        if ((flags & FILE_FLAG('i')) &&
+            !text_blob_read(file_option_value(address_of taking, 'i'),
+                           address_of ptx_ignore))
+                return text_done_closing(1, ptx_output);
+
+        if ((flags & FILE_FLAG('o')) &&
+            !text_blob_read(file_option_value(address_of taking, 'o'),
+                           address_of ptx_only))
+                return text_done_closing(1, ptx_output);
 
         if (ptx_custom_word)
         {
                 if (!regex_compile(ptx_word_pattern, true, ptx_fold, false,
                                    REGEX_POLICY_DEFAULT))
-                        return text_done(string_diagnostic(&text_diagnostic, 1, ptx_word_pattern, "unsupported word expression"));
+                        return text_done_closing_ptx(string_diagnostic(&text_diagnostic, 1, ptx_word_pattern, "unsupported word expression"));
         }
         else if (ptx_lower_word || ptx_alpha_word)
         {
@@ -15227,12 +15256,18 @@ static b32 text_ptx()
                                 ? byte_is_alpha((p8)character)
                                 : byte_is_lower((p8)character);
         }
-        else if (flags & FILE_FLAG('b'))
+        else if ((flags & FILE_FLAG('b')) || ptx_traditional)
         {
                 memory_fill(ptx_word_bytes, 1, sizeof(ptx_word_bytes));
 
                 for (positive at = 0; at < breaks.length; at++)
                         ptx_word_bytes[breaks.bytes[at]] = 0;
+
+                // Without GNU extensions blanks and newlines always part
+                // words, break file or none.
+                if (ptx_traditional)
+                        ptx_word_bytes[' '] = ptx_word_bytes['\t'] =
+                            ptx_word_bytes['\n'] = 0;
         }
         else
                 for (positive character = 0; character < 256; character++)
@@ -15244,7 +15279,7 @@ static b32 text_ptx()
             ptx_file_count * sizeof(ptx_file));
 
         if (!ptx_files)
-                return text_done(1);
+                return text_done_closing_ptx(1);
 
         for (positive input = 0; input < ptx_file_count; input++)
         {
@@ -15257,7 +15292,7 @@ static b32 text_ptx()
 
                 if (!text_blob_read(name,
                                    address_of ptx_files[input].text))
-                        return text_done(1);
+                        return text_done_closing_ptx(1);
 
                 ptx_files[input].lines =
                     ptx_count_lines(address_of ptx_files[input].text);
@@ -15266,25 +15301,25 @@ static b32 text_ptx()
         if (ptx_custom_sentence && ptx_sentence_pattern[0] &&
             !regex_compile(ptx_sentence_pattern, true, ptx_fold, false,
                            REGEX_POLICY_DEFAULT))
-                return text_done(string_diagnostic(&text_diagnostic, 1, ptx_sentence_pattern, "unsupported sentence expression"));
+                return text_done_closing_ptx(string_diagnostic(&text_diagnostic, 1, ptx_sentence_pattern, "unsupported sentence expression"));
 
         ptx_context_count = ptx_plan_contexts(false);
 
         if (ptx_failed)
-                return text_done(1);
+                return text_done_closing_ptx(1);
 
         ptx_contexts = (ptx_context address_to)utility_arena_take(
             ptx_context_count * sizeof(ptx_context));
 
         if (ptx_context_count && !ptx_contexts)
-                return text_done(1);
+                return text_done_closing_ptx(1);
 
         ptx_plan_contexts(true);
 
         if (ptx_custom_word &&
             !regex_compile(ptx_word_pattern, true, ptx_fold, false,
                            REGEX_POLICY_DEFAULT))
-                return text_done(string_diagnostic(&text_diagnostic, 1, ptx_word_pattern, "unsupported word expression"));
+                return text_done_closing_ptx(string_diagnostic(&text_diagnostic, 1, ptx_word_pattern, "unsupported word expression"));
 
         ptx_occurrence_count = ptx_scan_occurrences(false);
         ptx_occurrences = (ptx_occurrence address_to)utility_arena_take(
@@ -15296,7 +15331,7 @@ static b32 text_ptx()
 
         if (ptx_occurrence_count &&
             (!ptx_occurrences || !ptx_order || !spare))
-                return text_done(1);
+                return text_done_closing_ptx(1);
 
         ptx_maximum_word = 0;
         ptx_scan_occurrences(true);
@@ -15321,7 +15356,7 @@ static b32 text_ptx()
                                  ? string_length(ptx_files[file_index].name)
                                  : 0) +
                             1 + positive_digits(
-                                    ptx_files[file_index].counted + 1);
+                                    ptx_files[file_index].counted + 2);
 
                         if (width > ptx_reference_width)
                                 ptx_reference_width = width;
@@ -15346,9 +15381,16 @@ static b32 text_ptx()
         ptx_keyafter_width = ptx_half_width;
 
         positive reserve = ptx_truncation_length * 2;
-        ptx_before_width = reserve < ptx_before_width
-                               ? ptx_before_width - reserve
-                               : 0;
+
+        // GNU's own field planning takes both marks from each side; the
+        // traditional one takes them and one more from the keyword's side
+        // only.
+        if (!ptx_traditional)
+                ptx_before_width = reserve < ptx_before_width
+                                       ? ptx_before_width - reserve
+                                       : 0;
+        else
+                reserve++;
         ptx_keyafter_width = reserve < ptx_keyafter_width
                                  ? ptx_keyafter_width - reserve
                                  : 0;
@@ -15356,7 +15398,7 @@ static b32 text_ptx()
         for (positive at = 0; at < ptx_occurrence_count; at++)
                 ptx_output_one(ptx_occurrences + ptx_order[at]);
 
-        return text_done(text_status);
+        return text_done_closing_ptx(text_status);
 }
 
 /*
