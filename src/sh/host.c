@@ -9986,6 +9986,53 @@ static fn locale_restore(void)
                 locale_ntp_keep();
 }
 
+/*
+        What the schedule makes of a query that ended, or of a look between
+        queries. A success is only a success if the kernel still says the
+        clock is synchronised when it is looked at: any change of
+        clocksource clears that (timekeeping_notify ends in ntp_clear), and
+        x86 changes it by itself about 1.5 s into a boot, when the TSC's
+        refined calibration replaces tsc-early, and again whenever the
+        watchdog gives up on the TSC. A first answer that landed before the
+        switch left a correct clock marked unsynchronised and the next query
+        256 s away: on a guest whose entropy was ready at once, 6 boots in 6
+        synced at 1.4 s, were unsynchronised at 1.5 s, and were still
+        waiting at 42 s. So an answer the kernel has forgotten is asked for
+        again at the retry pace, whether that is seen as the child ends or
+        on a later look -- but not over a RATE answer's wait, which leaves
+        the retry pace at its slowest.
+*/
+static fn locale_ntp_schedule(bipolar ended, bool synced, p64 now)
+{
+        if (!ended && synced)
+        {
+                //      Soon at first, while the loop has not learned how
+                //      fast this clock runs, and half-hourly once it has
+                //      had the time to.
+                locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
+                locale_ntp_synced = locale_ntp_asked;
+                locale_ntp_next = now + (p64)locale_ntp_every * 1000000000ull;
+                locale_ntp_every = locale_ntp_every * 2 < LOCALE_NTP_AGAIN
+                                       ? locale_ntp_every * 2
+                                       : LOCALE_NTP_AGAIN;
+        }
+        else if (ended == LOCALE_NTP_EXIT_RATE)
+        {
+                locale_ntp_retry = LOCALE_NTP_RETRY_MOST;
+                locale_ntp_next = now + (p64)LOCALE_NTP_RATE_AGAIN * 1000000000ull;
+        }
+        else if (ended != LOCALE_CHILD_IDLE)
+        {
+                locale_ntp_next = now + (p64)locale_ntp_retry * 1000000000ull;
+                if (locale_ntp_retry < LOCALE_NTP_RETRY_MOST)
+                        locale_ntp_retry *= 2;
+        }
+        else if (locale_ntp_synced && !synced &&
+                 locale_ntp_retry == LOCALE_NTP_RETRY_LEAST &&
+                 locale_ntp_next > now + LOCALE_NTP_RETRY_LEAST * 1000000000ull)
+                locale_ntp_next = now + LOCALE_NTP_RETRY_LEAST * 1000000000ull;
+}
+
 static fn locale_ntp_keep(void)
 {
         p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME);
@@ -9993,38 +10040,8 @@ static fn locale_ntp_keep(void)
 
         if (ended == LOCALE_CHILD_RUNNING)
                 return;
-        if (ended != LOCALE_CHILD_IDLE)
-        {
-                if (!ended)
-                {
-                        //      Soon at first, while the loop has not
-                        //      learned how fast this clock runs, and
-                        //      half-hourly once it has had the time to.
-                        locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
-                        locale_ntp_synced = locale_ntp_asked;
-                        locale_ntp_next =
-                            now + (p64)locale_ntp_every * 1000000000ull;
-                        locale_ntp_every = locale_ntp_every * 2 < LOCALE_NTP_AGAIN
-                                                   ? locale_ntp_every * 2
-                                                   : LOCALE_NTP_AGAIN;
-                }
-                else if (ended == LOCALE_NTP_EXIT_RATE)
-                {
-                        locale_ntp_retry = LOCALE_NTP_RETRY_MOST;
-                        locale_ntp_next =
-                            now + (p64)LOCALE_NTP_RATE_AGAIN * 1000000000ull;
-                }
-                else
-                {
-                        locale_ntp_next =
-                            now + (p64)locale_ntp_retry * 1000000000ull;
-                        if (locale_ntp_retry < LOCALE_NTP_RETRY_MOST)
-                                locale_ntp_retry *= 2;
-                }
-                return;
-        }
-
-        if (locale_ntp_next && now < locale_ntp_next)
+        locale_ntp_schedule(ended, locale_clock_synced(), now);
+        if (ended != LOCALE_CHILD_IDLE || (locale_ntp_next && now < locale_ntp_next))
                 return;
 
         locale_ntp_asked = now;

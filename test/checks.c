@@ -73863,12 +73863,59 @@ static fn sntp_test_random_child(positive which)
         system_call_1(syscall(exit_group), ok ? 0 : 1);
 }
 
+/*
+        The schedule after a query, against the kernel forgetting a clock
+        it was told was synchronised -- which a clocksource change does,
+        and x86 makes one 1.5 s into every boot.
+*/
+static fn machine_ntp_schedule(void)
+{
+        p64 second = 1000000000ull;
+        p64 now = 1000 * second;
+        p64 next = locale_ntp_next;
+        p64 asked = locale_ntp_asked;
+        p64 synced = locale_ntp_synced;
+        positive retry = locale_ntp_retry;
+        positive every = locale_ntp_every;
+
+        locale_ntp_next = 0;
+        locale_ntp_synced = 0;
+        locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
+        locale_ntp_every = LOCALE_NTP_AGAIN_FIRST;
+        locale_ntp_asked = now - second;
+        locale_ntp_schedule(0, false, now);
+        check("an answer the kernel has already forgotten is asked again in a second",
+              locale_ntp_next == now + second && !locale_ntp_synced);
+        locale_ntp_asked = now + second;
+        locale_ntp_schedule(0, true, now + 2 * second);
+        check("an answer the kernel keeps waits for the first poll",
+              locale_ntp_next == now + 2 * second + LOCALE_NTP_AGAIN_FIRST * second &&
+                  locale_ntp_synced == now + second);
+        locale_ntp_schedule(LOCALE_CHILD_IDLE, true, now + 3 * second);
+        check("a clock still synchronised keeps that poll",
+              locale_ntp_next == now + 2 * second + LOCALE_NTP_AGAIN_FIRST * second);
+        locale_ntp_schedule(LOCALE_CHILD_IDLE, false, now + 3 * second);
+        check("one that loses it between polls is asked again in a second",
+              locale_ntp_next == now + 4 * second);
+        locale_ntp_schedule(LOCALE_NTP_EXIT_RATE, false, now + 5 * second);
+        locale_ntp_schedule(LOCALE_CHILD_IDLE, false, now + 6 * second);
+        check("but never over a RATE answer's wait",
+              locale_ntp_next == now + 5 * second + LOCALE_NTP_RATE_AGAIN * second);
+
+        locale_ntp_next = next;
+        locale_ntp_asked = asked;
+        locale_ntp_synced = synced;
+        locale_ntp_retry = retry;
+        locale_ntp_every = every;
+}
+
 static fn machine_sntp(void)
 {
         check("RFC 5905 offset, min-delay pick and poison guards hold",
               sntp_math_ok());
         check("the clock is stepped when far out and slewed when near",
               locale_discipline_ok());
+        machine_ntp_schedule();
 
         /* Case 0 refuses blocking getrandom: the stamp fails untouched and
            the exchange returns before any send. Case 1 refuses only
