@@ -423,6 +423,9 @@ static bool shell_exit_is_current HOT_STATE;
 static fn exec_command_reader_finish();
 static fn exec_input_finish();
 static fn exec_wait_background(bipolar child);
+/* Whether FUNCNEST was ever given a value: a function call asks for it
+   only then, rather than looking the name up on every call. */
+bool shell_funcnest_seen;
 static positive shell_command_reader_depth;
 static bool env_attribute_target_span(const_string name, positive length,
                                       const_string address_to target,
@@ -2663,6 +2666,8 @@ fn shell_env_init(string_address address_to process_environment)
         //      the first cd hands it to children; dash exports it from cd.
         if (shell_bash_compat && !env_get("OLDPWD"))
                 env_export_mark("OLDPWD");
+        if (shell_bash_compat && env_get("FUNCNEST"))
+                shell_funcnest_seen = true;
 }
 
 /*
@@ -3058,6 +3063,8 @@ static bool env_write_noted(const_string name, positive length, bool written)
                 shell_posix_changed(true);
         else if (memory_is_word((address_any)name, length, "OPTIND"))
                 shell_getopts_index_changed();
+        else if (memory_is_word((address_any)name, length, "FUNCNEST"))
+                shell_funcnest_seen = true;
         return written;
 }
 

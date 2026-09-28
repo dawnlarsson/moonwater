@@ -14731,6 +14731,15 @@ def shell_lang_globignore(rng):
             ("command", "stdin", "file"))
 
 
+#       FUNCNEST caps how deep functions may call; one call past it is
+#       refused and the command it was part of dropped. It was not read.
+def shell_lang_funcnest(rng):
+    limit = rng.choice(("0", "1", "2", "3", "x", "''"))
+    return ("funcnest", shell_BASH, shell_program(
+        "FUNCNEST=" + limit, "f() { echo \"d$1\"; [ \"$1\" -lt 4 ] && f $(($1 + 1)); }",
+        "f 1; echo \"s=$?\"", "echo next", 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
 #       Digits in front of > are a descriptor only while they fit one: bash
 #       reads a number past INT_MAX there as an ordinary word, so `echo a
 #       2147483648>f` writes "a 2147483648" to f. This called it a syntax
@@ -17597,6 +17606,7 @@ SHELL_FAMILIES = (
     shell_lang_case_substitution_lines,
     shell_lang_debug_trap_places,
     shell_lang_globignore,
+    shell_lang_funcnest,
     shell_lang_readonly_arrays,
     shell_lang_legacy_arithmetic,
     shell_lang_case_toggle,

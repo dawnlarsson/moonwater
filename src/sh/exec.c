@@ -8602,6 +8602,29 @@ static b32 exec_call(positive slot)
                 return 1;
         }
 
+        /*
+                FUNCNEST, a positive number, is as deep as bash lets
+                functions call: one call past it is refused, and the whole
+                command the reader was running goes with it.
+        */
+        if (shell_bash_compat && shell_funcnest_seen)
+        {
+                string_address nest = env_get("FUNCNEST");
+                positive limit;
+
+                if (nest && string_digits_exact(nest, address_of limit) &&
+                    limit && exec_function_depth >= limit)
+                {
+                        shell_diagnostic_where();
+                        string_format(log_error,
+                                      "%s: maximum function nesting level "
+                                      "exceeded (%p)\n",
+                                      shell_argv[0], limit);
+                        expand_discard_whole(1);
+                        return 1;
+                }
+        }
+
         if (!shell_local_enter())
         {
                 shell_status = 1;
