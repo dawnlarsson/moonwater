@@ -33213,7 +33213,8 @@ def harness_https_bench(argv):
     """Loopback HTTPS for wget: a CPU-bound download bench and a framing matrix.
 
     A forked Python TLS 1.3 server (TLS_AES_128_GCM_SHA256, the one suite the
-    client offers, key exchange on --group) serves over the chain shape the
+    client offers, key exchange on --group; --tls12 holds it to TLS 1.2 and
+    ECDHE-ECDSA-AES128-GCM-SHA256) serves over the chain shape the
     Arch mirror sends: a P-256 leaf under two P-384 intermediates under a P-384
     root that is itself in the chain, all generated under WORK/pki and reused
     while they stay valid. Only shells built here by --source trust that root:
@@ -33274,6 +33275,8 @@ def harness_https_bench(argv):
     parser.add_argument('--perf', action='store_true')
     parser.add_argument('--syscalls', action='store_true')
     parser.add_argument('--group', default='prime256v1')
+    parser.add_argument('--tls12', action='store_true',
+                        help='hold the server to TLS 1.2 (ECDHE-ECDSA-AES128-GCM-SHA256)')
     opts = parser.parse_args(argv)
     if opts.runs < 1:
         parser.error('--runs must be positive')
@@ -33380,6 +33383,9 @@ def harness_https_bench(argv):
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_3
+    if opts.tls12:
+        context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_2
+        context.set_ciphers('ECDHE-ECDSA-AES128-GCM-SHA256')
     context.load_cert_chain(pki / 'chain.pem', pki / 'leaf.key')
     context.set_ecdh_curve(opts.group)
 
@@ -36906,7 +36912,8 @@ def harness_tls_chains(argv):
     one fixed chain. This builds the shell trusting a P-384 root it makes
     (TLS_BENCH_ANCHOR), then walks a grammar of chains -- the leaf's key
     (P-256, P-384, RSA-2048) against every mutation below -- serving each
-    from a loopback TLS 1.3 server and asking wget for it, and asks openssl
+    from a loopback TLS 1.3 server and asking wget for it (and again over
+    TLS 1.2, whose verdict has to be the same), and asks openssl
     verify the same question with the same root, intermediates, name and
     purpose. The two verdicts have to agree, except where this tree refuses
     by policy what openssl accepts, which DELIBERATE names with its reason.
@@ -37475,37 +37482,54 @@ def harness_tls_chains(argv):
                                "accepts" if ours_ok else "refuses"))
                     continue
                 context.set_ecdh_curve("prime256v1")
-                listener = socket.socket()
-                listener.bind(("127.0.0.1", 0))
-                listener.listen(1)
-                listener.settimeout(20)
 
-                def serve():
-                    try:
-                        raw, _ = listener.accept()
-                        raw.settimeout(20)
-                        with context.wrap_socket(raw, server_side=True) as tls:
-                            head = b""
-                            while b"\r\n\r\n" not in head:
-                                got = tls.recv(4096)
-                                if not got:
-                                    return
-                                head += got
-                            tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n"
-                                        b"Connection: close\r\n\r\ntrusted")
-                    except (OSError, ssl.SSLError):
-                        pass
+                def fetch(context):
+                    listener = socket.socket()
+                    listener.bind(("127.0.0.1", 0))
+                    listener.listen(1)
+                    listener.settimeout(20)
 
-                server = threading.Thread(target=serve, daemon=True)
-                server.start()
-                fetched = subprocess.run(
-                    [str(work / "wget"), "-q", "-O", "-", "https://127.0.0.1:%d/" %
-                     listener.getsockname()[1]], capture_output=True, timeout=30,
-                    env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
-                server.join(25)
-                listener.close()
+                    def serve():
+                        try:
+                            raw, _ = listener.accept()
+                            raw.settimeout(20)
+                            with context.wrap_socket(raw, server_side=True) as tls:
+                                head = b""
+                                while b"\r\n\r\n" not in head:
+                                    got = tls.recv(4096)
+                                    if not got:
+                                        return
+                                    head += got
+                                tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n"
+                                            b"Connection: close\r\n\r\ntrusted")
+                        except (OSError, ssl.SSLError):
+                            pass
+
+                    server = threading.Thread(target=serve, daemon=True)
+                    server.start()
+                    fetched = subprocess.run(
+                        [str(work / "wget"), "-q", "-O", "-", "https://127.0.0.1:%d/" %
+                         listener.getsockname()[1]], capture_output=True, timeout=30,
+                        env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+                    server.join(25)
+                    listener.close()
+                    return fetched
+
+                fetched = fetch(context)
+                # The same chain over TLS 1.2, whose Certificate is relaid
+                # for the one chain check: the verdict may not move.
+                context12 = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context12.minimum_version = context12.maximum_version = \
+                    ssl.TLSVersion.TLSv1_2
+                context12.set_ciphers("ECDHE-ECDSA-AES128-GCM-SHA256:"
+                                      "ECDHE-RSA-AES128-GCM-SHA256")
+                context12.load_cert_chain(work / "chain.pem", work / "leaf.key")
+                fetched12 = fetch(context12)
                 ours_ok = fetched.returncode == 0 and fetched.stdout.startswith(b"truste")
                 name = "%s with a %s leaf" % (mutation, key_name)
+                checks(ours_ok == (fetched12.returncode == 0 and
+                                   fetched12.stdout.startswith(b"truste")),
+                       "%s: wget's TLS 1.2 verdict differs from its TLS 1.3 one" % name)
                 expected = mutation in MUST_ACCEPT
                 checks(openssl_ok == expected or mutation in DELIBERATE,
                        "%s: the OpenSSL oracle %s a chain the standards matrix says to %s" % (
@@ -37536,11 +37560,21 @@ def harness_tls_peer(argv):
     middle: a TLS 1.3 server written here over the cryptography package
     (X25519, P-256 or P-384 shares, TLS_AES_128_GCM_SHA256, a P-256 leaf
     that signs its CertificateVerify) runs a grammar of flights and
-    post-handshake streams
-    -- tickets whole, split and at close, KeyUpdate, compatibility and
+    post-handshake streams -- HelloRetryRequests for a group, a cookie or
+    both, a second retry, a retry for a group already shared or never
+    offered, and a ServerHello that changes the retry's suite or group
+    -- tickets whole, split and at close, KeyUpdate asked and answered
+    (the answer opened under the client's old key, a second one under its
+    new key), a bad KeyUpdate byte or one not ending its record, compatibility and
     protected CCS, empty, padded and all-padding records, the 2^14 content
     edge, bad tags, alerts, truncation with and without close_notify, data
     after close_notify, unasked EncryptedExtensions and a CertificateRequest.
+    TLS 1.2 scripts (a server over the same package: ECDHE-ECDSA, AES-128-GCM,
+    the extended master secret) add their flights, the downgrade sentinel,
+    a retry before TLS 1.2, the other version's messages and extensions, a
+    Finished without change_cipher_spec, HelloRequest, KeyUpdate and an
+    unasked ticket; then real OpenSSL servers held to TLS 1.2 by s_server
+    serve wget over each leaf kind, scheme and group.
     Each script is served once to the shell's wget (--no-check-certificate,
     so the leaf is still the CertificateVerify key) and once to Python's ssl
     client, which is OpenSSL; both are asked whether the body arrived whole
@@ -37652,6 +37686,7 @@ def harness_tls_peer(argv):
         return ("inner", data + b"\x17" + b"\0" * padding)
 
     close = ("inner", b"\1\0\x15")
+    RETRY_RANDOM = sha256(b"HelloRetryRequest")
     CURVES = {None: (0x1d, None), "prime256v1": (0x17, ec.SECP256R1),
               "secp384r1": (0x18, ec.SECP384R1)}
     SCRIPTS = [
@@ -37695,14 +37730,47 @@ def harness_tls_peer(argv):
          [("inner", key_update(0) + b"\x16"), ("rekey", None),
           app(length_head + body), close]),
         ("KeyUpdate, update requested", {},
-         [("inner", key_update(1) + b"\x16"), ("rekey", None),
+         [("inner", key_update(1) + b"\x16"), ("rekey", None), ("answer", None),
           app(length_head + body), close]),
+        ("KeyUpdate asked twice", {},
+         [("inner", key_update(1) + b"\x16"), ("rekey", None), ("answer", None),
+          ("inner", key_update(1) + b"\x16"), ("rekey", None), ("answer", None),
+          app(length_head + body), close]),
+        ("KeyUpdate asking with a byte past update_requested", {},
+         [("inner", key_update(2) + b"\x16"), ("rekey", None),
+          app(length_head + body), close]),
+        ("KeyUpdate not ending its record", {},
+         [("inner", key_update(0) + ticket + b"\x16"), ("rekey", None),
+          app(length_head + body), close]),
+        ("KeyUpdate under the old key after a rekey", {},
+         [("inner", key_update(0) + b"\x16"), app(length_head + body), close]),
         ("compatibility CCS after ServerHello", {"ccs": True},
          [app(length_head + body), close]),
         ("a protected change_cipher_spec in the flight", {"protected_ccs": True},
          [app(length_head + body), close]),
         ("key share on P-256", {"curve": "prime256v1"}, [app(length_head + body), close]),
         ("key share on P-384", {"curve": "secp384r1"}, [app(length_head + body), close]),
+        ("HelloRetryRequest with a cookie", {"retry": {"cookie": b"c" * 40}},
+         [app(length_head + body), close]),
+        ("HelloRetryRequest to P-256 with a cookie",
+         {"curve": "prime256v1", "retry": {"cookie": os.urandom(300)}},
+         [app(length_head + body), close]),
+        ("HelloRetryRequest with a 3000-byte cookie", {"retry": {"cookie": b"k" * 3000}},
+         [app(length_head + body), close]),
+        ("compatibility CCS after HelloRetryRequest",
+         {"curve": "prime256v1", "retry": {"ccs": True}}, [app(length_head + body), close]),
+        ("a second HelloRetryRequest", {"retry": {"cookie": b"c" * 8, "twice": True}},
+         [app(length_head + body), close]),
+        ("HelloRetryRequest naming the group already shared", {"retry": {"group": 0x1d}},
+         [app(length_head + body), close]),
+        ("HelloRetryRequest naming an unoffered group", {"retry": {"group": 0x15}},
+         [app(length_head + body), close]),
+        ("ServerHello after HelloRetryRequest changes the suite",
+         {"curve": "prime256v1", "suite": b"\x13\2"}, [app(length_head + body), close]),
+        ("ServerHello after HelloRetryRequest changes the group",
+         {"curve": "prime256v1", "answer": 0x18}, [app(length_head + body), close]),
+        ("plaintext bytes after ServerHello in its record",
+         {"after_hello": message(8, b"\0\0")}, [app(length_head + body), close]),
         ("flight one message a record", {"split": True},
          [app(length_head + body), close]),
         ("EncryptedExtensions answering supported_groups",
@@ -37713,10 +37781,52 @@ def harness_tls_peer(argv):
          [app(length_head + body), close]),
         ("CertificateRequest in the flight", {"request": True},
          [app(length_head + body), close]),
+        ("CertificateRequest with a context", {"request": True,
+                                               "request_body": b"\2ab\0\x08\0\x0d\0\4\0\2\4\3"},
+         [app(length_head + body), close]),
+        ("CertificateRequest after the Certificate", {"request_late": True},
+         [app(length_head + body), close]),
+        ("two CertificateRequests", {"request": True, "request_late": True},
+         [app(length_head + body), close]),
         ("an empty handshake record in the flight", {"empty": True},
          [app(length_head + body), close]),
         ("a compatibility CCS inside a split flight message", {"ccs_inside": True},
          [app(length_head + body), close]),
+        ("TLS 1.2", {"tls12": True}, [app(length_head + body), close]),
+        ("TLS 1.2 close-delimited", {"tls12": True}, [app(close_head + body), close]),
+        ("TLS 1.2 flight one message a record", {"tls12": True, "split": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 CertificateRequest", {"tls12": True, "request": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 empty records", {"tls12": True},
+         [app(b""), app(length_head + body), close]),
+        ("TLS 1.2 without the extended master secret", {"tls12": True, "no_ems": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 ServerHello dropping the extended master secret it keys with",
+         {"tls12": True, "ems_unsent": True}, [app(length_head + body), close]),
+        ("TLS 1.2 with the downgrade sentinel", {"tls12": True, "sentinel": b"DOWNGRD\1"},
+         [app(length_head + body), close]),
+        ("TLS 1.2 after a HelloRetryRequest", {"tls12": True, "retry_first": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 ServerHello with a key share", {"tls12": True,
+                                                  "hello_extra": b"\0\x33\0\4\0\x1d\0\0"},
+         [app(length_head + body), close]),
+        ("TLS 1.2 flight with EncryptedExtensions", {"tls12": True,
+                                                    "extra": [message(8, b"\0\0")]},
+         [app(length_head + body), close]),
+        ("TLS 1.2 flight with a CertificateVerify", {"tls12": True,
+                                                    "extra": [message(15, b"\4\3\0\0")]},
+         [app(length_head + body), close]),
+        ("TLS 1.2 Finished without change_cipher_spec", {"tls12": True, "no_ccs": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 wrong server Finished", {"tls12": True, "bad_finished": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 KeyUpdate", {"tls12": True},
+         [("inner", key_update(0) + b"\x16"), app(length_head + body), close]),
+        ("TLS 1.2 HelloRequest", {"tls12": True},
+         [("inner", message(0, b"") + b"\x16"), app(length_head + body), close]),
+        ("TLS 1.2 NewSessionTicket never asked for", {"tls12": True},
+         [("inner", ticket + b"\x16"), app(length_head + body), close]),
         ("user_canceled then close_notify", {},
          [app(close_head + body), ("inner", b"\1\x5a\x15"), close]),
         ("a warning-level unknown alert", {},
@@ -37729,13 +37839,24 @@ def harness_tls_peer(argv):
         "two tickets in one record", "empty records before the response",
         "padded records", "a record of exactly 2^14 content",
         "KeyUpdate, no update requested", "KeyUpdate, update requested",
+        "KeyUpdate asked twice",
         "compatibility CCS after ServerHello", "flight one message a record",
         "key share on P-256", "key share on P-384",
+        "HelloRetryRequest with a cookie", "HelloRetryRequest to P-256 with a cookie",
+        "HelloRetryRequest with a 3000-byte cookie",
+        "TLS 1.2", "TLS 1.2 close-delimited", "TLS 1.2 flight one message a record",
+        "TLS 1.2 CertificateRequest", "TLS 1.2 empty records",
+        # RFC 7627 5.4: a client MAY abort without it; see DELIBERATE.
+        "TLS 1.2 without the extended master secret",
+        "compatibility CCS after HelloRetryRequest",
         "EncryptedExtensions answering supported_groups",
         "CertificateRequest in the flight",
     }
     # Where OpenSSL 3.6's client accepts what the RFC says to refuse.
     OPENSSL_LENIENT = {
+        "TLS 1.2 HelloRequest":
+            "RFC 5246 7.4.1.1 lets a client ignore a HelloRequest or answer "
+            "it; OpenSSL renegotiates",
         "close_notify inside a split ticket":
             "5.1 forbids interleaving another record type within a split "
             "handshake message; OpenSSL drops the partial ticket at close",
@@ -37754,14 +37875,133 @@ def harness_tls_peer(argv):
             "Finished (D.4)",
     }
     DELIBERATE = {
-        "KeyUpdate, no update requested":
-            "KeyUpdate is refused by design: this client keeps no traffic "
-            "secret past the handshake to rekey from",
-        "KeyUpdate, update requested": "as above",
-        "CertificateRequest in the flight":
-            "the flight's one legal shape has no CertificateRequest; this "
-            "client has no certificate to decline with",
+        "TLS 1.2 without the extended master secret":
+            "RFC 7627 lets a client go on without it; this one requires it, "
+            "so a TLS 1.2 master secret is always bound to its handshake",
+        "TLS 1.2 HelloRequest":
+            "renegotiation is refused, so a HelloRequest ends the connection",
     }
+
+    def prf(secret, label, seed, size):
+        """TLS 1.2's P_SHA256 (RFC 5246 5)."""
+        out, block = b"", label + seed
+        while len(out) < size:
+            block = hmac_module.new(secret, block, hashlib.sha256).digest()
+            out += hmac_module.new(secret, block + label + seed, hashlib.sha256).digest()
+        return out[:size]
+
+    class Direction12:
+        """One side's TLS 1.2 AES-128-GCM keys (RFC 5288): the salt and an
+        explicit nonce that is the sequence number."""
+
+        def __init__(self, key, salt):
+            self.aead, self.salt, self.seq = AESGCM(key), salt, 0
+
+        def seal(self, kind, content):
+            explicit = self.seq.to_bytes(8, "big")
+            aad = explicit + bytes([kind, 3, 3]) + len(content).to_bytes(2, "big")
+            self.seq += 1
+            return record(kind, explicit + self.aead.encrypt(self.salt + explicit, content, aad))
+
+        def open(self, header, payload):
+            aad = (self.seq.to_bytes(8, "big") + header[:3] +
+                   (len(payload) - 24).to_bytes(2, "big"))
+            self.seq += 1
+            return self.aead.decrypt(self.salt + payload[:8], payload[8:], aad)
+
+    def run12(sock, flight, steps):
+        """TLS 1.2 ECDHE-ECDSA-AES128-GCM-SHA256 with the extended master
+        secret, and the knobs that break it: a retry first, the downgrade
+        sentinel, no extended master secret, extra ServerHello extensions,
+        a message of another version in the flight, a CertificateRequest,
+        no change_cipher_spec before Finished, a wrong Finished. Steps
+        take the TLS 1.3 inner form -- content, type byte, padding -- and
+        seal the content under that record type."""
+        hello, session, shares, kinds = read_hello(sock)
+        transcript = b""
+        if flight.get("retry_first"):
+            # The keys follow the transcript a client that let TLS 1.2
+            # answer its retry would keep, so only the refusal refuses.
+            request = retry_request(session, b"\x13\1", 0x17, None)
+            sock.sendall(record(22, request))
+            transcript = message(254, sha256(hello)) + request
+            hello, session, shares, kinds = read_hello(sock)
+        client_random = hello[6:38]
+        server_random = os.urandom(24) + flight.get("sentinel", os.urandom(8))
+        extensions = (b"" if flight.get("no_ems") or flight.get("ems_unsent")
+                      else b"\0\x17\0\0") + \
+            b"\xff\1\0\1\0" + flight.get("hello_extra", b"")
+        mine = X25519PrivateKey.generate()
+        params = b"\3\0\x1d\x20" + mine.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        signature = leaf_key.sign(client_random + server_random + params,
+                                  ec.ECDSA(hashes.SHA256()))
+        messages = [message(2, b"\3\3" + server_random + b"\x20" + os.urandom(32) +
+                            b"\xc0\x2b\0" + len(extensions).to_bytes(2, "big") + extensions),
+                    message(11, (len(leaf) + 3).to_bytes(3, "big") +
+                            len(leaf).to_bytes(3, "big") + leaf),
+                    message(12, params + b"\4\3" + len(signature).to_bytes(2, "big") +
+                            signature)]
+        if flight.get("request"):
+            messages.append(message(13, b"\1\x40\0\2\4\3\0\0"))
+        messages[1:1] = flight.get("extra", [])
+        messages.append(message(14, b""))
+        transcript += hello + b"".join(messages)
+        if flight.get("split"):
+            for part in messages:
+                sock.sendall(record(22, part))
+        else:
+            sock.sendall(record(22, b"".join(messages)))
+        point = None
+        while point is None:
+            header, sent = read_record(sock)
+            if header[0] != 22:
+                raise ValueError("client sent record type %d before its key" % header[0])
+            while sent:
+                kind, size = sent[0], int.from_bytes(sent[1:4], "big")
+                part, sent = sent[:4 + size], sent[4 + size:]
+                if kind == 16:
+                    point = part[5:]
+                elif not (kind == 11 and flight.get("request") and part[4:] == b"\0\0\0"):
+                    raise ValueError("client sent handshake type %d" % kind)
+                transcript += part
+        if read_record(sock)[0][0] != 20:
+            raise ValueError("no change_cipher_spec from the client")
+        premaster = mine.exchange(X25519PublicKey.from_public_bytes(point))
+        if flight.get("no_ems"):
+            master = prf(premaster, b"master secret", client_random + server_random, 48)
+        else:
+            master = prf(premaster, b"extended master secret", sha256(transcript), 48)
+        keys = prf(master, b"key expansion", server_random + client_random, 40)
+        client, server = Direction12(keys[:16], keys[32:36]), Direction12(keys[16:32], keys[36:40])
+        finished = client.open(*read_record(sock))
+        if finished != message(20, prf(master, b"client finished", sha256(transcript), 12)):
+            raise ValueError("the client's Finished does not verify")
+        transcript += finished
+        verify = prf(master, b"server finished", sha256(transcript), 12)
+        finished = message(20, bytes(12) if flight.get("bad_finished") else verify)
+        if flight.get("no_ccs"):
+            sock.sendall(record(22, finished))
+        else:
+            sock.sendall(record(20, b"\1") + server.seal(22, finished))
+        request = b""
+        while b"\r\n\r\n" not in request:
+            header, payload = read_record(sock)
+            if header[0] != 23:
+                raise ValueError("client sent record type %d" % header[0])
+            request += client.open(header, payload)
+        for what, value in steps:
+            if what == "inner":
+                inner = value.rstrip(b"\0")
+                sock.sendall(server.seal(inner[-1], inner[:-1]))
+            elif what == "plain":
+                sock.sendall(value)
+        sock.shutdown(socket.SHUT_WR)
+        try:
+            while sock.recv(4096):
+                pass
+        except OSError:
+            pass
 
     def serve(listener, flight, steps, outcome):
         try:
@@ -37771,7 +38011,7 @@ def harness_tls_peer(argv):
         raw.settimeout(20)
         try:
             with raw:
-                run(raw, flight, steps)
+                (run12 if flight.get("tls12") else run)(raw, flight, steps)
                 outcome.append("served")
         except Exception as error:  # the client hung up or refused
             outcome.append("server: %r" % error)
@@ -37789,8 +38029,12 @@ def harness_tls_peer(argv):
         header = read_exact(sock, 5)
         return header, read_exact(sock, int.from_bytes(header[3:5], "big"))
 
-    def run(sock, flight, steps):
+    def read_hello(sock):
+        """The next ClientHello, past any compatibility CCS: the message,
+        its session id, its shares by group and its extensions by kind."""
         header, hello = read_record(sock)
+        while header[0] == 20:
+            header, hello = read_record(sock)
         if header[0] != 22 or hello[0] != 1:
             raise ValueError("no ClientHello")
         at = 4 + 2 + 32
@@ -37800,40 +38044,79 @@ def harness_tls_peer(argv):
         at += 1 + hello[at]
         end = at + 2 + int.from_bytes(hello[at:at + 2], "big")
         at += 2
-        peer = None
-        chosen = CURVES[flight.get("curve")][0]
+        shares, kinds = {}, {}
         while at < end:
             kind = int.from_bytes(hello[at:at + 2], "big")
             size = int.from_bytes(hello[at + 2:at + 4], "big")
             data = hello[at + 4:at + 4 + size]
+            kinds[kind] = data
             at += 4 + size
             if kind == 0x33:
                 share = 2
                 while share < len(data):
                     group = int.from_bytes(data[share:share + 2], "big")
                     width = int.from_bytes(data[share + 2:share + 4], "big")
-                    if group == chosen:
-                        peer = data[share + 4:share + 4 + width]
+                    shares[group] = data[share + 4:share + 4 + width]
                     share += 4 + width
-        if chosen == 0x1d:
+        return hello, session, shares, kinds
+
+    def retry_request(session, suite, group, cookie):
+        extensions = b"\0\x2b\0\2\3\4"
+        if group is not None:
+            extensions += b"\0\x33\0\2" + group.to_bytes(2, "big")
+        if cookie is not None:
+            extensions += b"\0\x2c" + (len(cookie) + 2).to_bytes(2, "big") + \
+                len(cookie).to_bytes(2, "big") + cookie
+        return message(2, b"\3\3" + RETRY_RANDOM + bytes([len(session)]) + session +
+                       suite + b"\0" + len(extensions).to_bytes(2, "big") + extensions)
+
+    def run(sock, flight, steps):
+        hello, session, shares, kinds = read_hello(sock)
+        chosen = CURVES[flight.get("curve")][0]
+        transcript = hello
+        # A HelloRetryRequest when the chosen group has no share or the
+        # script asks for one: the group it names (the chosen one unless the
+        # script overrides it), a cookie the second hello has to echo.
+        retry = flight.get("retry", {})
+        rounds = 2 if retry.get("twice") else 1
+        while rounds and (chosen not in shares or retry):
+            rounds -= 1
+            cookie = retry.get("cookie")
+            group = retry.get("group", chosen if chosen not in shares else None)
+            request = retry_request(session, b"\x13\1", group, cookie)
+            transcript = message(254, sha256(transcript)) + request
+            sock.sendall(record(22, request))
+            if retry.get("ccs"):
+                sock.sendall(record(20, b"\1"))
+            hello, session, shares, kinds = read_hello(sock)
+            if cookie is not None and kinds.get(0x2c) != len(cookie).to_bytes(2, "big") + cookie:
+                raise ValueError("the second ClientHello lost the cookie")
+            transcript += hello
+            if not retry.get("twice"):
+                break
+        # The answering share is on the chosen group unless the script
+        # names another; one the client never offered agrees on nothing.
+        answer = flight.get("answer", chosen)
+        peer = shares.get(answer)
+        if answer == 0x1d:
             mine = X25519PrivateKey.generate()
-            shared = mine.exchange(X25519PublicKey.from_public_bytes(peer))
+            shared = mine.exchange(X25519PublicKey.from_public_bytes(peer)) if peer else bytes(32)
             public = mine.public_key().public_bytes(serialization.Encoding.Raw,
                                                     serialization.PublicFormat.Raw)
         else:
-            curve = CURVES[flight.get("curve")][1]()
+            curve = {0x17: ec.SECP256R1, 0x18: ec.SECP384R1}[answer]()
             mine = ec.generate_private_key(curve)
-            shared = mine.exchange(ec.ECDH(),
-                                   ec.EllipticCurvePublicKey.from_encoded_point(curve, peer))
+            shared = mine.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(
+                curve, peer)) if peer else bytes(32)
             public = mine.public_key().public_bytes(serialization.Encoding.X962,
                                                     serialization.PublicFormat.UncompressedPoint)
-        share = chosen.to_bytes(2, "big") + len(public).to_bytes(2, "big") + public
+        share = answer.to_bytes(2, "big") + len(public).to_bytes(2, "big") + public
         extensions = (b"\0\x2b\0\2\3\4\0\x33" + len(share).to_bytes(2, "big") + share)
         server_hello = message(2, b"\3\3" + os.urandom(32) + bytes([len(session)]) +
-                               session + b"\x13\1\0" +
+                               session + flight.get("suite", b"\x13\1") + b"\0" +
                                len(extensions).to_bytes(2, "big") + extensions)
-        transcript = hello + server_hello
-        sock.sendall(record(22, server_hello))
+        transcript += server_hello
+        sock.sendall(record(22, server_hello + flight.get("after_hello", b"")))
         if flight.get("ccs"):
             sock.sendall(record(20, b"\1"))
         early = extract(b"\0" * 32, b"\0" * 32)
@@ -37842,9 +38125,12 @@ def harness_tls_peer(argv):
         server_hs = Direction(expand_label(secret, b"s hs traffic", sha256(transcript), 32))
         answers = flight.get("ee", b"")
         messages = [message(8, len(answers).to_bytes(2, "big") + answers)]
+        request = message(13, flight.get("request_body", b"\0\0\x08\0\x0d\0\4\0\2\4\3"))
         if flight.get("request"):
-            messages.append(message(13, b"\0\0\x08\0\x0d\0\4\0\2\4\3"))
+            messages.append(request)
         messages.append(message(11, certificate))
+        if flight.get("request_late"):
+            messages.append(request)
         for part in messages:
             transcript += part
         signature = leaf_key.sign(b" " * 64 + b"TLS 1.3, server CertificateVerify\0" +
@@ -37881,8 +38167,24 @@ def harness_tls_peer(argv):
             if header[0] != 23:
                 raise ValueError("client sent record type %d" % header[0])
             inner = reading.open(header, payload).rstrip(b"\0")
-            if inner[-1] == 22 and inner[0] == 20:
-                reading = client_ap
+            if inner[-1] == 22 and reading is client_hs:
+                # The client's flight: an empty Certificate when one was
+                # requested, then a Finished over everything before it.
+                sent = inner[:-1]
+                while sent:
+                    kind, size = sent[0], int.from_bytes(sent[1:4], "big")
+                    part, sent = sent[:4 + size], sent[4 + size:]
+                    if kind == 11 and flight.get("request") and \
+                            part == message(11, b"\0\0\0\0"):
+                        transcript += part
+                    elif kind == 20:
+                        key = expand_label(client_hs.secret, b"finished", b"", 32)
+                        if part[4:] != hmac_module.new(key, sha256(transcript),
+                                                       hashlib.sha256).digest():
+                            raise ValueError("the client's Finished does not verify")
+                        reading = client_ap
+                    else:
+                        raise ValueError("client sent handshake type %d" % kind)
             elif inner[-1] == 23:
                 request += inner[:-1]
             elif inner[-1] == 21:
@@ -37896,6 +38198,15 @@ def harness_tls_peer(argv):
                 sock.sendall(value)
             elif what == "rekey":
                 server_ap = server_ap.update()
+            elif what == "answer" and not flight.get("answer_deferred"):
+                # The client's own KeyUpdate, under its current key; what
+                # it writes next is under the one after. OpenSSL defers its
+                # answer to its next write (RFC 8446 4.6.3 allows either),
+                # and this client never writes again, so only wget's is read.
+                header, payload = read_record(sock)
+                if client_ap.open(header, payload).rstrip(b"\0") != key_update(0) + b"\x16":
+                    raise ValueError("the client did not answer the KeyUpdate")
+                client_ap = client_ap.update()
         sock.shutdown(socket.SHUT_WR)
         try:
             while sock.recv(4096):
@@ -37913,13 +38224,15 @@ def harness_tls_peer(argv):
                 return len(rest) >= int(value)
         return None
 
-    def openssl_client(port, expected, curve):
+    def openssl_client(port, expected, tls12):
+        # OpenSSL's default groups share X25519 (and a hybrid) and list
+        # P-256 and P-384 without shares, so it meets the same retries. It
+        # offers TLS 1.2 only against the TLS 1.2 scripts.
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        if curve:
-            context.set_ecdh_curve(curve)
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-        context.minimum_version = ssl.TLSVersion.TLSv1_3
+        context.minimum_version = (ssl.TLSVersion.TLSv1_2 if tls12
+                                   else ssl.TLSVersion.TLSv1_3)
         received = b""
         clean = False
         try:
@@ -37971,7 +38284,8 @@ def harness_tls_peer(argv):
                 port = listener.getsockname()[1]
                 outcome = []
                 server = threading.Thread(target=serve,
-                                          args=(listener, flight, steps, outcome),
+                                          args=(listener, dict(flight, answer_deferred=(
+                                              client == "openssl")), steps, outcome),
                                           daemon=True)
                 server.start()
                 if client == "wget":
@@ -37983,7 +38297,7 @@ def harness_tls_peer(argv):
                                         fetched.stdout == flight.get("body", body))
                 else:
                     verdicts[client] = bool(openssl_client(port, flight.get("body", body),
-                                                           flight.get("curve")))
+                                                           flight.get("tls12")))
                 server.join(25)
                 listener.close()
             expected = script in MUST_ACCEPT
@@ -38009,6 +38323,65 @@ def harness_tls_peer(argv):
                    "%s: wget %s what RFC 8446 says to %s" % (
                        script, "accepts" if ours else "refuses",
                        "accept" if expected else "refuse"))
+
+        # Real OpenSSL servers held to TLS 1.2: each leaf kind, signature
+        # scheme and key exchange group, a certificate request, and one
+        # without the extended master secret, which this client refuses by
+        # design (RFC 7627 lets it).
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        rsa_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        rsa_leaf = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+                    .public_key(rsa_key.public_key()).serial_number(8)
+                    .not_valid_before(now - datetime.timedelta(days=1))
+                    .not_valid_after(now + datetime.timedelta(days=30))
+                    .sign(rsa_key, hashes.SHA256()))
+        for kind, key, certificate_der in (("ec", leaf_key, leaf), ("rsa", rsa_key, rsa_leaf)):
+            (work / (kind + ".key")).write_bytes(key.private_bytes(
+                serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption()))
+            loaded = (certificate_der if kind == "rsa"
+                      else x509.load_der_x509_certificate(certificate_der))
+            (work / (kind + ".pem")).write_bytes(loaded.public_bytes(serialization.Encoding.PEM))
+        SERVERS12 = [
+            ("ECDSA P-256 leaf", "ec", [], True),
+            ("ECDSA P-256 leaf signing with SHA-384", "ec", ["-sigalgs", "ECDSA+SHA384"], True),
+            ("RSA leaf, RSA-PSS", "rsa", ["-sigalgs", "rsa_pss_rsae_sha256"], True),
+            ("RSA leaf, PKCS#1 v1.5 SHA-256", "rsa", ["-sigalgs", "RSA+SHA256"], True),
+            ("RSA leaf, PKCS#1 v1.5 SHA-384", "rsa", ["-sigalgs", "RSA+SHA384"], True),
+            ("P-256 key exchange", "ec", ["-groups", "P-256"], True),
+            ("P-384 key exchange", "ec", ["-groups", "P-384"], True),
+            ("a certificate requested", "ec", ["-verify", "1"], True),
+            ("no extended master secret", "ec", ["-no_ems"], False),
+        ]
+        if not shutil.which("openssl"):
+            print("tls peer: OpenSSL TLS 1.2 servers NOT RUN -- no openssl")
+            SERVERS12 = []
+        for label, kind, extra, expect in SERVERS12:
+            probe = socket.socket()
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+            probe.close()
+            server = subprocess.Popen(
+                ["openssl", "s_server", "-accept", "127.0.0.1:%d" % port, "-cert",
+                 str(work / (kind + ".pem")), "-key", str(work / (kind + ".key")),
+                 "-tls1_2", "-www", "-naccept", "1", *extra],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL)
+            ready = b""
+            for _ in range(8):
+                ready = server.stdout.readline()
+                if not ready or b"ACCEPT" in ready:
+                    break
+            fetched = subprocess.run(
+                [str(work / "wget"), "-q", "--no-check-certificate", "-O", "-",
+                 "https://127.0.0.1:%d/" % port], capture_output=True, timeout=40,
+                env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+            server.kill()
+            server.wait()
+            ours = (b"ACCEPT" in ready and fetched.returncode == 0 and
+                    b"TLSv1.2" in fetched.stdout)
+            checks(ours == expect, "OpenSSL TLS 1.2 server, %s: wget %s it" % (
+                label, "accepts" if ours else "refuses"))
     return checks.verdict("tls peer", "tls-peer")
 
 
@@ -40155,6 +40528,47 @@ def tls_seed_server_hello(group=0x1d, extra=b""):
                             len(extensions).to_bytes(2, "big") + extensions)
 
 
+def tls_seed_retry(group=None, cookie=None, suite=b"\x13\1"):
+    """A HelloRetryRequest record asking for group and echoing cookie."""
+    extensions = b"\0\x2b\0\2\3\4"
+    if group is not None:
+        extensions += b"\0\x33\0\2" + group.to_bytes(2, "big")
+    if cookie is not None:
+        extensions += (b"\0\x2c" + (len(cookie) + 2).to_bytes(2, "big") +
+                       len(cookie).to_bytes(2, "big") + cookie)
+    return tls_seed_record(22, tls_seed_message(
+        2, b"\3\3" + hashlib.sha256(b"HelloRetryRequest").digest() + b"\0" + suite +
+        b"\0" + len(extensions).to_bytes(2, "big") + extensions))
+
+
+def tls_seed_hello12(suite=0xc02b, extensions=b"\0\x17\0\0\xff\1\0\1\0", random=b"\x42" * 32):
+    """A TLS 1.2 ServerHello: the suite, a session id, extensions."""
+    return tls_seed_message(2, b"\3\3" + random + b"\x20" + b"\x5e" * 32 +
+                            suite.to_bytes(2, "big") + b"\0" +
+                            len(extensions).to_bytes(2, "big") + extensions)
+
+
+def tls_seed_flight12(leaf=0, group=0x1d, scheme=b"\4\3", request=False):
+    """Certificate (one entry whose last byte picks the stubbed leaf),
+    ServerKeyExchange on group, an optional CertificateRequest, and
+    ServerHelloDone."""
+    size = {0x1d: 32, 0x17: 65, 0x18: 97}[group]
+    point = (b"\4" if size > 32 else b"\x09") + b"\x09" * (size - 1)
+    signature = b"\x30\x06\1\1\1\1\1\1"
+    exchange = (b"\3" + group.to_bytes(2, "big") + bytes([size]) + point + scheme +
+                len(signature).to_bytes(2, "big") + signature)
+    return (tls_seed_message(11, b"\0\0\x05\0\0\2\x30" + bytes([leaf])) +
+            tls_seed_message(12, exchange) +
+            (tls_seed_message(13, b"\1\x40\0\2\4\3\0\0") if request else b"") +
+            tls_seed_message(14, b""))
+
+
+def tls_seed_sealed12(kind, content, tag=0):
+    """A TLS 1.2 record under the identity AEAD: explicit nonce, content,
+    the tag whose first byte opens it when zero."""
+    return tls_seed_record(kind, b"\0" * 8 + content + bytes([tag]) + b"\0" * 15)
+
+
 def tls_seed_flight(leaf=0, scheme=b"\4\3", signature=b"\x30\x06\1\1\1\1\1\1"):
     """EncryptedExtensions, Certificate (its last byte picks the stubbed
     leaf), CertificateVerify and a Finished of the stub MAC's zeros."""
@@ -40182,10 +40596,24 @@ def tls_seed_connections():
     control = b"\0\0\0\1"
     seeds = {
         "conn_x25519.bin": (control, hello, ccs, flight, data, close),
-        "conn_p256.bin": (control, tls_seed_record(22, tls_seed_server_hello(0x17)),
-                          flight, data, close),
-        "conn_p384_leaf.bin": (b"\0\0\1\2", tls_seed_record(22, tls_seed_server_hello(0x18)),
+        "conn_p256.bin": (control, tls_seed_retry(0x17),
+                          tls_seed_record(22, tls_seed_server_hello(0x17)), flight, data, close),
+        "conn_p384_leaf.bin": (b"\0\0\1\2", tls_seed_retry(0x18),
+                               tls_seed_record(22, tls_seed_server_hello(0x18)),
                                tls_seed_sealed(22, tls_seed_flight(1, b"\5\3")), data, close),
+        "conn_retry_cookie.bin": (control, tls_seed_retry(None, b"c" * 40), hello, flight,
+                                  data, close),
+        "conn_retry_group_cookie_ccs.bin": (control, tls_seed_retry(0x17, b"k" * 3000), ccs,
+                                            tls_seed_record(22, tls_seed_server_hello(0x17)),
+                                            flight, data, close),
+        "conn_retry_twice.bin": (control, tls_seed_retry(None, b"c"), tls_seed_retry(0x17),
+                                 tls_seed_record(22, tls_seed_server_hello(0x17)), flight, close),
+        "conn_retry_same_group.bin": (control, tls_seed_retry(0x1d), hello, flight, close),
+        "conn_retry_group_changed.bin": (control, tls_seed_retry(0x17),
+                                         tls_seed_record(22, tls_seed_server_hello(0x18)),
+                                         flight, close),
+        "conn_unasked_p256.bin": (control, tls_seed_record(22, tls_seed_server_hello(0x17)),
+                                  flight, close),
         "conn_rsa_leaf.bin": (b"\2\0\1\3", hello,
                               tls_seed_sealed(22, tls_seed_flight(2, b"\x08\4", b"\1" * 256)),
                               data, close),
@@ -40217,6 +40645,16 @@ def tls_seed_connections():
             tls_seed_sealed(22, tls_seed_ticket()[:9]), close),
         "conn_key_update.bin": (control,) + base + (
             tls_seed_sealed(22, tls_seed_message(24, b"\1")), data, close),
+        "conn_key_update_quiet.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\0")), data,
+            tls_seed_sealed(22, tls_seed_message(24, b"\1")), data, close),
+        "conn_key_update_bad_byte.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\2")), data, close),
+        "conn_key_update_split.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\1")[:2]),
+            tls_seed_sealed(22, tls_seed_message(24, b"\1")[2:]), data, close),
+        "conn_key_update_then_ticket.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\0") + tls_seed_ticket()), data, close),
         "conn_empty_app.bin": (control,) + base + (tls_seed_sealed(23, b""),) * 8 + (data, close),
         "conn_empty_handshake_in_flight.bin": (control, hello, tls_seed_sealed(22, b""),
                                                flight, close),
@@ -40251,6 +40689,58 @@ def tls_seed_connections():
         "conn_ee_unrequested.bin": (control, hello, tls_seed_sealed(22, (
             tls_seed_message(8, b"\0\4\0\x10\0\0") + tls_seed_flight()[6:])), close),
     }
+    # TLS 1.2: the flight after its ServerHello in plaintext, the server's
+    # change_cipher_spec, then a Finished of the stub PRF's zeros.
+    hello12 = tls_seed_record(22, tls_seed_hello12() + tls_seed_flight12())
+    finished12 = tls_seed_sealed12(22, tls_seed_message(20, b"\0" * 12))
+    data12 = tls_seed_sealed12(23, b"GET-response " * 40)
+    close12 = tls_seed_sealed12(21, b"\1\0")
+    done12 = (hello12, ccs, finished12)
+    seeds.update({
+        "conn12_ecdsa.bin": (control,) + done12 + (data12, close12),
+        "conn12_rsa_pss.bin": (b"\2\0\1\5", tls_seed_record(22, tls_seed_hello12(0xc02f) +
+                                                             tls_seed_flight12(2, 0x1d, b"\x08\4")),
+                               ccs, finished12, data12, close12),
+        "conn12_rsa_pkcs1_p256.bin": (control, tls_seed_record(22, tls_seed_hello12(0xc02f) +
+                                                                tls_seed_flight12(2, 0x17, b"\4\1")),
+                                      ccs, finished12, data12, close12),
+        "conn12_p384_request.bin": (control, tls_seed_record(22, tls_seed_hello12() +
+                                                              tls_seed_flight12(1, 0x18, b"\5\3", True)),
+                                    ccs, finished12, data12, close12),
+        "conn12_split_records.bin": (control, tls_seed_record(22, tls_seed_hello12()),
+                                     tls_seed_record(22, tls_seed_flight12()[:7]),
+                                     tls_seed_record(22, tls_seed_flight12()[7:]),
+                                     ccs, finished12, data12, close12),
+        "conn12_empty_app.bin": (control,) + done12 + (tls_seed_sealed12(23, b""), data12, close12),
+        "conn12_sentinel.bin": (control, tls_seed_record(22, tls_seed_hello12(
+            random=b"\x42" * 24 + b"DOWNGRD\1") + tls_seed_flight12()), ccs, finished12),
+        "conn12_no_ems.bin": (control, tls_seed_record(22, tls_seed_hello12(
+            extensions=b"\xff\1\0\1\0") + tls_seed_flight12()), ccs, finished12),
+        "conn12_after_retry.bin": (control, tls_seed_retry(0x17), hello12, ccs, finished12),
+        "conn12_encrypted_extensions.bin": (control, tls_seed_record(22, tls_seed_hello12() +
+                                                                      tls_seed_message(8, b"\0\0") +
+                                                                      tls_seed_flight12()),
+                                            ccs, finished12),
+        "conn12_ccs_before_done.bin": (control, tls_seed_record(22, tls_seed_hello12()), ccs,
+                                       tls_seed_record(22, tls_seed_flight12()), finished12),
+        "conn12_bytes_after_done.bin": (control, tls_seed_record(22, tls_seed_hello12() +
+                                                                  tls_seed_flight12() + b"\x14"),
+                                        ccs, finished12),
+        "conn12_finished_unprotected.bin": (control, hello12,
+                                            tls_seed_record(22, tls_seed_message(20, b"\0" * 12))),
+        "conn12_two_ccs.bin": (control,) + done12[:2] + (ccs, finished12),
+        "conn12_hello_request.bin": (control,) + done12 + (
+            tls_seed_sealed12(22, tls_seed_message(0, b"")), data12),
+        "conn12_key_update.bin": (control,) + done12 + (
+            tls_seed_sealed12(22, tls_seed_message(24, b"\0")), data12),
+        "conn12_ticket.bin": (control,) + done12 + (tls_seed_sealed12(22, tls_seed_ticket()), data12),
+        "conn12_bad_tag.bin": (control,) + done12 + (tls_seed_sealed12(23, b"x", tag=1),),
+        "conn12_suite_leaf_mismatch.bin": (control, tls_seed_record(22, tls_seed_hello12(0xc02f) +
+                                                                     tls_seed_flight12(0)),
+                                           ccs, finished12),
+        "conn12_read_limit.bin": (b"\4\0\0\5",) + done12 + (data12,) * 4 + (close12,),
+        "conn12_write_limit.bin": (b"\x08\0\0\6",) + done12 + (data12, close12),
+    })
     return {name: tls_seed_connection(parts[0], *parts[1:]) for name, parts in seeds.items()}
 
 
@@ -40276,11 +40766,36 @@ def tls_fuzz_seeds(corpus):
     seeds = {name + ".bin": bytes.fromhex(hx)
              for name, hx in TLS_FUZZ_SEED_HEX[corpus].items()}
     if corpus == "tls_hs":
+        # The framing fixtures are handshake bytes, some as chunks (a
+        # 16-bit length before each); they become the records of a
+        # connection: a ServerHello's own, or the flight after an X25519
+        # ServerHello, sealed.
+        hello = tls_seed_record(22, tls_seed_server_hello())
+        connections = {}
+        for name, raw in seeds.items():
+            if raw[:1] in (b"\xf1", b"\xf2"):
+                raw = raw[1:]
+            pieces = [raw]
+            if "chunks" in name:
+                pieces, at = [], 0
+                while at + 2 <= len(raw):
+                    size = int.from_bytes(raw[at:at + 2], "big")
+                    pieces.append(raw[at + 2:at + 2 + size])
+                    at += 2 + size
+            if name.startswith("sh_"):
+                records = tuple(tls_seed_record(22, piece) for piece in pieces)
+            else:
+                records = (hello,) + tuple(tls_seed_sealed(22, piece) for piece in pieces)
+            connections[name] = tls_seed_connection(b"\0\0\0\1", *records)
         fill = b"\x0b\x00\x40\x00" + b"\xcd" * 16380
-        seeds["hs_max_fill.bin"] = fill
-        seeds["hs_max_plus_chunks.bin"] = b"\x40\x00" + fill + b"\x00\x01\x00"
-        seeds.update(tls_seed_connections())
-        return seeds
+        connections["hs_max_fill.bin"] = tls_seed_connection(
+            b"\0\0\0\1", hello, tls_seed_sealed(22, fill[:16000]),
+            tls_seed_sealed(22, fill[16000:]))
+        connections["hs_max_plus.bin"] = tls_seed_connection(
+            b"\0\0\0\1", hello, tls_seed_sealed(22, fill[:16000]),
+            tls_seed_sealed(22, fill[16000:] + b"\0"))
+        connections.update(tls_seed_connections())
+        return connections
     minimal = seeds["minimal_cert.bin"]
     for count, name in ((1, "cert_list_1"), (7, "cert_list_7"), (8, "cert_list_8"),
                         (9, "cert_list_9_leftover"), (2, "cert_list_two_minimal")):
@@ -41479,9 +41994,10 @@ def harness_tls_hs_fuzz(argv):
     tls_write, reads arriving in PRNG-sized pieces with interruptions. What
     ASan cannot see inside the connection is asserted: the buffer offsets,
     lent spans that must not move while tls_lend gathers more, and a closed
-    connection that must stay closed. Magics 0xf1 / 0xf2 keep the framing
-    walks over tls_encrypted_flight_append (tls=null) and
-    tls_handshake_one_append. Seeds from tls_fuzz_seeds("tls_hs"). Bounded
+    connection that must stay closed. Every input is a connection (the
+    seeds' leading 0xf3 is optional); the framing seeds of the old
+    ServerHello and flight walks arrive as records of one. Seeds from
+    tls_fuzz_seeds("tls_hs"). Bounded
     fixed-seed run; return 2 (NOT RUN) when clang/libFuzzer is unavailable.
     Expected TLS_FAIL is ignored; only sanitizer reports and the asserts fail
     the lane (or MSan when MOONWATER_MSAN=1). Override MOONWATER_FUZZ_RUNS /
@@ -41703,6 +42219,22 @@ static bool crypto_rsa_pss_sha256(p8 address_to n, positive n_length, p64 e,
         fuzz_mix(sink, 1, message, message_length, sink[0]);
         return signature_length && signature[0] != 0xff;
 }
+static bool crypto_rsa_pkcs1(p8 address_to n, positive n_length, p64 e,
+                             p8 address_to signature, positive signature_length,
+                             const p8 address_to info, positive info_length,
+                             p8 address_to hash, positive hash_length)
+{
+        p8 sink[1];
+        fuzz_mix(sink, 1, n, n_length, e);
+        fuzz_mix(sink, 1, info, info_length, sink[0]);
+        fuzz_mix(sink, 1, hash, hash_length, sink[0]);
+        return signature_length && signature[0] != 0xff;
+}
+static fn crypto_put_be64(p8 address_to bytes, p64 value)
+{
+        for (int i = 0; i < 8; i++)
+                bytes[i] = (p8)(value >> (56 - 8 * i));
+}
 static fn crypto_aesgcm_prepare(crypto_aesgcm_key address_to key,
                                 p8 address_to raw)
 {
@@ -41731,8 +42263,13 @@ static bool crypto_aesgcm_open(crypto_aesgcm_key address_to key,
         fuzz_mix(sink, 1, iv, 12, sink[0]);
         fuzz_mix(sink, 1, aad, aad_length, sink[0]);
         fuzz_mix(sink, 1, text, text_length, sink[0]);
-        if (aad_length != 5 || aad[0] != 23 || aad[1] != 3 || aad[2] != 3 ||
-            network_load_16(aad + 3) != text_length + 16)
+        /* TLS 1.3's AAD is the record header; TLS 1.2's the sequence, the
+           header's type and version, and the plaintext's length. */
+        if (aad_length == 13
+                ? aad[8] < 21 || aad[8] > 23 || aad[9] != 3 || aad[10] != 3 ||
+                      network_load_16(aad + 11) != text_length
+                : aad_length != 5 || aad[0] != 23 || aad[1] != 3 ||
+                      aad[2] != 3 || network_load_16(aad + 3) != text_length + 16)
                 abort();
         if (tag[0])
         {
@@ -41823,19 +42360,30 @@ static bool network_deadline_begin(network_deadline address_to deadline,
         deadline->budget = seconds * 1000000000ul + nanoseconds;
         return deadline->budget != 0;
 }
-/* Whatever the client sends has to be one well-formed record, every byte
-   written. */
+/* Whatever the client sends has to be whole, well-formed records, every
+   byte written. */
 static bool network_stream_send_all(bipolar handle, p8 address_to data,
                                     positive length)
 {
         p8 sink[1];
 
         (void)handle;
-        if (length < 5 || data[1] != 3 || data[2] != 3 ||
-            network_load_16(data + 3) != length - 5 ||
-            (data[0] != 22 && data[0] != 23) ||
-            (data[0] == 23 && length < 5 + 17) || length > 5 + 16640)
+        if (!length)
                 abort();
+        for (positive at = 0; at < length;)
+        {
+                positive size;
+
+                if (length - at < 5 || data[at + 1] != 3 || data[at + 2] != 3)
+                        abort();
+                size = network_load_16(data + at + 3);
+                if (size > length - at - 5 ||
+                    (data[at] == 20 ? size != 1 || data[at + 5] != 1
+                                    : data[at] != 22 && data[at] != 23) ||
+                    (data[at] == 23 && size < 17) || size > 16640)
+                        abort();
+                at += 5 + size;
+        }
         fuzz_mix(sink, 1, data, length, 9);
         if (sink[0] == 0x5a && fuzz_state == 0)
                 abort();
@@ -41856,7 +42404,9 @@ static bipolar string_to_host(string_address host)
 
     stubs = r"""
 /* The certificate verdict is another lift's: here the Certificate body's last
-   byte picks the leaf (0 P-256, 1 P-384, 2 RSA) and 0xff refuses it. */
+   byte picks the leaf (0 P-256, 1 P-384, 2 RSA) and 0xff refuses it; when
+   that byte is 0, the one three before it picks, which is a TLS 1.2 list's
+   last certificate byte once relaid with its empty extensions. */
 static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                                   string_address host, tls_conn address_to tls)
 {
@@ -41864,7 +42414,12 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
 
         if (!body_length || !host || body[body_length - 1] == 0xff)
                 return false;
-        kind = body[body_length - 1] % 3;
+        kind = body[body_length - 1];
+        if (!kind && body_length > 3)
+                kind = body[body_length - 3];
+        if (kind == 0xff)
+                return false;
+        kind %= 3;
         tls->leaf_curve = (p8)(1 + kind);
         memset(tls->leaf_qx, 0x11, sizeof tls->leaf_qx);
         memset(tls->leaf_qy, 0x22, sizeof tls->leaf_qy);
@@ -42044,147 +42599,6 @@ static fn fuzz_connection(const p8 *data, positive length)
         free(tls);
 }
 
-static void fuzz_flight_chunks(p8 *data, positive length)
-{
-        p8 *hs;
-        positive used = 0;
-        p8 flight = TLS_SERVER_FLIGHT_EE;
-        positive messages = 0;
-        positive at = 0;
-
-        hs = (p8 *)malloc(TLS_HS_MAX);
-        if (!hs)
-                return;
-        memory_fill(hs, 0, TLS_HS_MAX);
-
-        while (at + 2 <= length)
-        {
-                positive frag = ((positive)data[at] << 8) | data[at + 1];
-                at += 2;
-                if (at + frag > length)
-                        frag = length - at;
-                (void)tls_encrypted_flight_append(
-                    null, hs, TLS_HS_MAX, address_of used, address_of flight,
-                    data + at, frag, address_of messages);
-                at += frag;
-                if (used == TLS_HS_MAX)
-                {
-                        p8 one = 0;
-                        (void)tls_encrypted_flight_append(
-                            null, hs, TLS_HS_MAX, address_of used,
-                            address_of flight, address_of one, 1,
-                            address_of messages);
-                        break;
-                }
-        }
-        free(hs);
-}
-
-static void fuzz_flight_splits(p8 *data, positive length)
-{
-        p8 *hs;
-        positive used;
-        p8 flight;
-        positive messages;
-        positive split;
-
-        if (!length || length > 512)
-                return;
-
-        hs = (p8 *)malloc(TLS_HS_MAX);
-        if (!hs)
-                return;
-
-        for (split = 0; split <= length; split++)
-        {
-                used = 0;
-                flight = TLS_SERVER_FLIGHT_EE;
-                messages = 0;
-                memory_fill(hs, 0, TLS_HS_MAX);
-                if (split)
-                        (void)tls_encrypted_flight_append(
-                            null, hs, TLS_HS_MAX, address_of used,
-                            address_of flight, data, split,
-                            address_of messages);
-                if (split < length)
-                        (void)tls_encrypted_flight_append(
-                            null, hs, TLS_HS_MAX, address_of used,
-                            address_of flight, data + split, length - split,
-                            address_of messages);
-        }
-        free(hs);
-}
-
-static void fuzz_flight_whole(p8 *data, positive length)
-{
-        p8 *hs;
-        positive used = 0;
-        p8 flight = TLS_SERVER_FLIGHT_EE;
-        positive messages = 0;
-
-        hs = (p8 *)malloc(TLS_HS_MAX);
-        if (!hs)
-                return;
-        memory_fill(hs, 0, TLS_HS_MAX);
-        (void)tls_encrypted_flight_append(
-            null, hs, TLS_HS_MAX, address_of used, address_of flight, data,
-            length, address_of messages);
-        if (used == TLS_HS_MAX)
-        {
-                p8 one = 0;
-                (void)tls_encrypted_flight_append(
-                    null, hs, TLS_HS_MAX, address_of used, address_of flight,
-                    address_of one, 1, address_of messages);
-        }
-        free(hs);
-}
-
-static void fuzz_server_hello_chunks(p8 *data, positive length)
-{
-        p8 held[512];
-        positive used = 0;
-        positive at = 0;
-
-        memory_fill(held, 0, sizeof held);
-        while (at + 2 <= length)
-        {
-                positive frag = ((positive)data[at] << 8) | data[at + 1];
-                at += 2;
-                if (at + frag > length)
-                        frag = length - at;
-                (void)tls_handshake_one_append(held, sizeof held,
-                                               address_of used, data + at,
-                                               frag);
-                at += frag;
-                if (used >= sizeof held)
-                        break;
-        }
-}
-
-static void fuzz_server_hello_whole(p8 *data, positive length)
-{
-        p8 held[512];
-        positive used = 0;
-        positive split;
-
-        memory_fill(held, 0, sizeof held);
-        (void)tls_handshake_one_append(held, sizeof held, address_of used, data,
-                                       length);
-
-        if (!length || length > 256)
-                return;
-        for (split = 1; split < length; split++)
-        {
-                used = 0;
-                memory_fill(held, 0, sizeof held);
-                (void)tls_handshake_one_append(held, sizeof held,
-                                               address_of used, data, split);
-                (void)tls_handshake_one_append(held, sizeof held,
-                                               address_of used, data + split,
-                                               length - split);
-        }
-}
-
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         p8 *buf;
@@ -42201,30 +42615,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         if (length)
                 memcpy(buf, data, length);
 
-        payload = buf + 1;
-        payload_length = length ? length - 1 : 0;
-        /* Optional magic selects a focused path; remainder is the payload. */
+        /* The magic 0xf3 of the seeds is optional: every input is a
+           connection. */
+        payload = buf;
+        payload_length = length;
         if (length > 0 && buf[0] == 0xf3)
-                fuzz_connection(payload, payload_length);
-        else if (length > 0 && buf[0] == 0xf1)
         {
-                fuzz_flight_chunks(payload, payload_length);
-                fuzz_flight_whole(payload, payload_length);
-                fuzz_flight_splits(payload, payload_length);
+                payload = buf + 1;
+                payload_length = length - 1;
         }
-        else if (length > 0 && buf[0] == 0xf2)
-        {
-                fuzz_server_hello_chunks(payload, payload_length);
-                fuzz_server_hello_whole(payload, payload_length);
-        }
-        else
-        {
-                fuzz_flight_whole(buf, length);
-                fuzz_flight_chunks(buf, length);
-                fuzz_flight_splits(buf, length);
-                fuzz_server_hello_whole(buf, length);
-                fuzz_server_hello_chunks(buf, length);
-        }
+        fuzz_connection(payload, payload_length);
 
         free(buf);
         return 0;
