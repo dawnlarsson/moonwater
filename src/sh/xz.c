@@ -4170,7 +4170,10 @@ static b32 xz_stream_cli(bipolar in, bipolar out, bool decode, p8 level)
 
         xz_status = 0;
         xz_serial = file_codec_threads == 1;
-        if (decode && !xz_serial)
+        //      One CPU gains nothing from blocks decoded side by side, and the
+        //      batch held whole blocks of output: 148 MB where streaming
+        //      through the dictionary holds 13.
+        if (decode && !xz_serial && parallel_width() > 1)
                 ok = xz_par_decode(in, out);
         else if (decode)
         {
