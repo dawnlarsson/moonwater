@@ -10966,7 +10966,15 @@ bool test_variable_set(string_address name)
                                               address_of value_length) != null;
         }
 
-        return env_get(name) != null;
+        if (env_get(name) != null)
+                return true;
+        //      The variables bash answers when read are set to its -v too,
+        //      SHELLOPTS, RANDOM and LINENO among them, until unset; asked
+        //      by name so that RANDOM is not moved by the asking.
+        return shell_bash_compat && shell_dynamic_index(name, length) >= 0 &&
+               !shell_dynamic_removed(name, length) &&
+               (shell_trap_signal >= 0 ||
+                !memory_is_word(name, length, "BASH_TRAPSIG"));
 }
 
 static bool test_bash_unary_value(p8 letter, string_address operand)

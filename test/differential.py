@@ -15090,6 +15090,18 @@ def shell_lang_failglob_discard(rng):
             ("command", "stdin", "file"))
 
 
+#       The variables bash answers when read -- SHELLOPTS, BASHOPTS, RANDOM,
+#       LINENO, BASH_VERSION and the rest -- are set to test -v and [[ -v ]]
+#       until a script unsets one; BASH_TRAPSIG only inside a trap. These
+#       said none of them was set.
+def shell_lang_dynamic_set_tests(rng):
+    name = rng.choice(("SHELLOPTS", "BASHOPTS", "RANDOM", "LINENO", "BASH_VERSION", "EPOCHSECONDS", "SECONDS", "BASHPID",
+                       "GROUPS", "BASH_COMMAND", "SRANDOM", "BASH_TRAPSIG", "OSTYPE"))
+    form = rng.choice(("test -v %s", "[[ -v %s ]]", "unset %s; test -v %s", "[ -v %s ]"))
+    return ("dynamic-set-tests", shell_BASH, shell_program(
+        form.replace("%s", name) + '; echo "set=$?"', 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
 #       bash's kill takes -n signum where it takes -s, and -L where it
 #       takes -l; both were unknown signals named n and L.
 def shell_lang_kill_bash_options(rng):
@@ -18071,6 +18083,7 @@ SHELL_FAMILIES = (
     shell_lang_tilde_words,
     shell_lang_assigned_list_joins,
     shell_lang_failglob_discard,
+    shell_lang_dynamic_set_tests,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,
