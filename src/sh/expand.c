@@ -10410,6 +10410,16 @@ static bool expand_emit(positive at, positive stop, shell_words address_to out)
                                       pattern);
                         shell_status = 1;
                         expand_failed = true;
+                        //      bash drops the rest of the line with it,
+                        //      whatever holds the word -- a for list and a
+                        //      compound list too -- and under -e leaves.
+                        if (shell_bash_compat && !expand_errors_soft)
+                        {
+                                if (shell_options & ((positive)1 << ('e' - 'a')))
+                                        expand_fatal_status(1);
+                                else
+                                        exec_expand_input_error();
+                        }
                         return false;
                 }
 

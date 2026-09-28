@@ -15077,6 +15077,19 @@ def shell_lang_assigned_list_joins(rng):
         'set -- x "y z"; a=(p q)', ifs, "s=" + form + '; echo "[$s]"'), ("command", "stdin", "file"))
 
 
+#       A failglob refusal drops the rest of the line in bash whatever holds
+#       the word -- a for list and a compound list as well as a command --
+#       eval answering 1, and under set -e it ends the shell. The for list
+#       answered 1 and went on to the next command.
+def shell_lang_failglob_discard(rng):
+    line = rng.choice(("a=(*.ZZ); echo same $?", "for x in *.ZZ; do echo $x; done; echo same $?", "echo *.ZZ; echo same",
+                       "f() { echo *.ZZ; echo in-f; }; f; echo after-f", 'eval "echo *.ZZ; echo in"; echo after-eval $?',
+                       'x=$(echo *.ZZ; echo in); echo "cs [$x]"', "set -e; for x in *.ZZ; do :; done; echo not",
+                       "set -e; echo *.ZZ || echo alt; echo not", "case *.ZZ in *) echo case;; esac"))
+    return ("failglob-discard", shell_BASH, shell_program("shopt -s failglob", line, 'echo "next=$?"'),
+            ("command", "stdin", "file"))
+
+
 #       bash's kill takes -n signum where it takes -s, and -L where it
 #       takes -l; both were unknown signals named n and L.
 def shell_lang_kill_bash_options(rng):
@@ -18057,6 +18070,7 @@ SHELL_FAMILIES = (
     shell_lang_kill_bash_options,
     shell_lang_tilde_words,
     shell_lang_assigned_list_joins,
+    shell_lang_failglob_discard,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,
