@@ -4193,9 +4193,13 @@ static bool tsort_break_cycle(b32 address_to order, b32 address_to loop)
         return false;
 }
 
+/*      GNU takes -w and does nothing with it: every loop is already
+        reported, and the status is already 1 when one was. */
+static const argument_option tsort_options[] = {{"w", 0}, {null}};
+
 static b32 tools_tsort()
 {
-        tools_taking("tsort", tools_no_options);
+        tools_taking("tsort", tsort_options);
         utility_arena.used = 0;
 
         if (!file_take(address_of taking))
@@ -4255,24 +4259,25 @@ static b32 tools_tsort()
         positive tokens = 0;
         bool inside = false;
 
+        /*      A NUL byte is part of a token, as it is to GNU, whose names
+                are C strings: the node is the token up to its first NUL, so
+                "a\0b" and "a\0c" are one node named a, and a token that
+                starts with one is the empty name. Only the three blanks end
+                a token; each is overwritten with the terminator as the
+                graph is built. */
         for (positive at = 0; at < length; at++)
         {
                 p8 value = bytes[at];
 
-                if (!value)
-                        return text_done(string_diagnostic(&text_diagnostic, 1, path, "input contains a NUL byte"));
-
                 if (value == ' ' || value == '\t' || value == '\n')
-                {
-                        bytes[at] = end;
                         inside = false;
-                }
                 else if (!inside)
                 {
                         tokens++;
                         inside = true;
                 }
         }
+        bytes[length] = end;
 
         if (tokens & 1)
                 return text_done(string_diagnostic(&text_diagnostic, 1, path, "input contains an odd number of tokens"));
@@ -4327,14 +4332,23 @@ static b32 tools_tsort()
 
         while (at < length)
         {
-                at += memory_span_byte(bytes + at, 0, length - at);
+                while (at < length && (bytes[at] == ' ' || bytes[at] == '\t' ||
+                                       bytes[at] == '\n'))
+                        at++;
 
                 if (at == length)
                         break;
 
                 string_address name = bytes + at;
+
+                while (at < length && bytes[at] != ' ' && bytes[at] != '\t' &&
+                       bytes[at] != '\n')
+                        at++;
+                bytes[at] = end;
+                if (at < length)
+                        at++;
+
                 b32 node = tsort_node_for(name);
-                at += string_length(name);
 
                 if (before < 0)
                 {
