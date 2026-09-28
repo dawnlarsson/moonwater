@@ -11368,7 +11368,17 @@ counted
 #       A hostapd built with CONFIG_TESTING_OPTIONS (MOONWATER_HOSTAPD, or
 #       one on PATH that has them) adds the rekey family: rekeys started
 #       from its control socket. Without one that family is not run, and
-#       says so. MOONWATER_WIFI_TRANSCRIPT keeps the guest's transcript.
+#       says so -- and the lane is then blind to the rekeys a network makes
+#       forty minutes in. Distribution packages leave the option out; one
+#       builds in a minute (hostapd_cli beside it is copied too):
+#
+#           curl -LO https://w1.fi/releases/hostapd-2.11.tar.gz
+#           tar xzf hostapd-2.11.tar.gz && cd hostapd-2.11/hostapd
+#           cp defconfig .config
+#           printf 'CONFIG_LIBNL32=y\nCONFIG_TESTING_OPTIONS=y\nCONFIG_DEBUG_FILE=y\n' >> .config
+#           make -j8    # then MOONWATER_HOSTAPD=$PWD/hostapd
+#
+#       MOONWATER_WIFI_TRANSCRIPT keeps the guest's transcript.
 #
 lane_wifi()
 (
