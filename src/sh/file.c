@@ -8044,19 +8044,13 @@ static bool file_source_destination(string_address program, positive first,
                 bipolar why = target_looked < 0 ? target_looked
                                                 : -ERROR_NOT_DIRECTORY;
 
+                //      GNU's install opens a -t directory and names the
+                //      open's failure, a file there being Not a directory.
                 if (into && string_equals(program, (string_address) "install"))
-                {
-                        if (target_looked < 0)
-                                return string_report(
-                                    log_error, false,
-                                    "%s: failed to access %w: %s\n", program,
-                                    writer_shell_quoted_name, last,
-                                    file_reason(target_looked));
                         return string_report(
                             log_error, false,
-                            "%s: target %w is not a directory\n", program,
-                            writer_shell_quoted_name, last);
-                }
+                            "%s: failed to access %w: %s\n", program,
+                            writer_shell_quoted_name, last, file_reason(why));
 
                 if (into)
                         return string_report(
@@ -35114,6 +35108,7 @@ static bool install_loud;
 static bool install_no_target;
 static bool install_compare;
 static bool install_strip;
+static string_address install_strip_program;
 static b32 install_status;
 
 static const argument_option install_options[] = {
@@ -35126,8 +35121,10 @@ static const argument_option install_options[] = {
     {"group", 'g', ARGUMENT_REQUIRED},
     {"mode", 'm', ARGUMENT_REQUIRED},
     {"owner", 'o', ARGUMENT_REQUIRED},
+    {"preserve-context", 'X', ARGUMENT_LONG_ONLY},
     {"preserve-timestamps", 'p'},
-    {"strip", 's', ARGUMENT_LONG_ONLY},
+    {"strip", 's'},
+    {"strip-program", 'P', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"no-target-directory", 'T'},
     {"target-directory", 't', ARGUMENT_REQUIRED},
     {"verbose", 'v'},
@@ -35353,6 +35350,83 @@ static bool install_unchanged(bipolar source, file_facts address_to from,
         return true;
 }
 
+/*
+        -s: the strip program is run on the installed name, found on PATH,
+        with a name that begins with a dash handed over as ./-name so it is
+        not read as an option. A program that cannot be run is told apart
+        from one that ran and failed, as GNU's posix_spawnp tells them: the
+        child reports a refused exec through a pipe that closes on exec.
+*/
+static bool install_strip_run(string_address name)
+{
+        static p8 safe[FILE_PATH_MAX + 2];
+        string_address words[3];
+        string_address program = install_strip_program
+                                     ? install_strip_program
+                                     : (string_address) "strip";
+
+        words[0] = program;
+        words[1] = name;
+        words[2] = null;
+        if (string_is(name, '-') && string_length(name) < FILE_PATH_MAX)
+        {
+                safe[0] = '.';
+                safe[1] = '/';
+                memory_copy_apart_end(safe + 2, name, string_length(name));
+                words[1] = safe;
+        }
+
+        b32 ends[2];
+        log_flush();
+        if (system_pipe(ends, O_CLOEXEC) < 0)
+                return string_report(log_error, false, "install: cannot run strip program %w: %s\n",
+                                     writer_shell_quoted_name, program,
+                                     file_reason(-ERROR_NO_MEMORY));
+
+        bipolar child = system_fork();
+        if (child == 0)
+        {
+                system_close(ends[0]);
+                bipolar answer = file_exec_path_try(words);
+                (void)system_write_all_checked((positive)ends[1],
+                                               address_of answer,
+                                               sizeof(answer));
+                exit(127);
+        }
+        system_close(ends[1]);
+
+        bipolar refused = 0;
+        bipolar got = child < 0 ? 0
+                                : system_read_retry((positive)ends[0],
+                                                    address_of refused,
+                                                    sizeof(refused));
+        system_close(ends[0]);
+
+        positive status = 0;
+        bipolar waited = child < 0 ? child
+                                   : system_wait4_retry(child,
+                                                        address_of status, 0,
+                                                        null);
+
+        if (child < 0 || got == sizeof(refused))
+        {
+                string_format(log_error,
+                              string_equals(program, (string_address) "strip")
+                                  ? "install: cannot run %w: %s\n"
+                                  : "install: cannot run strip program %w: %s\n",
+                              writer_shell_quoted_name, program,
+                              file_reason(child < 0 ? child : refused));
+                return false;
+        }
+        if (waited < 0)
+                return string_report(log_error, false, "install: waiting for strip: %s\n",
+                                     file_reason(waited));
+        if ((status & 0x7f) || wait_status_code(status))
+                return string_report(log_error, false,
+                                     "install: strip process terminated abnormally\n");
+        return true;
+}
+
 static fn install_pair(string_address source, string_address destination)
 {
         static p8 source_leaf[FILE_PATH_MAX];
@@ -35362,6 +35436,12 @@ static fn install_pair(string_address source, string_address destination)
                          file_look_code(source_directory, source_leaf, 0,
                                         address_of from);
 
+        //      A name with no parent to open, '.' or '/', is looked at
+        //      where it is, so a directory is omitted rather than refused.
+        if (looked < 0 &&
+            file_look_code(AT_FDCWD, source, 0, address_of from) >= 0 &&
+            (from.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                looked = 0;
         if (looked < 0 || (from.mode & MODE_FORMAT) != MODE_FILE)
         {
                 if (source_directory >= 0)
@@ -35517,8 +35597,38 @@ static fn install_pair(string_address source, string_address destination)
                               destination_directory, destination_leaf,
                               address_of to))
         {
+                //      A copy -C found already there still takes the
+                //      source's times under -p, as GNU gives a skipped one.
+                if (install_preserve)
+                {
+                        p64 times[4];
+
+                        file_times_of(address_of from, times);
+                        (void)system_update_times_at(destination_directory,
+                                                     destination_leaf, times,
+                                                     AT_SYMLINK_NOFOLLOW);
+                }
                 system_close(destination_directory);
                 system_close(source_handle);
+                return;
+        }
+
+        /* GNU's copy.c, as cp and mv have it, once -C has had its say:
+           install a b dir with a and b one name does not put the second
+           over the first it has just made, unless numbered backups keep
+           both. */
+        if (destination_exists &&
+            (to.mode & MODE_FORMAT) != MODE_DIRECTORY &&
+            file_backup_kind != 'n' &&
+            file_made_seen(destination_leaf, address_of to))
+        {
+                string_format(log_error,
+                              "install: will not overwrite just-created %w with %w\n",
+                              writer_shell_quoted_name, destination,
+                              writer_shell_quoted_name, source);
+                system_close(destination_directory);
+                system_close(source_handle);
+                install_status = 1;
                 return;
         }
 
@@ -35558,18 +35668,23 @@ static fn install_pair(string_address source, string_address destination)
 
         bool copied = file_copy_handles(source_handle, destination_handle);
         system_close(source_handle);
-        bool attributed = copied && install_attributes_handle(
-                                      destination_handle, destination,
-                                      address_of from);
+        //      Under -s the copy stays 0600 until strip has run, since
+        //      a strip that rewrites its file may not open a read-only one;
+        //      the attributes are given after it, as GNU gives them.
+        bool attributed = copied &&
+                          (install_strip ||
+                           install_attributes_handle(destination_handle,
+                                                     destination,
+                                                     address_of from));
         bipolar published = file_stage_publish_protected_at(
             address_of protected, destination_directory, destination_leaf,
             destination_handle,
             attributed ? 0 : -ERROR_INPUT_OUTPUT, !destination_exists,
             destination_exists ? address_of to : null, 0);
-        system_close(destination_directory);
 
         if (!copied || published < 0)
         {
+                system_close(destination_directory);
                 string_format(log_error, "install: cannot publish %w\n",
                               writer_shell_quoted_name, destination);
                 install_status = 1;
@@ -35577,6 +35692,7 @@ static fn install_pair(string_address source, string_address destination)
         }
         if (!attributed)
         {
+                system_close(destination_directory);
                 install_status = 1;
                 return;
         }
@@ -35585,20 +35701,36 @@ static fn install_pair(string_address source, string_address destination)
                 file_backup_told(source, destination, (string_address) "'",
                                  (string_address) "' -> '");
 
+        /*      A failed strip takes the file away again. What a strip that
+                worked leaves at the name -- the same file or a new one it
+                renamed there -- is given the owner, mode and times now. */
         if (install_strip)
         {
-                string_address words[3];
+                bool stripped = install_strip_run(destination);
+                bipolar again = stripped
+                                    ? system_open_at(destination_directory,
+                                                     destination_leaf,
+                                                     O_PATH | O_NOFOLLOW |
+                                                         O_CLOEXEC)
+                                    : -1;
 
-                words[0] = (string_address) "strip";
-                words[1] = destination;
-                words[2] = null;
-                if (file_run(words, -1))
-                {
-                        log_error("install: strip process terminated abnormally\n",
-                                  0);
+                if (!stripped)
+                        (void)system_remove_at(destination_directory,
+                                               destination_leaf, 0);
+                else if (again < 0)
+                        string_format(log_error, "install: cannot stat %w: %s\n",
+                                      writer_shell_quoted_name, destination,
+                                      file_reason(again));
+                else if (!install_attributes_handle(again, destination,
+                                                    address_of from))
+                        stripped = false;
+                if (again >= 0)
+                        system_close(again);
+                if (!stripped || again < 0)
                         install_status = 1;
-                }
         }
+        file_made_now(destination_directory, destination_leaf);
+        system_close(destination_directory);
 }
 
 static fn install_directory_told(string_address path)
@@ -35607,12 +35739,36 @@ static fn install_directory_told(string_address path)
                       writer_shell_quoted_name, path);
 }
 
+/* What GNU weighs once the operands and the mode are read: the strip
+   program without -s, -C with -s, a mode -C cannot compare, and then the
+   owner and the group by name. */
+static bool install_late_checks(string_address owner, string_address group)
+{
+        if (install_strip_program && !install_strip)
+                log_error("install: WARNING: ignoring --strip-program option as -s option was not specified\n",
+                          0);
+        if (install_strip && install_compare)
+        {
+                log_error("install: options --compare (-C) and --strip are mutually exclusive\n",
+                          0);
+                return file_try_help((string_address) "install");
+        }
+        if (install_compare && (install_mode & ~0777))
+                log_error("install: the --compare (-C) option is ignored when you specify a mode with non-permission bits\n",
+                          0);
+        return (!owner || install_identity(owner, false, address_of install_owner)) &&
+               (!group || install_identity(group, true, address_of install_group));
+}
+
 static bool install_option_seen(p8 letter, string_address value)
 {
         if (!file_backup_seen((string_address) "install", letter, value))
                 return false;
         if (!file_into_option_seen((string_address) "install", letter, value))
                 return false;
+        if (letter == 'X')
+                log_error("install: WARNING: ignoring --preserve-context; this kernel is not SELinux-enabled\n",
+                          0);
         /* GNU warns while parsing --context=VALUE; bare -Z/--context stay quiet. */
         if (letter == 'Z' && value && string_get(value))
                 log_error("install: warning: ignoring --context; it requires an SELinux-enabled kernel\n",
@@ -35626,6 +35782,8 @@ static b32 file_install()
 
         file_taking taking = {
             .program = (string_address) "install",
+            .operand = file_operand,
+            .posix_order = true,
             .options = install_options,
             .seen = install_option_seen,
         };
@@ -35635,12 +35793,21 @@ static b32 file_install()
         install_group = -1;
         install_status = 0;
         install_strip = false;
+        install_strip_program = null;
         file_into_seen = null;
         file_join_source_path = false;
         file_backup_control_named = null;
 
+        file_operands_begin();
         if (!file_take(address_of taking))
                 return 1;
+        if (file_operand_failed)
+                return string_report(log_error, 1, "%s: memory exhausted\n",
+                                     (string_address) "install");
+        //      Options may follow the names, as getopt permutes them;
+        //      the names are gathered in order and read from there.
+        taking.first = 0;
+        count = file_operand_count;
         if (!file_backup_taken(address_of taking,
                                (string_address)"install"))
                 return 1;
@@ -35658,19 +35825,14 @@ static b32 file_install()
         install_no_target = (flags & FILE_FLAG('T')) != 0;
         install_compare = (flags & FILE_FLAG('C')) != 0;
         install_strip = (flags & FILE_FLAG('s')) != 0;
+        install_strip_program = file_option_value(address_of taking, 'P');
 
-        if (install_strip && install_compare)
-                return string_report(
-                    log_error, 1,
-                    "install: options --compare (-C) and --strip are mutually exclusive\n");
+        //      GNU's order: the two refusals of a directory install, then
+        //      the operands and the mode, then install_late_checks.
         if (install_strip && directories)
                 return string_report(
                     log_error, 1,
                     "install: the strip option may not be used when installing a directory\n");
-
-        if ((owner && !install_identity(owner, false, address_of install_owner)) ||
-            (group && !install_identity(group, true, address_of install_group)))
-                return 1;
 
         if (directories)
         {
@@ -35679,23 +35841,29 @@ static b32 file_install()
                             log_error, 1,
                             "install: target directory not allowed when installing a directory\n");
                 if (taking.first >= count)
-                        return string_report(log_error, 1,
-                                             "install: missing file operand\n");
+                {
+                        log_error("install: missing file operand\n", 0);
+                        return !file_try_help((string_address) "install");
+                }
                 if ((flags & FILE_FLAG('T')) && count - taking.first > 2)
-                        return string_report(
-                            log_error, 1, "install: extra operand '%w'\n",
-                            writer_terminal_quoted_name,
-                            program_argument((b32)(taking.first + 2)));
+                {
+                        string_format(log_error, "install: extra operand '%w'\n",
+                                      writer_terminal_quoted_name,
+                                      file_operand_at(taking.first + 2));
+                        return !file_try_help((string_address) "install");
+                }
                 if (mode &&
                     !file_mode_of(mode, 0, true, address_of install_mode))
                         return string_report(log_error, 1,
                                              "install: invalid mode '%w'\n",
                                              writer_terminal_quoted_name,
                                              mode);
+                if (!install_late_checks(owner, group))
+                        return 1;
 
                 for (positive at = taking.first; at < count; at++)
                 {
-                        string_address path = program_argument((b32)at);
+                        string_address path = file_operand_at(at);
                         p8 leaf[FILE_PATH_MAX];
                         p8 failing[FILE_PATH_MAX];
                         bipolar parent = -1;
@@ -35749,19 +35917,23 @@ static b32 file_install()
         }
 
         if (taking.first >= count)
-                return string_report(log_error, 1, "install: missing file operand\n");
+        {
+                log_error("install: missing file operand\n", 0);
+                return !file_try_help((string_address) "install");
+        }
         if (!into && taking.first + 1 >= count)
-                return string_report(
-                    log_error, 1,
-                    "install: missing destination file operand after %w\n",
-                    writer_shell_quoted_name,
-                    program_argument((b32)taking.first));
+        {
+                string_format(log_error,
+                              "install: missing destination file operand after %w\n",
+                              writer_shell_quoted_name,
+                              file_operand_at(taking.first));
+                return !file_try_help((string_address) "install");
+        }
         if (mode && !file_mode_of(mode, 0, false, address_of install_mode))
                 return string_report(log_error, 1, "install: invalid mode '%w'\n",
                                      writer_terminal_quoted_name, mode);
-        if (install_compare && (install_mode & ~0777))
-                log_error("install: the --compare (-C) option is ignored when you specify a mode with non-permission bits\n",
-                          0);
+        if (!install_late_checks(owner, group))
+                return 1;
         if (install_parents && into)
         {
                 file_facts into_facts;
