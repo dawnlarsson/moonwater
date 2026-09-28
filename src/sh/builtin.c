@@ -7137,6 +7137,7 @@ static shell_option shell_extra_options[] = {
 #define SHELL_EXTRA_OPTIONS (array_count(shell_extra_options) - 1)
 #define SHELL_EXTRA_ERRTRACE 0
 #define SHELL_EXTRA_FUNCTRACE 1
+#define SHELL_EXTRA_HISTORY 2
 #define SHELL_EXTRA_BRACEEXPAND 3
 #define SHELL_EXTRA_HASHALL 4
 #define SHELL_EXTRA_PHYSICAL 5
@@ -7363,6 +7364,8 @@ static bool shell_extra_letter(p8 letter, bool on)
 #define SHELL_OPTION_NAMES \
         (array_count(shell_option_names) - 1)
 #define SHELL_OPTION_MONITOR 4
+#define SHELL_OPTION_VI 9
+#define SHELL_OPTION_EMACS 10
 #define SHELL_OPTION_NOCLOBBER 11
 #define SHELL_OPTION_PIPEFAIL 16
 
@@ -7401,6 +7404,13 @@ fn shell_option_told(positive index, bool on)
                 shell_options_named |= (positive)1 << index;
         else
                 shell_options_named &= ~((positive)1 << index);
+
+        //      bash has one line editor: turning vi on turns emacs off and
+        //      the other way round. dash keeps the two apart.
+        if (on && shell_bash_compat && index == SHELL_OPTION_VI)
+                shell_options_named &= ~((positive)1 << SHELL_OPTION_EMACS);
+        else if (on && shell_bash_compat && index == SHELL_OPTION_EMACS)
+                shell_options_named &= ~((positive)1 << SHELL_OPTION_VI);
 }
 
 /* Startup and set use the same option table and side effects. */
@@ -7511,6 +7521,14 @@ fn shell_options_started(bool interactive, b32 monitor)
                 shell_extra_state |= (positive)1 << SHELL_EXTRA_HISTEXPAND;
         if (shell_bash_compat && interactive && !shell_alias_startup_told)
                 shell_shopt_state |= SHELL_SHOPT(EXPAND_ALIASES);
+        //      An interactive bash keeps history and edits the emacs way,
+        //      unless it was started with vi.
+        if (shell_bash_compat && interactive)
+        {
+                shell_extra_state |= (positive)1 << SHELL_EXTRA_HISTORY;
+                if (!shell_option_on(SHELL_OPTION_VI))
+                        shell_option_told(SHELL_OPTION_EMACS, true);
+        }
 
         // Defer the one monitor side effect until interactive identity is
         // known. Parsing -m earlier would mark job control initialized before

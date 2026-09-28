@@ -14978,6 +14978,23 @@ def shell_lang_readonly_subshell_status(rng):
         "readonly r=1", line, 'echo "next=$?"'), ("command", "stdin", "file"))
 
 
+#       bash has one line editor at a time: set -o vi turns emacs off and
+#       emacs turns vi off, where dash keeps the two apart; an interactive
+#       bash starts in emacs mode with history on unless started with vi.
+#       These let both be on and left an interactive bash with neither.
+def shell_lang_editing_modes(rng):
+    line = rng.choice(("set -o vi", "set -o emacs", "set -o vi; set -o emacs", "set -o emacs; set -o vi",
+                       "set -o vi; set +o emacs", "set -o emacs; set +o emacs"))
+    if rng.random() < 0.3:
+        flag = rng.choice(("", "-o vi "))
+        return ("editing-modes", shell_ALL, shell_program(
+            shell_SELF + "printf 'set -o | grep -E \"^(emacs|vi|history)[[:space:]]\" | tr -s \"\\\\t \" \" \"\\n' | "
+            "HISTFILE= ./$shell_me " + flag + "-i 2>/dev/null", 'echo "end=$?"'))
+    return ("editing-modes", shell_ALL, shell_program(
+        line, "set -o | grep -E '^(emacs|vi)[[:space:]]' | tr -s '\\t ' ' '", 'echo "end=$?"'),
+        ("command", "stdin", "file"))
+
+
 #       printf's quoting and time conversions as bash 5.3 has them: %q takes
 #       a width and cuts the quoted text to the precision, %Q cuts the
 #       argument and quotes the rest, a quoted character is its code point
@@ -17926,6 +17943,7 @@ SHELL_FAMILIES = (
     shell_lang_unset_scopes,
     shell_lang_readonly_discard_scope,
     shell_lang_readonly_subshell_status,
+    shell_lang_editing_modes,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,
