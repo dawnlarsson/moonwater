@@ -1,0 +1,122 @@
+#
+# Security tier: locked
+#
+# A kiosk or an appliance: one program on the screen or behind a port, and a
+# machine that should do nothing else. Every tool and builtin is off unless
+# it is named here, STRICT=2, and the monitor is gone. See sec_default for
+# the tiers and how to pick one.
+#
+#   sh build.sh debug_none limbo desktop serial sec_locked
+#
+# The allow list is what a boot script and a service supervisor use: move,
+# copy, read and search files, look at the processes, the mounts and the
+# kernel log, log a line, take a lock, time a command out, check a download's
+# sha256, and power off. What it leaves out, it leaves out because each is a
+# way out of a single-purpose machine:
+#
+#   the network        ip, host, fetch, wget
+#   archives, codecs   tar, gzip, xz, zstd and their readers
+#   languages          awk (sed stays; boot scripts edit a line with it)
+#   privilege          chroot, chown, chgrp, nsenter, unshare, setpriv, chrt,
+#                      taskset, prlimit, setarch, script, pivot_root
+#   disks              mkswap, wipefs, blockdev, the partition editors, dd,
+#                      shred, mknod
+#   other users        wall, write, mesg, who, users, last
+#   bowls and editing  bowl, edit
+#   interactive shell  history, fc, bind, complete, the job control builtins,
+#                      pushd and popd, alias, help, enable, builtin, source,
+#                      declare, let, mapfile, shopt
+#
+# /init, /term and /moonwater stay whatever this says: the kernel and init
+# run them by path. POSIX's special builtins with cd, true and false have no
+# switch either; the shell is not a shell without them.
+#
+
+CONFIG_SECURITY=y
+CONFIG_SECURITY_YAMA=y
+CONFIG_INTEGRITY=n
+
+CONFIG_MOONWATER_STRICT=2
+CONFIG_MOONWATER_SHELL_MONITOR=n
+CONFIG_MOONWATER_TOOLS_ALL=n
+CONFIG_MOONWATER_BUILTINS_ALL=n
+
+#
+# Tools.
+#
+CONFIG_MOONWATER_TOOL_BASENAME=y
+CONFIG_MOONWATER_TOOL_CAT=y
+CONFIG_MOONWATER_TOOL_CHMOD=y
+CONFIG_MOONWATER_TOOL_CP=y
+CONFIG_MOONWATER_TOOL_CUT=y
+CONFIG_MOONWATER_TOOL_DATE=y
+CONFIG_MOONWATER_TOOL_DF=y
+CONFIG_MOONWATER_TOOL_DIRNAME=y
+CONFIG_MOONWATER_TOOL_DU=y
+CONFIG_MOONWATER_TOOL_ENV=y
+CONFIG_MOONWATER_TOOL_GREP=y
+CONFIG_MOONWATER_TOOL_HEAD=y
+CONFIG_MOONWATER_TOOL_HOSTNAME=y
+CONFIG_MOONWATER_TOOL_ID=y
+CONFIG_MOONWATER_TOOL_KILL=y
+CONFIG_MOONWATER_TOOL_LN=y
+CONFIG_MOONWATER_TOOL_LS=y
+CONFIG_MOONWATER_TOOL_MKDIR=y
+CONFIG_MOONWATER_TOOL_MKTEMP=y
+CONFIG_MOONWATER_TOOL_MV=y
+CONFIG_MOONWATER_TOOL_NPROC=y
+CONFIG_MOONWATER_TOOL_PS=y
+CONFIG_MOONWATER_TOOL_READLINK=y
+CONFIG_MOONWATER_TOOL_REALPATH=y
+CONFIG_MOONWATER_TOOL_RM=y
+CONFIG_MOONWATER_TOOL_RMDIR=y
+CONFIG_MOONWATER_TOOL_SED=y
+CONFIG_MOONWATER_TOOL_SHA256SUM=y
+CONFIG_MOONWATER_TOOL_SLEEP=y
+CONFIG_MOONWATER_TOOL_SORT=y
+CONFIG_MOONWATER_TOOL_STAT=y
+CONFIG_MOONWATER_TOOL_STTY=y
+CONFIG_MOONWATER_TOOL_SYNC=y
+CONFIG_MOONWATER_TOOL_TAIL=y
+CONFIG_MOONWATER_TOOL_TEE=y
+CONFIG_MOONWATER_TOOL_TIMEOUT=y
+CONFIG_MOONWATER_TOOL_TOUCH=y
+CONFIG_MOONWATER_TOOL_TR=y
+CONFIG_MOONWATER_TOOL_UNAME=y
+CONFIG_MOONWATER_TOOL_UNIQ=y
+CONFIG_MOONWATER_TOOL_WC=y
+CONFIG_MOONWATER_TOOL_DMESG=y
+CONFIG_MOONWATER_TOOL_FLOCK=y
+CONFIG_MOONWATER_TOOL_LOGGER=y
+CONFIG_MOONWATER_TOOL_MOUNT=y
+CONFIG_MOONWATER_TOOL_MOUNTPOINT=y
+CONFIG_MOONWATER_TOOL_UMOUNT=y
+CONFIG_MOONWATER_TOOL_BLKID=y
+CONFIG_MOONWATER_TOOL_POINTER=y
+CONFIG_MOONWATER_TOOL_SPAWN=y
+CONFIG_MOONWATER_TOOL_TEXT=y
+CONFIG_MOONWATER_TOOL_WINDOW=y
+
+#
+# Builtins, beside the core.
+#
+CONFIG_MOONWATER_BUILTIN_BRACKET=y
+CONFIG_MOONWATER_BUILTIN_TEST=y
+CONFIG_MOONWATER_BUILTIN_ECHO=y
+CONFIG_MOONWATER_BUILTIN_PRINTF=y
+CONFIG_MOONWATER_BUILTIN_PWD=y
+CONFIG_MOONWATER_BUILTIN_READ=y
+CONFIG_MOONWATER_BUILTIN_COMMAND=y
+CONFIG_MOONWATER_BUILTIN_TYPE=y
+CONFIG_MOONWATER_BUILTIN_WAIT=y
+CONFIG_MOONWATER_BUILTIN_KILL=y
+CONFIG_MOONWATER_BUILTIN_GETOPTS=y
+CONFIG_MOONWATER_BUILTIN_UMASK=y
+CONFIG_MOONWATER_BUILTIN_ULIMIT=y
+CONFIG_MOONWATER_BUILTIN_LOCAL=y
+CONFIG_MOONWATER_BUILTIN_MOUNT=y
+CONFIG_MOONWATER_BUILTIN_UMOUNT=y
+CONFIG_MOONWATER_BUILTIN_MOUNTPOINT=y
+CONFIG_MOONWATER_BUILTIN_BLKID=y
+CONFIG_MOONWATER_BUILTIN_POWEROFF=y
+CONFIG_MOONWATER_BUILTIN_REBOOT=y

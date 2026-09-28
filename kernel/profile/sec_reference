@@ -1,0 +1,22 @@
+#
+# Security tier: reference
+#
+# Everything built, and the reference exactly: every byte the tool on the
+# machine writes, including the ones it should not (STRICT=0). For diffing
+# our output against that tool, or for a script that parses the hole on
+# purpose. See sec_default for the tiers and how to pick one.
+#
+#   sh build.sh debug_none limbo desktop wifi serial sec_reference
+#
+
+CONFIG_SECURITY=y
+CONFIG_SECURITY_YAMA=y
+CONFIG_INTEGRITY=n
+
+CONFIG_MOONWATER_SHELL=y
+CONFIG_MOONWATER_UTILITIES=y
+CONFIG_MOONWATER_UTIL_LINUX=y
+CONFIG_MOONWATER_SHELL_MONITOR=y
+CONFIG_MOONWATER_TOOLS_ALL=y
+CONFIG_MOONWATER_BUILTINS_ALL=y
+CONFIG_MOONWATER_STRICT=0

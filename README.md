@@ -254,6 +254,39 @@ both of its switches are off. The switches live in
 `src/moonwater/Kconfig.switches`, which `./build switches` writes from
 `src/sh/tools.inc` and the shell's builtin table.
 
+### Security tiers
+
+Four profiles in `kernel/profile/` choose how the build leans where safety and
+the reference disagree:
+
+| Profile | Tools and builtins | `MOONWATER_STRICT` |
+| --- | --- | --- |
+| `sec_reference` | all | 0: the reference exactly, holes and all |
+| `sec_default` | all | 1: sanitise only what hostile input made dangerous |
+| `sec_hardened` | all | 2: refuse where the default sanitises |
+| `sec_locked` | a kiosk's allow list | 2 |
+
+`sec_default` is in the default profile list, and it is the only tier that
+promises bash, dash and GNU behaviour for anything a script does. The others
+are choices, and what they refuse is refused on purpose. All four turn on Yama,
+which Floodlight's restricted launches need. To pick one, name it last after
+the rest of the default list:
+
+```sh
+sh build.sh debug_none limbo desktop wifi serial sec_hardened
+```
+
+To take a single tool or builtin out, add a line to a profile of your own, or
+use menuconfig:
+
+```sh
+# CONFIG_MOONWATER_TOOL_WGET is not set
+# CONFIG_MOONWATER_BUILTIN_HISTORY is not set
+```
+
+`./build config-header <profile> <header>` shows what a profile turns off, and
+`./build surface <profile>` lists the names it would link.
+
 ## Tests
 
 ```

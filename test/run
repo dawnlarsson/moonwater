@@ -9992,6 +9992,53 @@ else
         lost 'single build' 'the header or the shell did not build'
 fi
 
+#       kernel/profile/sec_locked as the build composes it over the
+#       defaults, after profile/any turns the core on: its allow list in,
+#       everything else out, the core kept.
+group locked
+{ echo CONFIG_MOONWATER_CORE=y; cat kernel/profile/sec_locked; } \
+        > "$work/switch-locked.config"
+if switch_header "$work/switch-locked.config" "$work/switch-locked.h" &&
+        switch_shell "$work/switch-locked.h" "$work/switch-locked"; then
+        won
+        switch_bin=$work/switch-locked
+        same 'strict level' 'MOONWATER_STRICT 2' \
+                "$(grep -o 'MOONWATER_STRICT [0-9]*' "$work/switch-locked.h")"
+        for switch_name in cat ls sed grep mount blkid echo printf test \
+                read poweroff cd exit trap eval; do
+                same "$switch_name kept" yes "$(switch_own "$switch_bin" "$switch_name")"
+        done
+        for switch_name in awk wget ip tar gzip chroot nsenter unshare dd \
+                monitor edit bowl history alias source declare enable \
+                pushd jobs; do
+                same "$switch_name gone" no "$(switch_own "$switch_bin" "$switch_name")"
+        done
+        same 'wget not found' 127 \
+                "$(switch_status "$switch_bin" 'wget http://localhost/')"
+        same 'history not found' 127 "$(switch_status "$switch_bin" 'history')"
+        same 'a script still runs' 7 \
+                "$(switch_status "$switch_bin" 'f() { return 7; }; trap : EXIT; f; exit $?')"
+        if build_tool surface "$work/switch-locked.config" \
+                > "$work/switch-locked.surface" 2>&1; then
+                same 'linked in locked' 'bin/cat bin/ls cat init ls moonwater term' \
+                        "$(grep -x -e cat -e bin/cat -e ls -e bin/ls -e init \
+                                -e term -e moonwater "$work/switch-locked.surface" |
+                                sort | tr '\n' ' ' | sed 's/ $//')"
+                same 'not linked in locked' '' \
+                        "$(grep -x -e awk -e bin/awk -e wget -e bin/wget \
+                                -e edit -e bowl -e monitor -e sbin/wipefs \
+                                "$work/switch-locked.surface")"
+                same 'links in locked' "$(grep -c '^CONFIG_MOONWATER_TOOL_.*=y$' \
+                                kernel/profile/sec_locked)" \
+                        "$(grep -c -v / "$work/switch-locked.surface" |
+                                awk '{ print $1 - 3 }')"
+        else
+                lost 'locked surface' "$(head -3 "$work/switch-locked.surface")"
+        fi
+else
+        lost 'locked build' 'the header or the shell did not build'
+fi
+
 counted
 )
 

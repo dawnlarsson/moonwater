@@ -1,0 +1,27 @@
+#
+# Security tier: hardened
+#
+# Everything built, and STRICT=2: refuse where the default sanitises, and
+# tighten what a careful operator would want tightened even though ordinary
+# use never arrives there. A script that meets one of those refusals was
+# meant to. See sec_default for the tiers and how to pick one.
+#
+#   sh build.sh debug_none limbo desktop wifi serial sec_hardened
+#
+
+CONFIG_SECURITY=y
+CONFIG_SECURITY_YAMA=y
+CONFIG_INTEGRITY=n
+
+CONFIG_MOONWATER_STRICT=2
+
+#
+# Floodlight's hardened runtime policy goes here once its symbols exist,
+# as a policy string and a seal:
+#
+#   MOONWATER_FLOODLIGHT_POLICY   the hardened policy string
+#   MOONWATER_FLOODLIGHT_SEAL     sealed at boot, so no later line loosens it
+#
+# PLACEHOLDER: written without the CONFIG_ prefix until then, because
+# verify-config reports a request for a symbol the kernel does not have.
+#
