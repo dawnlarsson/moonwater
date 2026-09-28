@@ -7655,6 +7655,16 @@ static bool ls_block_size_read(string_address text, positive address_to unit,
         if (string_is(at, '\''))
                 at++;
 
+        //      The two words -h and --si are spelled as, for any of the
+        //      three programs that take a block size.
+        if (string_equals(at, "human-readable") || string_equals(at, "si"))
+        {
+                address_to human = true;
+                address_to si = string_is(at, 's');
+                address_to unit = 1;
+                return true;
+        }
+
         if (byte_is_digit(string_get(at)))
         {
                 if (!string_digits_checked(address_of at, 10, address_of number) || !number)
@@ -15325,8 +15335,38 @@ static b32 file_stat()
         under -a and nothing added to the total. -l is the flag for the other
         answer.
 */
+/*
+        A stamp as du orders and prints it: the seconds above thirty bits of
+        nanoseconds, wide enough for any second a file can carry. Seconds
+        times a billion, which it used to be, wrapped past the year 2262, so
+        a file touched to 2**63 - 1 printed as 1969.
+*/
+typedef b128 du_moment;
+
+static du_moment du_moment_of(b64 seconds, positive nanoseconds)
+{
+        return (du_moment)seconds * 1073741824 + (du_moment)nanoseconds;
+}
+
 static bool du_all;
 static bool du_summary;
+// --inodes counts names rather than bytes; -0 ends a line with a zero byte;
+// --si scales -h's figures by thousands.
+static bool du_inodes;
+static bool du_null;
+static bool du_si;
+// --threshold: a line is written for an amount at least this, or, when it
+// is negative, at most its size; the total is always written.
+static b64 du_threshold;
+// Which of -P, -D (-H) and -L was said last.
+static p8 du_deref;
+static bool du_deref_args;
+static bool du_option_failed;
+// The depth as it was written, which a warning repeats.
+static b64 du_depth_said;
+// A tree under -L reached through this many links so far: the kernel
+// stops at forty in one path, and so does the reference's walk.
+#define DU_LINKS_MAX 40
 static bool du_human;
 static bool du_apparent;
 static bool du_total;
@@ -15361,8 +15401,8 @@ static p8 du_unit_option;
 static p8 du_time_kind;
 static p8 du_time_style;
 static string_address du_time_format;
-static b64 du_measure_stamp;
-static b64 du_grand_stamp;
+static du_moment du_measure_stamp;
+static du_moment du_grand_stamp;
 /*
         The letter --block-size=M asks for after every count. ls_block_size_read
         already draws the line the reference draws -- a spelling that begins
@@ -15416,57 +15456,91 @@ static bool du_excluded(string_address path)
         return false;
 }
 
-static b64 du_stamp(const file_facts address_to facts)
+static du_moment du_stamp(const file_facts address_to facts)
 {
         const file_moment address_to moment =
             du_time_kind == 'a'   ? address_of facts->accessed
             : du_time_kind == 'c' ? address_of facts->changed
                                   : address_of facts->modified;
 
-        return moment->seconds * 1000000000 + (b64)moment->nanoseconds;
+        return du_moment_of(moment->seconds, moment->nanoseconds);
 }
 
-static b64 du_newest(b64 left, b64 right)
+static du_moment du_newest(du_moment left, du_moment right)
 {
         return left > right ? left : right;
 }
 
-static fn du_report(p64 bytes, b64 stamp, string_address path)
+/*
+        One line: the amount, the stamp under --time, the name, and a new
+        line or under -0 a zero byte. A stamp too far out for the calendar
+        to name -- a file touched to 2**63 - 1 seconds -- is said to be out
+        of range and written as the count of seconds it is, as the
+        reference writes it.
+*/
+static fn du_report(p64 bytes, du_moment stamp, string_address path)
 {
-        if (du_human)
+        if (du_human && du_si)
+                ls_human_1000(log, bytes);
+        else if (du_human)
                 positive_to_human_1024(log, bytes);
         else
         {
-                positive_to_string(log, bytes / du_unit + (bytes % du_unit != 0));
+                positive unit = du_inodes ? 1 : du_unit;
 
-                if (du_suffix[0])
+                positive_to_string(log, bytes / unit + (bytes % unit != 0));
+
+                //      A count of inodes keeps only the B of a suffix
+                //      that had one: -BKB --inodes writes 3B.
+                if (du_suffix[0] && !du_inodes)
                         log(du_suffix, string_length(du_suffix));
+                else if (du_suffix[0] && du_suffix[string_length(du_suffix) - 1] == 'B')
+                        log("B", 1);
         }
 
         if (du_time_kind)
         {
-                b64 seconds = stamp / 1000000000;
-                b64 rest = stamp - seconds * 1000000000;
-
-                if (rest < 0)
-                {
-                        seconds--;
-                        rest += 1000000000;
-                }
+                b64 seconds = (b64)(stamp >> 30);
+                positive rest = (positive)(stamp & ((1 << 30) - 1));
+                bool said;
 
                 log("\t", 1);
                 if (du_time_style == 'f')
-                        file_stamp(log, seconds, (positive)rest);
+                        said = date_shape(log, seconds, rest, (string_address) "%Y-%m-%d %H:%M:%S.%N %z");
                 else
-                        date_shape(log, seconds, 0,
-                                   du_time_style == '+'
-                                       ? du_time_format
-                                       : du_time_style == 'i'
-                                             ? (string_address) "%Y-%m-%d"
-                                             : (string_address) "%Y-%m-%d %H:%M");
+                        said = date_shape(log, seconds, 0,
+                                          du_time_style == '+'
+                                              ? du_time_format
+                                              : du_time_style == 'i'
+                                                    ? (string_address) "%Y-%m-%d"
+                                                    : (string_address) "%Y-%m-%d %H:%M");
+                if (!said)
+                {
+                        p8 digits[24];
+                        positive length = seconds < 0 ? 1 : 0;
+
+                        if (seconds < 0)
+                                digits[0] = '-';
+                        length += positive_into_string(digits + length,
+                                                       seconds < 0 ? (p64)0 - (p64)seconds
+                                                                   : (p64)seconds);
+                        digits[length] = end;
+                        log_flush();
+                        string_format(log_error, "du: time '%s' is out of range\n", digits);
+                        log(digits, length);
+                }
         }
 
-        string_format(log, "\t%w\n", writer_terminal_name, path);
+        string_format(log, "\t%w", writer_terminal_name, path);
+        log(du_null ? (string_address) "" : (string_address) "\n", 1);
+}
+
+// A line for a name the walk reached, which --threshold may hold back.
+static fn du_listed(p64 bytes, du_moment stamp, string_address path)
+{
+        if (du_threshold < 0 ? (b64)bytes <= -du_threshold || bytes > (p64)bipolar_max
+                             : bytes >= (p64)du_threshold)
+                du_report(bytes, stamp, path);
 }
 
 /*
@@ -15481,8 +15555,8 @@ static struct
 {
         p64 total;
         p64 below;
-        b64 stamp;
-        b64 shallow;
+        du_moment stamp;
+        du_moment shallow;
 } du_levels[WALK_LEVELS];
 #endif
 
@@ -15547,8 +15621,10 @@ typedef struct du_tree_node
         p64 inode;
         p32 device_major;
         p32 device_minor;
-        b64 stamp;
+        du_moment stamp;
         bool unread;
+        // How many links -L followed to get here from the operand.
+        positive links;
         positive length;
         p8 path[];
 } du_tree_node;
@@ -15557,8 +15633,8 @@ typedef struct
 {
         p64 total;
         p64 below;
-        b64 stamp;
-        b64 shallow;
+        du_moment stamp;
+        du_moment shallow;
 } du_tree_level;
 
 enum
@@ -15582,13 +15658,13 @@ typedef struct
         p32 path_bytes;
         p64 inode;
         p64 cost;
-        b64 stamp;
+        du_moment stamp;
 } du_tree_record;
 
 static du_tree_level address_to du_tree_levels;
 static positive du_tree_levels_room;
 static p64 du_tree_result;
-static b64 du_tree_result_stamp;
+static du_moment du_tree_result_stamp;
 static du_tree_node address_to du_tree_skipping;
 
 FILE_TREE_NODE_NEW(du_tree_node_new, du_tree_node,
@@ -15690,9 +15766,19 @@ static fn du_tree_enter(address_any context, address_any node_address,
                         }
                 }
 
-                bipolar looked = file_look_code(directory, name,
-                                                du_follow ? 0 : AT_SYMLINK_NOFOLLOW,
-                                                address_of facts);
+                /*
+                        -L names what it reaches by the whole path from the
+                        operand, as the reference's walk does, and a path
+                        the kernel would have to follow more than forty
+                        links through is one it will not resolve: the name
+                        that would be the forty-first cannot be accessed.
+                */
+                positive links = node->links + (du_follow && entry->d_type == DT_LNK);
+                bipolar looked = links > DU_LINKS_MAX
+                                     ? -ERROR_TOO_MANY_LEVELS
+                                     : file_look_code(directory, name,
+                                                      du_follow ? 0 : AT_SYMLINK_NOFOLLOW,
+                                                      address_of facts);
 
                 memory_fill(address_of record, 0, sizeof(record));
 
@@ -15741,9 +15827,11 @@ static fn du_tree_enter(address_any context, address_any node_address,
                                         kept = child != null;
                                         if (child)
                                         {
-                                                child->own = du_apparent ? 0
-                                                                         : facts.blocks * 512;
+                                                child->own = du_inodes ? 1
+                                                             : du_apparent ? 0
+                                                                           : facts.blocks * 512;
                                                 child->stamp = du_stamp(address_of facts);
+                                                child->links = links;
                                                 child->device = device;
                                                 child->inode = facts.inode;
                                                 child->device_major = facts.device_major;
@@ -15763,8 +15851,9 @@ static fn du_tree_enter(address_any context, address_any node_address,
                                 record.device_major = facts.device_major;
                                 record.device_minor = facts.device_minor;
                                 record.inode = facts.inode;
-                                record.cost = du_apparent ? (p64)facts.size
-                                                          : facts.blocks * 512;
+                                record.cost = du_inodes     ? 1
+                                              : du_apparent ? (p64)facts.size
+                                                            : facts.blocks * 512;
                                 record.stamp = du_stamp(address_of facts);
                                 kept = du_tree_put(output, address_of record,
                                                    shown ? (string_address)path : null,
@@ -15805,7 +15894,7 @@ static fn du_tree_leave(address_any context, address_any node_address,
         (void)du_tree_put(output, address_of record, null, 0);
 }
 
-static fn du_tree_add(positive depth, p64 cost, bool below, b64 stamp)
+static fn du_tree_add(positive depth, p64 cost, bool below, du_moment stamp)
 {
         if (!depth)
         {
@@ -15922,7 +16011,7 @@ static bool du_tree_sink(address_any context, address_any node_address,
                                       file_reason(record.error));
                         du_status = 1;
                         if (node->depth <= du_maximum)
-                                du_report(node->own, node->stamp,
+                                du_listed(node->own, node->stamp,
                                           (string_address)node->path);
                         du_tree_add(node->depth, node->own, true, node->stamp);
                 }
@@ -15956,13 +16045,13 @@ static bool du_tree_sink(address_any context, address_any node_address,
                                 continue;
                         }
                         if (du_all && depth <= du_maximum)
-                                du_report(record.cost, record.stamp, path);
+                                du_listed(record.cost, record.stamp, path);
                         du_tree_add(depth, record.cost, false, record.stamp);
                 }
                 else if (record.kind == DU_TREE_LEAVE)
                 {
                         p64 total = du_tree_levels[node->depth].total;
-                        b64 stamp = du_tree_levels[node->depth].stamp;
+                        du_moment stamp = du_tree_levels[node->depth].stamp;
 
                         //      -S leaves what is under the subdirectories
                         //      out of both columns: the size the directory
@@ -15970,7 +16059,7 @@ static bool du_tree_sink(address_any context, address_any node_address,
                         //      directory and the names that are not
                         //      directories.
                         if (node->depth <= du_maximum)
-                                du_report(du_separate ? total - du_tree_levels[node->depth].below
+                                du_listed(du_separate ? total - du_tree_levels[node->depth].below
                                                       : total,
                                           du_separate ? du_tree_levels[node->depth].shallow
                                                       : stamp,
@@ -15984,13 +16073,18 @@ static bool du_tree_sink(address_any context, address_any node_address,
 static p64 du_measure_tree(string_address root)
 {
         file_facts facts;
-        bipolar looked = file_look_code(AT_FDCWD, root,
-                                        du_follow ? 0 : AT_SYMLINK_NOFOLLOW,
+        bool follow = du_follow || du_deref_args;
+        bipolar looked = file_look_code(AT_FDCWD, root, follow ? 0 : AT_SYMLINK_NOFOLLOW,
                                         address_of facts);
 
         if (looked < 0)
         {
-                if (du_follow && looked == -ERROR_NO_ENTRY)
+                file_facts link;
+
+                //      A link that leads nowhere is named without a reason,
+                //      as fts reports it; a name that is not there has one.
+                if (follow && looked == -ERROR_NO_ENTRY &&
+                    file_look_code(AT_FDCWD, root, AT_SYMLINK_NOFOLLOW, address_of link) == 0)
                         string_format(log_error, "du: cannot access %w\n",
                                       writer_shell_quoted_name, root);
                 else
@@ -16009,15 +16103,15 @@ static p64 du_measure_tree(string_address root)
 
         /* GNU --apparent-size without -b counts a directory as the sum of
            its children, not st_size of the directory record. */
-        p64 mine = du_apparent
-                       ? (directory ? 0 : (p64)facts.size)
-                       : facts.blocks * 512;
+        p64 mine = du_inodes ? 1
+                   : du_apparent ? (directory ? 0 : (p64)facts.size)
+                                 : facts.blocks * 512;
 
         du_measure_stamp = du_stamp(address_of facts);
 
         if (!directory)
         {
-                du_report(mine, du_measure_stamp, root);
+                du_listed(mine, du_measure_stamp, root);
                 return mine;
         }
 
@@ -16028,7 +16122,7 @@ static p64 du_measure_tree(string_address root)
                 string_format(log_error, "du: cannot read directory %w: %s\n",
                               writer_shell_quoted_name, root, file_reason(handle));
                 du_status = 1;
-                du_report(mine, du_measure_stamp, root);
+                du_listed(mine, du_measure_stamp, root);
                 return mine;
         }
 
@@ -16043,6 +16137,7 @@ static p64 du_measure_tree(string_address root)
                 return 0;
         }
         top->own = mine;
+        top->links = 0;
         top->stamp = du_measure_stamp;
         top->device = du_device;
         top->inode = facts.inode;
@@ -16180,10 +16275,10 @@ static p64 du_measure(string_address root)
                         if (kept->mark == DU_LEAVE)
                         {
                                 p64 total = du_levels[depth].total;
-                                b64 stamp = du_levels[depth].stamp;
+                                du_moment stamp = du_levels[depth].stamp;
 
                                 if (depth <= du_maximum)
-                                        du_report(du_separate ? total - du_levels[depth].below
+                                        du_listed(du_separate ? total - du_levels[depth].below
                                                               : total,
                                                   du_separate ? du_levels[depth].shallow : stamp,
                                                   path);
@@ -16244,13 +16339,14 @@ static p64 du_measure(string_address root)
                                 continue;
                         }
 
-                        p64 mine = du_apparent
+                        p64 mine = du_inodes ? 1
+                                   : du_apparent
                                        ? ((facts->mode & MODE_FORMAT) == MODE_DIRECTORY
                                               ? 0
                                               : (p64)facts->size)
                                        : facts->blocks * 512;
 
-                        b64 stamp = du_stamp(facts);
+                        du_moment stamp = du_stamp(facts);
 
                         if (kept->mark == DU_ENTERED)
                         {
@@ -16275,7 +16371,7 @@ static p64 du_measure(string_address root)
                                         du_status = 1;
                                 }
                                 if (depth <= du_maximum)
-                                        du_report(mine, stamp, path);
+                                        du_listed(mine, stamp, path);
                                 if (depth)
                                 {
                                         du_levels[depth - 1].total += mine;
@@ -16292,7 +16388,7 @@ static p64 du_measure(string_address root)
                         }
 
                         if ((du_all || !depth) && depth <= du_maximum)
-                                du_report(mine, stamp, path);
+                                du_listed(mine, stamp, path);
                         if (depth)
                         {
                                 du_levels[depth - 1].total += mine;
@@ -16397,8 +16493,8 @@ static bool du_exclude_file(string_address path)
         {
                 if (reason >= 0)
                         return false;
-                string_format(log_error, "du: %w: %s\nTry 'du --help' for more information.\n",
-                              writer_shell_name, path, file_reason(reason));
+                string_format(log_error, "du: %w: %s\n", writer_shell_name, path,
+                              file_reason(reason));
                 return false;
         }
 
@@ -16424,13 +16520,174 @@ static bool du_exclude_file(string_address path)
         return true;
 }
 
+/*
+        --threshold's size, xstrtoimax's way: base 0, one of the multiplier
+        letters with B after it for thousands or iB for 1024s, a letter with
+        no number in front of it standing for one of itself. What will not
+        read is refused in the reference's three wordings, and -0 on its own
+        as meaning nothing.
+*/
+static bool du_threshold_read(string_address value)
+{
+        string_address option = du_taking && du_taking->long_written
+                                    ? (string_address) "--threshold"
+                                    : (string_address) "-t";
+        string_address at = value;
+        bool negative = false;
+        positive base = 10;
+        p64 magnitude = 0;
+        bool overflow = false;
+        bool digits = false;
+
+        while (byte_is_space(string_get(at)))
+                at++;
+        if (string_is(at, '-') || string_is(at, '+'))
+                negative = string_get(at++) == '-';
+        if (string_is(at, '0') && (at[1] == 'x' || at[1] == 'X') &&
+            byte_is_hexadecimal(string_get(at + 2)))
+        {
+                base = 16;
+                at += 2;
+        }
+        else if (string_is(at, '0'))
+                base = 8;
+
+        for (;; at++)
+        {
+                p8 byte = string_get(at);
+                positive digit = byte_is_digit(byte) ? (positive)(byte - '0')
+                                 : base == 16 && byte_is_hexadecimal(byte)
+                                     ? (positive)((byte | 0x20) - 'a' + 10)
+                                     : 99;
+
+                if (digit >= base)
+                        break;
+                digits = true;
+                if (magnitude > (p64)(positive_max - digit) / base)
+                        overflow = true;
+                else
+                        magnitude = magnitude * base + digit;
+        }
+
+        static const p8 letters[] = "kKmMGgTtPEZYRQ";
+        static const p8 powers[] = {1, 1, 2, 2, 3, 3, 4, 4, 5, 6, 7, 8, 9, 10};
+        p8 letter = string_get(at);
+        string_address known = letter ? string_first_of((string_address)letters, letter) : null;
+
+        if (!digits)
+        {
+                if (!known)
+                        return string_report(log_error, false, "du: invalid %s argument '%s'\n",
+                                             option, value);
+                magnitude = 1;
+        }
+
+        if (letter)
+        {
+                if (!known)
+                        return string_report(log_error, false,
+                                             "du: invalid suffix in %s argument '%s'\n", option,
+                                             value);
+
+                p64 scale = 1024;
+                positive skip = 1;
+
+                if (at[1] == 'i' && at[2] == 'B')
+                        skip = 3;
+                else if (at[1] == 'B' || at[1] == 'D')
+                {
+                        scale = 1000;
+                        skip = 2;
+                }
+                for (positive power = powers[known - (string_address)letters]; power--;)
+                {
+                        if (magnitude > (p64)bipolar_max / scale + 1)
+                                overflow = true;
+                        else
+                                magnitude *= scale;
+                }
+                if (string_get(at + skip))
+                        return string_report(log_error, false,
+                                             "du: invalid suffix in %s argument '%s'\n", option,
+                                             value);
+        }
+
+        if (overflow || magnitude > (p64)bipolar_max + negative)
+                return string_report(log_error, false, "du: %s argument '%s' too large\n", option,
+                                     value);
+        if (!magnitude && negative)
+                return string_report(log_error, false, "du: invalid --threshold argument '-0'\n");
+
+        du_threshold = negative ? (b64)((p64)0 - magnitude) : (b64)magnitude;
+        return true;
+}
+
+/*
+        --time names a stamp that is not the default one, and the reference
+        has only two to name: the modification time is what --time shows on
+        its own and there is no word for it, so mtime and modification are
+        refused here as the reference refuses them.
+*/
+static const file_word du_time_words[] = {
+    {"atime", 'a'}, {"access", 'a'}, {"use", 'a'},
+    {"ctime", 'c'}, {"status", 'c'},
+};
+
 static bool du_exclude_seen(p8 letter, string_address value)
 {
         if (letter == 'B')
                 return du_block_size_seen(value);
 
+        if (letter == 'L' || letter == 'P' || letter == 'D' || letter == 'H')
+        {
+                du_deref = letter;
+                return true;
+        }
+
+        if (letter == 't')
+                return du_threshold_read(value ? value : (string_address) "");
+
+        /*
+                An exclusion file that cannot be read and a depth that is no
+                number are each said as they are met, and the options after
+                them are still read, so every one of them is said before du
+                gives up with the usage hint.
+        */
         if (letter == 'X' && value)
-                return du_exclude_file(value);
+        {
+                if (!du_exclude_file(value))
+                        du_option_failed = true;
+                return true;
+        }
+
+        //      --time's word is refused where it is read, before
+        //      anything after it, as XARGMATCH refuses it.
+        if (letter == 'T' && value && string_get(value) &&
+            file_word_among((string_address) "du", (string_address) "--time", value,
+                            du_time_words, array_count(du_time_words)) < 0)
+                return false;
+
+        if (letter == 'd')
+        {
+                string_address written = value ? value : (string_address) "";
+                bool negative = string_is(written, '-');
+                positive maximum;
+
+                if (negative || string_is(written, '+'))
+                        written++;
+                if (!value || !string_digits_exact(written, address_of maximum))
+                {
+                        string_format(log_error, "du: invalid maximum depth '%w'\n",
+                                      writer_terminal_quoted_name, value ? value : (string_address) "");
+                        du_option_failed = true;
+                }
+                else
+                {
+                        du_maximum = negative ? 0 : maximum;
+                        du_depth_said = negative ? -(b64)maximum : (b64)maximum;
+                }
+                return true;
+        }
 
         if (letter != 'e' || !value)
                 return true;
@@ -16456,19 +16713,18 @@ static const argument_option du_options[] = {
     {"time-style", 'Y', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"total", 'c'},
     {"km", 0, 0, 1},
+    {"dereference-args", 'D'},
+    {"no-dereference", 'P'},
+    // -H was --si before 2008; it is -D now.
+    {"H", 0},
+    {"si", 'j', ARGUMENT_LONG_ONLY, 1},
+    {"inodes", 'i', ARGUMENT_LONG_ONLY},
+    {"null", '0'},
+    {"threshold", 't', ARGUMENT_REQUIRED},
+    {"files0-from", 'F', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {null},
 };
 
-/*
-        --time names a stamp that is not the default one, and the reference
-        has only two to name: the modification time is what --time shows on
-        its own and there is no word for it, so mtime and modification are
-        refused here as the reference refuses them.
-*/
-static const file_word du_time_words[] = {
-    {"atime", 'a'}, {"access", 'a'}, {"use", 'a'},
-    {"ctime", 'c'}, {"status", 'c'},
-};
 
 /*
         How --time writes a stamp. Not ls's list: du has no locale style and
@@ -16508,6 +16764,109 @@ static bool du_time_style_read(string_address style)
         return true;
 }
 
+/*
+        --files0-from: the names to measure, each ended by a zero byte, read
+        from a file or with - from standard input, and measured as they
+        arrive -- a list can be endless, as `yes | tr` makes one. A name
+        that is empty is refused by its place in the list, and so is - in a
+        list read from standard input; either leaves du failing and goes on
+        to the next. A list that cannot be opened ends du, and one that
+        cannot be read ends the list.
+*/
+static bool du_files_from(string_address list)
+{
+        bool standard = string_equals(list, "-");
+        bipolar handle = standard ? 0 : system_open_at(AT_FDCWD, list, FILE_READ | O_CLOEXEC);
+
+        if (handle < 0)
+        {
+                string_format(log_error, "du: cannot open %w for reading: %s\n",
+                              writer_shell_quoted_name, list, file_reason(handle));
+                du_status = 1;
+                return false;
+        }
+
+        byte_store held = {0};
+        positive have = 0;
+        positive number = 0;
+        bool done = false;
+
+        while (!done && !du_seen_broken && !du_depth_broken)
+        {
+                held.used = have;
+                if (!byte_store_reserve(address_of held, have + 65536, 65536))
+                {
+                        log_error("du: memory exhausted\n", 0);
+                        du_status = 1;
+                        break;
+                }
+
+                bipolar got = system_read_retry((positive)handle, held.bytes + have, 65536);
+
+                if (got < 0)
+                {
+                        log_flush();
+                        string_format(log_error, "du: %w: read error: %s\n", writer_shell_name,
+                                      list, file_reason(got));
+                        du_status = 1;
+                        break;
+                }
+
+                have += (positive)got;
+                done = got == 0;
+
+                positive start = 0;
+
+                for (positive at = 0; at < have; at++)
+                {
+                        //      The last name need not end in a zero byte.
+                        if (held.bytes[at] && !(done && at + 1 == have))
+                                continue;
+
+                        positive stop = held.bytes[at] ? at + 1 : at;
+                        p8 keep = held.bytes[stop];
+
+                        held.bytes[stop] = end;
+                        number++;
+
+                        string_address name = (string_address)held.bytes + start;
+
+                        if (standard && string_equals(name, "-"))
+                        {
+                                log_flush();
+                                log_error("du: when reading file names from standard input, no file name of '-' allowed\n",
+                                          0);
+                                du_status = 1;
+                        }
+                        else if (!string_get(name))
+                        {
+                                log_flush();
+                                string_format(log_error, "du: %w:%p: invalid zero-length file name\n",
+                                              writer_shell_name, list, number);
+                                du_status = 1;
+                        }
+                        else
+                        {
+                                du_grand += du_measure(name);
+                                du_grand_stamp = du_newest(du_grand_stamp, du_measure_stamp);
+                        }
+
+                        held.bytes[stop] = keep;
+                        start = at + 1;
+                        if (du_seen_broken || du_depth_broken)
+                                break;
+                }
+
+                memory_copy(held.bytes, held.bytes + start, have - start);
+                have -= start;
+        }
+
+        byte_store_release(address_of held);
+        if (!standard)
+                system_close((positive)handle);
+        return true;
+}
+
 static b32 file_du()
 {
         positive count = (positive)program_argument_count();
@@ -16521,6 +16880,9 @@ static b32 file_du()
         du_seen_broken = false;
         du_depth_broken = false;
         du_unit_option = 0;
+        du_threshold = 0;
+        du_deref = 'P';
+        du_option_failed = false;
 
         file_taking taking = {
             .program = (string_address) "du",
@@ -16544,39 +16906,28 @@ static b32 file_du()
         du_separate = (flags & FILE_FLAG('S')) != 0;
         du_one_system = (flags & FILE_FLAG('x')) != 0;
         du_count_links = (flags & FILE_FLAG('l')) != 0;
-        du_follow = (flags & FILE_FLAG('L')) != 0;
+        du_follow = du_deref == 'L';
+        du_deref_args = du_deref == 'D' || du_deref == 'H';
+        du_inodes = (flags & FILE_FLAG('i')) != 0;
+        du_null = (flags & FILE_FLAG('0')) != 0;
+
+        string_address files_from = (flags & FILE_FLAG('F'))
+                                        ? file_option_value(address_of taking, 'F')
+                                        : null;
+
         //      GNU's du counts every identity once, directories too, when -L
-        //      can reach one twice or more than one operand is named.
+        //      can reach one twice or more than one operand is named -- and
+        //      it cannot count the names a list will hold, so a list is many.
         du_hash_all = !du_count_links &&
-                      (du_follow || (taking.first < count && count - taking.first > 1));
+                      (du_follow || files_from ||
+                       (taking.first < count && count - taking.first > 1));
 
-        if (flags & FILE_FLAG('d'))
-        {
-                positive maximum;
-                string_address given = file_option_value(address_of taking, 'd');
-                string_address written = given;
-                bool negative;
-
-                if (!given)
-                        return string_report(log_error, 1,
-                                             "du: invalid maximum depth '%w'\n",
-                                             writer_terminal_quoted_name, (string_address) "");
-
-                negative = string_is(written, '-');
-
-                if (negative || string_is(written, '+'))
-                        written++;
-
-                if (!string_digits_exact(written, address_of maximum))
-                        return string_report(log_error, 1,
-                                             "du: invalid maximum depth '%w'\n",
-                                             writer_terminal_quoted_name, given);
-
-                du_maximum = negative ? 0 : maximum;
-        }
+        if (du_option_failed)
+                return string_report(log_error, 1, "Try 'du --help' for more information.\n");
 
         positive block_unit = 0;
         bool block_human = false;
+        bool block_si = false;
         p8 block_suffix[8] = {0};
 
         if (flags & FILE_FLAG('B'))
@@ -16597,6 +16948,7 @@ static b32 file_du()
 
                 block_unit = unit;
                 block_human = human;
+                block_si = si;
                 string_copy_max_end(block_suffix, suffix, sizeof(block_suffix) - 1);
         }
 
@@ -16628,12 +16980,6 @@ static b32 file_du()
                         du_time_kind = (p8)chosen;
                 }
 
-                string_address style = (flags & FILE_FLAG('Y'))
-                                           ? file_option_value(address_of taking, 'Y')
-                                           : getenv((string_address) "TIME_STYLE");
-
-                if (style && string_get(style) && !du_time_style_read(style))
-                        return 1;
         }
 
         /*
@@ -16654,7 +17000,7 @@ static b32 file_du()
                 du_unit = 1024;
         else if (du_unit_option == 'm')
                 du_unit = 1048576;
-        else if (du_unit_option == 'h')
+        else if (du_unit_option == 'h' || du_unit_option == 'j')
                 du_human = true;
         else if (du_unit_option == 'B')
         {
@@ -16662,21 +17008,35 @@ static b32 file_du()
                 du_human = block_human;
                 string_copy_max_end(du_suffix, block_suffix, sizeof(du_suffix) - 1);
         }
+        du_si = du_unit_option == 'j' || (du_unit_option == 'B' && block_si);
 
         if (du_summary && du_all)
                 return string_report(log_error, 1,
                                      "du: cannot both summarize and show all entries\n");
 
         // -s with a depth of nought says the same thing twice, which is a
-        // warning; with any other depth it says two things, which is not.
-        if (du_summary && (flags & FILE_FLAG('d')) && !du_maximum)
+        // warning; with any other depth it says two things, which is not --
+        // -d-1 among them, which is no depth at all but is not nought.
+        if (du_summary && (flags & FILE_FLAG('d')) && !du_depth_said)
                 log_error("du: warning: summarizing is the same as using --max-depth=0\n", 0);
         else if (du_summary && (flags & FILE_FLAG('d')))
         {
                 string_format(log_error,
                               "du: warning: summarizing conflicts with --max-depth=%b\n",
-                              (b32)du_maximum);
-                return 1;
+                              (b32)du_depth_said);
+                return string_report(log_error, 1, "Try 'du --help' for more information.\n");
+        }
+
+        //      The style is read after the depth is settled, as the
+        //      reference reads it.
+        if (du_time_kind)
+        {
+                string_address style = (flags & FILE_FLAG('Y'))
+                                           ? file_option_value(address_of taking, 'Y')
+                                           : getenv((string_address) "TIME_STYLE");
+
+                if (style && string_get(style) && !du_time_style_read(style))
+                        return 1;
         }
 
         // -s is --max-depth=0 said another way, and the two are the same
@@ -16684,7 +17044,26 @@ static b32 file_du()
         if (du_summary)
                 du_maximum = 0;
 
-        if (first >= count)
+        if (du_inodes && du_apparent)
+                log_error("du: warning: options --apparent-size and -b are ineffective with --inodes\n",
+                          0);
+
+        if (files_from)
+        {
+                if (first < count)
+                        return string_report(log_error, 1,
+                                             "du: extra operand '%w'\n"
+                                             "file operands cannot be combined with --files0-from\n"
+                                             "Try 'du --help' for more information.\n",
+                                             writer_terminal_quoted_name,
+                                             program_argument((b32)first));
+                if (!du_files_from(files_from))
+                {
+                        log_flush();
+                        return 1;
+                }
+        }
+        else if (first >= count)
         {
                 du_grand += du_measure((string_address) ".");
                 du_grand_stamp = du_newest(du_grand_stamp, du_measure_stamp);

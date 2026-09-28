@@ -7350,7 +7350,13 @@ FILES_UTILITIES = (
                     ("-d", "1", "-s", "dir"), ("-b", "-m", "a.txt"), ("-m", "-b", "a.txt"), ("-k", "-m", "a.txt"),
                    ("--inodes", "-a", "."), ("--apparent-size", "-a", "dir"), ("-l", "dup"), ("--files0-from=-",),
                    ("--exclude=[^d]*", "-a", "."), ("--exclude=[!d]*", "-a", "."), ("--exclude=[d^]*", "-ab", "."),
-                   ("--max-depth=0", "--summarize", "dir"), ("-s", "-d", "0", "dir"), ("-s", "-d", "1", "dir"))
+                   ("--max-depth=0", "--summarize", "dir"), ("-s", "-d", "0", "dir"), ("-s", "-d", "1", "dir"),
+                   # -B's two words, --threshold's refusals in their three
+                   # wordings, --inodes beside -b, a list beside operands.
+                   ("-B", "si", "dir"), ("--block-size=human-readable", "-a", "dir"), ("-t", "5X", "dir"),
+                   ("--th=K", "-a", "dir"), ("-t", "-0", "dir"), ("-t", "99999999999999999999", "dir"),
+                   ("-t", "2KB", "-a", "dir"), ("--inodes", "-b", "dir"), ("--inodes", "-h", "-c", "."),
+                   ("--files0-from=-", "dir"), ("-0", "-a", "dir"), ("-D", "-P", "dirlink"), ("-P", "-H", "dirlink"))
                   #   Patterns read from a file, a line each: every file in
                   #   the fixture that holds lines, holds none, holds no
                   #   newline at its end, or cannot be read, over each root
@@ -41940,18 +41946,6 @@ PINNED = r"""
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"a426b2326cd183d22ef53f29de5e467110550ecd3acacc319c53be630efee169"},"case":{"argv":["-b","-c","--sh","--csh"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_colors","tier":"powerset","utility":"dircolors"},"domain":"files","id":"ffd8e04b1744252b","kind":"bug","list":"ledger","reason_id":"r97","reference":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"99aa0a7e9debcf010f7d781af4f4c2adb41ff9d43fa8f80ddadef2d2011b887c"},"utility":"dircolors"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-ø"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_nul_words","tier":"singles","utility":"du"},"domain":"files","id":"9b155b7bb5fc0af7","kind":"bug","list":"ledger","reason_id":"r325","reference":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"du"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"8b7da0a955236866626672589ed1c3a9bdd46406ff34b32df28410246b937b84"},"case":{"argv":["-a","--time","."],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_nul_words","utility":"du"},"domain":"files","id":"df49c6870b0a909d","kind":"bug","list":"ledger","reason_id":"r98","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","utility":"du"},
-{"domain":"files","kind":"bug","list":"ledger","option":"--dereference-args","reason_id":"r99","utility":"du"},
-{"domain":"files","kind":"bug","list":"ledger","option":"--files0-from","reason_id":"r99","utility":"du"},
-{"domain":"files","kind":"bug","list":"ledger","option":"--inodes","reason_id":"r99","utility":"du"},
-{"domain":"files","kind":"bug","list":"ledger","option":"--no-dereference","reason_id":"r99","utility":"du"},
-{"domain":"files","kind":"bug","list":"ledger","option":"--null","reason_id":"r99","utility":"du"},
-{"domain":"files","kind":"bug","list":"ledger","option":"--si","reason_id":"r99","utility":"du"},
-{"domain":"files","kind":"bug","list":"ledger","option":"--threshold","reason_id":"r99","utility":"du"},
-{"domain":"files","kind":"bug","list":"ledger","option":"-0","reason_id":"r99","utility":"du"},
-{"domain":"files","kind":"bug","list":"ledger","option":"-D","reason_id":"r99","utility":"du"},
-{"domain":"files","kind":"bug","list":"ledger","option":"-H","reason_id":"r99","utility":"du"},
-{"domain":"files","kind":"bug","list":"ledger","option":"-P","reason_id":"r99","utility":"du"},
-{"domain":"files","kind":"bug","list":"ledger","option":"-t","reason_id":"r99","utility":"du"},
 {"candidate":{"effects":"b5be582053b9cdb8bc8850776ad468fafecc497d4ae2a90d107606787d5d7bad","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":[".","-delete","-name","a.txt"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_yes","utility":"find"},"domain":"files","id":"018dc654d6d3e122","kind":"bug","list":"ledger","reason_id":"r102","utility":"find"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":0,"stdout":"3ba81c80b8b23ead1ff322d46b1f7d70b5503096a5df33c1cd7013639adf1692"},"case":{"argv":["two words","-not","-perm","/u=x","-and","-perm","/0"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_yes","utility":"find"},"domain":"files","id":"01a4296fc9908ec4","kind":"bug","list":"ledger","reason_id":"r102","utility":"find"},
 {"candidate":{"effects":"0cf939b11c075d78b34928501291d8b4bf90b244bee7ca5d9c750e48b90041f5","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":[".","(","-user","nosuchuser","-o","-uid","0",")","-name","*.txt","-o","-path","*/sub","-exec","./exe","{}",";"],"domain":"files","family":null,"fixture":"files","input_kind":"command","mode":null,"stdin":"files_yes","utility":"find"},"domain":"files","id":"02a3d30e3e58d93b","kind":"bug","list":"ledger","reason_id":"r102","utility":"find"},
