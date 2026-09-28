@@ -3925,7 +3925,7 @@ static fn tar_seen_store(file_facts address_to facts, string_address member)
 
 static b32 tar_add_named(bipolar archive, bipolar directory,
                          string_address name, string_address member,
-                         bool verbose, bool selected);
+                         bool verbose, bool selected, p8 kind);
 
 static b32 tar_add_directory(bipolar archive, bipolar directory,
                              string_address name, string_address member,
@@ -3970,7 +3970,7 @@ static b32 tar_add_directory(bipolar archive, bipolar directory,
                 }
 
                 tar_add_named(archive, walk.handle, entry->d_name, child,
-                              verbose, false);
+                              verbose, false, entry->d_type);
                 if (tar_status == 2)
                         break;
         }
@@ -3979,20 +3979,43 @@ static b32 tar_add_directory(bipolar archive, bipolar directory,
         return tar_status;
 }
 
+/* kind is the directory entry's d_type, DT_UNKNOWN for a named operand.
+   A regular file is opened first and looked at through its descriptor:
+   the facts are then those of the very object whose bytes are read, and
+   one statx by name is saved on every file.  Anything that will not open
+   so, or turns out not to be a regular file, takes the look by name. */
 static b32 tar_add_named(bipolar archive, bipolar directory,
                          string_address name, string_address member,
-                         bool verbose, bool selected)
+                         bool verbose, bool selected, p8 kind)
 {
         file_facts facts;
         p8 link[TAR_PATH];
-        bipolar handle;
-        bipolar looked;
+        bipolar handle = -1;
+        bipolar looked = -1;
         string_address prior;
         p8 type;
 
-        looked = system_stat_at(directory, name,
-                                AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT,
-                                STATX_BASIC, address_of facts);
+        if (kind == DT_REG)
+        {
+                handle = system_open_at(
+                    directory, name,
+                    FILE_READ | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+                looked = handle < 0 ? handle :
+                         file_look_code(handle, (string_address)"",
+                                        AT_EMPTY_PATH, address_of facts);
+                if (looked >= 0 &&
+                    ((facts.mask & STATX_BASIC) != STATX_BASIC ||
+                     (facts.mode & MODE_FORMAT) != MODE_FILE))
+                        looked = -1;
+                if (looked < 0 && handle >= 0)
+                        system_close(handle);
+                if (looked < 0)
+                        handle = -1;
+        }
+        if (handle < 0)
+                looked = system_stat_at(directory, name,
+                                        AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT,
+                                        STATX_BASIC, address_of facts);
         if (looked < 0)
         {
                 tar_fail(member, looked);
@@ -4006,6 +4029,15 @@ static b32 tar_add_named(bipolar archive, bipolar directory,
             tar_output_target_known &&
             file_same_identity(address_of facts,
                                address_of tar_output_target_facts);
+        if ((tar_output_stage_known &&
+             file_same_identity(address_of facts,
+                                address_of tar_output_stage_facts)) ||
+            active_output || replaced_output)
+        {
+                if (handle >= 0)
+                        system_close(handle);
+                handle = -1;
+        }
         if (tar_output_stage_known &&
             file_same_identity(address_of facts,
                                address_of tar_output_stage_facts))
@@ -4072,6 +4104,8 @@ static b32 tar_add_named(bipolar archive, bipolar directory,
         prior = tar_seen_name(address_of facts);
         if (prior)
         {
+                if (handle >= 0)
+                        system_close(handle);
                 tar_put_header(archive, member, '1', 0, facts.mode & 07777,
                                (p64)facts.modified.seconds, prior,
                                facts.owner, facts.group);
@@ -4112,9 +4146,10 @@ static b32 tar_add_named(bipolar archive, bipolar directory,
                 return tar_status;
         }
 
-        handle = file_open_same(
-            directory, name, address_of facts,
-            FILE_READ | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        if (handle < 0)
+                handle = file_open_same(
+                    directory, name, address_of facts,
+                    FILE_READ | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
         if (handle < 0)
         {
                 tar_fail(member, handle);
@@ -4140,7 +4175,8 @@ static b32 tar_add_named(bipolar archive, bipolar directory,
 
 static b32 tar_add_path(bipolar archive, string_address path, bool verbose)
 {
-        return tar_add_named(archive, AT_FDCWD, path, path, verbose, true);
+        return tar_add_named(archive, AT_FDCWD, path, path, verbose, true,
+                             DT_UNKNOWN);
 }
 
 static b32 tar_write_archive(struct tar_options address_to options)
