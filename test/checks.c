@@ -61938,13 +61938,70 @@ static p64 fill_change(struct waterlink_link address_to link, p64 state,
         return state;
 }
 
+/*      The normal band counted again by walking it: the tally the bounded
+        walks trust has to be what is there, whoever moved the band, and
+        every key with a frame there has its bit (a bit may outlive its
+        frames; a walk clears it). */
+static bool band_counts_hold(struct waterlink_link address_to link)
+{
+        p16 counted[WATERLINK_KEYS];
+        p64 keys = 0;
+
+        memory_zero(counted, sizeof counted);
+        for (p32 at = link->head[WATERLINK_BAND_NORMAL]; at != WATERLINK_NONE;
+             at = link->slot[at].next)
+        {
+                counted[link->slot[at].key]++;
+                keys |= 1ull << link->slot[at].key;
+        }
+        return !(keys & ~link->banded) &&
+               !memory_compare(counted, link->queued, sizeof counted);
+}
+
+/*      Two links the same from a place on, but for which keys' bits are
+        set in banded past their last frame: the reference fill never clears
+        one, and waterlink_fill clears those its walk comes across. */
+static bool fill_links_apart(struct waterlink_link address_to one,
+                             struct waterlink_link address_to two,
+                             positive from)
+{
+        positive mark = __builtin_offsetof(struct waterlink_link, banded);
+
+        return memory_compare((p8 address_to)one + from,
+                              (p8 address_to)two + from, mark - from) ||
+               memory_compare(one->queued, two->queued, sizeof one->queued) ||
+               !band_counts_hold(one) || !band_counts_hold(two);
+}
+
+//      The walk wake did before it could end early: any frame the window lets by.
+static bool sendable_walk(struct waterlink_link address_to link)
+{
+        for (p32 at = link->head[WATERLINK_BAND_NORMAL]; at != WATERLINK_NONE;
+             at = link->slot[at].next)
+                if (!waterlink_key_blocked(link, link->slot + at))
+                        return true;
+        return false;
+}
+
+//      Whether a walk now ends early: a stream blocked with more behind it.
+static bool band_walk_bounded(struct waterlink_link address_to link)
+{
+        for (p32 at = link->head[WATERLINK_BAND_NORMAL]; at != WATERLINK_NONE;
+             at = link->slot[at].next)
+                if ((link->slot[at].flags & WATERLINK_FRAME_DURABLE) &&
+                    waterlink_key_blocked(link, link->slot + at) &&
+                    link->queued[link->slot[at].key] > 1)
+                        return true;
+        return false;
+}
+
 static fn fill_procedural(void)
 {
         static p8 body_one[WATERLINK_PAYLOAD + 64];
         static p8 body_two[WATERLINK_PAYLOAD + 64];
         p64 state = 0x243f6a8885a308d3ull;
         positive runs = 0, calls = 0, written = 0, wrong = 0, apart = 0;
-        positive missed = 0;
+        positive missed = 0, bounded = 0, miscounted = 0;
 
         memory_zero(fill_seen, sizeof fill_seen);
         for (positive run = 0; run < 300; run++)
@@ -61971,6 +62028,9 @@ static fn fill_procedural(void)
                                 for (positive byte = 0; byte < sizeof body_one; byte++)
                                         body_one[byte] = body_two[byte] =
                                                 (p8)(byte * 13 + step + fill);
+                                bounded += band_walk_bounded(address_of fill_two);
+                                miscounted += waterlink_sendable(address_of fill_two) !=
+                                              sendable_walk(address_of fill_two);
                                 used_one = fill_walk(address_of fill_one, body_one,
                                                      at, address_of alone_one);
                                 used_two = waterlink_fill(address_of fill_two,
@@ -61978,17 +62038,17 @@ static fn fill_procedural(void)
                                                           address_of alone_two);
                                 calls++;
                                 written += used_one;
+                                miscounted += !band_counts_hold(address_of fill_one) ||
+                                              !band_counts_hold(address_of fill_two);
                                 wrong += used_one != used_two ||
                                          alone_one != alone_two ||
                                          memory_compare(body_one, body_two,
                                                         sizeof body_one) != 0;
-                                apart += memory_compare(
-                                                 address_of fill_one.sending,
-                                                 address_of fill_two.sending,
-                                                 sizeof fill_one -
-                                                         __builtin_offsetof(
-                                                                 struct waterlink_link,
-                                                                 sending)) != 0;
+                                apart += fill_links_apart(address_of fill_one,
+                                                          address_of fill_two,
+                                                          __builtin_offsetof(
+                                                                  struct waterlink_link,
+                                                                  sending));
                                 for (positive slot = 0; slot < WATERLINK_SLOTS; slot++)
                                         apart += memory_compare(
                                                          fill_one.slot + slot,
@@ -62000,16 +62060,17 @@ static fn fill_procedural(void)
                         now += fill_next(address_of state) % 8 ? fill_next(address_of state) % 3000
                                                                : fill_next(address_of state) % 300000;
                 }
-                apart += memory_compare(address_of fill_one, address_of fill_two,
-                                        sizeof fill_one) != 0;
+                apart += fill_links_apart(address_of fill_one,
+                                          address_of fill_two, 0);
                 runs++;
         }
 
         for (positive seen = 0; seen < FILL_SEEN; seen++)
                 missed += fill_seen[seen] < 20;
         string_format(log, "  fill: %p calls in %p runs wrote %p bytes; "
-                           "%p paths taken under twenty times\n",
-                      calls, runs, written, missed);
+                           "%p paths taken under twenty times; %p calls "
+                           "past a blocked stream\n",
+                      calls, runs, written, missed, bounded);
         for (positive seen = 0; seen < FILL_SEEN; seen++)
                 if (fill_seen[seen] < 20)
                         string_format(log, "    fill path %p taken %p times\n",
@@ -62019,6 +62080,10 @@ static fn fill_procedural(void)
               runs == 300 && calls > 50000 && wrong == 0 && apart == 0);
         check("and the generated links took every path of it",
               missed == 0);
+        check("and the normal band's tally by key is the band after every "
+              "fill, and wake's bounded walk finds what the whole walk "
+              "does, many of them past a blocked stream",
+              miscounted == 0 && bounded > 1000);
 }
 
 /*
@@ -62160,6 +62225,7 @@ static fn apply_procedural(void)
         static p8 body[WATERLINK_PAYLOAD];
         p64 state = 0x13198a2e03707344ull;
         positive runs = 0, calls = 0, apart = 0, heard = 0, missed = 0;
+        positive miscounted = 0;
 
         memory_zero(apply_seen, sizeof apply_seen);
         for (positive run = 0; run < 240; run++)
@@ -62213,6 +62279,7 @@ static fn apply_procedural(void)
                         waterlink_apply(address_of fill_two, body, parts, count, at,
                                         sink, (address_any)2);
                         calls++;
+                        miscounted += !band_counts_hold(address_of fill_two);
                         apart += memory_compare(address_of fill_one.sending,
                                                 address_of fill_two.sending,
                                                 sizeof fill_one -
@@ -62259,6 +62326,9 @@ static fn apply_procedural(void)
               runs == 240 && calls > 25000 && heard > 10000 && apart == 0);
         check("and the generated links and bodies took every path of it",
               missed == 0);
+        check("and the normal band's tally by key is the band after every "
+              "apply",
+              miscounted == 0);
 }
 
 static fn replay(void)
@@ -63142,6 +63212,55 @@ static fn held_answer_lost(void)
               heard == 3 && waterlink_idle(address_of held_sender) &&
                       held_sender.free_count == WATERLINK_SLOTS &&
                       held_sender.retransmitted == 1);
+}
+
+/*      A register's value replaced where it stands at the front of the
+        normal band takes the newest sequence and can be past its key's
+        window, with an older frame of the same key behind it that is not:
+        a walk that took the first as the key blocked would stop there, and
+        the older frame would wait for the window with nothing to open it. */
+static struct waterlink_link register_link;
+
+static fn register_behind_its_newest(void)
+{
+        struct waterlink_link address_to l = address_of register_link;
+        p8 body[WATERLINK_PAYLOAD];
+        bool alone = false;
+        p8 value = 'v';
+        p32 slot[5];
+        p64 now = 1000;
+        p64 wake;
+
+        waterlink_link_reset(l);
+        //      Normal, urgent, normal, urgent, normal: five slots of key 3.
+        for (positive at = 0; at < 5; at++)
+        {
+                (void)waterlink_post(l, 3,
+                                     WATERLINK_FRAME_REPLACEABLE |
+                                             (at & 1 ? WATERLINK_FRAME_URGENT : 0),
+                                     address_of value, 1, now);
+                slot[at] = l->sending[3].last;
+                while (waterlink_fill(l, body, now, address_of alone))
+                        ;
+        }
+        //      The newest lost first, then the older normal one behind it.
+        waterlink_lose(l, slot[4]);
+        waterlink_lose(l, slot[2]);
+        for (positive at = 0; at < WATERLINK_KEY_WINDOW; at++)
+                (void)waterlink_post(l, 3, WATERLINK_FRAME_REPLACEABLE,
+                                     address_of value, 1, now);
+        check("a register replaced where it stands, past its window, stands "
+              "ahead of an older frame of its key",
+              l->head[WATERLINK_BAND_NORMAL] == slot[4] &&
+                      l->slot[slot[4]].next == slot[2] &&
+                      waterlink_key_blocked(l, l->slot + slot[4]) &&
+                      !waterlink_key_blocked(l, l->slot + slot[2]));
+        wake = waterlink_wake(l, now);
+        (void)waterlink_fill(l, body, now, address_of alone);
+        check("sec: the older frame is not taken for blocked with it: wake "
+              "answers now, and fill sends it",
+              wake == now && l->slot[slot[2]].state == WATERLINK_SLOT_FLIGHT &&
+                      l->slot[slot[4]].state == WATERLINK_SLOT_QUEUED);
 }
 
 /*      A frame the path lost several times before it arrived and was held:
@@ -64869,6 +64988,7 @@ b32 main(void)
         reader_credit();
         held_answer_lost();
         held_after_losses();
+        register_behind_its_newest();
         invalid_application_keys();
         network_generated();
         handshake();
