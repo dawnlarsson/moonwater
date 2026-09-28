@@ -50277,8 +50277,15 @@ static positive dns_servers_asked(const char address_to text, positive length)
 
 static fn resolving_servers(void)
 {
+        static const char five[] =
+            "nameserver 127.0.0.2\nnameserver 127.0.0.3\n"
+            "nameserver 127.0.0.4\nnameserver 127.0.0.5\n"
+            "nameserver 127.0.0.6\n";
         static const char cut_line[] = "nameserver 127.0.0.12\n";
         p8 cut[4097];
+
+        check("resolv.conf asks at most the three nameservers glibc reads",
+              dns_servers_asked(five, sizeof five - 1) == 3);
 
         memory_fill(cut, '#', sizeof cut);
         memory_copy(cut, "nameserver 127.0.0.2\n", 21);

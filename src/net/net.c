@@ -1721,12 +1721,16 @@ failed:
         asked anyway, and only an actual address stops the walk.
 
         The cost is one extra query for a name that genuinely exists nowhere.
+        The walk stops after three servers, which is all glibc and musl read
+        (MAXNS): a file listing more would otherwise hold a lookup for its
+        timeout once per line.
 
         With no resolv.conf at all there is still somewhere to ask. A machine
         that has not been configured yet should be able to resolve a name, if
         only to fetch the thing that will configure it.
 */
 #define DNS_FALLBACK 0x01010101u
+#define DNS_SERVERS_MAX 3
 
 static COLD bipolar dns_resolve_any(string_address path, string_address name,
                                p32 address_to found, positive seconds)
@@ -1737,7 +1741,8 @@ static COLD bipolar dns_resolve_any(string_address path, string_address name,
         positive index = 0;
         bool asked = false;
 
-        while ((server = dns_server_at(path, index++)) >= 0)
+        while (index < DNS_SERVERS_MAX &&
+               (server = dns_server_at(path, index++)) >= 0)
         {
                 asked = true;
                 status = dns_resolve_at((p32)server, DNS_PORT, name, found,
