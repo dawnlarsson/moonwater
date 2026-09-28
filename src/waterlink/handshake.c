@@ -103,17 +103,22 @@ static fn waterlink_mix_hash(struct waterlink_noise address_to noise,
         crypto_sha256_close(address_of hash, noise->hash);
 }
 
-// HKDF with the chaining key as salt and no info: two outputs.
+/*
+        HKDF with the chaining key as salt and no info: MixKey's two outputs,
+        or with hash MixKeyAndHash's three, the middle one into the hash.
+*/
 static fn waterlink_mix_key(struct waterlink_noise address_to noise,
-                            p8 address_to material, positive length)
+                            p8 address_to material, positive length, bool hash)
 {
         p8 prk[32];
-        p8 out[64];
+        p8 out[96];
 
         crypto_hkdf_extract(noise->chain, 32, material, length, prk);
-        crypto_hkdf_expand(prk, (p8 address_to) "", 0, out, 64);
+        crypto_hkdf_expand(prk, (p8 address_to) "", 0, out, hash ? 96 : 64);
         memory_copy(noise->chain, out, 32);
-        memory_copy(noise->key, out + 32, 32);
+        if (hash)
+                waterlink_mix_hash(noise, out + 32, 32);
+        memory_copy(noise->key, out + (hash ? 64 : 32), 32);
         noise->nonce = 0;
         crypto_forget(prk, sizeof prk);
         crypto_forget(out, sizeof out);
@@ -126,7 +131,7 @@ static bool waterlink_mix_dh(struct waterlink_noise address_to noise,
         bool good = crypto_x25519(shared, secret, public);
 
         if (good)
-                waterlink_mix_key(noise, shared, 32);
+                waterlink_mix_key(noise, shared, 32, false);
         crypto_forget(shared, sizeof shared);
         return good;
 }
@@ -174,23 +179,6 @@ static bool waterlink_open_hash(struct waterlink_noise address_to noise,
                 waterlink_mix_hash(noise, sealed, length + 16);
         crypto_forget(address_of key, sizeof key);
         return good;
-}
-
-// MixKeyAndHash: three outputs, the middle one into the hash.
-static fn waterlink_mix_key_hash(struct waterlink_noise address_to noise,
-                                 p8 address_to material, positive length)
-{
-        p8 prk[32];
-        p8 out[96];
-
-        crypto_hkdf_extract(noise->chain, 32, material, length, prk);
-        crypto_hkdf_expand(prk, (p8 address_to) "", 0, out, 96);
-        memory_copy(noise->chain, out, 32);
-        waterlink_mix_hash(noise, out + 32, 32);
-        memory_copy(noise->key, out + 64, 32);
-        noise->nonce = 0;
-        crypto_forget(prk, sizeof prk);
-        crypto_forget(out, sizeof out);
 }
 
 //      A name longer than a hash is hashed, as Noise says.
@@ -316,7 +304,7 @@ bool waterlink_initiate(struct waterlink_noise address_to noise,
         waterlink_ephemeral(noise, ephemeral, at);
         waterlink_mix_hash(noise, at, 32);
         if (psk)
-                waterlink_mix_key(noise, at, 32);
+                waterlink_mix_key(noise, at, 32, false);
         at += 32;
 
         // es
@@ -332,7 +320,7 @@ bool waterlink_initiate(struct waterlink_noise address_to noise,
         if (!waterlink_mix_dh(noise, me->secret, responder_public))
                 return false;
         if (psk)
-                waterlink_mix_key_hash(noise, psk, 32);
+                waterlink_mix_key(noise, psk, 32, true);
 
         // payload
         memory_copy(at, hello, WATERLINK_HELLO_BYTES);
@@ -362,7 +350,7 @@ bool waterlink_accept(struct waterlink_noise address_to noise,
         memory_copy(noise->remote_ephemeral, at, 32);
         waterlink_mix_hash(noise, at, 32);
         if (psk)
-                waterlink_mix_key(noise, at, 32);
+                waterlink_mix_key(noise, at, 32, false);
         at += 32;
 
         // es
@@ -378,7 +366,7 @@ bool waterlink_accept(struct waterlink_noise address_to noise,
         if (!waterlink_mix_dh(noise, me->secret, noise->remote_static))
                 return false;
         if (psk)
-                waterlink_mix_key_hash(noise, psk, 32);
+                waterlink_mix_key(noise, psk, 32, true);
 
         if (!waterlink_open_hash(noise, at, WATERLINK_HELLO_BYTES, hello))
                 return false;
@@ -442,24 +430,18 @@ bool waterlink_answered(struct waterlink_noise address_to noise,
 }
 
 /*
-        Split: the initiator sends with the first key and the responder with
-        the second. Both cut to AES-128's sixteen bytes. The handshake state
-        is forgotten after.
+        Split: MixKey's two outputs of nothing, the initiator sending with
+        the first and the responder with the second, both cut to AES-128's
+        sixteen bytes. The handshake state is forgotten after.
 */
 fn waterlink_split(struct waterlink_noise address_to noise, bool initiator,
                    p8 address_to sending, p8 address_to receiving)
 {
-        p8 prk[32];
-        p8 out[64];
-
-        crypto_hkdf_extract(noise->chain, 32, (p8 address_to) "", 0, prk);
-        crypto_hkdf_expand(prk, (p8 address_to) "", 0, out, 64);
-        memory_copy(initiator ? sending : receiving, out,
+        waterlink_mix_key(noise, (p8 address_to) "", 0, false);
+        memory_copy(initiator ? sending : receiving, noise->chain,
                     WATERLINK_AEAD_BYTES);
-        memory_copy(initiator ? receiving : sending, out + 32,
+        memory_copy(initiator ? receiving : sending, noise->key,
                     WATERLINK_AEAD_BYTES);
-        crypto_forget(prk, sizeof prk);
-        crypto_forget(out, sizeof out);
         crypto_forget(noise, sizeof(address_to noise));
 }
 
