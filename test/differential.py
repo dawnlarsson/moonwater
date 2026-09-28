@@ -28406,6 +28406,8 @@ def harness_floodlight(argv):
 
     decide_body = shell[shell.rindex('static b32 floodlight_launch_decide('):]
     decide_body = decide_body[:decide_body.index('\n}\n')]
+    load_body = shell[shell.index('static fn floodlight_load()\n{'):]
+    load_body = load_body[:load_body.index('\n}\n')]
 
     def calls(*sequence):
         window = len(sequence)
@@ -28457,21 +28459,23 @@ def harness_floodlight(argv):
                    'handle', ',', '(', 'positive', ')', '""'),
              'the authorized descriptor, rather than a mutable pathname, is '
              'executed'),
-            (calls('if', '(', '!', 'tool', '&', '&', '!', 'final', '&', '&',
-                   'floodlight_report_state', '=', '=',
-                   'FLOODLIGHT_REPORT_VALID', ')', '{',
+            (calls('if', '(', 'paths', '&', '&', '!', 'final', ')', '{',
                    'floodlight_executable_drop', '(', 'image', ')', ';',
-                   'return', 'FLOODLIGHT_LAUNCH_PROCESS'),
-             'an active register sends external Spark launches through the '
-             'descriptor-pinned child path'),
+                   'return', 'FLOODLIGHT_LAUNCH_PROCESS') and
+             calls('paths', '=', '!', 'tool', '&', '&',
+                   'floodlight_names_paths', '(', ')', ';'),
+             'a policy that names a path sends external Spark launches '
+             'through the descriptor-pinned child path'),
             (calls('confined', '=', 'policy', '!', '=',
                    'FLOODLIGHT_LAUNCH_ALLOW', ';') and
              calls('shell_tail_command', '&', '&', '!', 'confined'),
              "an applet that must be confined never runs in the shell's own process"),
-            (calls('tool', '?', 'floodlight_built_in', '(', 'subject', ')',
-                   ':', 'true'),
-             'a register that cannot be read leaves the built-in answers '
-             'standing, so removing the device grants nothing'),
+            (calls('floodlight_row_count', '=', 'floodlight_compiled_rows',
+                   '(', 'floodlight_rows', ')', ';',
+                   'state', '=', 'FLOODLIGHT_REPORT_BUILTIN', ';'),
+             'a register that cannot be read leaves the answers this shell '
+             'was built with standing, so removing the device grants nothing '
+             'those did not'),
             (calls('file_look', '(', 'handle', ',', '(', 'string_address', ')',
                    '""', ',', 'AT_EMPTY_PATH', ',', '&', 'facts', ')'),
              'the reader checks it is talking to a device and not a file left '
@@ -28489,18 +28493,18 @@ def harness_floodlight(argv):
             (calls('got', '=', 'system_read_retry', '(', '(', 'positive', ')',
                    'handle', ',', 'report', '+', 'used'),
              'the reader retries interrupted reads and accumulates short reads'),
-            (calls('program_entry_identity', '|', '|',
-                   'floodlight_report_promised', '?',
-                   'FLOODLIGHT_REPORT_REFUSED', ':',
-                   'FLOODLIGHT_REPORT_BUILTIN'),
-             'a Spark-started shell and a process that has seen the register '
-             'fail closed when the promised policy device is unavailable'),
-            (calls('registered', '=', 'floodlight_policy_registered', '(',
-                   ')', ';', 'if', '(', 'registered', '!', '=', '0', ')'),
-             'stock fallback is permitted only after authenticated procfs '
-             'proves that the policy device is not registered'),
-            (calls('floodlight_row_count', '=', '0', ';',
-                   'floodlight_report_state', '=',
+            (calls('if', '(', 'floodlight_report_promised', ')',
+                   'state', '=', 'FLOODLIGHT_REPORT_VALID', ';') and
+             calls('floodlight_report_promised', '=', 'true', ';',
+                   'state', '=', 'FLOODLIGHT_REPORT_VALID', ';'),
+             'a process that has read a real register keeps its last answers '
+             'when the device is hidden from it, rather than falling back'),
+            ('floodlight_proc' not in load_body and
+             'floodlight_entry_unfiltered' not in load_body and
+             'floodlight_policy_registered' not in shell,
+             'reading the policy asks nothing of /proc, so a masked /proc '
+             'can refuse only a launch some row restricts'),
+            (calls('floodlight_report_state', '=',
                    'FLOODLIGHT_REPORT_UNREAD', ';',
                    'floodlight_load', '(', ')', ';'),
              'each launch reloads one coherent policy snapshot'),
@@ -28511,11 +28515,16 @@ def harness_floodlight(argv):
                    ')'),
              'every ordinary external exec passes the central final decision'),
             (bool(re.search(
-                r'if \(floodlight_inherited_seccomp\)\s*\{\s*'
-                r'diagnose = false;\s*if \(final\)\s*'
-                r'floodlight_silent_stop\(\);\s*\}', shell)),
-             'a final child under untrusted inherited seccomp enters the '
-             'silent terminal path before any diagnostic or cleanup syscall'),
+                r'if \(\(!spawn_allowed \|\| !network_allowed\) &&\s*'
+                r'!floodlight_own_seccomp && !floodlight_entry_unfiltered\(\)\)'
+                r'\s*\{\s*if \(inplace\)\s*diagnose = false;\s*'
+                r'else if \(final\)\s*\{\s*diagnose = false;\s*'
+                r'floodlight_silent_stop\(\);\s*\}', decide_body)) and
+             decide_body.index('floodlight_entry_unfiltered()') <
+                 decide_body.index('floodlight_apply('),
+             'a confined launch in a process not proved unfiltered is '
+             'refused, and a final child enters the silent terminal path '
+             'before any diagnostic or cleanup syscall'),
             (bool(re.search(
                 r'static DEAD_END fn floodlight_silent_stop\(\)\s*\{\s*'
                 r'system_call_1\(syscall\(exit_group\), 126\);\s*'
@@ -28523,7 +28532,7 @@ def harness_floodlight(argv):
                 shell)),
              'the silent terminal path tries exit once and otherwise performs '
              'no more syscalls or writes'),
-            (calls('if', '(', '!', 'floodlight_own_seccomp', '&', '&',
+            (calls('!', 'floodlight_own_seccomp', '&', '&',
                    '!', 'floodlight_entry_unfiltered', '(', ')', ')'),
              'interpreter recursion recognizes only a filter installed by '
              'this still-running image'),
@@ -29939,7 +29948,10 @@ int main(void)
     #   it and nothing for the open, the statx and the read to talk to.
     reader = (reader[:reader.index('static fn floodlight_load()')] +
               'static fn floodlight_load(void) { }\n'
-              'static fn floodlight_reload(void) { }\n\n' +
+              'static fn floodlight_reload(void) { }\n'
+              'static bool test_entry_unfiltered = true;\n'
+              'static bool floodlight_entry_unfiltered(void)\n'
+              '{ return test_entry_unfiltered; }\n\n' +
               reader[reader.index('static bool floodlight_says'):])
 
     #   Exercise the same final executable/argv decision as every launch
@@ -30535,10 +30547,43 @@ int main(void)
         {
                 bool said = false;
                 char *restricted_tool[] = {"awk", NULL};
+                char *plain_tool[] = {"cat", NULL};
+                unsigned refused = 0, i;
+
+                for (i = 0; i < ARRAY_SIZE(baseline); i++)
+                        refused += !baseline[i].allowed;
 
                 reread();
-                check(floodlight_row_count == 0,
-                      "an untouched register gives the reader nothing to carry");
+                check(floodlight_row_count == refused,
+                      "an untouched register gives the reader only what it refuses");
+
+                /* Nothing restricts cat, so nothing about this process is
+                   asked: not its seccomp state, not its parent, not /proc. */
+                floodlight_parent_role = false;
+                floodlight_parent_protected = false;
+                floodlight_parent_supervised = false;
+                test_entry_unfiltered = false;
+                shell_parser_source_kind = SHELL_PARSER_SOURCE_MUTABLE;
+                check(reader_tool_launch(plain_tool, true) ==
+                          FLOODLIGHT_LAUNCH_ALLOW,
+                      "a launch no row restricts runs with /proc unreadable, "
+                      "no protected parent and a live parser pipe");
+                check(reader_launch("./allowed", (char *[]){"./allowed", NULL},
+                                    true, NULL) == FLOODLIGHT_LAUNCH_ALLOW,
+                      "an external launch needs no pinned identity while no "
+                      "row names a path");
+
+                put("awk spawn deny");
+                reread();
+                floodlight_parent_role = true;
+                floodlight_parent_protected = true;
+                floodlight_parent_supervised = true;
+                shell_parser_source_kind = SHELL_PARSER_SOURCE_MEMORY;
+                check(reader_tool_launch(restricted_tool, false) ==
+                          FLOODLIGHT_LAUNCH_REFUSE,
+                      "a launch a row restricts fails closed when this "
+                      "process cannot be proved unfiltered");
+                test_entry_unfiltered = true;
 
                 floodlight_parent_role = false;
                 floodlight_parent_protected = false;
@@ -30586,18 +30631,19 @@ int main(void)
                 floodlight_parent_protected = false;
                 floodlight_parent_supervised = false;
 
-                put("awk spawn allow");
+                put("env spawn deny");
                 reread();
-                check(floodlight_row_count == 1,
+                check(floodlight_row_count == refused + 1,
                       "one deviation reaches the reader as one row");
-                check(reader_says("awk", FLOODLIGHT_SPAWN, "", &said) && said,
+                said = true;
+                check(reader_says("env", FLOODLIGHT_SPAWN, "", &said) && !said,
                       "and the reader reads back what was written");
 
-                put("env spawn deny");
+                put("find spawn deny");
                 put("curl network deny");
                 put("tar flag --to-command deny");
                 reread();
-                check(floodlight_row_count == 4,
+                check(floodlight_row_count == refused + 4,
                       "four deviations reach the reader as four rows");
 
                 said = true;
@@ -30611,15 +30657,15 @@ int main(void)
                       "a refused flag is read back");
                 check(!reader_says("tar", FLOODLIGHT_FLAG, "--other", &said),
                       "and a flag nobody refused is not");
-                check(!reader_says("find", FLOODLIGHT_SPAWN, "", &said),
-                      "a built-in answer is not carried twice");
+                check(!reader_says("xargs", FLOODLIGHT_SPAWN, "", &said),
+                      "a built-in allowance is not carried at all");
                 check(!reader_says("aw", FLOODLIGHT_SPAWN, "", &said) &&
                       !reader_says("awkk", FLOODLIGHT_SPAWN, "", &said),
                       "and a name that merely starts the same is not it");
 
-                put("awk spawn deny");   /* back to built in */
+                put("env spawn allow");   /* back to built in */
                 reread();
-                check(!reader_says("awk", FLOODLIGHT_SPAWN, "", &said),
+                check(!reader_says("env", FLOODLIGHT_SPAWN, "", &said),
                       "a deviation given back stops reaching the reader");
 
                 {
@@ -30637,7 +30683,8 @@ int main(void)
                             "# floodlight: TAMPERED; refusing report\n";
                         static const char builtin[] =
                             "# floodlight (sealed)\n"
-                            "awk spawn deny built in\n";
+                            "awk spawn deny built in\n"
+                            "find spawn allow built in\n";
                         static const char valued_flag[] =
                             "# floodlight\n"
                             "tar flag --output deny changed 3s ago by uid 9\n";
@@ -30662,9 +30709,14 @@ int main(void)
                               "unexpected report fields are refused");
                         check(!reader_accept(tampered, sizeof(tampered) - 1),
                               "the driver's tamper banner is never policy input");
+                        said = true;
                         check(reader_accept(builtin, sizeof(builtin) - 1) &&
-                              floodlight_row_count == 0,
-                              "built-in rows authenticate grammar but are not duplicated");
+                              floodlight_row_count == 1 &&
+                              reader_says("awk", FLOODLIGHT_SPAWN, "", &said) &&
+                              !said &&
+                              !reader_says("find", FLOODLIGHT_SPAWN, "", &said),
+                              "a refusing built-in row is carried as the kernel's "
+                              "word and an allowing one is not");
 
                         check(reader_accept(valued_flag,
                                             sizeof(valued_flag) - 1),
