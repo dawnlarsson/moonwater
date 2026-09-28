@@ -7845,7 +7845,7 @@ static bipolar http_body_borrow(http_body address_to body, positive room,
 
 /* Payload copied into the caller's bytes: the stash's and TLS's through
    http_body_borrow, a plaintext socket's by a read that asks the clock and
-   polls only when nothing is queued yet. */
+   polls only when nothing is queued yet (network_stream_read_some_for). */
 static bipolar http_body_read(http_body address_to body, p8 address_to into,
                               positive room, positive address_to got)
 {
@@ -7866,19 +7866,9 @@ static bipolar http_body_read(http_body address_to body, p8 address_to into,
                 return HTTP_OK;
         }
 
-        n = socket_receive((b32)body->link->handle, into, room, MSG_DONTWAIT,
-                           null, 0);
-        if (n == NETWORK_TRY_AGAIN || n == NETWORK_INTERRUPTED)
-        {
-                network_deadline deadline;
-
-                if (!network_deadline_begin(address_of deadline,
-                                            http_body_seconds(body),
-                                            body->read_nanoseconds))
-                        return HTTP_NO_REPLY;
-                n = network_stream_read_some_until(body->link->handle, into,
-                                                   room, address_of deadline);
-        }
+        n = network_stream_read_some_for(body->link->handle, into, room,
+                                         http_body_seconds(body),
+                                         body->read_nanoseconds);
         if (n < 0 || (positive)n > room)
                 return HTTP_NO_REPLY;
         address_to got = (positive)n;

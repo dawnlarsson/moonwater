@@ -38402,20 +38402,17 @@ static bool network_deadline_begin(network_deadline *d, positive s, positive n)
         abort();
         return false;
 }
-#define MSG_DONTWAIT 0x40
-#define NETWORK_INTERRUPTED (-4)
-#define NETWORK_TRY_AGAIN (-11)
-static bipolar socket_receive(b32 h, p8 *into, positive room, int flags,
-                              void *from, positive size)
-{
-        (void)h; (void)into; (void)room; (void)flags; (void)from; (void)size;
-        abort();
-        return -1;
-}
 static bipolar network_stream_read_some_until(bipolar h, p8 *into, positive room,
                                               const network_deadline *d)
 {
         (void)h; (void)into; (void)room; (void)d;
+        abort();
+        return -1;
+}
+static bipolar network_stream_read_some_for(bipolar h, p8 *into, positive room,
+                                            positive s, positive ns)
+{
+        (void)h; (void)into; (void)room; (void)s; (void)ns;
         abort();
         return -1;
 }
@@ -39131,17 +39128,12 @@ static bipolar network_stream_read_some_until(bipolar h, p8 *into, positive room
         return (bipolar)take;
 }
 
-/* A plaintext body read tries the socket without waiting first; now and
-   then nothing is queued, and it has to take the deadline path. */
-#define MSG_DONTWAIT 0x40
-#define NETWORK_INTERRUPTED (-4)
-#define NETWORK_TRY_AGAIN (-11)
-static bipolar socket_receive(b32 h, p8 *into, positive room, int flags,
-                              void *from, positive size)
+/* A plaintext body read waits a length of time rather than to an instant;
+   what it takes is the same segment. */
+static bipolar network_stream_read_some_for(bipolar h, p8 *into, positive room,
+                                            positive s, positive ns)
 {
-        (void)flags; (void)from; (void)size;
-        if (!fuzz_next(4))
-                return fuzz_next(2) ? NETWORK_TRY_AGAIN : NETWORK_INTERRUPTED;
+        (void)s; (void)ns;
         return network_stream_read_some_until(h, into, room, NULL);
 }
 
