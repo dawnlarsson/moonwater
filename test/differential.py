@@ -8933,6 +8933,19 @@ def files_tar_archives(rng, count):
         lambda: [member("dir", "ds"), member("file", "ds", data=b"now a file")],
         lambda: [member("file", "sp ace\ttab", data=b"s")],
         lambda: [member("file", "old", mtime=0, data=b"o")],
+        # Hard links to files made in directories the run made, which keep
+        # no identity until a link asks: in the same directory, from the
+        # root, after the name was overwritten, after it became a symlink
+        # and after it became a directory.
+        lambda: [member("file", "pd/t", data=b"pt"), member("hard", "pd/h", target="pd/t")],
+        lambda: [member("dir", "pe"), member("file", "pe/t", data=b"et"),
+                 member("hard", "he", target="pe/t")],
+        lambda: [member("file", "po/t", data=b"o1"), member("file", "po/t", data=b"o2"),
+                 member("hard", "po/h", target="po/t")],
+        lambda: [member("file", "pq/t", data=b"q"), member("sym", "pq/t", target="z"),
+                 member("hard", "pq/h", target="pq/t")],
+        lambda: [member("file", "pr/t", data=b"r"), member("dir", "pr/t"),
+                 member("hard", "pr/h", target="pr/t")],
         # The hostile: out through .., absolute, a link then a write through
         # it, a hard link to something outside, a link turned into a directory.
         lambda: [member("file", "../escape", data=b"out")],

@@ -1296,6 +1296,22 @@ static tar_stack_entry address_to tar_stack_child(string_address leaf,
         return tar_stack + depth;
 }
 
+/* A directory the stack holds that a later member took away: its entry and
+   those below it would be a descriptor for a directory no longer in the
+   tree, so they go, and the next member under that name looks again. */
+static fn tar_stack_forget(string_address path)
+{
+        positive length = string_length(path);
+
+        for (positive depth = 0; depth < tar_stack_used; depth++)
+                if (tar_stack[depth].stop == length &&
+                    !memory_compare(tar_stack_path, path, length))
+                {
+                        tar_stack_close_from(depth);
+                        return;
+                }
+}
+
 static bipolar tar_parent_walk(string_address path, p8 address_to leaf,
                                positive room, bool address_to owned)
 {
@@ -2735,6 +2751,7 @@ static bipolar tar_extract_destination(
                 if (system_remove_at(directory, leaf, AT_REMOVEDIR) < 0)
                         return -ERROR_IS_DIRECTORY;
                 tar_directory_forget(path);
+                tar_stack_forget(path);
                 return 0;
         }
 
@@ -3078,6 +3095,21 @@ static fn tar_extract_member(bipolar archive, p8 type, string_address path,
                             !tar_materialized_same(authorized,
                                                    address_of source_facts))
                                 made = -ERROR_ACCESS;
+                        /*      A directory where the target was: link()
+                                meets the name already there first, and the
+                                reference takes that away and tries again
+                                before the kernel refuses the directory. */
+                        if (made == -ERROR_ACCESS &&
+                            (source_facts.mask & STATX_BASIC) == STATX_BASIC &&
+                            (source_facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                        {
+                                if (tar_extract_destination(
+                                        parent, leaf, path, address_of replaced,
+                                        address_of replaced_known) >= 0 &&
+                                    replaced_known)
+                                        (void)system_remove_at(parent, leaf, 0);
+                                made = -ERROR_NOT_PERMITTED;
+                        }
                         if (made >= 0)
                         {
                                 expected.kind = source_facts.mode & MODE_FORMAT;
