@@ -1284,9 +1284,10 @@ static COLD bipolar net_lease_rollback(
 
         if (address_changed && net_owns_address(previous))
         {
-                bipolar status = netlink_address_add(
+                bipolar status = netlink_address_lease(
                     handle, previous->index, previous->lease.address,
-                    dhcp_prefix_of(previous->lease.mask));
+                    dhcp_prefix_of(previous->lease.mask),
+                    previous->lease.seconds, false);
                 if (status < 0 && !failed)
                         failed = status;
         }
@@ -1349,19 +1350,27 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
         address_changed = !net_holds_address(previous, index, lease);
         route_changed = !net_holds_route(previous, index, lease);
 
-        if (address_changed)
+        /* The address carries the lease's lifetimes, so the kernel drops
+           it at expiry even with no watcher left, and a renewal of the same
+           address puts the new lease's on it. EEXIST from the exclusive
+           create is the address already there: an operator's stays theirs,
+           present and not owned, but one this client leased -- a watcher's
+           before init restarted this one -- is taken back, so that a NAK or
+           expiry removes it as it would have. */
+        if (address_changed || net_owns_address(previous))
         {
-                status = net_owns_address(previous)
-                             ? netlink_address_add(
-                                   handle, index, lease->address,
-                                   dhcp_prefix_of(lease->mask))
-                             : netlink_address_acquire(
-                                   handle, index, lease->address,
-                                   dhcp_prefix_of(lease->mask));
-                /* EEXIST from the exclusive create is the address already
-                   there -- an operator's, or this watcher's before init
-                   restarted it -- which stays theirs: present, not owned. */
-                address_applied = status >= 0;
+                p8 prefix = dhcp_prefix_of(lease->mask);
+
+                status = netlink_address_lease(
+                    handle, index, lease->address, prefix, lease->seconds,
+                    !net_owns_address(previous));
+                if (status == -EEXIST &&
+                    netlink_address_leased(handle, index, lease->address,
+                                           prefix) > 0)
+                        status = netlink_address_lease(
+                            handle, index, lease->address, prefix,
+                            lease->seconds, false);
+                address_applied = address_changed && status >= 0;
                 if (status < 0 && status != -EEXIST)
                 {
                         doing = (string_address) "addr add";

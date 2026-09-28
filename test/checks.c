@@ -73427,47 +73427,68 @@ static fn storage_test_dhcp_apart(void)
                       -ECHILD);
 }
 
-/* A restarted watcher meets the address its predecessor installed: the
-   exclusive create answers EEXIST. In a user, network and mount namespace
-   of its own (lo up, the address added first, a tmpfs over /etc for the
-   resolver), the lease must be taken, held without ownership, and released
-   without removing an address it never owned. NOT RUN without namespaces. */
-static fn storage_test_lease_over_existing(void)
+/* A user, network and mount namespace of the caller's own, which must be
+   a child: lo up, a tmpfs over /etc for the resolver file a lease writes,
+   and a routing socket, or exit 2 (NOT RUN) where namespaces are refused. */
+static bipolar storage_test_net_namespace(void)
+{
+        p8 map[48] = "0 ";
+        p8 groups[48] = "0 ";
+        bipolar handle;
+        //      The ids outside, read before the namespace hides them; a
+        //      file made under an unmapped id is EOVERFLOW.
+        positive at = 2 + positive_into(
+            map + 2, (positive)system_call_1(syscall(getuid), 0));
+        positive group = 2 + positive_into(
+            groups + 2, (positive)system_call_1(syscall(getgid), 0));
+
+        if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWNET |
+                                                CLONE_NEWNS) < 0)
+                system_call_1(syscall(exit_group), 2);
+        memory_copy(map + at, " 1\n", 4);
+        memory_copy(groups + group, " 1\n", 4);
+        if (!storage_test_write_text("/proc/self/uid_map", map, at + 3) ||
+            !storage_test_write_text("/proc/self/setgroups", "deny", 4) ||
+            !storage_test_write_text("/proc/self/gid_map", groups, group + 3) ||
+            system_call_5(syscall(mount), 0, (positive) "/", 0, MS_REC | MS_PRIVATE, 0) < 0 ||
+            system_call_5(syscall(mount), (positive) "tmpfs", (positive) "/etc",
+                          (positive) "tmpfs", 0, 0) < 0 ||
+            (handle = netlink_open_groups(0)) < 0 ||
+            netlink_link_up((b32)handle, 1) < 0)
+                system_call_1(syscall(exit_group), 2);
+        return handle;
+}
+
+//      A child's exit status, 2 being NOT RUN.
+static b32 storage_test_child_status(bipolar child)
 {
         b32 status = 0;
+
+        if (child < 0)
+                return -1;
+        system_call_4(syscall(wait4), (positive)child, (positive)address_of status,
+                      0, 0);
+        return (status & 0x7f) ? -1 : (status >> 8) & 0xff;
+}
+
+/* A restarted watcher meets the address its predecessor installed: the
+   exclusive create answers EEXIST. An operator's address there (added
+   first, no lease stamped on it) must be taken, held without ownership,
+   and released without removing an address it never owned. */
+static fn storage_test_lease_over_existing(void)
+{
         bipolar child = system_fork();
 
         if (child == 0)
         {
-                p8 map[48] = "0 ";
-                p8 groups[48] = "0 ";
                 p8 hardware[6] = {2, 0, 0, 0, 0, 1};
                 dhcp_lease lease = {.address = 0x0a090909, .mask = 0xffffff00,
                                     .server = 0x0a090901, .seconds = 60,
                                     .renewal = 30, .rebinding = 52};
                 net_holding held = {0};
-                bipolar handle;
-                //      The ids outside, read before the namespace hides them;
-                //      a file made under an unmapped id is EOVERFLOW.
-                positive at = 2 + positive_into(
-                    map + 2, (positive)system_call_1(syscall(getuid), 0));
-                positive group = 2 + positive_into(
-                    groups + 2, (positive)system_call_1(syscall(getgid), 0));
+                bipolar handle = storage_test_net_namespace();
 
-                if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWNET |
-                                                        CLONE_NEWNS) < 0)
-                        system_call_1(syscall(exit_group), 2);
-                memory_copy(map + at, " 1\n", 4);
-                memory_copy(groups + group, " 1\n", 4);
-                if (!storage_test_write_text("/proc/self/uid_map", map, at + 3) ||
-                    !storage_test_write_text("/proc/self/setgroups", "deny", 4) ||
-                    !storage_test_write_text("/proc/self/gid_map", groups, group + 3) ||
-                    system_call_5(syscall(mount), 0, (positive) "/", 0, MS_REC | MS_PRIVATE, 0) < 0 ||
-                    system_call_5(syscall(mount), (positive) "tmpfs", (positive) "/etc",
-                                  (positive) "tmpfs", 0, 0) < 0 ||
-                    (handle = netlink_open_groups(0)) < 0 ||
-                    netlink_link_up((b32)handle, 1) < 0 ||
-                    netlink_address_add((b32)handle, 1, lease.address, 24) < 0)
+                if (netlink_address_add((b32)handle, 1, lease.address, 24) < 0)
                         system_call_1(syscall(exit_group), 2);
                 if (net_apply_lease((b32)handle, 1, "lo", hardware, address_of lease,
                                     address_of held, false) != 0 ||
@@ -73479,14 +73500,93 @@ static fn storage_test_lease_over_existing(void)
                                                              24) == 0
                                   ? 0 : 3);
         }
-        if (child > 0)
-                system_call_4(syscall(wait4), (positive)child,
-                              (positive)address_of status, 0, 0);
-        if (child > 0 && status == 2 << 8)
+        b32 status = storage_test_child_status(child);
+        if (status == 2)
                 log_direct(str("storage_io: lease over an existing address NOT RUN -- no namespaces\n"));
         else
                 check("a lease over an address already there is taken, held unowned and left",
-                      child > 0 && status == 0);
+                      status == 0);
+}
+
+typedef struct
+{
+        p32 host;
+        bool found;
+        p32 valid;
+} storage_test_address_facts;
+
+static bool storage_test_address_seen(netlink_header address_to header,
+                                      address_any context)
+{
+        storage_test_address_facts address_to facts = context;
+        positive size = 0;
+        p8 address_to named = netlink_find(header, sizeof(netlink_address),
+                                           IFA_LOCAL, address_of size);
+        p8 address_to cache;
+
+        if (!named || size != 4 ||
+            memory_load_unaligned(p32, named) != network_order_32(facts->host))
+                return true;
+        facts->found = true;
+        cache = netlink_find(header, sizeof(netlink_address), IFA_CACHEINFO,
+                             address_of size);
+        facts->valid = cache && size >= 8 ? memory_load_unaligned(p32, cache + 4)
+                                         : 0;
+        return true;
+}
+
+/* The same address when the lease stamped it: a restarted watcher takes it
+   back, so a NAK or expiry removes it, and the kernel holds it to the
+   lease's lifetime on its own. Exit 4: no finite lifetime; 5: not taken
+   back; 6: not removed on release. */
+static fn storage_test_lease_inherited(void)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                p8 hardware[6] = {2, 0, 0, 0, 0, 1};
+                dhcp_lease lease = {.address = 0x0a090a0a, .mask = 0xffffff00,
+                                    .server = 0x0a090a01, .seconds = 60,
+                                    .renewal = 30, .rebinding = 52};
+                net_holding first = {0};
+                net_holding second = {0};
+                storage_test_address_facts facts = {.host = lease.address};
+                bipolar handle = storage_test_net_namespace();
+
+                if (net_apply_lease((b32)handle, 1, "lo", hardware, address_of lease,
+                                    address_of first, false) != 0 ||
+                    !first.address_owned)
+                        system_call_1(syscall(exit_group), 1);
+                netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
+                             AF_INET, storage_test_address_seen, address_of facts);
+                if (!facts.found || !facts.valid || facts.valid > 60)
+                        system_call_1(syscall(exit_group), 4);
+                if (net_apply_lease((b32)handle, 1, "lo", hardware, address_of lease,
+                                    address_of second, false) != 0 ||
+                    !second.address_owned)
+                        system_call_1(syscall(exit_group), 5);
+                facts.found = false;
+                if (net_holding_release((b32)handle, address_of second) != 0 ||
+                    netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
+                                 AF_INET, storage_test_address_seen,
+                                 address_of facts) < 0 ||
+                    facts.found)
+                        system_call_1(syscall(exit_group), 6);
+                system_call_1(syscall(exit_group), 0);
+        }
+        b32 status = storage_test_child_status(child);
+        if (status == 2)
+                log_direct(str("storage_io: inherited lease NOT RUN -- no namespaces\n"));
+        else
+        {
+                check("a leased address carries the lease's lifetime",
+                      status != 4 && status != 1);
+                check("a restarted watcher takes back the address its predecessor leased",
+                      status != 5 && status != 1);
+                check("an inherited lease is removed when it is released",
+                      status == 0);
+        }
 }
 
 static fn storage_test_netlink_output(void)
@@ -74135,6 +74235,7 @@ b32 main(void)
         storage_test_lease_clock_origin();
         storage_test_dhcp_apart();
         storage_test_lease_over_existing();
+        storage_test_lease_inherited();
         storage_test_netlink_output();
         storage_test_net_files();
         return test_report(null);

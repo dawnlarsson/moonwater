@@ -96,6 +96,11 @@
 #define IFA_ADDRESS 1
 #define IFA_LOCAL 2
 #define IFA_LABEL 3
+#define IFA_CACHEINFO 6
+#define IFA_PROTO 11
+//      What the DHCP client stamps on an address it leases: the routing
+//      protocol number iproute2 calls dhcp.
+#define IFA_PROTO_DHCP 16
 
 #define RTA_DST 1
 #define RTA_OIF 4
@@ -912,9 +917,15 @@ static bipolar netlink_link_up(b32 handle, p32 index)
         REPLACE rather than EXCLUSIVE, so running the same command twice is
         the same as running it once. A boot that is retried should not fail
         because the first attempt succeeded.
+
+        A leased address carries the lease: seconds, when not zero, are its
+        valid and preferred lifetimes -- so the kernel removes it at expiry
+        even with no client left to -- and IFA_PROTO_DHCP says whose it is,
+        which is how a restarted client knows the address it inherited.
 */
 static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
-                                      p32 index, p32 host, p8 prefix)
+                                      p32 index, p32 host, p8 prefix,
+                                      p32 seconds)
 {
         netlink_buffer request = {0};
         netlink_address address_to body;
@@ -933,6 +944,18 @@ static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
 
         netlink_attribute_add(address_of request, IFA_LOCAL, address_of wire, 4);
         netlink_attribute_add(address_of request, IFA_ADDRESS, address_of wire, 4);
+        if (seconds)
+        {
+                //      ifa_cacheinfo: preferred, valid, and two stamps the
+                //      kernel keeps for itself.
+                p32 lifetimes[4] = {seconds, seconds, 0, 0};
+                p8 leased = IFA_PROTO_DHCP;
+
+                netlink_attribute_add(address_of request, IFA_CACHEINFO,
+                                      lifetimes, sizeof lifetimes);
+                netlink_attribute_add(address_of request, IFA_PROTO,
+                                      address_of leased, 1);
+        }
 
         return netlink_transact(handle, address_of request, sequence,
                                 null, null);
@@ -940,7 +963,16 @@ static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
 
 #define netlink_address_add(handle, index, host, prefix) netlink_address_change( \
         handle, RTM_NEWADDR, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_REPLACE,   \
-        index, host, prefix)
+        index, host, prefix, 0)
+
+/* A leased address, created exclusively or put in place of the one there,
+   its lifetimes the lease's. */
+#define netlink_address_lease(handle, index, host, prefix, seconds, exclusive) \
+        netlink_address_change(                                                \
+            handle, RTM_NEWADDR,                                                \
+            NLM_REQUEST | NLM_ACK | NLM_CREATE |                                \
+                ((exclusive) ? NLM_EXCLUSIVE : NLM_REPLACE),                    \
+            index, host, prefix, seconds)
 
 /* Automatic configuration must acquire a kernel object before it can later
    claim the right to remove it.  EXCLUSIVE distinguishes a newly installed
@@ -948,10 +980,10 @@ static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
    another network manager; REPLACE cannot make that distinction. */
 #define netlink_address_acquire(handle, index, host, prefix) netlink_address_change( \
         handle, RTM_NEWADDR, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_EXCLUSIVE,     \
-        index, host, prefix)
+        index, host, prefix, 0)
 
 #define netlink_address_delete(handle, index, host, prefix) netlink_address_change( \
-        handle, RTM_DELADDR, NLM_REQUEST | NLM_ACK, index, host, prefix)
+        handle, RTM_DELADDR, NLM_REQUEST | NLM_ACK, index, host, prefix, 0)
 
 /*
         A route, with a destination of no bits at all being the default one.
@@ -1038,6 +1070,53 @@ static bipolar netlink_dump(b32 handle, p16 type, positive body, p8 family,
 
         return netlink_transact(handle, address_of request, sequence,
                                 visit, context);
+}
+
+typedef struct
+{
+        p32 index;
+        p32 host;
+        p8 prefix;
+        bool leased;
+} netlink_lease_search;
+
+static COLD bool netlink_lease_seen(netlink_header address_to header,
+                                    address_any context)
+{
+        netlink_lease_search address_to search =
+            (netlink_lease_search address_to)context;
+        netlink_address address_to body =
+            netlink_message_body(header, sizeof(netlink_address));
+        positive size = 0;
+        p8 address_to named;
+        p8 address_to protocol;
+
+        if (!body || body->family != AF_INET || body->index != search->index ||
+            body->prefix != search->prefix)
+                return true;
+        named = (p8 address_to)netlink_find(header, sizeof(netlink_address),
+                                            IFA_LOCAL, address_of size);
+        if (!named || size != 4 ||
+            memory_load_unaligned(p32, named) != network_order_32(search->host))
+                return true;
+        protocol = (p8 address_to)netlink_find(header, sizeof(netlink_address),
+                                               IFA_PROTO, address_of size);
+        search->leased = protocol && size == 1 && protocol[0] == IFA_PROTO_DHCP;
+        return false;
+}
+
+/* 1 when the address on a link is a lease this client put there -- what a
+   restarted watcher inherits from the one before it -- and 0 when it is
+   anybody else's, an operator's static address included. */
+static COLD bipolar netlink_address_leased(b32 handle, p32 index, p32 host,
+                                           p8 prefix)
+{
+        netlink_lease_search search = {index, host, prefix, false};
+        bipolar status = netlink_dump(handle, RTM_GETADDR,
+                                      sizeof(netlink_address), AF_INET,
+                                      netlink_lease_seen, address_of search);
+
+        return status < 0 ? status : search.leased;
 }
 
 #endif // STANDARD_MODERN_C_NET_NETLINK
