@@ -53350,18 +53350,21 @@ static bipolar tls_read(tls_conn address_to tls, p8 address_to into,
         return tls_read_until(tls, into, room, got, null);
 }
 
+/* A connection for the post-handshake checks: nothing sent, no keys. */
+static tls_conn tls_post_handshake_conn;
+
 /* A post-handshake stream, whole: every message complete and allowed. */
 static bool tls_post_handshake_valid(p8 address_to messages,
                                      positive length)
 {
-        p8 held[TLS_HS_MAX];
-        positive held_length = 0;
+        tls_conn address_to tls = address_of tls_post_handshake_conn;
         bool valid;
 
-        valid = tls_post_handshake_append(held, address_of held_length,
-                                          messages, length) == TLS_OK &&
-                !held_length;
-        crypto_forget(held, sizeof held);
+        memory_fill(tls, 0, TLS_CONN_HEAD);
+        tls->handle = -1;
+        valid = tls_post_handshake_append(tls, messages, length) == TLS_OK &&
+                !tls->post_handshake_used;
+        tls_forget(tls);
         return valid;
 }
 
@@ -54231,10 +54234,10 @@ static fn tls_sensitive_state_erasure(void)
                                           sizeof zeros) &&
                           !memory_compare(connection.s_hs_traffic, zeros,
                                           sizeof zeros) &&
-                          !memory_compare(connection.c_ap_traffic, zeros,
-                                          sizeof zeros) &&
-                          !memory_compare(connection.s_ap_traffic, zeros,
-                                          sizeof zeros) &&
+                          memory_compare(connection.c_ap_traffic, zeros,
+                                         sizeof zeros) &&
+                          memory_compare(connection.s_ap_traffic, zeros,
+                                         sizeof zeros) &&
                           !memory_compare(address_of connection.transcript,
                                           address_of empty_transcript,
                                           sizeof empty_transcript));
@@ -56197,18 +56200,18 @@ static fn tls_post_handshake_framing(void)
         check("a complete post-handshake session ticket may be ignored",
               tls_post_handshake_valid(ticket, sizeof ticket));
         {
-                p8 held[TLS_HS_MAX];
-                positive held_length = 0;
+                tls_conn address_to tls = address_of tls_post_handshake_conn;
 
+                memory_fill(tls, 0, TLS_CONN_HEAD);
+                tls->handle = -1;
                 check("a fragmented post-handshake ticket is held",
-                      tls_post_handshake_append(
-                          held, address_of held_length, ticket, 7) == TLS_OK &&
-                          held_length == 7);
+                      tls_post_handshake_append(tls, ticket, 7) == TLS_OK &&
+                          tls->post_handshake_used == 7);
                 check("a fragmented post-handshake ticket is reassembled",
-                      tls_post_handshake_append(
-                          held, address_of held_length, ticket + 7,
-                          sizeof ticket - 7) == TLS_OK &&
-                          !held_length);
+                      tls_post_handshake_append(tls, ticket + 7,
+                                                sizeof ticket - 7) == TLS_OK &&
+                          !tls->post_handshake_used);
+                tls_forget(tls);
         }
 
         /* TLS_HS_MAX is both the hold buffer and the largest handshake body
@@ -56240,8 +56243,53 @@ static fn tls_post_handshake_framing(void)
                 check("a post-handshake body past the handshake-size ceiling is refused",
                       !tls_post_handshake_valid(over, sizeof over));
         }
-        check("an unsupported TLS KeyUpdate is not silently ignored",
-              !tls_post_handshake_valid(key_update, sizeof key_update));
+        check("a KeyUpdate asking nothing is taken",
+              tls_post_handshake_valid(key_update, sizeof key_update));
+        {
+                static p8 asked_bad[] = {24, 0, 0, 1, 2};
+                static p8 long_update[] = {24, 0, 0, 2, 0, 0};
+                static p8 update_ticket[sizeof key_update + sizeof ticket];
+                tls_conn address_to tls = address_of tls_post_handshake_conn;
+                p8 zeros[32] = {0};
+
+                check("a KeyUpdate byte past update_requested is refused",
+                      !tls_post_handshake_valid(asked_bad, sizeof asked_bad));
+                check("a KeyUpdate body of two bytes is refused",
+                      !tls_post_handshake_valid(long_update,
+                                                sizeof long_update));
+                memory_copy(update_ticket, key_update, sizeof key_update);
+                memory_copy(update_ticket + sizeof key_update, ticket,
+                            sizeof ticket);
+                check("a KeyUpdate that does not end its record is refused",
+                      !tls_post_handshake_valid(update_ticket,
+                                                sizeof update_ticket));
+                memory_copy(update_ticket, ticket, sizeof ticket);
+                memory_copy(update_ticket + sizeof ticket, key_update,
+                            sizeof key_update);
+                check("a KeyUpdate ending a record behind a ticket is taken",
+                      tls_post_handshake_valid(update_ticket,
+                                               sizeof update_ticket));
+
+                memory_fill(tls, 0, TLS_CONN_HEAD);
+                tls->handle = -1;
+                tls->seq_read = 9;
+                check("a KeyUpdate split across records is held",
+                      tls_post_handshake_append(tls, key_update, 3) == TLS_OK &&
+                          tls->seq_read == 9);
+                check("a KeyUpdate split across records rekeys when whole",
+                      tls_post_handshake_append(tls, key_update + 3, 2) ==
+                              TLS_OK &&
+                          !tls->seq_read &&
+                          memory_compare(tls->s_ap_traffic, zeros, 32) &&
+                          !memory_compare(tls->c_ap_traffic, zeros, 32));
+                memory_fill(tls, 0, TLS_CONN_HEAD);
+                tls->handle = -1;
+                key_update[4] = 1;
+                check("a KeyUpdate asking for one cannot be answered unsent",
+                      tls_post_handshake_append(tls, key_update, 5) == TLS_FAIL);
+                key_update[4] = 0;
+                tls_forget(tls);
+        }
         check("an empty authenticated handshake record is refused",
               !tls_post_handshake_valid(ticket, 0));
 
@@ -56298,6 +56346,85 @@ static fn tls_post_handshake_framing(void)
         check("a zero-length TLS session ticket is refused",
               !tls_post_handshake_valid(ticket, sizeof ticket));
         ticket[14] = 1;
+}
+
+/*
+        KeyUpdate over a socket pair, both ends this file's own record layer
+        under zero traffic secrets: client writes with c_ keys and reads
+        with s_, so each end's reading keys are the other's writing keys.
+        The writer rekeys half way to the AES-GCM record limit; the reader
+        asks the peer to rekey at the same mark and answers a peer that
+        asks; a round is proven by the data after it opening under the new
+        keys.
+*/
+static tls_conn tls_update_near;
+static tls_conn tls_update_far;
+
+static fn tls_key_update_rounds(void)
+{
+        tls_conn address_to near = address_of tls_update_near;
+        tls_conn address_to far = address_of tls_update_far;
+        b32 pair[2];
+        p8 got_bytes[8];
+        positive got = 0;
+        bool opened;
+
+        opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM, 0,
+                               (positive)pair) == 0;
+        check("KeyUpdate socket pair opens", opened);
+        if (!opened)
+                return;
+        memory_fill(near, 0, TLS_CONN_HEAD);
+        memory_fill(far, 0, TLS_CONN_HEAD);
+        near->handle = pair[0];
+        far->handle = pair[1];
+        near->encrypted = far->encrypted = true;
+        near->application = far->application = true;
+
+        /* The writer's key reaches the mark: KeyUpdate, then the data. */
+        near->seq_write = TLS_KEY_UPDATE_AT;
+        far->seq_read = TLS_KEY_UPDATE_AT;
+        check("a write at the key-update mark sends KeyUpdate first",
+              tls_write(near, (p8 address_to)"hi", 2) == TLS_OK &&
+                  near->seq_write == 1 && !near->update_asked);
+        check("the peer opens the data after the writer's KeyUpdate",
+              tls_read(far, got_bytes, sizeof got_bytes, address_of got) ==
+                      TLS_OK &&
+                  got == 2 && !memory_compare(got_bytes, "hi", 2) &&
+                  far->seq_read == 1 &&
+                  !memory_compare(far->s_ap_traffic, near->c_ap_traffic, 32));
+
+        /* The reader's key reaches the mark: it asks, the peer answers with
+           its own KeyUpdate and writes under the new key. */
+        near->seq_write = TLS_KEY_UPDATE_AT - 1;
+        far->seq_read = TLS_KEY_UPDATE_AT - 1;
+        check("a record at the read mark queues",
+              tls_send_enc(near, TLS_CT_APP, (p8 address_to)"ab", 2) == TLS_OK);
+        check("reading at the key-update mark asks the peer to update",
+              tls_read(far, got_bytes, sizeof got_bytes, address_of got) ==
+                      TLS_OK &&
+                  got == 2 && !memory_compare(got_bytes, "ab", 2) &&
+                  far->update_asked && far->seq_write == 0);
+        check("the asking side writes on under its new key",
+              tls_write(far, (p8 address_to)"zz", 2) == TLS_OK);
+        check("the asked side rekeys, answers, and opens what follows",
+              tls_read(near, got_bytes, sizeof got_bytes, address_of got) ==
+                      TLS_OK &&
+                  got == 2 && !memory_compare(got_bytes, "zz", 2) &&
+                  near->seq_read == 1 && near->seq_write == 0 &&
+                  !memory_compare(near->s_ap_traffic, far->c_ap_traffic, 32));
+        check("the answered side opens data under the answer's keys",
+              tls_write(near, (p8 address_to)"ok", 2) == TLS_OK &&
+                  tls_read(far, got_bytes, sizeof got_bytes,
+                           address_of got) == TLS_OK &&
+                  got == 2 && !memory_compare(got_bytes, "ok", 2) &&
+                  !far->update_asked && far->seq_read == 1 &&
+                  !memory_compare(far->s_ap_traffic, near->c_ap_traffic, 32));
+
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+        tls_forget(near);
+        tls_forget(far);
 }
 
 static fn tls_certificate_framing(void)
@@ -60075,6 +60202,7 @@ b32 main(void)
         tls_midpath_append_refusal();
         tls_encrypted_flight_hs_reassembly();
         tls_post_handshake_framing();
+        tls_key_update_rounds();
         tls_certificate_framing();
         crypto_floor();
         crypto_floor_ghash();

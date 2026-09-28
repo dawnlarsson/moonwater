@@ -37411,7 +37411,9 @@ def harness_tls_peer(argv):
     post-handshake streams -- HelloRetryRequests for a group, a cookie or
     both, a second retry, a retry for a group already shared or never
     offered, and a ServerHello that changes the retry's suite or group
-    -- tickets whole, split and at close, KeyUpdate, compatibility and
+    -- tickets whole, split and at close, KeyUpdate asked and answered
+    (the answer opened under the client's old key, a second one under its
+    new key), a bad KeyUpdate byte or one not ending its record, compatibility and
     protected CCS, empty, padded and all-padding records, the 2^14 content
     edge, bad tags, alerts, truncation with and without close_notify, data
     after close_notify, unasked EncryptedExtensions and a CertificateRequest.
@@ -37570,8 +37572,20 @@ def harness_tls_peer(argv):
          [("inner", key_update(0) + b"\x16"), ("rekey", None),
           app(length_head + body), close]),
         ("KeyUpdate, update requested", {},
-         [("inner", key_update(1) + b"\x16"), ("rekey", None),
+         [("inner", key_update(1) + b"\x16"), ("rekey", None), ("answer", None),
           app(length_head + body), close]),
+        ("KeyUpdate asked twice", {},
+         [("inner", key_update(1) + b"\x16"), ("rekey", None), ("answer", None),
+          ("inner", key_update(1) + b"\x16"), ("rekey", None), ("answer", None),
+          app(length_head + body), close]),
+        ("KeyUpdate asking with a byte past update_requested", {},
+         [("inner", key_update(2) + b"\x16"), ("rekey", None),
+          app(length_head + body), close]),
+        ("KeyUpdate not ending its record", {},
+         [("inner", key_update(0) + ticket + b"\x16"), ("rekey", None),
+          app(length_head + body), close]),
+        ("KeyUpdate under the old key after a rekey", {},
+         [("inner", key_update(0) + b"\x16"), app(length_head + body), close]),
         ("compatibility CCS after ServerHello", {"ccs": True},
          [app(length_head + body), close]),
         ("a protected change_cipher_spec in the flight", {"protected_ccs": True},
@@ -37623,6 +37637,7 @@ def harness_tls_peer(argv):
         "two tickets in one record", "empty records before the response",
         "padded records", "a record of exactly 2^14 content",
         "KeyUpdate, no update requested", "KeyUpdate, update requested",
+        "KeyUpdate asked twice",
         "compatibility CCS after ServerHello", "flight one message a record",
         "key share on P-256", "key share on P-384",
         "HelloRetryRequest with a cookie", "HelloRetryRequest to P-256 with a cookie",
@@ -37651,10 +37666,6 @@ def harness_tls_peer(argv):
             "Finished (D.4)",
     }
     DELIBERATE = {
-        "KeyUpdate, no update requested":
-            "KeyUpdate is refused by design: this client keeps no traffic "
-            "secret past the handshake to rekey from",
-        "KeyUpdate, update requested": "as above",
         "CertificateRequest in the flight":
             "the flight's one legal shape has no CertificateRequest; this "
             "client has no certificate to decline with",
@@ -37836,6 +37847,15 @@ def harness_tls_peer(argv):
                 sock.sendall(value)
             elif what == "rekey":
                 server_ap = server_ap.update()
+            elif what == "answer" and not flight.get("answer_deferred"):
+                # The client's own KeyUpdate, under its current key; what
+                # it writes next is under the one after. OpenSSL defers its
+                # answer to its next write (RFC 8446 4.6.3 allows either),
+                # and this client never writes again, so only wget's is read.
+                header, payload = read_record(sock)
+                if client_ap.open(header, payload).rstrip(b"\0") != key_update(0) + b"\x16":
+                    raise ValueError("the client did not answer the KeyUpdate")
+                client_ap = client_ap.update()
         sock.shutdown(socket.SHUT_WR)
         try:
             while sock.recv(4096):
@@ -37912,7 +37932,8 @@ def harness_tls_peer(argv):
                 port = listener.getsockname()[1]
                 outcome = []
                 server = threading.Thread(target=serve,
-                                          args=(listener, flight, steps, outcome),
+                                          args=(listener, dict(flight, answer_deferred=(
+                                              client == "openssl")), steps, outcome),
                                           daemon=True)
                 server.start()
                 if client == "wget":
@@ -40185,6 +40206,16 @@ def tls_seed_connections():
             tls_seed_sealed(22, tls_seed_ticket()[:9]), close),
         "conn_key_update.bin": (control,) + base + (
             tls_seed_sealed(22, tls_seed_message(24, b"\1")), data, close),
+        "conn_key_update_quiet.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\0")), data,
+            tls_seed_sealed(22, tls_seed_message(24, b"\1")), data, close),
+        "conn_key_update_bad_byte.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\2")), data, close),
+        "conn_key_update_split.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\1")[:2]),
+            tls_seed_sealed(22, tls_seed_message(24, b"\1")[2:]), data, close),
+        "conn_key_update_then_ticket.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\0") + tls_seed_ticket()), data, close),
         "conn_empty_app.bin": (control,) + base + (tls_seed_sealed(23, b""),) * 8 + (data, close),
         "conn_empty_handshake_in_flight.bin": (control, hello, tls_seed_sealed(22, b""),
                                                flight, close),

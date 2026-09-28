@@ -4383,6 +4383,7 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #define TLS_HS_CERTIFICATE 11
 #define TLS_HS_CERT_VERIFY 15
 #define TLS_HS_FINISHED 20
+#define TLS_HS_KEY_UPDATE 24
 
 /* One trust anchor from anchors.inc: hashes that find candidates, then the
    key itself (curve 1 P-256, 2 P-384, 3 RSA), key_length raw bytes at key_at
@@ -4430,8 +4431,10 @@ typedef struct
         p8 hs_secret[32];
         p8 c_hs_traffic[32];
         p8 s_hs_traffic[32];
+        /* Kept past the handshake: KeyUpdate derives the next from each. */
         p8 c_ap_traffic[32];
         p8 s_ap_traffic[32];
+        bool update_asked;
         p8 c_iv[12];
         p8 s_iv[12];
         crypto_aesgcm_key c_gcm;
@@ -4474,11 +4477,13 @@ typedef struct
    buffers. */
 #define TLS_CONN_HEAD __builtin_offsetof(tls_conn, post_handshake)
 
-/* RFC 8446 requires each AEAD key to stay within its usage bound.  This
-   client intentionally does not implement KeyUpdate, so end the connection
-   before AES-GCM reaches the 2^24.5-record analysis bound.  The conservative
-   integer limit also makes sequence wrap unreachable. */
+/* RFC 8446 5.5 holds each AES-GCM key under 2^24.5 full records. Half way
+   there a direction is rekeyed with KeyUpdate -- the write side by sending
+   one, the read side by asking the peer for one -- and a key that still
+   reaches 2^24 records ends the connection, which also keeps the sequence
+   number from wrapping. */
 #define TLS_AES_GCM_RECORD_LIMIT ((p64)1 << 24)
+#define TLS_KEY_UPDATE_AT ((p64)1 << 23)
 
 static fn tls_forget(tls_conn address_to tls)
 {
@@ -6466,8 +6471,6 @@ static COLD fn tls_use_app_keys(tls_conn address_to tls)
         crypto_forget(tls->hs_secret, sizeof tls->hs_secret);
         crypto_forget(tls->c_hs_traffic, sizeof tls->c_hs_traffic);
         crypto_forget(tls->s_hs_traffic, sizeof tls->s_hs_traffic);
-        crypto_forget(tls->c_ap_traffic, sizeof tls->c_ap_traffic);
-        crypto_forget(tls->s_ap_traffic, sizeof tls->s_ap_traffic);
         crypto_forget(address_of tls->transcript, sizeof tls->transcript);
 }
 
@@ -6694,15 +6697,47 @@ static COLD bool tls_new_session_ticket_valid(p8 address_to body,
                                               positive_max);
 }
 
-/* This client does not resume sessions, but servers commonly send tickets.
-   Ignore only complete, well-framed NewSessionTicket messages.  KeyUpdate and
-   every other unsupported post-handshake transition fail instead of leaving
-   traffic keys or authentication state silently stale. */
-static COLD bipolar tls_post_handshake_append(p8 address_to held,
-                                         positive address_to held_length,
-                                         p8 address_to fragment,
-                                         positive length)
+/* KeyUpdate (RFC 8446 4.6.3, 7.2): the next traffic secret replaces the
+   one it came from, and the direction's key, IV and sequence start over. */
+static COLD fn tls_update_traffic(p8 address_to secret,
+                                  crypto_aesgcm_key address_to gcm,
+                                  p8 address_to iv, p64 address_to seq)
 {
+        p8 next[32];
+
+        tls_expand_label(secret, "traffic upd", null, 0, next, 32);
+        memory_copy(secret, next, 32);
+        crypto_forget(next, sizeof next);
+        tls_traffic_keys(secret, gcm, iv);
+        address_to seq = 0;
+}
+
+/* Send a KeyUpdate under the current write key, then write under the
+   next. Asking the peer to update too is how the read side is rekeyed. */
+static COLD bipolar tls_key_update(tls_conn address_to tls, bool ask)
+{
+        p8 message[5] = {TLS_HS_KEY_UPDATE, 0, 0, 1, (p8)ask};
+
+        if (tls_send_enc(tls, TLS_CT_HANDSHAKE, message, sizeof message))
+                return TLS_FAIL;
+        tls_update_traffic(tls->c_ap_traffic, address_of tls->c_gcm, tls->c_iv,
+                           address_of tls->seq_write);
+        tls->update_asked |= ask;
+        return TLS_OK;
+}
+
+/* This client does not resume sessions, but servers commonly send tickets:
+   complete, well-framed NewSessionTickets are ignored. A KeyUpdate rekeys
+   the read side and, when the peer asks, answers with one of its own; it
+   has to end its record, since the key changes after it (RFC 8446 5.1),
+   and its one byte is 0 or 1. Every other post-handshake message fails
+   rather than leaving keys or authentication silently stale. */
+static COLD bipolar tls_post_handshake_append(tls_conn address_to tls,
+                                              p8 address_to fragment,
+                                              positive length)
+{
+        p8 address_to held = tls->post_handshake;
+        positive address_to held_length = address_of tls->post_handshake_used;
         positive at = 0;
 
         if (*held_length > TLS_HS_MAX || !length ||
@@ -6718,17 +6753,27 @@ static COLD bipolar tls_post_handshake_append(p8 address_to held,
 
                 if (*held_length - at < 4)
                         break;
-                if (held[at] != TLS_HS_NEW_SESSION_TICKET)
-                        return TLS_FAIL;
-
                 body_length = tls_load_24(held + at + 1);
-                if (body_length > TLS_HS_MAX - 4)
+                if (held[at] == TLS_HS_KEY_UPDATE ? body_length != 1
+                    : held[at] != TLS_HS_NEW_SESSION_TICKET ||
+                          body_length > TLS_HS_MAX - 4)
                         return TLS_FAIL;
 
                 if (body_length > *held_length - at - 4)
                         break;
-                if (!tls_new_session_ticket_valid(held + at + 4,
-                                                  body_length))
+                if (held[at] == TLS_HS_KEY_UPDATE)
+                {
+                        if (held[at + 4] > 1 || at + 5 != *held_length)
+                                return TLS_FAIL;
+                        tls_update_traffic(tls->s_ap_traffic,
+                                           address_of tls->s_gcm, tls->s_iv,
+                                           address_of tls->seq_read);
+                        tls->update_asked = false;
+                        if (held[at + 4] && tls_key_update(tls, false))
+                                return TLS_FAIL;
+                }
+                else if (!tls_new_session_ticket_valid(held + at + 4,
+                                                       body_length))
                         return TLS_FAIL;
                 at += 4 + body_length;
         }
@@ -6996,7 +7041,9 @@ static bipolar tls_write(tls_conn address_to tls, p8 address_to data,
         {
                 positive take = min(length, (positive)TLS_PLAINTEXT_MAX);
 
-                if (tls_send_enc(tls, TLS_CT_APP, data, take))
+                if ((tls->seq_write >= TLS_KEY_UPDATE_AT &&
+                     tls_key_update(tls, false)) ||
+                    tls_send_enc(tls, TLS_CT_APP, data, take))
                         return TLS_FAIL;
                 data += take;
                 length -= take;
@@ -7076,17 +7123,18 @@ static bipolar tls_take(tls_conn address_to tls, positive room,
                         return TLS_FAIL;
                 if (type == TLS_CT_HANDSHAKE)
                 {
-                        if (tls_post_handshake_append(
-                                tls->post_handshake,
-                                address_of tls->post_handshake_used,
-                                inner, length))
+                        if (tls_post_handshake_append(tls, inner, length))
                                 return TLS_FAIL;
                         crypto_forget(inner, length);
-                        continue;
                 }
-                if (type != TLS_CT_APP || tls->post_handshake_used)
+                else if (type != TLS_CT_APP || tls->post_handshake_used)
                         return TLS_FAIL;
-                if (!length)
+                /* Half way to the read key's limit, the peer is asked for a
+                   KeyUpdate, once; its answer starts the count over. */
+                if (tls->seq_read >= TLS_KEY_UPDATE_AT && !tls->update_asked &&
+                    tls_key_update(tls, true))
+                        return TLS_FAIL;
+                if (type == TLS_CT_HANDSHAKE || !length)
                         continue;
                 if (room > length)
                         room = length;
