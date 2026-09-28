@@ -166,6 +166,96 @@ bool waterlink_open_box(crypto_aesgcm_key address_to key,
     "pxor %xmm9, %xmm9\n   pxor %xmm10, %xmm10\n   pxor %xmm11, %xmm11\n"     \
     "pxor %xmm12, %xmm12\n   pxor %xmm13, %xmm13\n"
 
+/*
+        The whole-datagram bodies' pieces. zmm20 to zmm30 are the round keys,
+        zmm31 the byte reversal, zmm16 the next four counter blocks and zmm18
+        four; k1 skips the header's block, k2 keeps the box's last two and k3
+        picks the lane the running hash is folded into. A product sums into
+        zmm13 (low), zmm14 (high) and zmm15 (middle), against the powers at
+        lo and the middle terms' at mid in the table %r9 points at.
+*/
+#define WATERLINK_ZMM_SETUP                                                   \
+    "vbroadcasti32x4 .Lwaterlink_bswap(%rip), %zmm31\n   vbroadcasti32x4 0(%rdi), %zmm20\n" \
+    "vbroadcasti32x4 16(%rdi), %zmm21\n   vbroadcasti32x4 32(%rdi), %zmm22\n"  \
+    "vbroadcasti32x4 48(%rdi), %zmm23\n   vbroadcasti32x4 64(%rdi), %zmm24\n"  \
+    "vbroadcasti32x4 80(%rdi), %zmm25\n   vbroadcasti32x4 96(%rdi), %zmm26\n"  \
+    "vbroadcasti32x4 112(%rdi), %zmm27\n   vbroadcasti32x4 128(%rdi), %zmm28\n" \
+    "vbroadcasti32x4 144(%rdi), %zmm29\n   vbroadcasti32x4 160(%rdi), %zmm30\n" \
+    "lea 192(%rdi), %r9\n   mov 8(%rsi), %rax\n   bswap %rax\n   mov %rax, %r8\n" \
+    "shl $32, %r8\n   or $1, %r8\n   shr $32, %rax\n   vmovq %r8, %xmm8\n   vpinsrq $1, %rax, %xmm8, %xmm8\n" \
+    "vshufi64x2 $0, %zmm8, %zmm8, %zmm16\n   vpaddd .Lwaterlink_steps(%rip), %zmm16, %zmm16\n" \
+    "vbroadcasti32x4 .Lwaterlink_four(%rip), %zmm18\n   mov $0xfc, %eax\n"   \
+    "kmovw %eax, %k1\n   mov $0x0f, %eax\n   kmovw %eax, %k2\n   mov $0x0c, %eax\n" \
+    "kmovw %eax, %k3\n"
+//  Four counter blocks to zmm r, whitened; then the rounds, a key at a time
+//  across the registers, so each round's latency hides behind the others.
+#define WATERLINK_ZMM_KEYS(r)                                                 \
+    "vpshufb %zmm31, %zmm16, %zmm" r "\n   vpaddd %zmm18, %zmm16, %zmm16\n"   \
+    "vpxorq %zmm20, %zmm" r ", %zmm" r "\n"
+#define WATERLINK_ZMM_ROUND3(op, k, a, b, c)                                  \
+    op " %zmm" k ", %zmm" a ", %zmm" a "\n   " op " %zmm" k ", %zmm" b ", %zmm" b "\n   " \
+    op " %zmm" k ", %zmm" c ", %zmm" c "\n"
+#define WATERLINK_ZMM_ROUND4(op, k, a, b, c, d)                               \
+    WATERLINK_ZMM_ROUND3(op, k, a, b, c) op " %zmm" k ", %zmm" d ", %zmm" d "\n"
+#define WATERLINK_ZMM_ROUNDS(round, ...)                                      \
+    round("vaesenc", "21", __VA_ARGS__) round("vaesenc", "22", __VA_ARGS__)   \
+    round("vaesenc", "23", __VA_ARGS__) round("vaesenc", "24", __VA_ARGS__)   \
+    round("vaesenc", "25", __VA_ARGS__) round("vaesenc", "26", __VA_ARGS__)   \
+    round("vaesenc", "27", __VA_ARGS__) round("vaesenc", "28", __VA_ARGS__)   \
+    round("vaesenc", "29", __VA_ARGS__) round("vaesenclast", "30", __VA_ARGS__)
+#define WATERLINK_ZMM_AES4(a, b, c, d)                                        \
+    WATERLINK_ZMM_KEYS(a) WATERLINK_ZMM_KEYS(b) WATERLINK_ZMM_KEYS(c)         \
+    WATERLINK_ZMM_KEYS(d) WATERLINK_ZMM_ROUNDS(WATERLINK_ZMM_ROUND4, a, b, c, d)
+#define WATERLINK_ZMM_AES3(a, b, c)                                           \
+    WATERLINK_ZMM_KEYS(a) WATERLINK_ZMM_KEYS(b) WATERLINK_ZMM_KEYS(c)         \
+    WATERLINK_ZMM_ROUNDS(WATERLINK_ZMM_ROUND3, a, b, c)
+//  zmm x's four blocks, reversed, into the sums: the first of a run sets
+//  them, the rest add to them.
+#define WATERLINK_ZMM_PRODUCT(x, lo, mid, l, h, m)                            \
+    "vpshufb %zmm31, %zmm" x ", %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n"         \
+    "vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, " lo "(%r9), %zmm8, %zmm" l "\n" \
+    "vpclmulqdq $0x11, " lo "(%r9), %zmm8, %zmm" h "\n"                       \
+    "vpclmulqdq $0x00, " mid "(%r9), %zmm9, %zmm" m "\n"
+#define WATERLINK_ZMM_HASH_FIRST(x, lo, mid)                                  \
+    WATERLINK_ZMM_PRODUCT(x, lo, mid, "13", "14", "15")
+#define WATERLINK_ZMM_HASH(x, lo, mid)                                        \
+    WATERLINK_ZMM_PRODUCT(x, lo, mid, "10", "11", "12")                       \
+    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n"       \
+    "vpxorq %zmm12, %zmm15, %zmm15\n"
+//  Key stream r over the datagram's bytes at at, in place.
+#define WATERLINK_ZMM_XOR_STORE(r, at)                                        \
+    "vpxorq " at "(%rsi), %zmm" r ", %zmm" r "\n   vmovdqu64 %zmm" r ", " at "(%rsi)\n"
+//  Opening: the four blocks at at to zmm x, hashed as they came, then
+//  decrypted with key stream k in place.
+#define WATERLINK_ZMM_OPEN(x, k, at, mid)                                     \
+    "vmovdqu64 " at "(%rsi), %zmm" x "\n" WATERLINK_ZMM_HASH(x, at, mid)      \
+    "vpxorq %zmm" x ", %zmm" k ", %zmm" k "\n   vmovdqu64 %zmm" k ", " at "(%rsi)\n"
+//  The sums' four lanes folded to one and reduced, into xmm14.
+#define WATERLINK_ZMM_REDUCE                                                  \
+    "vpternlogq $0x96, %zmm14, %zmm13, %zmm15\n   vpslldq $8, %zmm15, %zmm12\n" \
+    "vpsrldq $8, %zmm15, %zmm15\n   vpxorq %zmm12, %zmm13, %zmm13\n   vpxorq %zmm15, %zmm14, %zmm14\n" \
+    "vextracti64x4 $1, %zmm13, %ymm12\n   vpxorq %ymm12, %ymm13, %ymm13\n"    \
+    "vextracti32x4 $1, %ymm13, %xmm12\n   vpxorq %xmm12, %xmm13, %xmm13\n"    \
+    "vextracti64x4 $1, %zmm14, %ymm12\n   vpxorq %ymm12, %ymm14, %ymm14\n"    \
+    "vextracti32x4 $1, %ymm14, %xmm12\n   vpxorq %xmm12, %xmm14, %xmm14\n"    \
+    "vpclmulqdq $0x00, .Lwaterlink_poly(%rip), %xmm13, %xmm12\n   vpshufd $0x4e, %xmm13, %xmm13\n" \
+    "vpxorq %xmm12, %xmm13, %xmm13\n   vpclmulqdq $0x00, .Lwaterlink_poly(%rip), %xmm13, %xmm12\n" \
+    "vpshufd $0x4e, %xmm13, %xmm13\n   vpternlogq $0x96, %xmm12, %xmm13, %xmm14\n"
+//  Every vector register and the header mask left zero, and back.
+#define WATERLINK_ZMM_WIPE                                                    \
+    "vpxorq %xmm0, %xmm0, %xmm0\n   vpxorq %xmm1, %xmm1, %xmm1\n   vpxorq %xmm2, %xmm2, %xmm2\n" \
+    "vpxorq %xmm3, %xmm3, %xmm3\n   vpxorq %xmm4, %xmm4, %xmm4\n   vpxorq %xmm5, %xmm5, %xmm5\n" \
+    "vpxorq %xmm6, %xmm6, %xmm6\n   vpxorq %xmm7, %xmm7, %xmm7\n   vpxorq %xmm8, %xmm8, %xmm8\n" \
+    "vpxorq %xmm9, %xmm9, %xmm9\n   vpxorq %xmm10, %xmm10, %xmm10\n   vpxorq %xmm11, %xmm11, %xmm11\n" \
+    "vpxorq %xmm12, %xmm12, %xmm12\n   vpxorq %xmm13, %xmm13, %xmm13\n   vpxorq %xmm14, %xmm14, %xmm14\n" \
+    "vpxorq %xmm15, %xmm15, %xmm15\n   vpxorq %xmm16, %xmm16, %xmm16\n   vpxorq %xmm17, %xmm17, %xmm17\n" \
+    "vpxorq %xmm18, %xmm18, %xmm18\n   vpxorq %xmm19, %xmm19, %xmm19\n   vpxorq %xmm20, %xmm20, %xmm20\n" \
+    "vpxorq %xmm21, %xmm21, %xmm21\n   vpxorq %xmm22, %xmm22, %xmm22\n   vpxorq %xmm23, %xmm23, %xmm23\n" \
+    "vpxorq %xmm24, %xmm24, %xmm24\n   vpxorq %xmm25, %xmm25, %xmm25\n   vpxorq %xmm26, %xmm26, %xmm26\n" \
+    "vpxorq %xmm27, %xmm27, %xmm27\n   vpxorq %xmm28, %xmm28, %xmm28\n   vpxorq %xmm29, %xmm29, %xmm29\n" \
+    "vpxorq %xmm30, %xmm30, %xmm30\n   vpxorq %xmm31, %xmm31, %xmm31\n"        \
+    "kxorw %k1, %k1, %k1\n   vzeroupper\n   ret\n"
+
 __asm__(
     ASM_FUNC(waterlink_seal_box)
     "cmp $64, %rcx\n   ja .Lwaterlink_seal_box_general\n"
@@ -219,433 +309,94 @@ __asm__(
     //  one pass, the key stream of each four vectors computed while the
     //  four before are hashed, with no load of anything a store just wrote.
     ".Lwaterlink_seal_zmm:\n"
-    "vbroadcasti32x4 .Lwaterlink_bswap(%rip), %zmm31\n   vbroadcasti32x4 0(%rdi), %zmm20\n"
-    "vbroadcasti32x4 16(%rdi), %zmm21\n   vbroadcasti32x4 32(%rdi), %zmm22\n"
-    "vbroadcasti32x4 48(%rdi), %zmm23\n   vbroadcasti32x4 64(%rdi), %zmm24\n"
-    "vbroadcasti32x4 80(%rdi), %zmm25\n   vbroadcasti32x4 96(%rdi), %zmm26\n"
-    "vbroadcasti32x4 112(%rdi), %zmm27\n   vbroadcasti32x4 128(%rdi), %zmm28\n"
-    "vbroadcasti32x4 144(%rdi), %zmm29\n   vbroadcasti32x4 160(%rdi), %zmm30\n"
-    "lea 192(%rdi), %r9\n   mov 8(%rsi), %rax\n   bswap %rax\n   mov %rax, %r8\n"
-    "shl $32, %r8\n   or $1, %r8\n   shr $32, %rax\n   vmovq %r8, %xmm8\n   vpinsrq $1, %rax, %xmm8, %xmm8\n"
-    "vshufi64x2 $0, %zmm8, %zmm8, %zmm16\n   vpaddd .Lwaterlink_steps(%rip), %zmm16, %zmm16\n"
-    "vbroadcasti32x4 .Lwaterlink_four(%rip), %zmm18\n   mov $0xfc, %eax\n"
-    "kmovw %eax, %k1\n   mov $0x0f, %eax\n   kmovw %eax, %k2\n   mov $0x0c, %eax\n"
-    "kmovw %eax, %k3\n   vpshufb %zmm31, %zmm16, %zmm0\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm0, %zmm0\n   vpshufb %zmm31, %zmm16, %zmm1\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm1, %zmm1\n   vpshufb %zmm31, %zmm16, %zmm2\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm2, %zmm2\n   vpshufb %zmm31, %zmm16, %zmm3\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm3, %zmm3\n   vaesenc %zmm21, %zmm0, %zmm0\n   vaesenc %zmm21, %zmm1, %zmm1\n"
-    "vaesenc %zmm21, %zmm2, %zmm2\n   vaesenc %zmm21, %zmm3, %zmm3\n   vaesenc %zmm22, %zmm0, %zmm0\n"
-    "vaesenc %zmm22, %zmm1, %zmm1\n   vaesenc %zmm22, %zmm2, %zmm2\n   vaesenc %zmm22, %zmm3, %zmm3\n"
-    "vaesenc %zmm23, %zmm0, %zmm0\n   vaesenc %zmm23, %zmm1, %zmm1\n   vaesenc %zmm23, %zmm2, %zmm2\n"
-    "vaesenc %zmm23, %zmm3, %zmm3\n   vaesenc %zmm24, %zmm0, %zmm0\n   vaesenc %zmm24, %zmm1, %zmm1\n"
-    "vaesenc %zmm24, %zmm2, %zmm2\n   vaesenc %zmm24, %zmm3, %zmm3\n   vaesenc %zmm25, %zmm0, %zmm0\n"
-    "vaesenc %zmm25, %zmm1, %zmm1\n   vaesenc %zmm25, %zmm2, %zmm2\n   vaesenc %zmm25, %zmm3, %zmm3\n"
-    "vaesenc %zmm26, %zmm0, %zmm0\n   vaesenc %zmm26, %zmm1, %zmm1\n   vaesenc %zmm26, %zmm2, %zmm2\n"
-    "vaesenc %zmm26, %zmm3, %zmm3\n   vaesenc %zmm27, %zmm0, %zmm0\n   vaesenc %zmm27, %zmm1, %zmm1\n"
-    "vaesenc %zmm27, %zmm2, %zmm2\n   vaesenc %zmm27, %zmm3, %zmm3\n   vaesenc %zmm28, %zmm0, %zmm0\n"
-    "vaesenc %zmm28, %zmm1, %zmm1\n   vaesenc %zmm28, %zmm2, %zmm2\n   vaesenc %zmm28, %zmm3, %zmm3\n"
-    "vaesenc %zmm29, %zmm0, %zmm0\n   vaesenc %zmm29, %zmm1, %zmm1\n   vaesenc %zmm29, %zmm2, %zmm2\n"
-    "vaesenc %zmm29, %zmm3, %zmm3\n   vaesenclast %zmm30, %zmm0, %zmm0\n"
-    "vaesenclast %zmm30, %zmm1, %zmm1\n   vaesenclast %zmm30, %zmm2, %zmm2\n"
-    "vaesenclast %zmm30, %zmm3, %zmm3\n   vmovdqa64 %xmm0, %xmm19\n   vpxorq 0(%rsi), %zmm0, %zmm0\n"
-    "vpxorq 64(%rsi), %zmm1, %zmm1\n   vpxorq 128(%rsi), %zmm2, %zmm2\n   vpxorq 192(%rsi), %zmm3, %zmm3\n"
-    "vmovdqu64 %zmm0, (%rsi){%k1}\n   vmovdqu64 %zmm1, 64(%rsi)\n   vmovdqu64 %zmm2, 128(%rsi)\n"
-    "vmovdqu64 %zmm3, 192(%rsi)\n   vpxorq %zmm19, %zmm0, %zmm0\n   vpshufb %zmm31, %zmm16, %zmm4\n"
-    "vpaddd %zmm18, %zmm16, %zmm16\n   vpxorq %zmm20, %zmm4, %zmm4\n   vpshufb %zmm31, %zmm16, %zmm5\n"
-    "vpaddd %zmm18, %zmm16, %zmm16\n   vpxorq %zmm20, %zmm5, %zmm5\n   vpshufb %zmm31, %zmm16, %zmm6\n"
-    "vpaddd %zmm18, %zmm16, %zmm16\n   vpxorq %zmm20, %zmm6, %zmm6\n   vpshufb %zmm31, %zmm16, %zmm7\n"
-    "vpaddd %zmm18, %zmm16, %zmm16\n   vpxorq %zmm20, %zmm7, %zmm7\n   vaesenc %zmm21, %zmm4, %zmm4\n"
-    "vaesenc %zmm21, %zmm5, %zmm5\n   vaesenc %zmm21, %zmm6, %zmm6\n   vaesenc %zmm21, %zmm7, %zmm7\n"
-    "vaesenc %zmm22, %zmm4, %zmm4\n   vaesenc %zmm22, %zmm5, %zmm5\n   vaesenc %zmm22, %zmm6, %zmm6\n"
-    "vaesenc %zmm22, %zmm7, %zmm7\n   vaesenc %zmm23, %zmm4, %zmm4\n   vaesenc %zmm23, %zmm5, %zmm5\n"
-    "vaesenc %zmm23, %zmm6, %zmm6\n   vaesenc %zmm23, %zmm7, %zmm7\n   vaesenc %zmm24, %zmm4, %zmm4\n"
-    "vaesenc %zmm24, %zmm5, %zmm5\n   vaesenc %zmm24, %zmm6, %zmm6\n   vaesenc %zmm24, %zmm7, %zmm7\n"
-    "vaesenc %zmm25, %zmm4, %zmm4\n   vaesenc %zmm25, %zmm5, %zmm5\n   vaesenc %zmm25, %zmm6, %zmm6\n"
-    "vaesenc %zmm25, %zmm7, %zmm7\n   vaesenc %zmm26, %zmm4, %zmm4\n   vaesenc %zmm26, %zmm5, %zmm5\n"
-    "vaesenc %zmm26, %zmm6, %zmm6\n   vaesenc %zmm26, %zmm7, %zmm7\n   vaesenc %zmm27, %zmm4, %zmm4\n"
-    "vaesenc %zmm27, %zmm5, %zmm5\n   vaesenc %zmm27, %zmm6, %zmm6\n   vaesenc %zmm27, %zmm7, %zmm7\n"
-    "vaesenc %zmm28, %zmm4, %zmm4\n   vaesenc %zmm28, %zmm5, %zmm5\n   vaesenc %zmm28, %zmm6, %zmm6\n"
-    "vaesenc %zmm28, %zmm7, %zmm7\n   vaesenc %zmm29, %zmm4, %zmm4\n   vaesenc %zmm29, %zmm5, %zmm5\n"
-    "vaesenc %zmm29, %zmm6, %zmm6\n   vaesenc %zmm29, %zmm7, %zmm7\n   vaesenclast %zmm30, %zmm4, %zmm4\n"
-    "vaesenclast %zmm30, %zmm5, %zmm5\n   vaesenclast %zmm30, %zmm6, %zmm6\n"
-    "vaesenclast %zmm30, %zmm7, %zmm7\n   vpshufb %zmm31, %zmm0, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 0(%r9), %zmm8, %zmm13\n"
-    "vpclmulqdq $0x11, 0(%r9), %zmm8, %zmm14\n   vpclmulqdq $0x00, 768(%r9), %zmm9, %zmm15\n"
-    "vpshufb %zmm31, %zmm1, %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 64(%r9), %zmm8, %zmm10\n   vpclmulqdq $0x11, 64(%r9), %zmm8, %zmm11\n"
-    "vpclmulqdq $0x00, 832(%r9), %zmm9, %zmm12\n   vpxorq %zmm10, %zmm13, %zmm13\n"
-    "vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n   vpshufb %zmm31, %zmm2, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 128(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 128(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 896(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "vpshufb %zmm31, %zmm3, %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 192(%r9), %zmm8, %zmm10\n   vpclmulqdq $0x11, 192(%r9), %zmm8, %zmm11\n"
-    "vpclmulqdq $0x00, 960(%r9), %zmm9, %zmm12\n   vpxorq %zmm10, %zmm13, %zmm13\n"
-    "vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n   vpxorq 256(%rsi), %zmm4, %zmm4\n"
-    "vmovdqu64 %zmm4, 256(%rsi)\n   vpxorq 320(%rsi), %zmm5, %zmm5\n   vmovdqu64 %zmm5, 320(%rsi)\n"
-    "vpxorq 384(%rsi), %zmm6, %zmm6\n   vmovdqu64 %zmm6, 384(%rsi)\n   vpxorq 448(%rsi), %zmm7, %zmm7\n"
-    "vmovdqu64 %zmm7, 448(%rsi)\n   vpshufb %zmm31, %zmm16, %zmm0\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm0, %zmm0\n   vpshufb %zmm31, %zmm16, %zmm1\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm1, %zmm1\n   vpshufb %zmm31, %zmm16, %zmm2\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm2, %zmm2\n   vpshufb %zmm31, %zmm16, %zmm3\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm3, %zmm3\n   vaesenc %zmm21, %zmm0, %zmm0\n   vaesenc %zmm21, %zmm1, %zmm1\n"
-    "vaesenc %zmm21, %zmm2, %zmm2\n   vaesenc %zmm21, %zmm3, %zmm3\n   vaesenc %zmm22, %zmm0, %zmm0\n"
-    "vaesenc %zmm22, %zmm1, %zmm1\n   vaesenc %zmm22, %zmm2, %zmm2\n   vaesenc %zmm22, %zmm3, %zmm3\n"
-    "vaesenc %zmm23, %zmm0, %zmm0\n   vaesenc %zmm23, %zmm1, %zmm1\n   vaesenc %zmm23, %zmm2, %zmm2\n"
-    "vaesenc %zmm23, %zmm3, %zmm3\n   vaesenc %zmm24, %zmm0, %zmm0\n   vaesenc %zmm24, %zmm1, %zmm1\n"
-    "vaesenc %zmm24, %zmm2, %zmm2\n   vaesenc %zmm24, %zmm3, %zmm3\n   vaesenc %zmm25, %zmm0, %zmm0\n"
-    "vaesenc %zmm25, %zmm1, %zmm1\n   vaesenc %zmm25, %zmm2, %zmm2\n   vaesenc %zmm25, %zmm3, %zmm3\n"
-    "vaesenc %zmm26, %zmm0, %zmm0\n   vaesenc %zmm26, %zmm1, %zmm1\n   vaesenc %zmm26, %zmm2, %zmm2\n"
-    "vaesenc %zmm26, %zmm3, %zmm3\n   vaesenc %zmm27, %zmm0, %zmm0\n   vaesenc %zmm27, %zmm1, %zmm1\n"
-    "vaesenc %zmm27, %zmm2, %zmm2\n   vaesenc %zmm27, %zmm3, %zmm3\n   vaesenc %zmm28, %zmm0, %zmm0\n"
-    "vaesenc %zmm28, %zmm1, %zmm1\n   vaesenc %zmm28, %zmm2, %zmm2\n   vaesenc %zmm28, %zmm3, %zmm3\n"
-    "vaesenc %zmm29, %zmm0, %zmm0\n   vaesenc %zmm29, %zmm1, %zmm1\n   vaesenc %zmm29, %zmm2, %zmm2\n"
-    "vaesenc %zmm29, %zmm3, %zmm3\n   vaesenclast %zmm30, %zmm0, %zmm0\n"
-    "vaesenclast %zmm30, %zmm1, %zmm1\n   vaesenclast %zmm30, %zmm2, %zmm2\n"
-    "vaesenclast %zmm30, %zmm3, %zmm3\n   vpshufb %zmm31, %zmm4, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 256(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 256(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 1024(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "vpshufb %zmm31, %zmm5, %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 320(%r9), %zmm8, %zmm10\n   vpclmulqdq $0x11, 320(%r9), %zmm8, %zmm11\n"
-    "vpclmulqdq $0x00, 1088(%r9), %zmm9, %zmm12\n   vpxorq %zmm10, %zmm13, %zmm13\n"
-    "vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n   vpshufb %zmm31, %zmm6, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 384(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 384(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 1152(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "vpshufb %zmm31, %zmm7, %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 448(%r9), %zmm8, %zmm10\n   vpclmulqdq $0x11, 448(%r9), %zmm8, %zmm11\n"
-    "vpclmulqdq $0x00, 1216(%r9), %zmm9, %zmm12\n   vpxorq %zmm10, %zmm13, %zmm13\n"
-    "vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n   vpxorq 512(%rsi), %zmm0, %zmm0\n"
-    "vmovdqu64 %zmm0, 512(%rsi)\n   vpxorq 576(%rsi), %zmm1, %zmm1\n   vmovdqu64 %zmm1, 576(%rsi)\n"
-    "vpxorq 640(%rsi), %zmm2, %zmm2\n   vmovdqu64 %zmm2, 640(%rsi)\n   vpxorq 704(%rsi), %zmm3, %zmm3\n"
-    "vmovdqu64 %zmm3, 704(%rsi)\n   vpshufb %zmm31, %zmm16, %zmm4\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm4, %zmm4\n   vpshufb %zmm31, %zmm16, %zmm5\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm5, %zmm5\n   vpshufb %zmm31, %zmm16, %zmm6\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm6, %zmm6\n   vpshufb %zmm31, %zmm16, %zmm7\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm7, %zmm7\n   vaesenc %zmm21, %zmm4, %zmm4\n   vaesenc %zmm21, %zmm5, %zmm5\n"
-    "vaesenc %zmm21, %zmm6, %zmm6\n   vaesenc %zmm21, %zmm7, %zmm7\n   vaesenc %zmm22, %zmm4, %zmm4\n"
-    "vaesenc %zmm22, %zmm5, %zmm5\n   vaesenc %zmm22, %zmm6, %zmm6\n   vaesenc %zmm22, %zmm7, %zmm7\n"
-    "vaesenc %zmm23, %zmm4, %zmm4\n   vaesenc %zmm23, %zmm5, %zmm5\n   vaesenc %zmm23, %zmm6, %zmm6\n"
-    "vaesenc %zmm23, %zmm7, %zmm7\n   vaesenc %zmm24, %zmm4, %zmm4\n   vaesenc %zmm24, %zmm5, %zmm5\n"
-    "vaesenc %zmm24, %zmm6, %zmm6\n   vaesenc %zmm24, %zmm7, %zmm7\n   vaesenc %zmm25, %zmm4, %zmm4\n"
-    "vaesenc %zmm25, %zmm5, %zmm5\n   vaesenc %zmm25, %zmm6, %zmm6\n   vaesenc %zmm25, %zmm7, %zmm7\n"
-    "vaesenc %zmm26, %zmm4, %zmm4\n   vaesenc %zmm26, %zmm5, %zmm5\n   vaesenc %zmm26, %zmm6, %zmm6\n"
-    "vaesenc %zmm26, %zmm7, %zmm7\n   vaesenc %zmm27, %zmm4, %zmm4\n   vaesenc %zmm27, %zmm5, %zmm5\n"
-    "vaesenc %zmm27, %zmm6, %zmm6\n   vaesenc %zmm27, %zmm7, %zmm7\n   vaesenc %zmm28, %zmm4, %zmm4\n"
-    "vaesenc %zmm28, %zmm5, %zmm5\n   vaesenc %zmm28, %zmm6, %zmm6\n   vaesenc %zmm28, %zmm7, %zmm7\n"
-    "vaesenc %zmm29, %zmm4, %zmm4\n   vaesenc %zmm29, %zmm5, %zmm5\n   vaesenc %zmm29, %zmm6, %zmm6\n"
-    "vaesenc %zmm29, %zmm7, %zmm7\n   vaesenclast %zmm30, %zmm4, %zmm4\n"
-    "vaesenclast %zmm30, %zmm5, %zmm5\n   vaesenclast %zmm30, %zmm6, %zmm6\n"
-    "vaesenclast %zmm30, %zmm7, %zmm7\n   vpshufb %zmm31, %zmm0, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 512(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 512(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 1280(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "vpshufb %zmm31, %zmm1, %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 576(%r9), %zmm8, %zmm10\n   vpclmulqdq $0x11, 576(%r9), %zmm8, %zmm11\n"
-    "vpclmulqdq $0x00, 1344(%r9), %zmm9, %zmm12\n   vpxorq %zmm10, %zmm13, %zmm13\n"
-    "vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n   vpshufb %zmm31, %zmm2, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 640(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 640(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 1408(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "vpshufb %zmm31, %zmm3, %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 704(%r9), %zmm8, %zmm10\n   vpclmulqdq $0x11, 704(%r9), %zmm8, %zmm11\n"
-    "vpclmulqdq $0x00, 1472(%r9), %zmm9, %zmm12\n   vpxorq %zmm10, %zmm13, %zmm13\n"
-    "vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n   vpxorq 768(%rsi), %zmm4, %zmm4\n"
-    "vmovdqu64 %zmm4, 768(%rsi)\n   vpxorq 832(%rsi), %zmm5, %zmm5\n   vmovdqu64 %zmm5, 832(%rsi)\n"
-    "vpxorq 896(%rsi), %zmm6, %zmm6\n   vmovdqu64 %zmm6, 896(%rsi)\n   vpxorq 960(%rsi), %zmm7, %zmm7\n"
-    "vmovdqu64 %zmm7, 960(%rsi)\n   vpternlogq $0x96, %zmm14, %zmm13, %zmm15\n"
-    "vpslldq $8, %zmm15, %zmm12\n   vpsrldq $8, %zmm15, %zmm15\n   vpxorq %zmm12, %zmm13, %zmm13\n"
-    "vpxorq %zmm15, %zmm14, %zmm14\n   vextracti64x4 $1, %zmm13, %ymm12\n"
-    "vpxorq %ymm12, %ymm13, %ymm13\n   vextracti32x4 $1, %ymm13, %xmm12\n"
-    "vpxorq %xmm12, %xmm13, %xmm13\n   vextracti64x4 $1, %zmm14, %ymm12\n"
-    "vpxorq %ymm12, %ymm14, %ymm14\n   vextracti32x4 $1, %ymm14, %xmm12\n"
-    "vpxorq %xmm12, %xmm14, %xmm14\n   vpclmulqdq $0x00, .Lwaterlink_poly(%rip), %xmm13, %xmm12\n"
-    "vpshufd $0x4e, %xmm13, %xmm13\n   vpxorq %xmm12, %xmm13, %xmm13\n   vpclmulqdq $0x00, .Lwaterlink_poly(%rip), %xmm13, %xmm12\n"
-    "vpshufd $0x4e, %xmm13, %xmm13\n   vpternlogq $0x96, %xmm12, %xmm13, %xmm14\n"
-    "vmovdqa64 %xmm14, %xmm17\n   vpshufb %zmm31, %zmm16, %zmm0\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm0, %zmm0\n   vpshufb %zmm31, %zmm16, %zmm1\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm1, %zmm1\n   vpshufb %zmm31, %zmm16, %zmm2\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm2, %zmm2\n   vaesenc %zmm21, %zmm0, %zmm0\n   vaesenc %zmm21, %zmm1, %zmm1\n"
-    "vaesenc %zmm21, %zmm2, %zmm2\n   vaesenc %zmm22, %zmm0, %zmm0\n   vaesenc %zmm22, %zmm1, %zmm1\n"
-    "vaesenc %zmm22, %zmm2, %zmm2\n   vaesenc %zmm23, %zmm0, %zmm0\n   vaesenc %zmm23, %zmm1, %zmm1\n"
-    "vaesenc %zmm23, %zmm2, %zmm2\n   vaesenc %zmm24, %zmm0, %zmm0\n   vaesenc %zmm24, %zmm1, %zmm1\n"
-    "vaesenc %zmm24, %zmm2, %zmm2\n   vaesenc %zmm25, %zmm0, %zmm0\n   vaesenc %zmm25, %zmm1, %zmm1\n"
-    "vaesenc %zmm25, %zmm2, %zmm2\n   vaesenc %zmm26, %zmm0, %zmm0\n   vaesenc %zmm26, %zmm1, %zmm1\n"
-    "vaesenc %zmm26, %zmm2, %zmm2\n   vaesenc %zmm27, %zmm0, %zmm0\n   vaesenc %zmm27, %zmm1, %zmm1\n"
-    "vaesenc %zmm27, %zmm2, %zmm2\n   vaesenc %zmm28, %zmm0, %zmm0\n   vaesenc %zmm28, %zmm1, %zmm1\n"
-    "vaesenc %zmm28, %zmm2, %zmm2\n   vaesenc %zmm29, %zmm0, %zmm0\n   vaesenc %zmm29, %zmm1, %zmm1\n"
-    "vaesenc %zmm29, %zmm2, %zmm2\n   vaesenclast %zmm30, %zmm0, %zmm0\n"
-    "vaesenclast %zmm30, %zmm1, %zmm1\n   vaesenclast %zmm30, %zmm2, %zmm2\n"
-    "valignq $6, %zmm4, %zmm4, %zmm12{%k1}{z}\n   vpshufb %zmm31, %zmm12, %zmm8\n"
-    "vshufi64x2 $0, %zmm17, %zmm17, %zmm12\n   vpxorq %zmm12, %zmm8, %zmm8{%k3}\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 320(%r9), %zmm8, %zmm13\n"
-    "vpclmulqdq $0x11, 320(%r9), %zmm8, %zmm14\n   vpclmulqdq $0x00, 1088(%r9), %zmm9, %zmm15\n"
-    "valignq $6, %zmm4, %zmm5, %zmm12\n   vpshufb %zmm31, %zmm12, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 384(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 384(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 1152(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "valignq $6, %zmm5, %zmm6, %zmm12\n   vpshufb %zmm31, %zmm12, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 448(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 448(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 1216(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "valignq $6, %zmm6, %zmm7, %zmm12\n   vpshufb %zmm31, %zmm12, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 512(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 512(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 1280(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "vpxorq 1024(%rsi), %zmm0, %zmm0\n   vmovdqu64 %zmm0, 1024(%rsi)\n   vpxorq 1088(%rsi), %zmm1, %zmm1\n"
-    "vmovdqu64 %zmm1, 1088(%rsi)\n   vmovdqu64 1152(%rsi), %zmm8{%k2}{z}\n"
-    "vpxorq %zmm8, %zmm2, %zmm2\n   vmovdqu64 %zmm2, 1152(%rsi){%k2}\n   vinserti32x4 $2, .Lwaterlink_lengths(%rip), %zmm2, %zmm2\n"
-    "valignq $6, %zmm7, %zmm0, %zmm12\n   vpshufb %zmm31, %zmm12, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 576(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 576(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 1344(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "valignq $6, %zmm0, %zmm1, %zmm12\n   vpshufb %zmm31, %zmm12, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 640(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 640(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 1408(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "valignq $6, %zmm1, %zmm2, %zmm12\n   vpshufb %zmm31, %zmm12, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 704(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 704(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 1472(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "vpternlogq $0x96, %zmm14, %zmm13, %zmm15\n   vpslldq $8, %zmm15, %zmm12\n"
-    "vpsrldq $8, %zmm15, %zmm15\n   vpxorq %zmm12, %zmm13, %zmm13\n   vpxorq %zmm15, %zmm14, %zmm14\n"
-    "vextracti64x4 $1, %zmm13, %ymm12\n   vpxorq %ymm12, %ymm13, %ymm13\n"
-    "vextracti32x4 $1, %ymm13, %xmm12\n   vpxorq %xmm12, %xmm13, %xmm13\n"
-    "vextracti64x4 $1, %zmm14, %ymm12\n   vpxorq %ymm12, %ymm14, %ymm14\n"
-    "vextracti32x4 $1, %ymm14, %xmm12\n   vpxorq %xmm12, %xmm14, %xmm14\n"
-    "vpclmulqdq $0x00, .Lwaterlink_poly(%rip), %xmm13, %xmm12\n   vpshufd $0x4e, %xmm13, %xmm13\n"
-    "vpxorq %xmm12, %xmm13, %xmm13\n   vpclmulqdq $0x00, .Lwaterlink_poly(%rip), %xmm13, %xmm12\n"
-    "vpshufd $0x4e, %xmm13, %xmm13\n   vpternlogq $0x96, %xmm12, %xmm13, %xmm14\n"
-    "vmovdqa64 %xmm14, %xmm17\n   vpshufb %xmm31, %xmm17, %xmm17\n   vpxorq %xmm19, %xmm17, %xmm17\n"
-    "vmovdqu64 %xmm17, 1184(%rsi)\n   vpxorq %xmm0, %xmm0, %xmm0\n   vpxorq %xmm1, %xmm1, %xmm1\n"
-    "vpxorq %xmm2, %xmm2, %xmm2\n   vpxorq %xmm3, %xmm3, %xmm3\n   vpxorq %xmm4, %xmm4, %xmm4\n"
-    "vpxorq %xmm5, %xmm5, %xmm5\n   vpxorq %xmm6, %xmm6, %xmm6\n   vpxorq %xmm7, %xmm7, %xmm7\n"
-    "vpxorq %xmm8, %xmm8, %xmm8\n   vpxorq %xmm9, %xmm9, %xmm9\n   vpxorq %xmm10, %xmm10, %xmm10\n"
-    "vpxorq %xmm11, %xmm11, %xmm11\n   vpxorq %xmm12, %xmm12, %xmm12\n   vpxorq %xmm13, %xmm13, %xmm13\n"
-    "vpxorq %xmm14, %xmm14, %xmm14\n   vpxorq %xmm15, %xmm15, %xmm15\n   vpxorq %xmm16, %xmm16, %xmm16\n"
-    "vpxorq %xmm17, %xmm17, %xmm17\n   vpxorq %xmm18, %xmm18, %xmm18\n   vpxorq %xmm19, %xmm19, %xmm19\n"
-    "vpxorq %xmm20, %xmm20, %xmm20\n   vpxorq %xmm21, %xmm21, %xmm21\n   vpxorq %xmm22, %xmm22, %xmm22\n"
-    "vpxorq %xmm23, %xmm23, %xmm23\n   vpxorq %xmm24, %xmm24, %xmm24\n   vpxorq %xmm25, %xmm25, %xmm25\n"
-    "vpxorq %xmm26, %xmm26, %xmm26\n   vpxorq %xmm27, %xmm27, %xmm27\n   vpxorq %xmm28, %xmm28, %xmm28\n"
-    "vpxorq %xmm29, %xmm29, %xmm29\n   vpxorq %xmm30, %xmm30, %xmm30\n   vpxorq %xmm31, %xmm31, %xmm31\n"
-    "kxorw %k1, %k1, %k1\n   vzeroupper\n   ret\n"
-    ".Lwaterlink_open_zmm:\n"
-    "vbroadcasti32x4 .Lwaterlink_bswap(%rip), %zmm31\n   vbroadcasti32x4 0(%rdi), %zmm20\n"
-    "vbroadcasti32x4 16(%rdi), %zmm21\n   vbroadcasti32x4 32(%rdi), %zmm22\n"
-    "vbroadcasti32x4 48(%rdi), %zmm23\n   vbroadcasti32x4 64(%rdi), %zmm24\n"
-    "vbroadcasti32x4 80(%rdi), %zmm25\n   vbroadcasti32x4 96(%rdi), %zmm26\n"
-    "vbroadcasti32x4 112(%rdi), %zmm27\n   vbroadcasti32x4 128(%rdi), %zmm28\n"
-    "vbroadcasti32x4 144(%rdi), %zmm29\n   vbroadcasti32x4 160(%rdi), %zmm30\n"
-    "lea 192(%rdi), %r9\n   mov 8(%rsi), %rax\n   bswap %rax\n   mov %rax, %r8\n"
-    "shl $32, %r8\n   or $1, %r8\n   shr $32, %rax\n   vmovq %r8, %xmm8\n   vpinsrq $1, %rax, %xmm8, %xmm8\n"
-    "vshufi64x2 $0, %zmm8, %zmm8, %zmm16\n   vpaddd .Lwaterlink_steps(%rip), %zmm16, %zmm16\n"
-    "vbroadcasti32x4 .Lwaterlink_four(%rip), %zmm18\n   mov $0xfc, %eax\n"
-    "kmovw %eax, %k1\n   mov $0x0f, %eax\n   kmovw %eax, %k2\n   mov $0x0c, %eax\n"
-    "kmovw %eax, %k3\n   vpshufb %zmm31, %zmm16, %zmm0\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm0, %zmm0\n   vpshufb %zmm31, %zmm16, %zmm1\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm1, %zmm1\n   vpshufb %zmm31, %zmm16, %zmm2\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm2, %zmm2\n   vpshufb %zmm31, %zmm16, %zmm3\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm3, %zmm3\n   vaesenc %zmm21, %zmm0, %zmm0\n   vaesenc %zmm21, %zmm1, %zmm1\n"
-    "vaesenc %zmm21, %zmm2, %zmm2\n   vaesenc %zmm21, %zmm3, %zmm3\n   vaesenc %zmm22, %zmm0, %zmm0\n"
-    "vaesenc %zmm22, %zmm1, %zmm1\n   vaesenc %zmm22, %zmm2, %zmm2\n   vaesenc %zmm22, %zmm3, %zmm3\n"
-    "vaesenc %zmm23, %zmm0, %zmm0\n   vaesenc %zmm23, %zmm1, %zmm1\n   vaesenc %zmm23, %zmm2, %zmm2\n"
-    "vaesenc %zmm23, %zmm3, %zmm3\n   vaesenc %zmm24, %zmm0, %zmm0\n   vaesenc %zmm24, %zmm1, %zmm1\n"
-    "vaesenc %zmm24, %zmm2, %zmm2\n   vaesenc %zmm24, %zmm3, %zmm3\n   vaesenc %zmm25, %zmm0, %zmm0\n"
-    "vaesenc %zmm25, %zmm1, %zmm1\n   vaesenc %zmm25, %zmm2, %zmm2\n   vaesenc %zmm25, %zmm3, %zmm3\n"
-    "vaesenc %zmm26, %zmm0, %zmm0\n   vaesenc %zmm26, %zmm1, %zmm1\n   vaesenc %zmm26, %zmm2, %zmm2\n"
-    "vaesenc %zmm26, %zmm3, %zmm3\n   vaesenc %zmm27, %zmm0, %zmm0\n   vaesenc %zmm27, %zmm1, %zmm1\n"
-    "vaesenc %zmm27, %zmm2, %zmm2\n   vaesenc %zmm27, %zmm3, %zmm3\n   vaesenc %zmm28, %zmm0, %zmm0\n"
-    "vaesenc %zmm28, %zmm1, %zmm1\n   vaesenc %zmm28, %zmm2, %zmm2\n   vaesenc %zmm28, %zmm3, %zmm3\n"
-    "vaesenc %zmm29, %zmm0, %zmm0\n   vaesenc %zmm29, %zmm1, %zmm1\n   vaesenc %zmm29, %zmm2, %zmm2\n"
-    "vaesenc %zmm29, %zmm3, %zmm3\n   vaesenclast %zmm30, %zmm0, %zmm0\n"
-    "vaesenclast %zmm30, %zmm1, %zmm1\n   vaesenclast %zmm30, %zmm2, %zmm2\n"
-    "vaesenclast %zmm30, %zmm3, %zmm3\n   vmovdqa64 %xmm0, %xmm19\n   vmovdqu64 0(%rsi), %zmm4\n"
-    "vpshufb %zmm31, %zmm4, %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 0(%r9), %zmm8, %zmm13\n   vpclmulqdq $0x11, 0(%r9), %zmm8, %zmm14\n"
-    "vpclmulqdq $0x00, 768(%r9), %zmm9, %zmm15\n   vpxorq %zmm4, %zmm0, %zmm0\n"
-    "vmovdqu64 %zmm0, (%rsi){%k1}\n   vmovdqu64 64(%rsi), %zmm5\n   vpshufb %zmm31, %zmm5, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 64(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 64(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 832(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "vpxorq %zmm5, %zmm1, %zmm1\n   vmovdqu64 %zmm1, 64(%rsi)\n   vmovdqu64 128(%rsi), %zmm6\n"
-    "vpshufb %zmm31, %zmm6, %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 128(%r9), %zmm8, %zmm10\n   vpclmulqdq $0x11, 128(%r9), %zmm8, %zmm11\n"
-    "vpclmulqdq $0x00, 896(%r9), %zmm9, %zmm12\n   vpxorq %zmm10, %zmm13, %zmm13\n"
-    "vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n   vpxorq %zmm6, %zmm2, %zmm2\n"
-    "vmovdqu64 %zmm2, 128(%rsi)\n   vmovdqu64 192(%rsi), %zmm7\n   vpshufb %zmm31, %zmm7, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 192(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 192(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 960(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "vpxorq %zmm7, %zmm3, %zmm3\n   vmovdqu64 %zmm3, 192(%rsi)\n   vpshufb %zmm31, %zmm16, %zmm0\n"
-    "vpaddd %zmm18, %zmm16, %zmm16\n   vpxorq %zmm20, %zmm0, %zmm0\n   vpshufb %zmm31, %zmm16, %zmm1\n"
-    "vpaddd %zmm18, %zmm16, %zmm16\n   vpxorq %zmm20, %zmm1, %zmm1\n   vpshufb %zmm31, %zmm16, %zmm2\n"
-    "vpaddd %zmm18, %zmm16, %zmm16\n   vpxorq %zmm20, %zmm2, %zmm2\n   vpshufb %zmm31, %zmm16, %zmm3\n"
-    "vpaddd %zmm18, %zmm16, %zmm16\n   vpxorq %zmm20, %zmm3, %zmm3\n   vaesenc %zmm21, %zmm0, %zmm0\n"
-    "vaesenc %zmm21, %zmm1, %zmm1\n   vaesenc %zmm21, %zmm2, %zmm2\n   vaesenc %zmm21, %zmm3, %zmm3\n"
-    "vaesenc %zmm22, %zmm0, %zmm0\n   vaesenc %zmm22, %zmm1, %zmm1\n   vaesenc %zmm22, %zmm2, %zmm2\n"
-    "vaesenc %zmm22, %zmm3, %zmm3\n   vaesenc %zmm23, %zmm0, %zmm0\n   vaesenc %zmm23, %zmm1, %zmm1\n"
-    "vaesenc %zmm23, %zmm2, %zmm2\n   vaesenc %zmm23, %zmm3, %zmm3\n   vaesenc %zmm24, %zmm0, %zmm0\n"
-    "vaesenc %zmm24, %zmm1, %zmm1\n   vaesenc %zmm24, %zmm2, %zmm2\n   vaesenc %zmm24, %zmm3, %zmm3\n"
-    "vaesenc %zmm25, %zmm0, %zmm0\n   vaesenc %zmm25, %zmm1, %zmm1\n   vaesenc %zmm25, %zmm2, %zmm2\n"
-    "vaesenc %zmm25, %zmm3, %zmm3\n   vaesenc %zmm26, %zmm0, %zmm0\n   vaesenc %zmm26, %zmm1, %zmm1\n"
-    "vaesenc %zmm26, %zmm2, %zmm2\n   vaesenc %zmm26, %zmm3, %zmm3\n   vaesenc %zmm27, %zmm0, %zmm0\n"
-    "vaesenc %zmm27, %zmm1, %zmm1\n   vaesenc %zmm27, %zmm2, %zmm2\n   vaesenc %zmm27, %zmm3, %zmm3\n"
-    "vaesenc %zmm28, %zmm0, %zmm0\n   vaesenc %zmm28, %zmm1, %zmm1\n   vaesenc %zmm28, %zmm2, %zmm2\n"
-    "vaesenc %zmm28, %zmm3, %zmm3\n   vaesenc %zmm29, %zmm0, %zmm0\n   vaesenc %zmm29, %zmm1, %zmm1\n"
-    "vaesenc %zmm29, %zmm2, %zmm2\n   vaesenc %zmm29, %zmm3, %zmm3\n   vaesenclast %zmm30, %zmm0, %zmm0\n"
-    "vaesenclast %zmm30, %zmm1, %zmm1\n   vaesenclast %zmm30, %zmm2, %zmm2\n"
-    "vaesenclast %zmm30, %zmm3, %zmm3\n   vmovdqu64 256(%rsi), %zmm4\n   vpshufb %zmm31, %zmm4, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 256(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 256(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 1024(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "vpxorq %zmm4, %zmm0, %zmm0\n   vmovdqu64 %zmm0, 256(%rsi)\n   vmovdqu64 320(%rsi), %zmm5\n"
-    "vpshufb %zmm31, %zmm5, %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 320(%r9), %zmm8, %zmm10\n   vpclmulqdq $0x11, 320(%r9), %zmm8, %zmm11\n"
-    "vpclmulqdq $0x00, 1088(%r9), %zmm9, %zmm12\n   vpxorq %zmm10, %zmm13, %zmm13\n"
-    "vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n   vpxorq %zmm5, %zmm1, %zmm1\n"
-    "vmovdqu64 %zmm1, 320(%rsi)\n   vmovdqu64 384(%rsi), %zmm6\n   vpshufb %zmm31, %zmm6, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 384(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 384(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 1152(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "vpxorq %zmm6, %zmm2, %zmm2\n   vmovdqu64 %zmm2, 384(%rsi)\n   vmovdqu64 448(%rsi), %zmm7\n"
-    "vpshufb %zmm31, %zmm7, %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 448(%r9), %zmm8, %zmm10\n   vpclmulqdq $0x11, 448(%r9), %zmm8, %zmm11\n"
-    "vpclmulqdq $0x00, 1216(%r9), %zmm9, %zmm12\n   vpxorq %zmm10, %zmm13, %zmm13\n"
-    "vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n   vpxorq %zmm7, %zmm3, %zmm3\n"
-    "vmovdqu64 %zmm3, 448(%rsi)\n   vpshufb %zmm31, %zmm16, %zmm0\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm0, %zmm0\n   vpshufb %zmm31, %zmm16, %zmm1\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm1, %zmm1\n   vpshufb %zmm31, %zmm16, %zmm2\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm2, %zmm2\n   vpshufb %zmm31, %zmm16, %zmm3\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm3, %zmm3\n   vaesenc %zmm21, %zmm0, %zmm0\n   vaesenc %zmm21, %zmm1, %zmm1\n"
-    "vaesenc %zmm21, %zmm2, %zmm2\n   vaesenc %zmm21, %zmm3, %zmm3\n   vaesenc %zmm22, %zmm0, %zmm0\n"
-    "vaesenc %zmm22, %zmm1, %zmm1\n   vaesenc %zmm22, %zmm2, %zmm2\n   vaesenc %zmm22, %zmm3, %zmm3\n"
-    "vaesenc %zmm23, %zmm0, %zmm0\n   vaesenc %zmm23, %zmm1, %zmm1\n   vaesenc %zmm23, %zmm2, %zmm2\n"
-    "vaesenc %zmm23, %zmm3, %zmm3\n   vaesenc %zmm24, %zmm0, %zmm0\n   vaesenc %zmm24, %zmm1, %zmm1\n"
-    "vaesenc %zmm24, %zmm2, %zmm2\n   vaesenc %zmm24, %zmm3, %zmm3\n   vaesenc %zmm25, %zmm0, %zmm0\n"
-    "vaesenc %zmm25, %zmm1, %zmm1\n   vaesenc %zmm25, %zmm2, %zmm2\n   vaesenc %zmm25, %zmm3, %zmm3\n"
-    "vaesenc %zmm26, %zmm0, %zmm0\n   vaesenc %zmm26, %zmm1, %zmm1\n   vaesenc %zmm26, %zmm2, %zmm2\n"
-    "vaesenc %zmm26, %zmm3, %zmm3\n   vaesenc %zmm27, %zmm0, %zmm0\n   vaesenc %zmm27, %zmm1, %zmm1\n"
-    "vaesenc %zmm27, %zmm2, %zmm2\n   vaesenc %zmm27, %zmm3, %zmm3\n   vaesenc %zmm28, %zmm0, %zmm0\n"
-    "vaesenc %zmm28, %zmm1, %zmm1\n   vaesenc %zmm28, %zmm2, %zmm2\n   vaesenc %zmm28, %zmm3, %zmm3\n"
-    "vaesenc %zmm29, %zmm0, %zmm0\n   vaesenc %zmm29, %zmm1, %zmm1\n   vaesenc %zmm29, %zmm2, %zmm2\n"
-    "vaesenc %zmm29, %zmm3, %zmm3\n   vaesenclast %zmm30, %zmm0, %zmm0\n"
-    "vaesenclast %zmm30, %zmm1, %zmm1\n   vaesenclast %zmm30, %zmm2, %zmm2\n"
-    "vaesenclast %zmm30, %zmm3, %zmm3\n   vmovdqu64 512(%rsi), %zmm4\n   vpshufb %zmm31, %zmm4, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 512(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 512(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 1280(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "vpxorq %zmm4, %zmm0, %zmm0\n   vmovdqu64 %zmm0, 512(%rsi)\n   vmovdqu64 576(%rsi), %zmm5\n"
-    "vpshufb %zmm31, %zmm5, %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 576(%r9), %zmm8, %zmm10\n   vpclmulqdq $0x11, 576(%r9), %zmm8, %zmm11\n"
-    "vpclmulqdq $0x00, 1344(%r9), %zmm9, %zmm12\n   vpxorq %zmm10, %zmm13, %zmm13\n"
-    "vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n   vpxorq %zmm5, %zmm1, %zmm1\n"
-    "vmovdqu64 %zmm1, 576(%rsi)\n   vmovdqu64 640(%rsi), %zmm6\n   vpshufb %zmm31, %zmm6, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 640(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 640(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 1408(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "vpxorq %zmm6, %zmm2, %zmm2\n   vmovdqu64 %zmm2, 640(%rsi)\n   vmovdqu64 704(%rsi), %zmm7\n"
-    "vpshufb %zmm31, %zmm7, %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 704(%r9), %zmm8, %zmm10\n   vpclmulqdq $0x11, 704(%r9), %zmm8, %zmm11\n"
-    "vpclmulqdq $0x00, 1472(%r9), %zmm9, %zmm12\n   vpxorq %zmm10, %zmm13, %zmm13\n"
-    "vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n   vpxorq %zmm7, %zmm3, %zmm3\n"
-    "vmovdqu64 %zmm3, 704(%rsi)\n   vpternlogq $0x96, %zmm14, %zmm13, %zmm15\n"
-    "vpslldq $8, %zmm15, %zmm12\n   vpsrldq $8, %zmm15, %zmm15\n   vpxorq %zmm12, %zmm13, %zmm13\n"
-    "vpxorq %zmm15, %zmm14, %zmm14\n   vextracti64x4 $1, %zmm13, %ymm12\n"
-    "vpxorq %ymm12, %ymm13, %ymm13\n   vextracti32x4 $1, %ymm13, %xmm12\n"
-    "vpxorq %xmm12, %xmm13, %xmm13\n   vextracti64x4 $1, %zmm14, %ymm12\n"
-    "vpxorq %ymm12, %ymm14, %ymm14\n   vextracti32x4 $1, %ymm14, %xmm12\n"
-    "vpxorq %xmm12, %xmm14, %xmm14\n   vpclmulqdq $0x00, .Lwaterlink_poly(%rip), %xmm13, %xmm12\n"
-    "vpshufd $0x4e, %xmm13, %xmm13\n   vpxorq %xmm12, %xmm13, %xmm13\n   vpclmulqdq $0x00, .Lwaterlink_poly(%rip), %xmm13, %xmm12\n"
-    "vpshufd $0x4e, %xmm13, %xmm13\n   vpternlogq $0x96, %xmm12, %xmm13, %xmm14\n"
-    "vmovdqa64 %xmm14, %xmm17\n   vpshufb %zmm31, %zmm16, %zmm0\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm0, %zmm0\n   vpshufb %zmm31, %zmm16, %zmm1\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm1, %zmm1\n   vpshufb %zmm31, %zmm16, %zmm2\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm2, %zmm2\n   vpshufb %zmm31, %zmm16, %zmm3\n   vpaddd %zmm18, %zmm16, %zmm16\n"
-    "vpxorq %zmm20, %zmm3, %zmm3\n   vaesenc %zmm21, %zmm0, %zmm0\n   vaesenc %zmm21, %zmm1, %zmm1\n"
-    "vaesenc %zmm21, %zmm2, %zmm2\n   vaesenc %zmm21, %zmm3, %zmm3\n   vaesenc %zmm22, %zmm0, %zmm0\n"
-    "vaesenc %zmm22, %zmm1, %zmm1\n   vaesenc %zmm22, %zmm2, %zmm2\n   vaesenc %zmm22, %zmm3, %zmm3\n"
-    "vaesenc %zmm23, %zmm0, %zmm0\n   vaesenc %zmm23, %zmm1, %zmm1\n   vaesenc %zmm23, %zmm2, %zmm2\n"
-    "vaesenc %zmm23, %zmm3, %zmm3\n   vaesenc %zmm24, %zmm0, %zmm0\n   vaesenc %zmm24, %zmm1, %zmm1\n"
-    "vaesenc %zmm24, %zmm2, %zmm2\n   vaesenc %zmm24, %zmm3, %zmm3\n   vaesenc %zmm25, %zmm0, %zmm0\n"
-    "vaesenc %zmm25, %zmm1, %zmm1\n   vaesenc %zmm25, %zmm2, %zmm2\n   vaesenc %zmm25, %zmm3, %zmm3\n"
-    "vaesenc %zmm26, %zmm0, %zmm0\n   vaesenc %zmm26, %zmm1, %zmm1\n   vaesenc %zmm26, %zmm2, %zmm2\n"
-    "vaesenc %zmm26, %zmm3, %zmm3\n   vaesenc %zmm27, %zmm0, %zmm0\n   vaesenc %zmm27, %zmm1, %zmm1\n"
-    "vaesenc %zmm27, %zmm2, %zmm2\n   vaesenc %zmm27, %zmm3, %zmm3\n   vaesenc %zmm28, %zmm0, %zmm0\n"
-    "vaesenc %zmm28, %zmm1, %zmm1\n   vaesenc %zmm28, %zmm2, %zmm2\n   vaesenc %zmm28, %zmm3, %zmm3\n"
-    "vaesenc %zmm29, %zmm0, %zmm0\n   vaesenc %zmm29, %zmm1, %zmm1\n   vaesenc %zmm29, %zmm2, %zmm2\n"
-    "vaesenc %zmm29, %zmm3, %zmm3\n   vaesenclast %zmm30, %zmm0, %zmm0\n"
-    "vaesenclast %zmm30, %zmm1, %zmm1\n   vaesenclast %zmm30, %zmm2, %zmm2\n"
-    "vaesenclast %zmm30, %zmm3, %zmm3\n   vmovdqu64 768(%rsi), %zmm12\n   valignq $6, %zmm12, %zmm12, %zmm12{%k1}{z}\n"
-    "vpshufb %zmm31, %zmm12, %zmm8\n   vshufi64x2 $0, %zmm17, %zmm17, %zmm12\n"
+    WATERLINK_ZMM_SETUP WATERLINK_ZMM_AES4("0", "1", "2", "3")
+    "vmovdqa64 %xmm0, %xmm19\n   vpxorq 0(%rsi), %zmm0, %zmm0\n   vpxorq 64(%rsi), %zmm1, %zmm1\n"
+    "vpxorq 128(%rsi), %zmm2, %zmm2\n   vpxorq 192(%rsi), %zmm3, %zmm3\n   vmovdqu64 %zmm0, (%rsi){%k1}\n"
+    "vmovdqu64 %zmm1, 64(%rsi)\n   vmovdqu64 %zmm2, 128(%rsi)\n   vmovdqu64 %zmm3, 192(%rsi)\n"
+    "vpxorq %zmm19, %zmm0, %zmm0\n"
+    WATERLINK_ZMM_AES4("4", "5", "6", "7")
+    WATERLINK_ZMM_HASH_FIRST("0", "0", "768")
+    WATERLINK_ZMM_HASH("1", "64", "832") WATERLINK_ZMM_HASH("2", "128", "896")
+    WATERLINK_ZMM_HASH("3", "192", "960") WATERLINK_ZMM_XOR_STORE("4", "256")
+    WATERLINK_ZMM_XOR_STORE("5", "320") WATERLINK_ZMM_XOR_STORE("6", "384")
+    WATERLINK_ZMM_XOR_STORE("7", "448") WATERLINK_ZMM_AES4("0", "1", "2", "3")
+    WATERLINK_ZMM_HASH("4", "256", "1024")
+    WATERLINK_ZMM_HASH("5", "320", "1088")
+    WATERLINK_ZMM_HASH("6", "384", "1152")
+    WATERLINK_ZMM_HASH("7", "448", "1216") WATERLINK_ZMM_XOR_STORE("0", "512")
+    WATERLINK_ZMM_XOR_STORE("1", "576") WATERLINK_ZMM_XOR_STORE("2", "640")
+    WATERLINK_ZMM_XOR_STORE("3", "704") WATERLINK_ZMM_AES4("4", "5", "6", "7")
+    WATERLINK_ZMM_HASH("0", "512", "1280")
+    WATERLINK_ZMM_HASH("1", "576", "1344")
+    WATERLINK_ZMM_HASH("2", "640", "1408")
+    WATERLINK_ZMM_HASH("3", "704", "1472") WATERLINK_ZMM_XOR_STORE("4", "768")
+    WATERLINK_ZMM_XOR_STORE("5", "832") WATERLINK_ZMM_XOR_STORE("6", "896")
+    WATERLINK_ZMM_XOR_STORE("7", "960") WATERLINK_ZMM_REDUCE
+    "vmovdqa64 %xmm14, %xmm17\n"
+    WATERLINK_ZMM_AES3("0", "1", "2")
+    "valignq $6, %zmm4, %zmm4, %zmm12{%k1}{z}\n   vpshufb %zmm31, %zmm12, %zmm8\n   vshufi64x2 $0, %zmm17, %zmm17, %zmm12\n"
     "vpxorq %zmm12, %zmm8, %zmm8{%k3}\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 320(%r9), %zmm8, %zmm13\n   vpclmulqdq $0x11, 320(%r9), %zmm8, %zmm14\n"
-    "vpclmulqdq $0x00, 1088(%r9), %zmm9, %zmm15\n   vmovdqu64 816(%rsi), %zmm12\n"
-    "vpshufb %zmm31, %zmm12, %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 384(%r9), %zmm8, %zmm10\n   vpclmulqdq $0x11, 384(%r9), %zmm8, %zmm11\n"
-    "vpclmulqdq $0x00, 1152(%r9), %zmm9, %zmm12\n   vpxorq %zmm10, %zmm13, %zmm13\n"
-    "vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n   vmovdqu64 880(%rsi), %zmm12\n"
-    "vpshufb %zmm31, %zmm12, %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 448(%r9), %zmm8, %zmm10\n   vpclmulqdq $0x11, 448(%r9), %zmm8, %zmm11\n"
-    "vpclmulqdq $0x00, 1216(%r9), %zmm9, %zmm12\n   vpxorq %zmm10, %zmm13, %zmm13\n"
-    "vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n   vmovdqu64 944(%rsi), %zmm12\n"
-    "vpshufb %zmm31, %zmm12, %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 512(%r9), %zmm8, %zmm10\n   vpclmulqdq $0x11, 512(%r9), %zmm8, %zmm11\n"
-    "vpclmulqdq $0x00, 1280(%r9), %zmm9, %zmm12\n   vpxorq %zmm10, %zmm13, %zmm13\n"
-    "vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n   vmovdqu64 1008(%rsi), %zmm12\n"
-    "vpshufb %zmm31, %zmm12, %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 576(%r9), %zmm8, %zmm10\n   vpclmulqdq $0x11, 576(%r9), %zmm8, %zmm11\n"
-    "vpclmulqdq $0x00, 1344(%r9), %zmm9, %zmm12\n   vpxorq %zmm10, %zmm13, %zmm13\n"
-    "vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n   vmovdqu64 1072(%rsi), %zmm12\n"
-    "vpshufb %zmm31, %zmm12, %zmm8\n   vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n"
-    "vpclmulqdq $0x00, 640(%r9), %zmm8, %zmm10\n   vpclmulqdq $0x11, 640(%r9), %zmm8, %zmm11\n"
-    "vpclmulqdq $0x00, 1408(%r9), %zmm9, %zmm12\n   vpxorq %zmm10, %zmm13, %zmm13\n"
-    "vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n   vmovdqu64 1136(%rsi), %zmm12\n"
-    "vinserti32x4 $3, .Lwaterlink_lengths(%rip), %zmm12, %zmm12\n   vpshufb %zmm31, %zmm12, %zmm8\n"
-    "vpsrldq $8, %zmm8, %zmm9\n   vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 704(%r9), %zmm8, %zmm10\n"
-    "vpclmulqdq $0x11, 704(%r9), %zmm8, %zmm11\n   vpclmulqdq $0x00, 1472(%r9), %zmm9, %zmm12\n"
-    "vpxorq %zmm10, %zmm13, %zmm13\n   vpxorq %zmm11, %zmm14, %zmm14\n   vpxorq %zmm12, %zmm15, %zmm15\n"
-    "vpxorq 768(%rsi), %zmm0, %zmm0\n   vmovdqu64 %zmm0, 768(%rsi)\n   vpxorq 832(%rsi), %zmm1, %zmm1\n"
-    "vmovdqu64 %zmm1, 832(%rsi)\n   vpxorq 896(%rsi), %zmm2, %zmm2\n   vmovdqu64 %zmm2, 896(%rsi)\n"
-    "vpxorq 960(%rsi), %zmm3, %zmm3\n   vmovdqu64 %zmm3, 960(%rsi)\n   vpshufb %zmm31, %zmm16, %zmm0\n"
-    "vpaddd %zmm18, %zmm16, %zmm16\n   vpxorq %zmm20, %zmm0, %zmm0\n   vpshufb %zmm31, %zmm16, %zmm1\n"
-    "vpaddd %zmm18, %zmm16, %zmm16\n   vpxorq %zmm20, %zmm1, %zmm1\n   vpshufb %zmm31, %zmm16, %zmm2\n"
-    "vpaddd %zmm18, %zmm16, %zmm16\n   vpxorq %zmm20, %zmm2, %zmm2\n   vaesenc %zmm21, %zmm0, %zmm0\n"
-    "vaesenc %zmm21, %zmm1, %zmm1\n   vaesenc %zmm21, %zmm2, %zmm2\n   vaesenc %zmm22, %zmm0, %zmm0\n"
-    "vaesenc %zmm22, %zmm1, %zmm1\n   vaesenc %zmm22, %zmm2, %zmm2\n   vaesenc %zmm23, %zmm0, %zmm0\n"
-    "vaesenc %zmm23, %zmm1, %zmm1\n   vaesenc %zmm23, %zmm2, %zmm2\n   vaesenc %zmm24, %zmm0, %zmm0\n"
-    "vaesenc %zmm24, %zmm1, %zmm1\n   vaesenc %zmm24, %zmm2, %zmm2\n   vaesenc %zmm25, %zmm0, %zmm0\n"
-    "vaesenc %zmm25, %zmm1, %zmm1\n   vaesenc %zmm25, %zmm2, %zmm2\n   vaesenc %zmm26, %zmm0, %zmm0\n"
-    "vaesenc %zmm26, %zmm1, %zmm1\n   vaesenc %zmm26, %zmm2, %zmm2\n   vaesenc %zmm27, %zmm0, %zmm0\n"
-    "vaesenc %zmm27, %zmm1, %zmm1\n   vaesenc %zmm27, %zmm2, %zmm2\n   vaesenc %zmm28, %zmm0, %zmm0\n"
-    "vaesenc %zmm28, %zmm1, %zmm1\n   vaesenc %zmm28, %zmm2, %zmm2\n   vaesenc %zmm29, %zmm0, %zmm0\n"
-    "vaesenc %zmm29, %zmm1, %zmm1\n   vaesenc %zmm29, %zmm2, %zmm2\n   vaesenclast %zmm30, %zmm0, %zmm0\n"
-    "vaesenclast %zmm30, %zmm1, %zmm1\n   vaesenclast %zmm30, %zmm2, %zmm2\n"
-    "vpxorq 1024(%rsi), %zmm0, %zmm0\n   vmovdqu64 %zmm0, 1024(%rsi)\n   vpxorq 1088(%rsi), %zmm1, %zmm1\n"
-    "vmovdqu64 %zmm1, 1088(%rsi)\n   vmovdqu64 1152(%rsi), %zmm8{%k2}{z}\n"
-    "vpxorq %zmm8, %zmm2, %zmm2\n   vmovdqu64 %zmm2, 1152(%rsi){%k2}\n   vpternlogq $0x96, %zmm14, %zmm13, %zmm15\n"
-    "vpslldq $8, %zmm15, %zmm12\n   vpsrldq $8, %zmm15, %zmm15\n   vpxorq %zmm12, %zmm13, %zmm13\n"
-    "vpxorq %zmm15, %zmm14, %zmm14\n   vextracti64x4 $1, %zmm13, %ymm12\n"
-    "vpxorq %ymm12, %ymm13, %ymm13\n   vextracti32x4 $1, %ymm13, %xmm12\n"
-    "vpxorq %xmm12, %xmm13, %xmm13\n   vextracti64x4 $1, %zmm14, %ymm12\n"
-    "vpxorq %ymm12, %ymm14, %ymm14\n   vextracti32x4 $1, %ymm14, %xmm12\n"
-    "vpxorq %xmm12, %xmm14, %xmm14\n   vpclmulqdq $0x00, .Lwaterlink_poly(%rip), %xmm13, %xmm12\n"
-    "vpshufd $0x4e, %xmm13, %xmm13\n   vpxorq %xmm12, %xmm13, %xmm13\n   vpclmulqdq $0x00, .Lwaterlink_poly(%rip), %xmm13, %xmm12\n"
-    "vpshufd $0x4e, %xmm13, %xmm13\n   vpternlogq $0x96, %xmm12, %xmm13, %xmm14\n"
+    "vpclmulqdq $0x00, 320(%r9), %zmm8, %zmm13\n   vpclmulqdq $0x11, 320(%r9), %zmm8, %zmm14\n   vpclmulqdq $0x00, 1088(%r9), %zmm9, %zmm15\n"
+    "valignq $6, %zmm4, %zmm5, %zmm12\n"
+    WATERLINK_ZMM_HASH("12", "384", "1152")
+    "valignq $6, %zmm5, %zmm6, %zmm12\n"
+    WATERLINK_ZMM_HASH("12", "448", "1216")
+    "valignq $6, %zmm6, %zmm7, %zmm12\n"
+    WATERLINK_ZMM_HASH("12", "512", "1280") WATERLINK_ZMM_XOR_STORE("0", "1024")
+    WATERLINK_ZMM_XOR_STORE("1", "1088")
+    "vmovdqu64 1152(%rsi), %zmm8{%k2}{z}\n   vpxorq %zmm8, %zmm2, %zmm2\n   vmovdqu64 %zmm2, 1152(%rsi){%k2}\n"
+    "vinserti32x4 $2, .Lwaterlink_lengths(%rip), %zmm2, %zmm2\n   valignq $6, %zmm7, %zmm0, %zmm12\n"
+    WATERLINK_ZMM_HASH("12", "576", "1344")
+    "valignq $6, %zmm0, %zmm1, %zmm12\n"
+    WATERLINK_ZMM_HASH("12", "640", "1408")
+    "valignq $6, %zmm1, %zmm2, %zmm12\n"
+    WATERLINK_ZMM_HASH("12", "704", "1472") WATERLINK_ZMM_REDUCE
     "vmovdqa64 %xmm14, %xmm17\n   vpshufb %xmm31, %xmm17, %xmm17\n   vpxorq %xmm19, %xmm17, %xmm17\n"
-    "vmovdqu64 %xmm17, (%rcx)\n   vpxorq %xmm0, %xmm0, %xmm0\n   vpxorq %xmm1, %xmm1, %xmm1\n"
-    "vpxorq %xmm2, %xmm2, %xmm2\n   vpxorq %xmm3, %xmm3, %xmm3\n   vpxorq %xmm4, %xmm4, %xmm4\n"
-    "vpxorq %xmm5, %xmm5, %xmm5\n   vpxorq %xmm6, %xmm6, %xmm6\n   vpxorq %xmm7, %xmm7, %xmm7\n"
-    "vpxorq %xmm8, %xmm8, %xmm8\n   vpxorq %xmm9, %xmm9, %xmm9\n   vpxorq %xmm10, %xmm10, %xmm10\n"
-    "vpxorq %xmm11, %xmm11, %xmm11\n   vpxorq %xmm12, %xmm12, %xmm12\n   vpxorq %xmm13, %xmm13, %xmm13\n"
-    "vpxorq %xmm14, %xmm14, %xmm14\n   vpxorq %xmm15, %xmm15, %xmm15\n   vpxorq %xmm16, %xmm16, %xmm16\n"
-    "vpxorq %xmm17, %xmm17, %xmm17\n   vpxorq %xmm18, %xmm18, %xmm18\n   vpxorq %xmm19, %xmm19, %xmm19\n"
-    "vpxorq %xmm20, %xmm20, %xmm20\n   vpxorq %xmm21, %xmm21, %xmm21\n   vpxorq %xmm22, %xmm22, %xmm22\n"
-    "vpxorq %xmm23, %xmm23, %xmm23\n   vpxorq %xmm24, %xmm24, %xmm24\n   vpxorq %xmm25, %xmm25, %xmm25\n"
-    "vpxorq %xmm26, %xmm26, %xmm26\n   vpxorq %xmm27, %xmm27, %xmm27\n   vpxorq %xmm28, %xmm28, %xmm28\n"
-    "vpxorq %xmm29, %xmm29, %xmm29\n   vpxorq %xmm30, %xmm30, %xmm30\n   vpxorq %xmm31, %xmm31, %xmm31\n"
-    "kxorw %k1, %k1, %k1\n   vzeroupper\n   ret\n"
+    "vmovdqu64 %xmm17, 1184(%rsi)\n"
+    WATERLINK_ZMM_WIPE
+    ".Lwaterlink_open_zmm:\n"
+    WATERLINK_ZMM_SETUP WATERLINK_ZMM_AES4("0", "1", "2", "3")
+    "vmovdqa64 %xmm0, %xmm19\n   vmovdqu64 0(%rsi), %zmm4\n"
+    WATERLINK_ZMM_HASH_FIRST("4", "0", "768")
+    "vpxorq %zmm4, %zmm0, %zmm0\n   vmovdqu64 %zmm0, (%rsi){%k1}\n"
+    WATERLINK_ZMM_OPEN("5", "1", "64", "832")
+    WATERLINK_ZMM_OPEN("6", "2", "128", "896")
+    WATERLINK_ZMM_OPEN("7", "3", "192", "960")
+    WATERLINK_ZMM_AES4("0", "1", "2", "3")
+    WATERLINK_ZMM_OPEN("4", "0", "256", "1024")
+    WATERLINK_ZMM_OPEN("5", "1", "320", "1088")
+    WATERLINK_ZMM_OPEN("6", "2", "384", "1152")
+    WATERLINK_ZMM_OPEN("7", "3", "448", "1216")
+    WATERLINK_ZMM_AES4("0", "1", "2", "3")
+    WATERLINK_ZMM_OPEN("4", "0", "512", "1280")
+    WATERLINK_ZMM_OPEN("5", "1", "576", "1344")
+    WATERLINK_ZMM_OPEN("6", "2", "640", "1408")
+    WATERLINK_ZMM_OPEN("7", "3", "704", "1472") WATERLINK_ZMM_REDUCE
+    "vmovdqa64 %xmm14, %xmm17\n"
+    WATERLINK_ZMM_AES4("0", "1", "2", "3")
+    "vmovdqu64 768(%rsi), %zmm12\n   valignq $6, %zmm12, %zmm12, %zmm12{%k1}{z}\n   vpshufb %zmm31, %zmm12, %zmm8\n"
+    "vshufi64x2 $0, %zmm17, %zmm17, %zmm12\n   vpxorq %zmm12, %zmm8, %zmm8{%k3}\n   vpsrldq $8, %zmm8, %zmm9\n"
+    "vpxorq %zmm8, %zmm9, %zmm9\n   vpclmulqdq $0x00, 320(%r9), %zmm8, %zmm13\n   vpclmulqdq $0x11, 320(%r9), %zmm8, %zmm14\n"
+    "vpclmulqdq $0x00, 1088(%r9), %zmm9, %zmm15\n   vmovdqu64 816(%rsi), %zmm12\n"
+    WATERLINK_ZMM_HASH("12", "384", "1152")
+    "vmovdqu64 880(%rsi), %zmm12\n"
+    WATERLINK_ZMM_HASH("12", "448", "1216")
+    "vmovdqu64 944(%rsi), %zmm12\n"
+    WATERLINK_ZMM_HASH("12", "512", "1280")
+    "vmovdqu64 1008(%rsi), %zmm12\n"
+    WATERLINK_ZMM_HASH("12", "576", "1344")
+    "vmovdqu64 1072(%rsi), %zmm12\n"
+    WATERLINK_ZMM_HASH("12", "640", "1408")
+    "vmovdqu64 1136(%rsi), %zmm12\n   vinserti32x4 $3, .Lwaterlink_lengths(%rip), %zmm12, %zmm12\n"
+    WATERLINK_ZMM_HASH("12", "704", "1472") WATERLINK_ZMM_XOR_STORE("0", "768")
+    WATERLINK_ZMM_XOR_STORE("1", "832") WATERLINK_ZMM_XOR_STORE("2", "896")
+    WATERLINK_ZMM_XOR_STORE("3", "960") WATERLINK_ZMM_AES3("0", "1", "2")
+    WATERLINK_ZMM_XOR_STORE("0", "1024") WATERLINK_ZMM_XOR_STORE("1", "1088")
+    "vmovdqu64 1152(%rsi), %zmm8{%k2}{z}\n   vpxorq %zmm8, %zmm2, %zmm2\n   vmovdqu64 %zmm2, 1152(%rsi){%k2}\n"
+    WATERLINK_ZMM_REDUCE
+    "vmovdqa64 %xmm14, %xmm17\n   vpshufb %xmm31, %xmm17, %xmm17\n   vpxorq %xmm19, %xmm17, %xmm17\n"
+    "vmovdqu64 %xmm17, (%rcx)\n"
+    WATERLINK_ZMM_WIPE
     //  A box of one to four blocks, in registers from end to end: the five
     //  counter blocks from J0 go through AES-NI side by side -- one more
     //  than a short box needs costs no time beside the rounds' latency --,
