@@ -10832,6 +10832,7 @@ static b32 exec_simple(b32 index)
         b32 count = 0;
         b32 first = 0;
         b32 declaration_from = -1;
+        bool compound_operand = false;
         b32 leading = 0;
         b32 address_to word_order = null;
         b32 status;
@@ -10984,6 +10985,8 @@ static b32 exec_simple(b32 index)
                 */
                 if (assignment)
                 {
+                        compound_operand |=
+                            (word_flags & PARSE_WORD_COMPOUND) != 0;
                         if (declaration_from < 0)
                                 declaration_from = exec_declaration_from(node);
 
@@ -11277,6 +11280,10 @@ static b32 exec_simple(b32 index)
                         exec_redirect_restore(mark);
                 shell_status = shell_substitution_status;
                 shell_store_rewind(address_of exec_store, arena_mark);
+                //      A command of assignments alone leaves $_ empty in
+                //      bash.
+                if (shell_bash_compat)
+                        shell_last_argument[0] = end;
                 return shell_status;
         }
 
@@ -11291,7 +11298,23 @@ static b32 exec_simple(b32 index)
         // $_ is the last argument of the command before this one, which is
         // what taking it here and not after the run means: this command's
         // words are already expanded and have already read the old value.
-        shell_last_argument_set(shell_argv[shell_argc - 1]);
+        //      A compound operand of declare and its family is its name
+        //      there: declare a=(1 2) leaves a.
+        if (compound_operand && shell_bash_compat &&
+            exec_declaration_compound(shell_argv[shell_argc - 1]))
+        {
+                string_address word = shell_argv[shell_argc - 1];
+                positive length = string_span(word, string_set_name);
+                p8 name[256];
+
+                if (length < sizeof(name))
+                {
+                        memory_copy_end(name, word, length);
+                        shell_last_argument_set(name);
+                }
+        }
+        else
+                shell_last_argument_set(shell_argv[shell_argc - 1]);
 
         // exec with nothing to run is there for its redirections, and those
         // belong to the shell from here on. Decided before anything runs: a

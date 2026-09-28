@@ -14846,6 +14846,17 @@ def shell_lang_list_null_tests(rng):
         'echo "end=$?"'))
 
 
+#       $_ after a command of assignments alone is empty in bash, and after a
+#       declaration whose last operand is a compound assignment it is that
+#       operand's name; this kept the command before and the whole word.
+def shell_lang_underscore_forms(rng):
+    line = rng.choice(("s=bar", "x=1 y=2", "y=$(echo z)", "a=(1 2)", "declare s=bar", "declare a=(1 2)",
+                       "declare -g d=(1 2)", "declare -a b=(1 2) c", "export e=(1)", "local 2>/dev/null",
+                       "x=1 : baz", "readonly r=(1)"))
+    return ("underscore-forms", shell_BASH, shell_program(": before", line, 'echo "[$_]"', 'echo "end=$?"'),
+            ("command", "stdin", "file"))
+
+
 #       bash's $'\x{H...}': every hex digit up to the brace and the low byte
 #       of their value, the brace taken when it is there; no digits is a zero,
 #       which ends the string. This kept \x{ as it was written.
@@ -17721,6 +17732,7 @@ SHELL_FAMILIES = (
     shell_lang_fd_prefix_range,
     shell_lang_case_substitution_lines,
     shell_lang_dollar_hex_brace,
+    shell_lang_underscore_forms,
     shell_lang_list_null_tests,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
