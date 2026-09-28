@@ -283,6 +283,10 @@ cover('benchmark_context', 'test/checks.c#BENCH_writer_text', 'buffered_write_co
 cover('direct_benchmark', 'test/checks.c#BENCH_utf8_valid', 'memory_utf8_valid_span',
       'paired against grep_text_valid\'s former C over ASCII and mixed lines '
       'of grep\'s sizes, with and without the AVX2 body')
+cover('benchmark_context', 'test/checks.c#BENCH_utf8_valid', 'memory_utf8_span_wide',
+      'the x86_64 AVX2 block body of memory_utf8_span, timed in that routine\'s '
+      'unbounded-count row against the walk it had alone',
+      {'memory_utf8_span_wide': 'memory_utf8_span'})
 cover('benchmark_context', 'test/checks.c#BENCH_span_byte', 'memory_span_byte_wide',
       'the out-of-line SSE and AVX bulk of the directly timed span, which the '
       'same row reaches for every run past sixteen bytes',

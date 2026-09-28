@@ -31996,6 +31996,50 @@ static fn utf8_valid_checks(p8 address_to guarded, positive quantum)
                 }
 }
 
+//      memory_utf8_span over the same runs, long enough and with counts large
+//      enough for its block body, the count running out before, inside and
+//      after the blocks, and the errors it counts one byte a time.
+static fn utf8_span_long_checks(p8 address_to guarded, positive quantum)
+{
+        static p8 bytes[64 + 400 + 64];
+        positive random = 0x6c078965;
+        for (positive background = 0; background < 6; background++)
+                for (positive align = 0; align < 64; align += 3)
+                        for (positive size = 0; size <= 300; size += size < 140 ? 1 : 7)
+                        {
+                                p8 address_to at = bytes + align;
+                                positive counts[] = {1, 31, 32, 33, 63, 64, 65, 96, 97,
+                                                     size / 3, size / 2, size - 1, size,
+                                                     size + 1, positive_max};
+                                utf8_valid_fill(at, size + 8, background, align + size, address_of random);
+                                if ((size + align) % 3 == 0 && size)
+                                {
+                                        const p8 address_to bad = utf8_valid_bad[
+                                            (size + background) % array_count(utf8_valid_bad)];
+                                        positive place = (size * 7 + align) % size;
+                                        for (positive i = 0; i < bad[0] && place + i < size + 8; i++)
+                                                at[place + i] = bad[1 + i];
+                                }
+                                for (positive c = 0; c < array_count(counts); c++)
+                                        utf8_span_check(at, size, counts[c]);
+                        }
+        if (!guarded)
+                return;
+        for (positive background = 0; background < 6; background++)
+                for (positive size = 64; size <= 200; size++)
+                {
+                        p8 address_to tail = guarded + quantum * 2 - size;
+                        p8 address_to head = guarded + quantum;
+                        utf8_valid_fill(tail, size, background, size, address_of random);
+                        utf8_span_check(tail, size, positive_max);
+                        utf8_span_check(tail, size, size / 2);
+                        utf8_valid_fill(head, size, background, size, address_of random);
+                        utf8_span_check(head, size, positive_max);
+                        head[0] = 0x80;
+                        utf8_span_check(head, size, positive_max);
+                }
+}
+
 //      Once per body: on x86_64 the AVX2 validator and the walk under it.
 static fn utf8_valid_tiers(p8 address_to guarded, positive quantum)
 {
@@ -32005,10 +32049,12 @@ static fn utf8_valid_tiers(p8 address_to guarded, positive quantum)
         {
                 cpu_has_avx2 = tier ? 0 : avx2;
                 utf8_valid_checks(guarded, quantum);
+                utf8_span_long_checks(guarded, quantum);
         }
         cpu_has_avx2 = avx2;
 #else
         utf8_valid_checks(guarded, quantum);
+        utf8_span_long_checks(guarded, quantum);
 #endif
 }
 
@@ -89964,9 +90010,58 @@ static fn row(positive n, bool mixed)
                       raw[TRIES / 2] % 100);
 }
 
+#if X64
+/*
+        memory_utf8_span with the whole line as its count -- cut -c's test of
+        a line, ${#x} -- its block body against the walk it had alone, which
+        is the same routine with the feature byte cleared.
+*/
+static p64 span_run(bool wide, positive n, positive rounds)
+{
+        p8 avx2 = cpu_has_avx2;
+        if (!wide)
+                cpu_has_avx2 = 0;
+        p64 start = get_cpu_time();
+        while (rounds--)
+                sink += memory_utf8_span(block, n, positive_max).y;
+        p64 elapsed = get_cpu_time() - start;
+        cpu_has_avx2 = avx2;
+        return elapsed;
+}
+
+static fn span_row(positive n, bool mixed)
+{
+        positive raw[TRIES], rounds = rounds_for(n);
+        p64 best_wide = ~(p64)0, best_walk = ~(p64)0;
+        fill(n, mixed);
+        for (positive trial = 0; trial < TRIES; trial++)
+        {
+                p64 wide = span_run(true, n, rounds), walk = span_run(false, n, rounds);
+                if (wide < best_wide) best_wide = wide;
+                if (walk < best_walk) best_walk = walk;
+                raw[trial] = wide * 10000 / max(walk, (p64)1);
+        }
+        order(raw, TRIES);
+        string_format(log, "  %s %p bytes  walk %p  blocks %p ticks/1000 calls  blocks/walk %p.%p%%\n",
+                      mixed ? "mixed" : "ascii", n, best_walk * 1000 / rounds,
+                      best_wide * 1000 / rounds, raw[TRIES / 2] / 100,
+                      raw[TRIES / 2] % 100);
+}
+#endif
+
 b32 main(void)
 {
         static const positive sizes[] = {8, 16, 24, 31, 40, 64, 118, 256, 1024, 65536};
+#if X64
+        if (cpu_has_avx2)
+        {
+                string_format(log, "memory_utf8_span, count unbounded, paired median of %p\n",
+                              (positive)TRIES);
+                for (positive i = 0; i < array_count(sizes); i++)
+                        for (positive mixed = 0; mixed < 2; mixed++)
+                                span_row(sizes[i], mixed);
+        }
+#endif
 #if X64
         p8 avx2 = cpu_has_avx2;
         for (positive tier = 0; tier < 2; tier++)

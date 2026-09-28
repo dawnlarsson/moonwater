@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        356 routines (342 public, 14 local), 354 of them on all three and 2 local to one.
+        357 routines (342 public, 15 local), 354 of them on all three and 3 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -250,6 +250,7 @@
           memory_to_upper_ascii          public  yes     yes     yes
           memory_translate               public  yes     yes     yes
           memory_utf8_span               public  yes     yes     yes
+          memory_utf8_span_wide          local   yes     --      --
           memory_utf8_valid_span         public  yes     yes     yes
           memory_zero                    public  yes     yes     yes
           montgomery_multiply            public  yes     yes     yes
@@ -429,6 +430,7 @@
         Private to one machine, by choice:
           memory_offsets_range_x64 -- local to x86_64
           memory_span_byte_wide -- local to x86_64
+          memory_utf8_span_wide -- local to x86_64
 */
 
 /*
@@ -11746,6 +11748,13 @@ __asm__(
     ASM_FUNC(memory_utf8_span)
     "xor %r8d, %r8d\n   xor %r9d, %r9d\n"
     "movabs $0x8080808080808080, %r10\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__)
+    //  Long spans with a long count: blocks of 32 through the validator
+    //  (memory_utf8_valid_span's section), which comes back here to finish.
+    "cmp $32, %rsi\n   jb 1f\n   cmp $32, %rdx\n   jb 1f\n"
+    "cmpb $0, cpu_has_avx2(%rip)\n   jne memory_utf8_span_wide\n"
+#endif
+    ".Lmemory_utf8_span_x64_walk:\n"
     "1:  test %rsi, %rsi\n   jz 9f\n   test %rdx, %rdx\n   jz 9f\n"
     "cmp $8, %rsi\n   jb 2f\n   cmp $8, %rdx\n   jb 2f\n"
     "mov (%rdi), %rax\n   test %r10, %rax\n   jnz 2f\n"
@@ -59566,6 +59575,81 @@ __asm__(
     ".popsection\n"
 #endif
     ASM_END(memory_utf8_valid_span)
+
+#if !defined(KERNEL_MODE) && defined(__ELF__)
+    /*
+        memory_utf8_span's long spans: rdi block, rsi size, rdx the count
+        left, as memory_utf8_span was entered, with size and count both 32 or
+        more and AVX2 present. A block of 32 holds at most 32 characters, so
+        while 32 or more are still wanted a whole block is taken with no
+        question of where the count runs out inside it: checked as above,
+        its characters counted, the count spent. What is left -- a count
+        under 32, a tail under a block, or a block with an error -- goes back
+        to memory_utf8_span's walk from the start of the character the vector
+        stopped inside, which counts an invalid byte as one the way it always
+        has. The walk wants rdi and rsi at the rest, rdx the count left, r8
+        and r9 the bytes and characters so far and r10 its ASCII mask.
+    */
+    ASM_LOCAL_FUNC(memory_utf8_span_wide)
+    "xor %eax, %eax\n   xor %r9d, %r9d\n"
+    ".Lutf8_span_x64_ascii:\n"
+    "vmovdqu (%rdi,%rax), %ymm0\n   vpmovmskb %ymm0, %ecx\n"
+    "test %ecx, %ecx\n   jnz .Lutf8_span_x64_enter\n"
+    "add $32, %rax\n   add $32, %r9\n   sub $32, %rdx\n"
+    "lea 32(%rax), %rcx\n   cmp %rsi, %rcx\n   ja .Lutf8_span_x64_out\n"
+    "cmp $32, %rdx\n   jae .Lutf8_span_x64_ascii\n"
+    "jmp .Lutf8_span_x64_out\n"
+    ".Lutf8_span_x64_enter:\n"
+    "vbroadcasti128 .Lutf8_valid_x64_tables(%rip), %ymm8\n"
+    "vbroadcasti128 .Lutf8_valid_x64_tables+16(%rip), %ymm9\n"
+    "vbroadcasti128 .Lutf8_valid_x64_tables+32(%rip), %ymm10\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+48(%rip), %ymm11\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+49(%rip), %ymm12\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+50(%rip), %ymm13\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+51(%rip), %ymm14\n"
+    "vpbroadcastb .Lutf8_valid_x64_tables+52(%rip), %ymm15\n"
+    "test %rax, %rax\n   jnz .Lutf8_span_x64_before\n"
+    "vperm2i128 $0x08, %ymm0, %ymm0, %ymm4\n"
+    "vpalignr $15, %ymm4, %ymm0, %ymm1\n   vpalignr $14, %ymm4, %ymm0, %ymm2\n"
+    "vpalignr $13, %ymm4, %ymm0, %ymm3\n"
+    "jmp .Lutf8_span_x64_check\n"
+    ".balign 16\n"
+    ".Lutf8_span_x64_block:\n"
+    "vmovdqu (%rdi,%rax), %ymm0\n   vpmovmskb %ymm0, %ecx\n"
+    "or %ecx, %r11d\n   jnz .Lutf8_span_x64_before\n"
+    "add $32, %rax\n   add $32, %r9\n   sub $32, %rdx\n"
+    "jmp .Lutf8_span_x64_next\n"
+    ".Lutf8_span_x64_before:\n"
+    "vmovdqu -1(%rdi,%rax), %ymm1\n   vmovdqu -2(%rdi,%rax), %ymm2\n"
+    "vmovdqu -3(%rdi,%rax), %ymm3\n"
+    ".Lutf8_span_x64_check:\n"
+    UTF8_VALID_X64_CHECK(".Lutf8_span_x64_out")
+    "vpcmpgtb %ymm12, %ymm0, %ymm5\n   vpmovmskb %ymm5, %r11d\n"
+    "popcnt %r11d, %r11d\n   add %r11, %r9\n   sub %r11, %rdx\n"
+    "mov %ecx, %r11d\n   and $0xe0000000, %r11d\n   add $32, %rax\n"
+    ".Lutf8_span_x64_next:\n"
+    "lea 32(%rax), %rcx\n   cmp %rsi, %rcx\n   ja .Lutf8_span_x64_out\n"
+    "cmp $32, %rdx\n   jae .Lutf8_span_x64_block\n"
+    //  Back to the start of a character the vector may have stopped inside,
+    //  its lead uncounted, then the walk.
+    ".Lutf8_span_x64_out:\n   vzeroupper\n"
+    "test %rax, %rax\n   jz .Lutf8_span_x64_walk\n"
+    "movzbl -1(%rdi,%rax), %ecx\n   cmp $0xc0, %ecx\n   jae .Lutf8_span_x64_back1\n"
+    "cmp $0x80, %ecx\n   jb .Lutf8_span_x64_walk\n"
+    "cmp $2, %rax\n   jb .Lutf8_span_x64_walk\n"
+    "movzbl -2(%rdi,%rax), %ecx\n   cmp $0xc0, %ecx\n   jae .Lutf8_span_x64_back2\n"
+    "cmp $0x80, %ecx\n   jb .Lutf8_span_x64_walk\n"
+    "cmp $3, %rax\n   jb .Lutf8_span_x64_walk\n"
+    "movzbl -3(%rdi,%rax), %ecx\n   cmp $0xc0, %ecx\n   jb .Lutf8_span_x64_walk\n"
+    "dec %rax\n"
+    ".Lutf8_span_x64_back2:\n   dec %rax\n"
+    ".Lutf8_span_x64_back1:\n   dec %rax\n   dec %r9\n   inc %rdx\n"
+    ".Lutf8_span_x64_walk:\n"
+    "add %rax, %rdi\n   sub %rax, %rsi\n   mov %rax, %r8\n"
+    "movabs $0x8080808080808080, %r10\n"
+    "jmp .Lmemory_utf8_span_x64_walk\n"
+    ASM_LOCAL_END(memory_utf8_span_wide)
+#endif
 );
 #undef UTF8_VALID_X64_CHECK
 #elif ARM64
