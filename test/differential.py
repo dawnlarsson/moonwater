@@ -36768,6 +36768,8 @@ def harness_tls_chains(argv):
         ("a stranger's root", 2, good_leaf, {"stranger": True}),
         ("an intermediate left out", 2, good_leaf, {"skip_second": True}),
         ("leaf is a CA", 2, good_leaf.replace("CA:FALSE", "CA:TRUE"), {}),
+        ("leaf signed with SHA-512", 2, good_leaf, {"leaf_digest": "sha512"}),
+        ("first intermediate signed with SHA-512", 2, good_leaf, {"first_digest": "sha512"}),
     )
     keys = (("P-256", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"]),
             ("P-384", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]),
@@ -36797,6 +36799,7 @@ def harness_tls_chains(argv):
         "first intermediate has no key usage",
         "first intermediate unknown noncritical extension",
         "first intermediate sixty-four extensions",
+        "leaf signed with SHA-512", "first intermediate signed with SHA-512",
     }
 
     checks = Checks()
@@ -36825,7 +36828,7 @@ def harness_tls_chains(argv):
             moment = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days)
             return moment.strftime("%Y%m%d%H%M%SZ")
 
-        def issue(name, key, subject, issuer, extensions, dates=(-1, 90)):
+        def issue(name, key, subject, issuer, extensions, dates=(-1, 90), digest="sha384"):
             (work / (name + ".ext")).write_text("[extensions]\n" + extensions)
             openssl("req", "-new", *key, "-nodes", "-keyout", name + ".key", "-out",
                     name + ".csr", "-subj", subject)
@@ -36833,7 +36836,7 @@ def harness_tls_chains(argv):
                 openssl("x509", "-req", "-in", name + ".csr", "-CA", issuer + ".pem",
                         "-CAkey", issuer + ".key", "-set_serial",
                         str(abs(hash(name)) % (1 << 62)), "-not_before", when(dates[0]),
-                        "-not_after", when(dates[1]), "-out", name + ".pem", "-sha384",
+                        "-not_after", when(dates[1]), "-out", name + ".pem", "-" + digest,
                         "-extfile", name + ".ext", "-extensions", "extensions")
             else:
                 (work / "index").write_text("")
@@ -36841,7 +36844,7 @@ def harness_tls_chains(argv):
                 openssl("ca", "-batch", "-config", "ca.conf", "-in", name + ".csr",
                         "-cert", issuer + ".pem", "-keyfile", issuer + ".key",
                         "-startdate", when(dates[0]), "-enddate", when(dates[1]),
-                        "-out", name + ".pem", "-notext", "-md", "sha384",
+                        "-out", name + ".pem", "-notext", "-md", digest,
                         "-extfile", name + ".ext", "-extensions", "extensions")
 
         def asn1_length(size):
@@ -36966,7 +36969,8 @@ def harness_tls_chains(argv):
                     first_extensions += change.get("first_extra", "")
                     issue("first", p384, "/CN=tls chains first", top,
                           first_extensions,
-                          change.get("first_dates", (-1, 90)))
+                          change.get("first_dates", (-1, 90)),
+                          change.get("first_digest", "sha384"))
                     if change.get("der_rewrite_oids_first") or change.get("der_dup_unknown_first"):
                         mutate_cert_der("first", top, change,
                                         "der_rewrite_oids_first", "der_dup_unknown_first")
@@ -36988,7 +36992,8 @@ def harness_tls_chains(argv):
                     chain.insert(0, "second")
                     issuer = "second"
                 issue("leaf", key, "/CN=127.0.0.1", issuer, leaf_ext,
-                      change.get("leaf_dates", (-1, 90)))
+                      change.get("leaf_dates", (-1, 90)),
+                      change.get("leaf_digest", "sha384"))
                 if change.get("der_rewrite_oids") or change.get("der_dup_unknown"):
                     mutate_cert_der("leaf", issuer, change,
                                     "der_rewrite_oids", "der_dup_unknown")
@@ -38653,6 +38658,7 @@ typedef struct {
         p64 state[8];
         p8 buf[128];
         positive used;
+        positive words;
 } fuzz_sha512;
 
 static p64 fuzz_rotr64(p64 x, positive n)
@@ -38673,6 +38679,19 @@ static void fuzz_sha384_init(fuzz_sha512 *h)
         h->state[5] = 0x8eb44a8768581511ull;
         h->state[6] = 0xdb0c2e0d64f98fa7ull;
         h->state[7] = 0x47b5481dbefa4fa4ull;
+        h->words = 6;
+}
+
+static void fuzz_sha512_init(fuzz_sha512 *h)
+{
+        static const p64 iv[8] = {
+            0x6a09e667f3bcc908ull, 0xbb67ae8584caa73bull, 0x3c6ef372fe94f82bull,
+            0xa54ff53a5f1d36f1ull, 0x510e527fade682d1ull, 0x9b05688c2b3e6c1full,
+            0x1f83d9abfb41bd6bull, 0x5be0cd19137e2179ull};
+
+        fuzz_sha384_init(h);
+        memory_copy(h->state, iv, sizeof iv);
+        h->words = 8;
 }
 
 static void fuzz_sha512_block(fuzz_sha512 *h, const p8 *block)
@@ -38804,7 +38823,7 @@ static void fuzz_sha384_final(fuzz_sha512 *h, p8 *out)
         for (i = 0; i < 8; i++)
                 pad[8 + i] = (p8)(lo >> (56 - 8 * i));
         fuzz_sha512_update(h, pad, 16);
-        for (i = 0; i < 6; i++)
+        for (i = 0; i < h->words; i++)
         {
                 out[i * 8] = (p8)(h->state[i] >> 56);
                 out[i * 8 + 1] = (p8)(h->state[i] >> 48);
@@ -38835,6 +38854,40 @@ static void crypto_sha256_of(p8 *d, positive n, p8 *out)
         fuzz_sha256_update(&h, d, n);
         fuzz_sha256_final(&h, out);
 }
+/* lib.util.c's streaming digest, for the three tls_verify_one takes. */
+#define DIGEST_SHA256 3
+#define DIGEST_SHA384 4
+#define DIGEST_SHA512 5
+typedef struct {
+        positive algorithm;
+        fuzz_sha256 small;
+        fuzz_sha512 large;
+} digest_state;
+static void digest_open(digest_state *d, positive algorithm, positive length)
+{
+        (void)length;
+        d->algorithm = algorithm;
+        if (algorithm == DIGEST_SHA256)
+                fuzz_sha256_init(&d->small);
+        else if (algorithm == DIGEST_SHA384)
+                fuzz_sha384_init(&d->large);
+        else
+                fuzz_sha512_init(&d->large);
+}
+static void digest_write(digest_state *d, const void *data, positive n)
+{
+        if (d->algorithm == DIGEST_SHA256)
+                fuzz_sha256_update(&d->small, data, n);
+        else
+                fuzz_sha512_update(&d->large, data, n);
+}
+static void digest_close(digest_state *d, p8 *out)
+{
+        if (d->algorithm == DIGEST_SHA256)
+                fuzz_sha256_final(&d->small, out);
+        else
+                fuzz_sha384_final(&d->large, out);
+}
 static void crypto_sha384(p8 *d, positive n, p8 *out)
 {
         crypto_sha512 h;
@@ -38847,33 +38900,33 @@ static void crypto_sha384(p8 *d, positive n, p8 *out)
 
 
 def tls_verify_ecdsa_chain():
-    """C arrays of a fresh ECDSA chain, leaf first: a P-256 leaf signed with
-    SHA-256 by a P-256 intermediate, that signed with SHA-384 by a
-    self-signed P-384 root."""
+    """C arrays of a fresh chain, leaf first, whose links are ECDSA P-256
+    under SHA-256, P-384 under SHA-384, P-384 under SHA-512 and RSA-2048
+    under SHA-512: the kinds WR2 under GTS Root R1 (RSA SHA-256) leaves."""
     import datetime
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric import ec, rsa
     from cryptography.x509.oid import NameOID
-    keys = (ec.generate_private_key(ec.SECP256R1()),
-            ec.generate_private_key(ec.SECP256R1()),
-            ec.generate_private_key(ec.SECP384R1()))
-    names = [x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, n)])
-             for n in ("leaf", "intermediate", "root")]
+    keys = (ec.generate_private_key(ec.SECP256R1()), ec.generate_private_key(ec.SECP256R1()),
+            ec.generate_private_key(ec.SECP384R1()), ec.generate_private_key(ec.SECP384R1()),
+            rsa.generate_private_key(public_exponent=65537, key_size=2048))
+    digests = (hashes.SHA256(), hashes.SHA384(), hashes.SHA512(), hashes.SHA512(),
+               hashes.SHA512())
     ders = []
-    for at in range(3):
-        signer = min(at + 1, 2)
-        ders.append(x509.CertificateBuilder()
-                    .subject_name(names[at]).issuer_name(names[signer])
-                    .public_key(keys[at].public_key()).serial_number(at + 1)
-                    .not_valid_before(datetime.datetime(2020, 1, 1))
-                    .not_valid_after(datetime.datetime(2040, 1, 1))
-                    .sign(keys[signer], hashes.SHA256() if at == 0 else hashes.SHA384())
-                    .public_bytes(serialization.Encoding.DER))
-    return ("enum { FUZZ_ECDSA_CHAIN = 3 };\n"
+    for at, key in enumerate(keys):
+        signer = min(at + 1, len(keys) - 1)
+        signed = x509.CertificateBuilder().subject_name(
+            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "link %d" % at)])).issuer_name(
+            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "link %d" % signer)])).public_key(
+            key.public_key()).serial_number(at + 1).not_valid_before(
+            datetime.datetime(2020, 1, 1)).not_valid_after(datetime.datetime(2040, 1, 1))
+        ders.append(signed.sign(keys[signer], digests[at]).public_bytes(
+            serialization.Encoding.DER))
+    return ("enum { FUZZ_ECDSA_CHAIN = %d };\n"
             "static const positive fuzz_ecdsa_length[] = { %s };\n"
             "static const p8 fuzz_ecdsa_der[][1024] = { %s };\n" %
-            (", ".join(str(len(d)) for d in ders),
+            (len(ders), ", ".join(str(len(d)) for d in ders),
              ", ".join("{ %s }" % ", ".join("0x%02x" % b for b in d) for d in ders)))
 
 
@@ -38947,8 +39000,8 @@ static bool fuzz_prove_wr2_gts(void)
         wr2.sig[wr2.sig_length - 1] ^= 1;
         if (tls_verify_one(address_of wr2, address_of gts))
                 return false;
-        /* Each ECDSA link accepts, and refuses one flipped bit of r: an
-           ECDSA verify that is never seen to pass proves nothing when it
+        /* Each generated link accepts, and refuses one flipped signature
+           bit: a verify that is never seen to pass proves nothing when it
            refuses. */
         for (positive link = 0; link + 1 < FUZZ_ECDSA_CHAIN; link++)
         {
@@ -38966,7 +39019,7 @@ static bool fuzz_prove_wr2_gts(void)
                                    address_of issuer, null) ||
                     !tls_verify_one(address_of child, address_of issuer))
                         return false;
-                child.sig[6] ^= 1;
+                child.sig[child.sig_length - 8] ^= 1;
                 if (tls_verify_one(address_of child, address_of issuer))
                         return false;
         }
