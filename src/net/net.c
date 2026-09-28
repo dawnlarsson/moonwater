@@ -6661,9 +6661,11 @@ static COLD bool tls_server_flight_step(p8 address_to state, p8 type)
    in a bitmap of the sixteen-bit space instead and the walk is one pass.  The
    nested scan's own framing tests were unreachable -- it only ever visited
    offsets this walk had already validated and placed -- so the predicate is
-   the same one. */
+   the same one. As answers, in EncryptedExtensions, only what the
+   ClientHello asked for may come back (RFC 8446 4.2): of what this client
+   sends, server_name and supported_groups. A ticket's may be anything. */
 static COLD bool tls_encrypted_extensions_valid(p8 address_to body,
-                                           positive length)
+                                           positive length, bool answers)
 {
         p8 seen[8192];
         positive at = 2;
@@ -6687,7 +6689,8 @@ static COLD bool tls_encrypted_extensions_valid(p8 address_to body,
                 if ((positive)size > length - at - 4)
                         return false;
 
-                if (seen[kind >> 3] & (p8)(1u << (kind & 7)))
+                if ((answers && kind != 0x0000 && kind != 0x000a) ||
+                    seen[kind >> 3] & (p8)(1u << (kind & 7)))
                         return false;
                 seen[kind >> 3] |= (p8)(1u << (kind & 7));
 
@@ -6720,7 +6723,7 @@ static COLD bool tls_new_session_ticket_valid(p8 address_to body,
                 return false;
         at += ticket_length;
 
-        return tls_encrypted_extensions_valid(body + at, length - at);
+        return tls_encrypted_extensions_valid(body + at, length - at, false);
 }
 
 /* This client does not resume sessions, but servers commonly send tickets.
@@ -6812,7 +6815,7 @@ static COLD bipolar tls_encrypted_flight_append(
                         if (hs_type == TLS_HS_ENCRYPTED_EXTS)
                         {
                                 if (!tls_encrypted_extensions_valid(
-                                        hs + msg_at + 4, hs_len))
+                                        hs + msg_at + 4, hs_len, true))
                                         return TLS_FAIL;
                                 tls_transcript_add(tls, hs + msg_at,
                                                    4 + hs_len);

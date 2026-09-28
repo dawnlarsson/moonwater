@@ -55488,18 +55488,54 @@ static fn tls_server_flight_validation(void)
                 static p8 overrun[] = {0, 4, 0, 10, 0, 1};
 
                 check("empty TLS encrypted extensions are framed",
-                      tls_encrypted_extensions_valid(empty, sizeof empty));
+                      tls_encrypted_extensions_valid(empty, sizeof empty, true));
                 check("one TLS encrypted extension is framed",
-                      tls_encrypted_extensions_valid(one, sizeof one));
+                      tls_encrypted_extensions_valid(one, sizeof one, true));
                 check("duplicate TLS encrypted extensions are refused",
                       !tls_encrypted_extensions_valid(duplicate,
-                                                      sizeof duplicate));
+                                                      sizeof duplicate, false));
                 check("TLS encrypted extension vector length is exact",
                       !tls_encrypted_extensions_valid(short_vector,
-                                                      sizeof short_vector));
+                                                      sizeof short_vector,
+                                                      false));
                 check("TLS encrypted extension payload cannot overrun",
                       !tls_encrypted_extensions_valid(overrun,
-                                                      sizeof overrun));
+                                                      sizeof overrun, false));
+        }
+
+        /*
+                RFC 8446 4.2: an extension in EncryptedExtensions that the
+                ClientHello never asked for is unsupported_extension. ALPN
+                (16) was never offered; server_name (0) and supported_groups
+                (10) were.
+        */
+        {
+                static tls_conn tls;
+                static p8 hs[TLS_HS_MAX];
+                static p8 unasked[] = {TLS_HS_ENCRYPTED_EXTS, 0, 0, 6,
+                                       0, 4, 0, 16, 0, 0};
+                static p8 asked[] = {TLS_HS_ENCRYPTED_EXTS, 0, 0, 14,
+                                     0, 12, 0, 0, 0, 0, 0, 10, 0, 4, 0, 2,
+                                     0, 29};
+                positive used = 0;
+                p8 flight = TLS_SERVER_FLIGHT_EE;
+
+                crypto_sha256_open(address_of tls.transcript);
+                check("EncryptedExtensions may answer server_name and supported_groups",
+                      tls_encrypted_flight_append(address_of tls, hs, sizeof hs,
+                                                  address_of used,
+                                                  address_of flight, asked,
+                                                  sizeof asked, null) ==
+                              TLS_OK &&
+                          flight == TLS_SERVER_FLIGHT_CERTIFICATE);
+                used = 0;
+                flight = TLS_SERVER_FLIGHT_EE;
+                check("EncryptedExtensions answering what was never offered is refused",
+                      tls_encrypted_flight_append(address_of tls, hs, sizeof hs,
+                                                  address_of used,
+                                                  address_of flight, unasked,
+                                                  sizeof unasked, null) ==
+                          TLS_FAIL);
         }
 }
 
