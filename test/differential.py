@@ -42766,6 +42766,18 @@ static bipolar network_stream_read_some_until(
                 abort();
         return fuzz_read(into, length);
 }
+/* wait.c's: what is queued, an interrupted receive asked again. */
+static bipolar network_stream_read_now(bipolar handle, p8 address_to into,
+                                       positive length)
+{
+        bipolar got;
+
+        do
+                got = socket_receive((b32)handle, into, length, MSG_DONTWAIT,
+                                     null, 0);
+        while (got == NETWORK_INTERRUPTED);
+        return got;
+}
 /* One wait in sixty-four finds the budget spent. */
 static bool network_deadline_left(const network_deadline address_to deadline,
                                   positive address_to seconds,
@@ -42945,6 +42957,7 @@ static fn fuzz_connection(const p8 *data, positive length)
         network_deadline deadline = {1, 1};
         p8 flags;
         bool closed = false;
+        bipolar status;
 
         if (length < 4)
                 return;
@@ -42959,10 +42972,14 @@ static fn fuzz_connection(const p8 *data, positive length)
         tls = (tls_conn address_to)malloc(sizeof *tls);
         if (!tls)
                 return;
-        if (tls_connect(tls, 3, flags & 1 ? "192.0.2.1" : "example.test",
-                        flags & 2))
+        status = tls_connect(tls, 3, flags & 1 ? "192.0.2.1" : "example.test",
+                             flags & 2);
+        if (status)
         {
-                if (tls->handle != -1)
+                /* Only a checked Certificate can be the reason. */
+                if (tls->handle != -1 ||
+                    (status != TLS_FAIL &&
+                     (status != TLS_UNTRUSTED || !(flags & 2))))
                         abort();
                 free(tls);
                 return;
