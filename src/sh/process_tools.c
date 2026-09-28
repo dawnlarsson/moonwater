@@ -1554,6 +1554,7 @@ static b32 process_timeout()
                 return string_report(log_error, 125, "timeout: cannot block relay signals\n");
 
         log_flush();
+        bipolar parent = (bipolar)system_call(syscall(getpid));
         bipolar child = system_fork();
 
         if (child < 0)
@@ -1591,6 +1592,16 @@ static b32 process_timeout()
 
                 if (!foreground)
                         system_call_2(syscall(setpgid), 0, 0);
+
+                /*
+                        A timeout killed outright (SIGKILL) can send nothing,
+                        so the kernel is asked to send the command the signal
+                        for it when timeout dies (PR_SET_PDEATHSIG), as GNU's
+                        does; one already gone by then is sent it at once.
+                */
+                system_call_2(syscall(prctl), 1, (positive)signal);
+                if ((bipolar)system_call(syscall(getppid)) != parent)
+                        system_call_2(syscall(kill), 0, (positive)signal);
 
                 b32 answer = process_tool_exec((string_address) "timeout",
                     program_argument_list() + taking.first);

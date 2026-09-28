@@ -5049,6 +5049,26 @@ lane_misc()
                         misc_failed=1
                 fi
                 wait "$prompt_writer" "$prompt_reader"
+
+                #       upstream timeout/timeout-group: a timeout killed
+                #       outright still has its signal sent to the command,
+                #       by the kernel (PR_SET_PDEATHSIG).
+                rm -f "$work/pdeath.got"
+                "$farm/timeout" -sUSR1 30 sh -c 'trap "echo got > \"\$0\"; exit" USR1
+                        i=0; while [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done' \
+                        "$work/pdeath.got" &
+                pdeath_timeout=$!
+                sleep 1
+                kill -KILL "$pdeath_timeout"
+                wait "$pdeath_timeout" 2>/dev/null
+                sleep 1
+                if [ "$(cat "$work/pdeath.got" 2>/dev/null)" = got ]; then
+                        tally timeout-death-signal 1 1
+                else
+                        tally timeout-death-signal 0 1
+                        note "a timeout killed by SIGKILL left its command without the USR1 it was to send"
+                        misc_failed=1
+                fi
         else
                 note "stdbuf: the glibc stream probe did not build"
                 sed 's/^/    /' "$work/stdio-buffer.err" | head -10
