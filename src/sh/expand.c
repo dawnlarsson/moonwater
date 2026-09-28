@@ -2389,9 +2389,27 @@ static bipolar arith_expression();
    passed whole it was four words stored to the stack and read back as two
    pairs, a load across two stores that cannot be forwarded, at every
    variable an expression reads. */
+//      The subscript of an element bash refused, kept for the store's
+//      complaint, and the length that marks the refusal.
+static p8 arith_refused_subscript[64];
+#define ARITH_KEY_REFUSED (positive_max - 1)
+//      Set while arithmetic resolves an element, which reports a refused
+//      subscript only if it reads or writes the element.
+static bool arith_subscript_quiet;
+
 static fn arith_keep_lvalue(const expand_reference address_to name,
                             bipolar value)
 {
+        if (name->key_length == ARITH_KEY_REFUSED &&
+            name->name_length < EXPAND_LOCAL_NAME)
+        {
+                memory_copy_end(arith_held_name, name->name, name->name_length);
+                arith_held = address_to name;
+                arith_held.name = arith_held_name;
+                arith_held_value = value;
+                arith_is_lvalue = true;
+                return;
+        }
         if (name->name_length >= EXPAND_LOCAL_NAME ||
             (name->key && name->key_length >= sizeof(arith_held_key)))
         {
@@ -2425,6 +2443,15 @@ static bipolar arith_store(const expand_reference address_to reference,
         if (!arith_active)
                 return 0;
 
+        if (reference->key_length == ARITH_KEY_REFUSED)
+        {
+                expand_where();
+                string_format(writer_stderr_once,
+                              "%s[%s]: bad array subscript\n",
+                              reference->name, reference->key);
+                return value;
+        }
+
         bipolar_into_string(written, value);
         if (!expand_assign_named(address_to reference, written))
         {
@@ -2451,6 +2478,7 @@ static bipolar arith_store(const expand_reference address_to reference,
         state explicitly. An inactive short-circuit arm only advances over
         the balanced bracket: Bash neither reads nor mutates its subscript.
 */
+
 static COLD bool arith_element_name(expand_reference address_to reference)
 {
         string_address open = arith_at;
@@ -2476,9 +2504,23 @@ static COLD bool arith_element_name(expand_reference address_to reference)
         held_at = arith_at;
         held_bad = arith_bad;
         held_active = arith_active;
+        arith_subscript_quiet = shell_bash_compat;
         reference->key = shell_expand_subscript(reference->name, reference->name_length,
             open + 1, (positive)(close - open - 1), &reference->key_length);
+        arith_subscript_quiet = false;
         nested_bad = arith_bad;
+        //      A subscript counting back past the start of its array: bash
+        //      has said so, reads the element as zero and writes nothing.
+        if (!reference->key && !nested_bad && !expand_failed &&
+            shell_bash_compat)
+        {
+                positive kept = min((positive)(close - open - 1),
+                                    (positive)sizeof(arith_refused_subscript) - 1);
+
+                memory_copy_end(arith_refused_subscript, open + 1, kept);
+                reference->key = arith_refused_subscript;
+                reference->key_length = ARITH_KEY_REFUSED;
+        }
         arith_at = held_at;
         arith_bad = held_bad || nested_bad;
         arith_active = held_active;
@@ -2882,6 +2924,19 @@ static bipolar arith_value_of(const expand_reference address_to reference)
 {
         p8 scratch[32];
         string_address expression;
+
+        if (reference->key_length == ARITH_KEY_REFUSED)
+        {
+                if (arith_active)
+                {
+                        expand_where();
+                        string_format(writer_stderr_once,
+                                      "%s: bad array subscript\n",
+                                      reference->name);
+                }
+                return 0;
+        }
+
         bipolar value = arith_number_of(address_to reference, scratch,
                                         address_of expression);
 
@@ -3573,7 +3628,8 @@ static bipolar arith_assign()
         target = arith_held;
         memory_copy_end(name_local, arith_held_name, target.name_length);
         target.name = name_local;
-        if (target.key)
+        //      A refused element keeps pointing at its subscript's text.
+        if (target.key && target.key_length != ARITH_KEY_REFUSED)
         {
                 memory_copy_end(key_local, arith_held_key, target.key_length);
                 target.key = key_local;
@@ -7196,6 +7252,9 @@ COLD string_address shell_subscript_index(string_address base,
                         //      A computed index that is still negative is an
                         //      empty expansion, not a fatal one: bash names
                         //      the array and the next command still runs.
+                        //      Arithmetic says so itself, when it reads.
+                        if (arith_subscript_quiet)
+                                return null;
                         expand_where();
                         string_format(writer_stderr_once,
                                       "%s: bad array subscript\n", named);

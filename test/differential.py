@@ -15035,6 +15035,22 @@ def shell_lang_array_indirect_operators(rng):
         'printf "<%s>" "${!ref[@]}" "${!a3[*]}"; echo'), ("command", "stdin", "file"))
 
 
+#       An element bash will not make: a[0]=(3 4) is "cannot assign list to
+#       array member" and the line is dropped with 1; unset 'a[-2]' past the
+#       start is "unset: [-2]: bad array subscript", 1, and the next name
+#       still goes; in arithmetic such an element reads as 0 and a write to
+#       it is refused by name, each said once. These took the list
+#       silently, answered 2 with "no room", and made arithmetic a syntax
+#       error.
+def shell_lang_array_element_refusals(rng):
+    line = rng.choice(("a[0]=(3 4); echo same", "a[1]+=(5); echo same", "unset -v 'a[-3]' x; echo st=$?",
+                       "unset -v 'a[-1]'; echo st=$?", 'echo "[$((a[-3]))]" $?', "echo $((1+a[-3]*2)) $?",
+                       "(( a[-5]=1 )); echo as $?", "echo $((a[-4]++)) $?", "echo $((++a[-4])) $?",
+                       "echo $((a[-6]+=3)) $?", "echo $((0 && a[-9])) $?", "echo $((c[-1])) $?"))
+    return ("array-element-refusals", shell_BASH, shell_program(
+        "a=(1 2); x=1", line, 'echo "next=$?"', "declare -p a x 2>&1"), ("command", "stdin", "file"))
+
+
 #       printf's quoting and time conversions as bash 5.3 has them: %q takes
 #       a width and cuts the quoted text to the precision, %Q cuts the
 #       argument and quotes the rest, a quoted character is its code point
@@ -17987,6 +18003,7 @@ SHELL_FAMILIES = (
     shell_lang_nameref_indirect,
     shell_lang_patsub_slash_tilde,
     shell_lang_array_indirect_operators,
+    shell_lang_array_element_refusals,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,

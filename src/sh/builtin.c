@@ -8633,6 +8633,7 @@ COLD fn shell_unset(writer write, string_address input)
 {
         shell_option_walk walk = {1};
         positive index;
+        bool unset_failed = false;
         bool functions = false;
         bool variables = false;
         bool reference = false;
@@ -8757,10 +8758,32 @@ COLD fn shell_unset(writer write, string_address input)
                                 return;
                         }
 
+                        //      bash names a subscript it cannot use by the
+                        //      builtin and the subscript, answers 1 and
+                        //      goes on to the next name.
+                        p8 named[80];
+                        positive named_length = subscript_length + 9;
+
+                        if (shell_bash_compat && named_length < sizeof(named))
+                        {
+                                memory_copy(named, "unset: [", 8);
+                                memory_copy(named + 8, subscript,
+                                            subscript_length);
+                                named[named_length - 1] = ']';
+                                named[named_length] = end;
+                                expand_subscript_named = named;
+                        }
                         key = shell_expand_subscript(word, base,
                                                      (string_address)subscript,
                                                      subscript_length,
                                                      address_of key_length);
+                        expand_subscript_named = null;
+                        if (!key && !expand_failed && shell_bash_compat)
+                        {
+                                unset_failed = true;
+                                index++;
+                                continue;
+                        }
 
                         b32 detached = 0;
                         env_reference resolved = env_reference_span(word, base);
@@ -8880,7 +8903,7 @@ COLD fn shell_unset(writer write, string_address input)
                 index++;
         }
 
-        shell_answer(0);
+        shell_answer(unset_failed ? 1 : 0);
 }
 
 /*
@@ -10368,6 +10391,7 @@ static fn shell_declare(writer write, string_address input)
                                     !shell_declare_print_one(write, name, length,
                                                              state.set))
                                 {
+                                        shell_diagnostic_where();
                                         string_format(log_error,
                                                       "%s: %s: not found\n",
                                                       shell_argv[0], name);

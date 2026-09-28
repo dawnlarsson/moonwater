@@ -9739,6 +9739,20 @@ static bool exec_assign_value(string_address word, positive name_length,
         if (compound)
         {
                 positive length = string_length(mark + 1);
+
+                //      A list goes to a whole array and not to one element
+                //      of it: bash refuses a[0]=(x y) and drops the line.
+                if (shell_bash_compat && name_length &&
+                    word[name_length - 1] == ']')
+                {
+                        shell_diagnostic_where();
+                        string_format(log_error,
+                                      "%s: cannot assign list to array member\n",
+                                      word);
+                        *name_end = append ? '+' : '=';
+                        exec_assignment_discard();
+                        return false;
+                }
                 if (env_assignment_readonly_hashed_span(word, name_length, name_hash))
                 {
                         shell_readonly_refused(null, null, word,
