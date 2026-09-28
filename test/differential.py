@@ -18386,11 +18386,64 @@ def _text_follow_valid(argv):
     return len(argv) == 2 and argv[0] in _TEXT_FOLLOW_SCRIPTS
 
 
+#       --help and --version where GNU's getopt finds them: anywhere before
+#       -- for a permuting tool, up to the first operand for the ones GNU
+#       parses with a leading + (and for every tool under POSIXLY_CORRECT),
+#       and only alone for expr; a letter's value hides the word after it.
+#       The texts differ from GNU's by design, so a case compares whether
+#       anything was printed, the status, and the status with standard
+#       output on /dev/full, where each tool fails with its own number.
+#       The words are the tool, then POSIX or - for the environment, then
+#       the tool's words.
+_TEXT_META_CASES = tuple(
+    (tool, "-") + words
+    for tool in ("yes", "sleep", "tsort", "cksum", "dd", "hostid", "link", "logname",
+                 "unlink", "users", "whoami", "cat", "sort", "ls", "tty", "wc", "printenv")
+    for words in (("BEFORE", "--version"), ("BEFORE", "--help", "AFTER"),
+                  ("--", "--help"), ("--help",), ("--version",))) + (
+    ("yes", "POSIX", "BEFORE", "--help"), ("sort", "POSIX", "BEFORE", "--version"),
+    ("cat", "POSIX", "-n", "--help"),
+    ("env", "-", "yes", "--version"), ("env", "-", "--help"), ("env", "-", "-u", "X", "--help"),
+    ("env", "-", "-i", "--version"), ("timeout", "-", "-s", "INT", "--help"),
+    ("timeout", "-", "5", "yes", "--help"), ("nice", "-", "-n", "1", "--version"),
+    ("nice", "-", "yes", "--version"), ("stdbuf", "-", "-o", "L", "--help"),
+    ("stdbuf", "-", "--help"), ("seq", "-", "-1", "--help"), ("seq", "-", "-s", ",", "--help"),
+    ("seq", "-", "1", "--version"), ("basename", "-", "a", "--help"),
+    ("basename", "-", "-s", "x", "--help"), ("tr", "-", "a", "--help"),
+    ("tr", "-", "-d", "--version"), ("expr", "-", "--help"), ("expr", "-", "1", "--help"),
+    ("expr", "-", "--version", "1"), ("nohup", "-", "--version"), ("nohup", "-", "--help"),
+    ("cut", "-", "-d", "--help", "-f1"), ("cut", "-", "-f1", "--help"),
+    ("head", "-", "-n", "--help"), ("head", "-", "-n1", "--version"),
+    ("sort", "-", "-k", "1", "--help"), ("sort", "-", "-o", "--help"),
+    ("date", "-", "-d", "--help"), ("date", "-", "+%s", "--version"),
+    ("ls", "-", "-w", "--help"), ("ls", "-", "-w80", "--help"),
+    ("printenv", "-", "HOME", "--help"), ("chroot", "-", "--help"),
+)
+
+
+def _text_meta_valid(argv):
+    return len(argv) >= 3 and argv[1] in ("POSIX", "-")
+
+
+def _text_meta_script(argv, stdin_name):
+    words = ul_words(argv[2:])
+    posix = "export POSIXLY_CORRECT=1\n" if argv[1] == "POSIX" else ""
+    body = (posix +
+            "{ run " + words + " 2>/dev/null < /dev/null; echo $? > st; } | env head -c 100000 > out\n"
+            "test -s out && echo printed\n"
+            "echo \"status $(env cat st)\"\nenv rm -f out st\n"
+            "run " + words + " > /dev/full 2>/dev/null < /dev/null\n"
+            "echo \"full $?\"\nstatus=0\nexit $status\n")
+    return ul_live(argv[0], body)
+
+
 # ----------------------------------------------------------------------------
 #       The programs.
 # ----------------------------------------------------------------------------
 
 TEXT_UTILITIES = (
+    Utility("meta_words", operands=_TEXT_META_CASES, stdin=("empty",), fixture="text",
+            stderr="ignore", modes=BASH, script=_text_meta_script, valid=_text_meta_valid),
     Utility("write_errors", operands=_TEXT_WRITE_CASES, stdin=("empty",), fixture="text",
             stderr="exact", modes=BASH, script=_text_write_script, valid=_text_write_valid),
     Utility("tail_follow", operands=_TEXT_FOLLOW_CASES, stdin=("empty",), fixture="text",

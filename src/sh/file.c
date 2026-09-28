@@ -39270,6 +39270,8 @@ static b32 file_env()
 }
 
 // printenv -------------------------------------------------------
+static bool file_output_told(string_address program);
+
 static const argument_option printenv_options[] = {
     {"null", '0'},
     {null},
@@ -39297,8 +39299,9 @@ static b32 file_printenv()
                 for (positive i = 0; environment && environment[i]; i++)
                         file_written(environment[i], zero);
 
-                log_flush();
-                return 0;
+                // GNU's printenv fails with 2 when it cannot write, as it
+                // does for a usage error.
+                return file_output_told((string_address) "printenv") ? 0 : 2;
         }
 
         b32 status = 0;
@@ -39316,8 +39319,7 @@ static b32 file_printenv()
                         status = 1;
         }
 
-        log_flush();
-        return status;
+        return file_output_told((string_address) "printenv") ? status : 2;
 }
 
 // id ------------------------------------------------------------

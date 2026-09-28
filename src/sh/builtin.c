@@ -17682,14 +17682,12 @@ static bool floodlight_external_final(
         the callers that say yes are the three that exit immediately after.
 */
 /*
-        --help and --version, first, for every tool that does not answer them
-        itself: a short usage or "<tool> from moonwater", the form gzip, xz,
-        tar and the util-linux set already print, and 0. Most tools called
-        them unrecognized options and failed. The tools below answer with
+        --help and --version for every tool that does not answer them itself:
+        tools_meta in tools.c finds them where GNU's getopt would and answers
+        with a short usage or "<tool> from moonwater", the form gzip, xz, tar
+        and the util-linux set already print. The tools below answer with
         their own synopsis and are left to it, as are moonwater, init and
         bowl, which are not command-line tools of that kind.
-        Two byte compares on the first operand when it is not one of these,
-        which is every ordinary start.
 */
 static const string_address shell_tool_own_meta[] = {
     "tar", "gzip", "gunzip", "zcat", "xz", "unxz", "xzcat", "unzstd", "zstd",
@@ -17703,30 +17701,19 @@ static const string_address shell_tool_own_meta[] = {
     "taskset", "uclampset", "unshare", "utmpdump", "waitpid", "wall",
     "whereis", "wipefs", "write", "moonwater", "init", "bowl", null};
 
-static bool shell_tool_meta(positive which, string_address address_to arguments,
-                            positive count)
+static b32 shell_tool_meta(positive which, string_address address_to arguments,
+                           positive count)
 {
         string_address name = shell_tools[which].name;
-        string_address word;
-        bool help;
 
-        if (count < 2 || !(word = arguments[1]) || !string_is(word, '-') ||
-            !string_is(word + 1, '-'))
-                return false;
-
-        help = word_is(word, "--help");
-        if (!help && !word_is(word, "--version"))
-                return false;
+        if (!tools_meta_asked(arguments, count))
+                return 256;
 
         for (positive at = 0; shell_tool_own_meta[at]; at++)
                 if (word_is(name, shell_tool_own_meta[at]))
-                        return false;
+                        return 256;
 
-        string_format(log, help ? "Usage: %s [OPTION]... [ARGUMENT]...\n"
-                                : "%s from moonwater\n",
-                      name);
-        log_flush();
-        return true;
+        return tools_meta(name, arguments, count);
 }
 
 static b32 shell_tool_call_in(positive which, bool own_process)
@@ -17745,8 +17732,9 @@ static b32 shell_tool_call_in(positive which, bool own_process)
 
         /* After the launch decision: a tool that policy refuses is refused
            for --version as for anything else. */
-        if (shell_tool_meta(which, arguments, count))
-                return 0;
+        b32 meta = shell_tool_meta(which, arguments, count);
+        if (meta != 256)
+                return meta;
 
         log_failure_reset();
         answered = shell_tools[which].function() & 0xff;

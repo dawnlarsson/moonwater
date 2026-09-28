@@ -28139,3 +28139,211 @@ static b32 tools_fincore_main()
         log_flush();
         return failed ? text_done(1) : 0;
 }
+
+/*
+        --help and --version for a tool that does not answer them itself, found
+        where GNU's getopt finds them. Most coreutils permute, so the words are
+        options wherever they stand before a --: yes BEFORE --version prints
+        the version, where the first operand alone was looked at and yes
+        repeated "BEFORE --version" for ever. The tools GNU parses with a
+        leading + in their option string stop at their first operand, as every
+        tool does under POSIXLY_CORRECT, and expr, true and false read the
+        word only when it is the one operand, as gnulib's parse_long_options
+        does. A letter that takes a value hides the word after it, which is
+        what makes timeout -s INT --help a request for help. seq's operands may
+        be negative, so a word that starts -digit or -. ends its options.
+
+        What was answered is the status: 0, or the status GNU gives a failure
+        of that tool when the text could not be written -- 125 for the tools
+        that run a command, 2 for sort, ls, grep and the diff family, 3 for tty
+        and expr, as help-version.sh expects of each with stdout on /dev/full.
+*/
+typedef struct
+{
+        string_address name;
+        string_address valued;
+        p8 stop;
+        p8 failure;
+} tools_meta_rule;
+
+enum { TOOLS_META_PERMUTE, TOOLS_META_FIRST, TOOLS_META_ALONE };
+
+static const tools_meta_rule tools_meta_rules[] = {
+    {"basename", "s", TOOLS_META_FIRST, 1},
+    {"chroot", "", TOOLS_META_FIRST, 125},
+    {"env", "aCSu", TOOLS_META_FIRST, 125},
+    {"nice", "n", TOOLS_META_FIRST, 125},
+    {"nohup", "", TOOLS_META_FIRST, 125},
+    {"pathchk", "", TOOLS_META_FIRST, 1},
+    {"printenv", "u", TOOLS_META_FIRST, 2},
+    {"runcon", "rtul", TOOLS_META_FIRST, 125},
+    {"seq", "fs", TOOLS_META_FIRST, 1},
+    {"stdbuf", "ioe", TOOLS_META_FIRST, 125},
+    {"timeout", "ks", TOOLS_META_FIRST, 125},
+    {"tr", "", TOOLS_META_FIRST, 1},
+    {"expr", "", TOOLS_META_ALONE, 3},
+    {"true", "", TOOLS_META_ALONE, 1},
+    {"false", "", TOOLS_META_ALONE, 1},
+    {"tty", "", TOOLS_META_PERMUTE, 3},
+    {"sort", "koStTy", TOOLS_META_PERMUTE, 2},
+    {"ls", "ITwpFABDtd", TOOLS_META_PERMUTE, 2},
+    {"dir", "ITwpFABDtd", TOOLS_META_PERMUTE, 2},
+    {"vdir", "ITwpFABDtd", TOOLS_META_PERMUTE, 2},
+    {"grep", "efmABCdD", TOOLS_META_PERMUTE, 2},
+    {"egrep", "efmABCdD", TOOLS_META_PERMUTE, 2},
+    {"fgrep", "efmABCdD", TOOLS_META_PERMUTE, 2},
+    {"cmp", "inI", TOOLS_META_PERMUTE, 2},
+    {"diff", "CDFLSUWIxX", TOOLS_META_PERMUTE, 2},
+    {"diff3", "L", TOOLS_META_PERMUTE, 2},
+    {"sdiff", "oIwWFs", TOOLS_META_PERMUTE, 2},
+    {"cut", "bcdfFOw", TOOLS_META_PERMUTE, 1},
+    {"head", "cn", TOOLS_META_PERMUTE, 1},
+    {"tail", "cns", TOOLS_META_PERMUTE, 1},
+    {"split", "Cabnlt", TOOLS_META_PERMUTE, 1},
+    {"csplit", "fbn", TOOLS_META_PERMUTE, 1},
+    {"date", "dfrsI", TOOLS_META_PERMUTE, 1},
+    {"touch", "drt", TOOLS_META_PERMUTE, 1},
+    {"du", "dtBX", TOOLS_META_PERMUTE, 1},
+    {"df", "BFtx", TOOLS_META_PERMUTE, 1},
+    {"cp", "tS", TOOLS_META_PERMUTE, 1},
+    {"mv", "tS", TOOLS_META_PERMUTE, 1},
+    {"ln", "tS", TOOLS_META_PERMUTE, 1},
+    {"install", "gmotS", TOOLS_META_PERMUTE, 1},
+    {"mkdir", "m", TOOLS_META_PERMUTE, 1},
+    {"mkfifo", "m", TOOLS_META_PERMUTE, 1},
+    {"mknod", "m", TOOLS_META_PERMUTE, 1},
+    {"mktemp", "p", TOOLS_META_PERMUTE, 1},
+    {"join", "aeijotv12", TOOLS_META_PERMUTE, 1},
+    {"nl", "hbfvilswnd", TOOLS_META_PERMUTE, 1},
+    {"numfmt", "d", TOOLS_META_PERMUTE, 1},
+    {"paste", "d", TOOLS_META_PERMUTE, 1},
+    {"ptx", "FMSWbigow", TOOLS_META_PERMUTE, 1},
+    {"shred", "ns", TOOLS_META_PERMUTE, 1},
+    {"shuf", "ino", TOOLS_META_PERMUTE, 1},
+    {"stat", "ct", TOOLS_META_PERMUTE, 1},
+    {"tac", "s", TOOLS_META_PERMUTE, 1},
+    {"truncate", "rs", TOOLS_META_PERMUTE, 1},
+    {"tsort", "", TOOLS_META_PERMUTE, 1},
+    {"unexpand", "t", TOOLS_META_PERMUTE, 1},
+    {"expand", "t", TOOLS_META_PERMUTE, 1},
+    {"fold", "w", TOOLS_META_PERMUTE, 1},
+    {"fmt", "wpg", TOOLS_META_PERMUTE, 1},
+    {"basenc", "w", TOOLS_META_PERMUTE, 1},
+    {"base32", "w", TOOLS_META_PERMUTE, 1},
+    {"base64", "w", TOOLS_META_PERMUTE, 1},
+    {"od", "AjNStw", TOOLS_META_PERMUTE, 1},
+    {"pr", "DeiNnowWlhS", TOOLS_META_PERMUTE, 1},
+    {"uniq", "fsw", TOOLS_META_PERMUTE, 1},
+    {"cksum", "al", TOOLS_META_PERMUTE, 1},
+    {"b2sum", "l", TOOLS_META_PERMUTE, 1},
+    {"stty", "F", TOOLS_META_PERMUTE, 1},
+    {null},
+};
+
+// Whether any word before a -- could be one of the two: most starts carry
+// neither, and this is a byte or three per operand.
+static bool tools_meta_asked(string_address address_to arguments, positive count)
+{
+        positive seen = 1;
+
+        for (; seen < count && arguments[seen]; seen++)
+        {
+                string_address word = arguments[seen];
+
+                if (word[0] == '-' && word[1] == '-' &&
+                    (!word[2] || word[2] == 'h' || word[2] == 'v'))
+                        break;
+        }
+        return seen < count && arguments[seen] && arguments[seen][2];
+}
+
+static b32 tools_meta(string_address name, string_address address_to arguments,
+                      positive count)
+{
+        if (!tools_meta_asked(arguments, count))
+                return 256;
+
+        const tools_meta_rule address_to rule = null;
+        string_address valued = "";
+        p8 stop = TOOLS_META_PERMUTE;
+        p8 failure = 1;
+        bool help = false;
+        bool found = false;
+
+        for (const tools_meta_rule address_to at = tools_meta_rules; at->name; at++)
+                if (string_equals(name, at->name))
+                {
+                        rule = at;
+                        break;
+                }
+        if (rule)
+        {
+                valued = rule->valued;
+                stop = rule->stop;
+                failure = rule->failure;
+        }
+        if (file_environment("POSIXLY_CORRECT") && stop == TOOLS_META_PERMUTE)
+                stop = TOOLS_META_FIRST;
+
+        for (positive at = 1; at < count && arguments[at]; at++)
+        {
+                string_address word = arguments[at];
+
+                if (stop == TOOLS_META_ALONE && count != 2)
+                        break;
+                if (word[0] != '-' || !word[1])
+                {
+                        if (stop == TOOLS_META_PERMUTE)
+                                continue;
+                        break;
+                }
+                if (word[1] == '-')
+                {
+                        if (!word[2])
+                                break;
+                        if (string_equals(word, "--help") ||
+                            string_equals(word, "--version"))
+                        {
+                                help = word[2] == 'h';
+                                found = true;
+                                break;
+                        }
+                        continue;
+                }
+                if (string_equals(name, "seq") &&
+                    (byte_is_digit(word[1]) || word[1] == '.'))
+                        break;
+                for (positive letter = 1; word[letter]; letter++)
+                        if (string_first_of(valued, word[letter]))
+                        {
+                                if (!word[letter + 1])
+                                        at++;
+                                break;
+                        }
+        }
+        if (!found)
+                return 256;
+
+        // One write, as stdio's one buffer gives GNU: a reader that leaves
+        // after the first bytes cannot cut the text in two.
+        string_address pieces[] = {help ? (string_address) "Usage: " : name,
+                                   help ? name : (string_address) " from moonwater\n",
+                                   help ? (string_address) " [OPTION]... [ARGUMENT]...\n" : (string_address) ""};
+        p8 text[256];
+        positive length = 0;
+
+        for (positive at = 0; at < 3; at++)
+                for (string_address byte = pieces[at]; *byte && length < sizeof(text); byte++)
+                        text[length++] = *byte;
+
+        system_write_result wrote = system_write_all_checked(1, text, length);
+
+        if (wrote.bytes != length)
+        {
+                string_format(log_error, "%s: write error: %s\n", name,
+                              file_reason(wrote.error ? wrote.error : -5));
+                log_flush();
+                return failure;
+        }
+        return 0;
+}
