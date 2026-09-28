@@ -7878,6 +7878,16 @@ FILES_UTILITIES = (
                    #   contents go, the link stays and the removal of the
                    #   name itself is an ENOTDIR that -f forgives.
                    ("-rf", "dirlink/"), ("-rfv", "dirlink/"), ("-Rf", "dirlink/"))
+            #   GNU's RMI_SOMETIMES: with no -f or -i (or with -I) and a
+            #   terminal on standard input -- which GNU's hidden
+            #   ---presume-input-tty stands for -- a name that cannot be
+            #   written is asked about, a link never is, and a directory
+            #   that cannot be read is refused or asked about under -d.
+            + tuple(("---presume-input-tty",) + words for words in (
+                ("unreadable",), ("a.txt",), ("link",), ("dangling",), ("-r", "shut"), ("-d", "shut"),
+                ("-r", "deep"), ("-r", "dir"), ("-I", "unreadable"), ("-f", "unreadable"), ("-rf", "shut"),
+                ("unreadable", "a.txt", "exe"), ("-v", "unreadable"), ("shut",), ("-rd", "shut"),
+                ("--interactive=never", "unreadable"), ("-r", "unreadable", "dup")))
             #   Two or more slashes on the end of a root are trimmed to one
             #   before the walk names anything, as gnulib's fts_open does.
             + tuple(flags + (name,) for flags in (("-rv",), ("-dv",), ("-rfv",), ("-v",), ("-r",))

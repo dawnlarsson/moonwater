@@ -33514,6 +33514,36 @@ static bool rm_dot_operand(string_address path)
 
 static bool rm_one_system;
 static bool rm_careful;
+/*
+        GNU's RMI_SOMETIMES: with neither -f nor -i, or with -I, and standard
+        input a terminal, rm still asks before it takes a name it could not
+        write -- "remove write-protected regular file 'f'?" -- and says it
+        cannot remove a directory it cannot read. A symbolic link is never
+        asked about this way, since its permissions mean nothing. rm has
+        GNU's hidden ---presume-input-tty, which the upstream suite uses to
+        reach this without a terminal.
+*/
+static bool rm_sometimes;
+
+/*
+        How deep the careful walk -- the one that asks, or keeps to one file
+        system -- goes before it says a tree is nested too deep. Each level
+        costs a descriptor and a few hundred bytes of stack, and the name it
+        is shown by lives in the arena, so this is far past FILE_MAX_DEPTH:
+        GNU's rm has no depth of its own, and rm -ri over 33 levels, or any
+        rm -r at a terminal, stopped here where it did not.
+*/
+#define RM_TREE_DEPTH 4096
+
+static bool rm_asks(bipolar directory, string_address name,
+                    file_facts address_to facts)
+{
+        if (rm_prompting == 'i')
+                return true;
+
+        return rm_sometimes && (facts->mode & MODE_FORMAT) != MODE_LINK &&
+               system_access_at(directory, name, 2) != 0;
+}
 static bool rm_preserve_root;
 static file_facts rm_root;
 static p32 rm_device_major;
@@ -33581,9 +33611,14 @@ static string_address rm_prompt(bipolar directory, string_address name,
 static bool rm_entry(bipolar directory, string_address shown, string_address name,
                      positive depth, bool address_to complete)
 {
-        p8 below[FILE_PATH_MAX];
+        // The name a tree is shown by grows past PATH_MAX in a deep one, and
+        // only the messages read it: the walk goes by descriptors. It is
+        // held in the arena for as long as the entry is being removed.
+        positive mark = utility_arena.used;
+        positive room = string_length(shown) + string_length(name) + 2;
+        p8 address_to below = (p8 address_to)utility_arena_take(room);
 
-        if (!file_path_join(below, shown, name))
+        if (!below)
         {
                 string_format(log_error, "rm: cannot remove '%w/%w': %s\n",
                               writer_terminal_quoted_name, shown,
@@ -33593,10 +33628,14 @@ static bool rm_entry(bipolar directory, string_address shown, string_address nam
                 address_to complete = false;
                 return false;
         }
-        if (rm_tree(directory, name, below, depth))
-                return true;
-        address_to complete = false;
-        return false;
+        path_join(below, room, shown, name);
+
+        bool gone = rm_tree(directory, name, below, depth);
+
+        utility_arena.used = mark;
+        if (!gone)
+                address_to complete = false;
+        return gone;
 }
 
 /*
@@ -33719,23 +33758,11 @@ static bool rm_contents(bipolar directory, string_address shown, positive depth)
 
                         seen++;
 
-                        p8 below[FILE_PATH_MAX];
+                        bool gone = rm_entry(directory, shown, entry->d_name,
+                                             depth, address_of complete);
 
-                        if (!file_path_join(below, shown, entry->d_name))
-                        {
-                                string_format(log_error, "rm: cannot remove '%w/%w': %s\n",
-                                              writer_terminal_quoted_name, shown,
-                                              writer_terminal_quoted_name, entry->d_name,
-                                              file_reason(-ERROR_NAME_TOO_LONG));
-                                rm_status = 1;
-                                complete = false;
-                                continue;
-                        }
-
-                        if (rm_tree(directory, entry->d_name, below, depth))
+                        if (gone)
                                 removed++;
-                        else
-                                complete = false;
                 }
 
                 if (walk.error < 0)
@@ -33792,14 +33819,20 @@ static bool rm_tree(bipolar directory, string_address name, string_address shown
                 //      A file kept at the question does not hold its
                 //      directory back either: GNU asks about the directory
                 //      next and says it is not empty.
-                if (rm_prompting == 'i' && !file_ask((string_address) "rm",
-                                        rm_prompt(directory, name, address_of facts,
-                                                  false),
-                                        shown))
+                bool ask = rm_asks(directory, name, address_of facts);
+
+                if (ask && !file_ask((string_address) "rm",
+                                     rm_prompt(directory, name, address_of facts, false),
+                                     shown))
                         return true;
 
-                tried = file_remove_same(directory, name, 0,
-                                         address_of facts);
+                // What was confirmed is what goes, so an answer is bound to
+                // the file it was given for; a name nothing asked about at a
+                // terminal is removed as the quiet walk removes it, in the
+                // three calls GNU makes for it rather than six.
+                tried = ask || rm_prompting == 'i' || rm_loud || rm_one_system
+                            ? file_remove_same(directory, name, 0, address_of facts)
+                            : system_remove_at(directory, name, 0);
 
                 if (tried == 0)
                 {
@@ -33850,6 +33883,7 @@ static bool rm_tree(bipolar directory, string_address name, string_address shown
         bipolar inside = -1;
         bool asked_remove = false;
         bipolar unread = 0;
+        bool asking = rm_asks(directory, name, address_of facts);
         if (rm_recursive)
         {
                 if (depth == 0)
@@ -33862,7 +33896,7 @@ static bool rm_tree(bipolar directory, string_address name, string_address shown
 
                 bool empty_directory = false;
 
-                if (rm_prompting == 'i')
+                if (asking)
                 {
                         bipolar emptiness = file_directory_empty_same(
                             directory, name, address_of facts, O_NOFOLLOW);
@@ -33982,7 +34016,7 @@ static bool rm_tree(bipolar directory, string_address name, string_address shown
         */
         bool inaccessible = false;
 
-        if (!rm_recursive && rm_prompting == 'i')
+        if (!rm_recursive && asking)
         {
                 bipolar emptiness = file_directory_empty_same(
                     directory, name, address_of facts, O_NOFOLLOW);
@@ -33997,7 +34031,7 @@ static bool rm_tree(bipolar directory, string_address name, string_address shown
                 inaccessible = emptiness < 0;
         }
 
-        if (rm_prompting == 'i' && !asked_remove &&
+        if (asking && !asked_remove &&
             !file_ask((string_address) "rm",
                       inaccessible ? (string_address) "attempt removal of inaccessible directory"
                                    : rm_prompt(directory, name, address_of facts, false),
@@ -34931,6 +34965,7 @@ static const argument_option rm_options[] = {
     {"preserve-root", 'P', ARGUMENT_LONG_OPTIONAL | ARGUMENT_LONG_ONLY},
     {"recursive", 'R'},
     {"verbose", 'v'},
+    {"-presume-input-tty", 'T', ARGUMENT_LONG_ONLY},
     {"iI", 0, 0, ARGUMENT_SELECT(rm_selection, collision) | ARGUMENT_SELECT(rm_selection, prompt)},
     {"r", 0},
     {null},
@@ -35055,7 +35090,9 @@ static b32 file_rm()
         rm_one_system = (flags & FILE_FLAG('o')) != 0;
         rm_empty_directories = (flags & FILE_FLAG('d')) != 0;
         rm_recursive = (flags & (FILE_FLAG('r') | FILE_FLAG('R'))) != 0;
-        rm_careful = rm_prompting == 'i' || rm_loud || rm_one_system;
+        rm_sometimes = (rm_prompting == 0 || rm_prompting == 'I') && !rm_force &&
+                       ((flags & FILE_FLAG('T')) || stream_is_terminal(0));
+        rm_careful = rm_prompting == 'i' || rm_sometimes || rm_loud || rm_one_system;
         rm_preserve_root = rm_recursive && !(flags & FILE_FLAG('N'));
 
         if (first >= count)
@@ -35210,10 +35247,11 @@ static b32 file_rm()
                 rm_device_major = facts.device_major;
                 rm_device_minor = facts.device_minor;
 
-                if (here && rm_recursive && rm_prompting != 'i' && !rm_one_system)
+                if (here && rm_recursive && rm_prompting != 'i' && !rm_sometimes &&
+                    !rm_one_system)
                         rm_batched(path, address_of facts);
                 else
-                        rm_tree(AT_FDCWD, path, path, FILE_MAX_DEPTH);
+                        rm_tree(AT_FDCWD, path, path, RM_TREE_DEPTH);
         }
 
         walk_batch_end(address_of rm_batch);
