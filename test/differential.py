@@ -8327,7 +8327,18 @@ FILES_UTILITIES = (
                         for zone, when in (("America/New_York", "2016-06-01 EDT + 6 months"),
                                            ("Europe/Helsinki", "2011-12-11 EET"), ("Europe/Helsinki", "2011-06-11 EEST"),
                                            ("America/Lima", "@1"), ("Europe/Berlin", "2021-03-28 02:30"),
-                                           ("Europe/Berlin", "2021-10-31 02:30"), ("Europe/Berlin", "2021-10-31 02:30 CEST")))),
+                                           ("Europe/Berlin", "2021-10-31 02:30"), ("Europe/Berlin", "2021-10-31 02:30 CEST"))) +
+                  # A TZ the environment holds at any length: a zone file
+                  # named through runs of ./ either side of the 255 bytes a
+                  # fixed buffer once held, which refused every date. The
+                  # dates are local and so is what is written, which keeps
+                  # the rows to the parse, whatever the zone reader makes
+                  # of so long a name.
+                  tuple({"argv": ("-d", when, "+%F %T"),
+                         "env": (("TZ", ":/usr/share/zoneinfo/" + "./" * run + "Asia/Tokyo"),)}
+                        for run in (100, 116, 117, 118, 300)
+                        for when in ("2001-09-09 01:46:40", "2001-09-09 01:46 tomorrow",
+                                     "292277026596-12-04 15:30:07 UTC"))),
 )
 
 #       Scenes a fixture cannot hold, made by the shell before the program

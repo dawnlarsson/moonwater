@@ -4127,6 +4127,31 @@ static fn pd_local_table_add(pd_parser address_to pc, b64 at)
         The body of parse_datetime: TEXT read from NOW (seconds and
         nanoseconds) in the zone of TZ, or of TZ="..." in front of it.
 */
+/* The TZ in force, held while another stands in for it: a zone the date
+   string names, or one a repair tries. Held by copy, since setenv may reuse
+   the entry it replaces, and at whatever length the environment gave it --
+   a fixed buffer here once refused every date under a long TZ. False only
+   when the copy could not be made. */
+static bool pd_zone_hold(string_address address_to held)
+{
+        string_address was = getenv((string_address) "TZ");
+
+        address_to held = was ? string_duplicate(was) : null;
+        return !was || address_to held;
+}
+
+static fn pd_zone_restore(string_address held)
+{
+        if (held)
+        {
+                setenv((string_address) "TZ", held, 1);
+                memory_give((address_any)held);
+        }
+        else
+                unsetenv((string_address) "TZ");
+        tzset();
+}
+
 static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
                      b64 address_to out, positive address_to out_ns)
 {
@@ -4134,14 +4159,8 @@ static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
         string_address tzstring = getenv((string_address) "TZ");
         bool own_zone = false;
         p8 zone[256];
-        p8 saved[256];
-        bool had_tz = tzstring != null;
+        string_address saved = null;
         bool ok = false;
-
-        if (had_tz && string_length(tzstring) >= sizeof(saved))
-                return false;
-        if (had_tz)
-                string_copy(saved, tzstring);
 
         while (pd_space(string_get(p)))
                 p++;
@@ -4164,6 +4183,8 @@ static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
                         else if (string_is(s, '"'))
                         {
                                 zone[used] = end;
+                                if (!pd_zone_hold(address_of saved))
+                                        return false;
                                 setenv((string_address) "TZ", zone, 1);
                                 tzset();
                                 own_zone = true;
@@ -4426,23 +4447,21 @@ static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
                                 //      A time near the ends of time_t read in
                                 //      another zone: tried again in that zone.
                                 p8 fixed[40] = "XXX";
-                                p8 held[256];
-                                string_address was = getenv((string_address) "TZ");
-                                bool had = was != null && string_length(was) < sizeof(held);
+                                string_address held;
 
-                                if (had)
-                                        string_copy(held, was);
-                                pd_zone_text(pc->time_zone, fixed + 3);
-                                setenv((string_address) "TZ", fixed, 1);
-                                tzset();
-                                t = t0;
-                                moment = pd_mktime(address_of t);
-                                repaired = pd_mktime_ok(address_of t0, address_of t);
-                                if (had)
-                                        setenv((string_address) "TZ", held, 1);
-                                else
-                                        unsetenv((string_address) "TZ");
-                                tzset();
+                                if (pd_zone_hold(address_of held))
+                                {
+                                        pd_zone_text(pc->time_zone, fixed + 3);
+                                        setenv((string_address) "TZ", fixed, 1);
+                                        tzset();
+                                        t = t0;
+                                        moment = pd_mktime(address_of t);
+                                        repaired = pd_mktime_ok(address_of t0, address_of t);
+                                        pd_zone_restore(held);
+                                        // The entry tzstring named may be gone.
+                                        if (!own_zone)
+                                                tzstring = getenv((string_address) "TZ");
+                                }
                         }
                         if (!repaired)
                         {
@@ -4772,13 +4791,7 @@ static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
 
 pd_done:
         if (own_zone)
-        {
-                if (had_tz)
-                        setenv((string_address) "TZ", saved, 1);
-                else
-                        unsetenv((string_address) "TZ");
-                tzset();
-        }
+                pd_zone_restore(saved);
         return ok;
 }
 
