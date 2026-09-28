@@ -49173,7 +49173,8 @@ static bool http_writev_error_hit;
         which trap sendto/recvfrom directly and never pass through system_call_N.
         Parallel thin wrappers around the net.c include arm mid-path faults after
         the socket already exists: EINTR-once-then-fail, EAGAIN, short progress,
-        hard ENOSPC/EIO, and sticky EINTR for deadline exhaustion.
+        hard ENOSPC/EIO, and a sticky hard send error for a server that never
+        takes a datagram.
 */
 static bipolar net_send_error;
 static bool net_send_error_hit;
@@ -49181,7 +49182,7 @@ static bool net_send_eintr_once;
 static bool net_send_eintr_hit;
 static positive net_send_short_limit;
 static bool net_send_short_hit;
-static bool net_send_eintr_sticky;
+static bool net_send_error_sticky;
 static positive net_send_arm_after;
 static positive net_send_calls;
 
@@ -49279,7 +49280,7 @@ static bipolar net_test_socket_send(b32 handle, address_any data, positive size,
                                      (positive)data, size, (positive)flags,
                                      (positive)to, to_size);
         }
-        if (net_send_eintr_sticky || net_send_eintr_once)
+        if (net_send_eintr_once)
         {
                 net_send_eintr_once = false;
                 net_send_eintr_hit = true;
@@ -49303,7 +49304,8 @@ static bipolar net_test_socket_send(b32 handle, address_any data, positive size,
         {
                 bipolar fault = net_send_error;
 
-                net_send_error = 0;
+                if (!net_send_error_sticky)
+                        net_send_error = 0;
                 net_send_error_hit = true;
                 return fault;
         }
@@ -49446,8 +49448,8 @@ static bool net_as_emulated(void)
           body / store       HTTP_FETCH_MAX (16MiB)
             exact framing:   "Content-Length of exactly HTTP_FETCH_MAX is framed"
             one-over e2e:    "Content-Length past HTTP_FETCH_MAX is refused in memory"
-          redirect hops      HTTP_HOPS (10)
-            exact+one-over:  fetching_for_real HTTP_HOPS nine-then-refuse coverage
+          redirect hops      HTTP_HOPS (21)
+            exact+one-over:  fetching_for_real HTTP_HOPS twenty-then-refuse coverage
           writev gather      HTTP_WRITE_SPANS (64)
             hit:             TLS write-span flush with HTTP_WRITE_SPANS + 1 records;
                              http_write_spans_partial short-write resume
@@ -49848,6 +49850,31 @@ static fn error_frames(void)
                       netlink_transact(-1, &request, 91, null, null) == -1 &&
                           !request.bytes && !request.room && !request.used && !request.failed);
         }
+        /* An interrupted dump fails only once the rest of it is drawn: it
+           returned at the first marked message and left the others queued,
+           where the kernel holds the socket's next dump off with EBUSY. */
+        if (netlink_begin(&request, RTM_GETLINK, NLM_REQUEST | NLM_DUMP, 91, 0))
+        {
+                netlink_header marked = {.length = NETLINK_HEADER,
+                                         .type = RTM_NEWLINK,
+                                         .flags = 2 | NLM_DUMP_INTERRUPTED,
+                                         .sequence = 91};
+                netlink_header more = marked;
+                netlink_header finished = marked;
+                p8 left[NETLINK_HEADER];
+
+                more.flags = 2;
+                finished.type = NLMSG_IS_DONE;
+                socket_send(pair[1], &marked, sizeof marked, 0, null, 0);
+                socket_send(pair[1], &more, sizeof more, 0, null, 0);
+                socket_send(pair[1], &finished, sizeof finished, 0, null, 0);
+                check("an interrupted netlink dump fails after draining the rest",
+                      netlink_walk(pair[0], &request, 91, &reply, null, null) == -1 &&
+                          socket_receive(pair[0], left, sizeof left, MSG_DONTWAIT,
+                                         null, null) == NETWORK_TRY_AGAIN);
+                p8 discarded[NETLINK_HEADER];
+                socket_receive(pair[1], discarded, sizeof discarded, 0, null, null);
+        }
         netlink_forget(&request);
         netlink_forget(&reply);
         socket_close(pair[0]);
@@ -50119,6 +50146,40 @@ static fn resolving(void)
         }
 
         {
+                //      A name is at most 255 bytes on the wire (RFC 1035
+                //      3.1), and a chain of pointers at most one jump a
+                //      label: 127. Each was one past, and a reply of names
+                //      at the end of a two-thousand-jump chain cost 4 ms.
+                p8 message[512];
+                positive at = 0;
+
+                memory_fill(message, 0, sizeof message);
+                for (positive label = 0; label < 4; label++)
+                {
+                        message[at] = label < 3 ? 63 : 62;
+                        memory_fill(message + at + 1, 'a', message[at]);
+                        at += 1 + message[at];
+                }
+                check("a 256-byte wire name is refused",
+                      at + 1 == 256 && dns_skip_name(message, sizeof message, 0) < 0);
+                message[at - 63] = 61;
+                message[at - 1] = 0;
+                check("a 255-byte wire name is taken",
+                      dns_skip_name(message, sizeof message, 0) == 255);
+
+                memory_fill(message, 0, sizeof message);
+                for (positive hop = 1; hop <= 128; hop++)
+                {
+                        message[2 * hop] = 0xc0;
+                        message[2 * hop + 1] = (p8)(2 * hop - 2);
+                }
+                check("a name 127 pointers deep is followed",
+                      dns_skip_name(message, sizeof message, 2 * 127) == 2 * 127 + 2);
+                check("a name 128 pointers deep is refused",
+                      dns_skip_name(message, sizeof message, 2 * 128) < 0);
+        }
+
+        {
                 p16 secure = 0;
 
                 check("a DNS transaction id comes from ready kernel randomness",
@@ -50366,8 +50427,8 @@ static fn resolving_edges(void)
         }
 
         /* Answer-section hop budget is answers+1 passes. A two-record CNAME
-           cycle burns every pass without a separate decompress step counter
-           (dns_copy_name bounds jumps by lowering its ceiling instead). */
+           cycle burns every pass; dns_copy_name bounds each name's jumps by
+           lowering its ceiling and counting them to DNS_POINTER_HOPS. */
         {
                 p8 reply[512] = {0};
                 bipolar question = dns_write_name(
@@ -50772,7 +50833,8 @@ static positive dns_servers_asked(const char address_to text, positive length)
         if (system_write_all((positive)file, (address_any)text, length) == length)
         {
                 net_io_faults_clear();
-                net_send_eintr_sticky = true;
+                net_send_error_sticky = true;
+                net_send_error = -ENETUNREACH;
                 net_send_calls = 0;
                 (void)dns_resolve_any((string_address)path,
                                       (string_address)"servers.example",
@@ -51065,7 +51127,7 @@ static fn fetching(void)
         check("unsupported explicit schemes are not reinterpreted as hosts",
               http_split_into((string_address) "gopher://127.0.0.1/", name,
                          sizeof name, address_of port, address_of path,
-                         address_of tls) == HTTP_BAD_URL);
+                         address_of tls) == HTTP_SCHEME);
         check("userinfo cannot disguise the connected HTTP host",
               http_split_into((string_address) "http://allowed@127.0.0.1/", name,
                          sizeof name, address_of port, address_of path,
@@ -52494,7 +52556,7 @@ static fn http_tls_resource_exhaustion(void)
 
                         status = http_fetch_to(
                             (string_address)"https://127.0.0.1:1/", -1, false,
-                            address_of code);
+                            address_of code, null);
                         check("HTTPS fetch fails closed when TLS open cannot get a socket",
                               status == HTTP_NO_ROUTE);
 
@@ -53116,7 +53178,7 @@ static fn net_io_faults_clear(void)
         net_send_eintr_hit = false;
         net_send_short_limit = 0;
         net_send_short_hit = false;
-        net_send_eintr_sticky = false;
+        net_send_error_sticky = false;
         net_send_arm_after = 0;
         net_recv_error = 0;
         net_recv_error_hit = false;
@@ -53238,13 +53300,14 @@ static fn dns_dhcp_midpath_faults(void)
 
         /* UDP send does not retry EINTR; a single interrupted send refuses. */
         net_send_eintr_once = true;
+        net_send_calls = 0;
         found = 0;
         status = dns_resolve_at(HOST_LOOPBACK, DNS_PORT,
                                 (string_address)"send.eintr.example",
                                 address_of found, 1);
-        check("DNS UDP send EINTR fails closed mid-path without retrying",
-              status == DNS_NO_REPLY && !found && net_send_eintr_hit &&
-                  !net_send_eintr_once);
+        check("DNS UDP send EINTR sends the question again",
+              !found && net_send_eintr_hit && !net_send_eintr_once &&
+                  net_send_calls == 2);
         net_io_faults_clear();
 
         /* --- DNS UDP: recv EINTR then hard I/O refuse after a junk peer --- */
@@ -60402,8 +60465,9 @@ static fn redirect_urls(void)
         /* One scheme rule for the parser and the redirect resolver: http and
            https in any case (RFC 3986 3.1), and any other scheme refused by
            both rather than read as a host or as a path on the current one.
-           split is the URL's verdict (1 plain, 2 TLS, 0 refused); location
-           is the Location's from https://h/dir/old, and 0 is refused. */
+           split is the URL's verdict (1 plain, 2 TLS, 0 refused, 3 an
+           unsupported scheme, GNU wget's words); location is the Location's
+           from https://h/dir/old, and 0 is an unsupported scheme. */
         {
                 static const struct
                 {
@@ -60414,9 +60478,9 @@ static fn redirect_urls(void)
                     {"HTTP://h/x", 1, "HTTP://h/x"},
                     {"Https://h/x", 2, "Https://h/x"},
                     {"hTtPs://h:444/x", 2, "hTtPs://h:444/x"},
-                    {"ftp://h/x", 0, 0},
-                    {"httpx://h/x", 0, 0},
-                    {"web+x.y-z://h/x", 0, 0},
+                    {"ftp://h/x", 3, 0},
+                    {"httpx://h/x", 3, 0},
+                    {"web+x.y-z://h/x", 3, 0},
                     {"javascript:alert(1)", 0, 0},
                     {"http:x", 0, 0},
                     {"h:81/x", 1, 0},
@@ -60435,14 +60499,15 @@ static fn redirect_urls(void)
                             (string_address)schemes[row].text, into, sizeof into);
 
                         check("a URL scheme splits in any case, and no other scheme does",
-                              schemes[row].split
-                                  ? split == HTTP_OK && tls == (schemes[row].split == 2)
-                                  : split == HTTP_BAD_URL);
+                              schemes[row].split == 3   ? split == HTTP_SCHEME
+                              : schemes[row].split      ? split == HTTP_OK &&
+                                                         tls == (schemes[row].split == 2)
+                                                        : split == HTTP_BAD_URL);
                         check("a Location scheme resolves in any case, and no other scheme does",
                               schemes[row].location
                                   ? placed == HTTP_OK &&
                                         string_equals(into, (string_address)schemes[row].location)
-                                  : placed == HTTP_BAD_URL);
+                                  : placed == HTTP_SCHEME);
                 }
         }
         {
@@ -60460,7 +60525,11 @@ static fn redirect_urls(void)
                     {"/..?x", "index.html"},
                     {"/a/..x", "..x"},
                     {"/a/...", "..."},
-                    {"/a/%2e%2e", "%2e%2e"},
+                    {"/a/%2e%2e", "index.html"},
+                    {"/a/.%2E", "index.html"},
+                    {"/a/%2e", "index.html"},
+                    {"/a/%2e%2e%2e", "%2e%2e%2e"},
+                    {"/a/%2", "%2"},
                 };
                 p8 overlong[HTTP_URL_MAX + 8];
 
@@ -60560,7 +60629,7 @@ static fn redirect_urls(void)
                           http_get(url, address_of body, address_of code) ==
                               HTTP_BAD_URL);
                 check("wget's start URL ceiling matches fetch",
-                      http_fetch_to(url, -1, false, address_of code) ==
+                      http_fetch_to(url, -1, false, address_of code, null) ==
                           HTTP_BAD_URL);
                 /* A target the request builder refuses is refused before
                    the connect: port 1 is closed, so a client that dials
@@ -60569,7 +60638,7 @@ static fn redirect_urls(void)
                       http_get((string_address)"http://127.0.0.1:1/caf\xe9",
                                address_of body, address_of code) == HTTP_BAD_URL &&
                           http_fetch_to((string_address)"http://127.0.0.1:1/%0d",
-                                        -1, false, address_of code) == HTTP_BAD_URL);
+                                        -1, false, address_of code, null) == HTTP_BAD_URL);
 
                 /* Absolute Location that already fills the next-URL buffer. */
                 {
@@ -60945,19 +61014,19 @@ static fn fetching_for_real(void)
 
                 {
                         status = http_fetch_to(url, -1, false,
-                                               address_of code);
+                                               address_of code, null);
                         check("a streaming 204 succeeds without writing its forbidden body",
                               status == HTTP_OK && code == 204);
                         status = http_fetch_to(url, -1, false,
-                                               address_of code);
+                                               address_of code, null);
                         check("a terminal 304 is not redirected or accepted as a download",
                               status == HTTP_STATUS && code == 304);
                         status = http_fetch_to(url, -1, false,
-                                               address_of code);
+                                               address_of code, null);
                         check("a 305 Location is not followed",
                               status == HTTP_STATUS && code == 305);
                         status = http_fetch_to(url, -1, false,
-                                               address_of code);
+                                               address_of code, null);
                         check("a 306 Location is not followed",
                               status == HTTP_STATUS && code == 306);
                 }
@@ -61020,9 +61089,10 @@ static fn fetching_for_real(void)
         system_wait4_retry((b32)child, null, 0, null);
         socket_close((b32)listening);
 
-        /* HTTP_HOPS: wget follows through nine redirects, then refuses a
-           tenth that still points elsewhere. Location stays on this
-           listener so the hop count is the only thing under test. */
+        /* HTTP_HOPS: wget follows through twenty redirects, as GNU wget
+           does, then refuses a twenty-first that still points elsewhere.
+           Location stays on this listener so the hop count is the only
+           thing under test. */
         {
                 socket_address_internet hops_where;
                 p32 hops_size = sizeof hops_where;
@@ -61065,8 +61135,8 @@ static fn fetching_for_real(void)
                         p8 answer_ok[] = "HTTP/1.1 200 OK\r\n"
                                          "Content-Length: 0\r\n"
                                          "\r\n";
-                        /* Nine redirects then a final body, then ten
-                           redirects that never land. */
+                        /* Twenty redirects then a final body, then
+                           twenty-one redirects that never land. */
                         positive answers = HTTP_HOPS - 1 + 1 + HTTP_HOPS;
 
                         for (positive at = 0; at < answers; at++)
@@ -61105,12 +61175,12 @@ static fn fetching_for_real(void)
                         url[url_used++] = '/';
                         url[url_used] = end;
 
-                        status = http_fetch_to(url, -1, false, address_of code);
-                        check("nine redirects then a final response succeed",
+                        status = http_fetch_to(url, -1, false, address_of code, null);
+                        check("twenty redirects then a final response succeed",
                               status == HTTP_OK && code == 200);
 
-                        status = http_fetch_to(url, -1, false, address_of code);
-                        check("ten redirects still pointing elsewhere are refused",
+                        status = http_fetch_to(url, -1, false, address_of code, null);
+                        check("twenty-one redirects still pointing elsewhere are refused",
                               status == HTTP_REDIRECTS);
                 }
 
@@ -61187,13 +61257,15 @@ static fn fetching_for_real(void)
                         p8 answer_ok[] = "HTTP/1.1 200 OK\r\n"
                                          "Content-Length: 0\r\n"
                                          "\r\n";
-                        /* Nine absolute redirects then a final body, then
-                           ten absolute redirects that never land. */
+                        /* Twenty absolute redirects then a final body,
+                           then twenty-one absolute redirects that never
+                           land. */
                         positive answers = HTTP_HOPS - 1 + 1 + HTTP_HOPS;
 
                         for (positive at = 0; at < answers; at++)
                         {
-                                bool on_a = (at & 1) == 0;
+                                //      Each fetch starts on 127.0.0.1.
+                                bool on_a = ((at < HTTP_HOPS ? at : at - HTTP_HOPS) & 1) == 0;
                                 bipolar listening = on_a ? listen_a : listen_b;
                                 p16 next_port = on_a ? port_b : port_a;
                                 string_address next_host =
@@ -61259,12 +61331,12 @@ static fn fetching_for_real(void)
                         url[url_used++] = '/';
                         url[url_used] = end;
 
-                        status = http_fetch_to(url, -1, false, address_of code);
-                        check("nine absolute multi-host redirects then a final response succeed",
+                        status = http_fetch_to(url, -1, false, address_of code, null);
+                        check("twenty absolute multi-host redirects then a final response succeed",
                               status == HTTP_OK && code == 200);
 
-                        status = http_fetch_to(url, -1, false, address_of code);
-                        check("ten absolute multi-host redirects are refused before a landing",
+                        status = http_fetch_to(url, -1, false, address_of code, null);
+                        check("twenty-one absolute multi-host redirects are refused before a landing",
                               status == HTTP_REDIRECTS);
                 }
 
@@ -61346,7 +61418,7 @@ static fn fetching_for_real(void)
                         url[url_used] = end;
 
                         check("a redirect Location of HTTP_URL_MAX is refused end to end",
-                              http_fetch_to(url, -1, false, address_of code) ==
+                              http_fetch_to(url, -1, false, address_of code, null) ==
                                   HTTP_BAD_URL);
                 }
 
@@ -76227,47 +76299,68 @@ static fn storage_test_dhcp_apart(void)
                       -ECHILD);
 }
 
-/* A restarted watcher meets the address its predecessor installed: the
-   exclusive create answers EEXIST. In a user, network and mount namespace
-   of its own (lo up, the address added first, a tmpfs over /etc for the
-   resolver), the lease must be taken, held without ownership, and released
-   without removing an address it never owned. NOT RUN without namespaces. */
-static fn storage_test_lease_over_existing(void)
+/* A user, network and mount namespace of the caller's own, which must be
+   a child: lo up, a tmpfs over /etc for the resolver file a lease writes,
+   and a routing socket, or exit 2 (NOT RUN) where namespaces are refused. */
+static bipolar storage_test_net_namespace(void)
+{
+        p8 map[48] = "0 ";
+        p8 groups[48] = "0 ";
+        bipolar handle;
+        //      The ids outside, read before the namespace hides them; a
+        //      file made under an unmapped id is EOVERFLOW.
+        positive at = 2 + positive_into(
+            map + 2, (positive)system_call_1(syscall(getuid), 0));
+        positive group = 2 + positive_into(
+            groups + 2, (positive)system_call_1(syscall(getgid), 0));
+
+        if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWNET |
+                                                CLONE_NEWNS) < 0)
+                system_call_1(syscall(exit_group), 2);
+        memory_copy(map + at, " 1\n", 4);
+        memory_copy(groups + group, " 1\n", 4);
+        if (!storage_test_write_text("/proc/self/uid_map", map, at + 3) ||
+            !storage_test_write_text("/proc/self/setgroups", "deny", 4) ||
+            !storage_test_write_text("/proc/self/gid_map", groups, group + 3) ||
+            system_call_5(syscall(mount), 0, (positive) "/", 0, MS_REC | MS_PRIVATE, 0) < 0 ||
+            system_call_5(syscall(mount), (positive) "tmpfs", (positive) "/etc",
+                          (positive) "tmpfs", 0, 0) < 0 ||
+            (handle = netlink_open_groups(0)) < 0 ||
+            netlink_link_up((b32)handle, 1) < 0)
+                system_call_1(syscall(exit_group), 2);
+        return handle;
+}
+
+//      A child's exit status, 2 being NOT RUN.
+static b32 storage_test_child_status(bipolar child)
 {
         b32 status = 0;
+
+        if (child < 0)
+                return -1;
+        system_call_4(syscall(wait4), (positive)child, (positive)address_of status,
+                      0, 0);
+        return (status & 0x7f) ? -1 : (status >> 8) & 0xff;
+}
+
+/* A restarted watcher meets the address its predecessor installed: the
+   exclusive create answers EEXIST. An operator's address there (added
+   first, no lease stamped on it) must be taken, held without ownership,
+   and released without removing an address it never owned. */
+static fn storage_test_lease_over_existing(void)
+{
         bipolar child = system_fork();
 
         if (child == 0)
         {
-                p8 map[48] = "0 ";
-                p8 groups[48] = "0 ";
                 p8 hardware[6] = {2, 0, 0, 0, 0, 1};
                 dhcp_lease lease = {.address = 0x0a090909, .mask = 0xffffff00,
                                     .server = 0x0a090901, .seconds = 60,
                                     .renewal = 30, .rebinding = 52};
                 net_holding held = {0};
-                bipolar handle;
-                //      The ids outside, read before the namespace hides them;
-                //      a file made under an unmapped id is EOVERFLOW.
-                positive at = 2 + positive_into(
-                    map + 2, (positive)system_call_1(syscall(getuid), 0));
-                positive group = 2 + positive_into(
-                    groups + 2, (positive)system_call_1(syscall(getgid), 0));
+                bipolar handle = storage_test_net_namespace();
 
-                if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWNET |
-                                                        CLONE_NEWNS) < 0)
-                        system_call_1(syscall(exit_group), 2);
-                memory_copy(map + at, " 1\n", 4);
-                memory_copy(groups + group, " 1\n", 4);
-                if (!storage_test_write_text("/proc/self/uid_map", map, at + 3) ||
-                    !storage_test_write_text("/proc/self/setgroups", "deny", 4) ||
-                    !storage_test_write_text("/proc/self/gid_map", groups, group + 3) ||
-                    system_call_5(syscall(mount), 0, (positive) "/", 0, MS_REC | MS_PRIVATE, 0) < 0 ||
-                    system_call_5(syscall(mount), (positive) "tmpfs", (positive) "/etc",
-                                  (positive) "tmpfs", 0, 0) < 0 ||
-                    (handle = netlink_open_groups(0)) < 0 ||
-                    netlink_link_up((b32)handle, 1) < 0 ||
-                    netlink_address_add((b32)handle, 1, lease.address, 24) < 0)
+                if (netlink_address_add((b32)handle, 1, lease.address, 24) < 0)
                         system_call_1(syscall(exit_group), 2);
                 if (net_apply_lease((b32)handle, 1, "lo", hardware, address_of lease,
                                     address_of held, false) != 0 ||
@@ -76279,14 +76372,304 @@ static fn storage_test_lease_over_existing(void)
                                                              24) == 0
                                   ? 0 : 3);
         }
-        if (child > 0)
-                system_call_4(syscall(wait4), (positive)child,
-                              (positive)address_of status, 0, 0);
-        if (child > 0 && status == 2 << 8)
+        b32 status = storage_test_child_status(child);
+        if (status == 2)
                 log_direct(str("storage_io: lease over an existing address NOT RUN -- no namespaces\n"));
         else
                 check("a lease over an address already there is taken, held unowned and left",
-                      child > 0 && status == 0);
+                      status == 0);
+}
+
+typedef struct
+{
+        p32 host;
+        bool found;
+        p32 valid;
+} storage_test_address_facts;
+
+static bool storage_test_address_seen(netlink_header address_to header,
+                                      address_any context)
+{
+        storage_test_address_facts address_to facts = context;
+        positive size = 0;
+        p8 address_to named = netlink_find(header, sizeof(netlink_address),
+                                           IFA_LOCAL, address_of size);
+        p8 address_to cache;
+
+        if (!named || size != 4 ||
+            memory_load_unaligned(p32, named) != network_order_32(facts->host))
+                return true;
+        facts->found = true;
+        cache = netlink_find(header, sizeof(netlink_address), IFA_CACHEINFO,
+                             address_of size);
+        facts->valid = cache && size >= 8 ? memory_load_unaligned(p32, cache + 4)
+                                         : 0;
+        return true;
+}
+
+/* The same address when the lease stamped it: a restarted watcher takes it
+   back, so a NAK or expiry removes it, and the kernel holds it to the
+   lease's lifetime on its own. A restarted watcher handed another address
+   removes the lease it inherited instead, and a one-shot ip auto, which
+   nothing renews, installs its address as it always did. Exit 4: no finite
+   lifetime; 5: not taken back; 6: not removed on release; 7: an inherited
+   lease outlived a new one; 8: a one-shot address expires. */
+static fn storage_test_lease_inherited(void)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                p8 hardware[6] = {2, 0, 0, 0, 0, 1};
+                dhcp_lease lease = {.address = 0x0a090a0a, .mask = 0xffffff00,
+                                    .server = 0x0a090a01, .seconds = 60,
+                                    .renewal = 30, .rebinding = 52};
+                dhcp_lease other = lease;
+                net_holding first = {0};
+                net_holding second = {0};
+                net_holding third = {0};
+                storage_test_address_facts facts = {.host = lease.address};
+                storage_test_address_facts moved = {.host = 0x0a090a0b};
+                bipolar handle = storage_test_net_namespace();
+
+                if (net_apply_lease((b32)handle, 1, "lo", hardware, address_of lease,
+                                    address_of first, false) != 0 ||
+                    !first.address_owned)
+                        system_call_1(syscall(exit_group), 1);
+                netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
+                             AF_INET, storage_test_address_seen, address_of facts);
+                if (!facts.found || !facts.valid || facts.valid > 60)
+                        system_call_1(syscall(exit_group), 4);
+                if (net_apply_lease((b32)handle, 1, "lo", hardware, address_of lease,
+                                    address_of second, false) != 0 ||
+                    !second.address_owned)
+                        system_call_1(syscall(exit_group), 5);
+                other.address = moved.host;
+                facts.found = false;
+                if (net_apply_lease((b32)handle, 1, "lo", hardware, address_of other,
+                                    address_of third, false) != 0 ||
+                    netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
+                                 AF_INET, storage_test_address_seen,
+                                 address_of facts) < 0 ||
+                    facts.found)
+                        system_call_1(syscall(exit_group), 7);
+                if (net_holding_release((b32)handle, address_of third) != 0 ||
+                    netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
+                                 AF_INET, storage_test_address_seen,
+                                 address_of moved) < 0 ||
+                    moved.found)
+                        system_call_1(syscall(exit_group), 6);
+                other.address = 0x0a090a0c;
+                moved.host = other.address;
+                if (net_apply_lease((b32)handle, 1, "lo", hardware, address_of other,
+                                    null, false) != 0 ||
+                    netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
+                                 AF_INET, storage_test_address_seen,
+                                 address_of moved) < 0 ||
+                    !moved.found || moved.valid != 0xffffffff)
+                        system_call_1(syscall(exit_group), 8);
+                system_call_1(syscall(exit_group), 0);
+        }
+        b32 status = storage_test_child_status(child);
+        if (status == 2)
+                log_direct(str("storage_io: inherited lease NOT RUN -- no namespaces\n"));
+        else
+        {
+                check("a leased address carries the lease's lifetime",
+                      status != 4 && status != 1);
+                check("a restarted watcher takes back the address its predecessor leased",
+                      status != 5 && status != 1);
+                check("a restarted watcher handed another address removes the one it inherited",
+                      status != 7 && status != 5 && status != 4 && status != 1);
+                check("an inherited lease is removed when it is released",
+                      status != 6 && status != 7 && status != 5 && status != 4 &&
+                          status != 1);
+                check("a one-shot ip auto address keeps no lifetime",
+                      status == 0);
+        }
+}
+
+/* A dummy link of the namespace's own, whose carrier can be set. */
+static bipolar storage_test_dummy(b32 handle, string_address name)
+{
+        netlink_buffer request = {0};
+        p32 sequence = netlink_sequence_take();
+        //      IFLA_LINKINFO's payload: IFLA_INFO_KIND "dummy", padded.
+        static const p8 kind[12] = {10, 0, IFLA_INFO_KIND, 0,
+                                    'd', 'u', 'm', 'm', 'y', 0, 0, 0};
+
+        if (!netlink_begin(address_of request, RTM_NEWLINK,
+                           NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_EXCLUSIVE,
+                           sequence, sizeof(netlink_link)))
+                return -1;
+        netlink_attribute_add(address_of request, IFLA_IFNAME, name,
+                              string_length(name) + 1);
+        netlink_attribute_add(address_of request, IFLA_LINKINFO,
+                              (address_any)kind, sizeof kind);
+        return netlink_transact(handle, address_of request, sequence, null, null);
+}
+
+#define STORAGE_TEST_IFLA_CARRIER 33
+
+//      IFLA_CARRIER (one byte) or IFLA_MTU set on a link.
+static bipolar storage_test_link_set(b32 handle, p32 index, p16 type, p32 value)
+{
+        netlink_buffer request = {0};
+        p32 sequence = netlink_sequence_take();
+        p8 carrier = (p8)value;
+
+        if (!netlink_begin(address_of request, RTM_NEWLINK,
+                           NLM_REQUEST | NLM_ACK, sequence, sizeof(netlink_link)))
+                return -1;
+        ((netlink_link address_to)netlink_body(address_of request))->index = index;
+        if (type == STORAGE_TEST_IFLA_CARRIER)
+                netlink_attribute_add(address_of request, type, address_of carrier, 1);
+        else
+                netlink_attribute_add(address_of request, type, address_of value, 4);
+        return netlink_transact(handle, address_of request, sequence, null, null);
+}
+
+/* The news a link change made, fed to the watcher as it would read it:
+   every datagram that comes within the wait, which ends early once the
+   lease is lost. Carrier news goes through linkwatch, up to a second late. */
+static fn storage_test_link_news(b32 events, net_holding address_to held,
+                                 positive nanoseconds)
+{
+        netlink_buffer message = {0};
+        network_deadline deadline;
+
+        if (!network_deadline_begin(address_of deadline, nanoseconds /
+                                        NETWORK_NANOSECONDS,
+                                    nanoseconds % NETWORK_NANOSECONDS))
+                return;
+        while (!held->lost &&
+               network_wait_readable_until(events, address_of deadline) > 0 &&
+               netlink_receive(events, address_of message, null) > 0)
+                for (positive at = 0; at + NETLINK_HEADER <= message.used;)
+                {
+                        netlink_header address_to header =
+                            (netlink_header address_to)(message.bytes + at);
+
+                        if (header->length < NETLINK_HEADER ||
+                            at + header->length > message.used)
+                                break;
+                        at += netlink_align(header->length);
+                        (void)net_link_event(header, held);
+                }
+        netlink_forget(address_of message);
+}
+
+/* A cable pulled and put back while the watcher was busy: both events are
+   read after the carrier is back, and only the kernel's count of carrier
+   losses says the link went away -- perhaps into another network. Other
+   news about the link (an MTU change) is not a loss. Exit 4: an MTU change
+   lost the lease; 5: the bounce did not. */
+static fn storage_test_carrier_bounce(void)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                bipolar handle = storage_test_net_namespace();
+                netlink_search link = {.wanted = (string_address) "wd0"};
+                net_holding held = {0};
+                bipolar events;
+
+                if (storage_test_dummy((b32)handle, "wd0") < 0 ||
+                    netlink_link_find((b32)handle, address_of link) < 0 ||
+                    netlink_link_up((b32)handle, link.index) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                //      A kernel, or an emulator, that keeps no count is
+                //      not a failure of the watcher's.
+                if (netlink_link_find((b32)handle, address_of link) < 0 ||
+                    !link.carrier_counted ||
+                    (events = netlink_open_groups(RTNLGRP_LINK_MASK)) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                held.index = link.index;
+                held.lease.address = 0x0a090b0b;
+                held.lease.seconds = 60;
+                held.carrier_counted = link.carrier_counted;
+                held.carrier_downs = link.carrier_downs;
+                string_copy_max_end(held.name, "wd0", IFNAME_SIZE - 1);
+                storage_test_link_set((b32)handle, link.index, IFLA_MTU, 1400);
+                storage_test_link_news((b32)events, address_of held, 1500000000);
+                if (held.lost)
+                        system_call_1(syscall(exit_group), 4);
+                storage_test_link_set((b32)handle, link.index,
+                                      STORAGE_TEST_IFLA_CARRIER, 0);
+                storage_test_link_set((b32)handle, link.index,
+                                      STORAGE_TEST_IFLA_CARRIER, 1);
+                storage_test_link_news((b32)events, address_of held, 3000000000);
+                system_call_1(syscall(exit_group), held.lost ? 0 : 5);
+        }
+        b32 status = storage_test_child_status(child);
+        if (status == 2)
+                log_direct(str("storage_io: carrier bounce NOT RUN -- no namespaces or dummy links\n"));
+        else
+        {
+                check("other news about the held link keeps the lease",
+                      status != 4 && status != 1);
+                check("a carrier lost and back while the watcher was busy loses the lease",
+                      status == 0);
+        }
+        netlink_forget(address_of net_states);
+}
+
+/* Link news faster than the watcher reads it: the kernel drops what does
+   not fit and says ENOBUFS, which must not end the watcher -- it asks
+   again instead, and forgets every carrier snapshot, where reading the
+   news would have kept one for the link. Exit 4: the watcher gave up; 5:
+   it read on as if nothing were lost. */
+static fn storage_test_link_news_overrun(void)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                bipolar handle = storage_test_net_namespace();
+                netlink_search link = {.wanted = (string_address) "wd1"};
+                netlink_buffer message = {0};
+                net_holding held = {0};
+                b32 small = 1;
+                bipolar events = netlink_open_groups(RTNLGRP_LINK_MASK);
+
+                if (events < 0 || storage_test_dummy((b32)handle, "wd1") < 0 ||
+                    netlink_link_find((b32)handle, address_of link) < 0 ||
+                    socket_option_set((b32)events, SOL_SOCKET, SO_RCVBUF,
+                                      address_of small, sizeof small) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                //      Every MTU change is news at once, where carrier news
+                //      waits on linkwatch and folds together.
+                for (positive flip = 0; flip < 64; flip++)
+                        storage_test_link_set((b32)handle, link.index, IFLA_MTU,
+                                              flip & 1 ? 1400 : 1500);
+                //      Gone again, so the resync finds nothing to ask a
+                //      lease for.
+                {
+                        netlink_buffer request = {0};
+                        p32 sequence = netlink_sequence_take();
+
+                        if (netlink_begin(address_of request, RTM_DELLINK,
+                                          NLM_REQUEST | NLM_ACK, sequence,
+                                          sizeof(netlink_link)))
+                        {
+                                ((netlink_link address_to)netlink_body(
+                                     address_of request))->index = link.index;
+                                netlink_transact((b32)handle, address_of request,
+                                                 sequence, null, null);
+                        }
+                }
+                if (net_watch_events((b32)events, address_of message,
+                                     address_of held) < 0)
+                        system_call_1(syscall(exit_group), 4);
+                system_call_1(syscall(exit_group), net_states.used ? 5 : 0);
+        }
+        b32 status = storage_test_child_status(child);
+        if (status == 2)
+                log_direct(str("storage_io: link news overrun NOT RUN -- no namespaces or dummy links\n"));
+        else
+                check("dropped link news resyncs the watcher instead of ending it",
+                      status == 0);
 }
 
 static fn storage_test_netlink_output(void)
@@ -76626,7 +77009,7 @@ static fn storage_test_wget_304(string_address target)
                     "wget", "-q", "-O", target, url, null};
                 program_arguments_use(words, 5);
                 check("wget refuses a terminal 304",
-                      net_wget() == 1);
+                      net_wget() == 8);
                 if (saved_words)
                         program_arguments_use(saved_words, saved_count);
                 else
@@ -76935,6 +77318,9 @@ b32 main(void)
         storage_test_lease_clock_origin();
         storage_test_dhcp_apart();
         storage_test_lease_over_existing();
+        storage_test_lease_inherited();
+        storage_test_carrier_bounce();
+        storage_test_link_news_overrun();
         storage_test_netlink_output();
         storage_test_net_files();
         return test_report(null);

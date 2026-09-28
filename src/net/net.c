@@ -87,6 +87,7 @@
 #define IFLA_WIRELESS 11
 #define IFLA_LINKINFO 18
 #define IFLA_INFO_KIND 1
+#define IFLA_CARRIER_DOWN_COUNT 48
 #define NLA_TYPE_MASK 0x3fff
 
 #define NETLINK_PREFER_ANY 0
@@ -96,6 +97,11 @@
 #define IFA_ADDRESS 1
 #define IFA_LOCAL 2
 #define IFA_LABEL 3
+#define IFA_CACHEINFO 6
+#define IFA_PROTO 11
+//      What the DHCP client stamps on an address it leases: the routing
+//      protocol number iproute2 calls dhcp.
+#define IFA_PROTO_DHCP 16
 
 #define RTA_DST 1
 #define RTA_OIF 4
@@ -529,7 +535,9 @@ static COLD bipolar netlink_transact(b32 handle, netlink_buffer address_to reque
         with EBUSY -- which arrives long after the abandoned one, attached to
         an innocent request, and reads as though the second question were the
         problem. So the remaining messages are drawn and dropped, and the
-        socket is handed back clean.
+        socket is handed back clean. An interrupted dump is drained the same
+        way before it fails: it returned at its first marked message and left
+        the rest of the dump on the socket.
 */
 static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
                             p32 sequence, netlink_buffer address_to reply,
@@ -538,6 +546,7 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
         netlink_header address_to header;
         network_deadline deadline;
         bool enough = false;
+        bool interrupted = false;
         bipolar sent;
         positive at;
 
@@ -595,16 +604,21 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
                                 continue;
                         }
 
-                        if (header->flags & NLM_DUMP_INTERRUPTED)
-                                return -1;
+                        interrupted |= (header->flags &
+                                        NLM_DUMP_INTERRUPTED) != 0;
 
                         if (header->type == NLMSG_IS_DONE)
-                                return netlink_status(header, true);
+                        {
+                                bipolar status = netlink_status(header, true);
+
+                                return interrupted && !status ? -1 : status;
+                        }
 
                         if (header->type == NLMSG_IS_ERROR)
                                 return netlink_status(header, false);
 
-                        if (!enough && header->type != NLMSG_IS_NOOP && visit &&
+                        if (!enough && !interrupted &&
+                            header->type != NLMSG_IS_NOOP && visit &&
                             !visit(header, context))
                                 enough = true;
 
@@ -725,6 +739,9 @@ typedef struct
         bool skip_loopback;
         bool has_hardware;
         bool wireless;
+        //      The kernel's count of carrier losses, where it says one.
+        bool carrier_counted;
+        p32 carrier_downs;
         p8 name[IFNAME_SIZE];
         p8 hardware[6];
 } netlink_search;
@@ -744,6 +761,23 @@ static inline INLINE string_address netlink_link_name(
         name = (string_address)netlink_find(
             header, sizeof(netlink_link), IFLA_IFNAME, address_of length);
         return name && length && memory_first_of(name, 0, length) ? name : null;
+}
+
+/* IFLA_CARRIER_DOWN_COUNT, which counts every loss of carrier: a cable
+   pulled and put back -- into another network, perhaps -- leaves it higher
+   even after both events have passed. */
+static bool netlink_link_carrier_downs(netlink_header address_to header,
+                                       p32 address_to downs)
+{
+        positive width = 0;
+        p8 address_to count = (p8 address_to)netlink_find(
+            header, sizeof(netlink_link), IFLA_CARRIER_DOWN_COUNT,
+            address_of width);
+
+        if (!count || width != 4)
+                return false;
+        address_to downs = memory_load_unaligned(p32, count);
+        return true;
 }
 
 static bool netlink_link_is_wireless(netlink_header address_to header,
@@ -851,6 +885,8 @@ static bool netlink_link_seen(netlink_header address_to header, address_any cont
                         search->has_hardware = true;
                 }
         }
+        search->carrier_counted = netlink_link_carrier_downs(
+            header, address_of search->carrier_downs);
 
         return search->skip_loopback;
 }
@@ -904,9 +940,15 @@ static bipolar netlink_link_up(b32 handle, p32 index)
         REPLACE rather than EXCLUSIVE, so running the same command twice is
         the same as running it once. A boot that is retried should not fail
         because the first attempt succeeded.
+
+        A leased address carries the lease: seconds, when not zero, are its
+        valid and preferred lifetimes -- so the kernel removes it at expiry
+        even with no client left to -- and IFA_PROTO_DHCP says whose it is,
+        which is how a restarted client knows the address it inherited.
 */
 static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
-                                      p32 index, p32 host, p8 prefix)
+                                      p32 index, p32 host, p8 prefix,
+                                      p32 seconds)
 {
         netlink_buffer request = {0};
         netlink_address address_to body;
@@ -925,6 +967,18 @@ static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
 
         netlink_attribute_add(address_of request, IFA_LOCAL, address_of wire, 4);
         netlink_attribute_add(address_of request, IFA_ADDRESS, address_of wire, 4);
+        if (seconds)
+        {
+                //      ifa_cacheinfo: preferred, valid, and two stamps the
+                //      kernel keeps for itself.
+                p32 lifetimes[4] = {seconds, seconds, 0, 0};
+                p8 leased = IFA_PROTO_DHCP;
+
+                netlink_attribute_add(address_of request, IFA_CACHEINFO,
+                                      lifetimes, sizeof lifetimes);
+                netlink_attribute_add(address_of request, IFA_PROTO,
+                                      address_of leased, 1);
+        }
 
         return netlink_transact(handle, address_of request, sequence,
                                 null, null);
@@ -932,7 +986,16 @@ static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
 
 #define netlink_address_add(handle, index, host, prefix) netlink_address_change( \
         handle, RTM_NEWADDR, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_REPLACE,   \
-        index, host, prefix)
+        index, host, prefix, 0)
+
+/* A leased address, created exclusively or put in place of the one there,
+   its lifetimes the lease's. */
+#define netlink_address_lease(handle, index, host, prefix, seconds, exclusive) \
+        netlink_address_change(                                                \
+            handle, RTM_NEWADDR,                                                \
+            NLM_REQUEST | NLM_ACK | NLM_CREATE |                                \
+                ((exclusive) ? NLM_EXCLUSIVE : NLM_REPLACE),                    \
+            index, host, prefix, seconds)
 
 /* Automatic configuration must acquire a kernel object before it can later
    claim the right to remove it.  EXCLUSIVE distinguishes a newly installed
@@ -940,10 +1003,10 @@ static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
    another network manager; REPLACE cannot make that distinction. */
 #define netlink_address_acquire(handle, index, host, prefix) netlink_address_change( \
         handle, RTM_NEWADDR, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_EXCLUSIVE,     \
-        index, host, prefix)
+        index, host, prefix, 0)
 
 #define netlink_address_delete(handle, index, host, prefix) netlink_address_change( \
-        handle, RTM_DELADDR, NLM_REQUEST | NLM_ACK, index, host, prefix)
+        handle, RTM_DELADDR, NLM_REQUEST | NLM_ACK, index, host, prefix, 0)
 
 /*
         A route, with a destination of no bits at all being the default one.
@@ -1032,6 +1095,64 @@ static bipolar netlink_dump(b32 handle, p16 type, positive body, p8 family,
                                 visit, context);
 }
 
+#define NETLINK_LEASES_MAX 8
+
+/* The addresses on one link stamped as this client's leases: whether one
+   is the address asked about, and the others, up to a handful. */
+typedef struct
+{
+        p32 index;
+        p32 host;
+        p8 prefix;
+        bool leased;
+        positive others;
+        p32 other_host[NETLINK_LEASES_MAX];
+        p8 other_prefix[NETLINK_LEASES_MAX];
+} netlink_lease_search;
+
+static COLD bool netlink_lease_seen(netlink_header address_to header,
+                                    address_any context)
+{
+        netlink_lease_search address_to search =
+            (netlink_lease_search address_to)context;
+        netlink_address address_to body =
+            netlink_message_body(header, sizeof(netlink_address));
+        positive size = 0;
+        p8 address_to named;
+        p8 address_to protocol;
+        p32 host;
+
+        if (!body || body->family != AF_INET || body->index != search->index)
+                return true;
+        protocol = (p8 address_to)netlink_find(header, sizeof(netlink_address),
+                                               IFA_PROTO, address_of size);
+        if (!protocol || size != 1 || protocol[0] != IFA_PROTO_DHCP)
+                return true;
+        named = (p8 address_to)netlink_find(header, sizeof(netlink_address),
+                                            IFA_LOCAL, address_of size);
+        if (!named || size != 4)
+                return true;
+        host = network_order_32(memory_load_unaligned(p32, named));
+        if (host == search->host && body->prefix == search->prefix)
+                search->leased = true;
+        else if (search->others < NETLINK_LEASES_MAX)
+        {
+                search->other_host[search->others] = host;
+                search->other_prefix[search->others++] = body->prefix;
+        }
+        return true;
+}
+
+/* Which addresses on a link are leases this client put there -- what a
+   restarted watcher inherits from the one before it -- as against anybody
+   else's, an operator's static address included. */
+static COLD bipolar netlink_leases_on(b32 handle,
+                                      netlink_lease_search address_to search)
+{
+        return netlink_dump(handle, RTM_GETADDR, sizeof(netlink_address),
+                            AF_INET, netlink_lease_seen, search);
+}
+
 #endif // STANDARD_MODERN_C_NET_NETLINK
 /* ---- dns: A resolver: a name, and the address behind it ---- */
 
@@ -1090,6 +1211,10 @@ static bipolar netlink_dump(b32 handle, p16 type, positive body, p8 family,
 
 #define DNS_MAX_MESSAGE 4096
 #define DNS_CNAME_HOPS 16
+//      A wire name is at most 255 bytes, so at most 127 labels, and no
+//      encoder needs more jumps than a name has labels.
+#define DNS_NAME_MAX 255
+#define DNS_POINTER_HOPS 127
 //      Everything the caller may want to tell apart.
 #define DNS_OK 0
 #define DNS_NO_SERVER (-1)
@@ -1135,7 +1260,7 @@ static COLD bipolar dns_write_name(p8 address_to into, positive room, string_add
                 name = dot + string_is(dot, '.');
         }
 
-        if (used + 1 > room || used + 1 > 255)
+        if (used + 1 > room || used + 1 > DNS_NAME_MAX)
                 return DNS_MALFORMED;
 
         into[used++] = 0;
@@ -1151,8 +1276,12 @@ static COLD bipolar dns_write_name(p8 address_to into, positive room, string_add
         is two bytes on from where it began however far away the pointer led.
         Each jump lowers the ceiling to its own offset: merely moving
         backwards is insufficient because labels can step forwards to that
-        same pointer again. The spelling is kept as sent; DNS names compare
-        without regard to ASCII case.
+        same pointer again. The ceiling alone still let a chain of pointers,
+        each one two bytes before the last, cost two thousand jumps a name,
+        and a reply of names at the end of such a chain four milliseconds, so
+        the jumps are counted too. A name longer than 255 bytes is refused
+        whatever the room (RFC 1035 3.1). The spelling is kept as sent; DNS
+        names compare without regard to ASCII case.
 */
 static COLD bipolar dns_copy_name(p8 address_to message, positive size,
                              positive at, p8 address_to into, positive room,
@@ -1160,8 +1289,11 @@ static COLD bipolar dns_copy_name(p8 address_to message, positive size,
 {
         positive ceiling = size;
         positive used = 0;
+        positive jumps = 0;
 
         address_to ended = 0;
+        if (room > DNS_NAME_MAX)
+                room = DNS_NAME_MAX;
 
         for (;;)
         {
@@ -1184,7 +1316,7 @@ static COLD bipolar dns_copy_name(p8 address_to message, positive size,
 
                         target = network_load_16(message + at) & 0x3fff;
 
-                        if (target >= at)
+                        if (target >= at || ++jumps > DNS_POINTER_HOPS)
                                 return DNS_MALFORMED;
 
                         ceiling = at;
@@ -1606,6 +1738,7 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
         bipolar got;
         bipolar failure = DNS_NO_REPLY;
         positive question_length;
+        positive left[2];
         network_deadline deadline;
 
         /*
@@ -1658,8 +1791,14 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
                 goto failed;
         }
 
-        if (socket_send((b32)handle, request, DNS_HEADER + question_length,
-                        0, 0, 0) < 0)
+        /* A signal before the datagram left is not the server's silence:
+           send it again, within the same budget. */
+        do
+                written = socket_send((b32)handle, request,
+                                      DNS_HEADER + question_length, 0, 0, 0);
+        while (written == NETWORK_INTERRUPTED &&
+               network_deadline_left(address_of deadline, left, left + 1));
+        if (written < 0)
                 goto failed;
 
         /* A connected UDP socket authenticates the source address, not the
@@ -8034,7 +8173,8 @@ static bipolar tls_read_until(
 #define HTTP_URL_MAX 2048
 #define HTTP_HEAD_MAX 16384
 #define HTTP_FETCH_MAX (16 * 1024 * 1024)
-#define HTTP_HOPS 10
+//      GNU wget's twenty redirects, and the request after the last.
+#define HTTP_HOPS 21
 #define HTTP_IDLE_SECONDS 30
 #define HTTP_HEAD_SECONDS 30
 
@@ -8049,6 +8189,7 @@ static bipolar tls_read_until(
 #define HTTP_DOWNGRADE (-9)
 #define HTTP_STATUS (-10)
 #define HTTP_WRITE (-11)
+#define HTTP_SCHEME (-12)
 
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
@@ -8121,7 +8262,7 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
         if (scheme && url[scheme] == '/' && url[scheme + 1] == '/')
         {
                 if (!http_web_scheme(url, scheme))
-                        return HTTP_BAD_URL;
+                        return HTTP_SCHEME;
                 selected_tls = scheme == 6;
                 at = url + scheme + 2;
         }
@@ -8826,7 +8967,7 @@ static bipolar http_body_borrow(http_body address_to body, positive room,
 
 /* Payload copied into the caller's bytes: the stash's and TLS's through
    http_body_borrow, a plaintext socket's by a read that asks the clock and
-   polls only when nothing is queued yet. */
+   polls only when nothing is queued yet (network_stream_read_some_for). */
 static bipolar http_body_read(http_body address_to body, p8 address_to into,
                               positive room, positive address_to got)
 {
@@ -8847,19 +8988,9 @@ static bipolar http_body_read(http_body address_to body, p8 address_to into,
                 return HTTP_OK;
         }
 
-        n = socket_receive((b32)body->link->handle, into, room, MSG_DONTWAIT,
-                           null, 0);
-        if (n == NETWORK_TRY_AGAIN || n == NETWORK_INTERRUPTED)
-        {
-                network_deadline deadline;
-
-                if (!network_deadline_begin(address_of deadline,
-                                            http_body_seconds(body),
-                                            body->read_nanoseconds))
-                        return HTTP_NO_REPLY;
-                n = network_stream_read_some_until(body->link->handle, into,
-                                                   room, address_of deadline);
-        }
+        n = network_stream_read_some_for(body->link->handle, into, room,
+                                         http_body_seconds(body),
+                                         body->read_nanoseconds);
         if (n < 0 || (positive)n > room)
                 return HTTP_NO_REPLY;
         address_to got = (positive)n;
@@ -9318,14 +9449,16 @@ static bipolar http_absolutize(bool tls, string_address host, p16 port,
 
         /* An absolute reference is http or https followed by "//", in any
            case; http_split_into reads the rest.  Any other scheme -- ftp:,
-           javascript:, a bare "http:path" -- is refused rather than taken
-           for a relative path on the current host.  A network-path "//host"
-           keeps the current scheme. */
+           javascript:, a bare "http:path" -- is an unsupported scheme, as
+           GNU wget names it, never a relative path on the current host.  A
+           network-path "//host" keeps the current scheme. */
         scheme = http_scheme_length(kept);
         if (scheme)
         {
                 if (!http_web_scheme(kept, scheme) || kept[scheme] != '/' ||
-                    kept[scheme + 1] != '/' || length >= room)
+                    kept[scheme + 1] != '/')
+                        return HTTP_SCHEME;
+                if (length >= room)
                         return HTTP_BAD_URL;
                 memory_copy_apart_end(into, kept, length);
                 return HTTP_OK;
@@ -9362,6 +9495,72 @@ static bipolar http_absolutize(bool tls, string_address host, p16 port,
         memory_copy_apart(merged, base, used);
         memory_copy_apart_end(merged + used, kept, length);
         return http_put_url(into, room, tls, host, port, merged);
+}
+
+/* 1 for a "." segment, 2 for "..", either spelled with %2e as well, as
+   GNU wget and a browser read them; 0 for any other. */
+static positive http_dot_segment(string_address segment, positive length)
+{
+        positive dots = 0;
+
+        for (positive at = 0; at < length; dots++)
+        {
+                if (segment[at] == '.')
+                        at++;
+                else if (length - at >= 3 && segment[at] == '%' &&
+                         segment[at + 1] == '2' && (segment[at + 2] | 0x20) == 'e')
+                        at += 3;
+                else
+                        return 0;
+        }
+        return dots <= 2 ? dots : 0;
+}
+
+/* RFC 3986 5.2.4's remove_dot_segments over the path in front of a query,
+   in place, where the path starts with '/': GNU wget and curl resolve the
+   dot segments of every URL and Location rather than asking the server to,
+   and a path climbing above the root stays at it. Output never outruns
+   input, so each segment moves down over what was dropped. */
+static fn http_path_simplify(p8 address_to path)
+{
+        positive length = string_span_without_set(path, "?#");
+        positive read = 0;
+        positive wrote = 0;
+
+        if (path[0] != '/')
+                return;
+        while (read < length)
+        {
+                positive start = read + 1;
+                positive stop = start + memory_span_without_byte(
+                                            path + start, '/', length - start);
+                positive dots = http_dot_segment((string_address)path + start,
+                                                 stop - start);
+
+                if (!dots)
+                {
+                        //      Nothing moves until something was dropped,
+                        //      so a path with no dot segment -- the root
+                        //      http_split_into names as a literal, too --
+                        //      is never written.
+                        if (wrote != read)
+                                memory_copy(path + wrote, path + read,
+                                            stop - read);
+                        wrote += stop - read;
+                }
+                else
+                {
+                        //      ".." drops the last segment written.
+                        while (dots == 2 && wrote && path[--wrote] != '/')
+                                ;
+                        if (stop == length)
+                                path[wrote++] = '/';
+                }
+                read = stop;
+        }
+        if (wrote != length)
+                memory_copy(path + wrote, path + length,
+                            string_length(path + length) + 1);
 }
 
 /* Once a redirect chain has reached HTTPS, no later Location may discard
@@ -9527,12 +9726,12 @@ static fn http_url_leaf(string_address path, p8 address_to into, positive room)
         if (query)
                 query[0] = end;
 
-        /* No last segment, ".", or "..": each names a directory, which a
-           file cannot replace, and GNU wget saves all three as index.html. */
+        /* No last segment, ".", or "..", %2e spellings too: each names a
+           directory, which a file cannot replace, and GNU wget saves all
+           three as index.html. */
         slash = string_last_of(target, '/');
         path = slash ? slash + 1 : target;
-        if (!string_get(path) || string_equals(path, (string_address) ".") ||
-            string_equals(path, (string_address) ".."))
+        if (!string_get(path) || http_dot_segment(path, string_length(path)))
                 path = (string_address) "index.html";
         string_copy_max_end(into, path, room - 1);
 }
@@ -9570,7 +9769,8 @@ static const http_manners http_manners_wget = {
    actually arrives. */
 static bipolar http_run(string_address start, const http_manners address_to how,
                         bool check_cert, bipolar dest,
-                        http_buffer address_to into, b32 address_to code)
+                        http_buffer address_to into, b32 address_to code,
+                        p8 address_to where)
 {
         p8 url[HTTP_URL_MAX];
         http_buffer whole = {0};
@@ -9602,6 +9802,8 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                    It is the head buffer's first bytes until it is sent. */
                 status = http_split_into(url, host, sizeof host, address_of port,
                                          address_of path, address_of tls);
+                if (!status)
+                        http_path_simplify((p8 address_to)path);
                 if (!status && tls && !how->allow_tls)
                         status = HTTP_TLS;
                 if (!status && !http_transport_allowed(address_of secure, tls))
@@ -9634,25 +9836,26 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                 if (!status && how->follow &&
                     http_response_is_redirect(response.code))
                 {
+                        p8 placed[HTTP_URL_MAX];
+
                         status = !response.location_length ? HTTP_MALFORMED
-                                 : response.location_length >= sizeof next
+                                 : response.location_length >= sizeof placed
                                      ? HTTP_BAD_URL : HTTP_OK;
                         if (!status)
                         {
-                                p8 placed[HTTP_URL_MAX];
-
                                 memory_copy(placed, response.location,
                                             response.location_length);
                                 placed[response.location_length] = end;
                                 status = http_absolutize(tls, host, port, path, placed,
                                                          next, sizeof next);
+                                //      The next hop, or the Location a failure
+                                //      names; both terminate inside a buffer
+                                //      exactly as large as url.
+                                string_copy(url, status ? placed : next);
                         }
                         http_link_close(address_of link);
                         if (status)
                                 goto done;
-                        //      http_absolutize terminates inside next, which is
-                        //      exactly as large as url.
-                        string_copy(url, next);
                         continue;
                 }
 
@@ -9685,6 +9888,9 @@ static bipolar http_run(string_address start, const http_manners address_to how,
         status = HTTP_REDIRECTS;
 
 done:
+        //      Where it ended: the URL a failure names.
+        if (where)
+                string_copy(where, url);
         //      The store path of http_copy terminates what it appends.
         if (into && !status)
         {
@@ -9702,15 +9908,16 @@ static bipolar http_get(string_address url, http_buffer address_to body,
                         b32 address_to code)
 {
         return http_run(url, address_of http_manners_fetch, false, -1, body,
-                        code);
+                        code, null);
 }
 
-//      wget: TLS, redirects, and the body written as it arrives.
+//      wget: TLS, redirects, and the body written as it arrives; where, if
+//      given, is HTTP_URL_MAX bytes and gets the URL the fetch ended on.
 static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert,
-                             b32 address_to code)
+                             b32 address_to code, p8 address_to where)
 {
         return http_run(start, address_of http_manners_wget, check_cert, dest,
-                        null, code);
+                        null, code, where);
 }
 
 #endif // STANDARD_MODERN_C_NET_HTTP

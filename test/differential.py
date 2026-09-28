@@ -38903,20 +38903,17 @@ static bool network_deadline_begin(network_deadline *d, positive s, positive n)
         abort();
         return false;
 }
-#define MSG_DONTWAIT 0x40
-#define NETWORK_INTERRUPTED (-4)
-#define NETWORK_TRY_AGAIN (-11)
-static bipolar socket_receive(b32 h, p8 *into, positive room, int flags,
-                              void *from, positive size)
-{
-        (void)h; (void)into; (void)room; (void)flags; (void)from; (void)size;
-        abort();
-        return -1;
-}
 static bipolar network_stream_read_some_until(bipolar h, p8 *into, positive room,
                                               const network_deadline *d)
 {
         (void)h; (void)into; (void)room; (void)d;
+        abort();
+        return -1;
+}
+static bipolar network_stream_read_some_for(bipolar h, p8 *into, positive room,
+                                            positive s, positive ns)
+{
+        (void)h; (void)into; (void)room; (void)s; (void)ns;
         abort();
         return -1;
 }
@@ -39632,17 +39629,12 @@ static bipolar network_stream_read_some_until(bipolar h, p8 *into, positive room
         return (bipolar)take;
 }
 
-/* A plaintext body read tries the socket without waiting first; now and
-   then nothing is queued, and it has to take the deadline path. */
-#define MSG_DONTWAIT 0x40
-#define NETWORK_INTERRUPTED (-4)
-#define NETWORK_TRY_AGAIN (-11)
-static bipolar socket_receive(b32 h, p8 *into, positive room, int flags,
-                              void *from, positive size)
+/* A plaintext body read waits a length of time rather than to an instant;
+   what it takes is the same segment. */
+static bipolar network_stream_read_some_for(bipolar h, p8 *into, positive room,
+                                            positive s, positive ns)
 {
-        (void)flags; (void)from; (void)size;
-        if (!fuzz_next(4))
-                return fuzz_next(2) ? NETWORK_TRY_AGAIN : NETWORK_INTERRUPTED;
+        (void)s; (void)ns;
         return network_stream_read_some_until(h, into, room, NULL);
 }
 
@@ -39889,7 +39881,7 @@ static void fuzz_run(const p8 *data, positive size, int lane)
         fuzz_requests = 0;
         fuzz_sink_used = 0;
         status = fetch ? http_get((string_address)start, &store, &code)
-                       : http_fetch_to((string_address)start, 7, true, &code);
+                       : http_fetch_to((string_address)start, 7, true, &code, null);
         if (fuzz_requests != fuzz_opened)
                 fuzz_die("a connection was opened with no request written on it");
 
@@ -40116,8 +40108,9 @@ def harness_http_urls(argv):
     host, port and origin-form target, and every URL urlsplit reads that way
     must be accepted. A resolved Location must name what urljoin names, less
     the fragment. DELIBERATE lists where this client refuses what urllib
-    takes; references with dot segments are not generated, since this client
-    sends them to the server as written and urljoin removes them.
+    takes. Paths and references carry dot segments too: the client resolves
+    them before it asks, as GNU wget does (http_path_simplify, %2e spellings
+    included), and the oracle by RFC 3986 5.2.4 over urllib's answer.
 
         python3 test/differential.py --harness http_urls
     """
@@ -40164,7 +40157,7 @@ static void answer(const p8 *url)
         p16 port = 0;
         bool tls = false;
         if (http_split_into((string_address)url, host, sizeof host, &port, &path, &tls) ||
-            http_origin_form(path, target, sizeof target)) {
+            (http_path_simplify((p8 *)path), http_origin_form(path, target, sizeof target))) {
                 printf("BAD\n");
                 return;
         }
@@ -40216,7 +40209,8 @@ int main(void)
     ports = ["", "", "", ":80", ":443", ":8080", ":65535", ":08", ":1"] * 2 + [
         ":0", ":65536", ":", ":+1", ":1x", ":99999999999999999999"]
     paths = ["", "/", "/a/b", "/a%20b", "/a;b,c", "/\u00e9", "/a:b@c", "/%0d%0a"] * 2 + [
-        "/a b", "/a\\b", "/a\tb", "/" + "p" * 2100]
+        "/a b", "/a\\b", "/a\tb", "/" + "p" * 2100, "/a/./b", "/a/../b", "/a/b/..",
+        "/..", "/./", "/a/%2e%2E/b", "/a/.%2e", "/a/...", "/a//../b", "/%2e/x"]
     queries = ["", "", "?", "?x=1", "?a/b?c", "?#"]
     fragments = ["", "", "#", "#f", "#a?b/c"]
 
@@ -40230,7 +40224,11 @@ int main(void)
     urls = sorted(urls)
     bases = ["http://example.com/dir/old", "https://example.com:8443/a/b?q=1",
              "http://h:80/", "https://h/x?y#z", "http://127.0.0.1:8080/d/e/f"]
-    segments = ["", "p", "p/q", "a%20b", "x;y", "\u00e9"]
+    segments = ["", "p", "p/q", "a%20b", "x;y", "\u00e9", "../x", "./y", "..", ".",
+                "a/../../b", "%2e%2e/z", "..%2f", "../../../up",
+                #   RFC 3986 5.4.2's abnormal examples.
+                "./../g", "./g/.", "g/./h", "g/../h", "g;x=1/./y", "g;x=1/../y",
+                "g.", ".g", "g..", "..g"]
     references = set()
     for _ in range(1500):
         shape = random_urls.randrange(7)
@@ -40246,6 +40244,25 @@ int main(void)
         return text.encode("utf-8").hex() or "-"
 
     scheme_shape = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):")
+
+    def dot_free(target):
+        """RFC 3986 5.2.4 over the path in front of the query, a segment
+        of dots spelled with %2e too."""
+        path, mark, query = target.partition("?")
+        if not path.startswith("/"):
+            return target
+        kept = []
+        segments = path.split("/")[1:]
+        for at, segment in enumerate(segments):
+            plain = re.sub("%2e", ".", segment, flags=re.I)
+            if plain in (".", ".."):
+                if plain == ".." and kept:
+                    kept.pop()
+                if at == len(segments) - 1:
+                    kept.append("")
+                continue
+            kept.append(segment)
+        return "/" + "/".join(kept) + mark + query
 
     def subset(url):
         """What this client must answer for url: a (tls, host, port, target)
@@ -40267,7 +40284,7 @@ int main(void)
             return "refuse"
         tls = scheme.group(1).lower() == "https"
         target = (parts.path or "/") + ("?" + parts.query if "?" in url.split("#", 1)[0] else "")
-        return (tls, host, int(port) if colon else 443 if tls else 80, target)
+        return (tls, host, int(port) if colon else 443 if tls else 80, dot_free(target))
 
     def same(got, want):
         """urljoin drops an empty query that RFC 3986 keeps; nothing else
@@ -43909,7 +43926,8 @@ static p8 fuzz_faults;
 static const p8 *fuzz_file;
 static positive fuzz_file_length;
 enum { FAULT_SOCKET = 2, FAULT_CONNECTING = 4, FAULT_SO_ERROR = 8,
-       FAULT_POLL_INVALID = 16, FAULT_SEND = 32, FAULT_INTERRUPT = 64 };
+       FAULT_POLL_INVALID = 16, FAULT_SEND = 32, FAULT_INTERRUPT = 64,
+       FAULT_SEND_INTERRUPT = 128 };
 
 static bool fuzz_frame_is(positive at, b32 handle)
 {
@@ -44023,6 +44041,11 @@ static bipolar socket_send(b32 handle, address_any data, positive size,
         (void)handle, (void)flags, (void)to, (void)to_size;
         for (positive at = 0; at < size; at++)
                 touched ^= ((const p8 *)data)[at];
+        if (fuzz_faults & FAULT_SEND_INTERRUPT)
+        {
+                fuzz_faults &= (p8)~FAULT_SEND_INTERRUPT;
+                return -4;
+        }
         return (fuzz_faults & FAULT_SEND) ? -28 : (bipolar)size;
 }
 static bipolar socket_receive(b32 handle, address_any data, positive size,
@@ -44214,6 +44237,7 @@ def dns_fuzz_seeds():
         "faults_poll_invalid.bin": seed("example.com", udp(plain), mode=16),
         "faults_send.bin": seed("example.com", udp(plain), mode=32),
         "faults_interrupt.bin": seed("example.com", udp(plain), mode=64),
+        "faults_send_interrupt.bin": seed("example.com", udp(plain), mode=128),
     }
 
 
@@ -44259,6 +44283,22 @@ static void fuzz_own_question(fuzz_frame *frame)
         free(copy);
 }
 
+static bipolar fuzz_resolve(const char *name, const p8 *frames, positive left,
+                            p8 faults, p32 *found)
+{
+        bipolar status;
+
+        fuzz_frames_load(frames, left);
+        fuzz_faults = faults;
+        status = fuzz_file
+                     ? dns_resolve_any("/etc/resolv.conf", (string_address)name,
+                                       found, 3)
+                     : dns_resolve_at(0x7f000001, DNS_PORT, (string_address)name,
+                                      found, 3);
+        fuzz_faults = 0;
+        return status;
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         char name[256];
@@ -44266,6 +44306,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         const p8 *at;
         positive left;
         p32 found = 0;
+        p32 again = 0;
+        bipolar status;
 
         if (size < 2 || data[1] > size - 2)
                 return 0;
@@ -44286,13 +44328,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 at += 2 + fuzz_file_length;
                 left -= 2 + fuzz_file_length;
         }
-        fuzz_frames_load(at, left);
-        fuzz_faults = data[0];
-        if (fuzz_file)
-                (void)dns_resolve_any("/etc/resolv.conf", name, &found, 3);
-        else
-                (void)dns_resolve_at(0x7f000001, DNS_PORT, name, &found, 3);
-        fuzz_faults = 0;
+        status = fuzz_resolve(name, at, left, data[0], &found);
+        /* A send a signal interrupted is sent again: the same question has
+           the same answer with or without the interruption. */
+        if (!(data[0] & (FAULT_SEND | FAULT_SEND_INTERRUPT)) &&
+            (fuzz_resolve(name, at, left, data[0] | FAULT_SEND_INTERRUPT,
+                          &again) != status || again != found))
+        {
+                fprintf(stderr, "an interrupted send changed the answer\n");
+                abort();
+        }
         for (positive frame = 0; frame < fuzz_frame_count; frame++)
                 fuzz_own_question(&fuzz_frames[frame]);
         return 0;
