@@ -7970,12 +7970,13 @@ static COLD bool sntp_math_ok(void)
            that compares only the old random low half recreates the weak
            predictable-clock authenticator this test is meant to prevent. */
         for (positive byte = 0; byte < 8; byte++)
-        {
-                reply[24 + byte] ^= 1;
-                if (sntp_reply_ok(reply, request) != SNTP_NO_REPLY)
-                        return false;
-                reply[24 + byte] ^= 1;
-        }
+                for (p8 bit = 1; bit; bit <<= 1)
+                {
+                        reply[24 + byte] ^= bit;
+                        if (sntp_reply_ok(reply, request) != SNTP_NO_REPLY)
+                                return false;
+                        reply[24 + byte] ^= bit;
+                }
         {
                 p8 later[SNTP_PACKET];
 

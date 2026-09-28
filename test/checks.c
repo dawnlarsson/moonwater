@@ -49814,6 +49814,17 @@ static fn resolving_edges(void)
                 network_store_32(reply + at + 10, 0xc0000209);
                 at += 14;
 
+                /* Every octet must belong to a declared record, so the
+                   ceiling is reached by one root-owned additional record
+                   whose data runs exactly to DNS_MAX_MESSAGE. */
+                network_store_16(reply + 10, 1);
+                reply[at++] = 0;
+                network_store_16(reply + at, 16);
+                network_store_16(reply + at + 2, DNS_CLASS_IN);
+                network_store_32(reply + at + 4, 0);
+                network_store_16(reply + at + 8,
+                                 (p16)(DNS_MAX_MESSAGE - at - 10));
+
                 check("a DNS reply of exactly DNS_MAX_MESSAGE is accepted",
                       dns_reply_result(reply, DNS_MAX_MESSAGE, id, request,
                                        question_length, address_of found) ==
@@ -49866,6 +49877,70 @@ static fn resolving_edges(void)
                       dns_answer_address(reply, at, (positive)question, 2, 0,
                                          address_of found) == DNS_MALFORMED &&
                           !found);
+        }
+
+        {
+                p8 request[96] = {0};
+                p8 reply[96] = {0};
+                p16 id = 0x1234;
+                bipolar name = dns_write_name(request + DNS_HEADER,
+                                              sizeof request - DNS_HEADER,
+                                              (string_address)"asked.example");
+                positive question_length = (positive)name + 4;
+                positive at = DNS_HEADER + question_length;
+                p32 found = 0;
+
+                network_store_16(request, id);
+                network_store_16(request + 4, 1);
+                network_store_16(request + DNS_HEADER + name, DNS_TYPE_A);
+                network_store_16(request + DNS_HEADER + name + 2,
+                                 DNS_CLASS_IN);
+                memory_copy(reply, request, at);
+                network_store_16(reply + 2, DNS_FLAG_RESPONSE);
+                network_store_16(reply + 6, 1);
+                reply[at++] = 0xc0;
+                reply[at++] = DNS_HEADER;
+                network_store_16(reply + at, DNS_TYPE_A);
+                network_store_16(reply + at + 2, DNS_CLASS_IN);
+                network_store_32(reply + at + 4, 0);
+                network_store_16(reply + at + 8, 4);
+                network_store_32(reply + at + 10, 0xc0000201);
+                at += 14;
+
+                check("a completely framed DNS answer is accepted",
+                      dns_reply_result(reply, at, id, request, question_length,
+                                       address_of found) == DNS_OK &&
+                          found == 0xc0000201);
+                reply[at] = 0xa5;
+                check("DNS refuses bytes after every declared section",
+                      dns_reply_result(reply, at + 1, id, request,
+                                       question_length, address_of found) ==
+                          DNS_MALFORMED);
+                network_store_16(reply + 10, 1);
+                check("DNS refuses a truncated declared additional record",
+                      dns_reply_result(reply, at, id, request, question_length,
+                                       address_of found) == DNS_MALFORMED);
+                network_store_16(reply + 10, 0);
+                network_store_16(reply + 8, 1);
+                check("DNS refuses a truncated declared authority record",
+                      dns_reply_result(reply, at, id, request, question_length,
+                                       address_of found) == DNS_MALFORMED);
+                network_store_16(reply + 8, 0);
+                network_store_16(reply + 6, 0);
+                network_store_16(reply + 2, DNS_FLAG_RESPONSE | 3);
+                check("a completely framed DNS NXDOMAIN is classified",
+                      dns_reply_result(reply, DNS_HEADER + question_length,
+                                       id, request, question_length,
+                                       address_of found) == DNS_NO_SUCH_NAME);
+                check("DNS validates trailing bytes before classifying NXDOMAIN",
+                      dns_reply_result(reply, DNS_HEADER + question_length + 1,
+                                       id, request, question_length,
+                                       address_of found) == DNS_MALFORMED);
+                network_store_16(reply + 8, 1);
+                check("DNS validates authority framing before classifying NXDOMAIN",
+                      dns_reply_result(reply, DNS_HEADER + question_length,
+                                       id, request, question_length,
+                                       address_of found) == DNS_MALFORMED);
         }
 }
 
@@ -53707,6 +53782,20 @@ static fn tls_sensitive_state_erasure(void)
 static fn tls_certificate_dates(void)
 {
         tls_cert cert = {0};
+        p64 parsed = 0;
+
+        check("UTCTime canonically covers the last second of 2049",
+              tls_date_value(0x17, "491231235959Z", 13, address_of parsed) &&
+                  parsed == 20491231235959ull);
+        check("GeneralizedTime canonically starts at the first second of 2050",
+              tls_date_value(0x18, "20500101000000Z", 15, address_of parsed) &&
+                  parsed == 20500101000000ull);
+        check("GeneralizedTime cannot spell a year assigned to UTCTime",
+              !tls_date_value(0x18, "20491231235959Z", 15,
+                              address_of parsed));
+        check("UTCTime's 50 pivot remains the year 1950",
+              tls_date_value(0x17, "500101000000Z", 13, address_of parsed) &&
+                  parsed == 19500101000000ull);
 
         cert.not_before = 20260102030405ull;
         cert.not_after = 20261230212223ull;
@@ -53729,6 +53818,34 @@ static fn tls_certificate_dates(void)
 
 static fn tls_certificate_identity_rules(void)
 {
+        static p8 usage_digital[] = {0x03, 0x02, 0x07, 0x80};
+        static p8 usage_sign[] = {0x03, 0x02, 0x02, 0x04};
+        static p8 usage_excess_bits[] = {0x03, 0x02, 0x00, 0x80};
+        static p8 usage_trailing_octet[] = {0x03, 0x03, 0x00, 0x80, 0x00};
+        static p8 usage_empty[] = {0x03, 0x02, 0x00, 0x00};
+        static p8 usage_decipher[] = {0x03, 0x03, 0x07, 0x08, 0x80};
+        static p8 usage_unknown_ninth[] = {0x03, 0x03, 0x06, 0x08, 0x40};
+        static p8 usage_tenth_octet[] = {
+            0x03, 0x04, 0x07, 0x08, 0x80, 0x80};
+        static p8 usage_decipher_alone[] = {0x03, 0x03, 0x07, 0x00, 0x80};
+        static p8 eku_server[] = {
+            0x30, 0x0a, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05,
+            0x05, 0x07, 0x03, 0x01};
+        static p8 eku_nonminimal[] = {
+            0x30, 0x06, 0x06, 0x04, 0x2a, 0x80, 0x03, 0x04};
+        static p8 eku_unterminated[] = {0x30, 0x04, 0x06, 0x02, 0x2a, 0x83};
+        static p8 eku_empty_oid[] = {0x30, 0x02, 0x06, 0x00};
+        /* 1.2.16384: the middle octet of 81 80 00 is seven zero bits,
+           not a pad, and stays minimal DER. */
+        static p8 eku_inner_zero_group[] = {
+            0x30, 0x06, 0x06, 0x04, 0x2a, 0x81, 0x80, 0x00};
+        static p8 version_absent[] = {0x02, 0x01, 0x01};
+        static p8 version_v1[] = {0xa0, 0x03, 0x02, 0x01, 0x00};
+        static p8 version_v2[] = {0xa0, 0x03, 0x02, 0x01, 0x01};
+        static p8 version_v3[] = {0xa0, 0x03, 0x02, 0x01, 0x02};
+        static p8 basic_empty[] = {0x30, 0x00};
+        static p8 basic_false[] = {0x30, 0x03, 0x01, 0x01, 0x00};
+        static p8 basic_true[] = {0x30, 0x03, 0x01, 0x01, 0xff};
         static p8 dns[] = "example.com";
         static p8 numeric_dns[] = "192.0.2.1";
         static p8 ip[] = {192, 0, 2, 1};
@@ -53860,6 +53977,25 @@ static fn tls_certificate_identity_rules(void)
             0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x01, 0x00,
             0x30, 0x07, 0x06, 0x02, 0x2a, 0x04, 0x04, 0x01, 0x00,
             0x30, 0x07, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x01, 0x00};
+        static p8 nonminimal_unknown_oid[] = {
+            0xa3, 0x0e, 0x30, 0x0c,
+            0x30, 0x0a, 0x06, 0x04, 0x2a, 0x80, 0x03, 0x04,
+            0x04, 0x01, 0x00};
+        static p8 unterminated_unknown_oid[] = {
+            0xa3, 0x0b, 0x30, 0x09,
+            0x30, 0x07, 0x06, 0x02, 0x2a, 0x83, 0x04, 0x01, 0x00};
+        static p8 empty_unknown_oid[] = {
+            0xa3, 0x09, 0x30, 0x07,
+            0x30, 0x05, 0x06, 0x00, 0x04, 0x01, 0x00};
+        static p8 no_extensions[] = {0xa3, 0x02, 0x30, 0x00};
+        static p8 explicit_false[] = {
+            0xa3, 0x0e, 0x30, 0x0c,
+            0x30, 0x0a, 0x06, 0x02, 0x2a, 0x03,
+            0x01, 0x01, 0x00, 0x04, 0x01, 0x00};
+        static p8 explicit_true[] = {
+            0xa3, 0x0e, 0x30, 0x0c,
+            0x30, 0x0a, 0x06, 0x02, 0x2a, 0x03,
+            0x01, 0x01, 0xff, 0x04, 0x01, 0x00};
         static p8 san_good[] = {
             0x30, 0x0d, 0x82, 0x0b,
             'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm'};
@@ -53878,9 +54014,124 @@ static fn tls_certificate_identity_rules(void)
             0x30, 0x14, 0x82, 0x0b,
             'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm',
             0x87, 0x05, 192, 0, 2, 1, 0};
+        static p8 san_registered[] = {0x30, 0x04, 0x88, 0x02, 0x2a, 0x03};
+        static p8 san_registered_nonminimal[] = {
+            0x30, 0x06, 0x88, 0x04, 0x2a, 0x80, 0x03, 0x04};
+        static p8 san_registered_unterminated[] = {
+            0x30, 0x04, 0x88, 0x02, 0x2a, 0x83};
+        static p8 san_registered_empty[] = {0x30, 0x02, 0x88, 0x00};
         tls_cert cert = {0};
         p8 too_many[593];
         bool matched = false;
+
+        check("canonical digitalSignature KeyUsage is accepted",
+              tls_parse_key_usage(usage_digital, sizeof usage_digital,
+                                  address_of cert) == TLS_OK &&
+                  cert.digital_signature && !cert.key_cert_sign);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("canonical keyCertSign KeyUsage is accepted",
+              tls_parse_key_usage(usage_sign, sizeof usage_sign,
+                                  address_of cert) == TLS_OK &&
+                  !cert.digital_signature && cert.key_cert_sign);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("KeyUsage refuses an inflated unused-bit domain",
+              tls_parse_key_usage(usage_excess_bits, sizeof usage_excess_bits,
+                                  address_of cert) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("KeyUsage refuses a redundant trailing zero octet",
+              tls_parse_key_usage(usage_trailing_octet,
+                                  sizeof usage_trailing_octet,
+                                  address_of cert) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("KeyUsage refuses an empty named-bit set",
+              tls_parse_key_usage(usage_empty, sizeof usage_empty,
+                                  address_of cert) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("decipherOnly remains valid with keyAgreement",
+              tls_parse_key_usage(usage_decipher, sizeof usage_decipher,
+                                  address_of cert) == TLS_OK);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("KeyUsage refuses undefined bits after decipherOnly",
+              tls_parse_key_usage(usage_unknown_ninth,
+                                  sizeof usage_unknown_ninth,
+                                  address_of cert) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("KeyUsage refuses bits beyond its nine-bit schema",
+              tls_parse_key_usage(usage_tenth_octet,
+                                  sizeof usage_tenth_octet,
+                                  address_of cert) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("decipherOnly is refused without keyAgreement",
+              tls_parse_key_usage(usage_decipher_alone,
+                                  sizeof usage_decipher_alone,
+                                  address_of cert) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("canonical serverAuth EKU is recognized",
+              tls_parse_extended_key_usage(eku_server, sizeof eku_server,
+                                           address_of cert) == TLS_OK &&
+                  cert.server_auth);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("EKU refuses a non-minimal OID arc",
+              tls_parse_extended_key_usage(eku_nonminimal,
+                                           sizeof eku_nonminimal,
+                                           address_of cert) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("EKU refuses an unterminated OID arc",
+              tls_parse_extended_key_usage(eku_unterminated,
+                                           sizeof eku_unterminated,
+                                           address_of cert) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("EKU refuses an empty OID",
+              tls_parse_extended_key_usage(eku_empty_oid,
+                                           sizeof eku_empty_oid,
+                                           address_of cert) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("EKU accepts a minimal OID arc with an inner zero group",
+              tls_parse_extended_key_usage(eku_inner_zero_group,
+                                           sizeof eku_inner_zero_group,
+                                           address_of cert) == TLS_OK &&
+                  !cert.server_auth);
+        memory_fill(address_of cert, 0, sizeof cert);
+
+        {
+                positive at = 0;
+                p8 version = 9;
+
+                check("an absent certificate version canonically means v1",
+                      tls_parse_version(version_absent, sizeof version_absent,
+                                        address_of at, address_of version) == TLS_OK &&
+                          !at && !version);
+                at = 0;
+                check("an explicitly encoded default v1 is refused",
+                      tls_parse_version(version_v1, sizeof version_v1,
+                                        address_of at, address_of version) == TLS_FAIL);
+                at = 0;
+                check("an explicit v2 certificate version remains valid",
+                      tls_parse_version(version_v2, sizeof version_v2,
+                                        address_of at, address_of version) == TLS_OK &&
+                          at == sizeof version_v2 && version == 1);
+                at = 0;
+                check("an explicit v3 certificate version remains valid",
+                      tls_parse_version(version_v3, sizeof version_v3,
+                                        address_of at, address_of version) == TLS_OK &&
+                          at == sizeof version_v3 && version == 2);
+        }
+
+        check("empty basic constraints canonically means non-CA",
+              tls_parse_basic_constraints(basic_empty, sizeof basic_empty,
+                                          address_of cert) == TLS_OK &&
+                  !cert.ca);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("explicit default-false cA is refused as non-canonical DER",
+              tls_parse_basic_constraints(basic_false, sizeof basic_false,
+                                          address_of cert) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("canonical true cA remains valid",
+              tls_parse_basic_constraints(basic_true, sizeof basic_true,
+                                          address_of cert) == TLS_OK &&
+                  cert.ca);
+        memory_fill(address_of cert, 0, sizeof cert);
+
 
         check("an exact dNSName identifies a named host",
               tls_general_name_match("example.com", 0x82, dns,
@@ -53911,6 +54162,21 @@ static fn tls_certificate_identity_rules(void)
         check("a malformed later IP SAN invalidates an early match",
               !tls_parse_san(san_bad_ip, sizeof san_bad_ip,
                              "example.com", address_of matched));
+        check("a canonical registeredID GeneralName remains valid",
+              tls_parse_san(san_registered, sizeof san_registered, null,
+                            address_of matched));
+        check("SAN refuses a non-minimal registeredID OID arc",
+              !tls_parse_san(san_registered_nonminimal,
+                             sizeof san_registered_nonminimal, null,
+                             address_of matched));
+        check("SAN refuses an unterminated registeredID OID arc",
+              !tls_parse_san(san_registered_unterminated,
+                             sizeof san_registered_unterminated, null,
+                             address_of matched));
+        check("SAN refuses an empty registeredID OID",
+              !tls_parse_san(san_registered_empty,
+                             sizeof san_registered_empty, null,
+                             address_of matched));
         check("name constraints are refused even when non-critical",
               tls_parse_extensions(constrained, sizeof constrained, 0, 2,
                                    address_of cert, null) == TLS_FAIL);
@@ -53984,6 +54250,36 @@ static fn tls_certificate_identity_rules(void)
               tls_parse_extensions(bc_oid_overlong_duplicate,
                                    sizeof bc_oid_overlong_duplicate, 0, 2,
                                    address_of cert, null) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("non-minimal certificate extension OIDs are refused",
+              tls_parse_extensions(nonminimal_unknown_oid,
+                                   sizeof nonminimal_unknown_oid, 0, 2,
+                                   address_of cert, null) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("unterminated certificate extension OID arcs are refused",
+              tls_parse_extensions(unterminated_unknown_oid,
+                                   sizeof unterminated_unknown_oid, 0, 2,
+                                   address_of cert, null) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("empty certificate extension OIDs are refused",
+              tls_parse_extensions(empty_unknown_oid,
+                                   sizeof empty_unknown_oid, 0, 2,
+                                   address_of cert, null) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("an empty certificate Extensions sequence is refused",
+              tls_parse_extensions(no_extensions, sizeof no_extensions, 0, 2,
+                                   address_of cert, null) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("an explicitly encoded default-false critical flag is refused",
+              tls_parse_extensions(explicit_false, sizeof explicit_false, 0, 2,
+                                   address_of cert, null) == TLS_FAIL);
+        memory_fill(address_of cert, 0, sizeof cert);
+        check("canonical true remains a valid critical extension flag",
+              tls_parse_extensions(explicit_true, sizeof explicit_true, 0, 2,
+                                   address_of cert, null) == TLS_OK &&
+                  cert.unsupported_critical);
+
         memory_fill(address_of cert, 0, sizeof cert);
         check("nonadjacent duplicate unknown extensions are refused",
               tls_parse_extensions(duplicate_unknown_nonadjacent,
@@ -58339,6 +58635,77 @@ static fn leasing(void)
                               !lease.router && !lease.nameserver &&
                               !lease.server && !lease.seconds &&
                               !lease.renewal && !lease.rebinding);
+
+                        packet[DHCP_HEAD + 7] = DHCP_OPTION_OVERLOAD;
+                        packet[DHCP_HEAD + 8] = 1;
+                        packet[DHCP_HEAD + 9] = 1;
+                        packet[DHCP_HEAD + 10] = DHCP_OPTION_END;
+                        packet[DHCP_FILE] = DHCP_OPTION_END;
+                        check("a canonical DHCP file-overload control parses",
+                              dhcp_read(packet, DHCP_HEAD + 11, 0xdeadbeef,
+                                        hardware, address_of lease,
+                                        address_of kind) == 0);
+                        packet[DHCP_FILE] = DHCP_OPTION_PAD;
+                        check("an overloaded DHCP region requires its END marker",
+                              dhcp_read(packet, DHCP_HEAD + 11, 0xdeadbeef,
+                                        hardware, address_of lease,
+                                        address_of kind) < 0);
+                        packet[DHCP_FILE] = DHCP_OPTION_END;
+                        packet[DHCP_HEAD + 9] = 4;
+                        check("DHCP overload rejects values outside 1 through 3",
+                              dhcp_read(packet, DHCP_HEAD + 11, 0xdeadbeef,
+                                        hardware, address_of lease,
+                                        address_of kind) < 0);
+                        packet[DHCP_HEAD + 8] = 2;
+                        packet[DHCP_HEAD + 9] = 1;
+                        packet[DHCP_HEAD + 10] = 2;
+                        packet[DHCP_HEAD + 11] = DHCP_OPTION_END;
+                        check("DHCP overload rejects a non-unit length",
+                              dhcp_read(packet, DHCP_HEAD + 12, 0xdeadbeef,
+                                        hardware, address_of lease,
+                                        address_of kind) < 0);
+                        packet[DHCP_HEAD + 8] = 1;
+                        packet[DHCP_HEAD + 9] = 1;
+                        packet[DHCP_HEAD + 10] = DHCP_OPTION_OVERLOAD;
+                        packet[DHCP_HEAD + 11] = 1;
+                        packet[DHCP_HEAD + 12] = 1;
+                        packet[DHCP_HEAD + 13] = DHCP_OPTION_END;
+                        check("DHCP overload rejects duplicate controls",
+                              dhcp_read(packet, DHCP_HEAD + 14, 0xdeadbeef,
+                                        hardware, address_of lease,
+                                        address_of kind) < 0);
+                        packet[DHCP_HEAD + 10] = DHCP_OPTION_END;
+                        packet[DHCP_FILE] = DHCP_OPTION_OVERLOAD;
+                        packet[DHCP_FILE + 1] = 1;
+                        packet[DHCP_FILE + 2] = 1;
+                        packet[DHCP_FILE + 3] = DHCP_OPTION_END;
+                        check("DHCP overload controls are forbidden in overloaded data",
+                              dhcp_read(packet, DHCP_HEAD + 11, 0xdeadbeef,
+                                        hardware, address_of lease,
+                                        address_of kind) < 0);
+                        memory_fill(packet + DHCP_FILE, 0,
+                                    DHCP_HEAD - DHCP_FILE);
+                        packet[DHCP_HEAD + 7] = DHCP_OPTION_END;
+                        check("the primary DHCP option stream requires END",
+                              dhcp_read(packet, DHCP_HEAD + 7, 0xdeadbeef,
+                                        hardware, address_of lease,
+                                        address_of kind) < 0);
+                        packet[DHCP_HEAD + 8] = DHCP_OPTION_PAD;
+                        packet[DHCP_HEAD + 9] = DHCP_OPTION_PAD;
+                        check("zero padding after DHCP END remains valid",
+                              dhcp_read(packet, DHCP_HEAD + 10, 0xdeadbeef,
+                                        hardware, address_of lease,
+                                        address_of kind) == 0);
+                        packet[DHCP_HEAD + 8] = DHCP_OPTION_TYPE;
+                        packet[DHCP_HEAD + 9] = 1;
+                        packet[DHCP_HEAD + 10] = DHCP_ACK;
+                        check("DHCP refuses hidden options after END",
+                              dhcp_read(packet, DHCP_HEAD + 11, 0xdeadbeef,
+                                        hardware, address_of lease,
+                                        address_of kind) < 0);
+                        packet[DHCP_HEAD + 8] = DHCP_OPTION_PAD;
+                        packet[DHCP_HEAD + 9] = DHCP_OPTION_PAD;
+                        packet[DHCP_HEAD + 10] = DHCP_OPTION_PAD;
 
                         lease.mask = 0xffffff00;
                         lease.router = 0x0a000202;
@@ -73486,6 +73853,89 @@ static fn machine_sntp(void)
               code == 0);
 }
 
+/* Prove the production stamp helper asks for blocking, initialized kernel
+   randomness and propagates its failure. Merely checking reply comparison
+   cannot distinguish the CSPRNG nonce from the predictable clock fallback it
+   replaced, so each policy is isolated in a child with a getrandom filter. */
+typedef struct
+{
+        p16 code;
+        p8 yes;
+        p8 no;
+        p32 value;
+} machine_sntp_filter_instruction;
+
+typedef struct
+{
+        p16 length;
+        machine_sntp_filter_instruction address_to instructions;
+} machine_sntp_filter_program;
+
+static bipolar machine_sntp_random_filter(p32 refused)
+{
+        machine_sntp_filter_instruction instructions[] = {
+            {0x20, 0, 0, 0},
+            {0x15, 0, 3, syscall(getrandom)},
+            {0x20, 0, 0, 32},
+            {0x15, 0, 1, refused},
+            {0x06, 0, 0, 0x0005000b},
+            {0x06, 0, 0, 0x7fff0000},
+        };
+        machine_sntp_filter_program program = {
+            array_count(instructions), instructions};
+
+        if (system_call_5(syscall(prctl), 38, 1, 0, 0, 0) < 0)
+                return -1;
+        return system_call_3(syscall(seccomp), 1, 0,
+                             (positive)address_of program);
+}
+
+static fn machine_sntp_random_child(positive which)
+{
+        p8 stamp[8];
+        bool ok;
+
+        memory_fill(stamp, 0xa5, sizeof stamp);
+        if (machine_sntp_random_filter(which ? 1 : 0) < 0)
+                system_call_1(syscall(exit_group), 77);
+        ok = sntp_put_stamp(stamp) == (which != 0);
+        if (!which)
+                for (positive at = 0; at < sizeof stamp; at++)
+                        ok &= stamp[at] == 0xa5;
+        system_call_1(syscall(exit_group), ok ? 0 : 1);
+}
+
+static fn machine_sntp_randomness(void)
+{
+        for (positive which = 0; which < 2; which++)
+        {
+                bipolar child = system_call_2(syscall(clone), SIGCHLD, 0);
+                positive raw = 0;
+                b32 code;
+
+                check("SNTP entropy-policy child starts", child >= 0);
+                if (child < 0)
+                        continue;
+                if (!child)
+                        machine_sntp_random_child(which);
+                if (system_wait4_retry((b32)child, address_of raw, 0, null) !=
+                    child)
+                {
+                        check("SNTP requires blocking CSPRNG output and preserves failure",
+                              false);
+                        continue;
+                }
+                code = wait_status_code(raw);
+                if (code == 77)
+                {
+                        log_direct(str("SNTP: stamp entropy-policy assertion NOT RUN -- seccomp unavailable\n"));
+                        return;
+                }
+                check("SNTP requires blocking CSPRNG output and preserves failure",
+                      code == 0);
+        }
+}
+
 /*
         Auto timezone: which answers from the network are believed, and
         when a network counts as the one already asked about. The request
@@ -73587,6 +74037,7 @@ b32 main(void)
         machine_policy();
         machine_stop_self();
         machine_sntp();
+        machine_sntp_randomness();
         machine_auto();
         return test_report(null);
 }

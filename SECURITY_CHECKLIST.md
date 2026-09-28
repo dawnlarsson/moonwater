@@ -37,6 +37,8 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
 ## Identity and state
 
 - [x] DNS binds replies to ID, exact question, connected peer, and deadline.
+- [x] DNS validates every declared answer/authority/additional record and has no
+  unaccounted trailing message bytes before classifying success or error rcodes.
 - [x] DHCP binds replies to xid, hardware address, server port, and selected
   OFFER peer; its xid uses only initialized CSPRNG output.
 - [x] SNTP binds replies to a 64-bit CSPRNG originate nonce and validates mode,
@@ -46,6 +48,9 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
   SNTP reply cover replay rejection for every stateful UDP exchange here.
 - [x] Exhaustive DHCP renewal/rebinding authorization covers every message
   kind, missing/selected/foreign server, retained/changed address, and phase.
+- [x] DHCP option-overload control is unique, primary-only, length one, and 1..3.
+- [x] Every primary or overloaded DHCP option stream has an explicit END marker.
+- [x] Bytes following DHCP END are canonical zero padding, never hidden options.
 
 ## HTTP and URL handling
 
@@ -72,9 +77,16 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
 - [x] Transcript, Finished, record sequence, AEAD tag, and close handling have
   pure or loopback checks.
 - [x] SAN matching distinguishes DNS and IPv4 names and constrains wildcards.
+- [x] SAN registeredID alternatives require complete canonical DER OID arcs.
 - [x] Unknown critical and name-constraints extensions fail closed.
-- [x] Duplicate extension OIDs, including unknown ones, are refused under an
-  explicit per-certificate extension-count/work ceiling.
+- [x] The default v1 certificate version is omitted; explicit v2/v3 remain valid.
+- [x] Certificate validity uses canonical UTC/GeneralizedTime at the 2050 pivot.
+- [x] KeyUsage has exact DER named-bit encoding, no undefined bits, and enforces
+  the decipherOnly/keyAgreement dependency.
+- [x] ExtendedKeyUsage purpose OIDs require complete canonical DER arcs.
+- [x] Extension envelopes require canonical DER: the sequence is nonempty,
+  default-false critical and basic-constraints cA flags are omitted, OIDs are
+  canonical, and duplicate OIDs are refused under an explicit count ceiling.
 - [x] Basic constraints, path length, key usage, EKU, dates, issuer names, and
   signatures are checked for served chains.
 - [x] Generated chain verdicts are compared with OpenSSL; certificate issuance
