@@ -6120,6 +6120,22 @@ static fn wc_utf8_block(wc_utf8 address_to state, const p8 address_to at, positi
                         if (p == size)
                                 break;
                 }
+                else if (!state->want_words)
+                {
+                        /*
+                                Characters alone: the well-formed prefix is
+                                its characters in one pass, and what stops it
+                                -- a byte that begins no character, or one
+                                the read cut short -- is the decode's below.
+                        */
+                        positive2 valid = memory_utf8_valid_span(at + p, size - p);
+
+                        state->chars += valid.y;
+                        p += valid.x;
+
+                        if (p == size)
+                                break;
+                }
                 else
                 {
                         positive run = string_span_max(at + p, size - p, text_set_ascii);
