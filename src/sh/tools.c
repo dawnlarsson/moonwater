@@ -7355,6 +7355,13 @@ static b32 tools_mcookie()
 #define DD_SWAB 0x200
 // An output block of nothing but NULs is seeked over, not written.
 #define DD_SPARSE 0x400
+// The character sets and the record reshaping; ascii implies unblock and
+// ebcdic and ibm imply block, as coreutils' table has them.
+#define DD_ASCII 0x800
+#define DD_EBCDIC 0x1000
+#define DD_IBM 0x2000
+#define DD_BLOCK 0x4000
+#define DD_UNBLOCK 0x8000
 // open(2) flags shared by iflag and oflag, above each group's own bits.
 #define DD_DIRECT 0x004
 #define DD_DIRECTORY 0x008
@@ -7399,7 +7406,12 @@ static b32 tools_mcookie()
 #define DD_SIGNAL_INFO 10
 #define DD_NO_SUCH_CALL 38
 
+// More than one of a set of conversions that exclude each other.
+#define dd_several(bits) (((bits) & ((bits) - 1)) != 0)
+
 static positive dd_in_full;
+// Records conv=block cut at cbs, which the summary counts.
+static positive dd_truncated;
 static positive dd_in_partial;
 static positive dd_out_full;
 static positive dd_out_partial;
@@ -7574,6 +7586,9 @@ static fn dd_summary()
 
         string_format(dd_report, "%p+%p records in\n%p+%p records out\n",
                       dd_in_full, dd_in_partial, dd_out_full, dd_out_partial);
+        if (dd_truncated)
+                string_format(dd_report, "%p truncated record%s\n", dd_truncated,
+                              dd_truncated == 1 ? (string_address)"" : (string_address)"s");
 
         if (dd_status_level == DD_STATUS_NOXFER)
                 return;
@@ -7611,6 +7626,13 @@ static bool dd_size(string_address text, positive address_to out)
         {
                 positive value;
 
+                /*      Each factor is read by strtoumax: blanks and a plus
+                        sign may lead it, a minus may not. */
+                while (byte_is_space((p8)string_get(at)))
+                        at++;
+                if (string_get(at) == '+')
+                        at++;
+
                 if (!string_digits_checked(address_of at, 10, address_of value))
                 {
                         // Digits that would not fit are the type's limit;
@@ -7623,7 +7645,12 @@ static bool dd_size(string_address text, positive address_to out)
                         value = 1;
                 }
 
-                positive power = size_suffix_power(string_get(at), false);
+                //      dd's letters are b c w and the powers, of which
+                //      only k may be written small.
+                p8 letter = (p8)string_get(at);
+                positive power = letter >= 'a' && letter != 'k'
+                                     ? 0
+                                     : size_suffix_power(letter, false);
                 positive multiple = 1;
 
                 if (power)
@@ -7634,6 +7661,17 @@ static bool dd_size(string_address text, positive address_to out)
                 case 'c': at++; break;
                 case 'w': multiple = 2; at++; break;
                 case 'B': at++; break;
+                }
+
+                //      The letters that are not powers still take the
+                //      base spelling after them, which changes nothing.
+                if (!power && letter != 'B' && at > text && at[-1] == letter &&
+                    (letter == 'b' || letter == 'c' || letter == 'w'))
+                {
+                        if (string_get(at) == 'i' && string_get(at + 1) == 'B')
+                                at += 2;
+                        else if (string_get(at) == 'B' || string_get(at) == 'D')
+                                at++;
                 }
 
                 if (power)
@@ -7697,6 +7735,44 @@ static bool dd_size(string_address text, positive address_to out)
         address_to out = total;
 
         return true;
+}
+
+/*
+        coreutils reads a product right to left, one factor and the product
+        of the rest, and every tail that begins 0x and comes to nought is
+        warned about as it is reached: count=0x1 is no records, which is
+        rarely meant, and 00x1 says it was. The word has been read whole
+        already, so every x in it joins two factors, and a tail is nought
+        when any of its factors has only zeros for digits.
+*/
+static fn dd_zero_warnings(string_address text)
+{
+        positive length = string_length(text);
+        bool zero = false;
+
+        for (positive at = length; at-- > 0;)
+        {
+                if (at && text[at - 1] != 'x')
+                        continue;
+
+                positive digit = at;
+
+                while (byte_is_space(text[digit]))
+                        digit++;
+                if (text[digit] == '+')
+                        digit++;
+                bool nought = byte_is_digit(text[digit]);
+                while (byte_is_digit(text[digit]))
+                        nought &= text[digit++] == '0';
+                zero |= nought;
+
+                if (zero && text[at] == '0' && text[at + 1] == 'x')
+                {
+                        text_flush();
+                        string_format(writer_stderr,
+                            "dd: warning: '0x' is a zero multiplier; use '00x' if that is intended\n");
+                }
+        }
 }
 
 // A B on count, skip or seek changes the unit from blocks to bytes. It is
@@ -7784,6 +7860,10 @@ static bool dd_flags(string_address value, p8 group, positive address_to flags)
             {"nocreat", DD_NOCREAT, 0}, {"lcase", DD_LCASE, 0},
             {"ucase", DD_UCASE, 0}, {"swab", DD_SWAB, 0},
             {"sparse", DD_SPARSE, 0},
+            {"ascii", DD_ASCII | DD_UNBLOCK, 0},
+            {"ebcdic", DD_EBCDIC | DD_BLOCK, 0},
+            {"ibm", DD_IBM | DD_BLOCK, 0},
+            {"block", DD_BLOCK, 0}, {"unblock", DD_UNBLOCK, 0},
             {"fullblock", DD_FULLBLOCK, 1}, {"count_bytes", DD_COUNT_BYTES, 1},
             {"skip_bytes", DD_SKIP_BYTES, 1},
             {"append", DD_APPEND, 2}, {"seek_bytes", DD_SEEK_BYTES, 2},
@@ -7850,28 +7930,10 @@ static fn dd_named(string_address name)
 
 /*
         O_DIRECT hands the buffer to the device, so the kernel wants it on a
-        page boundary; the arena hands out sixteen-byte alignment. coreutils
-        aligns both its buffers to a page whatever the flags are, and pays a
-        page for it, so this does the same rather than deciding per run.
+        page boundary. coreutils aligns both its buffers to a page whatever
+        the flags are; each buffer here is its own mapping, which is.
 */
 #define DD_PAGE 4096u
-
-static p8 address_to dd_buffer(positive bytes)
-{
-        /* Too large to align is too large to hold: let the arena refuse it
-           and keep its complaint, rather than wrapping the page on. */
-        if (bytes > UTILITY_ARENA_BYTES)
-                return (p8 address_to)utility_arena_take(bytes);
-
-        p8 address_to raw = (p8 address_to)utility_arena_take(bytes + DD_PAGE);
-
-        if (!raw)
-                return null;
-
-        positive at = (positive)raw;
-
-        return (p8 address_to)((at + (DD_PAGE - 1)) & ~(positive)(DD_PAGE - 1));
-}
 
 /*
         Every output path has the same failure contract. Keeping it here
@@ -8074,35 +8136,326 @@ static bool dd_cache_drop(positive handle, string_address name)
         return true;
 }
 
-// swab is one conversion over the byte stream, not one conversion per read.
-// An odd byte therefore waits for the first byte of the next input record.
-static positive dd_swab(p8 address_to into, p8 address_to from, positive length,
-                        bool address_to pending, p8 address_to held)
+/*
+        The character sets POSIX gives dd: conv=ascii reads EBCDIC, ebcdic
+        writes it, and ibm writes IBM's variant of it. They are data, the
+        same bytes in every dd.
+*/
+static const p8 dd_ascii_to_ebcdic[256] = {
+    0x00, 0x01, 0x02, 0x03, 0x37, 0x2d, 0x2e, 0x2f, 0x16, 0x05, 0x25, 0x0b,
+    0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x3c, 0x3d, 0x32, 0x26,
+    0x18, 0x19, 0x3f, 0x27, 0x1c, 0x1d, 0x1e, 0x1f, 0x40, 0x5a, 0x7f, 0x7b,
+    0x5b, 0x6c, 0x50, 0x7d, 0x4d, 0x5d, 0x5c, 0x4e, 0x6b, 0x60, 0x4b, 0x61,
+    0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0x7a, 0x5e,
+    0x4c, 0x7e, 0x6e, 0x6f, 0x7c, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
+    0xc8, 0xc9, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xe2,
+    0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xad, 0xe0, 0xbd, 0x9a, 0x6d,
+    0x79, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x91, 0x92,
+    0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6,
+    0xa7, 0xa8, 0xa9, 0xc0, 0x4f, 0xd0, 0x5f, 0x07, 0x20, 0x21, 0x22, 0x23,
+    0x24, 0x15, 0x06, 0x17, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x09, 0x0a, 0x1b,
+    0x30, 0x31, 0x1a, 0x33, 0x34, 0x35, 0x36, 0x08, 0x38, 0x39, 0x3a, 0x3b,
+    0x04, 0x14, 0x3e, 0xe1, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+    0x49, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x62, 0x63,
+    0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75,
+    0x76, 0x77, 0x78, 0x80, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f, 0x90, 0x6a,
+    0x9b, 0x9c, 0x9d, 0x9e, 0x9f, 0xa0, 0xaa, 0xab, 0xac, 0x4a, 0xae, 0xaf,
+    0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb,
+    0xbc, 0xa1, 0xbe, 0xbf, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xda, 0xdb,
+    0xdc, 0xdd, 0xde, 0xdf, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef, 0xfa, 0xfb,
+    0xfc, 0xfd, 0xfe, 0xff,
+};
+static const p8 dd_ascii_to_ibm[256] = {
+    0x00, 0x01, 0x02, 0x03, 0x37, 0x2d, 0x2e, 0x2f, 0x16, 0x05, 0x25, 0x0b,
+    0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x3c, 0x3d, 0x32, 0x26,
+    0x18, 0x19, 0x3f, 0x27, 0x1c, 0x1d, 0x1e, 0x1f, 0x40, 0x5a, 0x7f, 0x7b,
+    0x5b, 0x6c, 0x50, 0x7d, 0x4d, 0x5d, 0x5c, 0x4e, 0x6b, 0x60, 0x4b, 0x61,
+    0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0x7a, 0x5e,
+    0x4c, 0x7e, 0x6e, 0x6f, 0x7c, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
+    0xc8, 0xc9, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xe2,
+    0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xad, 0xe0, 0xbd, 0x5f, 0x6d,
+    0x79, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x91, 0x92,
+    0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6,
+    0xa7, 0xa8, 0xa9, 0xc0, 0x4f, 0xd0, 0xa1, 0x07, 0x20, 0x21, 0x22, 0x23,
+    0x24, 0x15, 0x06, 0x17, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x09, 0x0a, 0x1b,
+    0x30, 0x31, 0x1a, 0x33, 0x34, 0x35, 0x36, 0x08, 0x38, 0x39, 0x3a, 0x3b,
+    0x04, 0x14, 0x3e, 0xe1, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+    0x49, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x62, 0x63,
+    0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75,
+    0x76, 0x77, 0x78, 0x80, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f, 0x90, 0x9a,
+    0x9b, 0x9c, 0x9d, 0x9e, 0x9f, 0xa0, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
+    0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb,
+    0xbc, 0xbd, 0xbe, 0xbf, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xda, 0xdb,
+    0xdc, 0xdd, 0xde, 0xdf, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef, 0xfa, 0xfb,
+    0xfc, 0xfd, 0xfe, 0xff,
+};
+static const p8 dd_ebcdic_to_ascii[256] = {
+    0x00, 0x01, 0x02, 0x03, 0x9c, 0x09, 0x86, 0x7f, 0x97, 0x8d, 0x8e, 0x0b,
+    0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x9d, 0x85, 0x08, 0x87,
+    0x18, 0x19, 0x92, 0x8f, 0x1c, 0x1d, 0x1e, 0x1f, 0x80, 0x81, 0x82, 0x83,
+    0x84, 0x0a, 0x17, 0x1b, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x05, 0x06, 0x07,
+    0x90, 0x91, 0x16, 0x93, 0x94, 0x95, 0x96, 0x04, 0x98, 0x99, 0x9a, 0x9b,
+    0x14, 0x15, 0x9e, 0x1a, 0x20, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6,
+    0xa7, 0xa8, 0xd5, 0x2e, 0x3c, 0x28, 0x2b, 0x7c, 0x26, 0xa9, 0xaa, 0xab,
+    0xac, 0xad, 0xae, 0xaf, 0xb0, 0xb1, 0x21, 0x24, 0x2a, 0x29, 0x3b, 0x7e,
+    0x2d, 0x2f, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xcb, 0x2c,
+    0x25, 0x5f, 0x3e, 0x3f, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf, 0xc0, 0xc1,
+    0xc2, 0x60, 0x3a, 0x23, 0x40, 0x27, 0x3d, 0x22, 0xc3, 0x61, 0x62, 0x63,
+    0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9,
+    0xca, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x5e, 0xcc,
+    0xcd, 0xce, 0xcf, 0xd0, 0xd1, 0xe5, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78,
+    0x79, 0x7a, 0xd2, 0xd3, 0xd4, 0x5b, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb,
+    0xdc, 0xdd, 0xde, 0xdf, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0x5d, 0xe6, 0xe7,
+    0x7b, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0xe8, 0xe9,
+    0xea, 0xeb, 0xec, 0xed, 0x7d, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50,
+    0x51, 0x52, 0xee, 0xef, 0xf0, 0xf1, 0xf2, 0xf3, 0x5c, 0x9f, 0x53, 0x54,
+    0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9,
+    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0xfa, 0xfb,
+    0xfc, 0xfd, 0xfe, 0xff,
+};
+
+/*
+        The copy's state, which is coreutils' dd_copy's: the two buffers,
+        made when they are first needed and not before -- dd bs=30M count=0
+        under a small address-space limit copies nothing and needs neither
+        -- the output block being filled, and for block and unblock the
+        column within the record and the spaces not yet known to be
+        trailing. dd_quit is a write that failed where coreutils quits.
+*/
+static p8 address_to dd_ibuf;
+static p8 address_to dd_obuf;
+static positive dd_ibuf_size;
+static positive dd_obuf_size;
+static positive dd_ibs;
+static positive dd_obs;
+static positive dd_cbs;
+static positive dd_oc;
+static positive dd_col;
+static positive dd_pending_spaces;
+static p8 dd_newline;
+static p8 dd_space;
+static bool dd_two_buffers;
+static bool dd_quit;
+static positive dd_out_now;
+static string_address dd_out_name;
+static bool dd_warn_partial;
+static bipolar dd_previous_read;
+static positive dd_read_flags;
+
+static p8 address_to dd_buffer(positive bytes, bool input)
 {
-        positive in = 0;
-        positive out = 0;
+        positive size = bytes <= positive_max - 2 * DD_PAGE
+                            ? (bytes + 32 + DD_PAGE - 1) & ~(positive)(DD_PAGE - 1)
+                            : 0;
+        address_any at = size ? memory_checked(size) : null;
 
-        if (address_to pending && length)
+        if (!at)
         {
-                into[out++] = from[in++];
-                into[out++] = address_to held;
-                address_to pending = false;
+                p8 human[40];
+
+                human[positive_into_human_nearest_string(human, bytes, true)] = end;
+                text_flush();
+                string_format(writer_stderr,
+                              "dd: memory exhausted by %s buffer of size %p bytes (%s)\n",
+                              input ? (string_address)"input" : (string_address)"output",
+                              bytes, (string_address)human);
+                return null;
+        }
+        if (input)
+                dd_ibuf_size = size;
+        else
+                dd_obuf_size = size;
+        return (p8 address_to)at;
+}
+
+static bool dd_alloc_ibuf()
+{
+        if (!dd_ibuf)
+                dd_ibuf = dd_buffer(dd_ibs, true);
+        return dd_ibuf != null;
+}
+
+static bool dd_alloc_obuf()
+{
+        if (dd_obuf)
+                return true;
+        if (dd_two_buffers)
+                dd_obuf = dd_buffer(dd_obs, false);
+        else if (dd_alloc_ibuf())
+                dd_obuf = dd_ibuf;
+        return dd_obuf != null;
+}
+
+/*
+        One read, as coreutils' iread: a read O_DIRECT refuses for the
+        unaligned tail after a short one is the end, and under bs= without
+        fullblock, when records are counted or skipped, the first short read
+        that another read follows is warned about, once.
+*/
+static bipolar dd_read_once(positive handle, p8 address_to buffer, positive size)
+{
+        bipolar got = system_read_retry(handle, buffer, size);
+
+        if (got == -ERROR_INVALID && dd_previous_read > 0 &&
+            (positive)dd_previous_read < size && (dd_read_flags & DD_DIRECT))
+                got = 0;
+
+        if (got > 0 && dd_warn_partial && dd_previous_read > 0 &&
+            (positive)dd_previous_read < size)
+        {
+                if (dd_status_level != DD_STATUS_NONE)
+                {
+                        text_flush();
+                        string_format(writer_stderr,
+                                      "dd: warning: partial read (%p byte%s); suggest iflag=fullblock\n",
+                                      (positive)dd_previous_read,
+                                      dd_previous_read == 1 ? (string_address)"" : (string_address)"s");
+                }
+                dd_warn_partial = false;
         }
 
-        while (in + 1 < length)
-        {
-                into[out++] = from[in + 1];
-                into[out++] = from[in];
-                in += 2;
-        }
+        dd_previous_read = got;
+        return got;
+}
 
-        if (in < length)
-        {
-                address_to held = from[in];
-                address_to pending = true;
-        }
+static bipolar dd_read(positive handle, p8 address_to buffer, positive size)
+{
+        if (!(dd_read_flags & DD_FULLBLOCK))
+                return dd_read_once(handle, buffer, size);
 
-        return out;
+        positive gathered = 0;
+
+        while (gathered < size)
+        {
+                bipolar got = dd_read_once(handle, buffer + gathered, size - gathered);
+
+                if (got < 0)
+                        return got;
+                if (!got)
+                        break;
+                gathered += (positive)got;
+        }
+        return (bipolar)gathered;
+}
+
+// A whole output block, and the one failure coreutils quits on.
+static fn dd_write_output()
+{
+        positive wrote = dd_output(dd_out_now, dd_out_name, dd_obuf, dd_obs,
+                                   true, true);
+
+        if (wrote != dd_obs)
+        {
+                if (wrote)
+                        dd_out_partial++;
+                dd_quit = true;
+        }
+        else
+                dd_out_full++;
+        dd_oc = 0;
+}
+
+static inline fn dd_put(p8 byte)
+{
+        if (dd_quit)
+                return;
+        dd_obuf[dd_oc++] = byte;
+        if (dd_oc >= dd_obs)
+                dd_write_output();
+}
+
+static fn dd_copy_simple(const p8 address_to from, positive length)
+{
+        while (length && !dd_quit)
+        {
+                positive take = min(length, dd_obs - dd_oc);
+
+                memory_copy_apart(dd_obuf + dd_oc, from, take);
+                from += take;
+                length -= take;
+                dd_oc += take;
+                if (dd_oc >= dd_obs)
+                        dd_write_output();
+        }
+}
+
+/* conv=block: each newline-ended record padded with spaces to cbs, the
+   newline gone, and a record longer than cbs cut there and counted. */
+static fn dd_copy_block(const p8 address_to from, positive length)
+{
+        for (positive at = 0; at < length && !dd_quit; at++)
+        {
+                if (from[at] == dd_newline)
+                {
+                        for (positive column = dd_col; column < dd_cbs; column++)
+                                dd_put(dd_space);
+                        dd_col = 0;
+                }
+                else
+                {
+                        if (dd_col == dd_cbs)
+                                dd_truncated++;
+                        else if (dd_col < dd_cbs)
+                                dd_put(from[at]);
+                        dd_col++;
+                }
+        }
+}
+
+/* conv=unblock: every cbs bytes a record, its trailing spaces dropped and a
+   newline after it; spaces are held until something other than a space
+   shows they were not trailing. */
+static fn dd_copy_unblock(const p8 address_to from, positive length)
+{
+        for (positive at = 0; at < length && !dd_quit; at++)
+        {
+                p8 byte = from[at];
+
+                if (dd_col++ >= dd_cbs)
+                {
+                        dd_col = dd_pending_spaces = 0;
+                        at--;
+                        dd_put(dd_newline);
+                }
+                else if (byte == dd_space)
+                        dd_pending_spaces++;
+                else
+                {
+                        for (; dd_pending_spaces; dd_pending_spaces--)
+                                dd_put(dd_space);
+                        dd_put(byte);
+                }
+        }
+}
+
+/*
+        swab over the whole stream, in place: every other byte moves two
+        places on, so the block starts one byte in, and an odd byte left
+        over waits in saved for the first byte of the next read. The input
+        buffer has the one byte of room this needs.
+*/
+static p8 address_to dd_swab(p8 address_to buffer, positive address_to length,
+                             bipolar address_to saved)
+{
+        if (!address_to length)
+                return buffer;
+
+        bipolar before = address_to saved;
+
+        if ((before < 0) == ((address_to length & 1) != 0))
+                address_to saved = buffer[--address_to length];
+        else
+                address_to saved = -1;
+
+        for (positive at = address_to length; at > 1; at -= 2)
+                buffer[at] = buffer[at - 2];
+
+        if (before < 0)
+                return buffer + 1;
+
+        buffer[1] = (p8)before;
+        address_to length += 1;
+        return buffer;
 }
 
 // A short read is not the end of the input, and a partial record is not an
@@ -8130,7 +8483,6 @@ static b32 tools_dd(void)
         bool count_bytes = false;
         bool skip_bytes = false;
         bool seek_bytes = false;
-        b32 status = 0;
         struct {
                 string_address name;
                 positive address_to value;
@@ -8190,6 +8542,9 @@ static b32 tools_dd(void)
                                         ? dd_quantity(value, numbers[n].value, numbers[n].bytes)
                                         : dd_size(value, numbers[n].value);
 
+                        if (took)
+                                dd_zero_warnings(value);
+
                         if (took && sized && !address_to numbers[n].value)
                                 took = false;
 
@@ -8199,11 +8554,6 @@ static b32 tools_dd(void)
                                         return 1;
 
                                 text_flush();
-                                if (string_get(value) == '0' &&
-                                    (string_get(value + 1) == 'x' ||
-                                     string_get(value + 1) == 'X'))
-                                        string_format(writer_stderr,
-                                            "dd: warning: '0x' is a zero multiplier; use '00x' if that is intended\n");
                                 return string_report(writer_stderr, 1,
                                     dd_overflow
                                         ? (string_address)"dd: invalid number: %w: Value too large for defined data type\n"
@@ -8294,8 +8644,6 @@ static b32 tools_dd(void)
                 }
         }
 
-        (void)cbs;
-
         if (bs_set)
                 ibs = obs = bs;
 
@@ -8303,22 +8651,30 @@ static b32 tools_dd(void)
         skip_bytes |= (iflags & DD_SKIP_BYTES) != 0;
         seek_bytes |= (oflags & DD_SEEK_BYTES) != 0;
 
+        /*      Without cbs there are no records to reshape: block and
+                unblock fall away before anything is checked against them,
+                and ascii, ebcdic and ibm are the translation alone. */
+        if (!cbs)
+                conv &= ~(positive)(DD_BLOCK | DD_UNBLOCK);
+
+        if (dd_several(conv & (DD_ASCII | DD_EBCDIC | DD_IBM)))
+                return string_diagnostic(&text_diagnostic, 1, null, "cannot combine any two of {ascii,ebcdic,ibm}");
+        if (dd_several(conv & (DD_BLOCK | DD_UNBLOCK)))
+                return string_diagnostic(&text_diagnostic, 1, null, "cannot combine block and unblock");
         if ((conv & DD_LCASE) && (conv & DD_UCASE))
                 return string_diagnostic(&text_diagnostic, 1, null, "cannot combine lcase and ucase");
+        if ((conv & DD_EXCL) && (conv & DD_NOCREAT))
+                return string_diagnostic(&text_diagnostic, 1, null, "cannot combine excl and nocreat");
 
-        // nocache asks the page cache to let go and direct never used it.
-        if (((iflags | oflags) & DD_NOCACHE) && ((iflags | oflags) & DD_DIRECT))
+        // nocache asks the page cache to let go and direct never used it;
+        // each side is asked on its own.
+        if (dd_several(iflags & (DD_DIRECT | DD_NOCACHE)) ||
+            dd_several(oflags & (DD_DIRECT | DD_NOCACHE)))
                 return string_diagnostic(&text_diagnostic, 1, null, "cannot combine direct and nocache");
 
         if (!ibs || ibs > positive_max - 31)
         {
                 text_flush();
-                // A leading 0x multiplies by zero, which is rarely meant.
-                if (string_get(input_size) == '0' &&
-                    (string_get(input_size + 1) == 'x' ||
-                     string_get(input_size + 1) == 'X'))
-                        string_format(writer_stderr,
-                            "dd: warning: '0x' is a zero multiplier; use '00x' if that is intended\n");
                 return string_report(writer_stderr, 1,
                                      "dd: invalid number: %w\n", writer_shell_quoted_name, input_size);
         }
@@ -8337,12 +8693,63 @@ static b32 tools_dd(void)
                 return string_diagnostic(&text_diagnostic, 1, null, "offset too large");
         }
 
-        // The whole output blocks a seek covers, which is what coreutils
-        // decides the truncation by; a byte seek short of one block is
-        // none of them.
+        /*
+                What each count is in records and bytes, which is how
+                coreutils keeps them: a byte count is whole blocks and a
+                remainder, and a record is one read, whatever it brought.
+        */
+        positive max_records = positive_max;
+        positive max_bytes = 0;
+
+        if (count_set)
+        {
+                max_records = count_bytes ? count / ibs : count;
+                max_bytes = count_bytes ? count % ibs : 0;
+        }
+
+        positive skip_records = skip_bytes ? skip / ibs : skip;
+        positive skip_rest = skip_bytes ? skip % ibs : 0;
         positive seek_records = seek_bytes ? seek / obs : seek;
+        positive seek_rest = seek_bytes ? seek % obs : 0;
         positive in_handle = 0;
         positive out_handle = 1;
+
+        /*
+                The translation, built in coreutils' order: EBCDIC read in
+                first, then the case, then EBCDIC written out, whose newline
+                and space are the ones block and unblock work with.
+        */
+        p8 table[256];
+        bool translate = (conv & (DD_ASCII | DD_EBCDIC | DD_IBM | DD_LCASE | DD_UCASE)) != 0;
+
+        dd_newline = '\n';
+        dd_space = ' ';
+        for (positive at = 0; at < 256; at++)
+        {
+                p8 byte = (p8)at;
+
+                if (conv & DD_ASCII)
+                        byte = dd_ebcdic_to_ascii[byte];
+                if (conv & DD_UCASE)
+                        byte = byte_to_upper(byte);
+                else if (conv & DD_LCASE)
+                        byte = byte_to_lower(byte);
+                if (conv & DD_EBCDIC)
+                        byte = dd_ascii_to_ebcdic[byte];
+                else if (conv & DD_IBM)
+                        byte = dd_ascii_to_ibm[byte];
+                table[at] = byte;
+        }
+        if (conv & DD_EBCDIC)
+        {
+                dd_newline = dd_ascii_to_ebcdic['\n'];
+                dd_space = dd_ascii_to_ebcdic[' '];
+        }
+        else if (conv & DD_IBM)
+        {
+                dd_newline = dd_ascii_to_ibm['\n'];
+                dd_space = dd_ascii_to_ibm[' '];
+        }
 
         if (input)
         {
@@ -8361,9 +8768,14 @@ static b32 tools_dd(void)
         else if (!dd_flags_set(0, dd_open_flags(iflags), (string_address) "standard input"))
                 return 1;
 
+        bipolar input_start = system_seek(in_handle, 0, 1);
+
+        if (input_start < 0)
+                input_start = 0;
+
         if (output)
         {
-                positive flags = 01;
+                positive flags = 0;
 
                 if (!(conv & DD_NOCREAT))
                         flags |= 0100;
@@ -8382,7 +8794,14 @@ static b32 tools_dd(void)
                 if (!(conv & DD_NOTRUNC) && !seek_records)
                         flags |= O_TRUNC;
 
-                bipolar opened = text_open_handle(output, flags, 0666);
+                //      Read access too when a seek may have to be read
+                //      through, as on a tape; write alone if that is all
+                //      the file allows.
+                bipolar opened = seek_records ? text_open_handle(output, flags | 02, 0666)
+                                              : -1;
+
+                if (opened < 0)
+                        opened = text_open_handle(output, flags | 01, 0666);
 
                 if (opened < 0)
                 {
@@ -8392,6 +8811,16 @@ static b32 tools_dd(void)
                 }
 
                 out_handle = (positive)opened;
+
+                if (seek_records && !(conv & DD_NOTRUNC))
+                {
+                        positive size = seek_records * obs + seek_rest;
+                        bipolar refused = system_truncate_handle(out_handle, size);
+
+                        if (refused < 0 &&
+                            dd_truncate_failed(out_handle, output, size, refused))
+                                return 1;
+                }
         }
         else if (!dd_flags_set(1, dd_open_flags(oflags) |
                                       ((oflags & DD_APPEND) ? DD_O_APPEND : 0),
@@ -8406,120 +8835,222 @@ static b32 tools_dd(void)
                 into whole output blocks first. The two differ on a short read
                 and on which complaint a refused write gets.
         */
-        bool two_buffers = !bs_set || (conv & (DD_SWAB | DD_LCASE | DD_UCASE));
-        p8 address_to ibuf = dd_buffer(ibs + 16);
-        p8 address_to obuf = two_buffers ? dd_buffer(obs + 16) : ibuf;
-        p8 address_to converted = conv & DD_SWAB ? dd_buffer(ibs + 16) : ibuf;
+        dd_two_buffers = !bs_set || (conv & (DD_SWAB | DD_LCASE | DD_UCASE | DD_ASCII |
+                                             DD_EBCDIC | DD_IBM | DD_BLOCK | DD_UNBLOCK));
+        dd_ibuf = dd_obuf = null;
+        dd_ibs = ibs;
+        dd_obs = obs;
+        dd_cbs = cbs;
+        dd_oc = dd_col = dd_pending_spaces = dd_truncated = 0;
+        dd_quit = false;
+        dd_out_now = out_handle;
+        dd_out_name = output;
+        dd_read_flags = iflags;
+        dd_previous_read = 0;
+        dd_warn_partial = !dd_two_buffers && !(iflags & DD_FULLBLOCK) &&
+                          (skip_records ||
+                           (max_records && max_records != positive_max) ||
+                           ((iflags | oflags) & DD_DIRECT));
 
         dd_out_direct = (oflags & DD_DIRECT) != 0;
         dd_out_block = obs;
         dd_sparse = (conv & DD_SPARSE) != 0;
         dd_final_seek = false;
 
-        if (!ibuf || !obuf || !converted)
-                return 1;
-
         /* Restart a read interrupted by the report signal, so a short read is
            not mistaken for a partial input record. */
         system_signal_install(DD_SIGNAL_INFO, (positive)dd_info_caught,
                               SIGNAL_CATCH_FLAGS, SIGNAL_CATCH_RESTORER, null);
 
-        if (skip)
+        b32 result = 0;
+        bool quitting = false;
+
+        /*
+                skip= from where the input already is. A seek is the way, and
+                a regular file that ends short of it is reported; an input
+                that cannot seek but has an end it can seek to cannot be
+                skipped at all; anything else is read through a record at a
+                time, a short read counting as a record as it does in the
+                copy.
+        */
+        if (skip_records || skip_rest)
         {
-                positive want = skip_bytes ? skip : skip * ibs;
-                // From where the input already is, not from its start: a dd
-                // reading after another command on the same input skips
-                // from where that command stopped.
+                positive want = skip_records * ibs + skip_rest;
+                positive consumed = 0;
+                bipolar left = 0;
                 bipolar landed = system_seek(in_handle, want, 1);
-                bool short_of_it = false;
 
                 if (landed >= 0)
                 {
-                        bipolar stop = system_seek(in_handle, 0, 2);
+                        file_facts facts;
 
-                        if (stop >= 0)
+                        consumed = want;
+                        if (file_look(in_handle, (string_address)"", AT_EMPTY_PATH,
+                                      address_of facts) &&
+                            (facts.mode & MODE_FORMAT) == MODE_FILE && facts.size &&
+                            (bipolar)facts.size - input_start < (bipolar)want)
                         {
-                                system_seek(in_handle, landed, 0);
-
-                                // A size of zero is what a file that has no
-                                // size to report says, so it is not a file
-                                // that is too short.
-                                if (stop > 0 && stop < landed)
-                                        short_of_it = true;
+                                left = ((bipolar)want - (bipolar)facts.size) / (bipolar)ibs;
+                                consumed = (positive)((bipolar)facts.size - input_start);
                         }
+                }
+                else if (system_seek(in_handle, 0, 2) >= 0)
+                {
+                        text_flush();
+                        writer_stderr("dd: ", 4);
+                        dd_named(input ? input : (string_address)"standard input");
+                        string_format(writer_stderr, ": cannot skip: %s\n", file_reason(landed));
+                        result = 1;
+                        quitting = true;
+                        goto finish;
                 }
                 else
                 {
-                        positive left = want;
+                        positive bytes = skip_rest;
 
-                        while (left)
+                        if (!dd_alloc_ibuf())
                         {
-                                positive ask = min(left, ibs);
-                                bipolar got = system_read_retry(in_handle, ibuf, ask);
-
-                                if (got <= 0)
-                                        break;
-
-                                left -= (positive)got;
+                                result = 1;
+                                goto release;
                         }
+                        left = (bipolar)skip_records;
+                        do
+                        {
+                                bipolar got = dd_read(in_handle, dd_ibuf,
+                                                      left ? ibs : bytes);
 
-                        short_of_it = left != 0;
+                                if (got < 0)
+                                {
+                                        text_flush();
+                                        string_format(writer_stderr,
+                                            "dd: error reading '%w': %s\n",
+                                            writer_terminal_quoted_name,
+                                            input ? input : (string_address)"standard input",
+                                            file_reason(got));
+                                        result = 1;
+                                        quitting = true;
+                                        goto finish;
+                                }
+                                if (!got)
+                                        break;
+                                consumed += (positive)got;
+                                if (left)
+                                        left--;
+                                else
+                                        bytes = 0;
+                        } while (left || bytes);
                 }
 
                 // Asked to skip past what is there. Not fatal, and said only
                 // where a summary would have been said.
-                if (short_of_it && dd_status_level != DD_STATUS_NONE)
+                if ((left || consumed != want) && dd_status_level != DD_STATUS_NONE)
                 {
                         text_flush();
                         writer_stderr("dd: ", 4);
-                        dd_named(input ? input
-                                       : (string_address)"standard input");
+                        dd_named(input ? input : (string_address)"standard input");
                         writer_stderr(": cannot skip to specified offset\n", 0);
                 }
         }
 
         /*
-                seek moves the output on from where it already is, so a dd
-                sharing its standard output with the command before it
-                writes after what that command wrote. What is cut off after
-                the seek is coreutils' rule exactly: only a file dd opened
-                itself, only to a seek of whole blocks, and a refusal counts
-                only from the kinds of file dd_truncate_failed names.
-                Standard output is never truncated, whatever it is.
+                seek= from where the output already is, so a dd sharing its
+                standard output with the command before it writes after what
+                that command wrote. An output that cannot seek is read
+                through, which is how a tape is positioned, and what the
+                reading does not pass over is written as zeros.
         */
-        if (seek)
+        if (seek_records || seek_rest)
         {
-                positive want = seek_bytes ? seek : seek * obs;
+                positive want = seek_records * obs + seek_rest;
                 bipolar landed = system_seek(out_handle, want, 1);
 
                 if (landed < 0)
                 {
-                        text_flush();
-                        string_format(writer_stderr, "dd: '%w': cannot seek: %s\n",
-                                      writer_terminal_quoted_name, output ? output : (string_address)"standard output",
-                                      file_reason(landed));
-                        status = 1;
-                }
-                else if (output && seek_records && !(conv & DD_NOTRUNC))
-                {
-                        bipolar refused =
-                            system_truncate_handle(out_handle, want);
+                        positive left = seek_records;
+                        positive bytes = seek_rest;
+                        bool refused = system_seek(out_handle, 0, 2) >= 0;
 
-                        if (refused < 0 &&
-                            dd_truncate_failed(out_handle, output, want,
-                                               refused))
-                                status = 1;
+                        if (!refused)
+                        {
+                                if (!dd_alloc_obuf())
+                                {
+                                        result = 1;
+                                        goto release;
+                                }
+                                do
+                                {
+                                        bipolar got = dd_read(out_handle, dd_obuf,
+                                                              left ? obs : bytes);
+
+                                        if (got < 0)
+                                        {
+                                                refused = true;
+                                                break;
+                                        }
+                                        if (!got)
+                                                break;
+                                        if (left)
+                                                left--;
+                                        else
+                                                bytes = 0;
+                                } while (left || bytes);
+                        }
+
+                        if (refused)
+                        {
+                                text_flush();
+                                writer_stderr("dd: ", 4);
+                                dd_named(output ? output : (string_address)"standard output");
+                                string_format(writer_stderr, ": cannot seek: %s\n",
+                                              file_reason(landed));
+                                result = 1;
+                                quitting = true;
+                                goto finish;
+                        }
+
+                        if (left || bytes)
+                        {
+                                memory_fill(dd_obuf, 0, left ? obs : bytes);
+                                do
+                                {
+                                        positive size = left ? obs : bytes;
+
+                                        if (dd_output(out_handle, output, dd_obuf, size,
+                                                      false, true) != size)
+                                        {
+                                                result = 1;
+                                                quitting = true;
+                                                goto finish;
+                                        }
+                                        if (left)
+                                                left--;
+                                        else
+                                                bytes = 0;
+                                } while (left || bytes);
+                        }
                 }
         }
 
-        positive held = 0;
-        b32 result = status;
-        positive partial_before = 0;
-        positive input_bytes = 0;
-        bool swab_pending = false;
-        p8 swab_held = 0;
+        if (count_set && !max_records && !max_bytes)
+                goto finish;
 
-        while (count != 0 && !result)
+        //      A buffer that cannot be had ends dd where it stands, as
+        //      coreutils' allocation failure does: no statistics.
+        if (!dd_alloc_ibuf() || !dd_alloc_obuf())
+        {
+                if (out_handle != 1)
+                        system_close(out_handle);
+                if (in_handle != 0)
+                        system_close(in_handle);
+                result = 1;
+                goto release;
+        }
+
+        positive partial_before = 0;
+        bipolar saved_byte = -1;
+        bool blocking = (conv & (DD_BLOCK | DD_UNBLOCK)) != 0;
+
+        while (true)
         {
                 if (dd_info_asked)
                 {
@@ -8538,48 +9069,16 @@ static b32 tools_dd(void)
                         }
                 }
 
-                if (!count_bytes && count != TEXT_UNSET &&
-                    dd_in_full + dd_in_partial >= count)
+                positive records = dd_in_full + dd_in_partial;
+
+                if (records >= max_records + (max_bytes != 0) && max_records != positive_max)
                         break;
 
-                positive ask = ibs;
+                if ((conv & DD_SYNC) && (conv & DD_NOERROR))
+                        memory_fill(dd_ibuf, blocking ? ' ' : 0, ibs);
 
-                if (count_bytes && count != TEXT_UNSET)
-                {
-                        if (input_bytes >= count)
-                                break;
-
-                        if (ask > count - input_bytes)
-                                ask = count - input_bytes;
-                }
-
-                if (conv & (DD_SYNC | DD_NOERROR))
-                        memory_fill(ibuf, 0, ibs);
-
-                bipolar got;
-
-                if (iflags & DD_FULLBLOCK)
-                {
-                        positive gathered = 0;
-
-                        while (gathered < ask)
-                        {
-                                got = system_read_retry(in_handle, ibuf + gathered,
-                                                        ask - gathered);
-
-                                if (got <= 0)
-                                        break;
-
-                                gathered += (positive)got;
-                        }
-
-                        if (gathered)
-                                got = (bipolar)gathered;
-                }
-                else
-                {
-                        got = system_read_retry(in_handle, ibuf, ask);
-                }
+                bipolar got = dd_read(in_handle, dd_ibuf,
+                                      records >= max_records ? max_bytes : ibs);
 
                 if (!got)
                         break;
@@ -8621,15 +9120,18 @@ static b32 tools_dd(void)
 
                 positive read_bytes = (positive)got;
 
-                input_bytes += read_bytes;
-
                 if (read_bytes < ibs)
                 {
                         dd_in_partial++;
                         partial_before = read_bytes;
 
                         if (conv & DD_SYNC)
+                        {
+                                if (!(conv & DD_NOERROR))
+                                        memory_fill(dd_ibuf + read_bytes, blocking ? ' ' : 0,
+                                                    ibs - read_bytes);
                                 read_bytes = ibs;
+                        }
                 }
                 else
                 {
@@ -8637,25 +9139,9 @@ static b32 tools_dd(void)
                         partial_before = 0;
                 }
 
-                if (conv & DD_LCASE)
-                        memory_to_lower_ascii(ibuf, read_bytes);
-
-                if (conv & DD_UCASE)
-                        memory_to_upper_ascii(ibuf, read_bytes);
-
-                p8 address_to output_bytes = ibuf;
-
-                if (conv & DD_SWAB)
+                if (dd_ibuf == dd_obuf)
                 {
-                        read_bytes = dd_swab(converted, ibuf, read_bytes,
-                                             address_of swab_pending,
-                                             address_of swab_held);
-                        output_bytes = converted;
-                }
-
-                if (ibuf == obuf)
-                {
-                        positive wrote = dd_output(out_handle, output, obuf,
+                        positive wrote = dd_output(out_handle, output, dd_obuf,
                                                    read_bytes, true, false);
 
                         if (wrote != read_bytes)
@@ -8675,61 +9161,79 @@ static b32 tools_dd(void)
                         continue;
                 }
 
-                // The input block regrouped into output blocks, which is what
-                // dd is for whenever ibs and obs differ.
-                for (positive at = 0; at < read_bytes;)
+                if (translate)
                 {
-                        positive take = obs - held;
-
-                        if (take > read_bytes - at)
-                                take = read_bytes - at;
-
-                        memory_copy_apart(obuf + held, output_bytes + at, take);
-                        held += take;
-                        at += take;
-
-                        if (held < obs)
-                                continue;
-
-                        positive wrote = dd_output(out_handle, output, obuf, obs,
-                                                   true, true);
-                        held = 0;
-
-                        if (wrote != obs)
+                        if ((conv & (DD_ASCII | DD_EBCDIC | DD_IBM)) == 0)
                         {
-                                if (wrote)
-                                        dd_out_partial++;
-
-                                result = 1;
-                                break;
+                                if (conv & DD_LCASE)
+                                        memory_to_lower_ascii(dd_ibuf, read_bytes);
+                                else
+                                        memory_to_upper_ascii(dd_ibuf, read_bytes);
                         }
-
-                        dd_out_full++;
+                        else
+                                for (positive at = 0; at < read_bytes; at++)
+                                        dd_ibuf[at] = table[dd_ibuf[at]];
                 }
 
-                if (result)
-                        break;
+                p8 address_to start = dd_ibuf;
+
+                if (conv & DD_SWAB)
+                        start = dd_swab(dd_ibuf, address_of read_bytes, address_of saved_byte);
+
+                if (conv & DD_BLOCK)
+                        dd_copy_block(start, read_bytes);
+                else if (conv & DD_UNBLOCK)
+                        dd_copy_unblock(start, read_bytes);
+                else
+                        dd_copy_simple(start, read_bytes);
+
+                if (dd_quit)
+                {
+                        result = 1;
+                        quitting = true;
+                        goto finish;
+                }
         }
 
-        if (swab_pending)
-                obuf[held++] = swab_held;
-
-        if (held)
+        /*      What swab still holds, the padding of a last record that
+                had no newline, and the newline after the last unblocked
+                record, all go the way the rest of the stream went. */
+        if (saved_byte >= 0)
         {
-                positive wrote = dd_output(out_handle, output, obuf, held, true, false);
+                p8 held = (p8)saved_byte;
+
+                if (conv & DD_BLOCK)
+                        dd_copy_block(address_of held, 1);
+                else if (conv & DD_UNBLOCK)
+                        dd_copy_unblock(address_of held, 1);
+                else
+                        dd_put(held);
+        }
+
+        if ((conv & DD_BLOCK) && dd_col > 0)
+                for (positive column = dd_col; column < cbs; column++)
+                        dd_put(dd_space);
+
+        if (dd_col && (conv & DD_UNBLOCK))
+                dd_put(dd_newline);
+
+        if (dd_quit)
+        {
+                result = 1;
+                quitting = true;
+                goto finish;
+        }
+
+        if (dd_oc && dd_obuf != dd_ibuf)
+        {
+                positive wrote = dd_output(out_handle, output, dd_obuf, dd_oc, true, false);
 
                 if (wrote)
-                {
-                        if (held == obs)
-                                dd_out_full++;
-                        else
-                                dd_out_partial++;
-                }
+                        dd_out_partial++;
 
-                if (wrote != held)
+                if (wrote != dd_oc)
                         result = 1;
         }
-
         /*
                 A copy that ended in a seek has not reached its length yet:
                 a regular file is cut out to where the output stands, which
@@ -8773,6 +9277,7 @@ static b32 tools_dd(void)
                 }
         }
 
+finish:
         /*
                 A stream that cannot be synced says so and is a failure. A
                 pipe answers the narrower call with "invalid argument", and
@@ -8817,7 +9322,9 @@ static b32 tools_dd(void)
                 file, and coreutils refuses what cannot be dropped -- a pipe
                 has no offset to drop from -- rather than claim it was.
         */
-        if (count_set && !count)
+        if (quitting)
+                ;
+        else if (count_set && !max_records && !max_bytes)
         {
                 if ((iflags & DD_NOCACHE) &&
                     dd_cache_drop(in_handle, input ? input : (string_address) "standard input"))
@@ -8845,6 +9352,13 @@ static b32 tools_dd(void)
 
         text_flush();
         dd_summary();
+
+release:
+        if (dd_obuf && dd_obuf != dd_ibuf)
+                memory_free(dd_obuf, dd_obuf_size);
+        if (dd_ibuf)
+                memory_free(dd_ibuf, dd_ibuf_size);
+        dd_ibuf = dd_obuf = null;
 
         return result | dd_report_failed;
 }

@@ -10307,6 +10307,30 @@ MISC_UTILITIES = (
                    ("conv=unblock", "cbs=4", "if=ten", "status=noxfer"),
                    ("conv=ascii", "if=ten", "status=noxfer"), ("conv=ebcdic", "if=ten", "status=noxfer"),
                    ("conv=ibm", "if=ten", "status=noxfer"),
+                   # The record conversions and the character sets together,
+                   # a block record cut at cbs and counted, a record padded
+                   # and one unblocked through sync, and the refusals, which
+                   # come after block and unblock without cbs fall away.
+                   ("conv=block,sync", "ibs=10", "cbs=10", "if=a.txt", "status=noxfer"),
+                   ("conv=unblock,sync", "cbs=4", "ibs=4", "if=a.txt", "status=noxfer"),
+                   ("conv=block", "cbs=3", "if=a.txt", "status=noxfer"),
+                   ("conv=block", "cbs=3", "obs=5", "if=binary", "status=noxfer"),
+                   ("conv=unblock", "cbs=3", "if=a.txt"), ("conv=ascii", "cbs=8", "if=binary", "status=noxfer"),
+                   ("conv=ebcdic,ucase", "cbs=8", "if=a.txt", "status=noxfer"),
+                   ("conv=ibm,lcase,swab", "cbs=5", "if=a.txt", "status=noxfer"),
+                   ("conv=ascii,swab", "bs=3", "cbs=4", "if=binary", "status=noxfer"),
+                   ("conv=block,unblock", "if=a.txt", "status=noxfer"), ("conv=block,unblock", "cbs=2", "if=a.txt"),
+                   ("conv=ascii,ebcdic", "if=a.txt"), ("conv=ebcdic,ibm", "cbs=1", "if=a.txt"),
+                   ("conv=excl,nocreat", "of=out", "if=a.txt"), ("cbs=0", "if=a.txt"),
+                   # coreutils' numbers: a zero product that starts 0x is
+                   # warned about wherever it stands, blanks and a plus lead a
+                   # factor, and only k of the powers is written small.
+                   ("count=0x1", "seek=0x1", "skip=0x1", "if=a.txt", "status=none"), ("bs=0x5", "if=a.txt"),
+                   ("count=00x5x0x3", "if=a.txt", "status=noxfer"), ("count=2x0x3", "if=a.txt", "status=noxfer"),
+                   ("bs=1", "count=+2", "if=a.txt", "status=noxfer"), ("bs=1", "count= 2", "if=a.txt", "status=noxfer"),
+                   ("bs=1", "count=-2", "if=a.txt"), ("count=1bB", "if=binary", "status=noxfer"),
+                   ("bs=1", "count=1m", "if=a.txt"), ("bs=1", "count=1kD", "if=long", "status=noxfer"),
+                   ("bs=30M", "count=0", "if=a.txt", "status=noxfer"),
                    ("bs=4", "status=noxfer"), ("bs=16", "status=noxfer"), ("ibs=3", "obs=7", "status=noxfer"),
                    ("bs=4", "ibs=2", "status=noxfer"), ("bs=4", "obs=2", "status=noxfer"),
                    ("ibs=2", "obs=3", "bs=4", "status=noxfer"), ("bs=16", "conv=sync", "status=noxfer"),
@@ -42705,11 +42729,6 @@ PINNED = r"""
 {"domain":"files","kind":"bug","list":"ledger","option":"--show-limits","reason_id":"r138","utility":"xargs"},
 {"domain":"misc","kind":"deliberate","list":"ledger","option":"--groups","reason_id":"r141","utility":"chroot"},
 {"domain":"misc","kind":"deliberate","list":"ledger","option":"--userspec","reason_id":"r141","utility":"chroot"},
-{"domain":"misc","kind":"deliberate","list":"ledger","option":"conv=ascii","reason_id":"r143","utility":"dd"},
-{"domain":"misc","kind":"deliberate","list":"ledger","option":"conv=block","reason_id":"r144","utility":"dd"},
-{"domain":"misc","kind":"deliberate","list":"ledger","option":"conv=ebcdic","reason_id":"r143","utility":"dd"},
-{"domain":"misc","kind":"deliberate","list":"ledger","option":"conv=ibm","reason_id":"r143","utility":"dd"},
-{"domain":"misc","kind":"deliberate","list":"ledger","option":"conv=unblock","reason_id":"r144","utility":"dd"},
 {"candidate":{"effects":"f564511d7ba7e4479b672bf835fdff5281e1e7a47e8b1cf00438791c6f2fd195","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--label","L1","--report-identical-files","-Z","--strip-trailing-cr","--unified","-y","-b","q2a","q2b"],"domain":"misc","family":null,"fixture":"misc_pair","input_kind":"command","mode":null,"stdin":"empty","tier":"random","utility":"diff"},"domain":"misc","id":"00e94a20f19aebc4","kind":"bug","list":"ledger","reason":"the output styles this diff has not got, and the order it reads them in. -c, -y and -T are refused as letters it does not know, where the reference sees a second output style beside --unified and calls the pair conflicting; and an invalid context length is read here after that clash and there before it, so the two runs name different faults. What is left of the body is --unified=0, where the reference joins neighbouring runs into one hunk that this one splits; and the quoting, since a name with a space in it is shell-quoted in a verdict and C-quoted in a unified header and this one writes it plain.","reference":{"effects":"f564511d7ba7e4479b672bf835fdff5281e1e7a47e8b1cf00438791c6f2fd195","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"diff"},
 {"candidate":{"effects":"f564511d7ba7e4479b672bf835fdff5281e1e7a47e8b1cf00438791c6f2fd195","status":1,"stdout":"4b6f160480b4d48fcb8a48b8fee863d22cb01672c92a2c6b423862da78742627"},"case":{"argv":["--ignore-case","--strip-trailing-cr","-s","-w","--report-identical-files","-E","--unified=2","t2a","t2b"],"domain":"misc","family":null,"fixture":"misc_pair","input_kind":"command","mode":null,"stdin":"nonl","tier":"random","utility":"diff"},"domain":"misc","id":"061ff02d1a80f0a5","kind":"bug","list":"ledger","reason":"the output styles this diff has not got, and the order it reads them in. -c, -y and -T are refused as letters it does not know, where the reference sees a second output style beside --unified and calls the pair conflicting; and an invalid context length is read here after that clash and there before it, so the two runs name different faults. What is left of the body is --unified=0, where the reference joins neighbouring runs into one hunk that this one splits; and the quoting, since a name with a space in it is shell-quoted in a verdict and C-quoted in a unified header and this one writes it plain.","reference":{"effects":"f564511d7ba7e4479b672bf835fdff5281e1e7a47e8b1cf00438791c6f2fd195","status":1,"stdout":"2975b28d1eab0538c94b8be07dbc6e23b212e0309c7da8ed6cba00ba1387204c"},"utility":"diff"},
 {"candidate":{"effects":"f564511d7ba7e4479b672bf835fdff5281e1e7a47e8b1cf00438791c6f2fd195","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-E","--unified","-y","-b","-q","-N","--text","empty","empty"],"domain":"misc","family":null,"fixture":"misc_pair","input_kind":"command","mode":null,"stdin":"nonl","tier":"random","utility":"diff"},"domain":"misc","id":"0ed389b6d3abb917","kind":"bug","list":"ledger","reason":"the output styles this diff has not got, and the order it reads them in. -c, -y and -T are refused as letters it does not know, where the reference sees a second output style beside --unified and calls the pair conflicting; and an invalid context length is read here after that clash and there before it, so the two runs name different faults. What is left of the body is --unified=0, where the reference joins neighbouring runs into one hunk that this one splits; and the quoting, since a name with a space in it is shell-quoted in a verdict and C-quoted in a unified header and this one writes it plain.","reference":{"effects":"f564511d7ba7e4479b672bf835fdff5281e1e7a47e8b1cf00438791c6f2fd195","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"diff"},
