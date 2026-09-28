@@ -17412,6 +17412,8 @@ INPUTS.update({
     "text_b64_plus_slash": b"VA/c8A+vSg==\n",
     "text_b64url_long_slash": b"QUJD" * 1400 + b"QUJD" * 10 + b"/QUJD\n",
     "text_b64url_garbage": b"VAx%y\n",
+    "text_base58": b"11233QC4\n2NEpo7TZRRrLZSi2U\n",
+    "text_base58_garbage": b"1123 3QC4&0\n",
     #       Records past the one megabyte the fixed stores hold, and
     #       paragraphs past the thousand words and five thousand bytes GNU's
     #       fmt formats before it writes a piece out.
@@ -18981,7 +18983,14 @@ TEXT_UTILITIES = (
             modes=BASH, script=_text_stream_script, valid=_text_stream_valid),
     Utility("base64", options=_TEXT_ENCODING_OPTIONS, operands=_TEXT_ENCODING_OPERANDS,
             stdin=_TEXT_ENCODING_STDIN, fixture="text",
-            extra=(("--nosuchflag",), ("-Q",), ("-d", "-w", "0"), ("-di",))),
+            #       -w is read as xstrtoimax reads it: blanks and a sign may
+            #       lead, minus zero is zero, anything else below zero or
+            #       after the digits is "invalid wrap size: 'W'", and a wrap
+            #       past the signed range is no wrap.
+            stderr="exact",
+            extra=(("--nosuchflag",), ("-Q",), ("-d", "-w", "0"), ("-di",), ("-w", "-0"), ("-w", " 5"),
+                   ("-w", "+5"), ("-w", "-1"), ("-w", "99999999999999999999"), ("-w", "-99999999999999999999"),
+                   ("-w", "5x"), ("-w", ""), ("-w", "0x10"), ("-w", "08"))),
     Utility("base32", options=_TEXT_ENCODING_OPTIONS, operands=_TEXT_ENCODING_OPERANDS,
             stdin=_TEXT_ENCODING_STDIN, fixture="text",
             extra=(("--nosuchflag",), ("-Q",), ("-w0",), ("-di",))),
@@ -18989,7 +18998,16 @@ TEXT_UTILITIES = (
             options=_TEXT_ENCODING_OPTIONS + tuple(Option(name) for name in _TEXT_ENCODINGS),
             operands=_TEXT_ENCODING_OPERANDS, stdin=_TEXT_ENCODING_STDIN, fixture="text",
             valid=text_basenc_valid,
-            extra=(("--base64", "--base32"), ("--nosuchflag",), ("--z85", "-w4"), ("--z85", "-w1"),
+            #       The last encoding named is the one used; none is a usage
+            #       error. base58 is one big number: each leading zero byte a
+            #       '1', and only the alphabet and newlines decode without -i.
+            stderr="exact",
+            extra=(("--base64", "--base32"), ("--base58", "--base64"), ("--base64", "--base58"), (),
+                   ("--nosuchflag",), ("--z85", "-w4"), ("--z85", "-w1"),
+                   ("--base58", "-w", "7"), ("--base58", "-d", "-i"), ("--base58", "-w0", "big"),
+                   *({"argv": argv, "stdin": stdin, "fixture": "text"}
+                     for stdin in ("text_base58", "text_base58_garbage", "nul", "empty")
+                     for argv in (("--base58",), ("--base58", "-d"), ("--base58", "-di"))),
                    ("--base2lsbf", "-di"), ("--base16", "-d", "-i"),
                    #   base64url refuses a 5600-byte block holding base64's
                    #   own + or / before decoding any of it; -i drops them.
@@ -39751,7 +39769,6 @@ REASONS = {
  "r239": "Traps and traced output, as this shell answers them today: trap and trap -p list every condition where bash outside POSIX mode lists only the ones that were set, a signal is named without its SIG prefix, and an inherited ignore is not carried into a relaunched child. A traced word is quoted the way bash quotes it now, and marked with the reader's depth, but PS4 itself is written as it stands where bash reads its backslash escapes and any command substitution in it first, and a loop's header line is not traced at all. Under the dash name the special builtins are fatal, as POSIX asks.",
  "r24": "the long spelling of -f is gawk's; ours takes -f only and refuses the long form with usage",
  "r240": "reference bug: a wrap width past what a count can hold leaves GNU's column counter unable to reach it, and the final newline it would have written is lost. This wraps at no column and still ends the line.",
- "r241": "deliberate: base58 is a bignum radix conversion over the whole input, not a bit-sliced quantum codec like the RFC 4648 alphabets this shares one encoder with.",
  "r242": "deliberate: two record cursors cannot stand at two places in one stream -- the first cursor's refill would take the records the second is about to be asked for. Standard input named twice is refused rather than answered with whichever half arrived first.",
  "r243": "deliberate: this reads bytes where the reference decodes the locale's multibyte characters and stops at a sequence that is not one. In the C locale every byte is a character here, so a file of arbitrary bytes is filtered rather than refused.",
  "r244": "deliberate: the reference's help text is its own document rather than a result these utilities compute, and is not copied word for word.",
@@ -43372,7 +43389,6 @@ PINNED = r"""
 {"candidate":{"effects":"380c2ef080ec56eb06ef624ef3bbc52e444e5187b14cc2b8f63774432950003e","status":0,"stdout":"3770a7f4f39deb42b38ca070d55c42ca6d08bd779c481bc7437d7cd0c5e1dd47"},"case":{"argv":["-c",": > a.txt; x=X\nPS4='\\$ '\nexec 2>trace\nset -x; eval 'read v <<EOF\nl\nEOF'\nset +x\nexec 2>&1\necho ---\ncat trace | sed 's/^/|/'\necho \"end=$?\"\n"],"domain":"shell","family":"xtrace-shape","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","utility":"shell"},"domain":"shell","id":"8d29be3b97ec395b","kind":"bug","list":"ledger","reason_id":"r239","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","utility":"xtrace-shape"},
 {"candidate":{"effects":"380c2ef080ec56eb06ef624ef3bbc52e444e5187b14cc2b8f63774432950003e","status":0,"stdout":"3770a7f4f39deb42b38ca070d55c42ca6d08bd779c481bc7437d7cd0c5e1dd47"},"case":{"argv":["-c",": > a.txt; x=X\nPS4='\\$ '\nexec 2>trace\nset -x; eval 'read v <<EOF\nl\nEOF'\nset +x\nexec 2>&1\necho ---\ncat trace | sed 's/^/|/'\necho \"end=$?\"\n"],"domain":"shell","family":"xtrace-shape","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","utility":"shell"},"domain":"shell","id":"9ba3d261069d211f","kind":"bug","list":"ledger","reason_id":"r239","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","utility":"xtrace-shape"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"5e56d9216398e4e5129b3c0ab59bf8d7cfe7fa40ee3e3c003d6e5f98abb966e3"},"case":{"argv":["-d","-i","--ignore-garbage","--wrap=5","--z85"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text_bytes","tier":"pinned","utility":"basenc"},"domain":"text","id":"5387559f1db3cbf6","kind":"bug","list":"ledger","reason":"basenc does not refuse the z85 input GNU calls invalid.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"basenc"},
-{"domain":"text","kind":"deliberate","list":"ledger","option":"--base58","reason_id":"r241","utility":"basenc"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-b","-s","--quiet","--silent","-n3","-i1K","-","-"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"edge_65535","tier":"pinned","utility":"cmp"},"domain":"text","id":"04fe1c40d53778fa","kind":"bug","list":"ledger","reason":"GNU cmp calls two operands naming one open file at one offset identical without reading them, and reports a bad file descriptor when the offsets differ.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"cmp"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-b","--print-bytes","--quiet","--silent","-n0","--bytes=3","-i0:0","--ignore-initial=5:7","-","-"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","utility":"cmp"},"domain":"text","id":"1ddc54004d91188c","kind":"deliberate","list":"ledger","reason_id":"r242","utility":"cmp"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-b","--print-bytes","-s","-n","65000","-i","0","-","-"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"edge_65536","tier":"pinned","utility":"cmp"},"domain":"text","id":"2f22df87b3321ea1","kind":"bug","list":"ledger","reason":"GNU cmp calls two operands naming one open file at one offset identical without reading them, and reports a bad file descriptor when the offsets differ.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"cmp"},

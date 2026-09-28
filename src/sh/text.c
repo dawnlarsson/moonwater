@@ -1665,6 +1665,7 @@ enum
         ENCODING_BASE2MSBF,
         ENCODING_BASE2LSBF,
         ENCODING_Z85,
+        ENCODING_BASE58,
 };
 
 typedef struct
@@ -2245,6 +2246,307 @@ static b32 z85_decode(bool ignore_garbage)
         return text_done((!valid || text_status) ? 1 : 0);
 }
 
+/*
+        Base58, Bitcoin's alphabet, as GNU's basenc does it with GMP: the
+        whole input is one big-endian number, each leading zero byte is a
+        leading '1', and the number is written in base 58 after them. So the
+        input is gathered whole before a digit can be written -- all but its
+        leading zeros, which are only counted, so twenty megabytes of zeros
+        are twenty megabytes of '1' and no store. The number is worked in
+        32-bit limbs, five base-58 digits at a time (58^5 fits a limb).
+*/
+static const p8 base58_alphabet[] =
+    "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+#define BASE58_CHUNK 656356768u // 58^5
+
+static bool base58_emit(encoding_output address_to output,
+                        p8 address_to symbols, positive length)
+{
+        while (length)
+        {
+                positive take = min(length, (positive)4096);
+                p8 address_to into = text_reserve(encoding_wrapped(output, take));
+
+                if (!into)
+                        return false;
+
+                if (output->wrap)
+                        for (positive at = 0; at < take; at++)
+                                into = encoding_symbol(into, output, symbols[at]);
+                else
+                {
+                        memory_copy_apart(into, symbols, take);
+                        output->wrote = true;
+                }
+                symbols += take;
+                length -= take;
+        }
+
+        return true;
+}
+
+static b32 base58_refuse_memory(byte_store address_to store)
+{
+        byte_store_release(store);
+        string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+        return text_done(1);
+}
+
+static b32 base58_encode(positive wrap)
+{
+        encoding_output output = {.wrap = wrap};
+        byte_store number = {0};
+        positive zeros = 0;
+        p8 ones[256];
+
+        memory_fill(ones, '1', sizeof(ones));
+
+        while (text_fill())
+        {
+                p8 address_to at = text_input.buffer + text_input.position;
+                positive left = text_input.filled - text_input.position;
+
+                if (!number.used)
+                {
+                        positive lead = memory_span_byte(at, 0, left);
+
+                        zeros += lead;
+                        at += lead;
+                        left -= lead;
+                }
+
+                if (left)
+                {
+                        if (!byte_store_reserve(address_of number, number.used + left, 1 << 16))
+                                return base58_refuse_memory(address_of number);
+                        memory_copy_apart(number.bytes + number.used, at, left);
+                        number.used += left;
+                }
+
+                text_input.position = text_input.filled;
+        }
+
+        bool writing = true;
+
+        for (positive left = zeros; writing && left;)
+        {
+                positive take = min(left, (positive)sizeof(ones));
+
+                writing = base58_emit(address_of output, ones, take);
+                left -= take;
+        }
+
+        if (writing && number.used)
+        {
+                positive limbs = (number.used + 3) / 4;
+                positive digits_room = number.used * 138 / 100 + 16;
+                p32 address_to limb = (p32 address_to)memory_take(limbs * sizeof(p32));
+                p8 address_to digits = (p8 address_to)memory_take(digits_room);
+
+                if (!limb || !digits)
+                {
+                        if (limb)
+                                memory_give(limb);
+                        if (digits)
+                                memory_give(digits);
+                        return base58_refuse_memory(address_of number);
+                }
+
+                // Big-endian bytes into little-endian limbs.
+                for (positive at = 0; at < limbs; at++)
+                {
+                        p32 value = 0;
+
+                        for (positive byte = 4; byte; byte--)
+                        {
+                                positive index = at * 4 + byte - 1;
+
+                                value = (value << 8) |
+                                        (index < number.used
+                                             ? number.bytes[number.used - 1 - index]
+                                             : 0);
+                        }
+                        limb[at] = value;
+                }
+
+                positive used = limbs;
+                positive made = 0;
+
+                while (used && !limb[used - 1])
+                        used--;
+
+                while (used)
+                {
+                        positive rest = 0;
+
+                        for (positive at = used; at; at--)
+                        {
+                                positive wide = (rest << 32) | limb[at - 1];
+
+                                limb[at - 1] = (p32)(wide / BASE58_CHUNK);
+                                rest = wide % BASE58_CHUNK;
+                        }
+                        while (used && !limb[used - 1])
+                                used--;
+                        for (positive digit = 0; digit < 5; digit++)
+                        {
+                                digits[made++] = (p8)(rest % 58);
+                                rest /= 58;
+                        }
+                }
+
+                while (made && !digits[made - 1])
+                        made--;
+                for (positive at = 0; at < made / 2; at++)
+                {
+                        p8 swap = digits[at];
+
+                        digits[at] = digits[made - 1 - at];
+                        digits[made - 1 - at] = swap;
+                }
+                for (positive at = 0; at < made; at++)
+                        digits[at] = base58_alphabet[digits[at]];
+
+                writing = base58_emit(address_of output, digits, made);
+                memory_give(limb);
+                memory_give(digits);
+        }
+
+        byte_store_release(address_of number);
+
+        if (writing && output.wrap && output.wrote && output.column)
+                text_put_character('\n');
+
+        return text_done((!writing || text_status) ? 1 : 0);
+}
+
+static b32 base58_decode(bool ignore_garbage)
+{
+        p8 values[256];
+        byte_store digits = {0};
+        positive ones = 0;
+        bool valid = true;
+
+        memory_fill(values, 255, sizeof(values));
+        for (positive at = 0; at < 58; at++)
+                values[base58_alphabet[at]] = (p8)at;
+
+        while (valid && text_fill())
+        {
+                p8 address_to at = text_input.buffer + text_input.position;
+                positive left = text_input.filled - text_input.position;
+
+                if (!byte_store_reserve(address_of digits, digits.used + left, 1 << 16))
+                        return base58_refuse_memory(address_of digits);
+
+                for (positive k = 0; k < left; k++)
+                {
+                        p8 value = values[at[k]];
+
+                        // A newline is always passed over; anything else not
+                        // in the alphabet only under -i.
+                        if (value == 255)
+                        {
+                                if (at[k] == '\n' || ignore_garbage)
+                                        continue;
+                                valid = false;
+                                break;
+                        }
+                        if (!value && !digits.used)
+                                ones++;
+                        else
+                                digits.bytes[digits.used++] = value;
+                }
+
+                text_input.position = text_input.filled;
+        }
+
+        if (!valid)
+        {
+                byte_store_release(address_of digits);
+                string_diagnostic(&text_diagnostic, 0, null, "invalid input");
+                return text_done(1);
+        }
+
+        p8 zeros[256];
+
+        memory_fill(zeros, 0, sizeof(zeros));
+        for (positive left = ones; left;)
+        {
+                positive take = min(left, (positive)sizeof(zeros));
+
+                text_put(zeros, take);
+                left -= take;
+        }
+
+        if (digits.used)
+        {
+                // 58 < 2^6, so a digit is at most six bits of the number.
+                positive limbs = (digits.used * 6 + 31) / 32 + 1;
+                p32 address_to limb = (p32 address_to)memory_take(limbs * sizeof(p32));
+
+                if (!limb)
+                        return base58_refuse_memory(address_of digits);
+
+                positive used = 0;
+                positive at = 0;
+                positive first = digits.used % 5 ? digits.used % 5 : 5;
+
+                while (at < digits.used)
+                {
+                        positive take = at ? 5 : first;
+                        positive scale = 1;
+                        positive chunk = 0;
+
+                        for (positive k = 0; k < take; k++)
+                        {
+                                chunk = chunk * 58 + digits.bytes[at + k];
+                                scale *= 58;
+                        }
+                        at += take;
+
+                        positive carry = chunk;
+
+                        for (positive k = 0; k < used; k++)
+                        {
+                                positive wide = (positive)limb[k] * scale + carry;
+
+                                limb[k] = (p32)wide;
+                                carry = wide >> 32;
+                        }
+                        if (carry)
+                                limb[used++] = (p32)carry;
+                }
+
+                // Most significant first, with the leading zero bytes gone.
+                bool leading = true;
+                p8 staged[256];
+                positive held = 0;
+
+                for (positive k = used; k; k--)
+                        for (positive shift = 32; shift; shift -= 8)
+                        {
+                                p8 byte = (p8)(limb[k - 1] >> (shift - 8));
+
+                                if (leading && !byte)
+                                        continue;
+                                leading = false;
+                                staged[held++] = byte;
+                                if (held == sizeof(staged))
+                                {
+                                        text_put(staged, held);
+                                        held = 0;
+                                }
+                        }
+                if (held)
+                        text_put(staged, held);
+                memory_give(limb);
+        }
+
+        byte_store_release(address_of digits);
+        return text_done(text_status ? 1 : 0);
+}
+
 static const argument_option encoding_plain_options[] = {
     {"decode", 'd'},
     {"ignore-garbage", 'i'},
@@ -2256,14 +2558,15 @@ static const argument_option basenc_options[] = {
     {"decode", 'd'},
     {"ignore-garbage", 'i'},
     {"wrap", 'w', ARGUMENT_REQUIRED},
-    {"base64", '6', ARGUMENT_LONG_ONLY},
-    {"base64url", 'u', ARGUMENT_LONG_ONLY},
-    {"base32", '3', ARGUMENT_LONG_ONLY},
-    {"base32hex", 'x', ARGUMENT_LONG_ONLY},
-    {"base16", 'h', ARGUMENT_LONG_ONLY},
-    {"base2msbf", 'm', ARGUMENT_LONG_ONLY},
-    {"base2lsbf", 'l', ARGUMENT_LONG_ONLY},
-    {"z85", 'z', ARGUMENT_LONG_ONLY},
+    {"base64", '6', ARGUMENT_LONG_ONLY, 1},
+    {"base64url", 'u', ARGUMENT_LONG_ONLY, 1},
+    {"base32", '3', ARGUMENT_LONG_ONLY, 1},
+    {"base32hex", 'x', ARGUMENT_LONG_ONLY, 1},
+    {"base16", 'h', ARGUMENT_LONG_ONLY, 1},
+    {"base2msbf", 'm', ARGUMENT_LONG_ONLY, 1},
+    {"base2lsbf", 'l', ARGUMENT_LONG_ONLY, 1},
+    {"z85", 'z', ARGUMENT_LONG_ONLY, 1},
+    {"base58", '5', ARGUMENT_LONG_ONLY, 1},
     {null},
 };
 
@@ -2271,19 +2574,48 @@ static const argument_option basenc_options[] = {
 // is no wrap at all, as GNU reads it, rather than a refusal.
 static positive encoding_wrap;
 
+/*
+        xstrtoimax's reading: blanks may lead, then a sign, then decimal
+        digits and nothing else. A negative wrap (a minus before anything but
+        zeros) is refused as "invalid wrap size: 'W'", and a wrap too large
+        for the signed count GNU keeps it in is no wrap at all: it stops
+        folding the output and stops ending it with a newline, exactly as a
+        wrap of zero does.
+*/
 static bool encoding_option_seen(p8 letter, string_address value)
 {
-        if (letter == 'w' && !text_unsigned_option(value, true, address_of encoding_wrap))
-                return string_diagnostic(&text_diagnostic, 0, value, "invalid wrap size");
+        if (letter != 'w')
+                return true;
 
-        /*
-                A wrap wider than the signed count GNU keeps it in is no wrap
-                at all: it stops folding the output and stops ending it with
-                a newline, exactly as a wrap of zero does.
-        */
-        if (letter == 'w' && encoding_wrap > (positive_max >> 1))
-                encoding_wrap = 0;
+        string_address at = value + string_span(value, string_set_space);
+        bool negative = at[0] == '-';
 
+        if (negative || at[0] == '+')
+                at++;
+
+        bool good = byte_is_digit(at[0]);
+        positive made = 0;
+        bool over = false;
+
+        for (; good && byte_is_digit(at[0]); at++)
+        {
+                positive digit = (positive)(at[0] - '0');
+
+                if (made > ((positive_max >> 1) - digit) / 10)
+                        over = true;
+                else
+                        made = made * 10 + digit;
+        }
+
+        if (!good || at[0] || (negative && (made || over)))
+        {
+                text_flush();
+                string_format(writer_stderr, "%s: invalid wrap size: '%w'\n",
+                              text_name, writer_terminal_quoted_name, value);
+                return false;
+        }
+
+        encoding_wrap = over ? 0 : made;
         return true;
 }
 
@@ -2296,27 +2628,26 @@ static b32 text_encoding(string_address name, positive format)
             .seen = encoding_option_seen,
         };
 
+        p8 chosen = 0;
+
+        taking.selection = address_of chosen;
         text_begin(name);
         encoding_wrap = 76;
 
         if (!file_take(address_of taking))
                 return text_done(1);
 
+        // The last encoding named is the one used, as GNU's option loop has it.
         if (format == ENCODING_NONE)
         {
-                const p8 choices[] = {'6', 'u', '3', 'x', 'h', 'm', 'l', 'z'};
+                const p8 choices[] = {'6', 'u', '3', 'x', 'h', 'm', 'l', 'z', '5'};
 
                 for (positive at = 0; at < sizeof(choices); at++)
-                        if (taking.flags & FILE_FLAG(choices[at]))
-                        {
-                                if (format != ENCODING_NONE)
-                                        return text_done(string_diagnostic(&text_diagnostic, 1, null, "multiple encoding types"));
-
+                        if (chosen == choices[at])
                                 format = at + ENCODING_BASE64;
-                        }
 
                 if (format == ENCODING_NONE)
-                        return text_done(string_diagnostic(&text_diagnostic, 1, null, "missing encoding type"));
+                        return text_done(text_operand_trouble("missing encoding type", null, null));
         }
 
         positive wrap = encoding_wrap;
@@ -2334,7 +2665,11 @@ static b32 text_encoding(string_address name, positive format)
 
         b32 answered;
 
-        if (format == ENCODING_Z85)
+        if (format == ENCODING_BASE58)
+                answered = taking.flags & FILE_FLAG('d')
+                               ? base58_decode((taking.flags & FILE_FLAG('i')) != 0)
+                               : base58_encode(wrap);
+        else if (format == ENCODING_Z85)
                 answered = taking.flags & FILE_FLAG('d')
                                ? z85_decode((taking.flags & FILE_FLAG('i')) != 0)
                                : z85_encode(wrap);
