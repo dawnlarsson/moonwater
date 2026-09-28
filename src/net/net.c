@@ -4396,6 +4396,7 @@ typedef struct
 } tls_anchor;
 
 #include "anchors.inc"
+#include "suffixes.inc"
 
 static const p8 tls_oid_ec[7] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01};
 static const p8 tls_oid_p256[8] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07};
@@ -5066,6 +5067,127 @@ static COLD bool tls_printable(const p8 address_to bytes, positive length)
         return true;
 }
 
+/* Whether a dNSName of two or more labels is a public suffix under the
+   ICANN rules of the Public Suffix List: a rule names it, or a wildcard
+   rule names its parent and no exception names it. suffixes.inc keeps the
+   names with their labels reversed ("uk.co"): the wildcard parents and the
+   exceptions as short lists, and the other multi-label rules sorted and
+   front-coded -- an upper-case letter says how many leading bytes an
+   entry shares with the one before, 'A' none, and lower-case text follows
+   up to the next capital -- in one run a top-level label, each run found
+   by binary search over tls_public_suffix_runs. One-label names are
+   refused before this (every TLD is a suffix, known or not). */
+static COLD bool tls_suffix_in(const char address_to list, const p8 address_to key,
+                               positive length)
+{
+        for (; *list; list += string_length(list) + 1)
+                if (string_length(list) == length &&
+                    !memory_compare(list, key, length))
+                        return true;
+        return false;
+}
+
+static COLD bool tls_public_suffix(const p8 address_to name, positive length)
+{
+        p8 key[256];
+        p8 entry[256];
+        positive entry_length = 0;
+        positive key_length = 0;
+        positive label = length;
+        positive matched = 0;
+        positive low = 0;
+        positive high = array_count(tls_public_suffix_runs);
+        positive top;
+        positive cut;
+        bool behind = false;
+        const char address_to table;
+
+        if (length >= sizeof key)
+                return false;
+        while (label)
+        {
+                positive start = label;
+
+                while (start && name[start - 1] != '.')
+                        start--;
+                if (key_length)
+                        key[key_length++] = '.';
+                for (positive i = start; i < label; i++)
+                        key[key_length++] = name[i] >= 'A' && name[i] <= 'Z'
+                                                ? (p8)(name[i] + 32) : name[i];
+                label = start ? start - 1 : 0;
+        }
+        cut = key_length;
+        while (cut && key[cut - 1] != '.')
+                cut--;
+        top = memory_span_without_byte(key, '.', key_length);
+        if (tls_suffix_in(tls_public_suffix_exceptions, key, key_length))
+                return false;
+        if (cut && tls_suffix_in(tls_public_suffix_wildcards, key, cut - 1))
+                return true;
+
+        /* The run whose top-level label is the key's: each run's first
+           entry is spelled whole after its 'A'. */
+        while (low < high)
+        {
+                positive middle = low + (high - low) / 2;
+                const char address_to run = tls_public_suffixes +
+                                            tls_public_suffix_runs[middle] + 1;
+                positive run_top = memory_span_without_byte(
+                    run, '.', sizeof tls_public_suffixes - tls_public_suffix_runs[middle] - 1);
+                b32 order = memory_compare(run, key, run_top < top ? run_top : top);
+
+                if (!order && run_top == top)
+                {
+                        low = middle;
+                        break;
+                }
+                if (order < 0 || (!order && run_top < top))
+                        low = middle + 1;
+                else
+                        high = middle;
+        }
+        if (low == array_count(tls_public_suffix_runs))
+                return false;
+
+        /* matched counts the bytes of the entry that agree with the key.
+           Once an entry is below the key at matched, each entry sharing
+           more than matched bytes with it is too and is passed over, and
+           the first entry above the key, or the next run, ends the
+           search. */
+        table = tls_public_suffixes + tls_public_suffix_runs[low];
+        do
+        {
+                positive shared = (positive)(*table++ - 'A');
+
+                if (behind && shared > matched)
+                {
+                        while (*table && (*table < 'A' || *table > 'Z'))
+                                table++;
+                        continue;
+                }
+                entry_length = shared < entry_length ? shared : entry_length;
+                matched = shared < matched ? shared : matched;
+                while (*table && (*table < 'A' || *table > 'Z'))
+                {
+                        p8 byte = (p8)*table++;
+
+                        if (entry_length < sizeof entry)
+                                entry[entry_length++] = byte;
+                }
+                while (matched < key_length && matched < entry_length &&
+                       entry[matched] == key[matched])
+                        matched++;
+                if (matched == key_length && entry_length == key_length)
+                        return true;
+                behind = matched == entry_length ||
+                         (matched < key_length && entry[matched] < key[matched]);
+                if (!behind)
+                        return false;
+        } while (*table && *table != 'A');
+        return false;
+}
+
 /* A presented dNSName against a host already canonical (tls_general_name_
    match). An absolute name's trailing dot is dropped, as Chrome drops it:
    "example.com." and "example.com" are one name. */
@@ -5084,10 +5206,12 @@ static COLD bool tls_host_match(string_address host, p8 address_to name,
         if (!name_length || name[0] != '*' || name_length < 3 || name[1] != '.')
                 return false;
 
-        /* A wildcard leaves at least two labels beneath it. "*.com" is one
-           label, and a certificate carrying it would stand for every host in
-           a whole public suffix; no issuer means to say that, and a client
-           that reads it as written hands one certificate the internet. */
+        /* A wildcard leaves at least two labels beneath it, and those are
+           not a public suffix. "*.com" and "*.co.uk" would each stand for
+           every host in a whole registry; no issuer means to say that, and
+           a client that reads it as written hands one certificate the
+           internet. Chrome refuses the same names (ICANN rules only, so
+           *.appspot.com stands). */
         {
                 positive rest = name_length - 2;
                 positive dot = memory_span_without_byte(name + 2, '.', rest);
@@ -5097,14 +5221,16 @@ static COLD bool tls_host_match(string_address host, p8 address_to name,
         }
 
         /* The star stands for one whole label, never an empty one: a host
-           ".example.com" is not a name "*.example.com" covers. */
+           ".example.com" is not a name "*.example.com" covers. The suffix
+           list is read last, for the one wildcard that would match. */
         star = string_first_of(host, '.');
         if (!star || star == host || !star[1])
                 return false;
 
         return string_length(star) == name_length - 1 &&
                !memory_compare_ascii_case(star, (string_address)(name + 1),
-                                          name_length - 1);
+                                          name_length - 1) &&
+               !tls_public_suffix(name + 2, name_length - 2);
 }
 
 /* An IPv6 literal, bare or bracketed, as 16 bytes (RFC 4291 2.2): up to

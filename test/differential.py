@@ -40429,7 +40429,9 @@ def tls_der_fuzz_lift_parts(net):
     """
     oids = tls_fuzz_sec(net, "static const p8 tls_oid_ec[7] = {",
                         "typedef struct\n{\n        bipolar handle;")
-    oids = oids[:oids.rfind("};\n") + 3]
+    #   net.c includes suffixes.inc beside anchors.inc; the lift has no
+    #   include path, so the table comes in as text.
+    oids = (HARNESS_ROOT / "src/net/suffixes.inc").read_text() + oids[:oids.rfind("};\n") + 3]
     parsers = tls_fuzz_sec(
         net,
         "static COLD bipolar tls_asn1_length(p8 address_to bytes, positive size,",
@@ -40482,6 +40484,7 @@ typedef const char *const_string;
 #define end ((p8)0)
 #define positive_max (~(positive)0)
 #define min(a, b) ((a) < (b) ? (a) : (b))
+#define array_count(a) (sizeof(a) / sizeof((a)[0]))
 #define memory_compare memcmp
 #define memory_copy memcpy
 #define memory_fill(at, v, n) memset((at), (int)(v), (n))
@@ -42188,6 +42191,241 @@ typedef struct
             tls_fuzz_sec(net, "static COLD bool tls_verify_chain(p8 address_to body",
                          "static COLD bool tls_hello_append("))
 
+
+#       The Public Suffix List file suffixes.inc was generated from, fetched
+#       from https://publicsuffix.org/list/public_suffix_list.dat on the box
+#       2026-09-28. Only its ICANN section is used, the section Chrome's
+#       wildcard check reads.
+PUBLIC_SUFFIX_LIST_SHA256 = "257b298daca42f6d8ec964e238c2a55518e14f09d3117917ec8acee6f188503e"
+
+
+def public_suffix_rules(text):
+    """The ICANN section's rules, lower case, each U-label as its A-label."""
+    rules = []
+    icann = False
+    for line in text.splitlines():
+        line = line.strip()
+        if "===BEGIN ICANN DOMAINS===" in line:
+            icann = True
+        elif "===END ICANN DOMAINS===" in line:
+            icann = False
+        elif icann and line and not line.startswith("//"):
+            labels = []
+            for label in line.split()[0].split("."):
+                mark = "!" if label.startswith("!") else ""
+                label = label[len(mark):].lower()
+                if not label.isascii():
+                    label = "xn--" + label.encode("punycode").decode()
+                labels.append(mark + label)
+            rules.append(".".join(labels))
+    return rules
+
+
+def public_suffix_entries(rules):
+    """The multi-label rules as suffixes.inc keeps them, labels reversed
+    ("uk.co"): the plain rules sorted, the wildcards' parents ("ck" for
+    "*.ck") and the exceptions ("ck.www" for "!www.ck")."""
+    reverse = lambda name: ".".join(reversed(name.split(".")))
+    plain = sorted(reverse(r) for r in rules if "." in r and r[0] not in "*!")
+    wildcards = sorted(reverse(r[2:]) for r in rules if r.startswith("*."))
+    exceptions = sorted(reverse(r[1:]) for r in rules if r.startswith("!"))
+    return plain, wildcards, exceptions
+
+
+def public_suffix_compact(tables, name):
+    """What tls_public_suffix answers from the three tables."""
+    plain, wildcards, exceptions = tables
+    key = ".".join(reversed(name.lower().split(".")))
+    return key not in exceptions and (key.rpartition(".")[0] in wildcards or key in plain)
+
+
+def public_suffix_encode(entries):
+    """Front coding: a capital, 'A' plus the bytes shared with the entry
+    before (at most 25), then the rest of the entry. Each top-level label's
+    run starts from nothing, at the offsets returned beside the text."""
+    out = []
+    runs = []
+    before = ""
+    at = 0
+    for entry in entries:
+        shared = 0
+        if before.split(".")[0] != entry.split(".")[0]:
+            runs.append(at)
+        else:
+            while shared < min(len(before), len(entry), 25) and before[shared] == entry[shared]:
+                shared += 1
+        piece = chr(ord("A") + shared) + entry[shared:]
+        out.append(piece)
+        at += len(piece)
+        before = entry
+    return "".join(out), runs
+
+
+def public_suffix_decode(text):
+    entries = []
+    for found in re.finditer(r"([A-Z])([^A-Z]*)", text):
+        before = entries[-1] if entries else ""
+        entries.append(before[:ord(found.group(1)) - ord("A")] + found.group(2))
+    return entries
+
+
+def public_suffix_is_suffix(rules, name):
+    """The Public Suffix List algorithm itself: whether name is its own
+    public suffix under the prevailing rule (exception first, else the rule
+    of most labels, else the implicit "*")."""
+    labels = name.lower().split(".")
+    best = 1
+    for rule in rules:
+        parts = rule.lstrip("!").split(".")
+        if len(parts) <= len(labels) and all(
+                p == "*" or p == l for p, l in zip(reversed(parts), reversed(labels))):
+            if rule.startswith("!"):
+                return len(parts) - 1 == len(labels)
+            best = max(best, len(parts))
+    return best == len(labels)
+
+
+def public_suffix_probes(tables):
+    """Names derived from every entry: the rule, a name under it and its
+    parent, a wildcard's expansions and base, an exception and a name under
+    it, mixed case."""
+    plain, wildcards, exceptions = tables
+    names = set()
+    for entry in plain + wildcards + exceptions:
+        name = ".".join(reversed(entry.split(".")))
+        names.update((name, "zz." + name, "zz.zz." + name, name.upper(),
+                      name.partition(".")[2]))
+    names.update(("example.com", "example.foo", "co.uk.example", "github.io", "appspot.com"))
+    return sorted(n for n in names if n.count(".") >= 1)
+
+
+def harness_public_suffixes(argv):
+    """The wildcard public-suffix tables in src/net/suffixes.inc and the C
+    lookup that reads them.
+
+    With --list FILE (a copy of the Public Suffix List whose sha256 is
+    PUBLIC_SUFFIX_LIST_SHA256) and --write, regenerates suffixes.inc, after
+    proving that the compact test tls_public_suffix makes -- not an
+    exception, and a wildcard parent or a plain rule -- equals the Public
+    Suffix List algorithm over every rule-derived name. Without --list it
+    decodes suffixes.inc and holds the lifted tls_public_suffix and
+    tls_host_match to it over the same names: each is a suffix exactly when
+    the tables say so, and "*.<name>" identifies "a.<name>" exactly when it
+    is not.
+
+        python3 test/differential.py --harness public_suffixes
+        python3 test/differential.py --harness public_suffixes --list FILE --write
+    """
+    parser = argparse.ArgumentParser(prog="differential.py --harness public_suffixes")
+    parser.add_argument("--list")
+    parser.add_argument("--write", action="store_true")
+    args = parser.parse_args(argv)
+    path = HARNESS_ROOT / "src/net/suffixes.inc"
+    checks = Checks()
+
+    def c_list(name, items):
+        return "static const char %s[] =\n%s;\n" % (
+            name, "\n".join('    "%s\\0"' % item for item in items))
+
+    if args.list:
+        raw = Path(args.list).read_bytes()
+        if hashlib.sha256(raw).hexdigest() != PUBLIC_SUFFIX_LIST_SHA256:
+            print("public suffixes: FAIL -- %s is not the pinned list" % args.list)
+            return 1
+        rules = public_suffix_rules(raw.decode("utf-8"))
+        tables = public_suffix_entries(rules)
+        wrong = [name for name in public_suffix_probes(tables)
+                 if public_suffix_compact(tables, name) != public_suffix_is_suffix(rules, name)]
+        checks(not wrong, "the compact test differs from the list's algorithm for %s" %
+               " ".join(wrong[:10]))
+        encoded, runs = public_suffix_encode(tables[0])
+        checks(public_suffix_decode(encoded) == tables[0], "the front coding does not decode")
+        if args.write and not wrong:
+            lines = [encoded[at:at + 72] for at in range(0, len(encoded), 72)]
+            path.write_text(
+                "/*\n        Public suffixes a certificate wildcard may not stand on "
+                "(tls_public_suffix).\n\n"
+                "        Generated by test/differential.py --harness public_suffixes "
+                "--list FILE --write\n"
+                "        from the Public Suffix List, sha256 %s...,\n"
+                "        fetched from publicsuffix.org 2026-09-28: the %d multi-label "
+                "rules of its\n        ICANN section (U-labels as A-labels), labels "
+                "reversed. The plain rules are\n        sorted and front-coded -- a "
+                "capital letter, 'A' plus the bytes shared with\n        the entry "
+                "before, then the rest -- and each top-level label's run starts\n"
+                "        from 'A' at an offset in tls_public_suffix_runs. %d bytes "
+                "of text.\n*/\n\n"
+                "static const char tls_public_suffixes[] =\n%s;\n\n"
+                "static const p16 tls_public_suffix_runs[] = {\n%s};\n\n%s\n%s" % (
+                    PUBLIC_SUFFIX_LIST_SHA256[:16], sum(map(len, tables)), len(encoded),
+                    "\n".join('    "%s"' % line for line in lines),
+                    "".join("    %s,\n" % ", ".join(str(r) for r in runs[at:at + 10])
+                            for at in range(0, len(runs), 10)),
+                    c_list("tls_public_suffix_wildcards", tables[1]),
+                    c_list("tls_public_suffix_exceptions", tables[2])))
+            print("public suffixes: wrote %s (%d rules, %d bytes, %d runs)" % (
+                path, sum(map(len, tables)), len(encoded), len(runs)))
+        return checks.verdict("public suffixes", "public-suffixes")
+
+    text = path.read_text()
+
+    def c_strings(name):
+        found = re.search(r"%s\[\] =\n((?:\s*\"[^\"]*\"\n?)+);" % name, text)
+        return "".join(re.findall(r'"([^"]*)"', found.group(1))) if found else None
+
+    encoded = c_strings("tls_public_suffixes")
+    wildcards = c_strings("tls_public_suffix_wildcards")
+    exceptions = c_strings("tls_public_suffix_exceptions")
+    if None in (encoded, wildcards, exceptions):
+        print("public suffixes: FAIL -- a table is missing from suffixes.inc")
+        return 1
+    tables = (public_suffix_decode(encoded), wildcards.split("\\0")[:-1],
+              exceptions.split("\\0")[:-1])
+    names = public_suffix_probes(tables)
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
+    driver = r"""
+int main(void)
+{
+        char line[512];
+
+        while (fgets(line, sizeof line, stdin))
+        {
+                char star[520];
+                char host[520];
+                positive length = strcspn(line, "\n");
+
+                line[length] = 0;
+                snprintf(star, sizeof star, "*.%s", line);
+                snprintf(host, sizeof host, "a.%s", line);
+                printf("%d %d\n", tls_public_suffix((p8 *)line, length),
+                       tls_host_match(host, (p8 *)star, strlen(star)));
+        }
+        return 0;
+}
+"""
+    with tempfile.TemporaryDirectory(prefix="public-suffixes-") as temporary:
+        work = Path(temporary)
+        (work / "suffix.c").write_text(shim + oids + "\n" + parsers + driver)
+        built = subprocess.run([os.environ.get("CC", "cc"), "-O1", "-w", "-o",
+                                str(work / "suffix"), str(work / "suffix.c")],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print("public suffixes: FAIL -- the lift does not build:\n" + built.stderr[-2000:])
+            return 1
+        ran = subprocess.run([str(work / "suffix")], input="\n".join(names) + "\n",
+                             capture_output=True, text=True)
+    answers = ran.stdout.split("\n")
+    wrong = []
+    for name, answer in zip(names, answers):
+        suffix = public_suffix_compact(tables, name)
+        if answer != "%d %d" % (suffix, not suffix):
+            wrong.append("%s(%s)" % (name, answer))
+    checks(len(answers) > len(names) and not wrong,
+           "tls_public_suffix disagrees with suffixes.inc for %d of %d names: %s" % (
+               len(wrong), len(names), " ".join(wrong[:10])))
+    print("public suffixes: %d rules, %d names probed" % (sum(map(len, tables)), len(names)))
+    return checks.verdict("public suffixes", "public-suffixes")
 
 #       Public HTTPS hosts for x509_corpus: the popular sites, CDNs, clouds and
 #       registries, and a deliberate spread of governments, banks and national
@@ -52895,6 +53133,7 @@ HARNESS_CHECKS = {
     "crypto_vectors": harness_crypto_vectors,
     "crypto_fuzz": harness_crypto_fuzz,
     "x509_corpus": harness_x509_corpus,
+    "public_suffixes": harness_public_suffixes,
     "tls_fuzz": harness_tls_fuzz,
     "msan_net": harness_msan_net,
     "security_hygiene": harness_security_hygiene,

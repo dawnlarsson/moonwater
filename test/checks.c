@@ -54632,6 +54632,17 @@ static fn tls_certificate_identity_rules(void)
                     {"a.b.example.com", "*.example.com", false},
                     {"www.example.com.evil", "*.example.com", false},
                     {"example.com", "*.com", false},
+                    {"a.co.uk", "*.co.uk", false},
+                    {"a.CO.UK", "*.Co.Uk.", false},
+                    {"www.example.co.uk", "*.example.co.uk", true},
+                    {"a.b.ck", "*.b.ck", false},
+                    {"a.www.ck", "*.www.ck", true},
+                    {"a.x.kawasaki.jp", "*.x.kawasaki.jp", false},
+                    {"a.city.kawasaki.jp", "*.city.kawasaki.jp", true},
+                    {"a.aisai.aichi.jp", "*.aisai.aichi.jp", false},
+                    {"a.xn--55qx5d.cn", "*.xn--55qx5d.cn", false},
+                    {"a.appspot.com", "*.appspot.com", true},
+                    {"a.example.foo", "*.example.foo", true},
                     {"www.example.com", "w*.example.com", false},
                     {"www.example.com", "*.example.com.", true},
                     {"example.com", "example.com.", true},
@@ -54655,7 +54666,7 @@ static fn tls_certificate_identity_rules(void)
                                                 string_length(names[i].name)) !=
                                  names[i].match;
                 check("dNSName matching: case, one-label wildcards, no empty "
-                      "label, no public-suffix star",
+                      "label, no star on an ICANN public suffix",
                       wrong == 0);
         }
         {
