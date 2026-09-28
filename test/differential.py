@@ -40147,6 +40147,41 @@ def crypto_vectors_lines(seed):
     return out
 
 
+def crypto_branchless_bodies():
+    """The P-256 and P-384 field bodies in lib.c, on every machine that has
+    them, and the FIELD_ macros they expand, with any conditional branch
+    they hold: (routine, line, text), text None for a body's first line.
+    ECDH runs its secret scalar through these, and each body promises that
+    nothing branches on a value, so there should be none."""
+    lines = (HARNESS_ROOT / "src/lib.c").read_text().split("\n")
+    branch = re.compile(r"\b(j(?!mp\b)[a-z]{1,3}|b\.[a-z]{2}|cbn?z|tbn?z|"
+                        r"b(?:eq|ne|lt|ge|gt|le)u?z?)\s")
+    found = []
+    for at, line in enumerate(lines):
+        #   The rows, reductions and final subtractions the bodies expand.
+        macro = re.match(r"#define (FIELD_(?:X64|ARM64|RV)_\w+)", line)
+        if macro:
+            number = at
+            while True:
+                if branch.search(lines[number].split("//")[0]):
+                    found.append((macro.group(1), number + 1, lines[number].strip()))
+                if not lines[number].rstrip().endswith("\\"):
+                    break
+                number += 1
+        start = re.search(r"ASM_FUNC\((p(?:256|384)_(?:multiply|square|add|subtract))\)", line)
+        if not start:
+            continue
+        name = start.group(1)
+        stop = at
+        while "ASM_END(%s)" % name not in lines[stop]:
+            stop += 1
+        found.append((name, at + 1, None))
+        for number in range(at + 1, stop):
+            if branch.search(lines[number].split("//")[0]):
+                found.append((name, number + 1, lines[number].strip()))
+    return found
+
+
 def harness_crypto_vectors(argv):
     """Wycheproof-style vectors for the crypto in src/net/net.c, answered by
     Python's cryptography (OpenSSL) and printed for CHECK_crypto_vectors.
@@ -40176,6 +40211,10 @@ def harness_crypto_vectors(argv):
       cube-root forgery, PSS trailers, top bits and salt lengths; moduli
       under 2048 bits, even moduli and exponents refused by policy
 
+    First, the P-256 and P-384 field bodies in lib.c -- all eight on all
+    three machines, the arithmetic ECDH's secret scalar runs through --
+    must hold no conditional branch; any other exit is a failure.
+
     Verdicts are OpenSSL's, except where this client is stricter on
     purpose (RSA under 2048 bits, an even or unit exponent, a compressed
     ECDH share, a signature not exactly the modulus' length); the
@@ -40192,6 +40231,12 @@ def harness_crypto_vectors(argv):
     except ImportError:
         print("crypto vectors: NOT RUN -- python3 cryptography is missing", file=sys.stderr)
         return 2
+    bodies = crypto_branchless_bodies()
+    branches = [row for row in bodies if row[2]]
+    if len(bodies) - len(branches) != 24 or branches:
+        print("crypto vectors: lib.c's P-256/P-384 bodies: %d of 24 found, branches %s"
+              % (len(bodies) - len(branches), branches[:4]), file=sys.stderr)
+        return 1
     lines = crypto_vectors_lines(seed)
     kinds = collections.Counter(kind for kind, _, _ in lines)
     accepts = collections.Counter(kind for kind, expect, _ in lines if expect)
