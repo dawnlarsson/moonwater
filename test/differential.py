@@ -19421,6 +19421,23 @@ _TEXT_ENCODING_OPTIONS = (
 )
 _TEXT_ENCODING_OPERANDS = ((), ("a.txt",), ("-",), ("missing",), ("empty",), ("binary",),
                            ("a.txt", "b.txt"), ("dir",), ("unreadable",), ("b64",), ("nonl",))
+#       base58 is one big number, converted digit group by digit group up
+#       to a few hundred digits and split by powers of 58 past that: sizes
+#       either side of each limb and of the split, all-ones runs that sit
+#       just below a power, and digits spelling 58^k - 1 and 58^k exactly.
+_TEXT_BASE58_SIZES = (7, 8, 9, 64, 257, 300, 2049, 9000, 40000)
+_TEXT_BASE58_POWERS = (10, 319, 321, 1281, 5121, 20481)
+INPUTS.update({
+    **{f"text_base58_bytes_{size}_{shape}":
+       (b"\0\0" if shape == "lead" else b"") +
+       (b"\xff" * size if shape == "ff" else
+        hashlib.shake_256(b"base58 %d" % size).digest(size))
+       for size in _TEXT_BASE58_SIZES for shape in ("mixed", "ff", "lead")},
+    **{f"text_base58_digits_{count}_{shape}":
+       b"z" * count if shape == "top" else b"2" + b"1" * count
+       for count in _TEXT_BASE58_POWERS for shape in ("top", "power")},
+})
+
 _TEXT_ENCODING_STDIN = ("text", "empty", "text_b64", "text_b64_garbage", "text_b64_badpad",
                         "text_b32", "text_b32_garbage", "text_encoding_binary", "edge_65537",
                         "nonl", "blanks", "text_bytes", "text_z85", "edge_131072", "edge_65535", "edge_65536")
@@ -19889,6 +19906,11 @@ TEXT_UTILITIES = (
                    *({"argv": argv, "stdin": stdin, "fixture": "text"}
                      for stdin in ("text_base58", "text_base58_garbage", "nul", "empty")
                      for argv in (("--base58",), ("--base58", "-d"), ("--base58", "-di"))),
+                   *({"argv": ("--base58",) + wrap, "stdin": f"text_base58_bytes_{size}_{shape}", "fixture": "text"}
+                     for size in _TEXT_BASE58_SIZES for shape in ("mixed", "ff", "lead")
+                     for wrap in ((), ("-w", "0"))),
+                   *({"argv": ("--base58", "-d"), "stdin": f"text_base58_digits_{count}_{shape}", "fixture": "text"}
+                     for count in _TEXT_BASE58_POWERS for shape in ("top", "power")),
                    ("--base2lsbf", "-di"), ("--base16", "-d", "-i"),
                    #   base64url refuses a 5600-byte block holding base64's
                    #   own + or / before decoding any of it; -i drops them.

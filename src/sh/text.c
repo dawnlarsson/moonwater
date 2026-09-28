@@ -2275,8 +2275,7 @@ static b32 z85_decode(bool ignore_garbage)
         leading '1', and the number is written in base 58 after them. So the
         input is gathered whole before a digit can be written -- all but its
         leading zeros, which are only counted, so twenty megabytes of zeros
-        are twenty megabytes of '1' and no store. The number is worked in
-        32-bit limbs, five base-58 digits at a time (58^5 fits a limb).
+        are twenty megabytes of '1' and no store.
 */
 static const p8 base58_alphabet[] =
     "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -2311,6 +2310,477 @@ static inline INLINE p64 base58_divide(p64 high, p64 low, p64 address_to rest)
         }
         address_to rest = remainder;
         return quotient;
+}
+
+/*
+        Past a few hundred digits the conversion is divide and conquer, as
+        GMP's is, rather than one digit group at a time over the whole
+        number, which was quadratic: 465 ms for 100 KB where GNU takes 8,
+        and 4.2 s for 300 KB. A number below 58^(2k) is split by 58^k into
+        halves converted apart, and digits go back to a number as two
+        halves joined by one multiplication. The powers 58^(10 * 2^j) are
+        made by squaring, multiplication is Karatsuba's above
+        BIG_KARATSUBA limbs, and the split divides by multiplying with a
+        reciprocal of the power made by squaring the one below it. Every
+        reciprocal is rounded down, so the quotient it gives is never too
+        big and at most a step or two short, and each step is one more
+        subtraction of the power.
+*/
+#define BIG_KARATSUBA 32
+#define BASE58_SMALL 32 // limbs the digit-group loops convert whole
+#define BASE58_SMALL_DIGITS 320
+
+typedef struct
+{
+        p64 address_to power;   // 58^(10 * 2^j)
+        p64 address_to inverse; // at most B^scale / power, in B = 2^64
+        positive power_used, inverse_used, scale;
+} base58_level;
+
+static positive big_trim(const p64 address_to a, positive n)
+{
+        while (n && !a[n - 1])
+                n--;
+        return n;
+}
+
+// a += b over a's n limbs, b's m no more than n; the carry out.
+static p64 big_add(p64 address_to a, positive n, const p64 address_to b, positive m)
+{
+        p64 carry = 0;
+        positive at = 0;
+
+        for (; at < m; at++)
+        {
+                p64 sum = a[at] + carry;
+
+                carry = sum < carry;
+                sum += b[at];
+                carry += sum < b[at];
+                a[at] = sum;
+        }
+        for (; carry && at < n; at++)
+                carry = !++a[at];
+        return carry;
+}
+
+// a -= b the same way; the borrow out.
+static p64 big_subtract(p64 address_to a, positive n, const p64 address_to b, positive m)
+{
+        p64 borrow = 0;
+        positive at = 0;
+
+        for (; at < m; at++)
+        {
+                p64 x = a[at];
+                p64 y = b[at];
+
+                a[at] = x - y - borrow;
+                borrow = (x < y) | ((x == y) & borrow);
+        }
+        for (; borrow && at < n; at++)
+                borrow = !a[at]--;
+        return borrow;
+}
+
+static bipolar big_compare(const p64 address_to a, positive an,
+                           const p64 address_to b, positive bn)
+{
+        an = big_trim(a, an);
+        bn = big_trim(b, bn);
+        if (an != bn)
+                return an < bn ? -1 : 1;
+        while (an--)
+                if (a[an] != b[an])
+                        return a[an] < b[an] ? -1 : 1;
+        return 0;
+}
+
+/*
+        r = a * b, an + bn limbs, r apart from both. The scratch is
+        8 max(an, bn) + 2048 limbs, which the Karatsuba step's three
+        (h + 1)-limb pieces and the recursion under them stay inside.
+*/
+static fn big_multiply_into(p64 address_to r, const p64 address_to a, positive an,
+                            const p64 address_to b, positive bn, p64 address_to scratch)
+{
+        if (an < bn)
+        {
+                const p64 address_to swap = a;
+                positive length = an;
+
+                a = b;
+                an = bn;
+                b = swap;
+                bn = length;
+        }
+
+        if (bn < BIG_KARATSUBA)
+        {
+                memory_fill(r, 0, (an + bn) * sizeof(p64));
+                for (positive i = 0; i < bn; i++)
+                {
+                        p64 carry = 0;
+
+                        for (positive j = 0; j < an; j++)
+                        {
+                                unsigned __int128 t = (unsigned __int128)a[j] * b[i] +
+                                                      r[i + j] + carry;
+
+                                r[i + j] = (p64)t;
+                                carry = (p64)(t >> 64);
+                        }
+                        r[i + an] = carry;
+                }
+                return;
+        }
+
+        positive h = (an + 1) / 2;
+
+        // Far apart in length: b against a in pieces its own size.
+        if (bn <= h)
+        {
+                memory_fill(r, 0, (an + bn) * sizeof(p64));
+                for (positive at = 0; at < an; at += bn)
+                {
+                        positive take = min(bn, an - at);
+
+                        big_multiply_into(scratch, a + at, take, b, bn, scratch + take + bn);
+                        big_add(r + at, an + bn - at, scratch, take + bn);
+                }
+                return;
+        }
+
+        // (a1 B^h + a0)(b1 B^h + b0) with the middle as (a0 + a1)(b0 + b1)
+        // less the two ends.
+        p64 address_to sa = scratch;
+        p64 address_to sb = scratch + h + 1;
+        p64 address_to middle = scratch + 2 * h + 2;
+        positive high = an + bn - 2 * h;
+
+        big_multiply_into(r, a, h, b, h, scratch);
+        big_multiply_into(r + 2 * h, a + h, an - h, b + h, bn - h, scratch);
+        memory_copy_apart(sa, a, h * sizeof(p64));
+        sa[h] = big_add(sa, h, a + h, an - h);
+        memory_copy_apart(sb, b, h * sizeof(p64));
+        sb[h] = big_add(sb, h, b + h, bn - h);
+        big_multiply_into(middle, sa, h + 1, sb, h + 1, scratch + 4 * h + 4);
+        big_subtract(middle, 2 * h + 2, r, 2 * h);
+        big_subtract(middle, 2 * h + 2, r + 2 * h, high);
+        big_add(r + h, an + bn - h, middle, min(2 * h + 2, an + bn - h));
+}
+
+static bool big_multiply(p64 address_to r, const p64 address_to a, positive an,
+                         const p64 address_to b, positive bn)
+{
+        p64 address_to scratch = null;
+
+        if (min(an, bn) >= BIG_KARATSUBA &&
+            !(scratch = (p64 address_to)memory_take((8 * max(an, bn) + 2048) * sizeof(p64))))
+                return false;
+        big_multiply_into(r, a, an, b, bn, scratch);
+        if (scratch)
+                memory_give(scratch);
+        return true;
+}
+
+/*
+        Level j + 1 from level j: the power squared, and when asked the
+        reciprocal squared and cut back to three limbs past the power, each
+        cut rounding down again.
+*/
+static bool base58_level_next(base58_level address_to level, bool inverse)
+{
+        base58_level address_to next = level + 1;
+        positive dn = level->power_used;
+
+        if (!(next->power = (p64 address_to)memory_take(2 * dn * sizeof(p64))) ||
+            !big_multiply(next->power, level->power, dn, level->power, dn))
+                return false;
+        next->power_used = big_trim(next->power, 2 * dn);
+        if (!inverse)
+                return true;
+
+        positive rn = level->inverse_used;
+
+        if (!(next->inverse = (p64 address_to)memory_take((2 * rn + 1) * sizeof(p64))) ||
+            !big_multiply(next->inverse, level->inverse, rn, level->inverse, rn))
+                return false;
+
+        positive square = big_trim(next->inverse, 2 * rn);
+        positive keep = next->power_used + 3;
+        positive drop = square > keep ? square - keep : 0;
+
+        memory_copy(next->inverse, next->inverse + drop, (square - drop) * sizeof(p64));
+        next->inverse_used = square - drop;
+        next->scale = 2 * level->scale - drop;
+
+        /*
+                Squaring keeps the reciprocal's relative error, doubled,
+                where the power squared needs it squared: one Newton step,
+                r += r (B^s - power r) / B^s, which leaves it below the
+                true reciprocal still. power r < B^s, so B^s less it is its
+                negation in s limbs.
+        */
+        positive scale = next->scale;
+        positive rn2 = next->inverse_used;
+        positive dn2 = next->power_used;
+        positive room = max(scale, dn2 + rn2);
+        p64 address_to error = (p64 address_to)memory_take((room + rn2 + scale + 1) * sizeof(p64));
+        p64 address_to step = error + room;
+
+        if (!error)
+                return false;
+        memory_fill(error, 0, room * sizeof(p64));
+        if (!big_multiply(error, next->power, dn2, next->inverse, rn2))
+        {
+                memory_give(error);
+                return false;
+        }
+
+        p64 one = 1;
+
+        for (positive at = 0; at < scale; at++)
+                error[at] = ~error[at];
+        big_add(error, scale, &one, 1);
+
+        positive en = big_trim(error, scale);
+
+        if (!big_multiply(step, next->inverse, rn2, error, en))
+        {
+                memory_give(error);
+                return false;
+        }
+        if (rn2 + en > scale)
+        {
+                next->inverse[rn2] = 0;
+                big_add(next->inverse, rn2 + 1, step + scale, rn2 + en - scale);
+                next->inverse_used = big_trim(next->inverse, rn2 + 1);
+        }
+        memory_give(error);
+        return true;
+}
+
+static const p64 base58_power_first[] = {BASE58_CHUNK};
+static const p64 base58_inverse_first[] = { // floor(2^192 / 58^10)
+    0xd723fdba60afd36full, 0xd1bf16ed97e42595ull, 0x2a};
+
+static fn base58_levels_begin(base58_level address_to levels)
+{
+        memory_fill(levels, 0, 64 * sizeof(base58_level));
+        levels[0] = (base58_level){(p64 address_to)base58_power_first,
+                                   (p64 address_to)base58_inverse_first, 1, 3, 3};
+}
+
+static fn base58_levels_end(base58_level address_to levels)
+{
+        for (positive j = 1; j < 64; j++)
+        {
+                if (levels[j].power)
+                        memory_give(levels[j].power);
+                if (levels[j].inverse)
+                        memory_give(levels[j].inverse);
+        }
+}
+
+/*
+        x = x mod power and q = x / power, for x below the power squared;
+        q needs the power's length and one more. Answers q's length, or
+        -1 when memory ran out. x's top limbs past the power's but two are
+        all the estimate reads, which can only make it smaller.
+*/
+static bipolar base58_split(p64 address_to x, positive address_to x_used,
+                            const base58_level address_to level, p64 address_to q)
+{
+        positive dn = level->power_used;
+        positive xn = address_to x_used;
+        positive skip = dn > 2 ? dn - 2 : 0;
+        positive qn = 0;
+        p64 address_to work = (p64 address_to)memory_take(
+            (xn + level->inverse_used + dn + 2) * sizeof(p64));
+
+        if (!work)
+                return -1;
+
+        if (xn > skip)
+        {
+                positive made = xn - skip + level->inverse_used;
+                positive shift = level->scale - skip;
+
+                if (!big_multiply(work, x + skip, xn - skip, level->inverse,
+                                  level->inverse_used))
+                {
+                        memory_give(work);
+                        return -1;
+                }
+                if (made > shift)
+                {
+                        qn = big_trim(work + shift, made - shift);
+                        memory_copy_apart(q, work + shift, qn * sizeof(p64));
+                }
+        }
+
+        if (qn)
+        {
+                if (!big_multiply(work, q, qn, level->power, dn))
+                {
+                        memory_give(work);
+                        return -1;
+                }
+                big_subtract(x, xn, work, big_trim(work, qn + dn));
+                xn = big_trim(x, xn);
+        }
+        memory_give(work);
+
+        while (big_compare(x, xn, level->power, dn) >= 0)
+        {
+                p64 one = 1;
+
+                big_subtract(x, xn, level->power, dn);
+                xn = big_trim(x, xn);
+                q[qn] = 0;
+                big_add(q, qn + 1, &one, 1);
+                qn = big_trim(q, qn + 1);
+        }
+
+        address_to x_used = xn;
+        return (bipolar)qn;
+}
+
+// Ten digits a pass over the whole number, least significant first.
+static positive base58_digits_small(p64 address_to limb, positive used,
+                                    p8 address_to digits)
+{
+        positive made = 0;
+
+        used = big_trim(limb, used);
+        while (used)
+        {
+                p64 rest = 0;
+
+                for (positive at = used; at; at--)
+                {
+                        p64 value = limb[at - 1];
+
+                        limb[at - 1] = base58_divide(
+                            (rest << BASE58_SHIFT) | (value >> (64 - BASE58_SHIFT)),
+                            value << BASE58_SHIFT, address_of rest);
+                        rest >>= BASE58_SHIFT;
+                }
+                used = big_trim(limb, used);
+                for (positive digit = 0; digit < 10; digit++)
+                {
+                        digits[made++] = (p8)(rest % 58);
+                        rest /= 58;
+                }
+        }
+        return made;
+}
+
+// width digits of x, least significant first, x below 58^width; level
+// j splits a width of 20 * 2^j. x is used up.
+static bool base58_digits(p64 address_to x, positive used,
+                          const base58_level address_to levels, bipolar j,
+                          p8 address_to digits, positive width)
+{
+        used = big_trim(x, used);
+        if (j < 0 || used <= BASE58_SMALL)
+        {
+                positive made = base58_digits_small(x, used, digits);
+
+                memory_fill(digits + made, 0, width - made);
+                return true;
+        }
+
+        const base58_level address_to level = levels + j;
+        p64 address_to q = (p64 address_to)memory_take((level->power_used + 1) * sizeof(p64));
+        bipolar qn = q ? base58_split(x, address_of used, level, q) : -1;
+        bool made = qn >= 0 &&
+                    base58_digits(x, used, levels, j - 1, digits, width / 2) &&
+                    base58_digits(q, (positive)qn, levels, j - 1, digits + width / 2,
+                                  width / 2);
+
+        if (q)
+                memory_give(q);
+        return made;
+}
+
+// The value of count digits, most significant first, in a fresh store
+// the caller gives back; null when memory ran out.
+static p64 address_to base58_value(const p8 address_to digits, positive count,
+                                   const base58_level address_to levels,
+                                   positive address_to used)
+{
+        if (count <= BASE58_SMALL_DIGITS)
+        {
+                // 58 < 2^6, so a digit is at most six bits of the number.
+                p64 address_to limb = (p64 address_to)memory_take(
+                    ((count * 6 + 63) / 64 + 1) * sizeof(p64));
+                positive made = 0;
+                positive at = 0;
+                positive first = count % 10 ? count % 10 : 10;
+
+                if (!limb)
+                        return null;
+                while (at < count)
+                {
+                        positive take = at ? 10 : first;
+                        p64 scale = 1;
+                        p64 carry = 0;
+
+                        for (positive k = 0; k < take; k++)
+                        {
+                                carry = carry * 58 + digits[at + k];
+                                scale *= 58;
+                        }
+                        at += take;
+                        for (positive k = 0; k < made; k++)
+                        {
+                                unsigned __int128 wide =
+                                    (unsigned __int128)limb[k] * scale + carry;
+
+                                limb[k] = (p64)wide;
+                                carry = (p64)(wide >> 64);
+                        }
+                        if (carry)
+                                limb[made++] = carry;
+                }
+                address_to used = made;
+                return limb;
+        }
+
+        bipolar j = 0;
+
+        while (((positive)20 << j) < count)
+                j++;
+
+        const base58_level address_to level = levels + j;
+        positive low_count = (positive)10 << j;
+        positive high_used = 0;
+        positive low_used = 0;
+        p64 address_to high = base58_value(digits, count - low_count, levels, address_of high_used);
+        p64 address_to low = high ? base58_value(digits + count - low_count, low_count, levels,
+                                                 address_of low_used)
+                                  : null;
+        positive room = high_used + level->power_used + 1;
+        p64 address_to value = low ? (p64 address_to)memory_take(room * sizeof(p64)) : null;
+
+        if (value && big_multiply(value, high, high_used, level->power, level->power_used))
+        {
+                value[room - 1] = 0;
+                big_add(value, room, low, low_used);
+                address_to used = big_trim(value, room);
+        }
+        else if (value)
+        {
+                memory_give(value);
+                value = null;
+        }
+        if (high)
+                memory_give(high);
+        if (low)
+                memory_give(low);
+        return value;
 }
 
 static bool base58_emit(encoding_output address_to output,
@@ -2393,73 +2863,54 @@ static b32 base58_encode(positive wrap)
         if (writing && number.used)
         {
                 positive limbs = (number.used + 7) / 8;
-                positive digits_room = number.used * 138 / 100 + 32;
                 p64 address_to limb = (p64 address_to)memory_take(limbs * sizeof(p64));
-                p8 address_to digits = (p8 address_to)memory_take(digits_room);
+                base58_level levels[64];
+                bipolar top = 0;
+                p8 address_to digits = null;
 
-                if (!limb || !digits)
+                base58_levels_begin(levels);
+
+                // Big-endian bytes read backwards are little-endian limbs.
+                if (limb)
                 {
+                        p8 address_to bytes = (p8 address_to)limb;
+
+                        memory_copy_apart(bytes, number.bytes, number.used);
+                        memory_reverse(bytes, number.used);
+                        memory_fill(bytes + number.used, 0, limbs * sizeof(p64) - number.used);
+                }
+
+                // 58^(10 * 2^top) is past 2^(58 * 2^top), so past the
+                // number once that many bits hold it; the level below
+                // splits first, and top itself is never made.
+                positive bits = number.used * 8;
+                bool enough = limb != null;
+
+                for (p8 lead = number.bytes[0]; !(lead & 0x80); lead <<= 1)
+                        bits--;
+                while (((positive)58 << top) < bits)
+                        top++;
+                for (bipolar made = 0; enough && made + 1 < top; made++)
+                        enough = base58_level_next(levels + made, true);
+
+                positive width = (positive)10 << top;
+
+                if (enough)
+                        digits = (p8 address_to)memory_take(width);
+                if (!digits || !base58_digits(limb, limbs, levels, top - 1, digits, width))
+                {
+                        base58_levels_end(levels);
                         if (limb)
                                 memory_give(limb);
                         if (digits)
                                 memory_give(digits);
                         return base58_refuse_memory(address_of number);
                 }
+                base58_levels_end(levels);
 
-                // Big-endian bytes into little-endian limbs.
-                for (positive at = 0; at < limbs; at++)
-                {
-                        p64 value = 0;
+                positive made = width - memory_span_byte_reverse(digits, 0, width);
 
-                        for (positive byte = 8; byte; byte--)
-                        {
-                                positive index = at * 8 + byte - 1;
-
-                                value = (value << 8) |
-                                        (index < number.used
-                                             ? number.bytes[number.used - 1 - index]
-                                             : 0);
-                        }
-                        limb[at] = value;
-                }
-
-                positive used = limbs;
-                positive made = 0;
-
-                while (used && !limb[used - 1])
-                        used--;
-
-                while (used)
-                {
-                        p64 rest = 0;
-
-                        for (positive at = used; at; at--)
-                        {
-                                p64 value = limb[at - 1];
-
-                                limb[at - 1] = base58_divide(
-                                    (rest << BASE58_SHIFT) | (value >> (64 - BASE58_SHIFT)),
-                                    value << BASE58_SHIFT, address_of rest);
-                                rest >>= BASE58_SHIFT;
-                        }
-                        while (used && !limb[used - 1])
-                                used--;
-                        for (positive digit = 0; digit < 10; digit++)
-                        {
-                                digits[made++] = (p8)(rest % 58);
-                                rest /= 58;
-                        }
-                }
-
-                while (made && !digits[made - 1])
-                        made--;
-                for (positive at = 0; at < made / 2; at++)
-                {
-                        p8 swap = digits[at];
-
-                        digits[at] = digits[made - 1 - at];
-                        digits[made - 1 - at] = swap;
-                }
+                memory_reverse(digits, made);
                 for (positive at = 0; at < made; at++)
                         digits[at] = base58_alphabet[digits[at]];
 
@@ -2537,66 +2988,29 @@ static b32 base58_decode(bool ignore_garbage)
 
         if (digits.used)
         {
-                // 58 < 2^6, so a digit is at most six bits of the number.
-                positive limbs = (digits.used * 6 + 63) / 64 + 1;
-                p64 address_to limb = (p64 address_to)memory_take(limbs * sizeof(p64));
+                base58_level levels[64];
+                positive top = 0;
+                positive used = 0;
+                bool enough = true;
+                p64 address_to limb = null;
 
+                base58_levels_begin(levels);
+                while (enough && top < 62 && ((positive)20 << top) < digits.used)
+                        enough = base58_level_next(levels + top++, false);
+                if (enough)
+                        limb = base58_value(digits.bytes, digits.used, levels, address_of used);
+                base58_levels_end(levels);
                 if (!limb)
                         return base58_refuse_memory(address_of digits);
 
-                positive used = 0;
-                positive at = 0;
-                positive first = digits.used % 10 ? digits.used % 10 : 10;
+                // Little-endian limbs read backwards are the big-endian
+                // number, less its leading zero bytes.
+                p8 address_to bytes = (p8 address_to)limb;
 
-                while (at < digits.used)
-                {
-                        positive take = at ? 10 : first;
-                        p64 scale = 1;
-                        p64 chunk = 0;
+                memory_reverse(bytes, used * sizeof(p64));
+                positive lead = memory_span_byte(bytes, 0, used * sizeof(p64));
 
-                        for (positive k = 0; k < take; k++)
-                        {
-                                chunk = chunk * 58 + digits.bytes[at + k];
-                                scale *= 58;
-                        }
-                        at += take;
-
-                        p64 carry = chunk;
-
-                        for (positive k = 0; k < used; k++)
-                        {
-                                unsigned __int128 wide =
-                                    (unsigned __int128)limb[k] * scale + carry;
-
-                                limb[k] = (p64)wide;
-                                carry = (p64)(wide >> 64);
-                        }
-                        if (carry)
-                                limb[used++] = carry;
-                }
-
-                // Most significant first, with the leading zero bytes gone.
-                bool leading = true;
-                p8 staged[256];
-                positive held = 0;
-
-                for (positive k = used; k; k--)
-                        for (positive shift = 64; shift; shift -= 8)
-                        {
-                                p8 byte = (p8)(limb[k - 1] >> (shift - 8));
-
-                                if (leading && !byte)
-                                        continue;
-                                leading = false;
-                                staged[held++] = byte;
-                                if (held == sizeof(staged))
-                                {
-                                        text_put(staged, held);
-                                        held = 0;
-                                }
-                        }
-                if (held)
-                        text_put(staged, held);
+                text_put(bytes + lead, used * sizeof(p64) - lead);
                 memory_give(limb);
         }
 
