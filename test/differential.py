@@ -18128,6 +18128,23 @@ _TEXT_SORT_SAID_CASES = (
     ("none", "--files0-from=/dev/null"), ("none", "--files0-from=empty"), ("none", "--files0-from=dir"),
     ("nuls", "--files0-from=-"), ("minus", "--files0-from=-"), ("none", "-o", "no/such/file", "/dev/null"),
     ("none", "-m", "-o", "missing/x", "a.txt"), ("none", "-c", "--files0-from=-"),
+    #   --debug's commentary: the collation, then per key an obsolete
+    #   spelling, a key that cannot match, significant blanks and a number
+    #   across fields, then the decimal point, the global options no key
+    #   took, and -r reaching only the last resort.
+    ("none", "--debug"), ("none", "-s", "-k2,1", "--debug"), ("none", "-s", "-k2,1n", "--debug"),
+    ("none", "-s", "-k1,2n", "--debug"), ("none", "-s", "-rRVMhgb", "-k1,1n", "--debug"),
+    ("none", "-rRVMhgb", "-k1,1n", "--debug"), ("none", "-r", "-k1,1n", "--debug"),
+    ("none", "-gbr", "-k1,1n", "-k1,1r", "--debug"), ("none", "-b", "-k1b,1bn", "--debug"),
+    ("none", "-b", "-k1,1bn", "--debug"), ("none", "-b", "-k1,1bn", "-k2b,2", "--debug"),
+    ("none", "-r", "-k1,1r", "--debug"), ("none", "-i", "-k1,1i", "--debug"), ("none", "-d", "-k1,1b", "--debug"),
+    ("none", "-i", "-k1,1d", "--debug"), ("none", "-r", "--debug"), ("none", "-rM", "--debug"),
+    ("none", "-rM", "-k1,1", "--debug"), ("none", "--debug", "-rb", "-k2n", "+2.2", "-1b"),
+    ("none", "-nk1", "-t,", "--debug"), ("none", "-nk1", "-t.", "--debug"), ("none", "-nk1", "-t-", "--debug"),
+    ("none", "-gk1", "-t+", "--debug"), ("none", "-c", "--debug"), ("none", "-C", "--debug"),
+    ("none", "-o", "out", "--debug"), ("none", "--debug", "+0", "+1.2", "-3"), ("none", "-fdb", "-u", "--debug"),
+    ("none", "-k1.2,1.3n", "--debug"), ("none", "-k1,1.2", "--debug"), ("none", "-s", "-k2", "-n", "--debug"),
+    ("keys", "-k2n", "-k1", "--debug"), ("keys", "-R", "--random-source=big", "--debug"),
 )
 
 
@@ -19236,7 +19253,16 @@ TEXT_UTILITIES = (
                    ("-C", "unsorted"), ("-cu", "repeats"), ("-c", "-C"), ("-o", "a.txt", "a.txt"), ("-o", "a.txt", "a.txt", "a.txt"),
                    ("-z", "-t", ":", "-k2,2n"), ("-t:", "-k2,2n"), ("-t:", "-k2,2nr", "-s"), ("-t:", "-k2,2n", "-u"),
                    ("-t:", "-k3,3", "-k2,2n"), ("-t:", "-k2.2,2.7n"), ("-k3n", "big"), ("-u", "big"), ("-n", "big"),
-                   ("-g",), ("--debug",), ("--random-source=a.txt", "-R"),
+                   ("-g",), ("--random-source=a.txt", "-R"),
+                   #   --debug underlines each key where it was read -- a
+                   #   number or a month only as far as it went -- and the
+                   #   whole line unless -s or -u stopped short of it.
+                   *({"argv": argv + ("--debug",), "stdin": stdin, "fixture": "text"}
+                     for stdin in ("text_sort_keys", "text_sort_numbers", "text_sort_human",
+                                   "text_sort_month", "text_sort_general", "tabs", "text_sort_nul_fields")
+                     for argv in ((), ("-s",), ("-u",), ("-b",), ("-sb",), ("-n",), ("-k2n",), ("-s", "-k2,2n"),
+                                  ("-k1,1h",), ("-k2M",), ("-sg",), ("-k1.2b",), ("-k2.4b,2.3n",), ("-t", " ", "-k2"),
+                                  ("-z", "-k2b,2"), ("-r", "-k1"), ("-s", "+1", "-2"), ("-k1d",), ("-Rf", "--random-source=big"))),
                    #   -R is MD5 over the salt a source gives and the key, so
                    #   with a source its order is GNU's to the byte: equal
                    #   keys together, folded and ignored bytes gone first,
@@ -39459,7 +39485,6 @@ REASONS = {
  "r270": "deliberate: GNU's execution trace and annotated-program diagnostic format, not command-result semantics. The interpreter rejects it rather than pretending to emit that debugging protocol.",
  "r271": "bug: more than one thing is wrong with this argv and sort names a different first cause from the reference's.",
  "r272": "deliberate: -S is honoured in this sort's own record size, and GNU's buffer also grows with its thread count, so a buffer of a kilobyte or two spills at a different line here than there; whether a -T directory that cannot hold a temporary is ever reached follows from that. --compress-program is never run, because compressing a temporary cannot change a byte of the answer.",
- "r274": "deliberate: GNU's key annotation and diagnostic format, not ordering semantics. It is rejected rather than producing an incomplete diagnostic stream.",
  "r279": "bug: a separator expression that can match nothing splits the input differently from the reference's, which counts an empty match at a position this passes over.",
  "r28": "gawk's --debug; refused with usage",
  "r280": "bug: the obsolete -N form and the counted options around it are read in a different order from the reference's, so these argvs disagree about which count and which headers were asked for.",
@@ -44897,7 +44922,6 @@ PINNED = r"""
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"71fe5f003a3b15c50586b78cecf1e4da1447b4a5a3cef9f098702abd951ff3d3"},"case":{"argv":["-V","-d","--compress-program=nosuch","--field-separator=:","-S","1K","-Tdir","blank_runs"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"blanks","utility":"sort"},"domain":"text","id":"d650efeb494eb2dc","kind":"deliberate","list":"ledger","reason_id":"r272","utility":"sort"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--temporary-directory=dir","-r","--merge","--dictionary-order","--check=quiet","--check","big"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"edge_65536","utility":"sort"},"domain":"text","id":"df706ff58f3c4dca","kind":"bug","list":"ledger","reason_id":"r271","utility":"sort"},
 {"candidate":{"effects":"ed3508afed150d8a78a4e3b810ff94b17242f83f63889b96965436dd9947088c","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-o","a.txt","-r","--version-sort","--ignore-nonprinting","--key=1,1","-z","dir"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"fields","tier":"pinned","utility":"sort"},"domain":"text","id":"e98c1a3bfd732ab2","kind":"bug","list":"ledger","reason":"sort names a directory it cannot read in its own words, and -g and --random-source are not implemented.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"sort"},
-{"domain":"text","kind":"deliberate","list":"ledger","option":"--debug","reason_id":"r274","utility":"sort"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"52bb0f11a0d96cd79b15cbc47947e28d7da7fd63263e8f76cea9b643bc51d92b"},"case":{"argv":["-r","--separator=:","-b","-s^","--before","big"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text_random_lines","utility":"tac"},"domain":"text","id":"0bdc603cf851d7ec","kind":"bug","list":"ledger","reason_id":"r279","utility":"tac"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"63be28c14377de31674813c9b075d062a6d20288307c0ad20bf4db6b7ab8d6db"},"case":{"argv":["-b","-r","--regex","-s^","wide"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"many_lines","utility":"tac"},"domain":"text","id":"7cc3c4c7963e3be1","kind":"bug","list":"ledger","reason_id":"r279","utility":"tac"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"63be28c14377de31674813c9b075d062a6d20288307c0ad20bf4db6b7ab8d6db"},"case":{"argv":["--separator=:","--before","-s","^","--regex","wide"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"blanks","utility":"tac"},"domain":"text","id":"a8252bb35e483fbd","kind":"bug","list":"ledger","reason_id":"r279","utility":"tac"},

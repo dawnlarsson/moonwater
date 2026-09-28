@@ -26158,6 +26158,8 @@ typedef struct
         // did takes nothing from the command line: -r -k1n sorts the key
         // numerically and forwards, as the reference sort does.
         bool ordered;
+        // Written in the obsolete +POS1 -POS2 form, which --debug names.
+        bool traditional;
 } sort_key;
 
 static sort_key sort_keys[SORT_KEYS_MAX];
@@ -26414,13 +26416,16 @@ static inline INLINE bool sort_general_byte(p8 byte)
                byte == '_' || byte == '(' || byte == ')';
 }
 
-static sort_general sort_general_of(p8 address_to text, positive length)
+static sort_general sort_general_read(p8 address_to text, positive length,
+                                      positive address_to consumed)
 {
         sort_general out = {SORT_GENERAL_NONE, 0};
         positive at = string_span_max(text, length, string_set_space);
         positive stop = at;
         p8 small[96];
         p8 address_to copy = small;
+
+        address_to consumed = 0;
 
         while (stop < length && sort_general_byte(text[stop]))
                 stop++;
@@ -26446,6 +26451,9 @@ static sort_general sort_general_of(p8 address_to text, positive length)
         shape.value = string_to_extended(copy, address_of stopped);
 
         bool converted = stopped != copy;
+
+        if (converted)
+                address_to consumed = at + (positive)(stopped - copy);
 
         if (copy != small)
                 memory_give(copy);
@@ -26477,6 +26485,22 @@ static sort_general sort_general_of(p8 address_to text, positive length)
         out.rank = SORT_GENERAL_NUMBER;
         out.order = negative ? middle - magnitude : middle + magnitude;
         return out;
+}
+
+static sort_general sort_general_of(p8 address_to text, positive length)
+{
+        positive consumed;
+
+        return sort_general_read(text, length, address_of consumed);
+}
+
+// How much of the text strtold reads, for --debug's underline.
+static positive sort_general_extent(p8 address_to text, positive length)
+{
+        positive consumed;
+
+        sort_general_read(text, length, address_of consumed);
+        return consumed;
 }
 
 /*
@@ -26987,14 +27011,17 @@ static PURE bipolar sort_compare_version(p8 address_to a, positive la, p8 addres
 static PURE bipolar sort_compare_kind(p8 kind, positive how, p8 address_to a, positive la,
                                       p8 address_to b, positive lb)
 {
+        if (!kind)
+                return sort_compare_bytes(a, la, b, lb, how);
+
+        if (kind == 'n')
+                return sort_compare_number(a, la, b, lb);
+
         if (how && (kind == 'R' || kind == 'V' || (kind == 'h' && (how & SORT_FOLD))))
                 return sort_compare_translated(kind, how, a, la, b, lb);
 
         if (kind == 'R')
                 return sort_compare_random(a, la, b, lb);
-
-        if (kind == 'n')
-                return sort_compare_number(a, la, b, lb);
 
         if (kind == 'g')
                 return sort_compare_general(a, la, b, lb);
@@ -27005,10 +27032,7 @@ static PURE bipolar sort_compare_kind(p8 kind, positive how, p8 address_to a, po
         if (kind == 'M')
                 return sort_compare_month(a, la, b, lb);
 
-        if (kind == 'V')
-                return sort_compare_version(a, la, b, lb);
-
-        return sort_compare_bytes(a, la, b, lb, how);
+        return sort_compare_version(a, la, b, lb);
 }
 
 /*
@@ -28302,6 +28326,8 @@ typedef struct
         positive offered;
         positive error_offered;
         positive buffer;
+        // --debug's answer: each line shown with its keys underlined.
+        bool annotate;
 } sort_writer;
 
 // Where the newest temporary was made: a run or a merge is written right
@@ -28358,6 +28384,7 @@ static bool sort_writer_ready(sort_writer address_to out, positive handle)
         out->offered = 0;
         out->error_offered = 0;
         out->buffer = 0;
+        out->annotate = false;
         sort_out_used = 0;
 
         if (sort_out || array_store_reserve(sort_out, sort_out_room, 0,
@@ -28406,10 +28433,384 @@ static inline INLINE fn sort_writer_line(sort_writer address_to out,
         sort_out_used += length + 1;
 }
 
+/*
+        --debug. The answer goes to standard output as GNU's write_line gives
+        it: every tab shown as '>', the line ended with a newline whatever
+        ended it, and under it one line per key -- the key's bytes
+        underlined, or "^ no match for key" where it is empty -- and the whole
+        line underlined last unless -s or -u stopped the comparison before
+        it. A number or a month is underlined only as far as it was read, a
+        key of blanks and -b from where they end. Widths are columns in the C
+        locale: a control byte takes none, a tab one, any other byte one.
+*/
+static bool sort_debug;
+// Whether GNU's key list has anything in it: a -k, or the global ordering
+// standing in for one because it is not the plain default.
+static bool sort_debug_keyed;
+
+static fn sort_writer_bytes(sort_writer address_to out, p8 address_to at, positive length)
+{
+        while (length)
+        {
+                if (sort_out_used == sort_out_room)
+                        sort_writer_flush(out);
+
+                positive take = min(length, sort_out_room - sort_out_used);
+
+                memory_copy(sort_out + sort_out_used, at, take);
+                sort_out_used += take;
+                at += take;
+                length -= take;
+        }
+}
+
+static fn sort_writer_repeat(sort_writer address_to out, p8 byte, positive count)
+{
+        while (count)
+        {
+                if (sort_out_used == sort_out_room)
+                        sort_writer_flush(out);
+
+                positive take = min(count, sort_out_room - sort_out_used);
+
+                memory_fill(sort_out + sort_out_used, byte, take);
+                sort_out_used += take;
+                count -= take;
+        }
+}
+
+static positive sort_debug_width(p8 address_to at, positive length)
+{
+        positive width = 0;
+
+        for (positive i = 0; i < length; i++)
+                width += (at[i] >= 0x20 && at[i] != 0x7f) || at[i] == '\t';
+
+        return width;
+}
+
+// Where the key's underline ends: past the number or the month read.
+static positive sort_debug_tight(sort_key address_to key, p8 address_to at,
+                                 positive begin, positive limit)
+{
+        p8 kinds = key->order.kinds;
+
+        if (kinds & SORT_KIND_M)
+                return sort_month_of(at + begin, limit - begin) ? begin + 3 : begin;
+
+        if (kinds & SORT_KIND_G)
+                return begin + sort_general_extent(at + begin, limit - begin);
+
+        positive scan = begin + (begin < limit && at[begin] == '-');
+        bool digits = false;
+
+        for (; scan < limit && byte_is_digit(at[scan]); scan++)
+                digits = true;
+
+        if (scan < limit && at[scan] == '.')
+                for (scan++; scan < limit && byte_is_digit(at[scan]); scan++)
+                        digits = true;
+
+        if (!digits)
+                return begin;
+
+        if ((kinds & SORT_KIND_H) && scan < limit &&
+            string_first_of((string_address) "KkMGTPEZYRQ", at[scan]))
+                scan++;
+
+        return scan;
+}
+
+static fn sort_debug_mark(sort_writer address_to out, p8 address_to at, positive begin,
+                          positive limit)
+{
+        positive width = sort_debug_width(at + begin, limit - begin);
+
+        sort_writer_repeat(out, ' ', sort_debug_width(at, begin));
+
+        if (width)
+                sort_writer_repeat(out, '_', width);
+        else
+                sort_writer_bytes(out, (p8 address_to) "^ no match for key", 18);
+
+        sort_writer_repeat(out, '\n', 1);
+}
+
+static fn sort_debug_line(sort_writer address_to out, p8 address_to at, positive length)
+{
+        for (positive i = 0; i < length;)
+        {
+                positive run = 0;
+
+                while (i + run < length && at[i + run] != '\t')
+                        run++;
+
+                sort_writer_bytes(out, at + i, run);
+                i += run;
+
+                if (i < length)
+                {
+                        sort_writer_repeat(out, '>', 1);
+                        i++;
+                }
+        }
+
+        sort_writer_repeat(out, '\n', 1);
+
+        if (sort_debug_keyed)
+                for (b32 i = 0; i < sort_key_count; i++)
+                {
+                        sort_key address_to key = sort_keys + i;
+                        positive begin, limit;
+
+                        sort_key_span(key, at, length, address_of begin, address_of limit);
+
+                        if (key->order.kinds & (SORT_KIND_M | SORT_KIND_N | SORT_KIND_G | SORT_KIND_H))
+                        {
+                                begin += string_span_max(at + begin, limit - begin, sort_blanks);
+                                limit = sort_debug_tight(key, at, begin, limit);
+                        }
+
+                        sort_debug_mark(out, at, begin, limit);
+                }
+
+        if (!sort_debug_keyed || !(sort_unique || sort_stable))
+                sort_debug_mark(out, at, 0, length);
+}
+
+/*
+        What --debug says before the answer, in GNU's order and words: the
+        collation, then of each key whether it was written the obsolete way,
+        can never match, leaves leading blanks in, or reads a number across
+        fields, then how numbers are read, then which global options no key
+        took and whether -r only reached the last resort. keys and count are
+        the list GNU's key_warnings walks; defaults is what the command line
+        said outside any key, before any key took it.
+*/
+static bool sort_locale_named(string_address name)
+{
+        return !name || !name[0] || string_equals(name, "C") || string_equals(name, "POSIX") ||
+               string_equals(name, "C.UTF-8") || string_equals(name, "C.utf8");
+}
+
+// Whether setlocale(LC_ALL, "") would take the environment: every category's
+// name, from LC_ALL, its own variable or LANG, is one the C library has.
+static bool sort_locale_set()
+{
+        static const string_address categories[] = {
+            "LC_CTYPE", "LC_NUMERIC", "LC_TIME", "LC_COLLATE", "LC_MONETARY",
+            "LC_MESSAGES", "LC_PAPER", "LC_NAME", "LC_ADDRESS", "LC_TELEPHONE",
+            "LC_MEASUREMENT", "LC_IDENTIFICATION"};
+        string_address all = file_environment("LC_ALL");
+        string_address lang = file_environment("LANG");
+
+        if (all && all[0])
+                return sort_locale_named(all);
+
+        for (positive at = 0; at < sizeof(categories) / sizeof(categories[0]); at++)
+        {
+                string_address own = file_environment(categories[at]);
+
+                if (!sort_locale_named(own && own[0] ? own : lang))
+                        return false;
+        }
+
+        return true;
+}
+
+// One line of --debug's commentary, after whatever the tool still holds.
+#define sort_debug_say(...) (text_flush(), string_format(writer_stderr, __VA_ARGS__))
+
+static fn sort_debug_warnings(sort_ordering address_to defaults, b32 count, bool only)
+{
+        positive ignore = defaults->how & (SORT_DICTIONARY | SORT_PRINTABLE);
+        bool fold = (defaults->how & SORT_FOLD) != 0;
+        bool start = defaults->blanks[0];
+        bool stop = defaults->blanks[1];
+        p8 kinds = defaults->kinds;
+        bool reverse = defaults->reverse;
+        bool basic = false, general = false, basic_span = false, general_span = false;
+
+        if (!sort_locale_set())
+                sort_debug_say("%s: failed to set locale\n", text_name);
+
+        sort_debug_say("%s: text ordering performed using simple byte comparison\n", text_name);
+
+        for (b32 i = 0; i < count; i++)
+        {
+                sort_key address_to key = sort_keys + i;
+                positive number = (positive)i + 1;
+                p8 own = key->order.kinds;
+                bool numeric = (own & (SORT_KIND_N | SORT_KIND_G | SORT_KIND_H)) != 0;
+                bool from_line = key->first_field == 1 && key->first_char <= 1;
+                positive start_char = key->first_char ? key->first_char - 1 : 0;
+                positive end_char = key->second_field ? key->second_char : 0;
+
+                if (numeric)
+                {
+                        general |= (own & SORT_KIND_G) != 0;
+                        basic |= !(own & SORT_KIND_G);
+                }
+
+                // +A.x -B.y is -k A+1.x+1,B.y or ,B+1.y, and GNU names it
+                // by its fields alone.
+                if (key->traditional && key->second_field)
+                        sort_debug_say("%s: obsolescent key '+%p -%p' used; consider '-k %p,%p' instead\n",
+                                       text_name, key->first_field - 1, key->second_field,
+                                       key->first_field, key->second_field);
+                else if (key->traditional)
+                        sort_debug_say("%s: obsolescent key '+%p' used; consider '-k %p' instead\n",
+                                       text_name, key->first_field - 1, key->first_field);
+
+                bool zero = !from_line && key->second_field &&
+                            key->second_field < key->first_field;
+
+                if (zero)
+                        sort_debug_say("%s: key %p has zero width and will be ignored\n",
+                                       text_name, number);
+
+                bool implicit = numeric || (own & SORT_KIND_M);
+                bool line_offset = key->second_field == 1 && end_char;
+
+                if (!zero && !only && !sort_have_separator && !line_offset &&
+                    ((!key->order.blanks[0] && !implicit) ||
+                     (!key->order.blanks[0] && start_char) ||
+                     (!key->order.blanks[1] && end_char)))
+                        sort_debug_say("%s: leading blanks are significant in key %p; "
+                                       "consider also specifying 'b'\n",
+                                       text_name, number);
+
+                if (!only && numeric)
+                {
+                        positive first = from_line ? 1 : key->first_field;
+                        positive last = key->second_field;
+
+                        if (!last || first < last)
+                        {
+                                sort_debug_say("%s: key %p is numeric and spans multiple fields\n",
+                                               text_name, number);
+                                general_span |= (own & SORT_KIND_G) != 0;
+                                basic_span |= !(own & SORT_KIND_G);
+                        }
+                }
+
+                if (ignore && ignore == (key->order.how & (SORT_DICTIONARY | SORT_PRINTABLE)))
+                        ignore = 0;
+                if (key->order.how & SORT_FOLD)
+                        fold = false;
+                start &= !key->order.blanks[0];
+                stop &= !key->order.blanks[1];
+                kinds &= (p8)~own;
+                reverse &= !key->order.reverse;
+        }
+
+        bool warned = false;
+
+        if ((basic_span || general_span) && sort_have_separator)
+        {
+                p8 tab[2] = {sort_separator, 0};
+
+                if (sort_separator == '.')
+                {
+                        text_flush();
+                        string_format(writer_stderr,
+                                      "%s: field separator '%w' is treated as a decimal point in numbers\n",
+                                      text_name, writer_terminal_quoted_name, tab);
+                        warned = true;
+                }
+                else if (sort_separator == '-')
+                {
+                        text_flush();
+                        string_format(writer_stderr,
+                                      "%s: field separator '%w' is treated as a minus sign in numbers\n",
+                                      text_name, writer_terminal_quoted_name, tab);
+                }
+                else if (general_span && sort_separator == '+')
+                {
+                        text_flush();
+                        string_format(writer_stderr,
+                                      "%s: field separator '%w' is treated as a plus sign in numbers\n",
+                                      text_name, writer_terminal_quoted_name, tab);
+                }
+        }
+
+        if ((basic || general) && !warned)
+                sort_debug_say("%s: numbers use '.' as a decimal point in this locale\n", text_name);
+
+        bool stays = sort_stable || sort_unique;
+
+        if (ignore || fold || start || stop || kinds || (reverse && stays && count))
+        {
+                p8 letters[16];
+                positive used = 0;
+
+                if (start || stop)
+                        letters[used++] = 'b';
+                if (ignore == SORT_DICTIONARY)
+                        letters[used++] = 'd';
+                if (fold)
+                        letters[used++] = 'f';
+                if (kinds & SORT_KIND_G)
+                        letters[used++] = 'g';
+                if (kinds & SORT_KIND_H)
+                        letters[used++] = 'h';
+                if (ignore == SORT_PRINTABLE)
+                        letters[used++] = 'i';
+                if (kinds & SORT_KIND_M)
+                        letters[used++] = 'M';
+                if (kinds & SORT_KIND_N)
+                        letters[used++] = 'n';
+                if (kinds & SORT_KIND_R)
+                        letters[used++] = 'R';
+                if (reverse && stays)
+                        letters[used++] = 'r';
+                if (kinds & SORT_KIND_V)
+                        letters[used++] = 'V';
+                letters[used] = 0;
+
+                sort_debug_say(used == 1 ? "%s: option '-%s' is ignored\n"
+                                         : "%s: options '-%s' are ignored\n",
+                               text_name, letters);
+        }
+
+        if (reverse && !stays && count)
+                sort_debug_say("%s: option '-r' only applies to last-resort comparison\n",
+                               text_name);
+}
+
+// The answer's lines, annotated when --debug asked for it.
+static inline INLINE fn sort_writer_answer(sort_writer address_to out, p8 address_to at,
+                                           positive length, bool annotate)
+{
+        if (annotate)
+                sort_debug_line(out, at, length);
+        else
+                sort_writer_line(out, at, length);
+}
+
 static fn sort_emit_serial(sort_writer address_to out)
 {
         sort_view last;
         bool have_last = false;
+
+        // --debug's answer, apart from the loop every other answer takes.
+        if (out->annotate)
+        {
+                for (positive at = 0; at < sort_lines_count; at++)
+                {
+                        sort_view view = sort_view_of(sort_items[at].line);
+
+                        if (sort_unique && have_last &&
+                            !sort_compare_views_keys(address_of last, address_of view, 0))
+                                continue;
+
+                        last = view;
+                        have_last = true;
+                        sort_debug_line(out, view.at, view.length);
+                }
+
+                return;
+        }
 
         for (positive at = 0; at < sort_lines_count; at++)
         {
@@ -28544,7 +28945,7 @@ static bool sort_emit_sink(address_any context, positive index, address_any data
 
 static fn sort_emit(sort_writer address_to out)
 {
-        if (sort_lines_count <= 2 * SORT_BLOCK || sort_alone)
+        if (sort_lines_count <= 2 * SORT_BLOCK || sort_alone || out->annotate)
         {
                 sort_emit_serial(out);
                 return;
@@ -29075,7 +29476,10 @@ static p32 sort_tree_build(sort_source address_to sources, p32 address_to tree,
         return left;
 }
 
-static bool sort_merge(positive count, sort_writer address_to out)
+// The merge, made twice by the compiler: once for --debug's annotated answer
+// and once for every other, so the plain merge asks nothing more a line.
+static inline INLINE bool sort_merge_writing(positive count, sort_writer address_to out,
+                                             bool annotate)
 {
         sort_source address_to sources = sort_sources;
         sort_view last;
@@ -29092,12 +29496,12 @@ static bool sort_merge(positive count, sort_writer address_to out)
                         break;
 
                 if (!sort_unique)
-                        sort_writer_line(out, source->head.at, source->head.length);
+                        sort_writer_answer(out, source->head.at, source->head.length, annotate);
                 else if (!have_last ||
                          sort_compare_views_keys(address_of last,
                                                  address_of source->head, 0))
                 {
-                        sort_writer_line(out, source->head.at, source->head.length);
+                        sort_writer_answer(out, source->head.at, source->head.length, annotate);
 
                         if (!sort_hold(address_of source->head, address_of last))
                                 return false;
@@ -29125,6 +29529,12 @@ static bool sort_merge(positive count, sort_writer address_to out)
         }
 
         return true;
+}
+
+static bool sort_merge(positive count, sort_writer address_to out)
+{
+        return out->annotate ? sort_merge_writing(count, out, true)
+                             : sort_merge_writing(count, out, false);
 }
 
 /*
@@ -29589,7 +29999,7 @@ static b32 sort_pool_merge_ready()
         sort_samples_text_used = 0;
         sort_splitters_count = 0;
 
-        if (sort_alone || count < 2 ||
+        if (sort_alone || sort_debug || count < 2 ||
             !array_store_reserve(sort_sizes, sort_sizes_room, 0, count, 64) ||
             !array_store_reserve(sort_fences_at, sort_fences_at_room, 0, count + 1, 64))
                 return 0;
@@ -30604,6 +31014,7 @@ static const argument_option sort_options[] = {
     {"field-separator", 't', ARGUMENT_REQUIRED},
     {"temporary-directory", 'T', ARGUMENT_REQUIRED},
     {"compress-program", 'D', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
+    {"debug", 'G', ARGUMENT_LONG_ONLY},
     {"batch-size", 'B', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"parallel", 'p', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"files0-from", 'Z', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
@@ -30692,6 +31103,7 @@ static fn sort_obsolete_key(string_address plus, string_address minus)
         sort_key address_to key = sort_keys + sort_key_count;
 
         (void)sort_obsolete_start(key, plus);
+        key->traditional = true;
 
         if (minus)
         {
@@ -31207,7 +31619,12 @@ static bool sort_output_take(string_address output, bipolar handle,
         }
 
         text_flush();
-        return sort_writer_ready(out, text_out_handle);
+
+        if (!sort_writer_ready(out, text_out_handle))
+                return false;
+
+        out->annotate = sort_debug;
+        return true;
 }
 
 static fn sort_output_close(sort_writer address_to out)
@@ -31778,6 +32195,13 @@ static b32 text_sort()
         // Every comparison uses this effective key plan, including the
         // implicit whole-record key. An explicit ordering takes no defaults:
         // -r -k1n is a forward numeric key with a reversed whole-line tie break.
+        // GNU's key list: the -k keys, or else the global ordering as one
+        // key when it is more than the plain default -r leaves.
+        b32 written = sort_key_count;
+        bool global_key = !written && (defaults.kinds || defaults.how ||
+                                       defaults.blanks[0] || defaults.blanks[1]);
+        sort_ordering given = defaults;
+
         if (!sort_key_count)
                 sort_keys[sort_key_count++] = (sort_key){.first_field = 1};
         for (b32 i = 0; i < sort_key_count; i++)
@@ -31792,6 +32216,22 @@ static b32 text_sort()
                 key->whole = key->first_field == 1 && key->first_char <= 1 &&
                              !key->second_field && !key->order.blanks[0];
         }
+
+        sort_debug = (flags & FILE_FLAG('G')) != 0;
+        sort_debug_keyed = written || global_key;
+
+        if (sort_debug && (checking || output))
+        {
+                text_flush();
+                return text_done(string_report(writer_stderr, 2,
+                                               "%s: options '-%s --debug' are incompatible\n",
+                                               text_name,
+                                               checking ? (checking_quiet ? "C" : "c") : "o"));
+        }
+
+        if (sort_debug)
+                sort_debug_warnings(address_of given, written ? written : global_key,
+                                    global_key);
 
         // The salt is read only when some key hashes, as GNU reads it: a
         // --random-source that is never used is never opened.
