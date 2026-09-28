@@ -14663,6 +14663,18 @@ def shell_lang_assoc_pairs(rng):
         "p='p q'", line + " 2>&1 | sed 's/^[^:]*: line [0-9]*: //'", 'echo "end=$?"'), ("command", "stdin", "file"))
 
 
+#       Descriptors bash moves and duplicates in its own ways: >&word with
+#       a word that is no number is &>word, and with any descriptor but 1
+#       in front of it is ambiguous; N>&M- moves M to N and closes M.
+def shell_lang_descriptor_moves(rng):
+    line = rng.choice(("echo out >&f1; echo err >&2", "{ echo o; echo e >&2; } >&f1", "echo o 1>&f1",
+                       "echo o 2>&f1; echo \"s=$?\"", "exec 3>&1; echo moved 4>&3-; echo \"s=$?\"; echo still >&3",
+                       "exec 3>f1; exec 4>&3-; echo via4 >&4; echo via3 >&3 2>/dev/null || echo closed3",
+                       "exec 5>&1-; echo gone 2>/dev/null; echo back >&5", "{ echo in; } 3>&1 4>&3- >&4"))
+    return ("descriptor-moves", shell_BASH, shell_program(
+        "( " + line + " ) 2>/dev/null", 'echo "sub=$?"', "cat f1 2>/dev/null", 'echo "end=$?"'))
+
+
 #       Digits in front of > are a descriptor only while they fit one: bash
 #       reads a number past INT_MAX there as an ordinary word, so `echo a
 #       2147483648>f` writes "a 2147483648" to f. This called it a syntax
@@ -17531,6 +17543,7 @@ SHELL_FAMILIES = (
     shell_lang_legacy_arithmetic,
     shell_lang_case_toggle,
     shell_lang_assoc_pairs,
+    shell_lang_descriptor_moves,
     shell_lang_set_lone_plus,
     shell_lang_directory_state,
     shell_lang_builtin_refusals,

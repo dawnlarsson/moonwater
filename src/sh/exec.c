@@ -6552,6 +6552,41 @@ static bool exec_redirect_apply(b32 index)
                 b32 fd = want->fd;
                 bool var_alloc = false;
 
+                /*
+                        bash's >&word with a word that is no descriptor is
+                        &>word, stdout and stderr to one file, and with any
+                        descriptor but 1 in front it is ambiguous. N>&M- moves
+                        M to N: a duplicate, then M closed. dash has neither.
+                */
+                bool file_dup = false;
+                bool move_dup = false;
+
+                if (shell_bash_compat && !want->var_length &&
+                    (want->op == OP_GREATAND || want->op == OP_LESSAND) &&
+                    string_get(target))
+                {
+                        positive digits = string_span(target, string_set_digits);
+
+                        if (digits && string_is(target + digits, '-') &&
+                            !string_get(target + digits + 1))
+                                move_dup = true;
+                        else if (want->op == OP_GREATAND &&
+                                 string_get(target + digits) &&
+                                 !word_is(target, "-"))
+                        {
+                                if (fd != 1)
+                                {
+                                        string_format(log_error,
+                                                      "%s: ambiguous redirect\n",
+                                                      want->text);
+                                        exec_redirect_status = 1;
+                                        return false;
+                                }
+                                file_dup = true;
+                                both = true;
+                        }
+                }
+
                 if (want->var_length)
                 {
                         bool closing =
@@ -6625,7 +6660,8 @@ static bool exec_redirect_apply(b32 index)
                 if (shell_restricted &&
                     (want->op == OP_GREAT || want->op == OP_DGREAT ||
                      want->op == OP_CLOBBER || want->op == OP_LESSGREAT ||
-                     want->op == OP_ANDGREAT || want->op == OP_ANDDGREAT))
+                     want->op == OP_ANDGREAT || want->op == OP_ANDDGREAT ||
+                     file_dup))
                 {
                         exec_redirect_status = 1;
                         return shell_reported(false,
@@ -6729,14 +6765,27 @@ static bool exec_redirect_apply(b32 index)
 
                         opened = exec_here_open(body, length);
                 }
-                else if (want->op == OP_GREATAND || want->op == OP_LESSAND)
+                else if ((want->op == OP_GREATAND || want->op == OP_LESSAND) &&
+                         !file_dup)
                 {
                         positive source;
+                        p8 number[32];
 
                         if (string_is(target, '-') && string_is(target + 1, end))
                         {
                                 system_close(fd);
                                 continue;
+                        }
+
+                        if (move_dup)
+                        {
+                                positive digits = string_span(target,
+                                                              string_set_digits);
+
+                                if (digits >= sizeof(number))
+                                        digits = sizeof(number) - 1;
+                                memory_copy_end(number, target, digits);
+                                target = number;
                         }
 
                         if (!string_digits_checked_exact(target, 10, address_of source) ||
@@ -6758,6 +6807,13 @@ static bool exec_redirect_apply(b32 index)
                                 continue;
                         else
                                 opened = system_duplicate(source, fd, 0);
+
+                        //      The move's second half. bash closes the
+                        //      source for good, even for one command's own
+                        //      move: `cmd 4>&3-` leaves 3 closed after it.
+                        if (move_dup && opened >= 0 && (b32)source != fd &&
+                            (b32)source != (b32)opened)
+                                system_close(source);
                 }
                 else if (want->op == OP_LESS)
                         opened = system_open_at(AT_FDCWD,
