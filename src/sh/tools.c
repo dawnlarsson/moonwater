@@ -4893,11 +4893,6 @@ static fn numfmt_body_out(p8 address_to number, positive number_length,
         and expld, the conversion to intmax_t its rounding functions lean
         on, and a comparison against a small whole number.
 */
-static seq_wide numfmt_wide_word(p64 word)
-{
-        return seq_wide_round(word, 0, false);
-}
-
 static seq_wide numfmt_wide_divide(seq_wide left, seq_wide right)
 {
         bool negative = left.negative != right.negative;
@@ -4939,7 +4934,7 @@ static seq_wide numfmt_wide_power(seq_wide base, positive power)
         seq_wide result = base;
 
         if (!power)
-                return numfmt_wide_word(1);
+                return seq_wide_from(1);
         while (--power)
                 result = seq_wide_multiply(result, base);
         return result;
@@ -4951,13 +4946,13 @@ static bool numfmt_wide_below(seq_wide value, p64 word)
         value.negative = false;
         return value.kind == SEQ_WIDE_ZERO ||
                (value.kind == SEQ_WIDE_FINITE &&
-                seq_wide_order(value, numfmt_wide_word(word)) < 0);
+                seq_wide_order(value, seq_wide_from(word)) < 0);
 }
 
 // expld: divided by base while it is at least base, counting.
 static seq_wide numfmt_wide_scale(seq_wide value, p64 base, positive address_to power)
 {
-        seq_wide divisor = numfmt_wide_word(base);
+        seq_wide divisor = seq_wide_from(base);
 
         address_to power = 0;
         if (value.kind != SEQ_WIDE_FINITE && value.kind != SEQ_WIDE_ZERO)
@@ -5000,7 +4995,7 @@ static seq_wide numfmt_wide_from(bipolar integer)
 {
         bool negative = integer < 0;
         positive magnitude = negative ? (positive)0 - (positive)integer : (positive)integer;
-        seq_wide out = numfmt_wide_word(magnitude);
+        seq_wide out = seq_wide_from(magnitude);
 
         out.negative = negative && magnitude;
         return out;
@@ -5009,7 +5004,7 @@ static seq_wide numfmt_wide_from(bipolar integer)
 // simple_round: the whole part in steps of INTMAX_MAX, the rest by --round.
 static seq_wide numfmt_wide_round(seq_wide value)
 {
-        seq_wide most = numfmt_wide_word((positive)bipolar_max);
+        seq_wide most = seq_wide_from((positive)bipolar_max);
         bipolar times = numfmt_wide_integer(numfmt_wide_divide(value, most));
         seq_wide product = seq_wide_multiply(most, numfmt_wide_from(times));
 
@@ -5037,7 +5032,7 @@ static seq_wide numfmt_wide_round(seq_wide value)
                 break;
         case NUMFMT_ROUND_NEAREST:
         {
-                seq_wide half = numfmt_wide_divide(numfmt_wide_word(1), numfmt_wide_word(2));
+                seq_wide half = numfmt_wide_divide(seq_wide_from(1), seq_wide_from(2));
 
                 if (value.negative)
                         half.negative = true;
@@ -5231,7 +5226,7 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
         bool minus = numeric_length && bytes[0] == '-';
         positive digit_at = minus;
         positive whole_digits = 0, fraction_digits = 0, precision = 0;
-        seq_wide ten = numfmt_wide_word(10);
+        seq_wide ten = seq_wide_from(10);
         seq_wide value = {0, 0, SEQ_WIDE_ZERO, false};
         bool loss = false;
 
@@ -5240,7 +5235,7 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
                 if (value.kind != SEQ_WIDE_ZERO || bytes[digit_at] != '0')
                         whole_digits++;
                 value = seq_wide_add(seq_wide_multiply(value, ten),
-                                     numfmt_wide_word((p64)(bytes[digit_at] - '0')));
+                                     seq_wide_from((p64)(bytes[digit_at] - '0')));
         }
         loss |= whole_digits > 18;
         if (minus)
@@ -5256,7 +5251,7 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
                         if (part.kind != SEQ_WIDE_ZERO || bytes[digit_at] != '0')
                                 fraction_digits++;
                         part = seq_wide_add(seq_wide_multiply(part, ten),
-                                            numfmt_wide_word((p64)(bytes[digit_at] - '0')));
+                                            seq_wide_from((p64)(bytes[digit_at] - '0')));
                 }
                 loss |= fraction_digits > 18;
                 precision = digit_at - from;
@@ -5268,7 +5263,7 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
 
         if (suffix_bytes)
                 precision = 0;
-        value = seq_wide_multiply(value, numfmt_wide_power(numfmt_wide_word(base), power));
+        value = seq_wide_multiply(value, numfmt_wide_power(seq_wide_from(base), power));
 
         if (loss && numfmt.debug)
         {
@@ -5285,8 +5280,8 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
 
         if (numfmt.from_unit != 1 || numfmt.to_unit != 1)
                 value = numfmt_wide_divide(
-                    seq_wide_multiply(value, numfmt_wide_word(numfmt.from_unit)),
-                    numfmt_wide_word(numfmt.to_unit));
+                    seq_wide_multiply(value, seq_wide_from(numfmt.from_unit)),
+                    seq_wide_from(numfmt.to_unit));
 
         bool user = numfmt.have_format && numfmt.format.has_precision;
         positive used = user ? numfmt.format.precision : precision;
@@ -5343,7 +5338,7 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
         else
         {
                 positive output_base = numfmt.to == NUMFMT_SCALE_SI ? 1000 : 1024;
-                seq_wide scale_base = numfmt_wide_word(output_base);
+                seq_wide scale_base = seq_wide_from(output_base);
 
                 value = numfmt_wide_scale(value, output_base, address_of output_power);
 
