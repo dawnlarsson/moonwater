@@ -18153,14 +18153,42 @@ _TEXT_SORT_SAID_CASES = (
     ("keys", "--c"), ("keys", "--i"), ("keys", "--st"), ("keys", "--re"), ("keys", "-k0", "--rand"),
     ("keys", "--rand", "-k0"), ("keys", "--nosuch", "--rand"), ("keys", "--", "--rand"),
     ("keys", "-t", "--rand", "-k1"),
+    #   --compress-program runs: temporaries through the program and back
+    #   through its -d, a program that cannot run said once and the sort
+    #   done plain, and one that fails either way failing the sort.
+    ("cz", "-S", "1k", "--compress-program=./cz", "cin"), ("cz", "-S", "1k", "--compress-program=missing", "cin"),
+    ("cz", "-S", "1k", "--compress-program=./czundo", "cin"),
+    ("cz", "-S", "1k", "--compress-program=.", "cin"), ("cz", "-S", "1k", "--compress-program=./cin", "cin"),
+    ("cz", "-S", "1k", "--compress-program=./cz", "--batch-size=2", "cin"),
+    ("cz", "-S", "1k", "--compress-program=./cz", "-u", "-r", "cin"),
+    ("cz", "--compress-program=./cz", "-m", "--batch-size=2", "cin", "cin", "cin"),
+    ("cz", "--compress-program=./czundo", "-m", "--batch-size=2", "cin", "cin", "cin"),
+    ("cz", "--compress-program=a", "--compress-program=b", "cin"), ("cz", "--compress-program=./czbad", "cin"),
 )
 
 
 def _text_sort_said_valid(argv):
-    return len(argv) >= 1 and argv[0] in _TEXT_SORT_SAID_INPUTS
+    return len(argv) >= 1 and (argv[0] in _TEXT_SORT_SAID_INPUTS or argv[0] == "cz")
+
+
+#       "cz" cases run sort over three thousand lines in runs of a
+#       kilobyte, its temporaries in the case's own directory, with a
+#       compressor that works, one that fails, and one that fails only
+#       undoing; the answer is shown by its digest and the status after it.
+_TEXT_SORT_SAID_COMPRESSORS = (
+    "export TMPDIR=$PWD\n"
+    "env printf '#!/bin/sh\\ntr 41 14\\n' > cz\n"
+    "env printf '#!/bin/sh\\nexit 3\\n' > czbad\n"
+    "env printf '#!/bin/sh\\n[ \"$1\" = -d ] && exit 4\\ntr 41 14\\n' > czundo\n"
+    "env chmod +x cz czbad czundo\n"
+    "env seq -w 3000 | env tac > cin\n")
 
 
 def _text_sort_said_script(argv, stdin_name):
+    if argv[0] == "cz":
+        body = (_TEXT_SORT_SAID_COMPRESSORS + "run " + ul_words(argv[1:]) +
+                " > sorted\nstatus=$?\nenv md5sum < sorted\nexit $status\n")
+        return ul_live("sort", body)
     body = ("printf " + shlex.quote(_TEXT_SORT_SAID_INPUTS[argv[0]]) + " | run " +
             ul_words(argv[1:]) + "\nexit $?\n")
     return ul_live("sort", body)
@@ -19328,7 +19356,8 @@ TEXT_UTILITIES = (
                      for argv in (("+1", "fields"), ("+1", "-2", "fields"), ("+0", "-1", "+2r", "fields"),
                                   ("fields", "+1"))))),
     Utility("sort_said", operands=_TEXT_SORT_SAID_CASES, stdin=("empty",), fixture="text",
-            stderr="exact", modes=BASH, script=_text_sort_said_script, valid=_text_sort_said_valid),
+            stderr="exact", modes=BASH, script=_text_sort_said_script, valid=_text_sort_said_valid,
+            timeout=30.0),
     Utility("sum",
             options=(Option("-r"), Option("-s"), Option("--sysv")),
             operands=((), ("a.txt",), ("a.txt", "b.txt"), ("-",), ("missing",), ("empty",), ("binary",), ("dir",), ("big",),
@@ -39492,7 +39521,7 @@ REASONS = {
  "r27": "gawk's --copyright; refused with usage",
  "r270": "deliberate: GNU's execution trace and annotated-program diagnostic format, not command-result semantics. The interpreter rejects it rather than pretending to emit that debugging protocol.",
  "r271": "bug: more than one thing is wrong with this argv and sort names a different first cause from the reference's.",
- "r272": "deliberate: -S is honoured in this sort's own record size, and GNU's buffer also grows with its thread count, so a buffer of a kilobyte or two spills at a different line here than there; whether a -T directory that cannot hold a temporary is ever reached follows from that. --compress-program is never run, because compressing a temporary cannot change a byte of the answer.",
+ "r272": "deliberate: -S is honoured in this sort's own record size, and GNU's buffer also grows with its thread count, so a buffer of a kilobyte or two spills at a different line here than there; whether a -T directory that cannot hold a temporary is ever reached, and whether a --compress-program is ever run for one, follows from that.",
  "r279": "bug: a separator expression that can match nothing splits the input differently from the reference's, which counts an empty match at a position this passes over.",
  "r28": "gawk's --debug; refused with usage",
  "r280": "bug: the obsolete -N form and the counted options around it are read in a different order from the reference's, so these argvs disagree about which count and which headers were asked for.",

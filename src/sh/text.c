@@ -28328,6 +28328,9 @@ typedef struct
         positive buffer;
         // --debug's answer: each line shown with its keys underlined.
         bool annotate;
+        // Writing into a compressor's pipe, which only this thread may do:
+        // SIGPIPE is held back on it alone.
+        bool piped;
 } sort_writer;
 
 // Where the newest temporary was made: a run or a merge is written right
@@ -28385,6 +28388,7 @@ static bool sort_writer_ready(sort_writer address_to out, positive handle)
         out->error_offered = 0;
         out->buffer = 0;
         out->annotate = false;
+        out->piped = false;
         sort_out_used = 0;
 
         if (sort_out || array_store_reserve(sort_out, sort_out_room, 0,
@@ -28945,7 +28949,7 @@ static bool sort_emit_sink(address_any context, positive index, address_any data
 
 static fn sort_emit(sort_writer address_to out)
 {
-        if (sort_lines_count <= 2 * SORT_BLOCK || sort_alone || out->annotate)
+        if (sort_lines_count <= 2 * SORT_BLOCK || sort_alone || out->annotate || out->piped)
         {
                 sort_emit_serial(out);
                 return;
@@ -29087,6 +29091,306 @@ static bipolar sort_temporary()
 }
 
 /*
+        --compress-program, as GNU runs it: every temporary is written
+        through the program, which writes the file, and read back through
+        the program run with -d. The program is found on PATH before the
+        first one runs, and a program that cannot be run is said once --
+        "could not run compress program" and why -- and the temporaries are
+        written plain instead, which cannot change a byte of the answer.
+
+        The children are sort's own and waited for by pid: a compressor
+        before its file is read, a decompressor when its output ends, and
+        either one that did not exit 0 ends the sort with GNU's "terminated
+        abnormally", so a failure no byte of output shows still fails. A
+        child that was already sort's when it started is never asked about.
+        While sort has children SIGCHLD is held and at its default, so no
+        handler, and no ignoring inherited from a parent, can take their
+        statuses first; SIGPIPE is held while a compressor is written to, so
+        one that exits before reading everything is a write error and not a
+        death by signal, and the standard output keeps its own disposition.
+*/
+#define SORT_SIGNAL_CHILD 17
+
+static string_address sort_compress;
+static p8 address_to sort_compress_found;
+static positive sort_compress_found_room;
+static bipolar sort_compress_error;
+static bool sort_compress_looked;
+// GNU's last_result: a refusal is said only when it differs from the last.
+static bipolar sort_compress_said;
+// The pid of the compressor behind the temporary made last.
+static bipolar sort_made_pid;
+static p64 sort_signals_before;
+static positive sort_child_action[4];
+static bool sort_child_changed;
+
+static bipolar address_to sort_procs;
+static positive sort_procs_room;
+static positive sort_procs_count;
+
+// Whether a path is a program: executable, and not a directory.
+static bipolar sort_program_at(string_address path)
+{
+        bipolar access = system_access_at(AT_FDCWD, path, 1);
+
+        if (access < 0)
+                return access;
+
+        bipolar directory = system_open_at(AT_FDCWD, path, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+
+        if (directory >= 0)
+        {
+                system_close((positive)directory);
+                return -13;
+        }
+
+        return 0;
+}
+
+static bool sort_program_keep(string_address path, positive length)
+{
+        positive none = 0;
+
+        array_store_release(sort_compress_found, sort_compress_found_room, none);
+
+        if (!array_store_reserve(sort_compress_found, sort_compress_found_room, 0, length + 1, 64))
+                return false;
+
+        memory_copy(sort_compress_found, path, length);
+        sort_compress_found[length] = 0;
+        return true;
+}
+
+// gnulib's find_in_given_path: a name with a slash is itself, anything
+// else the first program of that name on PATH, and ENOENT unless some
+// candidate failed for another reason.
+static bipolar sort_compress_look()
+{
+        if (sort_compress_looked)
+                return sort_compress_error;
+
+        sort_compress_looked = true;
+        sort_compress_error = -2;
+
+        if (string_first_of(sort_compress, '/'))
+        {
+                sort_compress_error = sort_program_at(sort_compress);
+
+                if (!sort_compress_error &&
+                    !sort_program_keep(sort_compress, string_length(sort_compress)))
+                        sort_compress_error = -12;
+
+                return sort_compress_error;
+        }
+
+        string_address path = file_environment("PATH");
+        positive name = string_length(sort_compress);
+        p8 candidate[TEXT_PATH_MAX + 2];
+
+        if (!path)
+                path = (string_address) "/bin:/usr/bin";
+
+        for (string_address at = path;;)
+        {
+                string_address colon = string_first_of(at, ':');
+                positive length = colon ? (positive)(colon - at) : string_length(at);
+                string_address directory = length ? at : (string_address) ".";
+
+                if (!length)
+                        length = 1;
+
+                if (length + name + 1 <= TEXT_PATH_MAX)
+                {
+                        memory_copy(candidate, directory, length);
+                        candidate[length] = '/';
+                        memory_copy(candidate + length + 1, sort_compress, name + 1);
+
+                        bipolar found = sort_program_at(candidate);
+
+                        if (!found)
+                        {
+                                sort_compress_error = sort_program_keep(candidate,
+                                                                        length + 1 + name)
+                                                          ? 0
+                                                          : -12;
+                                return sort_compress_error;
+                        }
+
+                        if (found != -2)
+                                sort_compress_error = found;
+                }
+
+                if (!colon)
+                        break;
+
+                at = colon + 1;
+        }
+
+        return sort_compress_error;
+}
+
+// The program with from as its input and into as its output, -d to undo.
+static bipolar sort_compress_spawn(bool undo, bipolar from, bipolar into)
+{
+        string_address words[3] = {sort_compress_found,
+                                   undo ? (string_address) "-d" : null, null};
+        bipolar child = system_fork();
+
+        if (child)
+                return child;
+
+        system_signal_mask(SIG_SETMASK, address_of sort_signals_before, null, 8);
+
+        if (shell_child_fd_move(from, 0) < 0 || shell_child_fd_move(into, 1) < 0)
+                system_call_1(syscall(exit_group), 2);
+
+        (void)shell_exec_file(sort_compress_found, words, undo ? 2 : 1, file_environment_all());
+        system_call_1(syscall(exit_group), 127);
+        return -1;
+}
+
+static bool sort_proc_add(bipolar pid)
+{
+        if (!array_store_reserve(sort_procs, sort_procs_room, sort_procs_count,
+                                 sort_procs_count + 1, 64))
+                return false;
+
+        sort_procs[sort_procs_count++] = pid;
+        return true;
+}
+
+/*
+        Wait for a child of sort's that has not been waited for, and say so
+        if it failed: GNU's wait_proc, where a pid already reaped or never
+        sort's is nothing to wait for. loud false reaps without a word, for
+        a child whose output was not wanted.
+*/
+static bool sort_proc_wait(bipolar pid, bool loud)
+{
+        positive at = 0;
+
+        while (at < sort_procs_count && sort_procs[at] != pid)
+                at++;
+
+        if (at == sort_procs_count)
+                return true;
+
+        sort_procs[at] = sort_procs[--sort_procs_count];
+
+        positive status = 0;
+        bipolar waited = system_wait4_retry(pid, address_of status, 0, null);
+
+        if (!loud)
+                return true;
+
+        if (waited < 0)
+        {
+                text_flush();
+                string_format(writer_stderr, "%s: waiting for %w [-d]: %s\n", text_name,
+                              writer_shell_quoted_name, sort_compress, file_reason(waited));
+                sort_failed = true;
+                return false;
+        }
+
+        if (status)
+        {
+                text_flush();
+                string_format(writer_stderr, "%s: %w [-d] terminated abnormally\n", text_name,
+                              writer_shell_quoted_name, sort_compress);
+                sort_failed = true;
+                return false;
+        }
+
+        return true;
+}
+
+/*
+        The descriptor a temporary's writer writes: the temporary itself, or
+        a pipe into the compressor writing it, whose pid is in pid.
+*/
+static bipolar sort_compress_begin(sort_writer address_to out, bipolar handle,
+                                   bipolar address_to pid)
+{
+        p32 pair[2];
+        bipolar result;
+        bipolar child = -1;
+
+        address_to pid = 0;
+
+        if (!sort_compress)
+                return handle;
+
+        result = sort_compress_look();
+
+        if (!result)
+                result = system_pipe(pair, O_CLOEXEC);
+
+        if (!result)
+        {
+                child = sort_compress_spawn(false, pair[0], handle);
+
+                if (child < 0 || !sort_proc_add(child))
+                {
+                        system_close(pair[0]);
+                        system_close(pair[1]);
+                        result = child < 0 ? child : -12;
+                }
+        }
+
+        if (result)
+        {
+                if (result != sort_compress_said)
+                {
+                        text_flush();
+                        string_format(writer_stderr, "%s: could not run compress program %w: %s\n",
+                                      text_name, writer_shell_quoted_name, sort_compress,
+                                      file_reason(result));
+                }
+
+                sort_compress_said = result;
+                return handle;
+        }
+
+        sort_compress_said = 0;
+        system_close(pair[0]);
+        address_to pid = child;
+
+        p64 pipe_signal = (p64)1 << (SIGNAL_PIPE - 1);
+
+        system_signal_mask(SIG_BLOCK, address_of pipe_signal, null, 8);
+        out->piped = true;
+        return pair[1];
+}
+
+// The temporary written: the pipe closed, and a SIGPIPE it earned taken
+// back before the signal is let through again.
+static fn sort_compress_end(sort_writer address_to out, bipolar writing, bipolar handle)
+{
+        if (writing == handle)
+                return;
+
+        system_close((positive)writing);
+
+        p64 pipe_signal = (p64)1 << (SIGNAL_PIPE - 1);
+        positive never[2] = {0, 0};
+
+        (void)system_call_4(syscall(rt_sigtimedwait), (positive)address_of pipe_signal, 0,
+                            (positive)never, 8);
+
+        p64 current = sort_signals_before | ((p64)1 << (SORT_SIGNAL_CHILD - 1));
+
+        system_signal_mask(SIG_SETMASK, address_of current, null, 8);
+        out->piped = false;
+}
+
+// A temporary that will not be read after all: its compressor reaped.
+static fn sort_compress_drop(bipolar pid)
+{
+        if (pid > 0)
+                sort_proc_wait(pid, false);
+}
+
+/*
         Merging.
 
         An entry is what a merge reads: a named input, a temporary run, or
@@ -29105,6 +29409,9 @@ typedef struct
 {
         string_address name;
         bipolar handle;
+        // The compressor that wrote this temporary, when one did: a
+        // temporary with one is read back through the program's -d.
+        bipolar pid;
 } sort_entry;
 
 typedef struct
@@ -29131,6 +29438,8 @@ typedef struct
         // a diagnostic belongs to the main thread.
         bipolar error;
         bool quiet;
+        // The decompressor this source reads through, until it is reaped.
+        bipolar pid;
 } sort_source;
 
 static sort_entry address_to sort_entries;
@@ -29153,6 +29462,66 @@ static bool sort_hold(sort_view address_to view, sort_view address_to into)
         memory_copy_apart(sort_held, view->at, view->length);
         address_to into = address_to view;
         into->at = sort_held;
+        return true;
+}
+
+/*
+        A compressed temporary opened for reading: its compressor waited for,
+        then the program's -d started on a descriptor of its own onto the
+        file, so the offset the compressor left is not the one it reads from.
+*/
+static bool sort_compress_open(sort_source address_to source, sort_entry address_to entry)
+{
+        if (!sort_proc_wait(entry->pid, true))
+                return false;
+
+        p8 path[40];
+        p32 pair[2];
+
+        memory_copy(path, "/proc/self/fd/", 14);
+        path[14 + positive_into(path + 14, (positive)entry->handle)] = 0;
+
+        bipolar input = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        bool own = input >= 0;
+
+        if (!own)
+        {
+                input = entry->handle;
+                system_seek((positive)input, 0, FILE_SEEK_SET);
+        }
+
+        bipolar result = system_pipe(pair, O_CLOEXEC);
+        bipolar child = -1;
+
+        if (!result)
+        {
+                child = sort_compress_spawn(true, input, pair[1]);
+                system_close(pair[1]);
+
+                if (child < 0 || !sort_proc_add(child))
+                {
+                        system_close(pair[0]);
+                        result = child < 0 ? child : -12;
+                }
+        }
+
+        if (own)
+                system_close((positive)input);
+
+        if (result)
+        {
+                text_flush();
+                string_format(writer_stderr, "%s: could not run compress program %w -d: %s\n",
+                              text_name, writer_shell_quoted_name, sort_compress,
+                              file_reason(result));
+                sort_failed = true;
+                return false;
+        }
+
+        source->handle = pair[0];
+        source->opened = true;
+        source->positional = false;
+        source->pid = child;
         return true;
 }
 
@@ -29245,6 +29614,18 @@ static bool sort_source_next(sort_source address_to source)
                         {
                                 source->finished = true;
 
+                                // A decompressor's output ended: it is waited
+                                // for now, and one that failed fails the sort.
+                                if (source->pid > 0)
+                                {
+                                        bipolar pid = source->pid;
+
+                                        source->pid = 0;
+
+                                        if (!sort_proc_wait(pid, true))
+                                                return source->have = false;
+                                }
+
                                 if (got < 0 && source->quiet)
                                         source->error = got;
                                 else if (got < 0)
@@ -29276,7 +29657,9 @@ static bool sort_source_open(sort_source address_to source, sort_entry address_t
             .stop = sort_lines_count,
         };
 
-        if (entry->handle >= 0)
+        if (entry->handle >= 0 && entry->pid)
+                return sort_compress_open(source, entry);
+        else if (entry->handle >= 0)
                 source->positional = true;
         else if (entry->handle == SORT_ENTRY_NAMED)
         {
@@ -29320,6 +29703,9 @@ static fn sort_sources_close()
 
                 if (source->opened)
                         system_close((positive)source->handle);
+
+                if (source->pid > 0)
+                        sort_proc_wait(source->pid, false);
 
                 array_store_release(source->buffer, source->room, none);
         }
@@ -29999,7 +30385,7 @@ static b32 sort_pool_merge_ready()
         sort_samples_text_used = 0;
         sort_splitters_count = 0;
 
-        if (sort_alone || sort_debug || count < 2 ||
+        if (sort_alone || sort_debug || sort_compress || count < 2 ||
             !array_store_reserve(sort_sizes, sort_sizes_room, 0, count, 64) ||
             !array_store_reserve(sort_fences_at, sort_fences_at_room, 0, count + 1, 64))
                 return 0;
@@ -30194,16 +30580,21 @@ static bipolar sort_merge_temporary(positive first, positive count)
 {
         bipolar handle = sort_temporary();
         sort_writer out;
+        bipolar pid = 0;
 
         if (handle < 0)
                 return -1;
 
-        bool fine = sort_writer_ready(address_of out, (positive)handle) &&
-                    sort_sources_open(first, count) &&
-                    sort_merge(count, address_of out);
+        bool fine = sort_writer_ready(address_of out, (positive)handle);
+        bipolar writing = fine ? sort_compress_begin(address_of out, handle, address_of pid)
+                               : handle;
+
+        out.handle = (positive)writing;
+        fine = fine && sort_sources_open(first, count) && sort_merge(count, address_of out);
 
         sort_sources_close();
         sort_writer_flush(address_of out);
+        sort_compress_end(address_of out, writing, handle);
 
         if (fine && out.failed)
         {
@@ -30213,10 +30604,12 @@ static bipolar sort_merge_temporary(positive first, positive count)
 
         if (!fine)
         {
+                sort_compress_drop(pid);
                 system_close((positive)handle);
                 return -1;
         }
 
+        sort_made_pid = pid;
         return handle;
 }
 
@@ -30270,17 +30663,22 @@ static bool sort_spill()
 
         bipolar handle = sort_temporary();
         sort_writer out;
+        bipolar pid;
 
         if (handle < 0)
                 return false;
 
-        sort_entries[sort_entries_count++] = (sort_entry){.handle = handle};
-
         if (!sort_writer_ready(address_of out, (positive)handle))
                 return false;
 
+        bipolar writing = sort_compress_begin(address_of out, handle, address_of pid);
+
+        out.handle = (positive)writing;
+        sort_entries[sort_entries_count++] = (sort_entry){.handle = handle, .pid = pid};
+
         sort_emit(address_of out);
         sort_writer_flush(address_of out);
+        sort_compress_end(address_of out, writing, handle);
 
         if (out.failed)
         {
@@ -30305,7 +30703,7 @@ static bool sort_spill()
                 return false;
 
         sort_entries_close(0, sort_entries_count);
-        sort_entries[0] = (sort_entry){.handle = merged};
+        sort_entries[0] = (sort_entry){.handle = merged, .pid = sort_made_pid};
         sort_entries_count = 1;
         return true;
 }
@@ -30979,18 +31377,15 @@ static bool sort_parse_key(string_address spec)
         The long spellings sort answers to.
 
         -S sizes what a sort holds before it spills to a temporary file, -T
-        names where those files go, and --batch-size is how many inputs -m
-        merges at once. --compress-program and --parallel are taken and
-        thrown away rather than refused: neither can change a byte of the
-        answer, and a script that passes them should still get it.
-
-        Not here, and deliberately: --debug, which annotates every line with
-        which bytes the key looked at; --random-sort and --random-source,
-        which need a hash nothing else here wants; and --files0-from, which
-        is a list of file names in a file.
+        names where those files go, --compress-program what they pass
+        through, and --batch-size is how many inputs a merge takes at once.
+        --parallel is taken and thrown away rather than refused: it cannot
+        change a byte of the answer, and a script that passes it should
+        still get it.
 */
-// D takes a word and drops it, W is --sort, K is --check carrying one. None
-// of the three is a letter sort has, so -D and -W and -K stay mistakes.
+// D is --compress-program, G --debug, X --random-source, W is --sort, K is
+// --check carrying one, and A the stand-in for an ambiguous abbreviation.
+// None is a letter sort has, so each stays a mistake as a short option.
 static const argument_option sort_options[] = {
     {"ignore-leading-blanks", 'b'},
     {"dictionary-order", 'd'},
@@ -31603,6 +31998,13 @@ static bool sort_key_seen(p8 letter, string_address value)
                 return false;
         }
 
+        if (letter == 'D' && sort_compress && !string_equals(sort_compress, value))
+                return string_diagnostic(&text_diagnostic, 0, null,
+                                         "multiple compress programs specified");
+
+        if (letter == 'D')
+                sort_compress = value;
+
         if (letter == 'X' && sort_random_source && !string_equals(sort_random_source, value))
                 return string_diagnostic(&text_diagnostic, 0, null,
                                          "multiple random sources specified");
@@ -31639,6 +32041,7 @@ static bool sort_protect_output(string_address output, positive count)
         bool known = (output ? system_status_at(AT_FDCWD, output, address_of target, 0)
                              : system_file_status(1, address_of target)) >= 0;
         bipolar copy = -1;
+        bipolar copy_pid = 0;
 
         for (positive at = 0; at < count; at++)
         {
@@ -31667,10 +32070,17 @@ static bool sort_protect_output(string_address output, positive count)
                 if (!same)
                         continue;
 
-                if (copy < 0 && (copy = sort_merge_temporary(at, 1)) < 0)
-                        return false;
+                if (copy < 0)
+                {
+                        if ((copy = sort_merge_temporary(at, 1)) < 0)
+                                return false;
+
+                        copy_pid = sort_made_pid;
+                        sort_made_pid = 0;
+                }
 
                 entry->handle = copy;
+                entry->pid = copy_pid;
         }
 
         return true;
@@ -31731,6 +32141,8 @@ static fn sort_output_close(sort_writer address_to out)
         }
 }
 
+static b32 sort_merge_entries(string_address output);
+
 // Every input into chunks and runs, then the answer: straight from memory
 // when nothing spilled, through the merge when something did.
 static b32 sort_inputs(string_address output)
@@ -31775,6 +32187,9 @@ static b32 sort_inputs(string_address output)
                 sort_entries[sort_entries_count++] =
                     (sort_entry){.handle = SORT_ENTRY_MEMORY};
 
+        if (sort_compress)
+                return sort_merge_entries(output);
+
         b32 pool = sort_pool_merge_ready();
 
         if (pool < 0)
@@ -31816,7 +32231,8 @@ static b32 sort_inputs(string_address output)
 static fn sort_entries_fold(positive at, positive taken, bipolar merged)
 {
         sort_entries_close(at, taken);
-        sort_entries[at] = (sort_entry){.handle = merged};
+        sort_entries[at] = (sort_entry){.handle = merged, .pid = sort_made_pid};
+        sort_made_pid = 0;
         memory_copy(sort_entries + at + 1, sort_entries + at + taken,
                     (sort_entries_count - at - taken) * sizeof(sort_entry));
         sort_entries_count -= taken - 1;
@@ -31847,14 +32263,20 @@ static bipolar sort_merge_temporary_some(positive first, positive count,
 
         sort_writer out;
         positive opened = 0;
+        bipolar pid = 0;
         bool fine = sort_writer_ready(address_of out, (positive)handle) &&
                     sort_sources_open_some(first, count, address_of opened);
         bool starved = fine && opened < 2 && opened < count;
+        bipolar writing = fine && !starved
+                              ? sort_compress_begin(address_of out, handle, address_of pid)
+                              : handle;
 
+        out.handle = (positive)writing;
         fine = fine && !starved && sort_sources_prime() &&
                sort_merge(opened, address_of out);
         sort_sources_close();
         sort_writer_flush(address_of out);
+        sort_compress_end(address_of out, writing, handle);
 
         if (fine && out.failed)
         {
@@ -31866,10 +32288,12 @@ static bipolar sort_merge_temporary_some(positive first, positive count,
 
         if (!fine)
         {
+                sort_compress_drop(pid);
                 system_close((positive)handle);
                 return starved ? -2 : -1;
         }
 
+        sort_made_pid = pid;
         return handle;
 }
 
@@ -31905,6 +32329,19 @@ static b32 sort_merge_inputs(string_address output)
                                                 .handle = SORT_ENTRY_NAMED};
 
         sort_entries_count = count;
+        return sort_merge_entries(output);
+}
+
+/*
+        The entries merged into the output on GNU's schedule: --batch-size of
+        them at a time into temporaries until one batch is left. A sort that
+        compresses its runs merges them this way too, as GNU's does, so the
+        runs its compressor writes and reads are the ones GNU's would.
+*/
+static b32 sort_merge_entries(string_address output)
+{
+        positive count;
+        sort_writer out;
 
         while (sort_entries_count > sort_batch)
         {
@@ -32026,11 +32463,17 @@ static b32 sort_merge_inputs(string_address output)
                 if (handle < 0)
                         return 2;
 
-                bool fine = sort_writer_ready(address_of out, (positive)handle) &&
-                            sort_sources_prime() && sort_merge(opened, address_of out);
+                bipolar pid = 0;
+                bool fine = sort_writer_ready(address_of out, (positive)handle);
+                bipolar writing = fine ? sort_compress_begin(address_of out, handle, address_of pid)
+                                       : handle;
+
+                out.handle = (positive)writing;
+                fine = fine && sort_sources_prime() && sort_merge(opened, address_of out);
 
                 sort_sources_close();
                 sort_writer_flush(address_of out);
+                sort_compress_end(address_of out, writing, handle);
 
                 if (fine && out.failed)
                 {
@@ -32040,10 +32483,12 @@ static b32 sort_merge_inputs(string_address output)
 
                 if (!fine)
                 {
+                        sort_compress_drop(pid);
                         system_close((positive)handle);
                         return 2;
                 }
 
+                sort_made_pid = pid;
                 sort_entries_fold(0, opened, handle);
         }
 }
@@ -32111,8 +32556,6 @@ static b32 text_sort()
 {
         file_taking taking = {
             .program = (string_address) "sort",
-            // -g wants a floating point number parsed, and there is no
-            // floating point anywhere in this file.
             .options = sort_options,
             .operand = sort_operand,
             .seen = sort_key_seen,
@@ -32126,6 +32569,11 @@ static b32 text_sort()
         sort_option_status = 2;
         sort_said_kinds = 0;
         sort_random_source = null;
+        sort_compress = null;
+        sort_compress_looked = false;
+        sort_compress_said = 0;
+        sort_made_pid = 0;
+        sort_procs_count = 0;
         sort_tab_seen = false;
         sort_key_count = 0;
         sort_have_separator = false;
@@ -32360,9 +32808,33 @@ static b32 text_sort()
                          (sort_keys[0].whole ? 0 : sizeof(sort_span));
         sort_output_handle = -1;
 
+        bool compressing = sort_compress && !checking;
+
+        if (compressing)
+        {
+                p64 child = (p64)1 << (SORT_SIGNAL_CHILD - 1);
+
+                system_signal_mask(SIG_BLOCK, address_of child, address_of sort_signals_before, 8);
+                sort_child_changed = system_signal_action(SORT_SIGNAL_CHILD, null,
+                                                          sort_child_action, 8) >= 0 &&
+                                     sort_child_action[0] == 1 &&
+                                     system_signal_install(SORT_SIGNAL_CHILD, 0, 0, 0, null);
+        }
+
         b32 code = checking    ? sort_check(checking_quiet)
                    : merging   ? sort_merge_inputs(output)
                                : sort_inputs(output);
+
+        if (compressing)
+        {
+                while (sort_procs_count)
+                        sort_proc_wait(sort_procs[sort_procs_count - 1], false);
+
+                if (sort_child_changed)
+                        system_signal_action(SORT_SIGNAL_CHILD, sort_child_action, null, 8);
+
+                system_signal_mask(SIG_SETMASK, address_of sort_signals_before, null, 8);
+        }
 
         sort_release();
 
