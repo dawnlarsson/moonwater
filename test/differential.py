@@ -45816,6 +45816,8 @@ def harness_waterlink_fuzz(argv):
         print("waterlink fuzz: NOT RUN -- no C compiler")
         return 2
     core_source, shim = lifted
+    if waterlink_script_scan(shim):
+        return 1
     with_asm = (platform.system() != "Darwin" and
                 platform.machine() in ("x86_64", "amd64") and
                 not moonwater_msan_requested())
@@ -45824,6 +45826,108 @@ def harness_waterlink_fuzz(argv):
     source = ("#define WL_STATE 1\n#define WL_QUIET __attribute__((no_sanitize("
               "\"coverage\")))\n" + core_source(with_asm, False, WATERLINK_FUZZ_DRIVER))
     return tls_fuzz_run("waterlink", "waterlink", source, 4096)
+
+
+def waterlink_script_scan(shim):
+    """command.c's link_script_names_secret, hosted under ASan with each
+    script and namespace in a block of exactly its length, against a
+    regular expression over a grammar of machine-script lines. It once
+    compared the namespace's whole length with memory_compare wherever
+    "link join " was found, reading past a script that ended sooner.
+    Returns 1 on a report or a disagreement, 0 otherwise, and 0 without
+    a compiler that has ASan."""
+    import random
+    import subprocess
+    import tempfile
+    command = (HARNESS_ROOT / "src/waterlink/command.c").read_text()
+    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    scan = tls_fuzz_sec(command, "static bool link_script_names_secret(",
+                        "static b32 link_status(void)")
+    starts = tls_fuzz_sec(host, "static bool host_starts(", "static fn host_pause(")
+    driver = shim + r"""
+static b32 string_compare_max(const void *one, const void *two, positive size)
+{
+        return strncmp(one, two, size);
+}
+static positive string_span_of_set(const void *text, const char *set)
+{
+        return strspn(text, set);
+}
+""" + starts + scan + r"""
+int main(void)
+{
+        static p8 line[70000];
+        positive size;
+
+        while (fgets((char *)line, sizeof line, stdin))
+        {
+                p8 *tab = (p8 *)strchr((char *)line, '\t');
+                p8 *name, *text;
+
+                if (!tab)
+                        return 2;
+                *tab = 0;
+                size = strlen((char *)tab + 1);
+                tab[size] = 0; // the newline that ends the case
+                name = malloc(strlen((char *)line) + 1);
+                strcpy((char *)name, (char *)line);
+                text = malloc(size);
+                for (positive at = 0; at + 1 < size; at++)
+                        text[at] = tab[1 + at] == 1 ? '\n' : tab[1 + at];
+                text[size - 1] = 0;
+                putchar(link_script_names_secret(text, name) ? '1' : '0');
+                free(name);
+                free(text);
+        }
+        return 0;
+}
+"""
+    clang = shutil.which("clang") or shutil.which("cc")
+    generator = random.Random(0x5c1e)
+    names = ["home", "lab.1", "a", "net_9", "office-2", "x" * 31]
+    pieces = ["link join ", "link join  ", "link join", "allow", "allowed", "run",
+              " ", "  ", "\x01", ";", "#", "secret", "s3cr3t", "blink join ",
+              "moonwater link join "] + names
+
+    def case():
+        name = generator.choice(names)
+        if generator.randrange(3) == 0:
+            text = "".join(generator.choice(pieces) for _ in range(generator.randrange(12)))
+        else:
+            cut = generator.randrange(len(name) + 1)
+            text = generator.choice(["", "x\x01", "#\x01"]) + "link join " + (
+                name[:cut] if generator.randrange(2) else name +
+                generator.choice(["", " ", "  allow run", " s", " ;", " #", "\x01"]))
+        return name, text
+    cases = [case() for _ in range(20000)]
+    with tempfile.TemporaryDirectory(prefix="wl-script-") as temporary:
+        work = Path(temporary)
+        (work / "scan.c").write_text(driver)
+        built = subprocess.run([clang, "-O1", "-g", "-w", "-fsanitize=address,undefined",
+                                "-fno-sanitize-recover=all", str(work / "scan.c"), "-o",
+                                str(work / "scan")], capture_output=True, text=True)
+        if built.returncode:
+            print("  waterlink script scan: NOT RUN -- no ASan build\n" +
+                  built.stderr[-800:])
+            return 0
+        ran = subprocess.run([str(work / "scan")], capture_output=True, text=True,
+                             input="".join("%s\t%s\n" % pair for pair in cases),
+                             env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+    wrong = [pair for pair, got in zip(cases, ran.stdout)
+             if (got == "1") != bool(re.search(
+                 "link join +" + re.escape(pair[0]) + " +(?! |allow)[^\x01;#]",
+                 pair[1]))]
+    if ran.returncode or len(ran.stdout) != len(cases) or wrong:
+        report = [line for line in (ran.stderr or "").splitlines()
+                  if "ERROR" in line or "SUMMARY" in line or
+                  line.lstrip().startswith("#")][:8]
+        print("  FAIL waterlink script scan: %s %s" % ("\n".join(report), wrong[:3]))
+        write_tally("waterlink-script", 0, 1)
+        return 1
+    print("  waterlink script scan: %d machine scripts under ASan agree with the "
+          "model" % len(cases))
+    write_tally("waterlink-script", 1, 1)
+    return 0
 
 
 HARNESS_CHECKS = {

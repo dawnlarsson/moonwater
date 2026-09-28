@@ -125,7 +125,7 @@ static bool link_script_names_secret(string_address script,
                         continue;
                 word = at + 10;
                 word += string_span_of_set(word, " ");
-                if (memory_compare(word, namespace, length) || word[length] != ' ')
+                if (!host_starts(word, namespace) || word[length] != ' ')
                         continue;
                 word += length;
                 word += string_span_of_set(word, " ");
