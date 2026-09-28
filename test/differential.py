@@ -19203,8 +19203,17 @@ TEXT_UTILITIES = (
                       ("empty",), ("words",), ("nonl", "para"), ("wide",), ("big",)),
             stdin=("text_fmt", "text_fmt_indent", "text_fmt_prefix", "text_fmt_tabs", "text", "empty",
                    "nonl", "wide_words", "long", "blank_runs", "spaces", "text_random_lines", "edge_65535", "edge_65536", "edge_65537", "text_utf8"),
-            fixture="text", extra=(("--not-a-mode",), ("-Q",), ("-w", "20", "-g", "21"), ("-w39", "-g31"),
-                                   ("-p", "> ", "-w", "20"))),
+            fixture="text", stderr="exact",
+            #       A digit anywhere but in a first -WIDTH is an option getopt
+            #       does not know, said as it is met; widths are read as
+            #       xnumtoumax reads them, with its reasons.
+            extra=(("--not-a-mode",), ("-Q",), ("-w", "20", "-g", "21"), ("-w39", "-g31"),
+                   ("-p", "> ", "-w", "20"), ("-c72",), ("-c", "-72"), ("-72", "-c", "-7"), ("-s", "-Q", "-7"),
+                   ("-s", "-7", "-Q"), ("-c7x",), ("a.txt", "-72"), ("-p", "-72"), ("-p", "-7", "-3"),
+                   ("--prefix", "-7", "-3"), ("-w", "30", "-72"), ("-w", "32768"), ("-w", "2501"),
+                   ("-w", "99999999999999999999999"), ("-g", "80"), ("-w", "10", "-g", "11"), ("-72x",),
+                   ("-w", "1k"), ("-w", "0x10"), ("-w", "010"), ("-w", "+5"), ("-w", " 5"), ("--w=3", "-4"),
+                   ("-g", "99999999999999999999999"))),
     Utility("fold",
             options=(Option("-b"), Option("--bytes"), Option("-c"), Option("--characters"), Option("-s"),
                      Option("--spaces"),

@@ -1187,6 +1187,76 @@ static bool text_unsigned_option(string_address source, bool saturate,
         return true;
 }
 
+/*
+        gnulib's xnumtoumax in base 10 with no suffixes, words and all:
+        blanks may lead and a plus may sign, a minus or a word with no digits
+        or anything after them is "WHAT: 'WORD'", and a number past CEILING
+        (or one too long to hold) adds the reason, ERANGE where the caller
+        asked for it and EOVERFLOW where it did not. FLOOR works the same
+        way from below.
+*/
+enum
+{
+        TEXT_XNUM_MIN_RANGE = 1,
+        TEXT_XNUM_MAX_RANGE = 2,
+};
+
+static bool text_xnum(string_address said, positive floor, positive ceiling,
+                      p8 flags, string_address what,
+                      positive address_to value)
+{
+        string_address at = said + string_span(said, string_set_space);
+        bool invalid = at[0] == '-';
+        bool overflow = false;
+        bool range = false;
+        positive made = 0;
+
+        if (at[0] == '+')
+                at++;
+        if (!invalid && !byte_is_digit(at[0]))
+                invalid = true;
+
+        if (!invalid)
+        {
+                for (; byte_is_digit(at[0]); at++)
+                {
+                        positive digit = (positive)(at[0] - '0');
+
+                        if (made > (positive_max - digit) / 10)
+                        {
+                                overflow = true;
+                                made = positive_max;
+                        }
+                        else if (!overflow)
+                                made = made * 10 + digit;
+                }
+
+                if (at[0])
+                        invalid = true;
+        }
+
+        if (!invalid && (overflow || made > ceiling))
+                range = (flags & TEXT_XNUM_MAX_RANGE) != 0;
+        else if (!invalid && made < floor)
+        {
+                overflow = true;
+                range = (flags & TEXT_XNUM_MIN_RANGE) != 0;
+        }
+        else if (!invalid)
+        {
+                address_to value = made;
+                return true;
+        }
+
+        text_flush();
+        string_format(writer_stderr, "%s: %s: '%w'%s\n", text_name, what,
+                      writer_terminal_quoted_name, said,
+                      invalid ? ""
+                      : range ? ": Numerical result out of range"
+                              : ": Value too large for defined data type");
+        return false;
+}
+
 static bool text_word(p8 character)
 {
         return byte_is_alnum(character) || character == '_';
@@ -10993,6 +11063,87 @@ static const argument_option fmt_options[] = {
     {null},
 };
 
+/*
+        getopt meets the words in order, so a digit anywhere but in a first
+        -WIDTH word is an option letter it does not know, and fmt says so
+        the moment it gets there -- unless an unknown option, --help or
+        --version came first, which then answers instead. The option
+        arguments of -w, -g and -p (joined or the next word) are skipped as
+        getopt skips them. The digit is returned, or zero.
+*/
+static p8 fmt_digit_misplaced()
+{
+        static const string_address long_names[] = {
+            "crown-margin", "goal=", "prefix=", "split-only",
+            "tagged-paragraph", "uniform-spacing", "width=", "help", "version",
+        };
+        positive count = (positive)program_argument_count();
+        string_address first = count > 1 ? program_argument(1) : null;
+        positive at = first && first[0] == '-' && byte_is_digit(first[1]) ? 2 : 1;
+
+        for (; at < count; at++)
+        {
+                string_address word = program_argument((b32)at);
+
+                if (word[0] != '-' || !word[1])
+                        continue;
+                if (word[1] == '-')
+                {
+                        if (!word[2])
+                                return 0;
+
+                        positive name = (positive)(string_first_of_or_end(word + 2, '=') - (word + 2));
+                        positive found = array_count(long_names);
+                        positive matches = 0;
+
+                        for (positive which = 0; which < array_count(long_names); which++)
+                        {
+                                string_address candidate = long_names[which];
+                                positive whole = string_length(candidate) - (candidate[string_length(candidate) - 1] == '=');
+
+                                if (name > whole || memory_compare(candidate, word + 2, name))
+                                        continue;
+                                if (name == whole)
+                                {
+                                        found = which;
+                                        matches = 1;
+                                        break;
+                                }
+                                found = which;
+                                matches++;
+                        }
+
+                        // Unknown, ambiguous, --help or --version: getopt or
+                        // the option itself answers before any digit.
+                        if (matches != 1 || found >= 7)
+                                return 0;
+                        if (long_names[found][string_length(long_names[found]) - 1] == '=' &&
+                            !word[2 + name])
+                                at++;
+                        continue;
+                }
+
+                for (positive letter = 1; word[letter]; letter++)
+                {
+                        p8 character = (p8)word[letter];
+
+                        if (byte_is_digit(character))
+                                return character;
+                        if (character == 'w' || character == 'g' || character == 'p')
+                        {
+                                if (!word[letter + 1])
+                                        at++;
+                                break;
+                        }
+                        if (character != 'c' && character != 's' &&
+                            character != 't' && character != 'u')
+                                return 0;
+                }
+        }
+
+        return 0;
+}
+
 static b32 text_fmt()
 {
         fmt_hold = text_record_hold;
@@ -11007,17 +11158,23 @@ static b32 text_fmt()
         text_begin("fmt");
         utility_arena.used = 0;
 
+        p8 misplaced = fmt_digit_misplaced();
+
+        if (misplaced)
+        {
+                p8 spelled[2] = {misplaced, 0};
+
+                text_flush();
+                string_format(writer_stderr,
+                              "%s: invalid option -- %s; -WIDTH is recognized only when it is the first\n"
+                              "option; use -w N instead\n"
+                              "Try '%s --help' for more information.\n",
+                              text_name, (string_address)spelled, text_name);
+                return text_done(1);
+        }
+
         if (!text_took(address_of taking))
                 return text_done(1);
-
-        if (taking.flags & FILE_FLAG('W'))
-        {
-                string_address misplaced = text_digits_misplaced(address_of taking);
-
-                if (misplaced)
-                        return text_done(string_diagnostic(&text_diagnostic, 1, misplaced + 1,
-                                                          "invalid option; -WIDTH is recognized only when it is the first option"));
-        }
 
         positive width = FMT_WIDTH_DEFAULT;
         string_address width_value = (taking.flags & FILE_FLAG('w'))
@@ -11027,20 +11184,19 @@ static b32 text_fmt()
                                                : null;
 
         if (width_value &&
-            (!text_unsigned_option(width_value, false, address_of width) ||
-             width > 2500))
-                return text_done(string_diagnostic(&text_diagnostic, 1, width_value, "invalid width"));
+            !text_xnum(width_value, 0, 2500, TEXT_XNUM_MAX_RANGE,
+                       "invalid width", address_of width))
+                return text_done(1);
 
         positive goal;
 
         if (taking.flags & FILE_FLAG('g'))
         {
                 string_address value = file_option_value(address_of taking, 'g');
-                positive ceiling = width_value ? width : FMT_WIDTH_DEFAULT;
 
-                if (!text_unsigned_option(value, false, address_of goal) ||
-                    goal > ceiling)
-                        return text_done(string_diagnostic(&text_diagnostic, 1, value, "invalid width"));
+                if (!text_xnum(value, 0, width, 0, "invalid width",
+                               address_of goal))
+                        return text_done(1);
 
                 if (!width_value)
                         width = goal + 10;
