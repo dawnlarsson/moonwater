@@ -8556,6 +8556,8 @@ fn shell_shift(writer write, string_address input)
         shell_answer(0);
 }
 
+static bool local_unset_outer(const_string name, positive length);
+
 static bool shell_unset_variable(const_string name, positive length)
 {
         if (env_restricted_name(name, length) || env_bash_readonly_name(name, length))
@@ -8579,7 +8581,7 @@ static bool shell_unset_variable(const_string name, positive length)
         b32 detached = exec_unset_prefix(name, length);
         if (detached < 0)
                 shell_answered(2, "%s: no room\n", "unset");
-        else if (!detached)
+        else if (!detached && !local_unset_outer(name, length))
                 env_unset_span((string_address)name, length);
         return detached >= 0;
 }
@@ -8995,6 +8997,42 @@ static PURE shell_local_entry address_to local_find(string_address name,
                         return local_table + at;
 
         return null;
+}
+
+/*
+        unset run in a function deeper than the one that made the local:
+        bash takes that local away, and the name means what it meant outside
+        it again -- the unlocal idiom, f() { unset "$@"; }. Run in the
+        function that made it, the local stays, only unset.
+*/
+static bool local_unset_outer(const_string name, positive length)
+{
+        positive stop = local_count;
+
+        if (!shell_bash_compat || local_depth < 2)
+                return false;
+        for (positive depth = local_depth; depth; depth--)
+        {
+                positive begin = local_from[depth - 1];
+
+                for (positive at = stop; at > begin; at--)
+                {
+                        shell_local_entry address_to entry = local_table + at - 1;
+
+                        if (entry->detached ||
+                            entry->binding.variable.name_length != length ||
+                            memory_compare(entry->binding.name, name, length))
+                                continue;
+                        if (depth == local_depth ||
+                            local_getopts_scope(entry->binding.name, length))
+                                return false;
+                        shell_binding_restore(&entry->binding);
+                        entry->detached = true;
+                        return true;
+                }
+                stop = begin;
+        }
+        return false;
 }
 
 static b32 local_remember(string_address name)

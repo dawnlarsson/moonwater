@@ -14933,6 +14933,23 @@ def shell_lang_array_set_names(rng):
         setup, line, 'echo "st=$?"'), ("command", "stdin", "file"))
 
 
+#       unset run in a function deeper than the one that made a local takes
+#       that local away, so the name means what it meant outside it -- the
+#       unlocal idiom; run where the local was made it stays, unset. These
+#       left every local in place, unset.
+def shell_lang_unset_scopes(rng):
+    unsetter = rng.choice(("unlocal() { unset \"$@\"; }", "unlocal() { unset -v \"$@\"; }", "unlocal() { eval unset \"$1\"; }"))
+    body = rng.choice((
+        "level2() { local v=yy; echo l2=$v; unlocal v; echo l2=${v-unset}; }; level1() { local v=xx; level2; echo l1=$v; unlocal v; echo l1=${v-unset}; level2; }; v=global; level1; echo top=$v",
+        "h() { local r=1; k() { unlocal r; echo k=${r-unset}; r=3; }; k; echo h=${r-unset}; }; r=top; h; echo r=$r",
+        "m() { local -a arr=(1 2); unlocal arr; declare -p arr; }; arr=(9); m; declare -p arr",
+        "g() { local q=1; unset q; echo g=${q-unset}; q=2; echo g2=$q; }; q=outer; g; echo q=$q",
+        "u() { local n=1; unlocal n; echo u=${n-unset}; }; unset n; u; echo n=${n-unset}",
+        "w() { local -i z=4; unlocal z; z=2+3; echo w=$z; }; z=1; w; echo z=$z",
+    ))
+    return ("unset-scopes", shell_BASH, shell_program(unsetter, body, 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
 #       A readonly assignment outside posix mode drops the rest of the line
 #       the reader was on: eval answers 1 and a sourced file goes on at its
 #       next line, where a function's caller still loses its whole line.
@@ -17906,6 +17923,7 @@ SHELL_FAMILIES = (
     shell_lang_regex_refusals,
     shell_lang_conditional_tight,
     shell_lang_array_set_names,
+    shell_lang_unset_scopes,
     shell_lang_readonly_discard_scope,
     shell_lang_readonly_subshell_status,
     shell_lang_prompt_expansion,
