@@ -26777,6 +26777,13 @@ static b32 csplit_execute_line(csplit_state address_to state,
 
         positive boundary;
 
+        /* GNU's process_line_count under --suppress-matched asks only that
+           a line is left when it starts: the line it then drops may be the
+           one after the last, so csplit --suppress-matched seq30 31 keeps
+           all thirty where the boundary alone would be out of range. */
+        if (state->suppress_matched && state->cursor == state->length)
+                return CSPLIT_NOT_FOUND;
+
         /* GNU last_line_to_save is absolute. A later equal or already-passed
            line is a warning-only empty slice, not `'N': match not found`. */
         if (target < state->cursor_line)
@@ -26790,7 +26797,8 @@ static b32 csplit_execute_line(csplit_state address_to state,
                 return CSPLIT_EXECUTED;
         }
 
-        if (!csplit_line_offset(state, target, false, address_of boundary))
+        if (!csplit_line_offset(state, target, state->suppress_matched,
+                                address_of boundary))
                 return CSPLIT_NOT_FOUND;
         if (!csplit_section(state, state->cursor, boundary, true))
                 return CSPLIT_FAILED;

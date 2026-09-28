@@ -7905,6 +7905,15 @@ FILES_UTILITIES = (
                    #   name.
                    ("c.txt", "00"), ("c.txt", " 1"), ("c.txt", "+2"), ("c.txt", "0x1"), ("c.txt", "1 "),
                    ("c.txt", "9223372036854775808"), ("-k", "c.txt", "2", "0"),
+                   #   A line past the input, and the one just past it,
+                   #   with and without the line --suppress-matched drops
+                   #   there: GNU asks only that a line is left when it
+                   #   starts, so the line after the last is a target.
+                   ) + tuple(flags + (name,) + targets for flags in ((), ("--suppress-matched",), ("-k", "--suppress-matched"))
+                             for name, targets in (("c.txt", ("4",)), ("c.txt", ("5",)), ("c.txt", ("6",)),
+                                                   ("c.txt", ("5", "5")), ("c.txt", ("2", "{1}")), ("c.txt", ("2", "{2}")),
+                                                   ("c.txt", ("1", "{*}")), ("c.txt", ("/9/", "5")), ("c.txt", ("4", "5")),
+                                                   ("nonl", ("2",)), ("nonl", ("1", "2")))) + (
                    #   Every pattern is read, in order, once the input is
                    #   open and before anything is made: the first word
                    #   refused ends the run with no file left, -k or not;
