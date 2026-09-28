@@ -45122,28 +45122,56 @@ def crypto_vectors_lines(seed):
     return out
 
 
+#       The only conditional branches the x25519 bodies may hold, each on
+#       the line that decides it: a count loaded as a constant and stepped
+#       down -- the ladder's bit index, a run of squares, the frame wipe --
+#       or, on x86_64, the feature bytes. Nothing the scalar or u reaches.
+CRYPTO_X25519_COUNTED = (
+    r'"decq 520\(%rsp\)\\n\s+jns \.Lx25519_x64_" s "_step\\n"',
+    r'"dec %ebp\\n\s+jnz \.Lx25519_x64_" s "_squares_" id "\\n"',
+    r'"cmpb \$0, cpu_hash_probed\(%rip\)\\n\s+jne \.Lx25519_x64_probed\\n"',
+    r'"cmpb \$0, cpu_has_mulx\(%rip\)\\n\s+je \.Lx25519_x64_mulq_step\\n"',
+    r'"subs x20, x20, #1\\n\s+b\.pl \.Lx25519_arm64_step\\n"',
+    r'"subs x20, x20, #1\\n\s+b\.ne \.Lx25519_arm64_squares_" id "\\n"',
+    r'stp xzr, xzr, \[x3\], #16\\n\s+subs x4, x4, #1\\n\s+b\.ne \.Lx25519_arm64_wipe\\n"',
+    r'"addi s0, s0, -1\\n\s+bgez s0, \.Lx25519_rv_step\\n"',
+    r'"addi s0, s0, -1\\n\s+bnez s0, \.Lx25519_rv_squares_" id "\\n"',
+    r'addi t0, t0, 8\\n\s+bltu t0, t1, \.Lx25519_rv_wipe\\n"',
+)
+
+
 def crypto_branchless_bodies():
-    """The P-256 and P-384 field bodies in lib.c, on every machine that has
-    them, and the FIELD_ macros they expand, with any conditional branch
-    they hold: (routine, line, text), text None for a body's first line.
-    ECDH runs its secret scalar through these, and each body promises that
-    nothing branches on a value, so there should be none."""
+    """The P-256, P-384 and X25519 field bodies in lib.c, on every machine
+    that has them, and the FIELD_ and X25519_ macros they expand, with any
+    conditional branch they hold: (routine, line, text), text None for a
+    body's first line. ECDH and X25519 run their secret scalars through
+    these, and each body promises that nothing branches on a value, so
+    there should be none -- save, in x25519, the counted loops
+    CRYPTO_X25519_COUNTED names."""
     lines = (HARNESS_ROOT / "src/lib.c").read_text().split("\n")
     branch = re.compile(r"\b(j(?!mp\b)[a-z]{1,3}|b\.[a-z]{2}|cbn?z|tbn?z|"
                         r"b(?:eq|ne|lt|ge|gt|le)u?z?)\s")
+    counted = [re.compile(pattern) for pattern in CRYPTO_X25519_COUNTED]
+
+    def refused(text):
+        code = text.split("//")[0]
+        return bool(branch.search(code)) and not any(
+            pattern.search(code) for pattern in counted)
+
     found = []
     for at, line in enumerate(lines):
         #   The rows, reductions and final subtractions the bodies expand.
-        macro = re.match(r"#define (FIELD_(?:X64|ARM64|RV)_\w+)", line)
+        macro = re.match(r"#define ((?:FIELD|X25519)_(?:X64|ARM64|RV)_\w+)", line)
         if macro:
             number = at
             while True:
-                if branch.search(lines[number].split("//")[0]):
+                if refused(lines[number]):
                     found.append((macro.group(1), number + 1, lines[number].strip()))
                 if not lines[number].rstrip().endswith("\\"):
                     break
                 number += 1
-        start = re.search(r"ASM_FUNC\((p(?:256|384)_(?:multiply|square|add|subtract))\)", line)
+        start = re.search(r"ASM_FUNC\((p(?:256|384)_(?:multiply|square|add|subtract)|x25519)\)",
+                          line)
         if not start:
             continue
         name = start.group(1)
@@ -45152,9 +45180,101 @@ def crypto_branchless_bodies():
             stop += 1
         found.append((name, at + 1, None))
         for number in range(at + 1, stop):
-            if branch.search(lines[number].split("//")[0]):
+            if refused(lines[number]):
                 found.append((name, number + 1, lines[number].strip()))
     return found
+
+
+#       One x25519 of a scalar and u drawn from argv[1]'s first byte, for
+#       crypto_x25519_instruction_counts: everything but the call runs the
+#       same instructions whatever the byte is.
+CRYPTO_X25519_COUNT_C = r"""
+#include "src/lib.c"
+b32 main(void)
+{
+        p8 scalar[32], u[32], out[32];
+        string_address which = program_argument(1);
+        p64 seed = 0x9e3779b97f4a7c15ull * (p64)(p8)which[0];
+
+        for (positive i = 0; i < 32; i++)
+        {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                scalar[i] = (p8)seed;
+                u[i] = (p8)(seed >> 8);
+        }
+        x25519(out, scalar, u);
+        return out[0] & 0;
+}
+"""
+
+
+def crypto_x25519_instruction_counts():
+    """x25519's guest instruction count under qemu-user and test/insn.c, for
+    six scalar and u pairs, on each machine and x86_64 body: a Nehalem
+    has no BMI2 or ADX and takes the mulq body, -cpu max has both. Every
+    pair must retire the same count -- what a branch or a
+    loop on a secret would change. Returns (lines, failed); a machine
+    whose cross compiler, qemu or the plugin's headers are missing says
+    NOT RUN in its line and does not fail."""
+    lines, failed = [], False
+    cc = shutil.which("gcc")
+    if not cc:
+        return ["x25519 instructions: NOT RUN -- no gcc for the qemu plugin"], False
+    with tempfile.TemporaryDirectory(prefix="x25519-count-") as temporary:
+        work = Path(temporary)
+        glib = subprocess.run(["pkg-config", "--cflags", "glib-2.0"], capture_output=True,
+                              text=True)
+        plugin = work / "insn.so"
+        if glib.returncode or subprocess.run(
+                [cc, "-O2", "-shared", "-fPIC"] + glib.stdout.split() +
+                ["-o", str(plugin), str(HARNESS_ROOT / "test/insn.c")],
+                capture_output=True).returncode:
+            return ["x25519 instructions: NOT RUN -- the qemu plugin does not build"], False
+        unit = work / "count.c"
+        unit.write_text(CRYPTO_X25519_COUNT_C)
+        for machine, compiler, flags, runner, cpus in (
+                ("x86_64", "x86_64-linux-gnu-gcc" if os.uname().machine != "x86_64" else "gcc",
+                 ["-march=x86-64"], "qemu-x86_64",
+                 (("mulq", ["-cpu", "Nehalem"]), ("mulx", ["-cpu", "max"]))),
+                ("arm64", "aarch64-linux-gnu-gcc", ["-mno-outline-atomics"], "qemu-aarch64",
+                 (("", []),)),
+                ("riscv64", "riscv64-linux-gnu-gcc",
+                 ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"], "qemu-riscv64", (("", []),))):
+            if not shutil.which(compiler) or not shutil.which(runner):
+                lines.append("x25519 instructions %s: NOT RUN -- no %s or %s"
+                             % (machine, compiler, runner))
+                continue
+            binary = work / ("count." + machine)
+            built = subprocess.run(
+                [compiler] + flags + ["-O2", "-static", "-nostdlib", "-nostartfiles",
+                                      "-fno-stack-protector", "-fno-builtin", "-w",
+                                      "-I", str(HARNESS_ROOT), "-T",
+                                      str(HARNESS_ROOT / "src/build/spark.ld"),
+                                      "-Wl,-e,_start", "-Wl,--build-id=none",
+                                      "-Wl,--no-warn-rwx-segments", "-o", str(binary),
+                                      str(unit)], capture_output=True, text=True)
+            if built.returncode:
+                lines.append("x25519 instructions %s: did not build\n%s"
+                             % (machine, built.stderr[-1500:]))
+                failed = True
+                continue
+            for body, cpu in cpus:
+                counts = []
+                for which in "anqz19":
+                    ran = subprocess.run([runner] + cpu + ["-plugin", str(plugin), str(binary),
+                                                           which],
+                                         capture_output=True, text=True)
+                    counts.append(ran.stderr.strip().split("\n")[-1] if ran.returncode == 0
+                                  else "exit %d" % ran.returncode)
+                same = len(set(counts)) == 1 and counts[0].isdigit()
+                failed = failed or not same
+                lines.append("x25519 instructions %s%s: %s" % (
+                    machine, " " + body if body else "",
+                    ("%s for each of six keys" % counts[0]) if same else
+                    "FAIL -- they differ: " + ", ".join(counts)))
+    return lines, failed
 
 
 def harness_crypto_vectors(argv):
@@ -45192,7 +45312,11 @@ def harness_crypto_vectors(argv):
 
     First, the P-256 and P-384 field bodies in lib.c -- all eight on all
     three machines, the arithmetic ECDH's secret scalar runs through --
-    must hold no conditional branch; any other exit is a failure.
+    and x25519 on all three must hold no conditional branch but x25519's
+    counted loops (CRYPTO_X25519_COUNTED), and x25519 must retire the same
+    number of instructions for six different keys on every machine and
+    x86_64 body (crypto_x25519_instruction_counts, under qemu-user); any
+    other exit is a failure.
 
     Verdicts are OpenSSL's, except where this client is stricter on
     purpose (RSA under 2048 or over 8192 bits, an even or unit exponent, a compressed
@@ -45212,9 +45336,14 @@ def harness_crypto_vectors(argv):
         return 2
     bodies = crypto_branchless_bodies()
     branches = [row for row in bodies if row[2]]
-    if len(bodies) - len(branches) != 24 or branches:
-        print("crypto vectors: lib.c's P-256/P-384 bodies: %d of 24 found, branches %s"
+    if len(bodies) - len(branches) != 27 or branches:
+        print("crypto vectors: lib.c's P-256/P-384/X25519 bodies: %d of 27 found, branches %s"
               % (len(bodies) - len(branches), branches[:4]), file=sys.stderr)
+        return 1
+    counts, uneven = crypto_x25519_instruction_counts()
+    for line in counts:
+        print("crypto vectors: " + line, file=sys.stderr)
+    if uneven:
         return 1
     lines = crypto_vectors_lines(seed)
     kinds = collections.Counter(kind for kind, _, _ in lines)
@@ -45647,6 +45776,21 @@ static void fuzz_x25519(fuzz_take *f)
         take(f, scalar, 32);
         take(f, u, 32);
         valid = crypto_x25519(ours, scalar, u);
+#ifdef CRYPTO_FUZZ_X25519_LIFTED
+        {
+                //      lib.c's other x86_64 body, mulq for mulx, on the
+                //      same input: it must agree with the first.
+                p8 floor[32];
+                p8 mulx = cpu_has_mulx;
+                bool again;
+
+                cpu_has_mulx = 0;
+                again = crypto_x25519(floor, scalar, u);
+                cpu_has_mulx = mulx;
+                if (again != valid || memcmp(floor, ours, 32))
+                        disagree("X25519 mulq body");
+        }
+#endif
 #ifndef CRYPTO_FUZZ_NO_ORACLE
         {
                 EVP_PKEY *mine = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, scalar, 32);
@@ -46016,12 +46160,64 @@ int LLVMFuzzerTestOneInput(const p8 *data, size_t size)
 """
 
 
-def crypto_fuzz_source(net, checks, oracle):
+#       x25519 as the fuzz links it when lib.c's own x86_64 body is lifted:
+#       the prototype crypto_x25519 calls, the two feature bytes the body
+#       reads, answered from the host, and the probe it would call, which
+#       cpu_hash_probed set means it never does.
+CRYPTO_FUZZ_X25519_LIFTED_C = r"""
+#define CRYPTO_FUZZ_X25519_LIFTED 1
+void x25519(p8 *out, const p8 *scalar, const p8 *u);
+p8 cpu_hash_probed = 1;
+p8 cpu_has_mulx;
+void cpu_hash_detect(void) {}
+__attribute__((constructor)) static void crypto_fuzz_mulx(void)
+{
+        cpu_has_mulx = __builtin_cpu_supports("bmi2") && __builtin_cpu_supports("adx");
+}
+"""
+
+
+def library_routine_assembly(names):
+    """lib.c's x86_64 bodies of names as assembly text, for a hosted x86_64
+    program to link: lib.c compiled with -S and each routine's own section
+    cut out of the output, .pushsection to .popsection, so the bytes are
+    the ones every build assembles, macros expanded by the preprocessor
+    that expands them there. None when this is not an x86_64 host with a C
+    compiler, or a routine is missing."""
+    cc = shutil.which("gcc") or shutil.which("cc")
+    if os.uname().machine != "x86_64" or not cc:
+        return None
+    with tempfile.TemporaryDirectory(prefix="library-lift-") as temporary:
+        unit = Path(temporary) / "lift.c"
+        unit.write_text('#include "%s"\n' % (HARNESS_ROOT / "src/lib.c"))
+        if subprocess.run([cc, "-S", "-O2", "-march=x86-64", "-fno-builtin", "-w",
+                           "-o", str(unit.with_suffix(".s")), str(unit)],
+                          capture_output=True).returncode:
+            return None
+        lines = unit.with_suffix(".s").read_text().split("\n")
+    out = []
+    for name in names:
+        opener = '.pushsection .text.%s, "ax", %%progbits' % name
+        begins = [i for i, line in enumerate(lines) if line.strip() == opener]
+        if len(begins) != 1:
+            return None
+        end = next((i for i in range(begins[0], len(lines))
+                    if lines[i].strip() == ".size %s, .-%s" % (name, name)), None)
+        if end is None or lines[end + 1].strip() != ".popsection":
+            return None
+        out += lines[begins[0]:end + 2]
+    return "\n".join(out) + "\n"
+
+
+def crypto_fuzz_source(net, checks, oracle, lifted=False):
     """crypto_fuzz's program: net.c's crypto section whole, from crypto_wide
     to its #endif, with the p256_/p384_ fast paths cut so every field runs
     the C montgomery from checks.c's SHARED_montgomery_reference, over the
-    hosted digests, GHASH and AES above; then the driver. Raises ValueError
-    when a slice is gone and RuntimeError when a lib.c call survives."""
+    hosted digests, GHASH and AES above; then the driver. x25519 is lib.c's
+    own x86_64 body when lifted (library_routine_assembly, linked beside
+    the program) and otherwise the C crypto.c ran before it, from
+    SHARED_x25519_reference. Raises ValueError when a slice is gone and
+    RuntimeError when a lib.c call survives."""
     crypto = tls_fuzz_sec(net, "typedef unsigned __int128 crypto_wide;",
                           "#endif\n#include \"wait.c\"")
     for field_op in ("add", "subtract"):
@@ -46039,6 +46235,14 @@ def crypto_fuzz_source(net, checks, oracle):
     montgomery = montgomery.split("\n", 1)[1]
     montgomery = montgomery[:montgomery.rfind("#endif") + len("#endif")].replace(
         "montgomery_reference_multiply", "montgomery_multiply")
+    if lifted:
+        curve = CRYPTO_FUZZ_X25519_LIFTED_C
+    else:
+        curve = tls_fuzz_sec(checks, "#elif defined(SHARED_x25519_reference)",
+                             "#elif defined(SHARED_number_stream)")
+        curve = curve.split("\n", 1)[1]
+        curve = curve[:curve.rfind("#endif") + len("#endif")]
+        curve = re.sub(r"\bx25519_reference\(", "x25519(", curve)
     hosted = TLS_VERIFY_HOSTED_C
     sha = hosted[hosted.index("typedef struct {"):hosted.index("typedef fuzz_sha256 crypto_sha256;")]
     shim = tls_der_fuzz_lift_parts(net)[4]
@@ -46050,7 +46254,7 @@ def crypto_fuzz_source(net, checks, oracle):
     source = "\n".join((CRYPTO_FUZZ_ORACLE_INCLUDES if oracle else
                          "#define CRYPTO_FUZZ_NO_ORACLE",
                         shim, "#include <stdlib.h>", sha, CRYPTO_FUZZ_HOSTED_C,
-                        montgomery, crypto, CRYPTO_FUZZ_DRIVER_C))
+                        montgomery, curve, crypto, CRYPTO_FUZZ_DRIVER_C))
     left = re.search(r"\b(?:p(?:256|384)_(?:multiply|add|square|subtract)|"
                      r"sha256_blocks|sha512_blocks)\s*\(", source)
     if left:
@@ -46110,8 +46314,10 @@ def harness_crypto_fuzz(argv):
     The whole crypto section of src/net/net.c is lifted hosted -- lib.c's
     field, digest, GHASH and AES routines replaced by plain C (the stdin
     lane crypto_vectors is what holds the assembly to OpenSSL) -- and
-    linked against libcrypto. Each input picks a lane by its first byte:
-    X25519, ECDH and key shares on P-256/P-384 (OpenSSL's share of the
+    linked against libcrypto. x25519 is the exception on an x86_64 host:
+    lib.c's own body is linked (library_routine_assembly), and every X25519
+    input runs its mulx and its mulq body both. Each input picks a lane by
+    its first byte: X25519, ECDH and key shares on P-256/P-384 (OpenSSL's share of the
     input's scalar, then optionally a bit bent), ECDSA signed here with the
     input's key and nonce and then bent (high S, r or s flipped, digest or
     key bit flipped, leading zero dropped) or taken raw, RSA PKCS#1
@@ -46131,7 +46337,11 @@ def harness_crypto_fuzz(argv):
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     checks = (HARNESS_ROOT / "test/checks.c").read_text()
     oracle = not moonwater_msan_requested()
-    source = crypto_fuzz_source(net, checks, oracle)
+    #   MemorySanitizer sees nothing an assembly body stores, so under it
+    #   x25519 is the C reference; otherwise lib.c's own body is the one held
+    #   to OpenSSL, both of its x86_64 bodies on every input.
+    lifted = library_routine_assembly(["x25519"]) if oracle else None
+    source = crypto_fuzz_source(net, checks, oracle, lifted is not None)
     extra = ["-Wno-deprecated-declarations",
              os.environ.get("MOONWATER_CRYPTO_FUZZ_LIBRARY", "-lcrypto")] if oracle else []
     clang = shutil.which("clang")
@@ -46146,7 +46356,13 @@ def harness_crypto_fuzz(argv):
                               capture_output=True).returncode:
                 print("crypto fuzz: NOT RUN -- no OpenSSL headers or libcrypto to link")
                 return 2
-    return tls_fuzz_run("crypto", "crypto", source, 2048, extra)
+    if lifted is None:
+        return tls_fuzz_run("crypto", "crypto", source, 2048, extra)
+    with tempfile.TemporaryDirectory(prefix="crypto-fuzz-x25519-") as temporary:
+        assembly = Path(temporary) / "x25519.s"
+        assembly.write_text(lifted)
+        print("crypto fuzz: x25519 is lib.c's x86_64 body, mulx and mulq")
+        return tls_fuzz_run("crypto", "crypto", source, 2048, extra + [str(assembly)])
 
 
 def harness_tls_fuzz(argv):
