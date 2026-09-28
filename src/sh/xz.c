@@ -2064,7 +2064,12 @@ static xz_found address_to xz_chain(xz_encoder address_to e, p32 len_limit, p32 
 
 /* The binary tree walks. Every loop value is a plain local and find and
    skip are separate, so neither carries the other's state; that keeps the
-   walk in registers instead of spilling it to the stack. */
+   walk in registers instead of spilling it to the stack. The walk is a
+   chain of misses (son is 8 bytes a dictionary position, past L3 from -6
+   up), and which child comes next hangs on a byte compare no predictor
+   gets right half the time, so both children's pairs and bytes are
+   fetched as soon as their node's pair arrives: the right one is then in
+   flight whichever way the branch goes. */
 static xz_found address_to xz_tree_find(p32 address_to son, p8 address_to cur, p32 pos,
                                         p32 cur_match, p32 depth, p32 cyclic_pos,
                                         p32 cyclic_size, p32 len_limit,
@@ -2090,6 +2095,17 @@ static xz_found address_to xz_tree_find(p32 address_to son, p8 address_to cur, p
                 p32 address_to pair = son + ((positive)at << 1);
                 p8 address_to pb = cur - delta;
                 p32 len = len0 < len1 ? len0 : len1;
+                {
+                        p32 d0 = pos - pair[0];
+                        p32 d1 = pos - pair[1];
+                        p32 a0 = cyclic_pos - d0 + (d0 > cyclic_pos ? cyclic_size : 0);
+                        p32 a1 = cyclic_pos - d1 + (d1 > cyclic_pos ? cyclic_size : 0);
+
+                        __builtin_prefetch(son + ((positive)a0 << 1));
+                        __builtin_prefetch(son + ((positive)a1 << 1));
+                        __builtin_prefetch(cur - d0 + len);
+                        __builtin_prefetch(cur - d1 + len);
+                }
 
                 if (pb[len] == cur[len])
                 {
@@ -2148,6 +2164,17 @@ static fn xz_tree_skip(p32 address_to son, p8 address_to cur, p32 pos, p32 cur_m
                 p32 address_to pair = son + ((positive)at << 1);
                 p8 address_to pb = cur - delta;
                 p32 len = len0 < len1 ? len0 : len1;
+                {
+                        p32 d0 = pos - pair[0];
+                        p32 d1 = pos - pair[1];
+                        p32 a0 = cyclic_pos - d0 + (d0 > cyclic_pos ? cyclic_size : 0);
+                        p32 a1 = cyclic_pos - d1 + (d1 > cyclic_pos ? cyclic_size : 0);
+
+                        __builtin_prefetch(son + ((positive)a0 << 1));
+                        __builtin_prefetch(son + ((positive)a1 << 1));
+                        __builtin_prefetch(cur - d0 + len);
+                        __builtin_prefetch(cur - d1 + len);
+                }
 
                 if (pb[len] == cur[len])
                 {
@@ -2211,6 +2238,9 @@ static p32 xz_finder_find(xz_encoder address_to e)
                 p32 cur_match = hash[hv];
                 p32 len_best = 2;
 
+                __builtin_prefetch(hash + XZ_HASH2_SIZE +
+                                   ((xz_hash_head(cur + 1) ^ ((p32)cur[3] << 8)) & e->hash_mask));
+
                 hash[hv] = pos;
                 if (delta2 < e->cyclic_size && *(cur - delta2) == *cur)
                 {
@@ -2234,6 +2264,11 @@ static p32 xz_finder_find(xz_encoder address_to e)
         p32 h3 = XZ_HASH2_SIZE + (temp & (XZ_HASH3_SIZE - 1));
         p32 h4 = XZ_HASH2_SIZE + XZ_HASH3_SIZE +
                  ((temp ^ (hash_crc32_tab[cur[3]] << 5)) & e->hash_mask);
+        //      The next position's bucket, a miss of its own, is fetched a
+        //      whole walk ahead; its bytes lie within the block's slack.
+        __builtin_prefetch(hash + XZ_HASH2_SIZE + XZ_HASH3_SIZE +
+                           ((xz_hash_head(cur + 1) ^ ((p32)cur[3] << 8) ^
+                             (hash_crc32_tab[cur[4]] << 5)) & e->hash_mask));
         p32 delta3 = pos - hash[h3];
         p32 cur_match = hash[h4];
         p32 len_best = 1;
@@ -2306,12 +2341,17 @@ static fn xz_finder_skip(xz_encoder address_to e, p32 amount)
                 {
                         p32 hv = XZ_HASH2_SIZE + (temp & e->hash_mask);
                         cur_match = hash[hv];
+                        __builtin_prefetch(hash + XZ_HASH2_SIZE +
+                                           ((xz_hash_head(cur + 1) ^ ((p32)cur[3] << 8)) & e->hash_mask));
                         hash[hv] = pos;
                 }
                 else
                 {
                         p32 h4 = XZ_HASH2_SIZE + XZ_HASH3_SIZE +
                                  ((temp ^ (hash_crc32_tab[cur[3]] << 5)) & e->hash_mask);
+                        __builtin_prefetch(hash + XZ_HASH2_SIZE + XZ_HASH3_SIZE +
+                                           ((xz_hash_head(cur + 1) ^ ((p32)cur[3] << 8) ^
+                                             (hash_crc32_tab[cur[4]] << 5)) & e->hash_mask));
                         hash[XZ_HASH2_SIZE + (temp & (XZ_HASH3_SIZE - 1))] = pos;
                         cur_match = hash[h4];
                         hash[h4] = pos;
