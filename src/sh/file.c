@@ -41307,8 +41307,14 @@ static b32 file_seq()
 
                 scale = max(number[0].scale, max(number[1].scale, number[2].scale));
                 exact = seq_decimal_dyadic(number[0]) && seq_decimal_dyadic(number[1]);
+                /* A field that could come within reach of INT_MAX with the
+                   text around it is the wide road's, which measures each one
+                   as glibc does before writing it: seq -f %.2147483646f 1 1
+                   wrote two gigabytes here where GNU's printf refuses it. The
+                   margin is more than any long double's integer digits. */
+                positive reach = SEQ_INT_MAX - 8192 - format.prefix - format.suffix;
                 decimal = (format.conversion | 0x20) == 'f' &&
-                          format.width <= SEQ_INT_MAX && shown <= SEQ_INT_MAX &&
+                          format.width <= reach && shown <= reach &&
                           shown >= scale && !number[0].infinite && !number[1].infinite &&
                           seq_decimal_rescale(address_of number[0], scale) &&
                           seq_decimal_rescale(address_of number[1], scale) &&
