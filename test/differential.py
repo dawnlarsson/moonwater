@@ -7629,7 +7629,17 @@ FILES_UTILITIES = (
                    ("-m", "-r", "b.txt", "link"), ("-c", "-t", "202602310000", "missing"), ("-t", "202602310000", "missing"),
                    ("-d", "2001-09-09 01:46:40.123456789", "fresh"), ("-d", "@1000000000.25", "fresh"),
                    ("--time=access", "-d", "@5", "a.txt"), ("--time=modify", "-d", "@5", "a.txt"), ("-am", "-d", "@5", "a.txt"),
-                   ("-h", "-d", "@5", "dangling"), ("-c", "dangling"), ("dangling",), ("-h", "dangling"))),
+                   ("-h", "-d", "@5", "dangling"), ("-c", "dangling"), ("dangling",), ("-h", "dangling")) +
+                  # The obsolete MMDDhhmm[YY] first operand, a time only
+                  # under a pre-2001 _POSIX2_VERSION and with a file after it.
+                  tuple({"argv": argv, "env": env}
+                        for env in ((("_POSIX2_VERSION", "199209"),),
+                                    (("_POSIX2_VERSION", "199209"), ("POSIXLY_CORRECT", "1")),
+                                    (("_POSIX2_VERSION", "200809"),))
+                        for argv in (("0101000099", "a.txt"), ("01010000", "fresh"), ("0101000000", "fresh"),
+                                     ("--", "12312359", "a.txt"), ("0230000099", "fresh"), ("0101000099",),
+                                     ("-c", "0101000099", "a.txt"), ("-d", "@5", "0101000099", "a.txt"),
+                                     ("010100001999", "fresh")))),
     Utility("truncate", options=(Option("-c"), Option("-o"), Option("--no-create"), Option("--io-blocks"),
                                  Option("-s", ("4", "+4", "-2", "<3", ">9", "/4", "%4", "2KB", "2KiB", "K", "0", "1B", "1p", "/0",
                                                "2M", "-1", "x", "", "+0", "%0", "<0", ">0", "1k", "1kB", "1KiB", "2R", "1Y"), None),

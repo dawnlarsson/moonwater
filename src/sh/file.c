@@ -36351,6 +36351,40 @@ static bool touch_stamp(string_address text, b64 now, b64 address_to out)
         return true;
 }
 
+/*
+        The obsolete first operand MMDDhhmm[YY], which GNU takes as the
+        time only where the POSIX edition asked for is older than 2001 and
+        there is a file after it: posixtime with a trailing two-digit year
+        of 69 to 99 in the 1900s (a later one is not a time), no century
+        and no seconds.
+*/
+static bipolar tail_posix_version();
+
+static bool touch_obsolete(string_address text, b64 address_to out)
+{
+        positive digits = string_span(text, string_set_digits);
+        p8 stamp[16];
+
+        if (text[digits] || (digits != 8 && digits != 10))
+                return false;
+        //      The trailing year must be 69 to 99: 00 to 68 is refused.
+        if (digits == 10 && text[8] < '7' && !(text[8] == '6' && text[9] == '9'))
+                return false;
+
+        //      Moved to the -t order, [YY]MMDDhhmm, where a two-digit year
+        //      is read the same way.
+        positive at = 0;
+
+        if (digits == 10)
+        {
+                memory_copy(stamp, text + 8, 2);
+                at = 2;
+        }
+        memory_copy(stamp + at, text, 8);
+        stamp[at + 8] = end;
+        return touch_stamp(stamp, file_now(), out);
+}
+
 static const argument_option touch_options[] = {
     {"date", 'd', ARGUMENT_REQUIRED},
     {"no-create", 'c'},
@@ -36493,7 +36527,45 @@ static b32 file_touch()
         }
 
         if (first >= count)
-                return string_report(log_error, 1, "touch: missing file operand\n");
+                return string_report(log_error, 1, "touch: missing file operand\n"
+                                                   "Try 'touch --help' for more information.\n");
+
+        b64 obsolete;
+
+        if (!touch_stamp_given && !from && !written && count - first >= 2 &&
+            tail_posix_version() < 200112 &&
+            touch_obsolete(program_argument((b32)first), address_of obsolete))
+        {
+                times[0] = times[2] = (p64)obsolete;
+                times[1] = times[3] = 0;
+                if (!file_environment((string_address) "POSIXLY_CORRECT"))
+                {
+                        b64 year;
+                        positive month, day, hour, minute, second;
+
+                        file_split_moment(obsolete + clock_local_east(obsolete), address_of year,
+                                          address_of month, address_of day, address_of hour,
+                                          address_of minute, address_of second);
+                        positive parts[6] = {(positive)year / 100, (positive)year % 100, month,
+                                             day, hour, minute};
+                        p8 shown[16];
+                        positive at = 0;
+
+                        for (positive i = 0; i < 6; i++)
+                        {
+                                shown[at++] = (p8)('0' + parts[i] / 10 % 10);
+                                shown[at++] = (p8)('0' + parts[i] % 10);
+                        }
+                        shown[at++] = '.';
+                        shown[at++] = (p8)('0' + second / 10);
+                        shown[at++] = (p8)('0' + second % 10);
+                        shown[at] = end;
+                        string_format(log_error, "touch: warning: 'touch %s' is obsolete; use "
+                                                 "'touch -t %s'\n",
+                                      program_argument((b32)first), (string_address)shown);
+                }
+                first++;
+        }
 
         if (!access && !modify)
         {
