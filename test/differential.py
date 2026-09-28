@@ -38230,6 +38230,7 @@ def tls_seed_connections():
         "conn_ip_host.bin": (b"\1\0\0\4",) + base + (data, close),
         "conn_ccs_before_hello.bin": (control, ccs, hello, flight, close),
         "conn_ccs_twice.bin": (control, hello, ccs, ccs, flight, close),
+        "conn_ccs_protected.bin": (control, hello, tls_seed_sealed(20, b"\1"), flight, close),
         "conn_ccs_after_finished.bin": (control,) + base + (ccs, data, close),
         "conn_hello_split.bin": (control, tls_seed_record(22, tls_seed_server_hello()[:30]),
                                  tls_seed_record(22, tls_seed_server_hello()[30:]),

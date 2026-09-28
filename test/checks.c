@@ -53278,6 +53278,42 @@ static fn tls_closure_boundaries(void)
                 }
         }
 
+        /*
+                RFC 8446 5: a change_cipher_spec record that arrives
+                protected is unexpected_message. Only the plaintext one-byte
+                compatibility record may pass, once, before Finished.
+        */
+        {
+                b32 pair[2];
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_STREAM, 0,
+                                                (positive)pair);
+                check("TLS protected-CCS socket pair opens", opened == 0);
+                if (!opened)
+                {
+                        tls_conn sender = {0};
+                        tls_conn receiver = {0};
+                        p8 one = 1;
+                        p8 type = 0;
+                        p8 address_to inner = null;
+                        positive length = 0;
+
+                        sender.handle = pair[1];
+                        receiver.handle = pair[0];
+                        receiver.encrypted = true;
+                        check("TLS protected CCS is refused during the handshake",
+                              tls_send_enc(address_of sender, TLS_CT_CCS,
+                                           address_of one, 1) == TLS_OK &&
+                                  tls_next_record(address_of receiver,
+                                                  address_of type,
+                                                  address_of inner,
+                                                  address_of length,
+                                                  null) == TLS_FAIL);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                }
+        }
+
         {
                 b32 pair[2];
                 bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,

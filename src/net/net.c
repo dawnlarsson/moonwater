@@ -4903,9 +4903,11 @@ static bipolar tls_next_record(tls_conn address_to tls, p8 address_to type,
                 return TLS_OK;
         }
 
+        /* A change_cipher_spec that arrives protected is unexpected. */
         if (header[0] != TLS_CT_APP ||
             tls_decrypt_record(tls, payload, payload_length, header, payload,
-                               address_of inner_length, address_of inner_type))
+                               address_of inner_length, address_of inner_type) ||
+            inner_type == TLS_CT_CCS)
                 return TLS_FAIL;
 
         if (inner_type == TLS_CT_ALERT)
@@ -7198,7 +7200,7 @@ static bipolar tls_take(tls_conn address_to tls, positive room,
                         tls->closed = true;
                         continue;
                 }
-                if (status || type == TLS_CT_CCS)
+                if (status)
                         return TLS_FAIL;
                 if (type == TLS_CT_HANDSHAKE)
                 {
