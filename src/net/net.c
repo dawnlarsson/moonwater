@@ -5131,13 +5131,17 @@ static COLD bool tls_printable(const p8 address_to bytes, positive length)
    up to the next capital -- in one run a top-level label, each run found
    by binary search over tls_public_suffix_runs. One-label names are
    refused before this (every TLD is a suffix, known or not). */
-static COLD bool tls_suffix_in(const char address_to list, const p8 address_to key,
-                               positive length)
+static COLD bool tls_suffix_in(const char address_to list, positive size,
+                               const p8 address_to key, positive length)
 {
-        for (; *list; list += string_length(list) + 1)
-                if (string_length(list) == length &&
-                    !memory_compare(list, key, length))
+        for (positive at = 0; at < size && list[at];)
+        {
+                positive entry = memory_span_without_byte(list + at, 0, size - at);
+
+                if (entry == length && !memory_compare(list + at, key, length))
                         return true;
+                at += entry + 1;
+        }
         return false;
 }
 
@@ -5175,9 +5179,11 @@ static COLD bool tls_public_suffix(const p8 address_to name, positive length)
         while (cut && key[cut - 1] != '.')
                 cut--;
         top = memory_span_without_byte(key, '.', key_length);
-        if (tls_suffix_in(tls_public_suffix_exceptions, key, key_length))
+        if (tls_suffix_in(tls_public_suffix_exceptions,
+                          sizeof tls_public_suffix_exceptions, key, key_length))
                 return false;
-        if (cut && tls_suffix_in(tls_public_suffix_wildcards, key, cut - 1))
+        if (cut && tls_suffix_in(tls_public_suffix_wildcards,
+                                 sizeof tls_public_suffix_wildcards, key, cut - 1))
                 return true;
 
         /* The run whose top-level label is the key's: each run's first
