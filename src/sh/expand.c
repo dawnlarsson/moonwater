@@ -215,6 +215,7 @@ typedef struct
 } shell_array_item;
 
 PURE p8 shell_variable_attributes(const_string name, positive length);
+string_address shell_nameref_target(const_string name, positive length);
 PURE p8 shell_array_attributes(const_string name, positive length);
 PURE bool shell_variable_exported(const_string name, positive length);
 bool shell_variable_attribute_set(const_string name, positive length,
@@ -2183,6 +2184,12 @@ static string_address expand_capture(string_address text, bool quoted, b32 mode)
 
         if (mode == EXPAND_CAPTURE_WORD && !quoted && string_is(text, '~'))
                 text = expand_tilde(text, false);
+        //      bash tilde-expands a pattern and a replacement word too,
+        //      quoted or not: ${p//~/z} replaces the home directory.
+        else if ((mode == EXPAND_CAPTURE_PATTERN ||
+                  mode == EXPAND_CAPTURE_REPLACEMENT) &&
+                 shell_bash_compat && string_is(text, '~'))
+                text = expand_tilde(text, false);
 
         expand_into(text, quoted, MARK_PLAIN, false);
 
@@ -2382,9 +2389,27 @@ static bipolar arith_expression();
    passed whole it was four words stored to the stack and read back as two
    pairs, a load across two stores that cannot be forwarded, at every
    variable an expression reads. */
+//      The subscript of an element bash refused, kept for the store's
+//      complaint, and the length that marks the refusal.
+static p8 arith_refused_subscript[64];
+#define ARITH_KEY_REFUSED (positive_max - 1)
+//      Set while arithmetic resolves an element, which reports a refused
+//      subscript only if it reads or writes the element.
+static bool arith_subscript_quiet;
+
 static fn arith_keep_lvalue(const expand_reference address_to name,
                             bipolar value)
 {
+        if (name->key_length == ARITH_KEY_REFUSED &&
+            name->name_length < EXPAND_LOCAL_NAME)
+        {
+                memory_copy_end(arith_held_name, name->name, name->name_length);
+                arith_held = address_to name;
+                arith_held.name = arith_held_name;
+                arith_held_value = value;
+                arith_is_lvalue = true;
+                return;
+        }
         if (name->name_length >= EXPAND_LOCAL_NAME ||
             (name->key && name->key_length >= sizeof(arith_held_key)))
         {
@@ -2418,6 +2443,15 @@ static bipolar arith_store(const expand_reference address_to reference,
         if (!arith_active)
                 return 0;
 
+        if (reference->key_length == ARITH_KEY_REFUSED)
+        {
+                expand_where();
+                string_format(writer_stderr_once,
+                              "%s[%s]: bad array subscript\n",
+                              reference->name, reference->key);
+                return value;
+        }
+
         bipolar_into_string(written, value);
         if (!expand_assign_named(address_to reference, written))
         {
@@ -2444,6 +2478,7 @@ static bipolar arith_store(const expand_reference address_to reference,
         state explicitly. An inactive short-circuit arm only advances over
         the balanced bracket: Bash neither reads nor mutates its subscript.
 */
+
 static COLD bool arith_element_name(expand_reference address_to reference)
 {
         string_address open = arith_at;
@@ -2469,9 +2504,23 @@ static COLD bool arith_element_name(expand_reference address_to reference)
         held_at = arith_at;
         held_bad = arith_bad;
         held_active = arith_active;
+        arith_subscript_quiet = shell_bash_compat;
         reference->key = shell_expand_subscript(reference->name, reference->name_length,
             open + 1, (positive)(close - open - 1), &reference->key_length);
+        arith_subscript_quiet = false;
         nested_bad = arith_bad;
+        //      A subscript counting back past the start of its array: bash
+        //      has said so, reads the element as zero and writes nothing.
+        if (!reference->key && !nested_bad && !expand_failed &&
+            shell_bash_compat)
+        {
+                positive kept = min((positive)(close - open - 1),
+                                    (positive)sizeof(arith_refused_subscript) - 1);
+
+                memory_copy_end(arith_refused_subscript, open + 1, kept);
+                reference->key = arith_refused_subscript;
+                reference->key_length = ARITH_KEY_REFUSED;
+        }
         arith_at = held_at;
         arith_bad = held_bad || nested_bad;
         arith_active = held_active;
@@ -2875,6 +2924,19 @@ static bipolar arith_value_of(const expand_reference address_to reference)
 {
         p8 scratch[32];
         string_address expression;
+
+        if (reference->key_length == ARITH_KEY_REFUSED)
+        {
+                if (arith_active)
+                {
+                        expand_where();
+                        string_format(writer_stderr_once,
+                                      "%s: bad array subscript\n",
+                                      reference->name);
+                }
+                return 0;
+        }
+
         bipolar value = arith_number_of(address_to reference, scratch,
                                         address_of expression);
 
@@ -3566,7 +3628,8 @@ static bipolar arith_assign()
         target = arith_held;
         memory_copy_end(name_local, arith_held_name, target.name_length);
         target.name = name_local;
-        if (target.key)
+        //      A refused element keeps pointing at its subscript's text.
+        if (target.key && target.key_length != ARITH_KEY_REFUSED)
         {
                 memory_copy_end(key_local, arith_held_key, target.key_length);
                 target.key = key_local;
@@ -6937,7 +7000,21 @@ static COLD fn expand_transform(expand_reference reference, string_address word,
                         expand_positional_transform(which, string_get(name),
                                                     quoted);
                 else
+                {
+                        //      Under set -u a name with no value is unbound
+                        //      to bash whatever attributes it carries.
+                        if (shell_options & ((positive)1 << ('u' - 'a')))
+                        {
+                                expand_value_of(reference, scratch,
+                                                address_of present, null);
+                                if (!present)
+                                {
+                                        expand_unbound(reference, false);
+                                        return;
+                                }
+                        }
                         transform_attributes(reference, mark);
+                }
                 return;
         }
 
@@ -7034,8 +7111,9 @@ static fn expand_push_names(string_address prefix, positive prefix_length,
 
         for (positive at = 0; at < count; at++)
         {
-                positive length = (positive)(string_first_of(names[at], '=') -
-                                               names[at]);
+                string_address equals = string_first_of(names[at], '=');
+                positive length = equals ? (positive)(equals - names[at])
+                                         : string_length(names[at]);
                 p8 address_to kept = shell_store_copy(address_of expand_store,
                                                        names[at], length);
 
@@ -7084,6 +7162,18 @@ static fn expand_push_names(string_address prefix, positive prefix_length,
         The resolved key is retained separately from the base name, so every
         operator can read or write it without evaluating its subscript again.
 */
+//      Set while a compound assignment reads its words: an indexed
+//      subscript comes back as its expanded text, for arithmetic later.
+static bool expand_subscript_deferred;
+//      What a refused subscript is called, when not its array's name.
+static string_address expand_subscript_named;
+COLD string_address shell_subscript_index(string_address base,
+                                          positive base_length,
+                                          string_address key,
+                                          p8 address_to written,
+                                          positive address_to key_length,
+                                          string_address named);
+
 static COLD string_address expand_subscript_key(string_address base,
                                            positive base_length,
                                            string_address subscript,
@@ -7108,17 +7198,40 @@ static COLD string_address expand_subscript_key(string_address base,
         if (expand_failed || !key)
                 return null;
 
-        if (shell_array_attributes(base, base_length) &
-            SHELL_ARRAY_ASSOCIATIVE)
+        if (expand_subscript_deferred ||
+            (shell_array_attributes(base, base_length) &
+             SHELL_ARRAY_ASSOCIATIVE))
         {
                 address_to key_length = string_length(key);
                 return key;
         }
 
+        return shell_subscript_index(
+            base, base_length, key, written, key_length,
+            expand_subscript_named ? expand_subscript_named : base);
+}
+
+/*
+        An indexed subscript's text, expanded, made a number: arithmetic,
+        and a negative one counted back from the end of the array as it is
+        now. Apart from its expansion so that a compound assignment can
+        expand every word first and do the arithmetic as it assigns, the way
+        bash does: a=([0]=1+2+3 [a[0]]=10) puts 10 at 6.
+*/
+COLD string_address shell_subscript_index(string_address base,
+                                          positive base_length,
+                                          string_address key,
+                                          p8 address_to written,
+                                          positive address_to key_length,
+                                          string_address named)
+{
         {
                 bipolar index = arith_evaluate(key);
 
-                if (!arith_bad && index < 0)
+                //      Counted back from the end of an array that has
+                //      one: an empty array has no end, and bash refuses it.
+                if (!arith_bad && index < 0 &&
+                    shell_array_length(base, base_length))
                         index += (bipolar)shell_array_highest(base,
                                                               base_length) + 1;
 
@@ -7139,9 +7252,12 @@ static COLD string_address expand_subscript_key(string_address base,
                         //      A computed index that is still negative is an
                         //      empty expansion, not a fatal one: bash names
                         //      the array and the next command still runs.
+                        //      Arithmetic says so itself, when it reads.
+                        if (arith_subscript_quiet)
+                                return null;
                         expand_where();
                         string_format(writer_stderr_once,
-                                      "%s: bad array subscript\n", base);
+                                      "%s: bad array subscript\n", named);
                         if (!shell_bash_compat)
                                 expand_fatal_status(2);
                         return null;
@@ -7589,7 +7705,11 @@ static fn expand_modifier(expand_reference reference, p8 operation, bool doubled
         }
         else if (operation == '/')
         {
-                string_address separator = expand_replace_separator(word);
+                //      A pattern may begin with a slash: bash looks for the
+                //      one that ends it after that, so ${x////c} replaces
+                //      each / with c.
+                string_address separator = expand_replace_separator(
+                    string_is(word, '/') ? word + 1 : word);
                 string_address replacement = (string_address)"";
                 if (separator)
                 {
@@ -8173,6 +8293,87 @@ static PURE bool expand_indirect_element(string_address name, positive length)
         return shut == name + length - 1;
 }
 
+static COLD string_address expand_indirect_through(string_address name,
+                                                   positive length, p8 form,
+                                                   string_address rest,
+                                                   string_address close,
+                                                   bool quoted)
+{
+        positive tail = (positive)(close - rest);
+        p8 address_to joined_text;
+        string_address joined;
+        positive joined_length;
+        p8 address_to built;
+
+        if (!shell_array_length(name, length))
+        {
+                p8 which[2] = {form, end};
+
+                expand_where();
+                string_format(writer_stderr_once,
+                              "%s[%s]: invalid indirect expansion\n", name,
+                              which);
+                expand_indirect_error();
+                return close + 1;
+        }
+        {
+                positive count = shell_array_length(name, length);
+                positive room = 1;
+                shell_array_item address_to items;
+
+                if (count > positive_max / sizeof(items[0]) ||
+                    !(items = (shell_array_item address_to)shell_store_take(
+                          address_of expand_store, count * sizeof(items[0]))))
+                {
+                        expand_fail_state();
+                        return close + 1;
+                }
+                shell_array_items(name, length, items, count);
+                for (positive at = 0; at < count; at++)
+                        room += items[at].value_length + 1;
+                if (!(joined_text = shell_store_take(address_of expand_store,
+                                                     room)))
+                {
+                        expand_fail_state();
+                        return close + 1;
+                }
+                joined_length = 0;
+                for (positive at = 0; at < count; at++)
+                {
+                        if (at)
+                                joined_text[joined_length++] = ' ';
+                        memory_copy(joined_text + joined_length,
+                                    items[at].value, items[at].value_length);
+                        joined_length += items[at].value_length;
+                }
+                joined_text[joined_length] = end;
+                joined = joined_text;
+        }
+        if (!expand_parameter_name(joined, joined_length) &&
+            !expand_indirect_element(joined, joined_length))
+        {
+                expand_where();
+                string_format(writer_stderr_once,
+                              "%s: invalid variable name\n", joined);
+                expand_indirect_error();
+                return close + 1;
+        }
+        if (!(built = shell_store_take(address_of expand_store,
+                                       joined_length + tail + 4)))
+        {
+                expand_fail_state();
+                return close + 1;
+        }
+        built[0] = '$';
+        built[1] = '{';
+        memory_copy(built + 2, joined, joined_length);
+        memory_copy(built + 2 + joined_length, rest, tail);
+        built[2 + joined_length + tail] = '}';
+        built[3 + joined_length + tail] = end;
+        expand_braced_body(built, built + 2 + joined_length + tail, quoted);
+        return close + 1;
+}
+
 /*
         Whether ${#...} asks for a length. Only a whole parameter may follow
         the #: a name, a positional number or one special character, with a
@@ -8230,6 +8431,7 @@ static string_address expand_braced_body(string_address step,
         p8 name_list = 0;
         p8 operation = 0;
         p8 seen;
+        bool element_refused = false;
 
         step += 2;
 
@@ -8322,13 +8524,34 @@ static string_address expand_braced_body(string_address step,
                 {
                         reference.key = shell_expand_subscript(name, length, step + 1,
                                                                inner, &reference.key_length);
-                        if (!reference.key)
+                        //      A subscript counting back past the start is
+                        //      said and then read as an unset element, so
+                        //      ${a[-9]-none} is none in bash.
+                        if (!reference.key && shell_bash_compat &&
+                            !expand_failed)
+                        {
+                                parameter_mode |= EXPAND_PARAMETER_MISSING;
+                                element_refused = true;
+                        }
+                        else if (!reference.key)
                                 return close + 1;
                 }
 
                 step = shut + 1;
                 seen = string_get(step);
         }
+
+        /*
+                ${!a[@]} alone is the subscripts. With an operator after it
+                bash reads ${!r...} whose r is "${a[*]}": the elements,
+                joined, name the parameter the operator is applied to, so
+                a=(v) makes ${!a[@]:2} the same as ${v:2}.
+        */
+        if (array_form && (parameter_mode & EXPAND_PARAMETER_INDIRECT) &&
+            step < close && shell_bash_compat)
+                return expand_indirect_through(plain_name, plain_length,
+                                               array_form, step, close,
+                                               quoted);
 
         if (!array_form && !reference.key && (parameter_mode & EXPAND_PARAMETER_INDIRECT) &&
             expand_assignable_name(name) && step + 1 == close &&
@@ -8448,6 +8671,10 @@ static string_address expand_braced_body(string_address step,
                         return close + 1;
         }
 
+        //      A refused element has no length and nothing to transform.
+        if (element_refused && (want_length || operation == '@'))
+                return close + 1;
+
         /*
                 ${name@X} names one transformation. An unknown letter is a
                 bad substitution, but only when the name is set: bash 5.2
@@ -8522,6 +8749,32 @@ static string_address expand_braced_body(string_address step,
                 string_address source = name;
                 positive target_length;
                 bool present;
+
+                //      ${!ref} of a nameref is the name it refers to, in
+                //      bash, and not the value of the variable it holds.
+                //      One that refers to nothing is no indirection at all.
+                if (shell_bash_compat && !reference.key &&
+                    (shell_variable_attributes(source, length) &
+                     SHELL_ARRAY_NAMEREF))
+                {
+                        string_address target =
+                            shell_nameref_target(source, length);
+
+                        if (!target)
+                        {
+                                expand_where();
+                                string_format(writer_stderr_once,
+                                              "%s: invalid indirect expansion\n",
+                                              expand_reference_text(reference));
+                                expand_indirect_error();
+                                return close + 1;
+                        }
+                        if (!operation && !want_length)
+                        {
+                                expand_push_string(target, mark);
+                                return close + 1;
+                        }
+                }
 
                 name = expand_value_of(reference, indirect_scratch,
                                        address_of present,

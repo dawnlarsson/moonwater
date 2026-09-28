@@ -630,55 +630,6 @@ static bipolar floodlight_proc_read(string_address path, p8 address_to text,
         return got < 0 ? -ERROR_ACCESS : got;
 }
 
-/* /proc/misc is a kernel-owned inventory outside the caller's /dev mount.
-   A mount namespace can hide /dev/floodlight, but it cannot make the genuine
-   registered misc device disappear from an authenticated procfs view. Return
-   one when the policy device is registered, zero when it is absent, and a
-   negative result when stock-kernel absence cannot be proved. */
-static bipolar floodlight_policy_registered()
-{
-#define FLOODLIGHT_MISC_MAX 4096
-        static const p8 registered[] = "249 floodlight";
-        p8 text[FLOODLIGHT_MISC_MAX];
-        bipolar got = floodlight_proc_read((string_address)"misc", text,
-                                           sizeof(text));
-        positive used;
-
-        if (got < 0)
-                return got;
-
-        used = (positive)got;
-
-        /* Where the name is, and then whether it is a whole line: nothing
-           after it but the newline or the end, and nothing before it on its
-           line but spaces and tabs. */
-        for (positive at = 0; at < used;)
-        {
-                const p8 address_to found = memory_search(
-                    text + at, used - at, (address_any)registered,
-                    sizeof(registered) - 1);
-                positive start;
-                positive after;
-
-                if (!found)
-                        break;
-
-                start = (positive)(found - text);
-                after = start + sizeof(registered) - 1;
-                at = start + 1;
-
-                if (after < used && text[after] != '\n')
-                        continue;
-                while (start && (text[start - 1] == ' ' || text[start - 1] == '\t'))
-                        start--;
-                if (!start || text[start - 1] == '\n')
-                        return 1;
-        }
-
-        return 0;
-#undef FLOODLIGHT_MISC_MAX
-}
-
 static fn floodlight_descriptor_name(p8 address_to into, bipolar handle)
 {
         positive used = positive_into_string(into, (positive)handle);
@@ -2997,7 +2948,11 @@ positive env_names_prefix(string_address prefix, positive length,
         {
                 env_variable address_to variable = shell_vars + at;
 
-                if (!env_variable_has_value(variable) ||
+                //      An array assigned nothing, a=(), is set to bash and
+                //      named; declare -a a alone is not.
+                if (!(env_variable_has_value(variable) ||
+                      ((variable->attributes & SHELL_ARRAY_EITHER) &&
+                       (variable->attributes & SHELL_ARRAY_ASSIGNED))) ||
                     variable->name_length < length ||
                     memory_compare(variable->text, prefix, length))
                         continue;
@@ -3579,6 +3534,18 @@ COLD PURE p8 shell_variable_attributes(const_string name, positive length)
         positive found = env_find_span(name, length);
 
         return found < shell_var_count ? shell_vars[found].attributes : 0;
+}
+
+// The name a nameref holds, as written, or nothing for any other variable.
+COLD string_address shell_nameref_target(const_string name, positive length)
+{
+        positive found = env_find_span(name, length);
+
+        return found < shell_var_count &&
+                       (shell_vars[found].attributes & SHELL_ARRAY_NAMEREF) &&
+                       env_variable_has_value(shell_vars + found)
+                   ? shell_vars[found].text + length + 1
+                   : null;
 }
 
 /* Array syntax acts on a nameref's target, while declaration syntax still
@@ -7133,6 +7100,7 @@ static shell_option shell_extra_options[] = {
 #define SHELL_EXTRA_OPTIONS (array_count(shell_extra_options) - 1)
 #define SHELL_EXTRA_ERRTRACE 0
 #define SHELL_EXTRA_FUNCTRACE 1
+#define SHELL_EXTRA_HISTORY 2
 #define SHELL_EXTRA_BRACEEXPAND 3
 #define SHELL_EXTRA_HASHALL 4
 #define SHELL_EXTRA_PHYSICAL 5
@@ -7359,6 +7327,8 @@ static bool shell_extra_letter(p8 letter, bool on)
 #define SHELL_OPTION_NAMES \
         (array_count(shell_option_names) - 1)
 #define SHELL_OPTION_MONITOR 4
+#define SHELL_OPTION_VI 9
+#define SHELL_OPTION_EMACS 10
 #define SHELL_OPTION_NOCLOBBER 11
 #define SHELL_OPTION_PIPEFAIL 16
 
@@ -7397,6 +7367,13 @@ fn shell_option_told(positive index, bool on)
                 shell_options_named |= (positive)1 << index;
         else
                 shell_options_named &= ~((positive)1 << index);
+
+        //      bash has one line editor: turning vi on turns emacs off and
+        //      the other way round. dash keeps the two apart.
+        if (on && shell_bash_compat && index == SHELL_OPTION_VI)
+                shell_options_named &= ~((positive)1 << SHELL_OPTION_EMACS);
+        else if (on && shell_bash_compat && index == SHELL_OPTION_EMACS)
+                shell_options_named &= ~((positive)1 << SHELL_OPTION_VI);
 }
 
 /* Startup and set use the same option table and side effects. */
@@ -7507,6 +7484,14 @@ fn shell_options_started(bool interactive, b32 monitor)
                 shell_extra_state |= (positive)1 << SHELL_EXTRA_HISTEXPAND;
         if (shell_bash_compat && interactive && !shell_alias_startup_told)
                 shell_shopt_state |= SHELL_SHOPT(EXPAND_ALIASES);
+        //      An interactive bash keeps history and edits the emacs way,
+        //      unless it was started with vi.
+        if (shell_bash_compat && interactive)
+        {
+                shell_extra_state |= (positive)1 << SHELL_EXTRA_HISTORY;
+                if (!shell_option_on(SHELL_OPTION_VI))
+                        shell_option_told(SHELL_OPTION_EMACS, true);
+        }
 
         // Defer the one monitor side effect until interactive identity is
         // known. Parsing -m earlier would mark job control initialized before
@@ -8552,6 +8537,8 @@ fn shell_shift(writer write, string_address input)
         shell_answer(0);
 }
 
+static bool local_unset_outer(const_string name, positive length);
+
 static bool shell_unset_variable(const_string name, positive length)
 {
         if (env_restricted_name(name, length) || env_bash_readonly_name(name, length))
@@ -8575,7 +8562,7 @@ static bool shell_unset_variable(const_string name, positive length)
         b32 detached = exec_unset_prefix(name, length);
         if (detached < 0)
                 shell_answered(2, "%s: no room\n", "unset");
-        else if (!detached)
+        else if (!detached && !local_unset_outer(name, length))
                 env_unset_span((string_address)name, length);
         return detached >= 0;
 }
@@ -8597,6 +8584,7 @@ COLD fn shell_unset(writer write, string_address input)
 {
         shell_option_walk walk = {1};
         positive index;
+        bool unset_failed = false;
         bool functions = false;
         bool variables = false;
         bool reference = false;
@@ -8721,10 +8709,32 @@ COLD fn shell_unset(writer write, string_address input)
                                 return;
                         }
 
+                        //      bash names a subscript it cannot use by the
+                        //      builtin and the subscript, answers 1 and
+                        //      goes on to the next name.
+                        p8 named[80];
+                        positive named_length = subscript_length + 9;
+
+                        if (shell_bash_compat && named_length < sizeof(named))
+                        {
+                                memory_copy(named, "unset: [", 8);
+                                memory_copy(named + 8, subscript,
+                                            subscript_length);
+                                named[named_length - 1] = ']';
+                                named[named_length] = end;
+                                expand_subscript_named = named;
+                        }
                         key = shell_expand_subscript(word, base,
                                                      (string_address)subscript,
                                                      subscript_length,
                                                      address_of key_length);
+                        expand_subscript_named = null;
+                        if (!key && !expand_failed && shell_bash_compat)
+                        {
+                                unset_failed = true;
+                                index++;
+                                continue;
+                        }
 
                         b32 detached = 0;
                         env_reference resolved = env_reference_span(word, base);
@@ -8844,7 +8854,7 @@ COLD fn shell_unset(writer write, string_address input)
                 index++;
         }
 
-        shell_answer(0);
+        shell_answer(unset_failed ? 1 : 0);
 }
 
 /*
@@ -8991,6 +9001,42 @@ static PURE shell_local_entry address_to local_find(string_address name,
                         return local_table + at;
 
         return null;
+}
+
+/*
+        unset run in a function deeper than the one that made the local:
+        bash takes that local away, and the name means what it meant outside
+        it again -- the unlocal idiom, f() { unset "$@"; }. Run in the
+        function that made it, the local stays, only unset.
+*/
+static bool local_unset_outer(const_string name, positive length)
+{
+        positive stop = local_count;
+
+        if (!shell_bash_compat || local_depth < 2)
+                return false;
+        for (positive depth = local_depth; depth; depth--)
+        {
+                positive begin = local_from[depth - 1];
+
+                for (positive at = stop; at > begin; at--)
+                {
+                        shell_local_entry address_to entry = local_table + at - 1;
+
+                        if (entry->detached ||
+                            entry->binding.variable.name_length != length ||
+                            memory_compare(entry->binding.name, name, length))
+                                continue;
+                        if (depth == local_depth ||
+                            local_getopts_scope(entry->binding.name, length))
+                                return false;
+                        shell_binding_restore(&entry->binding);
+                        entry->detached = true;
+                        return true;
+                }
+                stop = begin;
+        }
+        return false;
 }
 
 static b32 local_remember(string_address name)
@@ -9488,6 +9534,8 @@ bool shell_compound_prepare(string_address name, positive name_length,
                             string_address body, positive body_length,
                             bool keyed);
 fn shell_compound_prepare_drop();
+static bool exec_compound_declaring;
+static bool exec_compound_kept;
 static b32 shell_declare_value(string_address name, positive length,
                                string_address mark, bool append,
                                bool bind_reference, bool declare_empty,
@@ -9506,10 +9554,14 @@ static b32 shell_declare_value(string_address name, positive length,
         {
                 positive body = string_length(mark + 1);
 
-                return shell_compound_assign(name, length, mark + 2,
-                                             body > 2 ? body - 2 : 0,
-                                             append)
-                           ? 1 : -1;
+                bool assigned;
+
+                exec_compound_declaring = true;
+                assigned = shell_compound_assign(name, length, mark + 2,
+                                                 body > 2 ? body - 2 : 0,
+                                                 append);
+                exec_compound_declaring = false;
+                return assigned ? 1 : -1;
         }
 
         if (destination)
@@ -10080,7 +10132,16 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                 return shell_answered(2, "%s: no room\n", local_mode ? (string_address)"local" : (string_address)"declare");
         }
 
-        shell_answer(failed ? 1 : 0);
+        //      A compound list refused part way answers 1, as bash does.
+        shell_answer(failed || exec_compound_kept ? 1 : 0);
+        exec_compound_kept = false;
+}
+
+static fn shell_local_written(writer write, string_address name,
+                              positive length, b32 filter)
+{
+        if (local_depth && local_find(name, local_from[local_depth - 1]))
+                shell_declare_print_one(write, name, length, filter);
 }
 
 COLD fn shell_local(writer write, string_address input)
@@ -10124,6 +10185,45 @@ COLD fn shell_local(writer write, string_address input)
 
         if (!shell_declare_options(address_of state))
                 return;
+
+        //      With no names local lists this function's own variables,
+        //      sorted, as declare -p writes them; -p with names prints
+        //      those of them that are this function's.
+        if (state.index >= shell_argc)
+        {
+                //      bash keeps `local -` as a variable named -, which
+                //      sorts first and lists as itself.
+                if (local_depth <= SHELL_LOCAL_OPTIONS_MAX &&
+                    local_options_kept[local_depth - 1])
+                        write("local -\n", 8);
+                return shell_answer(shell_inventory_sorted(
+                                        write, DECLARE_PRINT,
+                                        shell_local_written, false, false)
+                                        ? 0
+                                        : 1);
+        }
+        if (state.set & DECLARE_PRINT)
+        {
+                bool failed = false;
+
+                for (; state.index < shell_argc; state.index++)
+                {
+                        string_address name = shell_argv[state.index];
+                        positive length = string_length(name);
+
+                        if (!shell_valid_name(name, length) ||
+                            !local_find(name, local_from[local_depth - 1]) ||
+                            !shell_declare_print_one(write, name, length,
+                                                     state.set))
+                        {
+                                shell_diagnostic_where();
+                                string_format(log_error,
+                                              "local: %s: not found\n", name);
+                                failed = true;
+                        }
+                }
+                return shell_answer(failed ? 1 : 0);
+        }
 
         //      A lone "-" is a name to the walk and an instruction to Bash:
         //      keep the option letters as they are now and put them back
@@ -10242,6 +10342,7 @@ static fn shell_declare(writer write, string_address input)
                                     !shell_declare_print_one(write, name, length,
                                                              state.set))
                                 {
+                                        shell_diagnostic_where();
                                         string_format(log_error,
                                                       "%s: %s: not found\n",
                                                       shell_argv[0], name);
@@ -12025,6 +12126,22 @@ static bool printf_number_at(string_address word, string_address address_to at,
         if (string_is(address_to at, '\'') || string_is(address_to at, '"'))
         {
                 address_to quoted = string_get(address_to at + 1);
+                //      Bash reads the character after the quote the way the
+                //      locale does: under UTF-8 'μ is 956, and a sequence
+                //      that does not decode is its first byte.
+                if (address_to quoted >= 0x80 && shell_bash_compat &&
+                    shell_utf8_on())
+                {
+                        memory_utf8_state state = {0};
+                        string_address byte = address_to at + 1;
+                        b32 fed;
+
+                        while ((fed = memory_utf8_feed(address_of state,
+                                                       string_get(byte))) == 0)
+                                byte++;
+                        if (fed == 1)
+                                address_to quoted = state.value;
+                }
                 return false;
         }
 
@@ -12165,6 +12282,56 @@ static bool printf_star(string_address word, bipolar address_to value)
         return !out_of_range;
 }
 
+/*
+        The zone bash writes a time in is the TZ it exports: its tzset follows
+        the variable, so a TZ assigned without export, or unset here while
+        still in the environment this shell was handed, is no zone at all.
+        The clock reads the process environment, which only holds what the
+        shell was started with; this puts the shell's answer there for the
+        one call and takes it back after.
+*/
+static p8 shell_zone_saved[256];
+static b32 shell_zone_swapped;
+
+static COLD fn shell_zone_enter()
+{
+        positive found = env_find_span((const_string) "TZ", 2);
+        string_address want =
+            found < shell_var_count && env_variable_exports(shell_vars + found)
+                ? env_get((const_string) "TZ")
+                : null;
+        string_address have = getenv((string_address) "TZ");
+
+        shell_zone_swapped = 0;
+        if (!shell_bash_compat ||
+            (want ? have && string_equals(want, have) : !have))
+                return;
+        if (have)
+        {
+                if (string_length(have) >= sizeof(shell_zone_saved))
+                        return;
+                string_copy(shell_zone_saved, have);
+        }
+        shell_zone_swapped = have ? 1 : 2;
+        if (want)
+                setenv((string_address) "TZ", want, 1);
+        else
+                unsetenv((string_address) "TZ");
+        tzset();
+}
+
+static COLD fn shell_zone_leave()
+{
+        if (!shell_zone_swapped)
+                return;
+        if (shell_zone_swapped == 1)
+                setenv((string_address) "TZ", shell_zone_saved, 1);
+        else
+                unsetenv((string_address) "TZ");
+        shell_zone_swapped = 0;
+        tzset();
+}
+
 fn printf_one(writer write, string_address format)
 {
         string_address step = format;
@@ -12301,10 +12468,44 @@ fn printf_one(writer write, string_address format)
                         continue;
                 }
 
-                if (conversion == 'q')
+                /*
+                        %q quotes and then cuts the quoted text to the
+                        precision; bash 5.3's %Q cuts the argument first and
+                        quotes what is left. Either is padded to the width.
+                */
+                if (conversion == 'q' ||
+                    (conversion == 'Q' && shell_bash_compat))
                 {
-                        printf_reusable(write, printf_next());
+                        string_address value = printf_next();
+                        p8 address_to cut = null;
+                        p8 kept = 0;
 
+                        if (conversion == 'Q' && precision >= 0 &&
+                            (positive)precision < string_length(value))
+                        {
+                                cut = (p8 address_to)value + precision;
+                                kept = address_to cut;
+                                address_to cut = end;
+                        }
+
+                        if (!width && (conversion == 'Q' || precision < 0))
+                                printf_reusable(write, value);
+                        else
+                        {
+                                positive length;
+
+                                printf_hold.used = 0;
+                                printf_reusable(printf_holder, value);
+                                length = printf_hold.used;
+                                if (conversion == 'q' && precision >= 0 &&
+                                    (positive)precision < length)
+                                        length = (positive)precision;
+                                writer_field_bulk(write, printf_hold.bytes,
+                                                  length, width, ' ', left);
+                        }
+
+                        if (cut)
+                                address_to cut = kept;
                         continue;
                 }
 
@@ -12381,6 +12582,31 @@ fn printf_one(writer write, string_address format)
                         {
                                 shell_seconds_begin();
                                 when = (bipolar)shell_started_seconds;
+                        }
+
+                        //      Bash formats into 128 bytes and writes
+                        //      nothing when the time does not fit; an
+                        //      empty format is %X. The result is a string
+                        //      to the width and the precision.
+                        if (shell_bash_compat)
+                        {
+                                positive length;
+
+                                if (!kept)
+                                        string_copy(shape, (string_address) "%X");
+                                printf_hold.used = 0;
+                                shell_zone_enter();
+                                date_shape(printf_holder, (b64)when, 0, shape);
+                                shell_zone_leave();
+                                length = printf_hold.used;
+                                if (length >= 128)
+                                        length = 0;
+                                if (precision >= 0 &&
+                                    (positive)precision < length)
+                                        length = (positive)precision;
+                                writer_field_bulk(write, printf_hold.bytes,
+                                                  length, width, ' ', left);
+                                continue;
                         }
 
                         date_shape(write, (b64)when, 0, shape);
@@ -15908,18 +16134,14 @@ static string_address shell_tool_name(string_address path)
 #define FLOODLIGHT_DEVICE_MINOR 249
 
 /*
-        What is refused when the register cannot be read.
-
-        Not "everything", which would refuse the machine, and not "nothing",
-        which would mean removing the device is a way of removing the policy.
-        These are the three floodlight.c is built refusing -- awk, which
-        builds a command from what it reads, and script and setarch, which
-        start a shell -- so the absence of the register leaves the built-in
-        answers standing and only the deviations unavailable. The floodlight
-        harness fails the build if this list and floodlight.c's disagree.
+        What floodlight.c's array refuses, for when the register cannot be
+        read: nothing. A machine nobody configured refuses nothing, register
+        or not, and what a configuration refuses arrives as the configured
+        text below. The list stays so the two copies of the array stay one
+        fact -- the floodlight harness fails the build if this and
+        floodlight.c's refusing rows ever disagree.
 */
-static string_address const floodlight_denied[] = {
-    "awk", "script", "setarch", null};
+static string_address const floodlight_denied[] = {null};
 
 /*
         The register, read once and reduced to what it changes.
@@ -15929,18 +16151,22 @@ static string_address const floodlight_denied[] = {
         and kept. A deviation made after that reaches the next program started,
         which is the next thing anybody runs.
 
-        What is kept is not the report. The report is mostly the built-in
-        answers, and this shell already carries those; only the rows that
-        deviate from them say anything it does not already know. So the text is
-        walked once, at load, and what comes out is a handful of rows -- none
-        at all on a machine nobody has changed, which is every machine most of
-        the time. An applet then costs three comparisons against a count of
-        zero rather than three walks over eight kilobytes of text.
+        What is kept is not the report. The report is mostly answers that
+        allow, and allowing is what every program gets that no row refuses;
+        only the rows that refuse, and the deviations made since boot, say
+        anything. So the text is walked once, at load, and what comes out is a
+        handful of rows -- none at all on a machine nobody configured, which
+        is the default. An applet then costs three comparisons against a count
+        of zero rather than three walks over eight kilobytes of text.
 */
-#define FLOODLIGHT_REPORT 8192
+#define FLOODLIGHT_REPORT 20480
 #define FLOODLIGHT_NAME 64
 #define FLOODLIGHT_DETAIL 32
-#define FLOODLIGHT_ROWS 48
+/* floodlight.c's CONFIGURED and LINE: the rows a configuration may add, and
+   the longest one row may be. */
+#define FLOODLIGHT_CONFIGURED 64
+#define FLOODLIGHT_LINE (FLOODLIGHT_NAME + FLOODLIGHT_DETAIL + 32)
+#define FLOODLIGHT_ROWS 112
 
 /* The settings, in the order floodlight.c names them. */
 #define FLOODLIGHT_RUN 0
@@ -15974,7 +16200,6 @@ static positive floodlight_row_count HOT_STATE;
 
 static p8 floodlight_report_state HOT_STATE;
 static bool floodlight_report_promised HOT_STATE;
-static bool floodlight_inherited_seccomp HOT_STATE;
 /* Only a shell process may establish the protected-launcher contract.  A
    directly invoked applet is somebody else's child: making that applet
    nondumpable cannot protect the external shell which may still be parsing
@@ -16322,28 +16547,43 @@ static bool floodlight_take(string_address text, positive length,
 
                 origin = floodlight_word(&at);
 
+                /*
+                        A built-in answer is carried only when it refuses.
+                        Everything is allowed that no row refuses, so an
+                        allowing built-in row says nothing this shell does not
+                        already assume -- and the refusing ones are the kernel's
+                        word on what it was built refusing, which this shell
+                        takes over its own compiled copy: a kernel configured
+                        stricter than the shell it runs is still obeyed.
+                */
                 if (floodlight_is(origin, "built"))
                 {
                         if (!floodlight_is(floodlight_word(&at), "in") ||
                             floodlight_word(&at).length)
                                 return false;
 
-                        at = line_end + 1;
-                        continue;
+                        if (floodlight_is(state, "allow"))
+                        {
+                                at = line_end + 1;
+                                continue;
+                        }
                 }
+                else
+                {
+                        if (!floodlight_is(origin, "changed") ||
+                            !floodlight_report_number(floodlight_word(&at),
+                                                      true) ||
+                            !floodlight_is(floodlight_word(&at), "ago") ||
+                            !floodlight_is(floodlight_word(&at), "by") ||
+                            !floodlight_is(floodlight_word(&at), "uid"))
+                                return false;
 
-                if (!floodlight_is(origin, "changed") ||
-                    !floodlight_report_number(floodlight_word(&at), true) ||
-                    !floodlight_is(floodlight_word(&at), "ago") ||
-                    !floodlight_is(floodlight_word(&at), "by") ||
-                    !floodlight_is(floodlight_word(&at), "uid"))
-                        return false;
+                        tail = floodlight_word(&at);
 
-                tail = floodlight_word(&at);
-
-                if (!floodlight_report_number(tail, false) ||
-                    floodlight_word(&at).length)
-                        return false;
+                        if (!floodlight_report_number(tail, false) ||
+                            floodlight_word(&at).length)
+                                return false;
+                }
 
                 if (subject.length >= FLOODLIGHT_NAME ||
                     detail.length >= FLOODLIGHT_DETAIL ||
@@ -16366,6 +16606,226 @@ static bool floodlight_take(string_address text, positive length,
         return header;
 }
 
+/*
+        The configured answers, as floodlight.c carries them: the policy
+        string and the dangerous-flag switches of the kernel configuration,
+        composed into one text in the same order and the same bytes. The
+        floodlight harness fails the build when the two compositions differ.
+        Only where a configuration is there to say so -- the string is always
+        defined where Kconfig is -- so a shell built without one refuses
+        nothing it was not also built refusing.
+
+        The contract with whatever hands the configuration to this compile:
+        defining CONFIG_MOONWATER_FLOODLIGHT_POLICY says a configuration is
+        here, and every switch it does not also define reads as off, which
+        is a refusal. So a handoff that defines the string must define every
+        CONFIG_MOONWATER_FLOODLIGHT_* bool that is y, exactly as autoconf.h
+        does for the kernel; one that carries none of them must carry the
+        string neither. The build's configuration header, which src/lib.util.c
+        includes ahead of everything, does exactly that.
+*/
+static const p8 floodlight_configured_text[] =
+#ifdef CONFIG_MOONWATER_FLOODLIGHT_POLICY
+        CONFIG_MOONWATER_FLOODLIGHT_POLICY ";"
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_AWK_SPAWN
+        "awk spawn deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_SHELL_ESCAPES
+        "script spawn deny; setarch spawn deny; split flag --filter deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_FIND_EXEC
+        "find flag -exec deny; find flag -execdir deny;"
+        "find flag -ok deny; find flag -okdir deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_FIND_DELETE
+        "find flag -delete deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_FIND_WRITE
+        "find flag -fprint deny; find flag -fprint0 deny; find flag -fprintf deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_XARGS
+        "xargs run deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_SPLIT_FILTER
+        "split flag --filter deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_SORT_COMPRESS
+        "sort flag --compress-program deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_ENV_SPLIT
+        "env flag -S deny; env flag --split-string deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_LAUNCHERS
+        "timeout run deny; nice run deny; nohup run deny; stdbuf run deny;"
+        "setsid run deny; flock run deny; chrt run deny; ionice run deny;"
+        "taskset run deny; prlimit run deny; choom run deny; uclampset run deny;"
+        "coresched run deny; setpgid run deny; pipesz run deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_NAMESPACES
+        "unshare run deny; nsenter run deny;"
+        "chroot run deny; pivot_root run deny; setpriv run deny;"
+#endif
+#ifndef CONFIG_MOONWATER_FLOODLIGHT_NETWORK_FETCH
+        "wget run deny; fetch run deny;"
+#endif
+#endif
+        "";
+
+/* floodlight.c's plain(), over one token: the bytes a name, a path or a flag
+   is made of, and nothing that could print a row of its own. */
+static bool floodlight_plain(floodlight_token word)
+{
+        for (positive at = 0; at < word.length; at++)
+        {
+                p8 c = (p8)word.at[at];
+
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+                    c == '-' || c == '/' || c == '+' || c == ':')
+                        continue;
+
+                return false;
+        }
+
+        return word.length != 0;
+}
+
+/*
+        The configured text, read into rows as floodlight.c's configure()
+        reads it at boot -- a row there that does not read is one here that
+        does not, and the two are run against each other over the same texts
+        by the floodlight harness. Rows are split at semicolons and newlines,
+        words at spaces and tabs; nothing may follow the state; "seal" is not
+        a row; a row named twice is taken the first time. Answers false,
+        having published nothing, for a text any row of which does not read.
+*/
+static bool floodlight_policy_take(string_address text,
+                                   floodlight_row address_to rows,
+                                   positive address_to count_out)
+{
+        p8 line[FLOODLIGHT_LINE];
+        positive count = address_to count_out;
+
+        while (address_to text)
+        {
+                floodlight_token subject, said, state, detail = {null, 0};
+                string_address at = (string_address)line;
+                positive length = 0;
+                positive i, j;
+
+                while (text[length] && text[length] != ';' &&
+                       text[length] != '\n')
+                        length++;
+                if (length >= FLOODLIGHT_LINE)
+                        return false;
+                for (i = 0; i < length; i++)
+                        line[i] = text[i] == '\t' ? ' ' : (p8)text[i];
+                line[length] = 0;
+                text += length + (text[length] != 0);
+
+                subject = floodlight_word(&at);
+                if (!subject.length)
+                        continue;
+
+                said = floodlight_word(&at);
+                state = floodlight_word(&at);
+                if (!said.length || !state.length)
+                        return false;
+
+                for (i = 0; i < FLOODLIGHT_SETTINGS; i++)
+                        if (floodlight_is(said, floodlight_settings[i]))
+                                break;
+                if (i == FLOODLIGHT_SETTINGS)
+                        return false;
+
+                if (i == FLOODLIGHT_FLAG)
+                {
+                        detail = state;
+                        state = floodlight_word(&at);
+                        if (!state.length)
+                                return false;
+                }
+
+                if (floodlight_word(&at).length ||
+                    (!floodlight_is(state, "allow") &&
+                     !floodlight_is(state, "deny")))
+                        return false;
+                if (subject.length >= FLOODLIGHT_NAME ||
+                    detail.length >= FLOODLIGHT_DETAIL)
+                        return false;
+                if (floodlight_is(subject, "seal") ||
+                    !floodlight_plain(subject) ||
+                    (i == FLOODLIGHT_FLAG && !floodlight_plain(detail)))
+                        return false;
+
+                for (j = 0; j < count; j++)
+                        if (rows[j].setting == i &&
+                            floodlight_is(subject,
+                                          (string_address)rows[j].subject) &&
+                            floodlight_is(detail,
+                                          (string_address)rows[j].detail))
+                                break;
+                if (j < count)
+                        continue;
+
+                if (count == FLOODLIGHT_CONFIGURED)
+                        return false;
+
+                memory_copy_apart(rows[count].subject, subject.at,
+                                  subject.length);
+                rows[count].subject[subject.length] = 0;
+                if (detail.length)
+                        memory_copy_apart(rows[count].detail, detail.at,
+                                          detail.length);
+                rows[count].detail[detail.length] = 0;
+                rows[count].setting = (p8)i;
+                rows[count].allowed = (p8)floodlight_is(state, "allow");
+                count++;
+        }
+
+        address_to count_out = count;
+        return true;
+}
+
+/* The answers this shell was built with, as rows: what stands when no
+   register can be read. The configured rows first, as floodlight.c asks
+   them first, then the array's refusals it does not already answer. False
+   for a configured text that does not read. */
+static bool floodlight_compiled_rows(floodlight_row address_to rows,
+                                     positive address_to count_out)
+{
+        positive count = 0;
+
+        if (!floodlight_policy_take(
+                (string_address)floodlight_configured_text, rows,
+                address_of count))
+                return false;
+
+        for (positive i = 0; floodlight_denied[i]; i++)
+        {
+                floodlight_token name = {(string_address)floodlight_denied[i],
+                                         string_length(floodlight_denied[i])};
+                positive j;
+
+                for (j = 0; j < count; j++)
+                        if (rows[j].setting == FLOODLIGHT_SPAWN &&
+                            floodlight_is(name, (string_address)rows[j].subject))
+                                break;
+                if (j < count || count == FLOODLIGHT_ROWS)
+                        continue;
+
+                memory_copy_apart(rows[count].subject, name.at,
+                                  name.length + 1);
+                rows[count].detail[0] = 0;
+                rows[count].setting = FLOODLIGHT_SPAWN;
+                rows[count].allowed = 0;
+                count++;
+        }
+
+        address_to count_out = count;
+        return true;
+}
+
 static fn floodlight_load()
 {
         p8 report[FLOODLIGHT_REPORT];
@@ -16375,38 +16835,21 @@ static fn floodlight_load()
         bipolar got;
         positive used = 0;
         positive parsed_count = 0;
-        p8 state = program_entry_identity || floodlight_report_promised
-                       ? FLOODLIGHT_REPORT_REFUSED
-                       : FLOODLIGHT_REPORT_BUILTIN;
+        p8 state = FLOODLIGHT_REPORT_REFUSED;
 
         if (floodlight_report_state != FLOODLIGHT_REPORT_UNREAD)
                 return;
 
-        /* Stock defaults still install real confinement.  Verify the entry
-           state before the missing-device branch as well, or an inherited
-           errno filter can forge every later installation syscall and turn
-           the built-in denials into allowances. */
-        if (!floodlight_own_seccomp && !floodlight_entry_unfiltered())
-        {
-                floodlight_inherited_seccomp = true;
-                state = FLOODLIGHT_REPORT_REFUSED;
-                goto publish;
-        }
-
+        /*
+                No proof of this process's own seccomp state is asked here.
+                That proof reads /proc, and a launch nothing restricts needs
+                none of it: an inherited filter can forge the syscalls that
+                install confinement, which matters only to a launch that is
+                going to be confined. floodlight_launch_decide asks it there,
+                and fails closed there, so a masked or missing /proc refuses
+                what a policy restricts and nothing else.
+        */
         handle = system_open_at(AT_FDCWD, FLOODLIGHT_PATH, FILE_READ);
-
-        if (handle < 0)
-        {
-                bipolar registered = floodlight_policy_registered();
-
-                if (registered != 0)
-                {
-                        state = FLOODLIGHT_REPORT_REFUSED;
-                        if (registered > 0)
-                                floodlight_report_promised = true;
-                }
-                goto publish;
-        }
 
         /*
                 The register, and not something wearing its name.
@@ -16418,22 +16861,45 @@ static fn floodlight_load()
                 device on the misc major; a regular file is not, and neither is
                 a pipe somebody left there. Asked of the open handle rather
                 than the path, so nothing can be swapped between the two.
+
+                What it is not is a reason to refuse. A register that is
+                absent, or at this path but not the register, leaves the
+                answers this shell was built with standing -- the same answers
+                floodlight.c was built with -- and only the deviations made
+                since boot unavailable. A container or chroot whose /dev has no
+                such node is an ordinary place to run a tool, and a machine
+                nobody configured refuses nothing there. A process that has
+                already read a real register keeps the last answers it read
+                instead, so hiding the device from a running shell cannot
+                take back a restriction it has seen.
         */
-        if (!file_look(handle, (string_address)"", AT_EMPTY_PATH, &facts) ||
-            !floodlight_facts_complete(&facts, false) ||
-            (facts.mode & MODE_FORMAT) != MODE_CHARACTER ||
-            facts.rdev_major != FLOODLIGHT_DEVICE_MAJOR ||
-            facts.rdev_minor != FLOODLIGHT_DEVICE_MINOR)
+        if (handle >= 0 &&
+            (!file_look(handle, (string_address)"", AT_EMPTY_PATH, &facts) ||
+             !floodlight_facts_complete(&facts, false) ||
+             (facts.mode & MODE_FORMAT) != MODE_CHARACTER ||
+             facts.rdev_major != FLOODLIGHT_DEVICE_MAJOR ||
+             facts.rdev_minor != FLOODLIGHT_DEVICE_MINOR))
         {
                 system_close(handle);
-                state = FLOODLIGHT_REPORT_REFUSED;
-                goto publish;
+                handle = -1;
         }
 
-        /* An authenticated device means this process is running where a
-           policy register exists.  A malformed first report must not let a
-           later disappearance downgrade the process to stock defaults. */
-        floodlight_report_promised = true;
+        if (handle < 0)
+        {
+                if (floodlight_report_promised)
+                        state = FLOODLIGHT_REPORT_VALID;
+                else if (floodlight_compiled_rows(parsed,
+                                                  address_of parsed_count))
+                {
+                        if (parsed_count)
+                                memory_copy_apart(
+                                    floodlight_rows, parsed,
+                                    parsed_count * sizeof(parsed[0]));
+                        floodlight_row_count = parsed_count;
+                        state = FLOODLIGHT_REPORT_BUILTIN;
+                }
+                goto publish;
+        }
 
         /* seq_file reads may be short without being complete. Keep going to
            EOF, with system_read_retry owning EINTR, and reject a report that
@@ -16451,16 +16917,16 @@ static fn floodlight_load()
 
         system_close(handle);
 
-        state = FLOODLIGHT_REPORT_REFUSED;
-
+        /* An authenticated register that will not give a whole report is the
+           kernel saying it was tampered with, or something between the two
+           lying: refused, the one state here that refuses everything. */
         if (got < 0 || !used)
                 goto publish;
 
         /*
                 A report that filled the buffer is one that may have been cut,
                 and half a report is worse than none: the half that is missing
-                is the half that refuses something. Thrown away, so the
-                built-in answers stand.
+                is the half that refuses something.
         */
         if (used >= sizeof(report) - 1)
                 goto publish;
@@ -16476,6 +16942,7 @@ static fn floodlight_load()
                                   parsed_count * sizeof(parsed[0]));
 
         floodlight_row_count = parsed_count;
+        floodlight_report_promised = true;
         state = FLOODLIGHT_REPORT_VALID;
 
 publish:
@@ -16743,11 +17210,11 @@ static bool floodlight_entry_unfiltered()
 /* Read one coherent policy snapshot for every launch decision.  Keeping the
    loaded state through floodlight_may makes every setting for that launch
    agree; clearing it only here means a later command sees changes and
-   revocations.  Once a real register has answered, losing it is a refusal
-   rather than a return to the stock-kernel defaults. */
+   revocations.  The rows are left for the load to replace: once a real
+   register has answered, losing it keeps the last answers it gave rather
+   than returning to the ones this shell was built with. */
 static fn floodlight_reload()
 {
-        floodlight_row_count = 0;
         floodlight_report_state = FLOODLIGHT_REPORT_UNREAD;
         floodlight_load();
 }
@@ -16813,7 +17280,14 @@ static bool floodlight_says(string_address name, positive setting,
    ask for the bounded name before '='. GNU-style applet parsing also accepts
    unique long-option prefixes; a denied canonical spelling therefore covers
    its abbreviations, while an explicit row for the abbreviation still wins.
-   Short-option aliases and clusters remain distinct policy spellings. */
+
+   A short option can be clustered or carry its value in the same word:
+   -iS, -Sfoo, and the one argument a #!/usr/bin/env -S line passes. So a
+   denied one-letter row refuses that letter anywhere in a single-dash word.
+   Which letters take values is the tool's own knowledge, not the policy's,
+   so this also refuses a value that merely contains the letter -- the side
+   a refusal is allowed to err on. A different one-letter alias of the same
+   option is still its own spelling. */
 static bool floodlight_flag_refused(string_address name,
                                     string_address argument)
 {
@@ -16824,6 +17298,24 @@ static bool floodlight_flag_refused(string_address name,
         if (floodlight_says_length(name, FLOODLIGHT_FLAG, argument, length,
                                    address_of allowed))
                 return !allowed;
+
+        if (length >= 2 && argument[0] == '-' && argument[1] != '-')
+        {
+                floodlight_load();
+                for (positive at = 0; at < floodlight_row_count; at++)
+                {
+                        floodlight_row address_to row = floodlight_rows + at;
+
+                        if (row->setting == FLOODLIGHT_FLAG && !row->allowed &&
+                            row->detail[0] == '-' && row->detail[1] &&
+                            row->detail[1] != '-' && !row->detail[2] &&
+                            word_is((string_address)row->subject, name) &&
+                            memory_first_of(argument + 1, row->detail[1],
+                                            length - 1))
+                                return true;
+                }
+                return false;
+        }
 
         if (length < 3 || argument[0] != '-' || argument[1] != '-')
                 return false;
@@ -16861,18 +17353,6 @@ static bool floodlight_flag_refused(string_address name,
         return false;
 }
 
-/* The built-in answer this shell carries, for when the register is silent. */
-static bool floodlight_built_in(string_address name)
-{
-        positive i;
-
-        for (i = 0; floodlight_denied[i]; i++)
-                if (word_is(name, floodlight_denied[i]))
-                        return false;
-
-        return true;
-}
-
 static bool floodlight_may(string_address name, positive setting,
                            bool otherwise)
 {
@@ -16881,6 +17361,45 @@ static bool floodlight_may(string_address name, positive setting,
         return floodlight_says(name, setting, (string_address)"", &answer)
                    ? answer
                    : otherwise;
+}
+
+/*
+        Whether this snapshot confines anything at all, and whether it names
+        any program by its path.
+
+        Everything confinement costs hangs off these two: proving this process
+        carries no inherited filter, protecting and supervising the parent
+        shell, freezing its script, reading Yama and the child list, pinning
+        an external image by its physical path. Each of those asks /proc a
+        question, and each refuses when the answer cannot be had -- which is
+        right for a launch a policy restricts and wrong for every other one.
+        A machine nobody configured has no refusing row, so none of it is
+        asked and a tool runs the way it runs anywhere else, masked /proc
+        included.
+*/
+static bool floodlight_confines_any()
+{
+        floodlight_load();
+
+        for (positive at = 0; at < floodlight_row_count; at++)
+                if (!floodlight_rows[at].allowed &&
+                    (floodlight_rows[at].setting == FLOODLIGHT_SPAWN ||
+                     floodlight_rows[at].setting == FLOODLIGHT_NETWORK))
+                        return true;
+
+        return false;
+}
+
+static bool floodlight_names_paths()
+{
+        floodlight_load();
+
+        for (positive at = 0; at < floodlight_row_count; at++)
+                if (!floodlight_rows[at].allowed &&
+                    floodlight_rows[at].subject[0] == '/')
+                        return true;
+
+        return false;
 }
 
 /* External policy rows name one physical absolute path.  Open the command
@@ -17565,6 +18084,7 @@ static b32 floodlight_launch_decide(
         bool spawn_allowed;
         bool network_allowed;
         bool network_prepared = false;
+        bool paths;
         bool inplace = final &&
                        (floodlight_inplace_requested ||
                         floodlight_inplace_final);
@@ -17574,6 +18094,9 @@ static b32 floodlight_launch_decide(
 
         floodlight_reload();
 
+        /* Refused only by an authenticated register whose report would not
+           parse -- the kernel's own tamper banner -- which is the one state
+           that is nobody's configuration and so refuses everything. */
         if (floodlight_report_state == FLOODLIGHT_REPORT_REFUSED)
         {
                 if (inplace)
@@ -17581,12 +18104,6 @@ static b32 floodlight_launch_decide(
                            changed before commit. Refuse without mutating the
                            shell which must continue if execfail is enabled. */
                         diagnose = false;
-                else if (floodlight_inherited_seccomp)
-                {
-                        diagnose = false;
-                        if (final)
-                                floodlight_silent_stop();
-                }
                 else if (final && !floodlight_network_stdio_drop())
                         diagnose = false;
                 if (diagnose)
@@ -17595,11 +18112,14 @@ static b32 floodlight_launch_decide(
                 goto refuse;
         }
 
+        /* An external image needs a physical identity only when some row
+           names one; with none, nothing about its path can change the
+           answer, and it is launched the way any shell launches it. */
+        paths = !tool && floodlight_names_paths();
+
         if (tool && arguments && count)
                 subject = shell_tool_name(arguments[0]);
-        else if (!tool &&
-                 floodlight_report_state == FLOODLIGHT_REPORT_VALID &&
-                 final && !pinned)
+        else if (paths && final && !pinned)
         {
                 if (inplace)
                         diagnose = false;
@@ -17610,16 +18130,13 @@ static b32 floodlight_launch_decide(
                                   0);
                 goto refuse;
         }
-        else if (!tool &&
-                 floodlight_report_state == FLOODLIGHT_REPORT_VALID &&
-                 floodlight_executable_prepare(executable, image))
+        else if (paths && floodlight_executable_prepare(executable, image))
                 subject = (string_address)image->identity;
-        else if (!tool && executable && string_get(executable) &&
-                 floodlight_report_state == FLOODLIGHT_REPORT_BUILTIN)
+        else if (!paths && !tool && executable && string_get(executable))
         {
-                /* A stock kernel has no path rows to consult. Preserve its
-                   ordinary exec result when a path cannot be canonicalized;
-                   a valid or promised register must instead fail closed. */
+                /* No row names a path, so there is nothing to consult. Preserve
+                   the ordinary exec result; a policy that does name paths
+                   instead fails closed when this one cannot be pinned. */
                 if (inplace &&
                     !exec_inplace_ready(floodlight_parent_supervised))
                         goto refuse;
@@ -17639,9 +18156,35 @@ static b32 floodlight_launch_decide(
         }
 
         network_allowed = floodlight_may(subject, FLOODLIGHT_NETWORK, true);
-        spawn_allowed = floodlight_may(
-            subject, FLOODLIGHT_SPAWN,
-            tool ? floodlight_built_in(subject) : true);
+        spawn_allowed = floodlight_may(subject, FLOODLIGHT_SPAWN, true);
+
+        /*
+                A launch a row confines needs this process proved unfiltered
+                before anything else is believed: an inherited errno filter
+                can forge every syscall that installs confinement, and turn
+                the refusal into an allowance. The proof reads /proc, so a
+                masked or missing /proc refuses here -- which is the policy
+                working, and the only launches that ever ask.
+
+                A final child is refused in silence: under a filter it did not
+                install, neither its writes nor its exit can be trusted to be
+                what they say.
+        */
+        if ((!spawn_allowed || !network_allowed) &&
+            !floodlight_own_seccomp && !floodlight_entry_unfiltered())
+        {
+                if (inplace)
+                        diagnose = false;
+                else if (final)
+                {
+                        diagnose = false;
+                        floodlight_silent_stop();
+                }
+                if (diagnose)
+                        log_error("floodlight: cannot prove this process unfiltered; refusing confined launch\n",
+                                  0);
+                goto refuse;
+        }
 
         /* Refusals are reversible policy decisions. Resolve them before a
            nonfinal path changes dumpability, subreaper state or its parser
@@ -17820,10 +18363,9 @@ static b32 floodlight_launch_decide(
         }
 
         /* Spark accepts a pathname rather than an executable descriptor.
-           Once the register is active, every external launch therefore takes
+           Once a row names a path, every external launch therefore takes
            the portable child path whose final decision pins the image. */
-        if (!tool && !final &&
-            floodlight_report_state == FLOODLIGHT_REPORT_VALID)
+        if (paths && !final)
         {
                 floodlight_executable_drop(image);
                 return FLOODLIGHT_LAUNCH_PROCESS;
@@ -21623,6 +22165,16 @@ static fn prompt_quoted(address_any data, positive length)
         }
 }
 
+// A prompt's clock is in the zone the shell exports, as printf's %T is.
+static COLD fn prompt_time(writer write, string_address format)
+{
+        shell_zone_enter();
+        date_shape(write, shell_clock_seconds(SHELL_CLOCK_REALTIME, null), 0,
+                   format);
+        shell_zone_leave();
+}
+
+
 positive shell_job_count();
 positive shell_history_next();
 
@@ -21709,34 +22261,22 @@ COLD fn shell_prompt_written(writer write, string_address text)
                         break;
 
                 case 'd':
-                        date_shape(quoted,
-                                   shell_clock_seconds(SHELL_CLOCK_REALTIME,
-                                                       null),
-                                   0, (string_address) "%a %b %d");
+                        prompt_time(quoted, (string_address) "%a %b %d");
                         break;
 
                 case 't':
-                        date_shape(quoted,
-                                   shell_clock_seconds(SHELL_CLOCK_REALTIME,
-                                                       null),
-                                   0, (string_address) "%H:%M:%S");
+                        prompt_time(quoted, (string_address) "%H:%M:%S");
                         break;
 
                 case 'A':
-                        date_shape(quoted,
-                                   shell_clock_seconds(SHELL_CLOCK_REALTIME,
-                                                       null),
-                                   0, (string_address) "%H:%M");
+                        prompt_time(quoted, (string_address) "%H:%M");
                         break;
 
                 case 'T':
                 case '@':
-                        date_shape(quoted,
-                                   shell_clock_seconds(SHELL_CLOCK_REALTIME,
-                                                       null),
-                                   0, letter == 'T'
-                                          ? (string_address) "%I:%M:%S"
-                                          : (string_address) "%I:%M %p");
+                        prompt_time(quoted, letter == 'T'
+                                                ? (string_address) "%I:%M:%S"
+                                                : (string_address) "%I:%M %p");
                         break;
 
                 //      \D{format}: strftime, the locale's time when empty.
@@ -21751,11 +22291,9 @@ COLD fn shell_prompt_written(writer write, string_address text)
                                 if (shut && length < sizeof(format))
                                 {
                                         memory_copy_end(format, text + 1, length);
-                                        date_shape(quoted,
-                                                   shell_clock_seconds(
-                                                       SHELL_CLOCK_REALTIME, null),
-                                                   0, length ? format
-                                                             : (p8 address_to)"%X");
+                                        prompt_time(quoted,
+                                                    length ? format
+                                                           : (p8 address_to)"%X");
                                         text = shut + 1;
                                         break;
                                 }

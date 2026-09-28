@@ -16,12 +16,23 @@ CONFIG_INTEGRITY=n
 CONFIG_MOONWATER_STRICT=2
 
 #
-# Floodlight's hardened runtime policy goes here once its symbols exist,
-# as a policy string and a seal:
+# Floodlight: the denials the default refused before 2026-09-28 (awk
+# starting programs, script and setarch starting a shell), every
+# dangerous-flag switch off, and the policy sealed at boot so no later
+# line to /dev/floodlight loosens it. Each switch's help in
+# src/moonwater/Kconfig names the exploit class it closes.
 #
-#   MOONWATER_FLOODLIGHT_POLICY   the hardened policy string
-#   MOONWATER_FLOODLIGHT_SEAL     sealed at boot, so no later line loosens it
-#
-# PLACEHOLDER: written without the CONFIG_ prefix until then, because
-# verify-config reports a request for a symbol the kernel does not have.
-#
+CONFIG_MOONWATER_FLOODLIGHT_POLICY="awk spawn deny; script spawn deny; setarch spawn deny"
+CONFIG_MOONWATER_FLOODLIGHT_SEAL=y
+CONFIG_MOONWATER_FLOODLIGHT_AWK_SPAWN=n
+CONFIG_MOONWATER_FLOODLIGHT_SHELL_ESCAPES=n
+CONFIG_MOONWATER_FLOODLIGHT_FIND_EXEC=n
+CONFIG_MOONWATER_FLOODLIGHT_FIND_DELETE=n
+CONFIG_MOONWATER_FLOODLIGHT_FIND_WRITE=n
+CONFIG_MOONWATER_FLOODLIGHT_XARGS=n
+CONFIG_MOONWATER_FLOODLIGHT_SPLIT_FILTER=n
+CONFIG_MOONWATER_FLOODLIGHT_SORT_COMPRESS=n
+CONFIG_MOONWATER_FLOODLIGHT_ENV_SPLIT=n
+CONFIG_MOONWATER_FLOODLIGHT_LAUNCHERS=n
+CONFIG_MOONWATER_FLOODLIGHT_NAMESPACES=n
+CONFIG_MOONWATER_FLOODLIGHT_NETWORK_FETCH=n

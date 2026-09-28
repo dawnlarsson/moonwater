@@ -1122,18 +1122,19 @@ static bool exec_inplace_ready(bool restricted);
 #include "builtin.c"
 
 /* Structural forks can execute parsed commands before ordinary dispatch has
-   resolved a policy subject. On a real policy-bearing system, seal a regular
-   reader in its owning parent before making that copy. Stock/no-policy shells
-   keep streaming without the copy. */
+   resolved a policy subject. When the policy confines anything at all, seal a
+   regular reader in its owning parent before making that copy. A shell whose
+   policy confines nothing -- every unconfigured machine, register or not --
+   keeps ordinary process semantics: no subreaper, dumpable, streaming its
+   script without the copy. */
 static fn shell_parser_source_fork_prepare()
 {
-        /* Only whether a register is live matters here. One that was live
-           and has gone since leaves this the stricter path, and every launch
-           reloads it for itself, so it is read again only while none has
-           been live: one appearing is the change this must not miss. */
-        if (floodlight_report_state != FLOODLIGHT_REPORT_VALID)
-                floodlight_reload();
-        if (floodlight_report_state == FLOODLIGHT_REPORT_VALID)
+        /* The snapshot the last launch read, not a fresh one: a restriction
+           added since is caught by the final child, which reloads, finds its
+           parent unprotected and refuses. Missing it here costs a refusal,
+           never an allowance, and a structural fork is not charged a read of
+           the register. */
+        if (floodlight_confines_any())
         {
                 if (!floodlight_parent_prepare(true))
                         return;

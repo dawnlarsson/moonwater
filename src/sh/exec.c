@@ -9243,7 +9243,16 @@ typedef struct exec_compound_held
         positive key_length;
         string_address value;
         struct exec_compound_held address_to next;
+        string_address word;
+        p8 how;
 } exec_compound_held;
+
+//      How a held element finds its place when it is assigned: its key is
+//      an indexed subscript still to be counted, or it has none and takes
+//      the next index; [key]+=value adds to what the element holds then.
+#define EXEC_HELD_ARITH 1
+#define EXEC_HELD_NEXT 2
+#define EXEC_HELD_APPEND 4
 
 /*
         local and declare in a function make their name before they assign
@@ -9255,6 +9264,7 @@ static exec_compound_held address_to exec_compound_prepared;
 static string_address exec_compound_prepared_body;
 static bool exec_compound_preparing;
 static bool exec_compound_prepared_keyed;
+static bool exec_compound_prepared_refused;
 
 fn shell_compound_prepare_drop()
 {
@@ -9276,16 +9286,25 @@ bool shell_compound_prepare(string_address name, positive name_length,
         return answer;
 }
 
+//      The word an element was written as, for bash's diagnostics.
+static string_address exec_compound_piece;
+//      A refused list keeps what it assigned though the command is dropped.
+static bool exec_compound_kept;
+static COLD fn exec_assignment_discard();
+//      Set by declare and local around their compound values: bash quotes
+//      the word it refuses there and not in a plain assignment.
+static bool exec_compound_declaring;
+
 static bool exec_compound_put(string_address name, positive name_length,
                               string_address key, positive key_length,
-                              string_address value,
+                              string_address value, p8 how,
                               exec_compound_held address_to address_to tail)
 {
         exec_compound_held address_to held;
 
         if (!tail)
                 return shell_array_set(name, name_length, key, key_length,
-                                       value, false);
+                                       value, (how & EXEC_HELD_APPEND) != 0);
 
         held = (exec_compound_held address_to)shell_store_take(
             address_of exec_store, sizeof(*held));
@@ -9296,6 +9315,8 @@ static bool exec_compound_put(string_address name, positive name_length,
         held->value = shell_store_copy(address_of exec_store, value,
                                        string_length(value));
         held->next = null;
+        held->how = how;
+        held->word = exec_compound_piece;
         if (!held->key || !held->value)
                 return false;
         *tail = held;
@@ -9353,6 +9374,7 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
         exec_compound_held address_to address_to tail = address_of first;
         bool pairs_decided = false;
         bool pairs = false;
+        bool refused = false;
         string_address pending = null;
 
         //      The list was already read, before local made the name: take
@@ -9360,6 +9382,7 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
         if (exec_compound_prepared_body == body)
         {
                 first = exec_compound_prepared;
+                refused = exec_compound_prepared_refused;
                 exec_compound_prepared = null;
                 exec_compound_prepared_body = null;
                 at = stop;
@@ -9376,7 +9399,6 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                 string_address shut = null;
                 positive length;
                 positive key_length = 0;
-                p8 written[32];
 
                 while (at < stop && (string_is(at, ' ') || string_is(at, '\t') ||
                                      string_is(at, '\n')))
@@ -9401,6 +9423,7 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
 
                 length = (positive)(finish - at);
                 piece = shell_store_copy(address_of exec_store, at, length);
+                exec_compound_piece = piece;
 
                 if (!piece)
                 {
@@ -9412,6 +9435,14 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
 
                 if (string_is(piece, '['))
                         shut = expand_bracket_end(piece + 1, '[', ']');
+
+                //      [key]+=value adds to the element, in bash.
+                bool element_append = shut && shell_bash_compat &&
+                                      string_is(shut + 1, '+') &&
+                                      string_is(shut + 2, '=');
+
+                if (element_append)
+                        shut++;
 
                 /*
                         bash 5.1's other spelling of an associative list:
@@ -9448,7 +9479,7 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                         {
                                 answer = exec_compound_put(
                                     name, name_length, pending,
-                                    string_length(pending), value, tail);
+                                    string_length(pending), value, 0, tail);
                                 if (tail && *tail)
                                         tail = address_of (*tail)->next;
                         }
@@ -9465,11 +9496,16 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                         // The subscript is resolved against the array it is
                         // being written into, so a keyed one stays bytes and
                         // an indexed one is arithmetic, exactly as it would
-                        // be written on its own line.
-                        key = shell_expand_subscript(name, name_length,
-                                                     piece + 1,
-                                                     (positive)(shut - piece) - 1,
-                                                     address_of key_length);
+                        // be written on its own line. Its expansions are
+                        // made here with the rest of the word; bash does its
+                        // arithmetic only as it assigns, into the array the
+                        // earlier elements have already made.
+                        expand_subscript_deferred = !keyed;
+                        key = shell_expand_subscript(
+                            name, name_length, piece + 1,
+                            (positive)(shut - piece) - 1 - element_append,
+                            address_of key_length);
+                        expand_subscript_deferred = false;
 
                         if (!key)
                         {
@@ -9478,25 +9514,63 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                         }
 
                         value = shell_expand_assignment(piece, value_at);
-                        answer = exec_compound_put(name, name_length, key,
-                                                   key_length, value + value_at,
-                                                   tail);
+                        if (!value)
+                        {
+                                answer = false;
+                                break;
+                        }
+                        value += value_at;
+
+                        //      A keyed list that replaces the array adds
+                        //      to what the element held before it: bash
+                        //      reads the old table while filling a new one.
+                        if (keyed && element_append && !append)
+                        {
+                                positive had_length = 0;
+                                string_address had = shell_array_get(
+                                    name, name_length, key, key_length,
+                                    address_of had_length);
+                                positive more = string_length(value);
+                                p8 address_to both;
+
+                                element_append = false;
+                                if (had && had_length &&
+                                    (both = (p8 address_to)shell_store_take(
+                                         address_of exec_store,
+                                         had_length + more + 1)))
+                                {
+                                        memory_copy(both, had, had_length);
+                                        memory_copy_end(both + had_length,
+                                                        value, more);
+                                        value = both;
+                                }
+                        }
+                        answer = exec_compound_put(
+                            name, name_length, key, key_length, value,
+                            (p8)((keyed ? 0 : EXEC_HELD_ARITH) |
+                                 (element_append ? EXEC_HELD_APPEND : 0)),
+                            tail);
                         if (tail && *tail)
                                 tail = address_of (*tail)->next;
-
-                        if (!keyed)
-                                next = array_index_of(key, key_length) + 1;
 
                         continue;
                 }
 
+                //      Bash names the word, keeps the elements before it and
+                //      drops the rest of the command.
                 if (keyed)
                 {
+                        expand_where();
                         string_format(log_error,
-                                      "%s: must use subscript when assigning "
-                                      "associative array\n",
-                                      name);
-                        answer = false;
+                                      exec_compound_declaring
+                                          ? "%s: '%s': must use subscript "
+                                            "when assigning associative "
+                                            "array\n"
+                                          : "%s: %s: must use subscript "
+                                            "when assigning associative "
+                                            "array\n",
+                                      name, piece);
+                        refused = true;
                         break;
                 }
 
@@ -9513,11 +9587,10 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
 
                         for (positive one = 0; one < count && answer; one++)
                         {
-                                key_length = positive_into_string(written,
-                                                                  next++);
                                 answer = exec_compound_put(
-                                    name, name_length, written, key_length,
-                                    exec_compound_word[one], tail);
+                                    name, name_length, (string_address) "", 0,
+                                    exec_compound_word[one], EXEC_HELD_NEXT,
+                                    tail);
                                 if (tail && *tail)
                                         tail = address_of (*tail)->next;
                         }
@@ -9528,6 +9601,7 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
         {
                 exec_compound_prepared = answer ? first : null;
                 exec_compound_prepared_body = answer ? body : null;
+                exec_compound_prepared_refused = refused;
                 return answer;
         }
 
@@ -9539,7 +9613,7 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                 {
                         answer = exec_compound_put(name, name_length, pending,
                                                    string_length(pending), "",
-                                                   tail);
+                                                   0, tail);
                         if (tail && *tail)
                                 tail = address_of (*tail)->next;
                 }
@@ -9551,9 +9625,45 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                         answer = shell_array_clear(name, name_length);
                 for (exec_compound_held address_to one = first;
                      one && answer; one = one->next)
-                        answer = shell_array_set(name, name_length, one->key,
-                                                 one->key_length, one->value,
-                                                 false);
+                {
+                        string_address key = one->key;
+                        positive key_length = one->key_length;
+                        p8 written[32];
+
+                        if (one->how & EXEC_HELD_NEXT)
+                                key_length = positive_into_string(
+                                    written, next++);
+                        else if (one->how & EXEC_HELD_ARITH)
+                                key = shell_subscript_index(
+                                    name, name_length, one->key, written,
+                                    address_of key_length, one->word);
+                        //      A subscript that counts back past the
+                        //      start ends the assignment there, and bash
+                        //      drops the rest of the command with it.
+                        if (!key)
+                        {
+                                if (!expand_failed && shell_bash_compat)
+                                        refused = true;
+                                else
+                                        answer = false;
+                                break;
+                        }
+                        if (one->how & (EXEC_HELD_NEXT | EXEC_HELD_ARITH))
+                                key = written;
+                        answer = shell_array_set(
+                            name, name_length, key, key_length, one->value,
+                            (one->how & EXEC_HELD_APPEND) != 0);
+                        //      A placed element moves the running index to
+                        //      just after it; a bare one has already moved it.
+                        if (!keyed && (one->how & EXEC_HELD_ARITH))
+                                next = array_index_of(key, key_length) + 1;
+                }
+        }
+
+        if (answer && refused)
+        {
+                exec_compound_kept = true;
+                exec_assignment_discard();
         }
 
         shell_store_rewind(address_of exec_store, held);
@@ -9571,6 +9681,16 @@ static COLD bool exec_assignment_error(b32 fatal_status)
                    Bash's terminal 127 path below. */
                 if (fatal_status == EXEC_ASSIGNMENT_LINE_ABORT)
                 {
+                        //      Outside posix mode the dropped line is the
+                        //      reader's: eval answers 1 and a sourced file
+                        //      goes on at its next line, as in bash, where
+                        //      a function's caller still loses its line.
+                        if (shell_bash_compat && !shell_posix_on() &&
+                            !shell_is_interactive)
+                        {
+                                exec_assignment_discard();
+                                return false;
+                        }
                         exec_abort_line(1);
                         return false;
                 }
@@ -9619,6 +9739,20 @@ static bool exec_assign_value(string_address word, positive name_length,
         if (compound)
         {
                 positive length = string_length(mark + 1);
+
+                //      A list goes to a whole array and not to one element
+                //      of it: bash refuses a[0]=(x y) and drops the line.
+                if (shell_bash_compat && name_length &&
+                    word[name_length - 1] == ']')
+                {
+                        shell_diagnostic_where();
+                        string_format(log_error,
+                                      "%s: cannot assign list to array member\n",
+                                      word);
+                        *name_end = append ? '+' : '=';
+                        exec_assignment_discard();
+                        return false;
+                }
                 if (env_assignment_readonly_hashed_span(word, name_length, name_hash))
                 {
                         shell_readonly_refused(null, null, word,
@@ -9750,6 +9884,28 @@ static bool exec_assignment_promote(const_string name, positive length)
         return found;
 }
 
+/*
+        bash's answer to an assignment it cannot make: status 1 and the rest
+        of the line dropped, a -c string going on at its next line and eval
+        answering 1, where a function's caller loses its line too.
+*/
+static COLD fn exec_assignment_discard()
+{
+        //      An assignment statement's error ends a posix shell, as
+        //      exec_assignment_error_status says; declare's is still the
+        //      dropped line.
+        if (shell_posix_on() && !exec_compound_declaring)
+        {
+                expand_fatal_status(
+                    string_is(shell_option_flags, 'c') && !exec_forked ? 127
+                                                                       : 1);
+                return;
+        }
+        shell_status = 1;
+        expand_failed = true;
+        exec_expand_input_error();
+}
+
 static COLD bool exec_keep_element(exec_kept_value address_to kept,
                                    string_address base, positive base_length,
                                    string_address subscript,
@@ -9760,8 +9916,26 @@ static COLD bool exec_keep_element(exec_kept_value address_to kept,
         if (!base)
                 return false;
         positive key_length;
+        //      bash names an assignment it refuses by the element it wrote,
+        //      a[-5], and drops the rest of the command.
+        p8 named[256];
+        positive named_length = base_length + subscript_length + 2;
+
+        if (named_length < sizeof(named))
+        {
+                memory_copy(named, base, base_length);
+                named[base_length] = '[';
+                memory_copy(named + base_length + 1, subscript,
+                            subscript_length);
+                named[named_length - 1] = ']';
+                named[named_length] = end;
+                expand_subscript_named = named;
+        }
         string_address key = shell_expand_subscript(base, base_length,
             subscript, subscript_length, &key_length);
+        expand_subscript_named = null;
+        if (!key && !expand_failed && shell_bash_compat)
+                exec_assignment_discard();
         if (!key || key_length == positive_max)
                 return false;
         string_address value = shell_array_get(base, base_length, key, key_length, null);
@@ -10814,8 +10988,12 @@ static PURE b32 exec_assignment_error_status(bool assignments_only,
         if (!shell_posix_on())
                 return assignments_only ? EXEC_ASSIGNMENT_LINE_ABORT : 0;
 
+        //      127 is the -c string's own answer; a subshell of it that
+        //      ends on the error answers 1, as bash's does.
         if (assignments_only || exec_special_builtin(command))
-                return string_is(shell_option_flags, 'c') ? 127 : 1;
+                return string_is(shell_option_flags, 'c') && !exec_forked
+                           ? 127
+                           : 1;
 
         return EXEC_ASSIGNMENT_LINE_ABORT;
 }
@@ -11098,6 +11276,7 @@ static b32 exec_simple(b32 index)
 
                                 memory_copy_apart(shown, (address_any)word, kept);
                                 shown[kept] = 0;
+                                shell_diagnostic_where();
                                 string_format(log_error,
                                     "`%s': not a valid identifier\n", shown);
                         }
@@ -11172,7 +11351,7 @@ static b32 exec_simple(b32 index)
                     !exec_keep_value(expanded_kept + expanded_count, trial,
                         parse_word_name_lengths[word_index], assignments_only ? EXEC_KEEP_TARGET : EXEC_KEEP_PREFIX))
                 {
-                        status = 2;
+                        status = exec_line_aborted() ? shell_status : 2;
                         goto fail;
                 }
                 expanded_count++;
@@ -11197,6 +11376,14 @@ static b32 exec_simple(b32 index)
 
         if (exec_line_aborted())
         {
+                //      What a refused compound list assigned before the
+                //      word it stopped at stays, in bash.
+                if (exec_compound_kept && assignments_only)
+                {
+                        exec_put_back(expanded_kept, expanded_count, false);
+                        expanded_count = 0;
+                }
+                exec_compound_kept = false;
                 status = shell_status;
                 goto fail;
         }
@@ -12215,8 +12402,12 @@ static bool conditional_tokenize(string_address text)
                         continue;
                 }
 
+                //      < and > are operators without blanks round them too,
+                //      as bash's reader splits [[ b<a ]] into three words.
                 if (!regex_operand &&
-                    (string_is(at, '(') || string_is(at, ')')))
+                    (string_is(at, '(') || string_is(at, ')') ||
+                     ((string_is(at, '<') || string_is(at, '>')) &&
+                      shell_bash_compat)))
                 {
                         if (!conditional_add(at, 1))
                                 return false;
@@ -12231,6 +12422,14 @@ static bool conditional_tokenize(string_address text)
                    inside them included: [[ $v =~ (one two) ]] has the
                    pattern "(one two)", as bash reads it. */
                 positive depth = 0;
+                //      bash reads an extended pattern as one word where it
+                //      reads a pattern, after == = and !=; elsewhere !(a)
+                //      is a negation and a group.
+                bool pattern_operand =
+                    conditional_word_count &&
+                    (word_is(conditional_word[conditional_word_count - 1], "==") ||
+                     word_is(conditional_word[conditional_word_count - 1], "=") ||
+                     word_is(conditional_word[conditional_word_count - 1], "!="));
 
                 while (string_get(at) &&
                        (depth || !lex_is_space(string_get(at))))
@@ -12256,7 +12455,8 @@ static bool conditional_tokenize(string_address text)
                                 option is on, because what is in here is
                                 matched when the command runs.
                         */
-                        if (string_is(at + 1, '(') && lex_extended_head(value))
+                        if (string_is(at + 1, '(') && lex_extended_head(value) &&
+                            (pattern_operand || !shell_bash_compat))
                         {
                                 string_address group = lex_nesting(at + 1);
 
@@ -12271,7 +12471,9 @@ static bool conditional_tokenize(string_address text)
                              ((value == '&' && string_is(at + 1, '&')) ||
                               (value == '|' && string_is(at + 1, '|')))) ||
                             (!regex_operand &&
-                             (value == '(' || value == ')')))
+                             (value == '(' || value == ')' ||
+                              ((value == '<' || value == '>') &&
+                               shell_bash_compat))))
                                 break;
 
                         b32 skipped = lex_skip_held(address_of at);
@@ -12406,6 +12608,447 @@ static COLD fn conditional_regex_captures(string_address text)
         shell_store_rewind(address_of expand_store, held);
 }
 
+/*
+        Whether glibc's regcomp takes a [[ =~ ]] pattern as POSIX extended
+        syntax, and if not, why, in its own words. Bash 5.3 says so and
+        answers 2; the engine here is shared with grep -E, whose syntax
+        takes a leading * or an unfinished interval for literals, so this is
+        a walk of glibc's grammar in front of it -- parse_reg_exp, the
+        interval reader and the bracket reader -- that finds only refusals.
+*/
+/*
+        What regcomp takes that the engine would not: a ) with nothing open
+        is a literal to glibc, and [.a.] and [=a=] name the character a.
+        The walk notes each so the pattern handed on is spelled the plain
+        way.
+*/
+#define CONDITIONAL_REGEX_EDITS 16
+
+typedef struct
+{
+        positive at, length;
+        p8 value;
+} conditional_regex_edit;
+
+typedef struct
+{
+        string_address at;
+        string_address why;
+        p32 done;
+        b32 groups;
+        string_address from;
+        positive edits;
+        conditional_regex_edit edit[CONDITIONAL_REGEX_EDITS];
+} conditional_regex_walk;
+
+static COLD fn conditional_regex_note(conditional_regex_walk address_to walk,
+                                      string_address at, positive length,
+                                      p8 value)
+{
+        if (walk->edits < CONDITIONAL_REGEX_EDITS)
+                walk->edit[walk->edits++] = (conditional_regex_edit){
+                    (positive)(at - walk->from), length, value};
+}
+
+enum { RE_END, RE_CHAR, RE_RANGE, RE_CLOSE, RE_NOT, RE_COLL, RE_EQUIV,
+       RE_CLASS };
+
+static COLD fn conditional_regex_alternation(conditional_regex_walk
+                                                 address_to walk,
+                                             positive depth);
+
+//      One token inside brackets, as peek_token_bracket reads it.
+static COLD positive conditional_regex_bracket_token(string_address at,
+                                                     p8 address_to type)
+{
+        p8 value = string_get(at);
+
+        if (!value)
+                return address_to type = RE_END, 0;
+        if (value == '[')
+        {
+                p8 next = string_get(at + 1);
+
+                address_to type = next == '.' ? RE_COLL
+                                  : next == '=' ? RE_EQUIV
+                                  : next == ':' ? RE_CLASS
+                                                : RE_CHAR;
+                return address_to type == RE_CHAR ? 1 : 2;
+        }
+        address_to type = value == '-' ? RE_RANGE
+                          : value == ']' ? RE_CLOSE
+                          : value == '^' ? RE_NOT
+                                         : RE_CHAR;
+        return 1;
+}
+
+//      The value of one character at, and how many bytes it takes.
+static COLD positive conditional_regex_character(string_address at,
+                                                 p32 address_to value)
+{
+        memory_utf8_state state = {0};
+        positive used = 0;
+        b32 fed;
+
+        if (string_get(at) < 0x80 || !shell_utf8_on())
+                return address_to value = string_get(at), 1;
+        while (!(fed = memory_utf8_feed(address_of state,
+                                        string_get(at + used))))
+                used++;
+        if (fed < 0)
+                return address_to value = string_get(at), 1;
+        address_to value = state.value;
+        return used + 1;
+}
+
+typedef struct
+{
+        p8 kind;
+        p32 value;
+        positive length;
+        p8 name[32];
+} conditional_regex_element;
+
+static COLD bool conditional_regex_element_read(
+    conditional_regex_walk address_to walk,
+    conditional_regex_element address_to element, p8 type, positive size,
+    bool hyphen)
+{
+        if (type == RE_COLL || type == RE_EQUIV || type == RE_CLASS)
+        {
+                p8 delimiter = string_get(walk->at + 1);
+                positive kept = 0;
+
+                walk->at += 2;
+                if (!string_get(walk->at))
+                        return walk->why = (string_address) "Unmatched [, [^, [:, [., or [=", false;
+                for (;; kept++)
+                {
+                        p8 value;
+
+                        if (kept >= sizeof(element->name))
+                                return walk->why = (string_address) "Unmatched [, [^, [:, [., or [=", false;
+                        value = string_get(walk->at++);
+                        if (!string_get(walk->at))
+                                return walk->why = (string_address) "Unmatched [, [^, [:, [., or [=", false;
+                        if (value == delimiter && string_is(walk->at, ']'))
+                                break;
+                        element->name[kept] = value;
+                }
+                walk->at++;
+                element->name[kept] = end;
+                element->kind = type;
+                element->length = kept;
+                //      A collating element is one character, and names it.
+                if (type != RE_CLASS && kept &&
+                    conditional_regex_character(element->name,
+                                                address_of element->value) ==
+                        kept)
+                {
+                        element->length = 1;
+                        if (kept == 1 &&
+                            !string_first_of((string_address) "]^-[\\",
+                                             element->name[0]))
+                                conditional_regex_note(
+                                    walk, walk->at - kept - 4, kept + 4,
+                                    element->name[0]);
+                }
+                return true;
+        }
+        if (type == RE_RANGE && !hyphen)
+        {
+                p8 next;
+
+                conditional_regex_bracket_token(walk->at + size, address_of next);
+                if (next != RE_CLOSE)
+                        return walk->why = (string_address) "Invalid range end", false;
+        }
+        element->kind = RE_CHAR;
+        element->length = 1;
+        walk->at += conditional_regex_character(walk->at,
+                                                address_of element->value) -
+                    1 + size;
+        return true;
+}
+
+static COLD bool conditional_regex_class_known(p8 address_to name)
+{
+        static const p8 names[] =
+            "alpha\0upper\0lower\0digit\0xdigit\0space\0print\0punct\0"
+            "graph\0cntrl\0blank\0alnum\0";
+
+        for (string_address one = names; string_get(one);
+             one += string_length(one) + 1)
+                if (!string_compare(one, name))
+                        return true;
+        return false;
+}
+
+static COLD fn conditional_regex_bracket(conditional_regex_walk address_to walk)
+{
+        p8 type;
+        positive size;
+        bool first = true;
+
+        walk->at++;
+        size = conditional_regex_bracket_token(walk->at, address_of type);
+        if (type == RE_END)
+                return (void)(walk->why = (string_address) "Invalid regular expression");
+        if (type == RE_NOT)
+        {
+                walk->at += size;
+                size = conditional_regex_bracket_token(walk->at, address_of type);
+                if (type == RE_END)
+                        return (void)(walk->why = (string_address) "Invalid regular expression");
+        }
+        if (type == RE_CLOSE)
+                type = RE_CHAR;
+
+        for (;;)
+        {
+                conditional_regex_element start = {0};
+                conditional_regex_element stop = {0};
+                bool range = false;
+                p8 second;
+                positive second_size = 0;
+
+                if (!conditional_regex_element_read(walk, address_of start, type,
+                                                    size, first))
+                        return;
+                first = false;
+                size = conditional_regex_bracket_token(walk->at, address_of type);
+                if (start.kind != RE_CLASS && start.kind != RE_EQUIV)
+                {
+                        if (type == RE_END)
+                                return (void)(walk->why = (string_address) "Unmatched [, [^, [:, [., or [=");
+                        if (type == RE_RANGE)
+                        {
+                                second_size = conditional_regex_bracket_token(
+                                    walk->at + size, address_of second);
+                                if (second == RE_END)
+                                        return (void)(walk->why = (string_address) "Unmatched [, [^, [:, [., or [=");
+                                if (second == RE_CLOSE)
+                                        type = RE_CHAR;
+                                else
+                                {
+                                        walk->at += size;
+                                        range = true;
+                                }
+                        }
+                }
+                if (range)
+                {
+                        if (!conditional_regex_element_read(walk, address_of stop,
+                                                            second, second_size,
+                                                            true))
+                                return;
+                        size = conditional_regex_bracket_token(walk->at,
+                                                               address_of type);
+                        if (start.kind == RE_CLASS || start.kind == RE_EQUIV ||
+                            stop.kind == RE_CLASS || stop.kind == RE_EQUIV)
+                                return (void)(walk->why = (string_address) "Invalid range end");
+                        if (start.length != 1 || stop.length != 1)
+                                return (void)(walk->why = (string_address) "Invalid collation character");
+                        if (start.value > stop.value)
+                                return (void)(walk->why = (string_address) "Invalid range end");
+                }
+                else if (start.kind == RE_CLASS &&
+                         !conditional_regex_class_known(start.name))
+                        return (void)(walk->why = (string_address) "Invalid character class name");
+                else if ((start.kind == RE_COLL || start.kind == RE_EQUIV) &&
+                         start.length != 1)
+                        return (void)(walk->why = (string_address) "Invalid collation character");
+                if (type == RE_END)
+                        return (void)(walk->why = (string_address) "Unmatched [, [^, [:, [., or [=");
+                if (type == RE_CLOSE)
+                {
+                        walk->at += size;
+                        return;
+                }
+        }
+}
+
+//      fetch_number: -1 for no digits, -2 for anything else in the way.
+static COLD bipolar conditional_regex_number(conditional_regex_walk address_to walk,
+                                             p8 address_to stopped)
+{
+        bipolar number = -1;
+
+        for (;;)
+        {
+                p8 value = string_get(walk->at);
+                bool plain = true;
+
+                if (!value)
+                        return address_to stopped = 0, -2;
+                if (value == '\\' && string_get(walk->at + 1))
+                        value = string_get(++walk->at);
+                else
+                        plain = !string_first_of((string_address) "*+?{}()|^$.[",
+                                                 value);
+                walk->at++;
+                if ((value == '}' && !plain) || value == ',')
+                {
+                        address_to stopped = value;
+                        return number;
+                }
+                number = !plain || value < '0' || value > '9' || number == -2
+                             ? -2
+                         : number == -1 ? value - '0'
+                                        : min(number * 10 + (value - '0'),
+                                              (bipolar)32768);
+        }
+}
+
+static COLD fn conditional_regex_interval(conditional_regex_walk address_to walk)
+{
+        p8 stopped;
+        bipolar start;
+        bipolar stop = 0;
+
+        walk->at++;
+        start = conditional_regex_number(walk, address_of stopped);
+        if (start == -1)
+        {
+                if (stopped != ',')
+                        return (void)(walk->why = (string_address) "Invalid content of \\{\\}");
+                start = 0;
+        }
+        if (start != -2)
+                stop = stopped == '}' ? start
+                       : stopped == ',' ? conditional_regex_number(walk, address_of stopped)
+                                        : -2;
+        if (start == -2 || stop == -2)
+                return (void)(walk->why = stopped ? (string_address) "Invalid content of \\{\\}"
+                                                  : (string_address) "Unmatched \\{");
+        if ((stop != -1 && start > stop) || stopped != '}')
+                return (void)(walk->why = (string_address) "Invalid content of \\{\\}");
+        if ((stop == -1 ? start : stop) > 32767)
+                walk->why = (string_address) "Regular expression too big";
+}
+
+static COLD fn conditional_regex_expression(conditional_regex_walk address_to walk,
+                                            positive depth)
+{
+        p8 value = string_get(walk->at);
+
+        if (value == '*' || value == '+' || value == '?' || value == '{')
+                return (void)(walk->why = (string_address) "Invalid preceding regular expression");
+        if (value == '^' || value == '$')
+        {
+                walk->at++;
+                return;
+        }
+        if (value == '\\')
+        {
+                p8 next = string_get(walk->at + 1);
+
+                if (!next)
+                        return (void)(walk->why = (string_address) "Trailing backslash");
+                walk->at += 2;
+                if (next >= '1' && next <= '9' &&
+                    !(walk->done & (1u << (next - '0'))))
+                        return (void)(walk->why = (string_address) "Invalid back reference");
+                //      The word and buffer edges are anchors, and nothing
+                //      may repeat one.
+                if (string_first_of((string_address) "<>bB`'", next))
+                        return;
+        }
+        else if (value == '(')
+        {
+                b32 group = ++walk->groups;
+
+                walk->at++;
+                if (!string_is(walk->at, ')'))
+                {
+                        conditional_regex_alternation(walk, depth + 1);
+                        if (walk->why)
+                                return;
+                        if (!string_is(walk->at, ')'))
+                                return (void)(walk->why = (string_address) "Unmatched ( or \\(");
+                }
+                walk->at++;
+                if (group <= 9)
+                        walk->done |= 1u << group;
+        }
+        else if (value == '[')
+        {
+                conditional_regex_bracket(walk);
+                if (walk->why)
+                        return;
+        }
+        else
+        {
+                if (value == ')')
+                        conditional_regex_note(walk, walk->at, 1, ')');
+                walk->at++;
+        }
+
+        while (string_is(walk->at, '*') || string_is(walk->at, '+') ||
+               string_is(walk->at, '?') || string_is(walk->at, '{'))
+        {
+                if (!string_is(walk->at, '{'))
+                {
+                        walk->at++;
+                        continue;
+                }
+                conditional_regex_interval(walk);
+                if (walk->why)
+                        return;
+        }
+}
+
+static COLD fn conditional_regex_alternation(conditional_regex_walk
+                                                 address_to walk,
+                                             positive depth)
+{
+        for (;;)
+        {
+                while (string_get(walk->at) && !string_is(walk->at, '|') &&
+                       !(depth && string_is(walk->at, ')')))
+                {
+                        conditional_regex_expression(walk, depth);
+                        if (walk->why)
+                                return;
+                }
+                if (!string_is(walk->at, '|'))
+                        return;
+                walk->at++;
+        }
+}
+
+static COLD string_address conditional_regex_refusal(
+    string_address address_to pattern)
+{
+        conditional_regex_walk walk = {address_to pattern, null, 0, 0,
+                                       address_to pattern, 0, {{0}}};
+        positive length = string_length(address_to pattern);
+        p8 address_to made;
+        positive from = 0;
+        positive put = 0;
+
+        conditional_regex_alternation(address_of walk, 0);
+        if (walk.why || !walk.edits ||
+            !(made = (p8 address_to)shell_store_take(address_of expand_store,
+                                                     length * 2 + 1)))
+                return walk.why;
+        for (positive one = 0; one < walk.edits; one++)
+        {
+                conditional_regex_edit edit = walk.edit[one];
+
+                memory_copy(made + put, address_to pattern + from,
+                            edit.at - from);
+                put += edit.at - from;
+                if (edit.length == 1)
+                        made[put++] = '\\';
+                made[put++] = edit.value;
+                from = edit.at + edit.length;
+        }
+        memory_copy_end(made + put, address_to pattern + from, length - from);
+        address_to pattern = made;
+        return null;
+}
+
 static bool conditional_regex_match(string_address text, string_address pattern,
                                     bool address_to valid)
 {
@@ -12413,6 +13056,24 @@ static bool conditional_regex_match(string_address text, string_address pattern,
         rx_mark mark = regex_pool.used;
         positive slots[RX_SLOT_MAX];
         bool matched = false;
+
+        //      bash 5.3 names a pattern regcomp refuses, and answers 2.
+        if (shell_bash_compat)
+        {
+                string_address shown = pattern;
+                string_address why =
+                    conditional_regex_refusal(address_of pattern);
+
+                if (why)
+                {
+                        shell_diagnostic_where();
+                        string_format(log_error,
+                                      "[[: invalid regular expression `%s': %s\n",
+                                      shown, why);
+                        address_to valid = false;
+                        return false;
+                }
+        }
 
         memory_copy_apart(slots, regex_slots, sizeof(slots));
         /* Compile above any live transient program; rewind only our own work. */

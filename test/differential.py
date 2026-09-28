@@ -14842,6 +14842,239 @@ def shell_lang_prompt_expansion(rng):
     return ("prompt-expansion", shell_BASH, shell_program(setup, line, 'echo "end=$?"'), ("command", "stdin", "file"))
 
 
+#       A compound assignment the way bash makes it: every word expanded
+#       first, then the array emptied, then each element placed with its
+#       subscript's arithmetic done against what the list has built so far;
+#       [k]+=v adds to the element (to the old value, for a keyed list that
+#       replaces). A subscript counting back past the start, and a bare word
+#       in a keyed list, keep what was assigned and drop the rest of the
+#       command with 1 (127 and the end of a posix shell for a statement).
+#       These took [k]+=v for a word, did the arithmetic first against the
+#       old array, and threw the whole list away.
+def shell_lang_compound_order(rng):
+    line = rng.choice((
+        "hello=100; a=([hello]=1 [hello]+=2); a+=([hello]+=:3 [hello]+=:4)",
+        "declare -A a; hello=100; a=([hello]=1 [hello]+=2); a+=([hello]+=:3)",
+        "declare -A a=([k]=old); a=([k]+=x [n]=1 [n]+=2)",
+        "i=1; a=([100+i++]=$((i++)) [200+i++]=$((i++)) [300+i++]=$((i++)))",
+        "a=([0]=1+2+3 [a[0]]=10 [a[6]]=hello)",
+        "a=(o1 o2 o3); o1=101 o2=102; n1=201 n2=202; a+=([0]=n1 [1]=n2 [5]=\"${a[2]}\" [a[0]]=\"${a[0]}\" [a[1]]=x)",
+        "a=(1 2); a=([1]=a [-1]=b)",
+        "a=(1 2); a=([1]=a [-3]=b c); echo same",
+        "a=(1 2 3); a=([-1]=x y); echo same",
+        "a=(1 2 3); a+=([-1]=x y)",
+        "a=(); a[-1]=x; echo same",
+        "a=(); echo \"[${a[-1]-none}]\"; a=(x); echo \"[${a[-5]:-e}][${a[-5]@Q}]\"",
+        "unset a; a[-1]=x; echo same",
+        "a=(1); a[-5]=x; echo same",
+        "declare -A a; a=([j]=1 2 3 4); echo same",
+        "declare -A a=([x]=1 y [z]=2); echo same",
+        "f() { local -A a=([p]=1 q); echo in; }; f; echo after",
+        "f() { a=([-2]=1); echo in; }; f; echo after",
+        "eval 'a=([-2]=1); echo in'; echo after $?",
+        "a=(1); a[1]=x echo cmd; echo same",
+    ))
+    return ("compound-order", shell_BASH, shell_program(
+        line, 'echo "st=$?"', 'for k in "${!a[@]}"; do echo "$k=${a[$k]}"; done | sort', 'echo "end=$?"'),
+        ("command", "stdin", "file"))
+
+
+#       local with no names lists the function's own variables, sorted, as
+#       declare -p writes them, and local -p NAME prints NAME or says it is
+#       not found; these printed nothing and answered 0.
+def shell_lang_local_listing(rng):
+    body = rng.choice(("local", "local -p", "local -r", "local -p b", "local -p zz", "local -p b zz a",
+                       "local -; local", "local -i"))
+    decls = rng.choice(("local b=1 a=2 c; local -a arr=(1); local -i n=3", "local z", "", "local -x e=1 d='x y'"))
+    return ("local-listing", shell_BASH, shell_program(
+        "b=g", "f() { " + (decls + "; " if decls else "") + body + "; echo \"st=$?\"; }", "f", "local; echo \"out=$?\"",
+        'echo "end=$?"'), ("command", "stdin", "file"))
+
+
+#       A [[ =~ ]] pattern glibc's regcomp refuses: bash 5.3 names it with
+#       regcomp's reason and answers 2, where this took a leading * or an
+#       unfinished interval for a literal as grep -E does. A ) with nothing
+#       open is a literal to glibc, and [.a.] and [=a=] name a.
+def shell_lang_regex_refusals(rng):
+    pattern = rng.choice(("'*'", "'+a'", "'^*'", "'a|?'", "'(*a)'", "'{1}'", "'a{1'", "'a{'", "'a{x}'", "'a{2,1}'",
+                          "'a{1,x}'", "'a{99999}'", "'x{,2}'", "'a{,}'", "'a**'", "'['", "'[a'", "'[[:foo:]]'",
+                          "'[b-a]'", "'[a-b-c]'", "'[--/]'", "'[]a]'", "'\\'", "'\\1'", "'(a)\\1'", "'(a\\2)(b)'",
+                          "'\\b*'", "'$*'", "'a)'", "')'", "'[[.a.]]'", "'[[=a=]]x'", "'[[.ab.]]'", "'()'",
+                          "'a||b'", "'(|a)'"))
+    subject = rng.choice(("a", "a)", "ax", "b", ""))
+    return ("regex-refusals", shell_BASH, shell_program(
+        "p=" + pattern, "[[ " + (subject or "''") + " =~ $p ]]; echo \"st=$?\"", 'echo "end=$?"'),
+        ("command", "stdin", "file"))
+
+
+#       Inside [[ ]] bash's reader splits words at < > && || ( and ) with
+#       or without blanks: [[ b<a ]] compares, and ]] closes after a ).
+#       These took b<a for one word and needed a blank before ]].
+def shell_lang_conditional_tight(rng):
+    line = rng.choice(("[[ b<a ]]", "[[ a<b ]]", "[[ b>a ]]", "[[ a>b&&b<c ]]", "[[ a<b||b<c ]]",
+                       "[[ ''||! (1 == 2)&&(2 == 2)]]", "[[ (a)]]", "[[ !(a)]]", "[[ a&&(b)]]",
+                       "[[ -n x&&-z '' ]]", "[[ (a==a) ]]", "[[ x == @(x|y) ]]", "[[ x != !(x) ]]",
+                       "[[ ( b<a ) ]]", "[[ $v<b ]]"))
+    return ("conditional-tight", shell_BASH, shell_program(
+        "v=a", line + "; echo \"st=$?\"", 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
+#       Two readings of "set" bash has for arrays: ${!prefix@} names an array
+#       assigned nothing, a=(), where declare -a a alone is not named; and
+#       under set -u ${x@a} of a name with no value is unbound whatever its
+#       attributes. These left the empty array out and wrote the letters.
+def shell_lang_array_set_names(rng):
+    setup = rng.choice(("hello1=1 hello2=2", "hello1=1; hello=()", "hello=(); declare hx", "declare -a hello",
+                        "declare -A hello; hello=()", "hello=(); unset hello", "f() { local -a hello=(); echo ${!hel*}; }; f"))
+    line = rng.choice(('echo "${!hello@}|${!hel*}"', "set -u; declare -i x; echo ${x@a}", "set -u; a=(); echo ${a@a}",
+                       "set -u; a=(1); echo ${a[5]@a}", "set -u; echo ${u@a}", "set -u; x=1; echo ${x@a}",
+                       "set -u; declare -A A; echo ${A[k]@a}", "set -u; echo ${hello@a}"))
+    return ("array-set-names", shell_BASH, shell_program(
+        setup, line, 'echo "st=$?"'), ("command", "stdin", "file"))
+
+
+#       unset run in a function deeper than the one that made a local takes
+#       that local away, so the name means what it meant outside it -- the
+#       unlocal idiom; run where the local was made it stays, unset. These
+#       left every local in place, unset.
+def shell_lang_unset_scopes(rng):
+    unsetter = rng.choice(("unlocal() { unset \"$@\"; }", "unlocal() { unset -v \"$@\"; }", "unlocal() { eval unset \"$1\"; }"))
+    body = rng.choice((
+        "level2() { local v=yy; echo l2=$v; unlocal v; echo l2=${v-unset}; }; level1() { local v=xx; level2; echo l1=$v; unlocal v; echo l1=${v-unset}; level2; }; v=global; level1; echo top=$v",
+        "h() { local r=1; k() { unlocal r; echo k=${r-unset}; r=3; }; k; echo h=${r-unset}; }; r=top; h; echo r=$r",
+        "m() { local -a arr=(1 2); unlocal arr; declare -p arr; }; arr=(9); m; declare -p arr",
+        "g() { local q=1; unset q; echo g=${q-unset}; q=2; echo g2=$q; }; q=outer; g; echo q=$q",
+        "u() { local n=1; unlocal n; echo u=${n-unset}; }; unset n; u; echo n=${n-unset}",
+        "w() { local -i z=4; unlocal z; z=2+3; echo w=$z; }; z=1; w; echo z=$z",
+    ))
+    return ("unset-scopes", shell_BASH, shell_program(unsetter, body, 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
+#       A readonly assignment outside posix mode drops the rest of the line
+#       the reader was on: eval answers 1 and a sourced file goes on at its
+#       next line, where a function's caller still loses its whole line.
+#       This dropped the line that called eval or . as well.
+def shell_lang_readonly_discard_scope(rng):
+    line = rng.choice((
+        "f() { r=2; echo in-f; }; f; echo after-f $?",
+        "eval 'r=3; echo in-eval'; echo after-eval $?",
+        "g() { eval 'r=4'; echo in-g $?; }; g; echo after-g",
+        "printf 'r=5; echo in-dot\\necho in-dot-2\\n' > s.sh; . ./s.sh; echo after-dot $?",
+        "{ r=8; echo in-group; }; echo after-group",
+        "for i in 1 2; do eval 'r=$i'; echo loop $?; done",
+    ))
+    return ("readonly-discard-scope", shell_BASH, shell_program(
+        "readonly r=1", line, 'echo "next=$?"'), ("command", "stdin", "file"))
+
+
+#       Under posix mode a readonly assignment that ends a -c string answers
+#       127, but a subshell of it -- ( ), $( ), a background job -- that ends
+#       on the same error answers 1. This answered 127 from all of them.
+def shell_lang_readonly_subshell_status(rng):
+    line = rng.choice(("( r=6; echo in-sub ); echo after-sub $?", 'x=$(r=7; echo in-cs); echo "cs [$x] $?"',
+                       "f() { r=8; }; (f); echo fs $?", "{ r=9; } & wait $!; echo bg $?", "r=10 | cat; echo pipe $?",
+                       "(export r=11); echo ex $?"))
+    return ("readonly-subshell-status", shell_BASH, shell_program(
+        "readonly r=1", line, 'echo "next=$?"'), ("command", "stdin", "file"))
+
+
+#       bash has one line editor at a time: set -o vi turns emacs off and
+#       emacs turns vi off, where dash keeps the two apart; an interactive
+#       bash starts in emacs mode with history on unless started with vi.
+#       These let both be on and left an interactive bash with neither.
+def shell_lang_editing_modes(rng):
+    line = rng.choice(("set -o vi", "set -o emacs", "set -o vi; set -o emacs", "set -o emacs; set -o vi",
+                       "set -o vi; set +o emacs", "set -o emacs; set +o emacs"))
+    if rng.random() < 0.3:
+        flag = rng.choice(("", "-o vi "))
+        return ("editing-modes", shell_ALL, shell_program(
+            shell_SELF + "printf 'set -o | grep -E \"^(emacs|vi|history)[[:space:]]\" | tr -s \"\\\\t \" \" \"\\n' | "
+            "HISTFILE= ./$shell_me " + flag + "-i 2>/dev/null", 'echo "end=$?"'))
+    return ("editing-modes", shell_ALL, shell_program(
+        line, "set -o | grep -E '^(emacs|vi)[[:space:]]' | tr -s '\\t ' ' '", 'echo "end=$?"'),
+        ("command", "stdin", "file"))
+
+
+#       ${!ref} of a nameref is the name it refers to, not the value of the
+#       variable it holds, and a nameref that refers to nothing is an invalid
+#       indirect expansion. These read through it twice.
+def shell_lang_nameref_indirect(rng):
+    line = rng.choice(('typeset -n ref=x; echo "${!ref}"', 'ref=x; typeset -n ref; echo "${!ref}|$ref"',
+                       'typeset -n a2=arr; arr=(1 2); echo "${!a2}"', 'typeset -n el=arr[1]; arr=(1 2); echo "${!el} $el"',
+                       'typeset -n e; echo "[${!e}]"; echo same', 'ref=x; echo "${!ref}"'))
+    return ("nameref-indirect", shell_BASH, shell_program(
+        "foo=FOO; x=foo", line, 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
+#       A replacement pattern may begin with a slash, which bash takes as
+#       the pattern and looks past for the separator: ${x////c} replaces
+#       each / with c and ${x///} deletes them. The pattern and replacement
+#       words, and a trim's pattern, are tilde-expanded, quoted or not.
+#       These took the leading slash for the separator and kept ~ literal.
+def shell_lang_patsub_slash_tilde(rng):
+    form = rng.choice(("${x////c}", "${x///}", '"${x////c}"', "${x//'/'/c}", "${x/\\//Q}", "${x////\\\\/}",
+                       "${p//~/z}", '"${p//~/z}"', "${p/#~/z}", "${p#~}", "${p##~}", "x${p/g/~}x", "${q/~/z}",
+                       "${q/a~/z}", "${q//\\~/Z}", "${@////c}", "${p/~\\//z}"))
+    return ("patsub-slash-tilde", shell_BASH, shell_program(
+        "HOME=/h; x=/_/; p=/h/g; q=a~b; set -- /a /b", "echo " + form, 'echo "end=$?"'),
+        ("command", "stdin", "file"))
+
+
+#       ${!a[@]} alone lists subscripts, but with an operator after it bash
+#       reads ${!r<op>} whose r is the elements joined: a=(v) makes
+#       ${!a[@]:2} ${v:2}; no element is an invalid indirect expansion and a
+#       joined value that names nothing an invalid variable name. These
+#       applied the operator to the subscripts.
+def shell_lang_array_indirect_operators(rng):
+    target = rng.choice(("v1", "v2", "a1", "'a2[0]'", "'a3[@]'", "'x y'", "''"))
+    op = rng.choice((":2", ":1:2", ":-empty", ":+set", ":=assign", "#?", "%?", "//[a-f]", "//[a-f]/x", "@Q", "^^",
+                     "-d", "+s"))
+    return ("array-indirect-operators", shell_BASH, shell_program(
+        "v1=value; v2=; a1=(); a2=(element); a3=(1 2 3); declare -A ref=([k]=" + target + ")",
+        "printf '<%s>' \"${!ref[@]" + op + "}\"; echo", 'echo "st=$?"', "unset b; (echo \"${!b[@]" + op + "}\"); echo \"b=$?\"",
+        'printf "<%s>" "${!ref[@]}" "${!a3[*]}"; echo'), ("command", "stdin", "file"))
+
+
+#       An element bash will not make: a[0]=(3 4) is "cannot assign list to
+#       array member" and the line is dropped with 1; unset 'a[-2]' past the
+#       start is "unset: [-2]: bad array subscript", 1, and the next name
+#       still goes; in arithmetic such an element reads as 0 and a write to
+#       it is refused by name, each said once. These took the list
+#       silently, answered 2 with "no room", and made arithmetic a syntax
+#       error.
+def shell_lang_array_element_refusals(rng):
+    line = rng.choice(("a[0]=(3 4); echo same", "a[1]+=(5); echo same", "unset -v 'a[-3]' x; echo st=$?",
+                       "unset -v 'a[-1]'; echo st=$?", 'echo "[$((a[-3]))]" $?', "echo $((1+a[-3]*2)) $?",
+                       "(( a[-5]=1 )); echo as $?", "echo $((a[-4]++)) $?", "echo $((++a[-4])) $?",
+                       "echo $((a[-6]+=3)) $?", "echo $((0 && a[-9])) $?", "echo $((c[-1])) $?"))
+    return ("array-element-refusals", shell_BASH, shell_program(
+        "a=(1 2); x=1", line, 'echo "next=$?"', "declare -p a x 2>&1"), ("command", "stdin", "file"))
+
+
+#       printf's quoting and time conversions as bash 5.3 has them: %q takes
+#       a width and cuts the quoted text to the precision, %Q cuts the
+#       argument and quotes the rest, a quoted character is its code point
+#       under UTF-8, and %(...)T is a string to the width and precision, in
+#       the zone the shell exports, empty past 128 bytes and %X when empty.
+#       These wrote %q bare, refused %Q, read the first byte and ignored TZ.
+def shell_lang_printf_quote_time(rng):
+    line = rng.choice((
+        "printf '[%6q][%-6q][%.2q][%8.3q]\\n' 'a b' 'a b' 'a b' 'a b'",
+        "printf '[%Q][%5.2Q][%-4Q]\\n' 'x' 'a b' ''",
+        "printf '%d %x %o|' \\'$'\\316\\274' \\'$'\\344\\270\\211' \\'$'\\316\\316'; echo",
+        "printf '%d %d %d %d|' \\'$'\\360\\237\\231\\202' \\'$'\\355\\240\\200' \\'$'\\301\\201' \\'$'\\316'; echo",
+        "export TZ=JST-9; printf '%(%F %T %Z)T\\n' 1557978599; export TZ=EST5EDT,M3.2.0,M11.1.0; printf '%(%F %T %Z)T\\n' 1557978599",
+        "export TZ=JST-9; TZ=UTC0; printf '%(%H)T\\n' 0; declare +x TZ; printf '%(%H)T\\n' 0; unset TZ; printf '%(%H)T\\n' 0",
+        "TZ=JST-9; printf '%(%H)T\\n' 0",
+        "export TZ=UTC0; printf '[%10.5(%Y-%m-%d)T][%-4(%H)T][%()T]\\n' 1557978599 0 0",
+        "export TZ=UTC0; f=$(printf '%%Y%.0s' {1..31}); printf \"%($f)T\" 0 | wc -c; f=$f%Y; printf \"%($f)T\" 0 | wc -c",
+        "export TZ=UTC0; printf -v v '[%6(%H)T]' 0; echo \"$v\"",
+    ))
+    locale = rng.choice(("LC_ALL=C.UTF-8", "LC_ALL=C", ""))
+    return ("printf-quote-time", shell_BASH, shell_program(
+        locale, line, 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
 #       Whether a list is null to :- and :+: bash joins it and asks the join,
 #       so a=("") and set -- "" are null, ("" "") is not as @ (a blank joins
 #       them) but is as quoted * under IFS=. This called one "" set and any
@@ -17757,6 +17990,20 @@ SHELL_FAMILIES = (
     shell_lang_underscore_forms,
     shell_lang_cfor_lineno,
     shell_lang_list_null_tests,
+    shell_lang_printf_quote_time,
+    shell_lang_compound_order,
+    shell_lang_local_listing,
+    shell_lang_regex_refusals,
+    shell_lang_conditional_tight,
+    shell_lang_array_set_names,
+    shell_lang_unset_scopes,
+    shell_lang_readonly_discard_scope,
+    shell_lang_readonly_subshell_status,
+    shell_lang_editing_modes,
+    shell_lang_nameref_indirect,
+    shell_lang_patsub_slash_tilde,
+    shell_lang_array_indirect_operators,
+    shell_lang_array_element_refusals,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,
@@ -27899,27 +28146,27 @@ def harness_floodlight(argv):
     check(can_spawn == set(declared),
           'the array describes exactly the applets that can start a program')
 
-    #   Refusing the ones that turn data into execution is the whole reason
-    #   the array exists, and an edit that quietly allows them again should be
-    #   loud. What counts is where the *name of the program* comes from.
+    #   A machine nobody configured refuses nothing: every tool behaves as
+    #   its bash, dash or GNU counterpart does (the user's rule, 2026-09-28).
+    #   awk, script and setarch were refused here until then -- awk builds
+    #   the program it runs out of its program text, script and setarch end
+    #   at a shell -- and that broke awk in every pipeline and substitution
+    #   of a machine that had asked for nothing. Their refusal lives in the
+    #   configuration now (MOONWATER_FLOODLIGHT_AWK_SPAWN and _SHELL_ESCAPES,
+    #   both off in kernel/profile/sec_hardened), and an edit that quietly
+    #   refuses something by default again should be loud.
     #
-    #   awk builds it out of the program text, and program text arrives in
-    #   files and variables: system() and "cmd" | getline are the avenue.
-    #   script and setarch each end at a shell by design. Those stay shut.
-    #   bowl is named, like chroot: the line says which program runs.
-    #
-    #   find and xargs are not that shape and were denied here until it was
-    #   measured: they take the command on their own command line and put
-    #   data in its arguments, so whoever wrote the line already chose what
-    #   runs. Denying them removed -exec from find and left xargs reading its
-    #   input to no purpose -- five lanes of this suite went red saying so.
-    #   They keep their rows, because a machine that wants them shut should
-    #   still say it here, and the check below is what notices if a row goes
-    #   missing rather than changing value.
+    #   find and xargs keep their rows, as every spawning applet does,
+    #   because a machine that wants them shut should still say it here, and
+    #   the check below is what notices if a row goes missing rather than
+    #   changing value.
     for name in ('awk', 'script', 'setarch'):
-        check(declared.get(name) == '0',
-              '%s reaches a shell or builds a command out of what it reads, '
-              'and must be denied by default' % name)
+        check(declared.get(name) == '1',
+              '%s is allowed by default; refusing it is the configuration\'s '
+              'to say' % name)
+    check(set(declared.values()) == {'1'},
+          'the built-in array refuses nothing, so an unconfigured machine '
+          'behaves as bash, dash and GNU do')
 
     check(declared.get('bowl') == '1',
           'bowl runs the program the line named, like chroot, and must be '
@@ -28054,7 +28301,97 @@ def harness_floodlight(argv):
     subject = int(re.search(r'#define SUBJECT (\d+)', text).group(1))
     detail = int(re.search(r'#define DETAIL (\d+)', text).group(1))
     slots = int(re.search(r'#define CHANGES (\d+)', text).group(1))
-    rows = len(declared) + slots
+    configured_room = int(re.search(r'#define CONFIGURED (\d+)', text).group(1))
+    rows = len(declared) + configured_room + slots
+    shell_define = lambda name: int(re.search(r'#define %s (\d+)' % name,
+                                              shell).group(1))
+    check(shell_define('FLOODLIGHT_CONFIGURED') == configured_room and
+          shell_define('FLOODLIGHT_NAME') == subject and
+          shell_define('FLOODLIGHT_DETAIL') == detail and
+          '#define FLOODLIGHT_LINE (FLOODLIGHT_NAME + FLOODLIGHT_DETAIL + 32)'
+              in shell and
+          '#define LINE (SUBJECT + DETAIL + 32)' in text,
+          'the shell reads configured rows to the same limits floodlight.c '
+          'sets on them')
+    check(shell_define('FLOODLIGHT_ROWS') >= len(declared) + configured_room + slots,
+          'the reader can hold every refusing built-in, configured and '
+          'changed row a report can carry')
+
+    #   The configured text, twice: floodlight.c reads it at boot and the
+    #   shell reads the same text when the register cannot be read. Each
+    #   switch is a #ifndef around literal rows, and the two files must
+    #   carry the same switches around the same rows, in the same order,
+    #   inside the same guard on the policy string being defined at all.
+    def configured_composition(source, opener):
+        block = source[source.index(opener):]
+        block = block[:block.index('"";') + 3]
+        switches = re.findall(r'#ifndef (CONFIG_MOONWATER_FLOODLIGHT_\w+)\n(.*?)#endif',
+                              block, re.S)
+        return (block.split('\n', 1)[1].split('\n', 2)[:2],
+                [(name, ''.join(re.findall(r'"([^"]*)"', body)))
+                 for name, body in switches])
+
+    kernel_composition = configured_composition(
+        text, 'static const char configured_text[] =')
+    shell_composition = configured_composition(
+        shell, 'static const p8 floodlight_configured_text[] =')
+    check([line.strip() for line in kernel_composition[0]] ==
+              ['#ifdef CONFIG_MOONWATER_FLOODLIGHT_POLICY',
+               'CONFIG_MOONWATER_FLOODLIGHT_POLICY ";"'] and
+          [line.strip() for line in shell_composition[0]] ==
+              ['#ifdef CONFIG_MOONWATER_FLOODLIGHT_POLICY',
+               'CONFIG_MOONWATER_FLOODLIGHT_POLICY ";"'],
+          'both compositions read the switches only where a configuration '
+          'defines the policy string, so a build with none refuses nothing')
+    check(kernel_composition[1] == shell_composition[1] and
+          len(kernel_composition[1]) >= 8,
+          'the shell composes the configured text exactly as floodlight.c '
+          'does (%d switches)' % len(kernel_composition[1]))
+    kconfig = (ROOT / 'src/moonwater/Kconfig').read_text()
+    for name, _ in kernel_composition[1]:
+        symbol = name[len('CONFIG_'):]
+        entry = re.search(r'config %s\n\s+bool .*?\n\s+default y\n\s+help\n'
+                          % symbol, kconfig)
+        check(bool(entry),
+              '%s is a Kconfig bool that allows by default and says what it '
+              'closes' % symbol)
+    build_source = (ROOT / 'src/build/build.c').read_text()
+    carried = re.search(r'build_floodlight_switches\[\] = \{(.*?)null\}',
+                        build_source, re.S)
+    check(bool(carried) and
+          re.findall(r'"(\w+)"', carried.group(1)) ==
+              [name[len('CONFIG_MOONWATER_FLOODLIGHT_'):]
+               for name, _ in kernel_composition[1]],
+          'the configuration header carries every dangerous-flag switch to '
+          'the shell, in the order floodlight.c composes them')
+    check('"#define CONFIG_MOONWATER_FLOODLIGHT_POLICY "' in build_source,
+          'and the policy string beside them')
+    check(bool(re.search(r'config MOONWATER_FLOODLIGHT_POLICY\n\s+string .*?\n'
+                         r'\s+depends on MOONWATER_FLOODLIGHT\n\s+default ""',
+                         kconfig)) and
+          bool(re.search(r'config MOONWATER_FLOODLIGHT_SEAL\n\s+bool .*?\n'
+                         r'\s+depends on MOONWATER_FLOODLIGHT\n\s+default n',
+                         kconfig)),
+          'the policy string defaults empty and the boot seal defaults off')
+    check(bool(re.search(r'#ifdef CONFIG_MOONWATER_FLOODLIGHT_SEAL\n'
+                         r'\s*sealed = true;', text)) and
+          text.index('sealed = true;') < text.index('answer = misc_register('),
+          'the boot seal is set before the device exists, so no write can '
+          'land first')
+    switch_rows = ''.join(body for _, body in kernel_composition[1])
+    profile_policies = []
+    for profile in sorted((ROOT / 'kernel/profile').rglob('*')):
+        if not profile.is_file():
+            continue
+        for line in profile.read_text(errors='replace').splitlines():
+            found = re.match(r'CONFIG_MOONWATER_FLOODLIGHT_POLICY="(.*)"$', line)
+            if found:
+                profile_policies.append((profile.name, found.group(1)))
+            named = re.match(r'CONFIG_(MOONWATER_FLOODLIGHT\w*)=', line)
+            if named:
+                check(('config %s\n' % named.group(1)) in kconfig,
+                      'profile %s sets %s, which Kconfig defines'
+                      % (profile.name, named.group(1)))
     widest = (subject - 1) + 1 + 8 + 1 + (detail - 1) + 1 + 5 + 1 + \
         len('changed 18446744073709551615s ago by uid 4294967295\n')
     check(bool(room) and int(room.group(1)) > rows * widest,
@@ -28159,6 +28496,8 @@ def harness_floodlight(argv):
 
     decide_body = shell[shell.rindex('static b32 floodlight_launch_decide('):]
     decide_body = decide_body[:decide_body.index('\n}\n')]
+    load_body = shell[shell.index('static fn floodlight_load()\n{'):]
+    load_body = load_body[:load_body.index('\n}\n')]
 
     def calls(*sequence):
         window = len(sequence)
@@ -28210,21 +28549,24 @@ def harness_floodlight(argv):
                    'handle', ',', '(', 'positive', ')', '""'),
              'the authorized descriptor, rather than a mutable pathname, is '
              'executed'),
-            (calls('if', '(', '!', 'tool', '&', '&', '!', 'final', '&', '&',
-                   'floodlight_report_state', '=', '=',
-                   'FLOODLIGHT_REPORT_VALID', ')', '{',
+            (calls('if', '(', 'paths', '&', '&', '!', 'final', ')', '{',
                    'floodlight_executable_drop', '(', 'image', ')', ';',
-                   'return', 'FLOODLIGHT_LAUNCH_PROCESS'),
-             'an active register sends external Spark launches through the '
-             'descriptor-pinned child path'),
+                   'return', 'FLOODLIGHT_LAUNCH_PROCESS') and
+             calls('paths', '=', '!', 'tool', '&', '&',
+                   'floodlight_names_paths', '(', ')', ';'),
+             'a policy that names a path sends external Spark launches '
+             'through the descriptor-pinned child path'),
             (calls('confined', '=', 'policy', '!', '=',
                    'FLOODLIGHT_LAUNCH_ALLOW', ';') and
              calls('shell_tail_command', '&', '&', '!', 'confined'),
              "an applet that must be confined never runs in the shell's own process"),
-            (calls('tool', '?', 'floodlight_built_in', '(', 'subject', ')',
-                   ':', 'true'),
-             'a register that cannot be read leaves the built-in answers '
-             'standing, so removing the device grants nothing'),
+            (calls('else', 'if', '(', 'floodlight_compiled_rows', '(',
+                   'parsed', ',', 'address_of', 'parsed_count', ')', ')') and
+             calls('floodlight_row_count', '=', 'parsed_count', ';',
+                   'state', '=', 'FLOODLIGHT_REPORT_BUILTIN', ';'),
+             'a register that cannot be read leaves the answers this shell '
+             'was built with standing, so removing the device grants nothing '
+             'those did not'),
             (calls('file_look', '(', 'handle', ',', '(', 'string_address', ')',
                    '""', ',', 'AT_EMPTY_PATH', ',', '&', 'facts', ')'),
              'the reader checks it is talking to a device and not a file left '
@@ -28242,18 +28584,18 @@ def harness_floodlight(argv):
             (calls('got', '=', 'system_read_retry', '(', '(', 'positive', ')',
                    'handle', ',', 'report', '+', 'used'),
              'the reader retries interrupted reads and accumulates short reads'),
-            (calls('program_entry_identity', '|', '|',
-                   'floodlight_report_promised', '?',
-                   'FLOODLIGHT_REPORT_REFUSED', ':',
-                   'FLOODLIGHT_REPORT_BUILTIN'),
-             'a Spark-started shell and a process that has seen the register '
-             'fail closed when the promised policy device is unavailable'),
-            (calls('registered', '=', 'floodlight_policy_registered', '(',
-                   ')', ';', 'if', '(', 'registered', '!', '=', '0', ')'),
-             'stock fallback is permitted only after authenticated procfs '
-             'proves that the policy device is not registered'),
-            (calls('floodlight_row_count', '=', '0', ';',
-                   'floodlight_report_state', '=',
+            (calls('if', '(', 'floodlight_report_promised', ')',
+                   'state', '=', 'FLOODLIGHT_REPORT_VALID', ';') and
+             calls('floodlight_report_promised', '=', 'true', ';',
+                   'state', '=', 'FLOODLIGHT_REPORT_VALID', ';'),
+             'a process that has read a real register keeps its last answers '
+             'when the device is hidden from it, rather than falling back'),
+            ('floodlight_proc' not in load_body and
+             'floodlight_entry_unfiltered' not in load_body and
+             'floodlight_policy_registered' not in shell,
+             'reading the policy asks nothing of /proc, so a masked /proc '
+             'can refuse only a launch some row restricts'),
+            (calls('floodlight_report_state', '=',
                    'FLOODLIGHT_REPORT_UNREAD', ';',
                    'floodlight_load', '(', ')', ';'),
              'each launch reloads one coherent policy snapshot'),
@@ -28264,11 +28606,16 @@ def harness_floodlight(argv):
                    ')'),
              'every ordinary external exec passes the central final decision'),
             (bool(re.search(
-                r'if \(floodlight_inherited_seccomp\)\s*\{\s*'
-                r'diagnose = false;\s*if \(final\)\s*'
-                r'floodlight_silent_stop\(\);\s*\}', shell)),
-             'a final child under untrusted inherited seccomp enters the '
-             'silent terminal path before any diagnostic or cleanup syscall'),
+                r'if \(\(!spawn_allowed \|\| !network_allowed\) &&\s*'
+                r'!floodlight_own_seccomp && !floodlight_entry_unfiltered\(\)\)'
+                r'\s*\{\s*if \(inplace\)\s*diagnose = false;\s*'
+                r'else if \(final\)\s*\{\s*diagnose = false;\s*'
+                r'floodlight_silent_stop\(\);\s*\}', decide_body)) and
+             decide_body.index('floodlight_entry_unfiltered()') <
+                 decide_body.index('floodlight_apply('),
+             'a confined launch in a process not proved unfiltered is '
+             'refused, and a final child enters the silent terminal path '
+             'before any diagnostic or cleanup syscall'),
             (bool(re.search(
                 r'static DEAD_END fn floodlight_silent_stop\(\)\s*\{\s*'
                 r'system_call_1\(syscall\(exit_group\), 126\);\s*'
@@ -28276,7 +28623,7 @@ def harness_floodlight(argv):
                 shell)),
              'the silent terminal path tries exit once and otherwise performs '
              'no more syscalls or writes'),
-            (calls('if', '(', '!', 'floodlight_own_seccomp', '&', '&',
+            (calls('!', 'floodlight_own_seccomp', '&', '&',
                    '!', 'floodlight_entry_unfiltered', '(', ')', ')'),
              'interpreter recursion recognizes only a filter installed by '
              'this still-running image'),
@@ -28653,8 +29000,11 @@ def harness_floodlight(argv):
              'the register has a fixed minor, so it needs no devtmpfs'),
             (r'return fold\(secret \^ [0-9]+u, row,', text,
              'a row seal is folded with the boot secret'),
-            (r'return fold\(secret \^ [0-9]+u, baseline, sizeof\(baseline\)\);', text,
-             'the built-in answers are summed with the boot secret'),
+            (r'u32 sum = fold\(secret \^ [0-9]+u, baseline, sizeof\(baseline\)\);'
+             r'[^}]*sum = fold\(sum, configured, sizeof\(configured\)\);'
+             r'\s*return fold\(sum, &configured_count, sizeof\(configured_count\)\);',
+             text,
+             'the built-in and configured answers are summed with the boot secret'),
             (r'secret = get_random_u32\(\);', text,
              'the secret is drawn fresh at every boot'),
             (r'late_initcall\(floodlight_start\);', text,
@@ -29692,7 +30042,10 @@ int main(void)
     #   it and nothing for the open, the statx and the read to talk to.
     reader = (reader[:reader.index('static fn floodlight_load()')] +
               'static fn floodlight_load(void) { }\n'
-              'static fn floodlight_reload(void) { }\n\n' +
+              'static fn floodlight_reload(void) { }\n'
+              'static bool test_entry_unfiltered = true;\n'
+              'static bool floodlight_entry_unfiltered(void)\n'
+              '{ return test_entry_unfiltered; }\n\n' +
               reader[reader.index('static bool floodlight_says'):])
 
     #   Exercise the same final executable/argv decision as every launch
@@ -29987,6 +30340,14 @@ static void seq_puts(struct seq_file *s, const char *text)
 
     bridge = r'''
 static bool intact_public(void) { mutex_lock(&lock); bool a = intact(); mutex_unlock(&lock); return a; }
+static int baseline_answer(const char *subject)
+{
+        unsigned i;
+        for (i = 0; i < ARRAY_SIZE(baseline); i++)
+                if (!strcmp(baseline[i].subject, subject))
+                        return baseline[i].allowed;
+        return -1;
+}
 '''
 
     driver = r'''
@@ -30025,8 +30386,43 @@ static void reset(u32 random)
         shell_parser_source_kind = SHELL_PARSER_SOURCE_MEMORY;
         mock_random = random;
         secret = get_random_u32();
+        memset(configured, 0, sizeof(configured));
+        configured_count = 0;
+        configured_invalid = false;
         baseline_sum = baseline_seal();
         guard_arm();
+}
+
+/* One text through both readers of it: floodlight.c's configure() and the
+   shell's floodlight_policy_take(). They must agree on whether it reads and,
+   when it does, on every row. */
+static bool configured_agree(const char *text, bool want, const char *what)
+{
+        floodlight_row rows[FLOODLIGHT_ROWS];
+        positive count = 0;
+        bool kernel, shell_ok, same;
+        unsigned i;
+
+        memset(configured, 0, sizeof(configured));
+        configured_count = 0;
+        kernel = configure(text);
+        shell_ok = floodlight_policy_take((string_address)text, rows, &count);
+        same = kernel == shell_ok;
+        if (kernel && shell_ok) {
+                same = same && count == configured_count;
+                for (i = 0; same && i < configured_count; i++)
+                        same = !strcmp((char *)rows[i].subject, configured[i].subject) &&
+                               !strcmp((char *)rows[i].detail, configured[i].detail) &&
+                               rows[i].setting == configured[i].setting &&
+                               rows[i].allowed == configured[i].allowed;
+        }
+        if (!same || kernel != want)
+                printf("  configured [%s]: kernel %d shell %d want %d\n",
+                       text, kernel, shell_ok, want);
+        check(same && kernel == want, what);
+        memset(configured, 0, sizeof(configured));
+        configured_count = 0;
+        return same;
 }
 
 /* One writer among several: adds, changes and gives back rows, and reads the
@@ -30062,24 +30458,23 @@ int main(void)
         /* --- it answers at all --------------------------------------- */
         check(shows("awk") && shows("find") && shows("xargs"),
               "the report carries the built-in answers");
-        check(strstr(report(), "awk") && strstr(report(), "deny"),
-              "awk is denied out of the box");
+        check(!shows("deny"), "nothing is refused out of the box");
         check(!shows("changed"), "a machine nobody has touched shows no change");
 
         /* --- an ordinary change -------------------------------------- */
         mock_uid = 0; mock_now = 2000;
-        check(put("awk spawn allow\n") > 0, "root may change an answer");
+        check(put("awk spawn deny\n") > 0, "root may change an answer");
         check(shows("changed"), "the change is in the report");
-        check(strstr(mock_log, "allowed") && strstr(mock_log, "awk"),
+        check(strstr(mock_log, "denied") && strstr(mock_log, "awk"),
               "the change is said out loud");
 
         /* --- and undoing it gives the row back ------------------------ */
-        check(put("awk spawn deny\n") > 0, "an answer can be put back");
+        check(put("awk spawn allow\n") > 0, "an answer can be put back");
         check(!shows("changed"), "back to built in leaves no deviation behind");
 
         /* --- who may write -------------------------------------------- */
         mock_root = false;
-        check(put("awk spawn allow") == -EPERM, "a non-root write is refused");
+        check(put("awk spawn deny") == -EPERM, "a non-root write is refused");
         check(!shows("changed"), "and changes nothing");
         mock_root = true;
 
@@ -30142,17 +30537,17 @@ int main(void)
         reset(0x11223344);
         check(put("seal") > 0, "the register can be sealed");
         check(shows("(sealed)"), "and says so");
-        check(put("awk spawn allow") == -EPERM, "a sealed register refuses a change");
+        check(put("awk spawn deny") == -EPERM, "a sealed register refuses a change");
         check(put("seal") > 0, "sealing again is allowed");
         check(!strstr(mock_log, "sealed"), "but says nothing the second time");
 
         /* --- red team: tampering ------------------------------------------ */
         reset(0x11223344);
-        put("awk spawn allow");
-        changed[0].allowed = 0;                    /* a write that missed the seal */
+        put("awk spawn deny");
+        changed[0].allowed = 1;                    /* a write that missed the seal */
         check(!intact_public(), "a deviation altered in memory is caught");
         check(shows("TAMPERED"), "and the report stops answering");
-        check(put("awk spawn deny") == -EPERM, "and no further change is taken");
+        check(put("awk spawn allow") == -EPERM, "and no further change is taken");
 
         reset(0x11223344);
         {
@@ -30190,7 +30585,7 @@ int main(void)
         put("bbb network deny");
         put("ccc network deny");
         put("bbb network allow");      /* not built in, so this stays a row */
-        check(put("awk spawn allow") > 0, "a row can still be added");
+        check(put("awk spawn deny") > 0, "a row can still be added");
         {
                 /* Hand a row back by hand, the way restoring a built-in does,
                    and then look past the hole it leaves. */
@@ -30288,10 +30683,43 @@ int main(void)
         {
                 bool said = false;
                 char *restricted_tool[] = {"awk", NULL};
+                char *plain_tool[] = {"cat", NULL};
+                unsigned refused = 0, i;
+
+                for (i = 0; i < ARRAY_SIZE(baseline); i++)
+                        refused += !baseline[i].allowed;
 
                 reread();
-                check(floodlight_row_count == 0,
-                      "an untouched register gives the reader nothing to carry");
+                check(floodlight_row_count == refused,
+                      "an untouched register gives the reader only what it refuses");
+
+                /* Nothing restricts cat, so nothing about this process is
+                   asked: not its seccomp state, not its parent, not /proc. */
+                floodlight_parent_role = false;
+                floodlight_parent_protected = false;
+                floodlight_parent_supervised = false;
+                test_entry_unfiltered = false;
+                shell_parser_source_kind = SHELL_PARSER_SOURCE_MUTABLE;
+                check(reader_tool_launch(plain_tool, true) ==
+                          FLOODLIGHT_LAUNCH_ALLOW,
+                      "a launch no row restricts runs with /proc unreadable, "
+                      "no protected parent and a live parser pipe");
+                check(reader_launch("./allowed", (char *[]){"./allowed", NULL},
+                                    true, NULL) == FLOODLIGHT_LAUNCH_ALLOW,
+                      "an external launch needs no pinned identity while no "
+                      "row names a path");
+
+                put("awk spawn deny");
+                reread();
+                floodlight_parent_role = true;
+                floodlight_parent_protected = true;
+                floodlight_parent_supervised = true;
+                shell_parser_source_kind = SHELL_PARSER_SOURCE_MEMORY;
+                check(reader_tool_launch(restricted_tool, false) ==
+                          FLOODLIGHT_LAUNCH_REFUSE,
+                      "a launch a row restricts fails closed when this "
+                      "process cannot be proved unfiltered");
+                test_entry_unfiltered = true;
 
                 floodlight_parent_role = false;
                 floodlight_parent_protected = false;
@@ -30339,18 +30767,19 @@ int main(void)
                 floodlight_parent_protected = false;
                 floodlight_parent_supervised = false;
 
-                put("awk spawn allow");
+                put("env spawn deny");
                 reread();
-                check(floodlight_row_count == 1,
+                check(floodlight_row_count == refused + 1,
                       "one deviation reaches the reader as one row");
-                check(reader_says("awk", FLOODLIGHT_SPAWN, "", &said) && said,
+                said = true;
+                check(reader_says("env", FLOODLIGHT_SPAWN, "", &said) && !said,
                       "and the reader reads back what was written");
 
-                put("env spawn deny");
+                put("find spawn deny");
                 put("curl network deny");
                 put("tar flag --to-command deny");
                 reread();
-                check(floodlight_row_count == 4,
+                check(floodlight_row_count == refused + 4,
                       "four deviations reach the reader as four rows");
 
                 said = true;
@@ -30364,15 +30793,15 @@ int main(void)
                       "a refused flag is read back");
                 check(!reader_says("tar", FLOODLIGHT_FLAG, "--other", &said),
                       "and a flag nobody refused is not");
-                check(!reader_says("find", FLOODLIGHT_SPAWN, "", &said),
-                      "a built-in answer is not carried twice");
+                check(!reader_says("xargs", FLOODLIGHT_SPAWN, "", &said),
+                      "a built-in allowance is not carried at all");
                 check(!reader_says("aw", FLOODLIGHT_SPAWN, "", &said) &&
                       !reader_says("awkk", FLOODLIGHT_SPAWN, "", &said),
                       "and a name that merely starts the same is not it");
 
-                put("awk spawn deny");   /* back to built in */
+                put("env spawn allow");   /* back to built in */
                 reread();
-                check(!reader_says("awk", FLOODLIGHT_SPAWN, "", &said),
+                check(!reader_says("env", FLOODLIGHT_SPAWN, "", &said),
                       "a deviation given back stops reaching the reader");
 
                 {
@@ -30390,7 +30819,8 @@ int main(void)
                             "# floodlight: TAMPERED; refusing report\n";
                         static const char builtin[] =
                             "# floodlight (sealed)\n"
-                            "awk spawn deny built in\n";
+                            "awk spawn deny built in\n"
+                            "find spawn allow built in\n";
                         static const char valued_flag[] =
                             "# floodlight\n"
                             "tar flag --output deny changed 3s ago by uid 9\n";
@@ -30415,9 +30845,14 @@ int main(void)
                               "unexpected report fields are refused");
                         check(!reader_accept(tampered, sizeof(tampered) - 1),
                               "the driver's tamper banner is never policy input");
+                        said = true;
                         check(reader_accept(builtin, sizeof(builtin) - 1) &&
-                              floodlight_row_count == 0,
-                              "built-in rows authenticate grammar but are not duplicated");
+                              floodlight_row_count == 1 &&
+                              reader_says("awk", FLOODLIGHT_SPAWN, "", &said) &&
+                              !said &&
+                              !reader_says("find", FLOODLIGHT_SPAWN, "", &said),
+                              "a refusing built-in row is carried as the kernel's "
+                              "word and an allowing one is not");
 
                         check(reader_accept(valued_flag,
                                             sizeof(valued_flag) - 1),
@@ -30573,6 +31008,100 @@ int main(void)
                 test_ptrace_scope_safe = true;
         }
 
+        /* --- the configured rows, read twice -------------------------------- */
+        {
+                char long_subject[128], long_row[160], many[4096];
+                unsigned i;
+
+                memset(long_subject, 'n', SUBJECT - 1);
+                strcpy(long_subject + SUBJECT - 1, " spawn deny");
+                configured_agree(long_subject, true, "the longest subject a row holds is read");
+                memset(long_subject, 'n', SUBJECT);
+                strcpy(long_subject + SUBJECT, " spawn deny");
+                configured_agree(long_subject, false, "a subject one past a row is not");
+                memset(long_row, ' ', LINE);
+                strcpy(long_row + LINE, "awk spawn deny");
+                configured_agree(long_row, false, "a row longer than a written line is not");
+                many[0] = 0;
+                for (i = 0; i <= CONFIGURED; i++)
+                        sprintf(many + strlen(many), "p%u run deny;", i);
+                configured_agree(many, false, "one row past the configured room is refused whole");
+                many[0] = 0;
+                for (i = 0; i < CONFIGURED; i++)
+                        sprintf(many + strlen(many), "p%u run deny;", i);
+                configured_agree(many, true, "the configured room is exactly what it says");
+                for (i = 0; i < ARRAY_SIZE(configured_corpus); i++)
+                        configured_agree(configured_corpus[i].text,
+                                         configured_corpus[i].reads,
+                                         configured_corpus[i].what);
+        }
+
+        /* --- configured rows are built-in answers ------------------------- */
+        reset(0x11223344);
+        {
+                char *xargs_tool[] = {"xargs", NULL};
+                char *awk_tool[] = {"awk", NULL};
+                bool said = true;
+                unsigned refused = 0, i;
+
+                for (i = 0; i < ARRAY_SIZE(baseline); i++)
+                        refused += !baseline[i].allowed &&
+                                   strcmp(baseline[i].subject, "find");
+
+                check(configure("find spawn deny; tar flag --to-command deny;"
+                                "xargs run deny; awk spawn allow; env flag -S deny"),
+                      "a configured text reads");
+                baseline_sum = baseline_seal();
+                check(intact_public(), "and is summed with the array");
+                check(shows("--to-command") && !shows("changed"),
+                      "configured rows are reported as built in");
+                reread();
+                check(floodlight_row_count ==
+                          refused + 4 - (baseline_answer("awk") == 0),
+                      "the reader carries each configured refusal once, "
+                      "and a configured allowance over the array's refusal "
+                      "not at all");
+                check(reader_says("find", FLOODLIGHT_SPAWN, "", &said) && !said,
+                      "a configured row wins over the array's allowance");
+                check(!reader_says("awk", FLOODLIGHT_SPAWN, "", &said),
+                      "and over the array's refusal");
+                check(reader_flag_refused("tar", "--to-command=x"),
+                      "a configured flag refusal reaches the reader");
+                check(reader_tool_launch(xargs_tool, false) == FLOODLIGHT_LAUNCH_REFUSE &&
+                      reader_tool_launch(awk_tool, false) == FLOODLIGHT_LAUNCH_ALLOW,
+                      "and decides launches");
+                check(reader_flag_refused("env", "-S") &&
+                      reader_flag_refused("env", "-iS") &&
+                      reader_flag_refused("env", "-Secho hi") &&
+                      reader_flag_refused("env", "-S echo hi") &&
+                      !reader_flag_refused("env", "-i") &&
+                      !reader_flag_refused("env", "--ignore-environment") &&
+                      !reader_flag_refused("env", "SOME=S"),
+                      "a one-letter refusal covers its clusters and attached "
+                      "values, and nothing that is not a single-dash word");
+
+                check(put("find spawn allow") > 0 && shows("changed"),
+                      "root can deviate from a configured row");
+                reread();
+                said = false;
+                check(reader_says("find", FLOODLIGHT_SPAWN, "", &said) && said,
+                      "and the reader sees the deviation");
+                check(put("find spawn deny") > 0 && !shows("changed"),
+                      "putting it back gives the row back");
+                check(put("tar flag --to-command allow") > 0 && shows("changed") &&
+                      put("tar flag --to-command deny") > 0 && !shows("changed"),
+                      "a configured flag row deviates and returns the same way");
+
+                configured_invalid = true;
+                check(shows("does not read") && !shows("find"),
+                      "a configuration that does not read answers nothing");
+                check(put("awk spawn allow") == -EPERM,
+                      "and takes no change");
+                check(!reader_accept(report(), strlen(report())),
+                      "and its banner is never policy input");
+                configured_invalid = false;
+        }
+
         /* --- the lock is balanced whatever happened ------------------------ */
         check(mock_lock_depth == 0, "every path leaves the lock as it found it");
 
@@ -30591,6 +31120,48 @@ int main(void)
     runnable = runnable.replace(
         "static const struct rule baseline[] = {",
         "static struct rule baseline[] = {")
+
+    #   Texts both readers of the configured policy are run over, with what
+    #   each should make of it: the grammar's edges, every switch turned off
+    #   at once, and the policy string of every shipped profile alone and
+    #   composed with every switch off -- so no image this tree can build
+    #   boots into a register that refuses to answer.
+    def c_string(value):
+        return '"%s"' % ''.join(
+            ch if ch.isalnum() or ch in ' ;:/._+-=' else '\\x%02x""' % ord(ch)
+            for ch in value)
+    corpus_rows = [
+        ('', True, 'an empty text is no rows'),
+        (' ; ;\t;', True, 'rows of nothing are skipped'),
+        ('awk spawn deny', True, 'one row reads'),
+        ('awk\tspawn\tdeny;', True, 'tabs part words as spaces do'),
+        ('awk spawn deny; awk spawn allow', True, 'a row named twice is taken the first time'),
+        ('find flag -exec deny\nxargs run deny', True, 'a newline parts rows'),
+        ('/usr/bin/curl network deny', True, 'a path is a subject'),
+        ('tar flag --to-command deny', True, 'a flag row reads'),
+        ('flag spawn deny; allow network deny', True, 'names that look like words are names'),
+        ('awk', False, 'a row with no setting does not read'),
+        ('awk spawn', False, 'nor one with no state'),
+        ('awk spawn maybe', False, 'nor a state that is not allow or deny'),
+        ('awk fly deny', False, 'nor a setting that does not exist'),
+        ('awk spawn deny extra', False, 'nor anything after the state'),
+        ('tar flag deny', False, 'nor a flag row with no state'),
+        ('seal', False, 'seal is its own switch, not a row'),
+        ('seal spawn deny', False, 'and not a subject either'),
+        ('a\x1bb spawn deny', False, 'an escape in a name does not read'),
+        ('tar flag --a"b deny', False, 'nor a quote in a flag'),
+        ('awk spawn deny; broken', False, 'one bad row refuses the whole text'),
+        (switch_rows, True, 'every switch off at once reads'),
+    ]
+    for name, policy in profile_policies:
+        corpus_rows.append((policy, True, 'profile %s policy reads' % name))
+        corpus_rows.append((policy + ';' + switch_rows, True,
+                            'profile %s policy reads beside every switch' % name))
+    corpus = ('struct configured_case { const char *text; bool reads; const char *what; };\n'
+              'static const struct configured_case configured_corpus[] = {\n' +
+              ''.join('        {%s, %s, %s},\n' % (c_string(t), 'true' if r else 'false',
+                                                     c_string(w))
+                      for t, r, w in corpus_rows) + '};\n')
 
     round_trip = r"""
 /* The report the module just wrote, handed to the shell's reader. */
@@ -30695,7 +31266,7 @@ static b32 reader_tool_launch(char **arguments, bool final)
             (work_path / executable).chmod(0o755)
         binary, _ = build_c(Path(work) / 'run.c',
                             mock + runnable + bridge + reader_mock + descriptor +
-                            reader + decision + round_trip + driver,
+                            reader + decision + round_trip + corpus + driver,
                             ('-std=gnu11', '-O1', '-g', '-w'))
         ran = subprocess.run([str(binary)], cwd=work, text=True,
                              capture_output=True)
@@ -42397,9 +42968,8 @@ def harness_guest_scenarios(argv):
         segments.append((index, 0, 0, frames))
     #   /dev/spark covered by an empty file, which sends the monitor to
     #   /proc; and /proc/stat covered by init's memory, whose first page
-    #   reads as EIO, so the fallback cannot read the processors. Covering
-    #   all of /dev or /proc takes floodlight's policy with it, and then it
-    #   refuses every launch.
+    #   reads as EIO, so the fallback cannot read the processors. One file
+    #   each, so the rest of /dev and /proc stay as the monitor finds them.
     lines.append(": > /tmp/scen-nospark")
     lines.append("unshare -m sh -c 'mount --bind /tmp/scen-nospark /dev/spark && exec monitor 0.05 2' > /tmp/m.out 2>&1; scen_status 'monitor from /proc exits 0' 0 $?")
     lines.append("scen_count 'monitor from /proc lists processes' 1 \"$(grep -q 'cpu%' /tmp/m.out && echo 1)\"")
@@ -45195,6 +45765,7 @@ PINNED = r"""
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"},"case":{"argv":["BEGIN { print PROCINFO[\"version\"] != \"\" }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","utility":"awk"},"domain":"awk","id":"415c50f36a82c08a","kind":"deliberate","list":"ledger","reason_id":"r7","utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["BEGIN { print gensub(/a/, \"b\", \"g\", \"aa\") }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","utility":"awk"},"domain":"awk","id":"41e1c3c75e063647","kind":"deliberate","list":"ledger","reason_id":"r0","utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"6218b42da88599cdf8f6206e3f0eaa62da18d61399be18591e120b1e89553afb"},"case":{"argv":["-v","x=\\xZ","BEGIN { printf \"<%s> %d\\n\", x, length(x) }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","utility":"awk"},"domain":"awk","id":"43a61abc721480ff","kind":"deliberate","list":"ledger","reason_id":"r2","utility":"awk"},
+{"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"bde1b687f534f84cd7e6e5f8845f9e5a5cb3c111596f1f31c41c750bb3fe49e0"},"case":{"argv":["--version"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","tier":"extra","utility":"awk"},"domain":"awk","id":"45b58635d1279ece","kind":"deliberate","list":"ledger","reason_id":"r26","reference":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"23e9e85a12a47502bdfe87b507330eb45ed6ffa65b5d7a90e9ee0ced1c2a0bdd"},"utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"7d060d4406ef28d7d287de74210fa4a36223ce66f422bc7decad4d62d89559a8"},"case":{"argv":["BEGIN { print \"\\101\\x41\\t|\\/\\\"|\\q\" }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","utility":"awk"},"domain":"awk","id":"45fae75796c46c09","kind":"deliberate","list":"ledger","reason_id":"r2","utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"e6c06876672c538907f5f4ea6295ea22667344d2d50a0c397078e2ba312dfa68"},"case":{"argv":["BEGIN { CONVFMT = \"%G\"; OFMT = \"%.2f\"; x = -1e300*1e300; print x; print x \"\"; a[x] = 1; for (k in a) print k; print (x \"\" == x) }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","tier":"extra","utility":"awk"},"domain":"awk","id":"46a5aa539afca372","kind":"bug","list":"ledger","reason":"a fractional power differs from glibc in the last place. Rendering is not the difference -- 0.1, 1/3, 1e-4 and an integer past a double all print byte for byte to thirty digits -- and an integer exponent is exact, because it is done by repeated multiplication. What is left is power() against glibc pow(): 2**0.5 gives the double below the correctly rounded one where glibc gives the one above. It shows only where the program sets CONVFMT or OFMT to ask for more digits than a double carries, and closing it means matching glibc ulp for ulp, which is a numerical library of its own","reference":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"5742735e9f15a04891606a87dd459552545a40ab84d1dfbafb3ba79943c21f2d"},"utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"6218b42da88599cdf8f6206e3f0eaa62da18d61399be18591e120b1e89553afb"},"case":{"argv":["END { printf \"<%s> %d\\n\", x, length(x) }","x=\\xZ"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","utility":"awk"},"domain":"awk","id":"496e8262060ca663","kind":"deliberate","list":"ledger","reason_id":"r2","utility":"awk"},
@@ -45259,6 +45830,7 @@ PINNED = r"""
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["@include \"p_lib.awk\"\nBEGIN { print twice(2) }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","utility":"awk"},"domain":"awk","id":"e95c773ecaee736a","kind":"deliberate","list":"ledger","reason_id":"r4","utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"e6c06876672c538907f5f4ea6295ea22667344d2d50a0c397078e2ba312dfa68"},"case":{"argv":["BEGIN { CONVFMT = \"%.0f\"; OFMT = \"%g\"; x = -1e300*1e300; print x; print x \"\"; a[x] = 1; for (k in a) print k; print (x \"\" == x) }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","tier":"extra","utility":"awk"},"domain":"awk","id":"e99afa716eecd65f","kind":"bug","list":"ledger","reason":"a fractional power differs from glibc in the last place. Rendering is not the difference -- 0.1, 1/3, 1e-4 and an integer past a double all print byte for byte to thirty digits -- and an integer exponent is exact, because it is done by repeated multiplication. What is left is power() against glibc pow(): 2**0.5 gives the double below the correctly rounded one where glibc gives the one above. It shows only where the program sets CONVFMT or OFMT to ask for more digits than a double carries, and closing it means matching glibc ulp for ulp, which is a numerical library of its own","reference":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"5742735e9f15a04891606a87dd459552545a40ab84d1dfbafb3ba79943c21f2d"},"utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"e6c06876672c538907f5f4ea6295ea22667344d2d50a0c397078e2ba312dfa68"},"case":{"argv":["BEGIN { CONVFMT = \"%#.3e\"; OFMT = \"%.0f\"; x = -1e300*1e300; print x; print x \"\"; a[x] = 1; for (k in a) print k; print (x \"\" == x) }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","tier":"extra","utility":"awk"},"domain":"awk","id":"f10b84adf7e5fb7b","kind":"bug","list":"ledger","reason":"a fractional power differs from glibc in the last place. Rendering is not the difference -- 0.1, 1/3, 1e-4 and an integer past a double all print byte for byte to thirty digits -- and an integer exponent is exact, because it is done by repeated multiplication. What is left is power() against glibc pow(): 2**0.5 gives the double below the correctly rounded one where glibc gives the one above. It shows only where the program sets CONVFMT or OFMT to ask for more digits than a double carries, and closing it means matching glibc ulp for ulp, which is a numerical library of its own","reference":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"5742735e9f15a04891606a87dd459552545a40ab84d1dfbafb3ba79943c21f2d"},"utility":"awk"},
+{"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"857fd0feac87fe868af401430373648ffe410d3271cd055148ecc84c1033e12c"},"case":{"argv":["--help"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","tier":"extra","utility":"awk"},"domain":"awk","id":"f286b45cd5127cc5","kind":"deliberate","list":"ledger","reason_id":"r25","reference":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"9b382a0b69e8fd0c7c96b1cdfa4923976359a5c1a1d14fb7c07637b09cf4b1cb"},"utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"acda87158697443a633768a7c49464d62b23ab29313bd9f7ffae7842256c9f11"},"case":{"argv":["-v","RS=(a|bc)*","{ print NR \"[\" $0 \"]\" }","csv"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","tier":"extra","utility":"awk"},"domain":"awk","id":"f9c14b0a0c54006d","kind":"bug","list":"ledger","reason":"a fractional power differs from glibc in the last place. Rendering is not the difference -- 0.1, 1/3, 1e-4 and an integer past a double all print byte for byte to thirty digits -- and an integer exponent is exact, because it is done by repeated multiplication. What is left is power() against glibc pow(): 2**0.5 gives the double below the correctly rounded one where glibc gives the one above. It shows only where the program sets CONVFMT or OFMT to ask for more digits than a double carries, and closing it means matching glibc ulp for ulp, which is a numerical library of its own","reference":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"e167304886c4a654eca56ba8f949ea52514bb842b75449faceade9d830b1ff53"},"utility":"awk"},
 {"candidate":{"effects":"ac80a12e5956ccdc0e8296cef4f01dfd69c9c8d1beb39d0d11fd9e2d7996f525","status":0,"stdout":"e6c06876672c538907f5f4ea6295ea22667344d2d50a0c397078e2ba312dfa68"},"case":{"argv":["BEGIN { CONVFMT = \"%#.3e\"; OFMT = \"%e\"; x = -1e300*1e300; print x; print x \"\"; a[x] = 1; for (k in a) print k; print (x \"\" == x) }"],"domain":"awk","family":null,"fixture":"awk","input_kind":"command","mode":null,"stdin":"text","utility":"awk"},"domain":"awk","id":"ffd3a35405ddb335","kind":"deliberate","list":"ledger","reason_id":"r19","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--assign","reason_id":"r20","utility":"awk"},
@@ -45272,7 +45844,6 @@ PINNED = r"""
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--field-separator","reason_id":"r23","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--file","reason_id":"r24","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--gen-pot","reason_id":"r21","utility":"awk"},
-{"domain":"awk","kind":"deliberate","list":"ledger","option":"--help","reason_id":"r25","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--include","reason_id":"r21","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--lint","reason_id":"r21","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--lint-old","reason_id":"r21","utility":"awk"},
@@ -45289,7 +45860,6 @@ PINNED = r"""
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--trace","reason_id":"r21","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--traditional","reason_id":"r21","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"--use-lc-numeric","reason_id":"r21","utility":"awk"},
-{"domain":"awk","kind":"deliberate","list":"ledger","option":"--version","reason_id":"r26","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"-C","reason_id":"r27","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"-D","reason_id":"r28","utility":"awk"},
 {"domain":"awk","kind":"deliberate","list":"ledger","option":"-E","reason_id":"r29","utility":"awk"},
@@ -45363,11 +45933,8 @@ PINNED = r"""
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"1f7a5ae882e72af0ba6527fc94e9b3a95d76309dc6cb4326f659cf9d8d77826b"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"1b8ba84cdfae88d0","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"880d07545ccfce3deff98989ba51b2400986caf0d383d297f1b6c87343a4f6f6"},"utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2e0a5cfd7a732016ba4740382ee335f5aa56290513459ff80aa07f3a8be6680e"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${a[k]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","utility":"shell"},"domain":"builtins","id":"1e19a106289f8d4a","kind":"deliberate","list":"ledger","reason_id":"r57","utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"8195e8cd543e967c97b3643019fed09daffe76b949d476cc25b4086e547c863d"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"1e80366503120cc4","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"41d70e9aa7af64576ed93d9172fea36e639f68dc9b87a79751848f590d6d2691"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"e8b8230049c2f7e4466abd4be1094d061fce65ca9744c38b12ed8676ad9b155f"},"case":{"argv":["-c","a=()\ndeclare -p a\nprintf '<%s>' \"${a[-1]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"23f8a4ee09db32fb","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"e8b8230049c2f7e4466abd4be1094d061fce65ca9744c38b12ed8676ad9b155f"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a999cc042f370715517b1babd67eae1ff617b83d088b3c20e99363bff77d9b30"},"case":{"argv":["-c","a=()\na[-1]=last\nprintf '<%s>' \"${!a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","utility":"shell"},"domain":"builtins","id":"241acfb9ed85b50b","kind":"deliberate","list":"ledger","reason_id":"r57","utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"bf7f84c2c0d32fe1970feedc076ec339bc6cb36d4c55630e2d152c9c218b2604"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"28a9896552c05980","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"82c855d7c9c4e4a675158f2c06d8b0cc8c9414d8108874e10716156aef11a83e"},"utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2e0a5cfd7a732016ba4740382ee335f5aa56290513459ff80aa07f3a8be6680e"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${a[k]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"333fa3c087391e9f","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"211b3f87fce106cd1c5c78cbe15d44fd3a6155d35ebcc1926778ad30d5919690"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a999cc042f370715517b1babd67eae1ff617b83d088b3c20e99363bff77d9b30"},"case":{"argv":["-c","a=()\na[-1]=last\nprintf '<%s>' \"${!a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","utility":"shell"},"domain":"builtins","id":"3465393c3dde7813","kind":"deliberate","list":"ledger","reason_id":"r57","utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2e0a5cfd7a732016ba4740382ee335f5aa56290513459ff80aa07f3a8be6680e"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"366105644e4c5f89","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"211b3f87fce106cd1c5c78cbe15d44fd3a6155d35ebcc1926778ad30d5919690"},"utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"95b66abd4259d903cf2869b176934c1240d69552de3c6b39fab5eaedc36c9ceb"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"466fa693daa144f3","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"ea864d18c63d7191c84679f74e21fb143c43ca645f71ab89b1df1914ceb3561d"},"utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"529db8a622b1bf8dcd83f4ebd24e8ae51808e53ce3e76c226a4faa9ed53ff504"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","utility":"shell"},"domain":"builtins","id":"4d2b9618bab2de15","kind":"deliberate","list":"ledger","reason_id":"r57","utility":"builtins-array-machinery"},
@@ -45375,14 +45942,11 @@ PINNED = r"""
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"7efafb797e30d59351ca5000e5e629878376d9657c70bccaf80728340838a3f8"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"57c9a19c3c37b37f","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"927a52fb8d6f15a1f67109f95f848108881f696dbdf067725bef576c95052118"},"utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"bf7f84c2c0d32fe1970feedc076ec339bc6cb36d4c55630e2d152c9c218b2604"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"6a69af958578e2e1","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"82c855d7c9c4e4a675158f2c06d8b0cc8c9414d8108874e10716156aef11a83e"},"utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"88b129524a4f09614c462a25214775cd4ae5be3d6159eb3643ae5d62464511c3"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"6b15665a233b2b35","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"d1cca6cfece5320b534e3c33d85c98e40a3f710d79f50b3bc9918da39a0cc126"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"fac1709e7532f8cf835c8388b6dcbd96b5079076cfd4a32984bfdf259ad5a66b"},"case":{"argv":["-c","a=()\na[-1]=last\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"73f0fe79c3b196d3","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":127,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"b91e8c954081a0b3a0c82c9205fbf46bef0649aa6e348a6e32d4b87e0578a20f"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${!a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"777ac011cf2d06bc","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a225bafa29262ce4b23856a403925edebbc8af95c280feb8113116fcd07feef5"},"utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2e0a5cfd7a732016ba4740382ee335f5aa56290513459ff80aa07f3a8be6680e"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"7efda84c0d26cd74","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"211b3f87fce106cd1c5c78cbe15d44fd3a6155d35ebcc1926778ad30d5919690"},"utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"b91e8c954081a0b3a0c82c9205fbf46bef0649aa6e348a6e32d4b87e0578a20f"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${!a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"8085a20e871065ca","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a225bafa29262ce4b23856a403925edebbc8af95c280feb8113116fcd07feef5"},"utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2e0a5cfd7a732016ba4740382ee335f5aa56290513459ff80aa07f3a8be6680e"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${a[k]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"87b44450b99acf4f","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"211b3f87fce106cd1c5c78cbe15d44fd3a6155d35ebcc1926778ad30d5919690"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"e8b8230049c2f7e4466abd4be1094d061fce65ca9744c38b12ed8676ad9b155f"},"case":{"argv":["-c","a=()\ndeclare -p a\nprintf '<%s>' \"${a[-1]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"9148f972bb2f5ce0","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"e8b8230049c2f7e4466abd4be1094d061fce65ca9744c38b12ed8676ad9b155f"},"utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"19c50bcc9f232cb20fbc34b96257756c75c01e76f7496e5e6b0f719834622f71"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"96ff1afe72e30a15","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"efa8e04f8770d61374dad46a56e04fe881c41be6abdfbbf99967842fd1455b47"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"fac1709e7532f8cf835c8388b6dcbd96b5079076cfd4a32984bfdf259ad5a66b"},"case":{"argv":["-c","a=()\na[-1]=last\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"a4965b13d19c770b","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a29dc0a36fbecae02117d57a728654d13e2993a4332004bf1b33775b499a2565"},"utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2e0a5cfd7a732016ba4740382ee335f5aa56290513459ff80aa07f3a8be6680e"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"a67fc606814fe6f0","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"211b3f87fce106cd1c5c78cbe15d44fd3a6155d35ebcc1926778ad30d5919690"},"utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"529db8a622b1bf8dcd83f4ebd24e8ae51808e53ce3e76c226a4faa9ed53ff504"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${a[k]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"acd4bc6df51a1523","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"5c8e38b226c6b7543b8c6a2c9eafa646ea4e5790d8cd876260630f65c041c7ef"},"utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a289cf35254e6a01f7b95417400c59c16971487b68976d5265c45ce950f283d2"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${!a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"add7c406a40c6bdc","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a2b4821abf17756c7a9d3f7d2128ecfc504e229b30e3cef37ac4fa5e1e428159"},"utility":"builtins-array-machinery"},
@@ -45520,7 +46084,6 @@ PINNED = r"""
 {"candidate":{"effects":"d4549443963dd34e5a47ff0869b2bae06a2ca0d25cbf14eb0ee54f3a0175adea","status":0,"stdout":"fcfaf2dac02056a37bde8418c8b8e23e159b58ea57c5d6422b00ea41b3a1f129"},"case":{"argv":["-c","printf '%s' 'aébé:c' > feed\na=old; b=old; c=old\nIFS='é:'\nread -r a b c < feed\ns=$?\nprintf '%s:<%s>:<%s>:<%s>\\n' \"$s\" \"$a\" \"$b\" \"$c\"\n"],"domain":"builtins","family":"builtins-read-ifs-snapshot","fixture":"shell","input_kind":"command","mode":"dash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"d0ea05cb415d2b23","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"d4549443963dd34e5a47ff0869b2bae06a2ca0d25cbf14eb0ee54f3a0175adea","status":0,"stdout":"d9878379f95c5641760e6072dda4ec31b09262aa4e248509ba15c370c3f2de60"},"utility":"builtins-read-ifs-snapshot"},
 {"candidate":{"effects":"f844471a4510ab48da935e289d304e5c849b0b6ea27516f92679fdfaab3d54b8","status":0,"stdout":"211a71f67e83c6acdd8c3a0fa95c2538b650216807b4db182f8a2f294a27571f"},"case":{"argv":["-c","printf '%s' 'one:two::three:\n' > feed\na=old; b=old; c=old\nIFS='é:'\nread  IFS b c < feed\ns=$?\nprintf '%s:<%s>:<%s>:<%s>\\n' \"$s\" \"$IFS\" \"$b\" \"$c\"\n"],"domain":"builtins","family":"builtins-read-ifs-snapshot","fixture":"shell","input_kind":"command","mode":"dash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"e3071576922dff3a","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"f844471a4510ab48da935e289d304e5c849b0b6ea27516f92679fdfaab3d54b8","status":0,"stdout":"2843714a85fd8af86dedfc7fe2cc0268ebeba3f64c0f77bb333feb80402ae155"},"utility":"builtins-read-ifs-snapshot"},
 {"candidate":{"effects":"f844471a4510ab48da935e289d304e5c849b0b6ea27516f92679fdfaab3d54b8","status":0,"stdout":"211a71f67e83c6acdd8c3a0fa95c2538b650216807b4db182f8a2f294a27571f"},"case":{"argv":["-c","printf '%s' 'one:two::three:\n' > feed\na=old; b=old; c=old\nIFS='é:'\nread -r IFS b c < feed\ns=$?\nprintf '%s:<%s>:<%s>:<%s>\\n' \"$s\" \"$IFS\" \"$b\" \"$c\"\n"],"domain":"builtins","family":"builtins-read-ifs-snapshot","fixture":"shell","input_kind":"command","mode":"dash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"e42656ae3a83b446","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"f844471a4510ab48da935e289d304e5c849b0b6ea27516f92679fdfaab3d54b8","status":0,"stdout":"2843714a85fd8af86dedfc7fe2cc0268ebeba3f64c0f77bb333feb80402ae155"},"utility":"builtins-read-ifs-snapshot"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"793d5baf22a2cbc21eca61ba3e570dfa50e57a31c2af56d2fdd286133c6035f6"},"case":{"argv":["-c","x=outer; (f() { local x=inner; readonly x; x=bad; echo no; }; f) 2>/dev/null; printf '%s:%s\\n' \"$?\" \"$x\"\n"],"domain":"builtins","family":"builtins-readonly-scope","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","utility":"shell"},"domain":"builtins","id":"5bed2435d4235923","kind":"deliberate","list":"ledger","reason_id":"r61","utility":"builtins-readonly-scope"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2a0bd7c36d2c77896a8f06363b07cc8b1bcb93ad7c9f7b77b6b5c343dc836d6a"},"case":{"argv":["-c","a=([0]=zero [2]='two words' [31]='v=31' [500]='')\nf() { unset 'a[31]'; }\na=prefix f\nprintf '<%s>:<%s>:<%s>:<%s>:<%s>\\n' \"${#a[@]}\" \"${a[700]-}\" \"${a[0]-}\" \"${a[2]-}\" \"${a[31]-}\"\n"],"domain":"builtins","family":"builtins-scope-snapshot","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","utility":"shell"},"domain":"builtins","id":"0c9d2649666e20b2","kind":"bug","list":"ledger","reason_id":"r59","utility":"builtins-scope-snapshot"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2a0bd7c36d2c77896a8f06363b07cc8b1bcb93ad7c9f7b77b6b5c343dc836d6a"},"case":{"argv":["-c","a=([0]=zero [2]='two words' [31]='v=31' [500]='')\nf() { unset 'a[31]'; }\na=prefix f\nprintf '<%s>:<%s>:<%s>:<%s>:<%s>\\n' \"${#a[@]}\" \"${a[700]-}\" \"${a[0]-}\" \"${a[2]-}\" \"${a[31]-}\"\n"],"domain":"builtins","family":"builtins-scope-snapshot","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","utility":"shell"},"domain":"builtins","id":"6e2ea5827dc5a70f","kind":"bug","list":"ledger","reason_id":"r59","utility":"builtins-scope-snapshot"},
 {"candidate":{"effects":"bcd9972a4d7cd705a721a5af93f9827ca7a40252a90f3cfb7ea1396ad7d03a64","status":0,"stdout":"fcc2cf947718239cddef0a29aab06a008fac8bafe8ea90c18de7f3b1f7a542bf"},"case":{"argv":["-c","/bin/mkdir -p real one/two two\n/bin/ln -s real softdir\ncd \"$PWD\" >/dev/null 2>&1\nbase=$PWD\ncd -L ''\nprintf \"[%s]\\n\" \"$?\"\nplace() { case ${1-unset} in \"$base\"*) printf \"%s\" \"${1#\"$base\"}\";; unset) printf unset;; *) printf outside;; esac; }\nprintf \"pwd:\"; place \"$PWD\"; printf \"\\nold:\"; place \"${OLDPWD-unset}\"; echo\n"],"domain":"builtins","family":"cd","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"triples","utility":"shell"},"domain":"builtins","id":"099bee4c9c5e8f3f","kind":"bug","list":"ledger","reason":"answers bash 5.3.20 and dash 0.5.13.4 give that this shell does not yet: dash type, bg, fg, jobs and kill option and job errors; kill -n and kill -l ranges, which go through the kill utility parser; exec +Z; POSIX shift of a bad count as a fatal special-builtin error; and cd, read -e and -N, local -, unset and test -ef/-nt rows. Pinned 2026-09-24 so the lane fails on anything new; each row is a bug to fix, not a policy","reference":{"effects":"bcd9972a4d7cd705a721a5af93f9827ca7a40252a90f3cfb7ea1396ad7d03a64","status":0,"stdout":"cd8fe86ec18b40ad6434193233946c7c5d1c7fa0b7f9e22517374d2d26420ef2"},"utility":"cd"},

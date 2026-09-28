@@ -4521,67 +4521,86 @@ differential_domain()
                 --jobs "${MW_JOBS:-$differential_jobs}"
 }
 
-#       awk, script and setarch carry a stock spawn denial even when the
-#       Floodlight device is absent. A fresh named-app image cannot prove that
-#       its external parent is not parsing an inherited descriptor, so its
-#       direct refusal is a security property rather than an implementation
-#       result for the differential oracle. All three need to spawn for parts
-#       of their corpus, so a test-only nonfinal driver reaches those
-#       implementations. Focused checks below still exercise their real
-#       protected-shell and direct-refusal paths.
-policy_farm=""
-need_policy_farm()
+#       The shell as kernel/profile/sec_hardened configures it, built through
+#       the configuration header an image build writes (switch_header, below
+#       in kit), so its Floodlight policy string and dangerous-flag switches
+#       reach the compile the way they reach the image's shell; a switch the
+#       profile does not turn off keeps its Kconfig default, y. Another
+#       whole-shell build, so run -j makes it beside the others.
+need_hardened_shell()
 {
-        need_shell || return 1
-        need_policy_utilities || return 1
-
-        if [ ! -d "$work/policy-bin" ]; then
-                mkdir -p "$work/policy-bin" || return 1
-                for policy_name in $utilities; do
-                        ln -sf "$farm/$policy_name" \
-                                "$work/policy-bin/$policy_name" || return 1
-                done
-                ln -sf "$farm/bash" "$work/policy-bin/bash" || return 1
-                for policy_name in awk script setarch; do
-                        ln -sf "$work/policy-utilities" \
-                                "$work/policy-bin/$policy_name" || return 1
-                done
-        fi
-
-        policy_farm="$work/policy-bin"
+        [ -x "$work/hardened-shell" ] && return 0
+        build_tool config-header kernel/profile/sec_hardened \
+                "$work/hardened.h" > "$work/hardened.h.log" 2>&1 ||
+                { sed 's/^/    /' "$work/hardened.h.log"; return 1; }
+        freestanding programs/shell.c "$work/hardened-shell.building" \
+                "$host_arch" "-DMOONWATER_CONFIG=\"$work/hardened.h\"" ||
+                return 1
+        mkdir -p "$work/hardened-bin" || return 1
+        for hardened_name in $utilities bash sh; do
+                ln -sf "$work/hardened-shell" "$work/hardened-bin/$hardened_name" ||
+                        return 1
+        done
+        mv "$work/hardened-shell.building" "$work/hardened-shell"
 }
 
-#       The policy utilities are a second whole-shell build, needing nothing
-#       of the first, so run -j builds the two side by side.
-need_policy_utilities()
+#       What sec_hardened refuses, refused, by the shell's own copy of it on a
+#       machine with no register; and what it does not name, still allowed.
+#       Flag and run rows need nothing of /proc, so they hold with it masked;
+#       awk's spawn denial needs confinement, which cannot be proved there,
+#       so awk is refused outright -- the policy failing closed. Each row is
+#       name, status, a word the output must hold, and the command.
+floodlight_hardened()
 {
-        if [ ! -x "$work/policy-utilities" ]; then
-                cat > "$work/policy-utilities.c" <<POLICY_UTILITIES
-#include "$root/src/lib.util.c"
-#include "$root/src/moonwater/spark.c"
-#define SHELL_UTILITY_PROGRAM
-#include "$root/src/sh/shell.c"
-
-b32 main()
-{
-        string_address name = shell_tool_name(program_argument(0));
-        positive which = shell_tool_key_find(name);
-        b32 answered;
-
-        if (which == SHELL_TOOLS)
-                return string_report(log_error, 127,
-                                     "%s: utility not found\\n",
-                                     program_argument(0));
-
-        log_failure_reset();
-        answered = shell_tools[which].function() & 0xff;
-        log_flush();
-        return log_failed() && !answered ? 1 : answered;
-}
-POLICY_UTILITIES
-                freestanding "$work/policy-utilities.c" \
-                        "$work/policy-utilities" || return 1
-        fi
+        need_hardened_shell || return 1
+        hardened_failed=0
+        hardened_masked=0
+        /usr/bin/unshare -rm true 2> /dev/null && hardened_masked=1
+        while IFS='|' read -r hardened_case hardened_want hardened_needle \
+                hardened_command; do
+                [ -n "$hardened_case" ] || continue
+                case $hardened_case in
+                masked-*) [ "$hardened_masked" = 1 ] || continue ;;
+                esac
+                PATH="$work/hardened-bin:/usr/bin:/bin" HB="$work/hardened-bin" \
+                        /bin/sh -c "$hardened_command" > "$work/hardened.out" 2>&1
+                hardened_got=$?
+                if [ "$hardened_got" = "$hardened_want" ] &&
+                        { [ -z "$hardened_needle" ] ||
+                          grep -q -- "$hardened_needle" "$work/hardened.out"; }; then
+                        tally "floodlight-hardened-$hardened_case" 1 1
+                else
+                        tally "floodlight-hardened-$hardened_case" 0 1
+                        note "floodlight hardened $hardened_case: status $hardened_got, want $hardened_want: $(head -c 200 "$work/hardened.out")"
+                        hardened_failed=1
+                fi
+        done <<'HARDENED'
+find-exec|126|flag refused|find /dev/null -exec true {} ';'
+find-execdir|126|flag refused|find /dev/null -execdir true {} ';'
+find-delete|126|flag refused|find /dev/null -delete
+find-fprint|126|flag refused|find /dev/null -fprint /dev/null
+find-print|0||find /dev/null -print
+env-split|126|flag refused|env -S true
+env-split-cluster|126|flag refused|env -iS true
+env-split-long|126|flag refused|env --split-string=true
+env-named|0||env true
+xargs|126|run refused|xargs < /dev/null
+split-filter|126|flag refused|split --filter=cat /dev/null
+split-filter-abbreviated|126|flag refused|split --fil=cat /dev/null
+sort-compress|126|flag refused|sort --compress-program=gzip /dev/null
+timeout|126|run refused|timeout 5 true
+nice|126|run refused|nice true
+unshare|126|run refused|unshare true
+chroot|126|run refused|chroot / true
+wget|126|run refused|wget
+shell-find-delete|126|flag refused|"$HB/sh" -c 'find /dev/null -delete'
+shell-xargs|126|run refused|"$HB/sh" -c 'xargs < /dev/null'
+cat|0||cat /dev/null
+masked-find-exec|126|flag refused|/usr/bin/unshare -rm /bin/sh -c 'mount -t tmpfs tmpfs /proc && "$HB/find" /dev/null -exec true {} ";"'
+masked-awk|126||/usr/bin/unshare -rm /bin/sh -c 'mount -t tmpfs tmpfs /proc && echo x | "$HB/awk" 1'
+masked-cat|0||/usr/bin/unshare -rm /bin/sh -c 'mount -t tmpfs tmpfs /proc && "$HB/cat" /dev/null'
+HARDENED
+        return "$hardened_failed"
 }
 
 #       The self-test drives the engine end to end on a farm of its own, and
@@ -5047,10 +5066,24 @@ lane_files()
 }
 lane_misc()
 {
-        need_policy_farm || return 1
+        need_shell || return 1
+        need_hardened_shell || return 1
         misc_failed=0
 
-        "$farm/script" --version > /dev/null \
+        #       script started straight from a foreign parent: by default as
+        #       util-linux's is, and under a policy refusing its spawn, refused,
+        #       because its external parent cannot be proved to be a protected
+        #       shell. Under our own shell that policy still lets it run the
+        #       modes that start nothing.
+        if "$farm/script" --version > /dev/null 2>&1; then
+                tally script-direct-default 1 1
+        else
+                tally script-direct-default 0 1
+                note "direct script --version failed with nothing configured"
+                misc_failed=1
+        fi
+
+        "$work/hardened-bin/script" --version > /dev/null \
                 2> "$work/script-direct-policy.err"
         script_direct=$?
         if [ "$script_direct" = 126 ] &&
@@ -5059,11 +5092,11 @@ lane_misc()
                 tally script-direct-policy-refusal 1 1
         else
                 tally script-direct-policy-refusal 0 1
-                note "direct stock script did not preserve its parent-contract refusal"
+                note "direct hardened script did not preserve its parent-contract refusal"
                 misc_failed=1
         fi
 
-        if "$farm/bash" -c 'script --version >/dev/null' \
+        if "$work/hardened-bin/bash" -c 'script --version >/dev/null' \
                 > /dev/null 2>&1; then
                 tally script-integrated-policy-path 1 1
         else
@@ -5176,15 +5209,76 @@ lane_misc()
                 misc_failed=1
         fi
 
-        differential_domain misc "$policy_farm" || misc_failed=1
+        floodlight_masked_proc || misc_failed=1
+        floodlight_hardened || misc_failed=1
+
+        differential_domain misc "$farm" || misc_failed=1
         return "$misc_failed"
+}
+
+#       Floodlight asks /proc nothing for a launch no row restricts, so a
+#       machine nobody configured runs the same with /proc masked as with it:
+#       a tmpfs over /proc in a private mount namespace, the way a sandbox or
+#       a half-built chroot leaves it. Each case runs twice, under our shell
+#       and tools and under the host's bash and GNU, and the two must agree.
+#       The dash rows are a foreign shell starting our tools directly, which
+#       is where every tool used to answer 126. awk is here from stdin, a
+#       file, a substitution and a pipeline, with system() and both kinds of
+#       pipe, and the last line is an in-place exec after a structural fork
+#       with a child still alive: nothing about any of it is restricted, so
+#       none of it may ask /proc a question.
+floodlight_masked_proc_script='mount -t tmpfs tmpfs /proc || exit 99
+printf "%s|" "$(printf x | cat)" "$(printf "a\nb\n" | wc -l)" "$(ls /dev/null)"
+cat /dev/null; printf "%s|" "$?"
+(cat /dev/null); printf "%s|" "$?"
+printf "%s|" "$(env ls /dev/null)"
+sort /dev/null | cat; printf "%s|" "$?"
+printf "a b\n" | awk "{ print \$2 }"
+printf "%s|" "$(awk "BEGIN { print 1 + 1 }")"
+printf "{ print NR }\n" > "${TMPDIR:-/tmp}/masked.awk.$$"
+printf "x\ny\n" | awk -f "${TMPDIR:-/tmp}/masked.awk.$$"; rm -f "${TMPDIR:-/tmp}/masked.awk.$$"
+awk "BEGIN { system(\"echo s\"); \"echo p\" | getline v; print v }"
+printf "q\n" | awk "{ print | \"cat\" }"
+(sleep 1 &); exec cat /dev/null'
+floodlight_masked_proc()
+{
+        if ! unshare -rm true 2> /dev/null; then
+                note "floodlight masked /proc: no unprivileged mount namespace here"
+                return 0
+        fi
+
+        masked_failed=0
+        for masked_shell in bash dash; do
+                masked_want=$(PATH=/usr/bin:/bin unshare -rm "/bin/$masked_shell" \
+                        -c "$floodlight_masked_proc_script" 2>&1; echo "status $?")
+                masked_got=$(PATH="$farm:/usr/bin:/bin" unshare -rm \
+                        "$([ "$masked_shell" = bash ] && echo "$farm/bash" || echo /bin/dash)" \
+                        -c "$floodlight_masked_proc_script" 2>&1; echo "status $?")
+                if [ "$masked_got" = "$masked_want" ]; then
+                        tally "floodlight-masked-proc-$masked_shell" 1 1
+                else
+                        tally "floodlight-masked-proc-$masked_shell" 0 1
+                        note "floodlight masked /proc under $masked_shell: got [$masked_got] want [$masked_want]"
+                        masked_failed=1
+                fi
+        done
+        return "$masked_failed"
 }
 lane_util_linux()
 {
-        need_policy_farm || return 1
+        need_shell || return 1
+        need_hardened_shell || return 1
         util_linux_failed=0
 
-        "$farm/setarch" --show > /dev/null \
+        if "$farm/setarch" --show > /dev/null 2>&1; then
+                tally setarch-direct-default 1 1
+        else
+                tally setarch-direct-default 0 1
+                note "direct setarch --show failed with nothing configured"
+                util_linux_failed=1
+        fi
+
+        "$work/hardened-bin/setarch" --show > /dev/null \
                 2> "$work/setarch-direct-policy.err"
         setarch_direct=$?
         if [ "$setarch_direct" = 126 ] &&
@@ -5193,11 +5287,11 @@ lane_util_linux()
                 tally setarch-direct-policy-refusal 1 1
         else
                 tally setarch-direct-policy-refusal 0 1
-                note "direct stock setarch did not preserve its parent-contract refusal"
+                note "direct hardened setarch did not preserve its parent-contract refusal"
                 util_linux_failed=1
         fi
 
-        if "$farm/bash" -c 'setarch --show >/dev/null' \
+        if "$work/hardened-bin/bash" -c 'setarch --show >/dev/null' \
                 > /dev/null 2>&1; then
                 tally setarch-integrated-policy-path 1 1
         else
@@ -5206,7 +5300,7 @@ lane_util_linux()
                 util_linux_failed=1
         fi
 
-        differential_domain util_linux "$policy_farm" || util_linux_failed=1
+        differential_domain util_linux "$farm" || util_linux_failed=1
 
         #       Mount names a user chose, planted in a namespace and listed.
         python3 test/differential.py --harness mount_names "$farm"
@@ -5338,6 +5432,13 @@ PROBES
                 shell_failed=1
         fi
 
+        # Everything from here to the here-document checks is what a policy
+        # refusing awk's spawn must still guarantee, so it runs under the
+        # shell sec_hardened configures: with nothing configured awk is not
+        # confined and none of these boundaries is asked for.
+        need_hardened_shell || return 1
+        parser_shell="$work/hardened-bin/bash"
+
         # A named script remains open while its commands run. Before the
         # parser-source gate, confined awk could append a command that this
         # unrestricted shell then read and executed. Keep an unrestricted
@@ -5362,7 +5463,7 @@ REGULAR_SCRIPT
                         "$parser_padding" >> "$parser_regular_script"
                 parser_padding=$((parser_padding + 1))
         done
-        "$farm/bash" "$parser_regular_script" >/dev/null 2>&1 || :
+        "$parser_shell" "$parser_regular_script" >/dev/null 2>&1 || :
 
         if [ "$(cat "$parser_regular_compatible" 2>/dev/null)" = ready ]; then
                 tally shell-parser-regular-compatible 1 1
@@ -5384,7 +5485,7 @@ REGULAR_SCRIPT
         # no live source descriptor for a child to feed and remain compatible
         # with restricted applets that can otherwise be confined.
         parser_command_marker="$parser_source_dir/command-memory"
-        "$farm/bash" -c \
+        "$parser_shell" -c \
                 "awk 'BEGIN { print \"ready\" > \"$parser_command_marker\" }'" \
                 >/dev/null 2>&1 || :
         if [ "$(cat "$parser_command_marker" 2>/dev/null)" = ready ]; then
@@ -5405,7 +5506,7 @@ REGULAR_SCRIPT
 awk 'BEGIN { if ((getline line < "/dev/stdin") > 0) print line > "$parser_startup_stolen" }' 2>/dev/null
 STARTUP_ENV
         printf 'printf ready > "%s"\n' "$parser_startup_main" |
-                BASH_ENV="$parser_startup_env" "$farm/bash" >/dev/null 2>&1 || :
+                BASH_ENV="$parser_startup_env" "$parser_shell" >/dev/null 2>&1 || :
         if [ "$(cat "$parser_startup_main" 2>/dev/null)" = ready ] &&
                 [ ! -e "$parser_startup_stolen" ]; then
                 tally shell-parser-startup-stdin 1 1
@@ -5419,7 +5520,7 @@ STARTUP_ENV
         # change any pathname it was given. The shell must refuse both a main
         # named script and a later dot/source open in that state; copying the
         # already changed bytes after open would only preserve the attack.
-        parser_late_result=$(python3 - "$farm/bash" \
+        parser_late_result=$(python3 - "$parser_shell" \
                 "$parser_source_dir" <<'PY'
 import os, pathlib, shlex, signal, subprocess, sys
 
@@ -5486,9 +5587,12 @@ PY
         # says nothing about the outer shell which still owns future syntax.
         # Close the inherited marker descriptor, derive the outer PID through
         # procfs, and make the applet try to reopen it. Opaque command names
-        # must likewise refuse rather than minting a launcher role in-child.
+        # must likewise never mint a launcher role in-child: a shell whose
+        # policy confines anything protects itself before the fork, so the
+        # child inherits the role rather than inventing it, and the dynamic
+        # awk runs confined, its system() refused.
         parser_ancestor_marker="$parser_source_dir/ancestor-escaped"
-        parser_ancestor_result=$(python3 - "$farm/bash" \
+        parser_ancestor_result=$(python3 - "$parser_shell" \
                 "$parser_ancestor_marker" <<'PY'
 import pathlib, subprocess, sys
 
@@ -5504,7 +5608,7 @@ value=$(exec 9>&-; :; awk 'BEGIN {
 }')
 printf '%s:%s\n' "$?" "$value"
 '''
-dynamic = r'''value=$(tool=awk; "$tool" 'BEGIN { print "ran" }')
+dynamic = r'''value=$(tool=awk; "$tool" 'BEGIN { system("printf spawned > " ENVIRON["SPAWNED"]); print "ran" }')
 printf '%s:%s\n' "$?" "$value"
 '''
 literal = r'''value=$(awk 'BEGIN { print 3 }')
@@ -5516,15 +5620,24 @@ try:
         [shell, "-c", ancestor, "guard", marker_name],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         text=True, timeout=10)
+    spawned = pathlib.Path(marker_name + ".spawned")
     second = subprocess.run(
         [shell, "-c", dynamic], stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL, text=True, timeout=10)
+        stderr=subprocess.DEVNULL, text=True, timeout=10,
+        env=dict(__import__("os").environ, SPAWNED=str(spawned)))
     third = subprocess.run(
         [shell, "-c", literal], stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL, text=True, timeout=10)
-    ancestor_ok = (first.returncode == 0 and first.stdout == "126:\n" and
+    # The shell protects itself before the substitution's fork, so awk may
+    # run there confined (a failed write, 2) or be refused outright (126);
+    # either way the outer shell's descriptor is never reached, and a
+    # dynamically named awk never starts a program.
+    ancestor_ok = (first.returncode == 0 and
+                   first.stdout in ("126:\n", "2:\n") and
                    marker.exists() and marker.read_bytes() == b"")
-    dynamic_ok = second.returncode == 0 and second.stdout == "126:\n"
+    dynamic_ok = (second.returncode == 0 and
+                  second.stdout in ("126:\n", "0:ran\n") and
+                  not spawned.exists())
     literal_ok = third.returncode == 0 and third.stdout == "0:3\n"
 except (OSError, subprocess.TimeoutExpired):
     ancestor_ok = dynamic_ok = literal_ok = False
@@ -5546,13 +5659,13 @@ PY
         # before either fallback fork; otherwise the child correctly refuses
         # its inherited launcher contract and the pipeline is empty.
         parser_redirect_pipeline=$(
-                "$farm/bash" -c \
+                "$parser_shell" -c \
                         "awk 'BEGIN { print \"ok\" }' 2>/dev/null | wc -c" \
                         2>/dev/null
         )
         parser_redirect_status=$?
         parser_monitor_pipeline=$(
-                "$farm/bash" -c \
+                "$parser_shell" -c \
                         "set -m; awk 'BEGIN { print \"ok\" }' | wc -c" \
                         2>/dev/null
         )
@@ -5573,7 +5686,7 @@ PY
         cat > "$parser_dot_file" <<DOT_SOURCE
 awk 'BEGIN { print "ready" > "$parser_dot_marker" }'
 DOT_SOURCE
-        "$farm/bash" -c ". '$parser_dot_file'" >/dev/null 2>&1 || :
+        "$parser_shell" -c ". '$parser_dot_file'" >/dev/null 2>&1 || :
         if [ "$(cat "$parser_dot_marker" 2>/dev/null)" = ready ]; then
                 tally shell-parser-dot-memory 1 1
         else
@@ -5589,7 +5702,7 @@ DOT_SOURCE
         # that reflection if the payload escapes.
         parser_socket_compatible="$parser_source_dir/socket-compatible"
         parser_socket_target="$parser_source_dir/socket-injected"
-        parser_socket_result=$(python3 - "$farm/bash" \
+        parser_socket_result=$(python3 - "$parser_shell" \
                 "$parser_socket_compatible" "$parser_socket_target" <<'PY'
 import os, socket, subprocess, sys, time
 
@@ -5653,7 +5766,7 @@ PY
         # from the same terminal remains ordinary shell input.
         parser_pty_compatible="$parser_source_dir/pty-compatible"
         parser_pty_restricted="$parser_source_dir/pty-restricted-ran"
-        parser_pty_result=$(python3 - "$farm/bash" \
+        parser_pty_result=$(python3 - "$parser_shell" \
                 "$parser_pty_compatible" "$parser_pty_restricted" <<'PY'
 import os, pty, subprocess, sys, time
 
@@ -6263,60 +6376,85 @@ Cannot write to 'out' (File too large)."
 }
 lane_awk()
 {
-        need_policy_farm || return 1
+        need_shell || return 1
+        need_hardened_shell || return 1
         awk_failed=0
         awk_policy_dir="$work/awk-parent-policy"
         mkdir -p "$awk_policy_dir"
-        awk_main="$awk_policy_dir/main"
-        awk_stolen="$awk_policy_dir/stolen"
-        awk_direct_status="$awk_policy_dir/status"
-        awk_direct_error="$awk_policy_dir/error"
 
-        printf '%s\n' \
-                "\"$farm/awk\" 'BEGIN { if ((getline line < \"/dev/stdin\") > 0) print line > \"$awk_stolen\" }' 2>\"$awk_direct_error\"; printf '%s' \"\$?\" > \"$awk_direct_status\"" \
-                "printf ready > \"$awk_main\"" | /bin/bash \
-                > /dev/null 2>&1 || :
-        if [ "$(cat "$awk_direct_status" 2>/dev/null)" = 126 ] &&
-                [ "$(cat "$awk_main" 2>/dev/null)" = ready ] &&
-                [ ! -e "$awk_stolen" ] &&
-                grep -q 'parent protection unavailable; refusing launch' \
-                        "$awk_direct_error"; then
-                tally awk-direct-parser-policy 1 1
-        else
-                tally awk-direct-parser-policy 0 1
-                note "direct stock awk did not refuse the external shell's live parser input"
-                awk_failed=1
-        fi
+        #       A foreign bash reading its script from a pipe starts awk, and
+        #       awk reads the pipe too: by default it takes the next line of
+        #       that script exactly as gawk does, so bash never runs it. Under
+        #       a policy refusing awk's spawn it is refused instead, because a
+        #       confined child of a parser it cannot protect could feed that
+        #       parser, and the next line runs.
+        for awk_mode in default hardened; do
+                awk_bin=$farm
+                [ "$awk_mode" = hardened ] && awk_bin=$work/hardened-bin
+                awk_main="$awk_policy_dir/$awk_mode-main"
+                awk_stolen="$awk_policy_dir/$awk_mode-stolen"
+                awk_direct_status="$awk_policy_dir/$awk_mode-status"
+                awk_direct_error="$awk_policy_dir/$awk_mode-error"
+                printf '%s\n' \
+                        "\"$awk_bin/awk\" 'BEGIN { if ((getline line < \"/dev/stdin\") > 0) print line > \"$awk_stolen\" }' 2>\"$awk_direct_error\"; printf '%s' \"\$?\" > \"$awk_direct_status\"" \
+                        "printf ready > \"$awk_main\"" | /bin/bash \
+                        > /dev/null 2>&1 || :
+                if [ "$awk_mode" = default ]; then
+                        [ "$(cat "$awk_direct_status" 2>/dev/null)" = 0 ] &&
+                                [ ! -e "$awk_main" ] &&
+                                grep -q 'printf ready' "$awk_stolen" 2>/dev/null
+                else
+                        [ "$(cat "$awk_direct_status" 2>/dev/null)" = 126 ] &&
+                                [ "$(cat "$awk_main" 2>/dev/null)" = ready ] &&
+                                [ ! -e "$awk_stolen" ] &&
+                                grep -q 'parent protection unavailable; refusing launch' \
+                                        "$awk_direct_error"
+                fi
+                if [ "$?" = 0 ]; then
+                        tally "awk-direct-parser-$awk_mode" 1 1
+                else
+                        tally "awk-direct-parser-$awk_mode" 0 1
+                        note "direct $awk_mode awk under a foreign bash reading a pipe: status $(cat "$awk_direct_status" 2>/dev/null)"
+                        awk_failed=1
+                fi
 
-        if [ "$(printf 'alpha beta\n' |
-                "$farm/bash" -c 'awk '\''{ print }'\'' 2>/dev/null')" = \
-                'alpha beta' ]; then
-                tally awk-integrated-policy-path 1 1
-        else
-                tally awk-integrated-policy-path 0 1
-                note "awk failed with a protected shell parent and memory parser"
-                awk_failed=1
-        fi
+                if [ "$(printf 'alpha beta\n' |
+                        "$awk_bin/bash" -c 'awk '\''{ print }'\'' 2>/dev/null')" = \
+                        'alpha beta' ]; then
+                        tally "awk-integrated-$awk_mode" 1 1
+                else
+                        tally "awk-integrated-$awk_mode" 0 1
+                        note "$awk_mode awk failed under our shell with a memory parser"
+                        awk_failed=1
+                fi
 
-        awk_system_marker="$awk_policy_dir/system-ran"
-        awk_pipe_marker="$awk_policy_dir/pipe-ran"
-        awk_system_output=$(AWK_POLICY_MARKER="$awk_system_marker" \
-                "$farm/bash" -c \
-                'awk '\''BEGIN { print "ran"; system("printf ready > " ENVIRON["AWK_POLICY_MARKER"]) }'\'' 2>/dev/null')
-        awk_pipe_output=$(AWK_POLICY_MARKER="$awk_pipe_marker" \
-                "$farm/bash" -c \
-                'awk '\''BEGIN { cmd = "printf ready > " ENVIRON["AWK_POLICY_MARKER"]; cmd | getline; close(cmd); print "ran" }'\'' 2>/dev/null')
-        if [ "$awk_system_output:$awk_pipe_output" = 'ran:ran' ] &&
-                [ ! -e "$awk_system_marker" ] &&
-                [ ! -e "$awk_pipe_marker" ]; then
-                tally awk-integrated-spawn-policy 1 1
-        else
-                tally awk-integrated-spawn-policy 0 1
-                note "protected awk did not preserve its system and pipe spawn denial"
-                awk_failed=1
-        fi
+                #       system() and "cmd" | getline: by default they run, as
+                #       gawk's do; under the policy the filter refuses them and
+                #       awk carries on.
+                awk_system_marker="$awk_policy_dir/$awk_mode-system-ran"
+                awk_pipe_marker="$awk_policy_dir/$awk_mode-pipe-ran"
+                awk_system_output=$(AWK_POLICY_MARKER="$awk_system_marker" \
+                        "$awk_bin/bash" -c \
+                        'awk '\''BEGIN { print "ran"; system("printf ready > " ENVIRON["AWK_POLICY_MARKER"]) }'\'' 2>/dev/null')
+                awk_pipe_output=$(AWK_POLICY_MARKER="$awk_pipe_marker" \
+                        "$awk_bin/bash" -c \
+                        'awk '\''BEGIN { cmd = "printf ready > " ENVIRON["AWK_POLICY_MARKER"]; cmd | getline; close(cmd); print "ran" }'\'' 2>/dev/null')
+                if [ "$awk_system_output:$awk_pipe_output" = 'ran:ran' ] &&
+                        if [ "$awk_mode" = default ]; then
+                                [ -e "$awk_system_marker" ] && [ -e "$awk_pipe_marker" ]
+                        else
+                                [ ! -e "$awk_system_marker" ] && [ ! -e "$awk_pipe_marker" ]
+                        fi
+                then
+                        tally "awk-spawn-$awk_mode" 1 1
+                else
+                        tally "awk-spawn-$awk_mode" 0 1
+                        note "$awk_mode awk's system and pipe answered $awk_system_output:$awk_pipe_output"
+                        awk_failed=1
+                fi
+        done
 
-        differential_domain awk "$policy_farm" || awk_failed=1
+        differential_domain awk "$farm" || awk_failed=1
         return "$awk_failed"
 }
 
@@ -11305,7 +11443,8 @@ ls /monitor.sh | rev
 #       command echo, the way every other check here does.
 #
 printf 'fl-device-%s\n' "$(head -c 12 /dev/floodlight | rev)"
-printf 'fl-awk-%s\n' "$(grep -c '^awk .*spawn .*deny' /dev/floodlight)"
+printf 'fl-denials-%s\n' "$(grep -c ' deny ' /dev/floodlight)"
+printf 'fl-awk-%s\n' "$(grep -c '^awk .*spawn .*allow' /dev/floodlight)"
 printf 'fl-env-%s\n' "$(grep -c '^env .*spawn .*allow' /dev/floodlight)"
 #
 #       Reversed, because the console echoes the command before the machine
@@ -11314,8 +11453,25 @@ printf 'fl-env-%s\n' "$(grep -c '^env .*spawn .*allow' /dev/floodlight)"
 #       watches is broken. Every other answer in this file is reversed for the
 #       same reason.
 #
-printf 'fl-esc-%s\n' "$(awk 'BEGIN { system("printf out") }' 2>/dev/null | rev)"
+#       Nothing configured, so awk runs its command as gawk would; the same
+#       launch after root refuses awk's spawn does not.
+#
+printf 'fl-free-%s\n' "$(awk 'BEGIN { system("printf out") }' 2>/dev/null | rev)"
 printf 'fl-named-%s\n' "$(env /bin/dash -c 'printf ready' 2>/dev/null | rev)"
+#
+#       A live register refusing nothing leaves the shell's process
+#       semantics as bash has them: after a structural fork, with a child of
+#       its own still running, an explicit exec replaces it in place, where a
+#       supervising shell refuses while it has children. And /proc masked
+#       by a tmpfs changes nothing a launch no row restricts.
+#
+/bin/bash -c '(:); sleep 2 & exec /bin/cat /dev/null'
+printf 'fl-inplace-%s\n' "$?" | rev
+unshare -m /bin/dash -c 'mount -t tmpfs tmpfs /proc && printf "%s-" "$(printf x | /bin/cat)" "$(echo a b | awk "{ print \$2 }")" && /bin/bash -c "exec /bin/ls /dev/null"' | rev
+printf '%s\n' 'awk spawn deny' > /dev/floodlight
+printf 'fl-esc-%s\n' "$(awk 'BEGIN { system("printf out") }' 2>/dev/null | rev)"
+unshare -m /bin/dash -c 'mount -t tmpfs tmpfs /proc && echo x | awk 1' > /dev/null 2>&1
+printf 'fl-masked-%s\n' "$?" | rev
 #
 #       A live pipe has a writer in an outside feeder which a same-UID child
 #       can reacquire through that feeder's proc descriptor table. Restricted
@@ -11372,6 +11528,8 @@ wait "$fl_parser_child"
 [ ! -e /tmp/fl-parser-reader ] &&
         printf 'fl-parser-reader-clean\n' | rev
 rm -f /tmp/fl-parser-script
+printf '%s\n' 'awk spawn allow' > /dev/floodlight
+printf 'fl-restored-%s\n' "$(grep -c ' deny ' /dev/floodlight)"
 printf 'alias-%s\n' "$(readlink /mointor.sh | rev)"
 printf 'path-%s\n' "$(readlink /bin/monitor.sh | rev)"
 printf 'mount-link-%s\n' "$(readlink /bin/mount | rev)"
@@ -11607,10 +11765,16 @@ says transcript 'and the clock reads the zone it was set to' '0010+'
 says transcript 'and the zone reached the kernel and this system' '1applied'
 says transcript 'as a TZif that bowl programs read' '2fiZTtzif'
 says transcript 'floodlight device'   'fl-device-thgildoolf #'
+says transcript 'floodlight refuses nothing' 'fl-denials-0'
 says transcript 'floodlight has awk'  'fl-awk-1'
 says transcript 'floodlight has env'  'fl-env-1'
+says transcript 'awk runs by default' 'fl-free-tuo'
+says transcript 'in-place exec as bash' '0-ecalpni-lf'
+says transcript 'masked /proc as bash' 'llun/ved/-b-x'
 says transcript 'awk was asked'       'fl-esc-'
 never transcript 'awk cannot escape'  'fl-esc-tuo'
+says transcript 'denied awk fails closed' '621-deksam-lf'
+says transcript 'awk given back'      'fl-restored-0'
 says transcript 'a named applet runs' 'fl-named-ydaer'
 says transcript 'nested parser alias' 'naelc-detsen-resrap-lf'
 says transcript 'forked parser alias' 'naelc-noitutitsbus-resrap-lf'
@@ -15518,8 +15682,8 @@ cases = [
     ("tr-delete", "tr", ("-d", "a"), data),
     ("tr-squeeze", "tr", ("-s", "a-z"), data),
     ("sed-substitute", "sed", ("s/alpha/omega/g", str(data)), None),
-    # awk -F: with a program operand is a final floodlight launch; this
-    # driver is python, so parent protection is unavailable (exit 126).
+    # awk is not in this list: it was left out while floodlight refused it
+    # under this python driver, and has not been gated against gawk since.
     ("sort", "sort", (str(data),), None),
     ("uniq", "uniq", ("-c", str(data)), None),
     ("head", "head", ("-n", "1000", str(data)), None),
@@ -16317,10 +16481,9 @@ if [ "$jobs" -gt 1 ]; then
         (
                 need_shell > "$work/shared.shell.log" 2>&1 &
                 shell_build=$!
-                need_policy_utilities > "$work/shared.policy.log" 2>&1 &
-                policy_build=$!
-                wait "$shell_build" && wait "$policy_build" &&
-                        need_policy_farm > "$work/shared.farm.log" 2>&1 ||
+                need_hardened_shell > "$work/shared.hardened.log" 2>&1 &
+                hardened_build=$!
+                wait "$shell_build" && wait "$hardened_build" ||
                         : > "$work/shared.failed"
                 : > "$work/shared.done"
         ) &
