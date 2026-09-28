@@ -176,6 +176,8 @@ struct waterlink_link {
         p64 acked;
         p64 kept;    // frames held back
         p64 spilled; // frames dropped because the hold-back was full
+
+        p64 looked;  // when held keys are next looked over
 };
 
 /*
@@ -196,6 +198,7 @@ struct waterlink_link {
 #define WATERLINK_GRANULE 1000ull       // the least a timer means
 #define WATERLINK_RTO_MOST 2000000ull
 #define WATERLINK_PERSISTENT 3          // probe expiries, then the path is gone
+#define WATERLINK_HELD_MOST 60000000ull // the longest a held frame waits to be asked about
 
 /*      Acknowledgements are owed every second datagram that carried frames,
         and never later than this: at once when a frame arrived out of
@@ -1320,21 +1323,71 @@ __asm__(
 #endif
 
 /*
+        A key whose frames the far side holds, with none of its own in
+        flight, has no timer to ask again: the acknowledgement that frees
+        them -- sent when the far side took them, or when its reader came
+        back -- may be the one the network lost, and then the key waits for
+        ever, with everything queued behind it on its window. So its oldest
+        held frame goes back to its band once the probe timer, doubled for
+        each time the frame went out and at most a minute, runs out, and the
+        far side answers the copy with what it has taken: a reader that is
+        only slow costs a copy now and then, as TCP's persist timer does.
+        Looking over the keys is sixty four steps, so it is done when one of
+        them is due, and at least every RTO_MOST while any slot is taken,
+        never on every wake. Answers when to look next.
+*/
+static p64 waterlink_held_probes(struct waterlink_link address_to link,
+                                 p64 now)
+{
+        p64 due = now + WATERLINK_RTO_MOST;
+
+        if (link->free_count == WATERLINK_SLOTS)
+                return ~0ull;
+        if (now < link->looked)
+                return link->looked;
+        for (p32 key = 0; key < WATERLINK_KEYS; key++)
+        {
+                p32 at = link->sending[key].first;
+                struct waterlink_slot address_to slot;
+                p64 wait;
+
+                if (at == WATERLINK_NONE || link->sending[key].flying ||
+                    link->slot[at].state != WATERLINK_SLOT_HELD)
+                        continue;
+                slot = link->slot + at;
+                wait = waterlink_timeout(link)
+                       << (slot->tries > 16 ? 15 : slot->tries ? slot->tries - 1 : 0);
+                if (wait > WATERLINK_HELD_MOST)
+                        wait = WATERLINK_HELD_MOST;
+                if (now >= slot->sent && now - slot->sent >= wait)
+                {
+                        waterlink_band_requeue(link, at);
+                        due = now;
+                }
+                else if (slot->sent + wait < due)
+                        due = slot->sent + wait;
+        }
+        link->looked = due;
+        return due;
+}
+
+/*
         When the caller should next call fill if nothing arrives first: now,
         when acknowledgements are owed or something may be sent; when the
         pacer next lets a datagram go; when the oldest frame in flight would
-        time out. ~0 when there is nothing to wait for.
+        time out, or a held one is due to be asked about. ~0 when there is
+        nothing to wait for.
 */
 p64 waterlink_wake(struct waterlink_link address_to link, p64 now)
 {
-        p64 wake = ~0ull;
+        p64 wake = waterlink_held_probes(link, now);
         bool sendable = false;
 
-        if (waterlink_ack_due(link, now) ||
+        if (wake <= now || waterlink_ack_due(link, now) ||
             link->head[WATERLINK_BAND_URGENT] != WATERLINK_NONE)
                 return now;
 
-        if (link->acking)
+        if (link->acking && link->owed + WATERLINK_ACK_DELAY < wake)
                 wake = link->owed + WATERLINK_ACK_DELAY;
 
         //      A frame waiting on its key's window is waiting for an
