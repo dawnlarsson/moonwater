@@ -3027,6 +3027,21 @@ fn shell_kill(writer write, string_address input)
                 // This builtin shares the utility parser, but needs no helper
                 // process. Handlers only mark pending traps until argv is back.
                 log_flush();
+                //      bash's kill also takes -n signum for -s and -L for -l,
+                //      in the words before the first operand.
+                if (shell_bash_compat)
+                        for (positive word = 1; word < shell_argc; word++)
+                        {
+                                if (word_is(shell_argv[word], "--") ||
+                                    string_get(shell_argv[word]) != '-')
+                                        break;
+                                if (word_is(shell_argv[word], "-n"))
+                                        shell_argv[word] = (string_address) "-s";
+                                else if (word_is(shell_argv[word], "-L"))
+                                        shell_argv[word] = (string_address) "-l";
+                                if (word_is(shell_argv[word], "-s"))
+                                        word++;
+                        }
                 program_arguments_use(shell_argv, (b32)shell_argc);
                 kill_shell_spelling = true;
                 answer = file_kill();
