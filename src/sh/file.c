@@ -27070,6 +27070,7 @@ typedef struct
         string_address prefix;
         positive prefix_length;
         positive digits;
+        string_address suffix;
         positive made;
         bool keep;
         bool quiet;
@@ -27086,6 +27087,7 @@ static file_facts address_to csplit_outputs;
 static positive csplit_output_room;
 
 static const argument_option csplit_options[] = {
+    {"suffix-format", 'b', ARGUMENT_REQUIRED},
     {"digits", 'n', ARGUMENT_REQUIRED},
     {"elide-empty-files", 'z'},
     {"keep-files", 'k'},
@@ -27110,15 +27112,224 @@ static bool csplit_seen(p8 letter, string_address value)
         /* GNU refuses a non-numeric -n when it is seen, so `-n x --digits=4`
            never last-wins onto 4. Zero is a valid width. */
         if (!string_digits_checked(address_of at, 10, address_of digits) ||
-            string_get(at) || digits > 32)
+            string_get(at) || digits > 2147483647)
                 return string_report(log_error, false,
                                      "csplit: invalid number: '%w'\n", writer_terminal_quoted_name, value);
 
         return true;
 }
 
+/*
+        -b FORMAT, GNU's suffix: printf's one integer conversion among text,
+        %d %i %u %o %x or %X with the flags - 0 # and ' (# only for the
+        three that have an alternative form, ' only for the decimal ones), a
+        width and a precision, and %% for a percent sign. Checked as GNU's
+        max_out checks it before the input is opened; the file number is
+        then written the way printf writes a non-negative int.
+*/
+static bool csplit_suffix_valid(string_address format)
+{
+        bool conversion = false;
+
+        for (string_address at = format; *at; at++)
+        {
+                if (*at != '%')
+                        continue;
+                if (*++at == '%')
+                        continue;
+                if (conversion)
+                {
+                        log_error("csplit: too many % conversion specifications in suffix\n", 0);
+                        return false;
+                }
+                conversion = true;
+
+                bool alternative = false, thousands = false;
+
+                for (;; at++)
+                        if (*at == '#')
+                                alternative = true;
+                        else if (*at == '\'')
+                                thousands = true;
+                        else if (*at != '-' && *at != '0')
+                                break;
+                while (byte_is_digit(*at))
+                        at++;
+                if (*at == '.')
+                        while (byte_is_digit(*++at))
+                                ;
+
+                p8 kind = *at;
+                bool decimal = kind == 'd' || kind == 'i' || kind == 'u';
+
+                if (!kind)
+                        return string_report(log_error, false,
+                                             "csplit: missing conversion specifier in suffix\n");
+                if (!decimal && kind != 'o' && kind != 'x' && kind != 'X')
+                {
+                        p8 shown[8];
+
+                        if (kind >= 0x20 && kind < 0x7f)
+                        {
+                                shown[0] = kind;
+                                shown[1] = 0;
+                        }
+                        else
+                        {
+                                shown[0] = '\\';
+                                shown[1] = (p8)('0' + (kind >> 6));
+                                shown[2] = (p8)('0' + ((kind >> 3) & 7));
+                                shown[3] = (p8)('0' + (kind & 7));
+                                shown[4] = 0;
+                        }
+                        return string_report(log_error, false,
+                                             "csplit: invalid conversion specifier in suffix: %s\n",
+                                             shown);
+                }
+                if ((alternative && decimal) || (thousands && !decimal))
+                {
+                        p8 shown[] = "csplit: invalid flags in conversion specification: %##\n";
+                        positive at_flag = sizeof(shown) - 4;
+
+                        shown[at_flag] = alternative && decimal ? '#' : '\'';
+                        shown[at_flag + 1] = kind;
+                        log_error(shown, 0);
+                        return false;
+                }
+                if (!*at)
+                        break;
+        }
+        if (!conversion)
+        {
+                log_error("csplit: missing % conversion specification in suffix\n", 0);
+                return false;
+        }
+        return true;
+}
+
+// The suffix for file number, into out; its length, or positive_max when
+// it would not fit.
+static positive csplit_suffix_format(string_address format, positive number,
+                                     p8 address_to out, positive room)
+{
+        positive used = 0;
+
+        for (string_address at = format; *at; at++)
+        {
+                if (*at != '%' || at[1] == '%')
+                {
+                        if (used >= room)
+                                return positive_max;
+                        out[used++] = *at;
+                        at += *at == '%';
+                        continue;
+                }
+                at++;
+
+                bool left = false, zero = false, alternative = false;
+                positive width = 0, precision = 0;
+                bool precise = false;
+
+                for (;; at++)
+                        if (*at == '-')
+                                left = true;
+                        else if (*at == '0')
+                                zero = true;
+                        else if (*at == '#')
+                                alternative = true;
+                        else if (*at != '\'')
+                                break;
+                for (; byte_is_digit(*at); at++)
+                {
+                        positive grown = width * 10 + (positive)(*at - '0');
+
+                        width = grown < FILE_PATH_MAX ? grown : FILE_PATH_MAX;
+                }
+                if (*at == '.')
+                {
+                        precise = true;
+                        while (byte_is_digit(*++at))
+                        {
+                                positive grown = precision * 10 + (positive)(*at - '0');
+
+                                precision = grown < FILE_PATH_MAX ? grown : FILE_PATH_MAX;
+                        }
+                }
+
+                p8 kind = *at;
+                positive base = kind == 'o' ? 8 : kind == 'x' || kind == 'X' ? 16 : 10;
+                p8 digits[32];
+                positive count = 0;
+
+                // printf writes no digit for 0 at a precision of 0.
+                if (!(precise && !precision && !number))
+                {
+                        positive value = number;
+
+                        do
+                        {
+                                p8 digit = (p8)(value % base);
+
+                                digits[count++] = (p8)(digit < 10 ? '0' + digit
+                                                                  : (kind == 'X' ? 'A' : 'a') + digit - 10);
+                                value /= base;
+                        } while (value);
+                }
+
+                string_address prefix = (string_address)"";
+                positive zeros = precise && precision > count ? precision - count : 0;
+
+                if (alternative && kind == 'o' && !zeros && (!count || digits[count - 1] != '0'))
+                        zeros = 1;
+                if (alternative && number && base == 16)
+                        prefix = kind == 'X' ? (string_address)"0X" : (string_address)"0x";
+
+                positive prefix_length = string_length(prefix);
+                positive body = prefix_length + zeros + count;
+
+                if (zero && !left && !precise && width > body)
+                {
+                        zeros += width - body;
+                        body = width;
+                }
+
+                positive pad = width > body ? width - body : 0;
+
+                if (used + pad + body > room)
+                        return positive_max;
+                if (!left)
+                        for (; pad; pad--)
+                                out[used++] = ' ';
+                memory_copy_apart(out + used, prefix, prefix_length);
+                used += prefix_length;
+                memory_fill(out + used, '0', zeros);
+                used += zeros;
+                while (count)
+                        out[used++] = digits[--count];
+                for (; pad; pad--)
+                        out[used++] = ' ';
+        }
+        return used;
+}
+
 static bool csplit_name(csplit_state address_to state, positive number)
 {
+        if (state->suffix)
+        {
+                positive room = state->prefix_length < FILE_PATH_MAX
+                                    ? FILE_PATH_MAX - state->prefix_length - 1
+                                    : 0;
+                positive made = csplit_suffix_format(state->suffix, number,
+                                                     state->name + state->prefix_length,
+                                                     room);
+
+                if (made == positive_max)
+                        return string_report(log_error, false, "csplit: output file name is too long\n");
+                memory_copy_apart(state->name, state->prefix, state->prefix_length);
+                state->name[state->prefix_length + made] = 0;
+                return true;
+        }
+
         p8 suffix[32];
         positive length = positive_into_base(suffix, number, 10, false);
         positive width = max(length, state->digits);
@@ -27680,10 +27891,15 @@ static b32 file_csplit()
 
                 if (!string_digits_checked(address_of at, 10,
                                            address_of digits) ||
-                    string_get(at) || digits > 32)
+                    string_get(at) || digits > 2147483647)
                         return string_report(log_error, 1, "csplit: invalid number: '%w'\n",
                                       writer_terminal_quoted_name, digit_text);
         }
+
+        string_address suffix = file_option_value(address_of taking, 'b');
+
+        if (suffix && !csplit_suffix_valid(suffix))
+                return 1;
 
         string_address input_name = file_operand_at(0);
         bipolar in = string_is(input_name, '-') && !string_get(input_name + 1)
@@ -27749,6 +27965,7 @@ static b32 file_csplit()
             .input_name = input_name,
             .prefix = file_option_value(address_of taking, 'f'),
             .digits = digits,
+            .suffix = suffix,
             .keep = (taking.flags & FILE_FLAG('k')) != 0,
             .quiet = (taking.flags & (FILE_FLAG('s') | FILE_FLAG('q'))) != 0,
             .elide = (taking.flags & FILE_FLAG('z')) != 0,
