@@ -19021,85 +19021,119 @@ static COLD fn shell_bind(writer write, string_address input)
         shell_answer(0);
 }
 
+/*
+        The builtins, each with a switch of its own but the core.
+
+        SHELL_BUILTIN rows are CONFIG_MOONWATER_BUILTIN_<KEY>: switched off,
+        the row is compiled out through the same gate as the tools, and the
+        name is not found -- unless a tool of that name is still built, since
+        blkid, findfs, findmnt, kill, mount, mountpoint and umount are in
+        both tables and each table has its own switch.
+
+        SHELL_BUILTIN_CORE rows have no switch. They are POSIX's special
+        builtins -- . : break continue eval exec exit export readonly return
+        set shift times trap unset -- with cd, true and false. A special
+        builtin is part of the language rather than a command it runs: the
+        executor answers break, continue and return itself and finds `:`,
+        true and false before any table (here and in programs/shell.c), so
+        taking their rows away would not even make them "not found". And a
+        script that met "exit: not found" or "trap: not found" would carry on
+        past the point it meant to stop or clean up at, which is the opposite
+        of what switching things off is for. cd is the one ordinary builtin
+        that cannot be a program at all, since a child cannot move its
+        parent. The key is the upper-case name, BRACKET for [.
+*/
+#define SHELL_BUILTIN_KEEP(name, function) {name, function},
+#define SHELL_BUILTIN_DROP(name, function)
+#define SHELL_BUILTIN(key, name, function) \
+        SHELL_GATE(MOONWATER_BUILTIN_OFF_##key, SHELL_BUILTIN_DROP, \
+                   SHELL_BUILTIN_KEEP)(name, function)
+#define SHELL_BUILTIN_CORE(name, function) {name, function},
+
 shell_command shell_commands[] = {
     //      Byte order, because `enable` writes this list as it
     //      stands and the reference writes a sorted one: '.' is
     //      0x2e and ':' is 0x3a, so the two of them led it wrong.
-    {".", shell_dot},
-    {":", shell_true},
-    {"[", shell_test},
-    {"alias", shell_alias},
-    {"bg", shell_bg},
-    {"bind", shell_bind},
-    {"blkid", shell_blkid},
-    {"break", shell_break},
-    {"builtin", shell_builtin_run},
-    {"caller", shell_caller},
-    {"cd", shell_cd},
-    {"clear", shell_clear},
-    {"command", shell_command_builtin},
-    {"compgen", shell_compgen},
-    {"complete", shell_complete},
-    {"compopt", shell_compopt},
-    {"continue", shell_break},
-    {"declare", shell_declare},
-    {"dirs", shell_dirs},
-    {"disown", shell_disown},
-    {"echo", shell_echo},
-    {"enable", shell_enable},
-    {"eval", shell_eval},
-    {"exec", shell_exec},
-    {"exit", shell_exit},
-    {"export", shell_export},
-    {"false", shell_false},
-    {"fc", shell_fc},
-    {"fg", shell_fg},
-    {"findfs", shell_findfs},
-    {"findmnt", shell_findmnt},
-    {"getopts", shell_getopts},
-    {"hash", shell_hash},
-    {"help", shell_help},
-    {"history", shell_history},
-    {"jobs", shell_jobs},
-    {"kill", shell_kill},
-    {"let", shell_let},
-    {"local", shell_local},
-    {"logout", shell_logout},
-    {"mapfile", shell_mapfile},
-    {"mount", shell_mount},
-    {"mountpoint", shell_mountpoint},
-    {"popd", shell_popd},
-    {"poweroff", shell_poweroff},
-    {"printf", shell_printf},
-    {"pushd", shell_pushd},
-    {"pwd", shell_pwd},
-    {"read", shell_read},
-    {"readarray", shell_mapfile},
-    {"readonly", shell_readonly},
-    {"reboot", shell_reboot},
-    {"return", shell_break},
-    {"set", shell_set},
-    {"shift", shell_shift},
-    {"shopt", shell_shopt},
-    {"source", shell_dot},
-    {"suspend", shell_suspend},
-    {"test", shell_test},
-    {"times", shell_times},
-    {"trap", shell_trap},
-    {"true", shell_true},
-    {"type", shell_type},
-    {"typeset", shell_declare},
-    {"ulimit", shell_ulimit},
-    {"umask", shell_umask},
-    {"umount", shell_umount},
-    {"unalias", shell_unalias},
-    {"unset", shell_unset},
-    {"wait", job_wait},
-    {"which", shell_which},
+    SHELL_BUILTIN_CORE(".", shell_dot)
+    SHELL_BUILTIN_CORE(":", shell_true)
+    SHELL_BUILTIN(BRACKET, "[", shell_test)
+    SHELL_BUILTIN(ALIAS, "alias", shell_alias)
+    SHELL_BUILTIN(BG, "bg", shell_bg)
+    SHELL_BUILTIN(BIND, "bind", shell_bind)
+    SHELL_BUILTIN(BLKID, "blkid", shell_blkid)
+    SHELL_BUILTIN_CORE("break", shell_break)
+    SHELL_BUILTIN(BUILTIN, "builtin", shell_builtin_run)
+    SHELL_BUILTIN(CALLER, "caller", shell_caller)
+    SHELL_BUILTIN_CORE("cd", shell_cd)
+    SHELL_BUILTIN(CLEAR, "clear", shell_clear)
+    SHELL_BUILTIN(COMMAND, "command", shell_command_builtin)
+    SHELL_BUILTIN(COMPGEN, "compgen", shell_compgen)
+    SHELL_BUILTIN(COMPLETE, "complete", shell_complete)
+    SHELL_BUILTIN(COMPOPT, "compopt", shell_compopt)
+    SHELL_BUILTIN_CORE("continue", shell_break)
+    SHELL_BUILTIN(DECLARE, "declare", shell_declare)
+    SHELL_BUILTIN(DIRS, "dirs", shell_dirs)
+    SHELL_BUILTIN(DISOWN, "disown", shell_disown)
+    SHELL_BUILTIN(ECHO, "echo", shell_echo)
+    SHELL_BUILTIN(ENABLE, "enable", shell_enable)
+    SHELL_BUILTIN_CORE("eval", shell_eval)
+    SHELL_BUILTIN_CORE("exec", shell_exec)
+    SHELL_BUILTIN_CORE("exit", shell_exit)
+    SHELL_BUILTIN_CORE("export", shell_export)
+    SHELL_BUILTIN_CORE("false", shell_false)
+    SHELL_BUILTIN(FC, "fc", shell_fc)
+    SHELL_BUILTIN(FG, "fg", shell_fg)
+    SHELL_BUILTIN(FINDFS, "findfs", shell_findfs)
+    SHELL_BUILTIN(FINDMNT, "findmnt", shell_findmnt)
+    SHELL_BUILTIN(GETOPTS, "getopts", shell_getopts)
+    SHELL_BUILTIN(HASH, "hash", shell_hash)
+    SHELL_BUILTIN(HELP, "help", shell_help)
+    SHELL_BUILTIN(HISTORY, "history", shell_history)
+    SHELL_BUILTIN(JOBS, "jobs", shell_jobs)
+    SHELL_BUILTIN(KILL, "kill", shell_kill)
+    SHELL_BUILTIN(LET, "let", shell_let)
+    SHELL_BUILTIN(LOCAL, "local", shell_local)
+    SHELL_BUILTIN(LOGOUT, "logout", shell_logout)
+    SHELL_BUILTIN(MAPFILE, "mapfile", shell_mapfile)
+    SHELL_BUILTIN(MOUNT, "mount", shell_mount)
+    SHELL_BUILTIN(MOUNTPOINT, "mountpoint", shell_mountpoint)
+    SHELL_BUILTIN(POPD, "popd", shell_popd)
+    SHELL_BUILTIN(POWEROFF, "poweroff", shell_poweroff)
+    SHELL_BUILTIN(PRINTF, "printf", shell_printf)
+    SHELL_BUILTIN(PUSHD, "pushd", shell_pushd)
+    SHELL_BUILTIN(PWD, "pwd", shell_pwd)
+    SHELL_BUILTIN(READ, "read", shell_read)
+    SHELL_BUILTIN(READARRAY, "readarray", shell_mapfile)
+    SHELL_BUILTIN_CORE("readonly", shell_readonly)
+    SHELL_BUILTIN(REBOOT, "reboot", shell_reboot)
+    SHELL_BUILTIN_CORE("return", shell_break)
+    SHELL_BUILTIN_CORE("set", shell_set)
+    SHELL_BUILTIN_CORE("shift", shell_shift)
+    SHELL_BUILTIN(SHOPT, "shopt", shell_shopt)
+    SHELL_BUILTIN(SOURCE, "source", shell_dot)
+    SHELL_BUILTIN(SUSPEND, "suspend", shell_suspend)
+    SHELL_BUILTIN(TEST, "test", shell_test)
+    SHELL_BUILTIN_CORE("times", shell_times)
+    SHELL_BUILTIN_CORE("trap", shell_trap)
+    SHELL_BUILTIN_CORE("true", shell_true)
+    SHELL_BUILTIN(TYPE, "type", shell_type)
+    SHELL_BUILTIN(TYPESET, "typeset", shell_declare)
+    SHELL_BUILTIN(ULIMIT, "ulimit", shell_ulimit)
+    SHELL_BUILTIN(UMASK, "umask", shell_umask)
+    SHELL_BUILTIN(UMOUNT, "umount", shell_umount)
+    SHELL_BUILTIN(UNALIAS, "unalias", shell_unalias)
+    SHELL_BUILTIN_CORE("unset", shell_unset)
+    SHELL_BUILTIN(WAIT, "wait", job_wait)
+    SHELL_BUILTIN(WHICH, "which", shell_which)
     {null, null},
 };
 
 #define SHELL_COMMAND_COUNT ((array_count(shell_commands)) - 1)
+
+#ifdef MOONWATER_CONFIG_BUILTINS
+_Static_assert(SHELL_COMMAND_COUNT == MOONWATER_CONFIG_BUILTINS,
+               "the builtin table holds what the configuration header counted");
+#endif
 #define SHELL_COMMAND_INDEX_ROOM 256
 
 static shell_name_slot shell_command_index[SHELL_COMMAND_INDEX_ROOM];

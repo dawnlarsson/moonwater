@@ -245,9 +245,14 @@ Every tool has a switch of its own, `CONFIG_MOONWATER_TOOL_<NAME>` (`TOOL_TAC`,
 compiled out of the shell's table and linked nowhere, so its name is not
 found. `CONFIG_MOONWATER_TOOLS_ALL=n` turns the default of every one off, for
 an allow list. `/init`, `/term` and `/moonwater` have no switch, because the
-kernel and init run them by path. The switches live in
+kernel and init run them by path. Builtins have the same,
+`CONFIG_MOONWATER_BUILTIN_<NAME>` (`BUILTIN_ULIMIT`, `BUILTIN_BRACKET` for `[`),
+with `CONFIG_MOONWATER_BUILTINS_ALL` as their default. POSIX's special builtins,
+with `cd`, `true` and `false`, have none: they are the language, not commands
+it runs. A name in both tables, such as `mount` or `kill`, is gone only when
+both of its switches are off. The switches live in
 `src/moonwater/Kconfig.switches`, which `./build switches` writes from
-`src/sh/tools.inc`.
+`src/sh/tools.inc` and the shell's builtin table.
 
 ## Tests
 

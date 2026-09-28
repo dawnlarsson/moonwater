@@ -9949,7 +9949,12 @@ fi
 #       the table, from every name the image links, and from the shell.
 group tool
 printf '%s\n' 'CONFIG_MOONWATER_CORE=y' \
-        '# CONFIG_MOONWATER_TOOL_TAC is not set' > "$work/switch-single.config"
+        '# CONFIG_MOONWATER_TOOL_TAC is not set' \
+        '# CONFIG_MOONWATER_BUILTIN_ULIMIT is not set' \
+        '# CONFIG_MOONWATER_TOOL_MOUNTPOINT is not set' \
+        '# CONFIG_MOONWATER_BUILTIN_MOUNTPOINT is not set' \
+        '# CONFIG_MOONWATER_BUILTIN_KILL is not set' \
+        '# CONFIG_MOONWATER_BUILTIN_EXIT is not set' > "$work/switch-single.config"
 if switch_header "$work/switch-single.config" "$work/switch-single.h" &&
         switch_shell "$work/switch-single.h" "$work/switch-single"; then
         won
@@ -9959,6 +9964,18 @@ if switch_header "$work/switch-single.config" "$work/switch-single.h" &&
         same 'tail its own' yes "$(switch_own "$switch_bin" tail)"
         same 'sum still on' 0 "$(switch_status "$switch_bin" 'sum /dev/null')"
         same 'tail still on' 0 "$(switch_status "$switch_bin" 'tail /dev/null')"
+        same 'ulimit not found' 127 "$(switch_status "$switch_bin" 'ulimit -n')"
+        same 'ulimit not its own' no "$(switch_own "$switch_bin" ulimit)"
+        same 'umask still its own' yes "$(switch_own "$switch_bin" umask)"
+        same 'mountpoint gone from both' no \
+                "$(switch_own "$switch_bin" mountpoint)"
+        same 'mountpoint not found' 127 \
+                "$(switch_status "$switch_bin" 'mountpoint /')"
+        same 'kill kept by its tool' yes "$(switch_own "$switch_bin" kill)"
+        same 'exit has no switch' 3 "$(switch_status "$switch_bin" 'exit 3')"
+        same 'enable lists no ulimit' '' \
+                "$(PATH="$switch_empty" "$switch_bin" -c 'enable' < /dev/null |
+                        grep -x 'enable ulimit')"
         if build_tool surface "$work/switch-single.config" \
                 > "$work/switch-single.surface" 2>&1; then
                 same 'tac not linked' '' \

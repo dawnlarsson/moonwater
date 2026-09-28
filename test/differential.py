@@ -25668,7 +25668,10 @@ def harness_surface_coreutils_gap(argv):
                           source, re.MULTILINE | re.DOTALL)
         if not match:
             raise ValueError('cannot find dispatch table %s' % name)
-        return set(re.findall(r'^\s*\{"([^"]+)",\s*[A-Za-z_]\w*\},',
+        # A row is SHELL_BUILTIN(KEY, "name", function) or, for the core
+        # with no switch, SHELL_BUILTIN_CORE("name", function).
+        return set(re.findall(r'^\s*SHELL_BUILTIN(?:_CORE\(|\(\w+,\s*)'
+                              r'"([^"]+)",\s*[A-Za-z_]\w*\)$',
                               match.group(1), re.MULTILINE))
 
 

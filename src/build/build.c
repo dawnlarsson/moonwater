@@ -155,6 +155,7 @@ static build_setting build_settings[BUILD_SETTING_ROOM] = {
         /*      The sources and scripts a build reads. */
         {"tool_registry", "src/sh/tools.inc"},
         {"switches_kconfig", "src/moonwater/Kconfig.switches"},
+        {"builtin_registry", "src/sh/builtin.c"},
         {"shell_source", "programs/shell"},
         {"utilities_source", "programs/utilities"},
         {"monitor_source", "programs/monitor.sh"},
@@ -3682,6 +3683,86 @@ static bool build_tools_read()
 }
 
 /*
+        The builtins as the shell's own table spells them: every
+        SHELL_BUILTIN(KEY, "name", function) row of shell_commands[] in
+        src/sh/builtin.c is a switch, and every SHELL_BUILTIN_CORE row is
+        counted and has none.
+*/
+typedef struct build_builtin_entry
+{
+        string_address key;
+        string_address name;
+} build_builtin_entry;
+
+#define BUILD_BUILTIN_ROOM 256
+
+static build_builtin_entry build_builtin_table[BUILD_BUILTIN_ROOM];
+static positive build_builtin_count;
+static positive build_builtin_core;
+static bool build_builtins_ready;
+
+static bool build_builtins_read()
+{
+        build_lines walk;
+        p8 address_to store;
+
+        if (build_builtins_ready)
+                return true;
+
+        if (file_slurp(build_setting_get("builtin_registry"), build_file_two,
+                        BUILD_FILE_ROOM) < 0)
+                return false;
+
+        store = build_text_take(BUILD_WORD_ROOM);
+        build_lines_open(address_of walk, (string_address)build_file_two);
+
+        while (build_lines_next(address_of walk) &&
+               build_builtin_count < BUILD_BUILTIN_ROOM)
+        {
+                string_address words[BUILD_ARGUMENT_ROOM];
+                positive parts;
+                positive length = walk.length;
+                p8 address_to flat = build_text_take(length + 1);
+
+                //      Only rows as the table writes them, four spaces in;
+                //      the macro definitions above it start at the margin.
+                if (length < 17 || memory_compare(walk.line, "    SHELL_BUILTIN", 17))
+                        continue;
+
+                for (positive which = 0; which < length; which++)
+                {
+                        p8 byte = walk.line[which];
+
+                        flat[which] = (byte == '(' || byte == ')' || byte == ',' ||
+                                       byte == '"')
+                                              ? ' '
+                                              : byte;
+                }
+
+                flat[length] = end;
+                parts = build_words_of((string_address)flat, length,
+                                       (string_address address_to)words,
+                                       BUILD_ARGUMENT_ROOM, store,
+                                       BUILD_WORD_ROOM);
+
+                if (parts == 3 && word_is(words[0], "SHELL_BUILTIN_CORE"))
+                        build_builtin_core++;
+                else if (parts == 4 && word_is(words[0], "SHELL_BUILTIN"))
+                {
+                        build_builtin_table[build_builtin_count].key =
+                                build_join(words[1], null);
+                        build_builtin_table[build_builtin_count].name =
+                                build_join(words[2], null);
+                        build_builtin_count++;
+                }
+        }
+
+        build_builtins_ready = build_builtin_count > 0;
+
+        return build_builtins_ready;
+}
+
+/*
         The build.
 
         Everything below is build.sh's local path, step for step and label for
@@ -3933,6 +4014,26 @@ static string_address build_config_header(string_address from,
                         tools++;
         }
 
+        {
+                positive builtins = build_builtin_core;
+
+                for (positive at = 0; at < build_builtin_count; at++)
+                {
+                        build_builtin_entry address_to one =
+                                address_of build_builtin_table[at];
+
+                        if (build_switch_on("BUILTIN_", one->key))
+                                builtins++;
+                        else
+                                text = build_join(text,
+                                                  "#define MOONWATER_BUILTIN_OFF_",
+                                                  one->key, " 1\n", null);
+                }
+
+                text = build_join(text, "#define MOONWATER_CONFIG_BUILTINS ",
+                                  build_number(builtins), "\n", null);
+        }
+
         text = build_join(text, "#define MOONWATER_CONFIG_TOOLS ",
                           build_number(tools), "\n",
                           "#define MOONWATER_CONFIG_SYSTEM_TOOLS ",
@@ -4006,8 +4107,8 @@ static b32 build_config_header_write(string_address config, string_address outpu
 
         build_components(config);
 
-        if (!build_tools_read())
-                return build_die("cannot read the tool registry");
+        if (!build_tools_read() || !build_builtins_read())
+                return build_die("cannot read the tool or builtin registry");
 
         build_utility_program = kind != null;
         text = build_config_header(config, address_of record);
@@ -4152,8 +4253,9 @@ static string_address build_switches_text()
             {"Tools: the shell's own programs", "MOONWATER_SHELL", "SYSTEM", null},
         };
         string_address text =
-            "# Generated by `build switches` from src/sh/tools.inc. Do not edit:\n"
-            "# the kit lane fails when this file and its sources disagree.\n"
+            "# Generated by `build switches` from src/sh/tools.inc and the\n"
+            "# shell_commands[] table in src/sh/builtin.c. Do not edit: the kit\n"
+            "# lane fails when this file and its sources disagree.\n"
             "\n"
             "config MOONWATER_TOOLS_ALL\n"
             "    bool \"Build every tool unless it is switched off below\"\n"
@@ -4197,7 +4299,34 @@ static string_address build_switches_text()
                                   null);
         }
 
-        return text;
+        text = build_join(text,
+            "\nconfig MOONWATER_BUILTINS_ALL\n"
+            "    bool \"Build every builtin unless it is switched off below\"\n"
+            "    depends on MOONWATER_SHELL\n"
+            "    default y\n"
+            "    help\n"
+            "      The default of every MOONWATER_BUILTIN_ switch, as\n"
+            "      MOONWATER_TOOLS_ALL is for the tools. A builtin switched off\n"
+            "      is compiled out of the shell's table and its name is not\n"
+            "      found, unless a tool of that name is still built: blkid,\n"
+            "      findfs, findmnt, kill, mount, mountpoint and umount are\n"
+            "      in both tables, and each has its own switch.\n"
+            "\n"
+            "      The core has no switch: POSIX's special builtins (. : break\n"
+            "      continue eval exec exit export readonly return set shift\n"
+            "      times trap unset), which are the language rather than\n"
+            "      commands it runs, with cd, true and false. The comment over\n"
+            "      shell_commands[] in src/sh/builtin.c says why.\n"
+            "\nmenu \"Shell builtins\"\n"
+            "    depends on MOONWATER_SHELL\n", null);
+
+        for (positive at = 0; at < build_builtin_count; at++)
+                text = build_join(text, "\nconfig MOONWATER_BUILTIN_",
+                                  build_builtin_table[at].key, "\n",
+                                  "    bool \"", build_builtin_table[at].name, "\"\n",
+                                  "    default MOONWATER_BUILTINS_ALL\n", null);
+
+        return build_join(text, "\nendmenu\n", null);
 }
 
 //      build switches [check]
@@ -4211,8 +4340,8 @@ static b32 build_switches(string_address mode)
                 return string_report(log_error, 1, "switches: '%s' is not check\n",
                                      mode);
 
-        if (!build_tools_read())
-                return build_die("cannot read the tool registry");
+        if (!build_tools_read() || !build_builtins_read())
+                return build_die("cannot read the tool or builtin registry");
 
         text = build_switches_text();
 
@@ -4488,8 +4617,8 @@ static b32 build_userspace()
 
         build_components(config);
 
-        if (!build_tools_read())
-                return build_die("cannot read the tool registry");
+        if (!build_tools_read() || !build_builtins_read())
+                return build_die("cannot read the tool or builtin registry");
 
         //      kernel/profile/coverage: /shell built to record which of its
         //      blocks the guest reached, for `sh test/run coverage`. Any
