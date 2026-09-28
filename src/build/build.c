@@ -4127,22 +4127,35 @@ static b32 build_floodlight_policy_check()
         positive count = 0;
         positive length;
         positive used = 0;
+        bool whole = true;
         p8 address_to text;
 
         if (!build_moon_floodlight || !quoted)
                 return 0;
 
         //      Kconfig writes the string as C does: quoted, and a backslash
-        //      in front of each backslash and quote inside.
+        //      in front of each backslash and quote inside. The header
+        //      carries it as written, so anything else -- a quote that ends
+        //      it early -- would be C of its own in the shell's source.
         length = string_length(quoted);
         text = build_text_take(length);
         for (positive at = 1; at + 1 < length; at++)
         {
-                if (quoted[at] == '\\' && at + 2 < length)
+                if (quoted[at] == '\\')
+                {
+                        whole = whole && at + 2 < length;
                         at++;
+                }
+                else if (quoted[at] == '"')
+                        whole = false;
                 text[used++] = (p8)quoted[at];
         }
         text[used] = end;
+
+        if (!whole || length < 2 || quoted[length - 1] != '"')
+                return build_die(build_join(
+                    "CONFIG_MOONWATER_FLOODLIGHT_POLICY is not one quoted "
+                    "string: ", quoted, null));
 
         if (!floodlight_policy_take((string_address)text, rows,
                                     address_of count))

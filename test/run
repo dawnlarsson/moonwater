@@ -10612,7 +10612,8 @@ fi
 #       A policy string the shell and floodlight.c cannot read refuses every
 #       program at boot, /init among them, so the header is not written for
 #       one: each row below is read as given, then misspelled one field at
-#       a time, and only the row as given builds.
+#       a time, and only the row as given builds. A value that is not one C
+#       string is refused too; the header carries it as written.
 group floodlight-policy
 for switch_row in 'wget spawn deny' 'curl network allow' '/usr/bin/nc run deny' \
         'find flag -exec deny' 'tar flag --to-command allow'; do
@@ -10620,9 +10621,10 @@ for switch_row in 'wget spawn deny' 'curl network allow' '/usr/bin/nc run deny' 
         set -- $switch_row
         switch_last=$(($# == 4 ? 4 : 3))
         eval "switch_state=\${$switch_last}"
-        for switch_shape in given setting state extra short seal option; do
+        for switch_shape in given setting state extra short seal option split; do
                 case $switch_shape in
                 given) switch_policy="$switch_row; $switch_row" ;;
+                split) switch_policy="$switch_row\"; \"" ;;
                 setting) switch_policy="$1 ${2}s ${switch_row#"$1 $2 "}" ;;
                 state) switch_policy="${switch_row% *} ${switch_state}d" ;;
                 extra) switch_policy="$switch_row now" ;;
