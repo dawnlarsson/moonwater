@@ -14618,6 +14618,18 @@ def shell_lang_fd_prefix_range(rng):
         ("command", "stdin", "file"))
 
 
+#       Two case commands in one substitution, the second on its own line: a
+#       newline did not tell the substitution's scanner that a command could
+#       start, so the second case's first ) closed the substitution.
+def shell_lang_case_substitution_lines(rng):
+    one = rng.choice(("case 1 in 1) echo 1;; esac", "case 1 in\n  1) echo 1\n  esac", "case 1 in (1) echo 1\nesac"))
+    two = rng.choice(("case 2 in 2) echo 2;; esac", "case 2 in\n  2) echo 2\n  esac", "for f in a; do echo $f; done"))
+    joint = rng.choice(("\n", "\n\n", "; ", "\n  "))
+    form = rng.choice(("x=$(%s)\necho \"[$x]\"", "echo \"$(%s)\"", "x=$(\n%s\n)\necho \"[$x]\""))
+    return ("case-substitution-lines", shell_ALL, shell_program(form % (one + joint + two), 'echo "end=$?"'),
+            ("command", "stdin", "file"))
+
+
 #       What bash does with a builtin handed words it has no place for, and
 #       with a subscript it cannot evaluate: the whole command the reader was
 #       running is dropped -- through eval, a sourced file and a function --
@@ -17456,6 +17468,7 @@ SHELL_FAMILIES = (
     shell_lang_loop_control_arguments,
     shell_lang_builtin_discard,
     shell_lang_fd_prefix_range,
+    shell_lang_case_substitution_lines,
     shell_lang_set_lone_plus,
     shell_lang_directory_state,
     shell_lang_builtin_refusals,

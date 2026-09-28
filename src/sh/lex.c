@@ -973,6 +973,10 @@ static string_address lex_nesting_at(string_address at, positive nesting,
                         fresh = true;
                         maybe_here = false;
                         line = step;
+                        //      A newline ends a command, so the next word
+                        //      may be a case: `esac<newline>case 2 in 2)`
+                        //      closed the substitution at the second arm.
+                        cases.command = true;
                         continue;
                 }
 
