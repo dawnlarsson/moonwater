@@ -18061,7 +18061,7 @@ static fn clock_format_core(clock_format_state address_to state,
                         alone, the width less the six of "-MM-DD":
                         %12F is %06Y-%m-%d, %+F is %+1Y-%m-%d.
                 */
-                p8 dated[24];
+                p8 dated[32];
 
                 if (which == 'F' && state->extensions)
                 {
@@ -18077,12 +18077,7 @@ static fn clock_format_core(clock_format_state address_to state,
                         dated[at++] = state->pad || state->width >= 0 ? state->pad : '+';
                         if (!dated[at - 1])
                                 at--;
-                        if (year_width)
-                        {
-                                if (year_width >= 10)
-                                        dated[at++] = (p8)('0' + year_width / 10 % 10);
-                                dated[at++] = (p8)('0' + year_width % 10);
-                        }
+                        at += positive_into(dated + at, (positive)year_width);
                         memory_copy(dated + at, "Y-%m-%d", 8);
                         composite = (const char address_to)dated;
                         state->width = -1;

@@ -8254,7 +8254,7 @@ FILES_UTILITIES = (
                                      ("-d", "@1000000000", "+%c|%x|%X|%r|%Ec|%EX|%%c|%p"), ("-u", "-d", "@0"))) +
                   # nstrftime's %F: a bare one signs a year past 9999, a flag
                   # or width goes to the year alone.
-                  tuple(("-u", "-d", "@%d" % moment, "+%F|%+F|%+12F|%12F|%-12F|%012F|%_12F|%^F|%3F")
+                  tuple(("-u", "-d", "@%d" % moment, "+%F|%+F|%+12F|%12F|%-12F|%012F|%_12F|%^F|%3F|%120F|%_110F")
                         for moment in (0, 253402300800, 327403900800, -62135596800)) +
                   # parse_datetime's grammar where it shifts: a lone number,
                   # DD.MM., comments, zone T after a time, a year in the way
