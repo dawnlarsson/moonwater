@@ -49029,9 +49029,9 @@ static bool net_as_emulated(void)
             connected socketpair body → writev once-armed -ENOSPC → HTTP_WRITE
           writev       http_write_spans_midpath_fault
             short writev prefix then once-armed -ENOSPC → HTTP write refuse
-          TLS framing  tls_midpath_append_refusal
-            plaintext ServerHello / encrypted-flight append past a tight
-            hold room after a retained prefix → TLS_FAIL (no hang).
+          TLS framing  tls_encrypted_flight_hs_reassembly
+            handshake records past the TLS_HS_MAX hold room after a
+            retained prefix → TLS_FAIL (no hang).
             TLS flight/hs buffers are fixed (TLS_HS_MAX); no mmap/heap path.
           DNS TCP      stack frame/reply only (DNS_MAX_MESSAGE); no heap
             growth — oversized frame is refused without byte_store_reserve.
@@ -55567,6 +55567,55 @@ static fn tls_client_hello_groups(void)
         }
 }
 
+/*
+        The handshake byte stream, walked: handshake records laid in a
+        connection's receive buffer as the peer sends them before keys (so
+        tls_next_record hands them over as they are), pulled a message at a
+        time by tls_handshake_next and placed by tls_server_flight_step --
+        the same two functions tls_handshake runs, without the checks that
+        need keys. A walk ends at COMPLETE with nothing left behind, or
+        fails; the buffer running dry reads as the peer going away.
+*/
+static tls_conn tls_walk_conn;
+static p8 tls_walk_hs[TLS_HS_MAX];
+static bool tls_walk_ccs;
+
+static positive tls_walk_record(p8 address_to out, p8 type,
+                                const p8 address_to bytes, positive length)
+{
+        tls_record_header(out, type, length);
+        memory_copy(out + 5, bytes, length);
+        return 5 + length;
+}
+
+static fn tls_walk_load(const p8 address_to records, positive length)
+{
+        memory_fill(address_of tls_walk_conn, 0, TLS_CONN_HEAD);
+        tls_walk_conn.handle = -1;
+        memory_copy(tls_walk_conn.receive, records, length);
+        tls_walk_conn.receive_end = length;
+        tls_walk_conn.receive_high = length;
+        tls_walk_ccs = false;
+}
+
+static bipolar tls_walk(p8 flight, positive address_to messages)
+{
+        positive used = 0;
+        positive length = 0;
+
+        *messages = 0;
+        while (flight != TLS_SERVER_FLIGHT_COMPLETE)
+        {
+                if (tls_handshake_next(address_of tls_walk_conn, tls_walk_hs,
+                                       address_of used, address_of length,
+                                       address_of tls_walk_ccs, null) ||
+                    !tls_server_flight_step(address_of flight, tls_walk_hs[0]))
+                        return TLS_FAIL;
+                (*messages)++;
+        }
+        return used == length ? TLS_OK : TLS_FAIL;
+}
+
 static fn tls_server_hello_validation(void)
 {
         p8 hello[91] = {0};
@@ -55651,32 +55700,24 @@ static fn tls_server_hello_validation(void)
               tls_server_hello_keys(changed, 91, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         {
-                p8 assembled[128];
+                p8 records[2 * 5 + 90];
                 positive used = 0;
+                positive length = 0;
 
-                check("a fragmented ServerHello header is retained",
-                      tls_handshake_one_append(
-                          assembled, sizeof assembled, address_of used,
-                          hello, 2) == TLS_HANDSHAKE_MORE && used == 2);
-                check("a fragmented ServerHello body is reassembled",
-                      tls_handshake_one_append(
-                          assembled, sizeof assembled, address_of used,
-                          hello + 2, 88) == TLS_HANDSHAKE_COMPLETE &&
-                          used == 90 &&
-                          tls_server_hello_keys(assembled, used, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) ==
+                tls_walk_record(records, TLS_CT_HANDSHAKE, hello, 2);
+                tls_walk_record(records + 7, TLS_CT_HANDSHAKE, hello + 2, 88);
+                tls_walk_load(records, sizeof records);
+                check("a ServerHello split across records is reassembled",
+                      tls_handshake_next(address_of tls_walk_conn, tls_walk_hs,
+                                         address_of used, address_of length,
+                                         address_of tls_walk_ccs, null) ==
+                              TLS_OK &&
+                          used == 90 && length == 90 &&
+                          tls_server_hello_keys(tls_walk_hs, length, 0x1d, peer,
+                                                sizeof peer, &share, &group,
+                                                &cookie, &cookie_length) ==
                               TLS_OK);
-
-                memory_copy(changed, hello, 90);
-                changed[90] = 0;
-                used = 0;
-                check("bytes after a plaintext ServerHello are refused",
-                      tls_handshake_one_append(
-                          assembled, sizeof assembled, address_of used,
-                          changed, 91) == TLS_FAIL);
-                check("an empty ServerHello fragment is refused",
-                      tls_handshake_one_append(
-                          assembled, sizeof assembled, address_of used,
-                          hello, 0) == TLS_FAIL);
+                tls_forget(address_of tls_walk_conn);
         }
 }
 
@@ -55940,264 +55981,137 @@ static fn tls_server_flight_validation(void)
         */
         {
                 static tls_conn tls;
-                static p8 hs[TLS_HS_MAX];
                 static p8 unasked[] = {TLS_HS_ENCRYPTED_EXTS, 0, 0, 6,
                                        0, 4, 0, 16, 0, 0};
                 static p8 asked[] = {TLS_HS_ENCRYPTED_EXTS, 0, 0, 14,
                                      0, 12, 0, 0, 0, 0, 0, 10, 0, 4, 0, 2,
                                      0, 29};
-                positive used = 0;
-                p8 flight = TLS_SERVER_FLIGHT_EE;
 
                 crypto_sha256_open(address_of tls.transcript);
                 tls.named = true;
                 check("EncryptedExtensions may answer server_name and supported_groups",
-                      tls_encrypted_flight_append(address_of tls, hs, sizeof hs,
-                                                  address_of used,
-                                                  address_of flight, asked,
-                                                  sizeof asked, null) ==
-                              TLS_OK &&
-                          flight == TLS_SERVER_FLIGHT_REQUEST);
-                used = 0;
-                flight = TLS_SERVER_FLIGHT_EE;
+                      tls_flight_message(address_of tls, asked, sizeof asked) ==
+                          TLS_OK);
                 check("EncryptedExtensions answering what was never offered is refused",
-                      tls_encrypted_flight_append(address_of tls, hs, sizeof hs,
-                                                  address_of used,
-                                                  address_of flight, unasked,
-                                                  sizeof unasked, null) ==
-                          TLS_FAIL);
-                used = 0;
-                flight = TLS_SERVER_FLIGHT_EE;
+                      tls_flight_message(address_of tls, unasked,
+                                         sizeof unasked) == TLS_FAIL);
                 tls.named = false;
                 check("EncryptedExtensions answering server_name without SNI is refused",
-                      tls_encrypted_flight_append(address_of tls, hs, sizeof hs,
-                                                  address_of used,
-                                                  address_of flight, asked,
-                                                  sizeof asked, null) ==
+                      tls_flight_message(address_of tls, asked, sizeof asked) ==
                           TLS_FAIL);
         }
-}
-
-/* After ServerHello the encrypted flight uses tls_encrypted_flight_append
-   (same static tls_handshake calls).  Full loopback needs a peer and keys;
-   these unit proofs feed plaintext fragments with tls=null so only framing
-   and flight-step run — one implementation, no mirrored walk. */
-typedef struct
-{
-        p8 hs[TLS_HS_MAX];
-        positive used;
-        p8 flight;
-        positive messages;
-} tls_flight_hs_walk;
-
-static bipolar tls_flight_hs_append(tls_flight_hs_walk address_to walk,
-                                    p8 address_to fragment, positive length)
-{
-        return tls_encrypted_flight_append(
-            null, walk->hs, sizeof(walk->hs), address_of walk->used,
-            address_of walk->flight, fragment, length,
-            address_of walk->messages);
-}
-
-static fn tls_flight_hs_put_header(p8 address_to at, p8 type, positive body)
-{
-        at[0] = type;
-        at[1] = (p8)(body >> 16);
-        at[2] = (p8)(body >> 8);
-        at[3] = (p8)body;
 }
 
 /*
-        Mid-path framing refuse after a retained handshake prefix: open-time
-        TLS EMFILE is covered elsewhere; these prove a tight hold room refuses
-        the next fragment closed once some bytes are already kept.
+        Flight rows: records written as type, then body bytes, each record
+        one entry of up to 40 bytes; a type of 0 ends the row. The messages
+        are EncryptedExtensions (08 000002 0000), a 2-byte Certificate
+        (0b 000002 abab), CertificateVerify (0f 000000), a 1-byte Finished
+        (14 000001 55) and CertificateRequest (0d 000000).
 */
-static fn tls_midpath_append_refusal(void)
-{
-        {
-                p8 held[16];
-                positive used = 0;
-                p8 fragment[12];
-
-                memory_fill(fragment, 0xee, sizeof fragment);
-                check("a plaintext ServerHello prefix is retained in a tight room",
-                      tls_handshake_one_append(held, 8, address_of used,
-                                               fragment, 3) ==
-                              TLS_HANDSHAKE_MORE &&
-                          used == 3);
-                check("a plaintext ServerHello fragment past the hold room is refused mid-reassembly",
-                      tls_handshake_one_append(held, 8, address_of used,
-                                               fragment + 3, 6) == TLS_FAIL &&
-                          used == 3);
-        }
-
-        {
-                p8 hs[16];
-                positive used = 0;
-                p8 flight = TLS_SERVER_FLIGHT_CERTIFICATE;
-                positive messages = 0;
-                p8 fragment[20];
-
-                tls_flight_hs_put_header(fragment, TLS_HS_CERTIFICATE, 100);
-                memory_fill(fragment + 4, 0xab, sizeof fragment - 4);
-                check("an encrypted-flight Certificate prefix is retained in a tight room",
-                      tls_encrypted_flight_append(
-                          null, hs, sizeof hs, address_of used,
-                          address_of flight, fragment, 10,
-                          address_of messages) == TLS_OK &&
-                          used == 10 && !messages);
-                check("an encrypted-flight fragment past the hold room is refused mid-reassembly",
-                      tls_encrypted_flight_append(
-                          null, hs, sizeof hs, address_of used,
-                          address_of flight, fragment + 10, 7,
-                          address_of messages) == TLS_FAIL &&
-                          used == 10 && !messages &&
-                          flight == TLS_SERVER_FLIGHT_CERTIFICATE);
-        }
-}
-
 static fn tls_encrypted_flight_hs_reassembly(void)
 {
-        /* 1. Certificate (type 11) split across appends: incomplete then complete. */
+#define EE 8, 0, 0, 2, 0, 0
+#define CERT 11, 0, 0, 2, 0xab, 0xab
+#define CV 15, 0, 0, 0
+#define FIN 20, 0, 0, 1, 0x55
+#define CR 13, 0, 0, 0
+        static const struct
         {
-                p8 cert[4 + 24];
-                tls_flight_hs_walk walk = {.flight = TLS_SERVER_FLIGHT_CERTIFICATE};
-
-                tls_flight_hs_put_header(cert, TLS_HS_CERTIFICATE, 24);
-                memory_fill(cert + 4, 0xab, 24);
-
-                check("a fragmented Certificate header is retained",
-                      tls_flight_hs_append(address_of walk, cert, 3) == TLS_OK &&
-                          walk.used == 3 && !walk.messages);
-                check("a fragmented Certificate body waits for its declared end",
-                      tls_flight_hs_append(address_of walk, cert + 3, 10) ==
-                          TLS_OK &&
-                          walk.used == 13 && !walk.messages);
-                check("a fragmented Certificate is consumed when complete",
-                      tls_flight_hs_append(address_of walk, cert + 13,
-                                          sizeof cert - 13) == TLS_OK &&
-                          !walk.used && walk.messages == 1 &&
-                          walk.flight == TLS_SERVER_FLIGHT_CERT_VERIFY);
-        }
-
-        /* 2. Exact TLS_HS_MAX fill is accepted; one octet past refuses. */
-        {
-                p8 chunk[TLS_HS_MAX];
-                p8 one = 0;
-                tls_flight_hs_walk walk = {.flight = TLS_SERVER_FLIGHT_CERTIFICATE};
-
-                /* Declare a body larger than the buffer so the message stays
-                   incomplete while the flight hs[] fills to its ceiling. */
-                tls_flight_hs_put_header(chunk, TLS_HS_CERTIFICATE, TLS_HS_MAX);
-                memory_fill(chunk + 4, 0xcd, sizeof chunk - 4);
-
-                check("encrypted-flight hs may fill exactly to TLS_HS_MAX",
-                      tls_flight_hs_append(address_of walk, chunk,
-                                          sizeof chunk) == TLS_OK &&
-                          walk.used == TLS_HS_MAX && !walk.messages &&
-                          sizeof(walk.hs) == (positive)TLS_HS_MAX);
-                check("one byte past the encrypted-flight hs buffer is refused",
-                      tls_flight_hs_append(address_of walk, address_of one, 1) ==
-                          TLS_FAIL &&
-                          walk.used == TLS_HS_MAX);
-        }
-
-        /* 3. Empty mid-message fragment: RFC 8446 5.1 forbids sending one,
-           and the flight refuses it as the other appends do, leaving the
-           held prefix alone. */
-        {
-                p8 cert[4 + 8];
-                tls_flight_hs_walk walk = {.flight = TLS_SERVER_FLIGHT_CERTIFICATE};
-
-                tls_flight_hs_put_header(cert, TLS_HS_CERTIFICATE, 8);
-                memory_fill(cert + 4, 0x11, 8);
-
-                check("an empty encrypted-flight fragment is refused mid-message",
-                      tls_flight_hs_append(address_of walk, cert, 6) == TLS_OK &&
-                          walk.used == 6 &&
-                          tls_flight_hs_append(address_of walk, cert, 0) ==
-                              TLS_FAIL &&
-                          walk.used == 6 && !walk.messages);
-        }
-
-        /* 4. Two HS messages in one record: tiny EE consumed, Certificate start held. */
-        {
-                p8 record[6 + 4 + 2];
-                tls_flight_hs_walk walk = {.flight = TLS_SERVER_FLIGHT_EE};
-
-                /* EncryptedExtensions with empty extension vector (body 2). */
-                tls_flight_hs_put_header(record, TLS_HS_ENCRYPTED_EXTS, 2);
-                record[4] = 0;
-                record[5] = 0;
-                /* Start of Certificate: header + two body bytes of eight. */
-                tls_flight_hs_put_header(record + 6, TLS_HS_CERTIFICATE, 8);
-                record[10] = 0xaa;
-                record[11] = 0xbb;
-
-                check("EncryptedExtensions in a shared record is consumed",
-                      tls_flight_hs_append(address_of walk, record,
-                                          sizeof record) == TLS_OK &&
-                          walk.messages == 1 &&
-                          walk.flight == TLS_SERVER_FLIGHT_REQUEST &&
-                          walk.used == 6 &&
-                          walk.hs[0] == TLS_HS_CERTIFICATE &&
-                          walk.hs[3] == 8 && walk.hs[4] == 0xaa &&
-                          walk.hs[5] == 0xbb);
-
+                string_address name;
+                struct
                 {
-                        p8 rest[6];
+                        p8 type;
+                        p8 length;
+                        p8 bytes[40];
+                } records[5];
+                bipolar expect;
+                positive messages;
+        } rows[] = {
+            {"a flight in one record", {{22, 21, {EE, CERT, CV, FIN}}}, TLS_OK, 4},
+            {"a flight one message a record",
+             {{22, 6, {EE}}, {22, 6, {CERT}}, {22, 4, {CV}}, {22, 5, {FIN}}},
+             TLS_OK, 4},
+            {"a flight split inside headers",
+             {{22, 2, {8, 0}}, {22, 10, {0, 2, 0, 0, CERT}}, {22, 1, {15}},
+              {22, 8, {0, 0, 0, FIN}}},
+             TLS_OK, 4},
+            {"a flight with a CertificateRequest",
+             {{22, 25, {EE, CR, CERT, CV, FIN}}}, TLS_OK, 5},
+            {"a Certificate before EncryptedExtensions", {{22, 6, {CERT}}},
+             TLS_FAIL, 0},
+            {"a CertificateRequest after the Certificate",
+             {{22, 16, {EE, CERT, CR}}}, TLS_FAIL, 2},
+            {"bytes after Finished in its record",
+             {{22, 22, {EE, CERT, CV, FIN, 0}}}, TLS_FAIL, 4},
+            {"an empty record inside a message",
+             {{22, 3, {EE}}, {22, 0, {0}}, {22, 3, {2, 0, 0}}}, TLS_FAIL, 0},
+            {"a compatibility CCS inside a split message",
+             {{22, 3, {EE}}, {20, 1, {1}}, {22, 18, {2, 0, 0, CERT, CV, FIN}}},
+             TLS_OK, 4},
+            {"a second compatibility CCS",
+             {{20, 1, {1}}, {22, 6, {EE}}, {20, 1, {1}}}, TLS_FAIL, 1},
+            {"a CCS of another byte", {{20, 1, {2}}, {22, 21, {EE, CERT, CV, FIN}}},
+             TLS_FAIL, 0},
+            {"a message past the hold room", {{22, 4, {11, 0, 0x40, 0}}},
+             TLS_FAIL, 0},
+            {"an alert in the flight", {{22, 6, {EE}}, {21, 2, {2, 40}}},
+             TLS_FAIL, 1},
+            {"the flight ends early", {{22, 12, {EE, CERT}}}, TLS_FAIL, 2},
+        };
+#undef EE
+#undef CERT
+#undef CV
+#undef FIN
+#undef CR
+        bool all = true;
 
-                        memory_fill(rest, 0xcc, sizeof rest);
-                        check("the Certificate remainder after a shared record completes",
-                              tls_flight_hs_append(address_of walk, rest,
-                                                  sizeof rest) == TLS_OK &&
-                                  !walk.used && walk.messages == 2 &&
-                                  walk.flight == TLS_SERVER_FLIGHT_CERT_VERIFY);
+        for (positive row = 0; row < array_count(rows); row++)
+        {
+                static p8 records[5 * 45];
+                positive at = 0;
+                positive messages = 0;
+                bipolar got;
+
+                for (positive r = 0; r < 5 && rows[row].records[r].type; r++)
+                        at += tls_walk_record(records + at,
+                                              rows[row].records[r].type,
+                                              rows[row].records[r].bytes,
+                                              rows[row].records[r].length);
+                tls_walk_load(records, at);
+                got = tls_walk(TLS_SERVER_FLIGHT_EE, address_of messages);
+                if (got != rows[row].expect || messages != rows[row].messages)
+                {
+                        all = false;
+                        string_format(log, "  flight row: %s\n", rows[row].name);
                 }
         }
+        check("each handshake flight row walks to its verdict", all);
 
-        /* 5. Trailing junk after Finished when the flight is COMPLETE fails. */
+        /* Two records that together pass the hold room: the second is
+           refused whole, not truncated. */
         {
-                p8 flight_bytes[6 + 4 + 4 + 4 + 32 + 1];
+                static p8 records[2 * (5 + 10000)];
+                static p8 bytes[10000];
                 positive at = 0;
-                tls_flight_hs_walk walk = {.flight = TLS_SERVER_FLIGHT_EE};
+                positive messages = 0;
 
-                tls_flight_hs_put_header(flight_bytes + at, TLS_HS_ENCRYPTED_EXTS,
-                                        2);
-                at += 4;
-                flight_bytes[at++] = 0;
-                flight_bytes[at++] = 0;
-
-                tls_flight_hs_put_header(flight_bytes + at, TLS_HS_CERTIFICATE, 0);
-                at += 4;
-
-                tls_flight_hs_put_header(flight_bytes + at, TLS_HS_CERT_VERIFY, 0);
-                at += 4;
-
-                tls_flight_hs_put_header(flight_bytes + at, TLS_HS_FINISHED, 32);
-                at += 4;
-                memory_fill(flight_bytes + at, 0x55, 32);
-                at += 32;
-                flight_bytes[at++] = 0xff; /* junk past Finished */
-
-                check("trailing junk after a COMPLETE encrypted flight is refused",
-                      tls_flight_hs_append(address_of walk, flight_bytes, at) ==
-                          TLS_FAIL &&
-                          walk.flight == TLS_SERVER_FLIGHT_COMPLETE &&
-                          walk.messages == 4);
-
-                /* Same flight without the junk clears cleanly. */
-                walk.used = 0;
-                walk.flight = TLS_SERVER_FLIGHT_EE;
-                walk.messages = 0;
-                memory_fill(walk.hs, 0, sizeof walk.hs);
-                check("a COMPLETE encrypted flight with no leftover clears",
-                      tls_flight_hs_append(address_of walk, flight_bytes,
-                                          at - 1) == TLS_OK &&
-                          !walk.used &&
-                          walk.flight == TLS_SERVER_FLIGHT_COMPLETE &&
-                          walk.messages == 4);
+                memory_fill(bytes, 0xab, sizeof bytes);
+                bytes[0] = TLS_HS_CERTIFICATE;
+                bytes[1] = 0;
+                bytes[2] = 0x3e;
+                bytes[3] = 0x80;
+                at += tls_walk_record(records, TLS_CT_HANDSHAKE, bytes,
+                                      sizeof bytes);
+                at += tls_walk_record(records + at, TLS_CT_HANDSHAKE, bytes,
+                                      sizeof bytes);
+                tls_walk_load(records, at);
+                check("handshake records past the hold room are refused",
+                      tls_walk(TLS_SERVER_FLIGHT_CERTIFICATE,
+                               address_of messages) == TLS_FAIL &&
+                          !messages);
         }
+        tls_forget(address_of tls_walk_conn);
 }
 
 static fn tls_post_handshake_framing(void)
@@ -60253,7 +60167,6 @@ b32 main(void)
         tls_server_hello_validation();
         tls_hello_retry_rows();
         tls_server_flight_validation();
-        tls_midpath_append_refusal();
         tls_encrypted_flight_hs_reassembly();
         tls_post_handshake_framing();
         tls_key_update_rounds();

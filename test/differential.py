@@ -37611,6 +37611,8 @@ def harness_tls_peer(argv):
          {"curve": "prime256v1", "suite": b"\x13\2"}, [app(length_head + body), close]),
         ("ServerHello after HelloRetryRequest changes the group",
          {"curve": "prime256v1", "answer": 0x18}, [app(length_head + body), close]),
+        ("plaintext bytes after ServerHello in its record",
+         {"after_hello": message(8, b"\0\0")}, [app(length_head + body), close]),
         ("flight one message a record", {"split": True},
          [app(length_head + body), close]),
         ("EncryptedExtensions answering supported_groups",
@@ -37788,7 +37790,7 @@ def harness_tls_peer(argv):
                                session + flight.get("suite", b"\x13\1") + b"\0" +
                                len(extensions).to_bytes(2, "big") + extensions)
         transcript += server_hello
-        sock.sendall(record(22, server_hello))
+        sock.sendall(record(22, server_hello + flight.get("after_hello", b"")))
         if flight.get("ccs"):
             sock.sendall(record(20, b"\1"))
         early = extract(b"\0" * 32, b"\0" * 32)
@@ -40297,11 +40299,36 @@ def tls_fuzz_seeds(corpus):
     seeds = {name + ".bin": bytes.fromhex(hx)
              for name, hx in TLS_FUZZ_SEED_HEX[corpus].items()}
     if corpus == "tls_hs":
+        # The framing fixtures are handshake bytes, some as chunks (a
+        # 16-bit length before each); they become the records of a
+        # connection: a ServerHello's own, or the flight after an X25519
+        # ServerHello, sealed.
+        hello = tls_seed_record(22, tls_seed_server_hello())
+        connections = {}
+        for name, raw in seeds.items():
+            if raw[:1] in (b"\xf1", b"\xf2"):
+                raw = raw[1:]
+            pieces = [raw]
+            if "chunks" in name:
+                pieces, at = [], 0
+                while at + 2 <= len(raw):
+                    size = int.from_bytes(raw[at:at + 2], "big")
+                    pieces.append(raw[at + 2:at + 2 + size])
+                    at += 2 + size
+            if name.startswith("sh_"):
+                records = tuple(tls_seed_record(22, piece) for piece in pieces)
+            else:
+                records = (hello,) + tuple(tls_seed_sealed(22, piece) for piece in pieces)
+            connections[name] = tls_seed_connection(b"\0\0\0\1", *records)
         fill = b"\x0b\x00\x40\x00" + b"\xcd" * 16380
-        seeds["hs_max_fill.bin"] = fill
-        seeds["hs_max_plus_chunks.bin"] = b"\x40\x00" + fill + b"\x00\x01\x00"
-        seeds.update(tls_seed_connections())
-        return seeds
+        connections["hs_max_fill.bin"] = tls_seed_connection(
+            b"\0\0\0\1", hello, tls_seed_sealed(22, fill[:16000]),
+            tls_seed_sealed(22, fill[16000:]))
+        connections["hs_max_plus.bin"] = tls_seed_connection(
+            b"\0\0\0\1", hello, tls_seed_sealed(22, fill[:16000]),
+            tls_seed_sealed(22, fill[16000:] + b"\0"))
+        connections.update(tls_seed_connections())
+        return connections
     minimal = seeds["minimal_cert.bin"]
     for count, name in ((1, "cert_list_1"), (7, "cert_list_7"), (8, "cert_list_8"),
                         (9, "cert_list_9_leftover"), (2, "cert_list_two_minimal")):
@@ -41380,9 +41407,10 @@ def harness_tls_hs_fuzz(argv):
     tls_write, reads arriving in PRNG-sized pieces with interruptions. What
     ASan cannot see inside the connection is asserted: the buffer offsets,
     lent spans that must not move while tls_lend gathers more, and a closed
-    connection that must stay closed. Magics 0xf1 / 0xf2 keep the framing
-    walks over tls_encrypted_flight_append (tls=null) and
-    tls_handshake_one_append. Seeds from tls_fuzz_seeds("tls_hs"). Bounded
+    connection that must stay closed. Every input is a connection (the
+    seeds' leading 0xf3 is optional); the framing seeds of the old
+    ServerHello and flight walks arrive as records of one. Seeds from
+    tls_fuzz_seeds("tls_hs"). Bounded
     fixed-seed run; return 2 (NOT RUN) when clang/libFuzzer is unavailable.
     Expected TLS_FAIL is ignored; only sanitizer reports and the asserts fail
     the lane (or MSan when MOONWATER_MSAN=1). Override MOONWATER_FUZZ_RUNS /
@@ -41721,19 +41749,29 @@ static bool network_deadline_begin(network_deadline address_to deadline,
         deadline->budget = seconds * 1000000000ul + nanoseconds;
         return deadline->budget != 0;
 }
-/* Whatever the client sends has to be one well-formed record, every byte
-   written. */
+/* Whatever the client sends has to be whole, well-formed records, every
+   byte written. */
 static bool network_stream_send_all(bipolar handle, p8 address_to data,
                                     positive length)
 {
         p8 sink[1];
 
         (void)handle;
-        if (length < 5 || data[1] != 3 || data[2] != 3 ||
-            network_load_16(data + 3) != length - 5 ||
-            (data[0] != 22 && data[0] != 23) ||
-            (data[0] == 23 && length < 5 + 17) || length > 5 + 16640)
+        if (!length)
                 abort();
+        for (positive at = 0; at < length;)
+        {
+                positive size;
+
+                if (length - at < 5 || data[at + 1] != 3 || data[at + 2] != 3)
+                        abort();
+                size = network_load_16(data + at + 3);
+                if (size > length - at - 5 ||
+                    (data[at] != 22 && data[at] != 23) ||
+                    (data[at] == 23 && size < 17) || size > 16640)
+                        abort();
+                at += 5 + size;
+        }
         fuzz_mix(sink, 1, data, length, 9);
         if (sink[0] == 0x5a && fuzz_state == 0)
                 abort();
@@ -41942,147 +41980,6 @@ static fn fuzz_connection(const p8 *data, positive length)
         free(tls);
 }
 
-static void fuzz_flight_chunks(p8 *data, positive length)
-{
-        p8 *hs;
-        positive used = 0;
-        p8 flight = TLS_SERVER_FLIGHT_EE;
-        positive messages = 0;
-        positive at = 0;
-
-        hs = (p8 *)malloc(TLS_HS_MAX);
-        if (!hs)
-                return;
-        memory_fill(hs, 0, TLS_HS_MAX);
-
-        while (at + 2 <= length)
-        {
-                positive frag = ((positive)data[at] << 8) | data[at + 1];
-                at += 2;
-                if (at + frag > length)
-                        frag = length - at;
-                (void)tls_encrypted_flight_append(
-                    null, hs, TLS_HS_MAX, address_of used, address_of flight,
-                    data + at, frag, address_of messages);
-                at += frag;
-                if (used == TLS_HS_MAX)
-                {
-                        p8 one = 0;
-                        (void)tls_encrypted_flight_append(
-                            null, hs, TLS_HS_MAX, address_of used,
-                            address_of flight, address_of one, 1,
-                            address_of messages);
-                        break;
-                }
-        }
-        free(hs);
-}
-
-static void fuzz_flight_splits(p8 *data, positive length)
-{
-        p8 *hs;
-        positive used;
-        p8 flight;
-        positive messages;
-        positive split;
-
-        if (!length || length > 512)
-                return;
-
-        hs = (p8 *)malloc(TLS_HS_MAX);
-        if (!hs)
-                return;
-
-        for (split = 0; split <= length; split++)
-        {
-                used = 0;
-                flight = TLS_SERVER_FLIGHT_EE;
-                messages = 0;
-                memory_fill(hs, 0, TLS_HS_MAX);
-                if (split)
-                        (void)tls_encrypted_flight_append(
-                            null, hs, TLS_HS_MAX, address_of used,
-                            address_of flight, data, split,
-                            address_of messages);
-                if (split < length)
-                        (void)tls_encrypted_flight_append(
-                            null, hs, TLS_HS_MAX, address_of used,
-                            address_of flight, data + split, length - split,
-                            address_of messages);
-        }
-        free(hs);
-}
-
-static void fuzz_flight_whole(p8 *data, positive length)
-{
-        p8 *hs;
-        positive used = 0;
-        p8 flight = TLS_SERVER_FLIGHT_EE;
-        positive messages = 0;
-
-        hs = (p8 *)malloc(TLS_HS_MAX);
-        if (!hs)
-                return;
-        memory_fill(hs, 0, TLS_HS_MAX);
-        (void)tls_encrypted_flight_append(
-            null, hs, TLS_HS_MAX, address_of used, address_of flight, data,
-            length, address_of messages);
-        if (used == TLS_HS_MAX)
-        {
-                p8 one = 0;
-                (void)tls_encrypted_flight_append(
-                    null, hs, TLS_HS_MAX, address_of used, address_of flight,
-                    address_of one, 1, address_of messages);
-        }
-        free(hs);
-}
-
-static void fuzz_server_hello_chunks(p8 *data, positive length)
-{
-        p8 held[512];
-        positive used = 0;
-        positive at = 0;
-
-        memory_fill(held, 0, sizeof held);
-        while (at + 2 <= length)
-        {
-                positive frag = ((positive)data[at] << 8) | data[at + 1];
-                at += 2;
-                if (at + frag > length)
-                        frag = length - at;
-                (void)tls_handshake_one_append(held, sizeof held,
-                                               address_of used, data + at,
-                                               frag);
-                at += frag;
-                if (used >= sizeof held)
-                        break;
-        }
-}
-
-static void fuzz_server_hello_whole(p8 *data, positive length)
-{
-        p8 held[512];
-        positive used = 0;
-        positive split;
-
-        memory_fill(held, 0, sizeof held);
-        (void)tls_handshake_one_append(held, sizeof held, address_of used, data,
-                                       length);
-
-        if (!length || length > 256)
-                return;
-        for (split = 1; split < length; split++)
-        {
-                used = 0;
-                memory_fill(held, 0, sizeof held);
-                (void)tls_handshake_one_append(held, sizeof held,
-                                               address_of used, data, split);
-                (void)tls_handshake_one_append(held, sizeof held,
-                                               address_of used, data + split,
-                                               length - split);
-        }
-}
-
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         p8 *buf;
@@ -42099,30 +41996,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         if (length)
                 memcpy(buf, data, length);
 
-        payload = buf + 1;
-        payload_length = length ? length - 1 : 0;
-        /* Optional magic selects a focused path; remainder is the payload. */
+        /* The magic 0xf3 of the seeds is optional: every input is a
+           connection. */
+        payload = buf;
+        payload_length = length;
         if (length > 0 && buf[0] == 0xf3)
-                fuzz_connection(payload, payload_length);
-        else if (length > 0 && buf[0] == 0xf1)
         {
-                fuzz_flight_chunks(payload, payload_length);
-                fuzz_flight_whole(payload, payload_length);
-                fuzz_flight_splits(payload, payload_length);
+                payload = buf + 1;
+                payload_length = length - 1;
         }
-        else if (length > 0 && buf[0] == 0xf2)
-        {
-                fuzz_server_hello_chunks(payload, payload_length);
-                fuzz_server_hello_whole(payload, payload_length);
-        }
-        else
-        {
-                fuzz_flight_whole(buf, length);
-                fuzz_flight_chunks(buf, length);
-                fuzz_flight_splits(buf, length);
-                fuzz_server_hello_whole(buf, length);
-                fuzz_server_hello_chunks(buf, length);
-        }
+        fuzz_connection(payload, payload_length);
 
         free(buf);
         return 0;
