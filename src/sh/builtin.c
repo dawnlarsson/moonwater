@@ -19057,13 +19057,8 @@ static bipolar shell_source_open(string_address name,
                 //      A directory of the name is passed over, as a PATH
                 //      search for a command passes over one: the next
                 //      segment may hold the file.
-                {
-                        file_facts facts;
-
-                        if (test_facts(*found, address_of facts, true) &&
-                            (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
-                                continue;
-                }
+                if (test_unary('d', (string_address)*found))
+                        continue;
 
                 handle = shell_source_direct(*found);
 
@@ -20426,14 +20421,8 @@ static b32 shell_find_in_path_mode(string_address name, p8 address_to into,
                    execute test: both references search on past d/hello to
                    the program in the next directory of PATH. When nothing
                    else is found, dash still names the directory's refusal. */
-                if (!shell_find_directories)
-                {
-                        file_facts facts;
-
-                        if (test_facts(into, address_of facts, true) &&
-                            (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
-                                continue;
-                }
+                if (!shell_find_directories && test_unary('d', into))
+                        continue;
 
                 // Remembered only as the executor's answer: a query reads
                 // the table and writes nothing into it.
@@ -20523,7 +20512,6 @@ static bipolar shell_find_in_path_alloc_mode(string_address name,
         */
         if (query)
         {
-                file_facts facts;
                 bool runs;
 
                 shell_find_asking = shell_bash_compat;
@@ -20533,8 +20521,7 @@ static bipolar shell_find_in_path_alloc_mode(string_address name,
                 shell_find_asking = false;
                 if (runs &&
                     !(string_first_of(name, '/') &&
-                      test_facts(*into, address_of facts, true) &&
-                      (facts.mode & MODE_FORMAT) == MODE_DIRECTORY))
+                      test_unary('d', (string_address)*into)))
                         return 1;
 
                 if (shell_bash_compat && !shell_posix_on() &&
@@ -20546,9 +20533,7 @@ static bipolar shell_find_in_path_alloc_mode(string_address name,
                         found = shell_find_in_path_mode(name, *into, *room, 0,
                                                         false, fixed_path);
                         shell_find_directories = false;
-                        if (found &&
-                            !(test_facts(*into, address_of facts, true) &&
-                              (facts.mode & MODE_FORMAT) == MODE_DIRECTORY))
+                        if (found && !test_unary('d', (string_address)*into))
                                 return 1;
                 }
         }
