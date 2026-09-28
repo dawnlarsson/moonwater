@@ -48963,11 +48963,15 @@ static bool net_as_emulated(void)
                              / "a DNS CNAME chain one link past DNS_CNAME_HOPS is refused"
 
         TLS
-          record payload     TLS_RECORD_MAX (16640)
-            exact+one-over:  "a TLS record of exactly TLS_RECORD_MAX is accepted"
-                             / "a TLS record one past TLS_RECORD_MAX is refused"
-          enc plaintext      TLS_RECORD_MAX - 17
-            one-over:        "TLS encrypted plaintext one over TLS_RECORD_MAX-17 is refused"
+          record content     TLS_PLAINTEXT_MAX (16384), plaintext and protected
+            exact+one-over:  "a plaintext TLS record of exactly 2^14 bytes is accepted"
+                             / "a plaintext TLS record one past 2^14 bytes is refused"
+                             "a protected TLS record of exactly 2^14 content bytes is accepted"
+                             / "a protected TLS record over 2^14 content bytes is refused"
+          record payload     TLS_RECORD_MAX (16401: content, type byte, tag)
+            one-over:        "a TLS record one past TLS_RECORD_MAX is refused"
+          enc plaintext      TLS_PLAINTEXT_MAX
+            one-over:        "TLS encrypted plaintext one over 2^14 bytes is refused"
                              (wraparound also: "TLS record sizing rejects arithmetic wraparound")
           handshake hold     TLS_HS_MAX (16384)
             exact+one-over:  "encrypted-flight hs may fill exactly to TLS_HS_MAX"
@@ -53305,6 +53309,28 @@ static fn network_stream_sigpipe(void)
         socket_close(pair[0]);
 }
 
+/* The checks' reads: no deadline, so a read waits in the kernel. */
+static bipolar tls_read(tls_conn address_to tls, p8 address_to into,
+                        positive room, positive address_to got)
+{
+        return tls_read_until(tls, into, room, got, null);
+}
+
+/* A post-handshake stream, whole: every message complete and allowed. */
+static bool tls_post_handshake_valid(p8 address_to messages,
+                                     positive length)
+{
+        p8 held[TLS_HS_MAX];
+        positive held_length = 0;
+        bool valid;
+
+        valid = tls_post_handshake_append(held, address_of held_length,
+                                          messages, length) == TLS_OK &&
+                !held_length;
+        crypto_forget(held, sizeof held);
+        return valid;
+}
+
 static fn tls_closure_boundaries(void)
 {
         {
@@ -53388,6 +53414,87 @@ static fn tls_closure_boundaries(void)
                 }
         }
 
+        /*
+                RFC 8446 5.2: a record that fails to open is bad_record_mac,
+                and fatal. A forged record injected ahead of the peer's next
+                one fails; asked again, the connection must not go on to
+                open the genuine record behind it as though nothing
+                happened.
+        */
+        {
+                b32 pair[2];
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_STREAM, 0,
+                                                (positive)pair);
+                check("TLS forged-record socket pair opens", opened == 0);
+                if (!opened)
+                {
+                        static p8 forged[5 + 17] = {TLS_CT_APP, 0x03, 0x03, 0,
+                                                    17, 'x'};
+                        tls_conn sender = {0};
+                        tls_conn receiver = {0};
+                        p8 data[] = {'o', 'k'};
+                        p8 received[2] = {0};
+                        positive got = 0;
+
+                        sender.handle = pair[1];
+                        receiver.handle = pair[0];
+                        receiver.encrypted = true;
+                        receiver.application = true;
+                        check("TLS forged and genuine records queue",
+                              network_stream_send_all(pair[1], forged,
+                                                      sizeof forged) &&
+                                  tls_send_enc(address_of sender, TLS_CT_APP,
+                                               data, sizeof data) == TLS_OK);
+                        check("TLS forged record is refused",
+                              tls_read(address_of receiver, received,
+                                       sizeof received, address_of got) ==
+                                  TLS_FAIL);
+                        check("TLS opens nothing after a record failed to open",
+                              tls_read(address_of receiver, received,
+                                       sizeof received, address_of got) ==
+                                  TLS_FAIL);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                }
+        }
+
+        /*
+                RFC 8446 5: a change_cipher_spec record that arrives
+                protected is unexpected_message. Only the plaintext one-byte
+                compatibility record may pass, once, before Finished.
+        */
+        {
+                b32 pair[2];
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_STREAM, 0,
+                                                (positive)pair);
+                check("TLS protected-CCS socket pair opens", opened == 0);
+                if (!opened)
+                {
+                        tls_conn sender = {0};
+                        tls_conn receiver = {0};
+                        p8 one = 1;
+                        p8 type = 0;
+                        p8 address_to inner = null;
+                        positive length = 0;
+
+                        sender.handle = pair[1];
+                        receiver.handle = pair[0];
+                        receiver.encrypted = true;
+                        check("TLS protected CCS is refused during the handshake",
+                              tls_send_enc(address_of sender, TLS_CT_CCS,
+                                           address_of one, 1) == TLS_OK &&
+                                  tls_next_record(address_of receiver,
+                                                  address_of type,
+                                                  address_of inner,
+                                                  address_of length,
+                                                  null) == TLS_FAIL);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                }
+        }
+
         {
                 b32 pair[2];
                 bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
@@ -53424,6 +53531,53 @@ static fn tls_closure_boundaries(void)
                               tls_read(address_of receiver, received,
                                        sizeof(received), address_of got) == TLS_OK &&
                                   got == 0);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                }
+        }
+
+        /*
+                A peer that keeps the socket full of records that deliver
+                nothing (empty application data here; tickets take the same
+                path) never lets a read wait, and the budget was only asked
+                when one did. A hundred empty records and a close_notify are
+                queued before a read whose budget has already run out: the
+                read has to fail, not open them all and report a clean close.
+        */
+        {
+                b32 pair[2];
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_STREAM, 0,
+                                                (positive)pair);
+                check("TLS empty-record flood socket pair opens", opened == 0);
+                if (!opened)
+                {
+                        tls_conn sender = {0};
+                        tls_conn receiver = {0};
+                        network_deadline deadline;
+                        p8 alert[] = {1, 0};
+                        p8 byte = 0;
+                        positive got = 99;
+                        bool queued = true;
+
+                        sender.handle = pair[1];
+                        receiver.handle = pair[0];
+                        receiver.encrypted = true;
+                        receiver.application = true;
+                        for (positive at = 0; at < 100; at++)
+                                queued &= tls_send_enc(address_of sender,
+                                                       TLS_CT_APP, alert,
+                                                       0) == TLS_OK;
+                        queued &= tls_send_enc(address_of sender, TLS_CT_ALERT,
+                                               alert, sizeof alert) == TLS_OK;
+                        check("TLS empty-record flood queues", queued);
+                        network_deadline_begin(address_of deadline, 0, 1);
+                        check("TLS queued empty records cannot outlast a read's budget",
+                              tls_read_until(address_of receiver,
+                                             address_of byte, 1,
+                                             address_of got,
+                                             address_of deadline) ==
+                                  TLS_FAIL);
                         socket_close(pair[0]);
                         socket_close(pair[1]);
                 }
@@ -53776,9 +53930,30 @@ static fn tls_closure_boundaries(void)
         #undef TLS_BATCH_RECORDS
 }
 
-/* TLS_RECORD_MAX is the inclusive ciphertext payload ceiling on the wire.
-   An unencrypted handshake record is enough to hit the length gate before
-   any AEAD work: exact fill is accepted, one past and empty are refused. */
+/* A record sealed where tls_next_record opens it, under the zero keys of a
+   fresh connection: content bytes of 0xa5 and the application type. */
+static fn tls_seal_in_receive(tls_conn address_to tls, positive content)
+{
+        p8 nonce[12] = {0};
+        p8 address_to header = tls->receive;
+
+        header[0] = TLS_CT_APP;
+        header[1] = 0x03;
+        header[2] = 0x03;
+        network_store_16(header + 3, content + 1 + 16);
+        memory_fill(header + 5, 0xa5, content);
+        header[5 + content] = TLS_CT_APP;
+        crypto_aesgcm_seal(address_of tls->s_gcm, nonce, header, 5, header + 5,
+                           content + 1, header + 5 + content + 1);
+        tls->receive_start = 0;
+        tls->receive_end = 5 + content + 1 + 16;
+        tls->encrypted = true;
+}
+
+/* RFC 8446 5.1 and 5.4: 2^14 bytes of content is the ceiling for a
+   plaintext record and for a protected record's inner plaintext, so
+   TLS_RECORD_MAX, the header's gate, is that plus the type byte and the
+   AES-GCM tag. Exact fills are accepted, one past and empty are refused. */
 static fn tls_record_payload_ceiling(void)
 {
         tls_conn tls = {0};
@@ -53789,20 +53964,49 @@ static fn tls_record_payload_ceiling(void)
         tls.receive[0] = TLS_CT_HANDSHAKE;
         tls.receive[1] = 0x03;
         tls.receive[2] = 0x03;
-        network_store_16(tls.receive + 3, TLS_RECORD_MAX);
-        memory_fill(tls.receive + 5, 0xa5, TLS_RECORD_MAX);
-        tls.receive_end = 5 + TLS_RECORD_MAX;
-        check("a TLS record of exactly TLS_RECORD_MAX is accepted",
+        network_store_16(tls.receive + 3, TLS_PLAINTEXT_MAX);
+        memory_fill(tls.receive + 5, 0xa5, TLS_PLAINTEXT_MAX);
+        tls.receive_end = 5 + TLS_PLAINTEXT_MAX;
+        check("a plaintext TLS record of exactly 2^14 bytes is accepted",
               tls_next_record(address_of tls, address_of type,
                               address_of inner, address_of length, null) ==
                       TLS_OK &&
-                  type == TLS_CT_HANDSHAKE && length == TLS_RECORD_MAX &&
+                  type == TLS_CT_HANDSHAKE && length == TLS_PLAINTEXT_MAX &&
                   inner == tls.receive + 5);
 
         memory_fill(address_of tls, 0, sizeof tls);
         tls.receive[0] = TLS_CT_HANDSHAKE;
         tls.receive[1] = 0x03;
         tls.receive[2] = 0x03;
+        network_store_16(tls.receive + 3, TLS_PLAINTEXT_MAX + 1);
+        memory_fill(tls.receive + 5, 0xa5, TLS_PLAINTEXT_MAX + 1);
+        tls.receive_end = 5 + TLS_PLAINTEXT_MAX + 1;
+        check("a plaintext TLS record one past 2^14 bytes is refused",
+              tls_next_record(address_of tls, address_of type,
+                              address_of inner, address_of length, null) ==
+                  TLS_FAIL);
+
+        memory_fill(address_of tls, 0, sizeof tls);
+        tls_seal_in_receive(address_of tls, TLS_PLAINTEXT_MAX);
+        check("a protected TLS record of exactly 2^14 content bytes is accepted",
+              tls_next_record(address_of tls, address_of type,
+                              address_of inner, address_of length, null) ==
+                      TLS_OK &&
+                  type == TLS_CT_APP && length == TLS_PLAINTEXT_MAX &&
+                  tls.receive_start == 5 + TLS_PLAINTEXT_MAX + 1 + 16);
+
+        memory_fill(address_of tls, 0, sizeof tls);
+        tls_seal_in_receive(address_of tls, TLS_PLAINTEXT_MAX + 1);
+        check("a protected TLS record over 2^14 content bytes is refused",
+              tls_next_record(address_of tls, address_of type,
+                              address_of inner, address_of length, null) ==
+                  TLS_FAIL);
+
+        memory_fill(address_of tls, 0, sizeof tls);
+        tls.receive[0] = TLS_CT_APP;
+        tls.receive[1] = 0x03;
+        tls.receive[2] = 0x03;
+        tls.encrypted = true;
         network_store_16(tls.receive + 3, TLS_RECORD_MAX + 1);
         tls.receive_end = 5;
         type = 0;
@@ -53835,10 +54039,10 @@ static fn tls_sensitive_state_erasure(void)
                       tls_send_enc(address_of connection, TLS_CT_APP,
                                    address_of byte, (positive)-1) == TLS_FAIL);
 
-                check("TLS encrypted plaintext one over TLS_RECORD_MAX-17 is refused",
+                check("TLS encrypted plaintext one over 2^14 bytes is refused",
                       tls_send_enc(address_of connection, TLS_CT_APP,
                                    address_of byte,
-                                   TLS_RECORD_MAX - 16) == TLS_FAIL);
+                                   TLS_PLAINTEXT_MAX + 1) == TLS_FAIL);
 
                 connection.seq_write = TLS_AES_GCM_RECORD_LIMIT;
                 check("TLS write keys stop at their AES-GCM usage limit",
@@ -53848,7 +54052,6 @@ static fn tls_sensitive_state_erasure(void)
                 {
                         p8 payload[16] = {0};
                         p8 aad[5] = {TLS_CT_APP, 0x03, 0x03, 0, 16};
-                        p8 inner[16] = {0};
                         positive inner_length = 0;
                         p8 type = 0;
 
@@ -53856,7 +54059,7 @@ static fn tls_sensitive_state_erasure(void)
                         check("TLS read keys stop at their AES-GCM usage limit",
                               tls_decrypt_record(
                                   address_of connection, payload,
-                                  sizeof payload, aad, inner,
+                                  sizeof payload, aad,
                                   address_of inner_length,
                                   address_of type) == TLS_FAIL);
                 }
@@ -55475,18 +55678,54 @@ static fn tls_server_flight_validation(void)
                 static p8 overrun[] = {0, 4, 0, 10, 0, 1};
 
                 check("empty TLS encrypted extensions are framed",
-                      tls_encrypted_extensions_valid(empty, sizeof empty));
+                      tls_encrypted_extensions_valid(empty, sizeof empty, true));
                 check("one TLS encrypted extension is framed",
-                      tls_encrypted_extensions_valid(one, sizeof one));
+                      tls_encrypted_extensions_valid(one, sizeof one, true));
                 check("duplicate TLS encrypted extensions are refused",
                       !tls_encrypted_extensions_valid(duplicate,
-                                                      sizeof duplicate));
+                                                      sizeof duplicate, false));
                 check("TLS encrypted extension vector length is exact",
                       !tls_encrypted_extensions_valid(short_vector,
-                                                      sizeof short_vector));
+                                                      sizeof short_vector,
+                                                      false));
                 check("TLS encrypted extension payload cannot overrun",
                       !tls_encrypted_extensions_valid(overrun,
-                                                      sizeof overrun));
+                                                      sizeof overrun, false));
+        }
+
+        /*
+                RFC 8446 4.2: an extension in EncryptedExtensions that the
+                ClientHello never asked for is unsupported_extension. ALPN
+                (16) was never offered; server_name (0) and supported_groups
+                (10) were.
+        */
+        {
+                static tls_conn tls;
+                static p8 hs[TLS_HS_MAX];
+                static p8 unasked[] = {TLS_HS_ENCRYPTED_EXTS, 0, 0, 6,
+                                       0, 4, 0, 16, 0, 0};
+                static p8 asked[] = {TLS_HS_ENCRYPTED_EXTS, 0, 0, 14,
+                                     0, 12, 0, 0, 0, 0, 0, 10, 0, 4, 0, 2,
+                                     0, 29};
+                positive used = 0;
+                p8 flight = TLS_SERVER_FLIGHT_EE;
+
+                crypto_sha256_open(address_of tls.transcript);
+                check("EncryptedExtensions may answer server_name and supported_groups",
+                      tls_encrypted_flight_append(address_of tls, hs, sizeof hs,
+                                                  address_of used,
+                                                  address_of flight, asked,
+                                                  sizeof asked, null) ==
+                              TLS_OK &&
+                          flight == TLS_SERVER_FLIGHT_CERTIFICATE);
+                used = 0;
+                flight = TLS_SERVER_FLIGHT_EE;
+                check("EncryptedExtensions answering what was never offered is refused",
+                      tls_encrypted_flight_append(address_of tls, hs, sizeof hs,
+                                                  address_of used,
+                                                  address_of flight, unasked,
+                                                  sizeof unasked, null) ==
+                          TLS_FAIL);
         }
 }
 
@@ -55614,9 +55853,9 @@ static fn tls_encrypted_flight_hs_reassembly(void)
                           walk.used == TLS_HS_MAX);
         }
 
-        /* 3. Empty mid-message fragment: flight path has no !length guard
-           (unlike tls_handshake_one_append / post-handshake), so length 0 is
-           a no-op that leaves the held prefix alone. */
+        /* 3. Empty mid-message fragment: RFC 8446 5.1 forbids sending one,
+           and the flight refuses it as the other appends do, leaving the
+           held prefix alone. */
         {
                 p8 cert[4 + 8];
                 tls_flight_hs_walk walk = {.flight = TLS_SERVER_FLIGHT_CERTIFICATE};
@@ -55624,16 +55863,12 @@ static fn tls_encrypted_flight_hs_reassembly(void)
                 tls_flight_hs_put_header(cert, TLS_HS_CERTIFICATE, 8);
                 memory_fill(cert + 4, 0x11, 8);
 
-                check("an empty encrypted-flight fragment is ignored mid-message",
+                check("an empty encrypted-flight fragment is refused mid-message",
                       tls_flight_hs_append(address_of walk, cert, 6) == TLS_OK &&
                           walk.used == 6 &&
                           tls_flight_hs_append(address_of walk, cert, 0) ==
-                              TLS_OK &&
+                              TLS_FAIL &&
                           walk.used == 6 && !walk.messages);
-                check("Certificate reassembly resumes after an empty fragment",
-                      tls_flight_hs_append(address_of walk, cert + 6,
-                                          sizeof cert - 6) == TLS_OK &&
-                          !walk.used && walk.messages == 1);
         }
 
         /* 4. Two HS messages in one record: tiny EE consumed, Certificate start held. */

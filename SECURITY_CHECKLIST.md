@@ -103,10 +103,12 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
       list walk with `tls_parse_cert` on slices, then the same empty-list /
       leftover refuse as `tls_verify_chain`; expected `TLS_FAIL` ignored). Local
       continuous: see `sh test/run fuzz` / `MOONWATER_FUZZ_*`.
-- [x] Bounded lane-smoke coverage-guided fuzzing for handshake fragmentation
-      (`python3 test/differential.py --harness tls_hs_fuzz`, 5s / 20k; lifts
-      `tls_handshake_one_append` / `tls_encrypted_flight_append` with `tls=null`
-      framing; seeds from `tls_fuzz_seeds("tls_hs")`; ASan/UBSan via clang
+- [x] Bounded lane-smoke coverage-guided fuzzing for the TLS client protocol
+      (`python3 test/differential.py --harness tls_hs_fuzz`, 5s / 20k; lifts the
+      record layer and state machine from `tls_forget` through `tls_read_until` and
+      drives `tls_connect` / `tls_read_until` / `tls_borrow` / `tls_lend` /
+      `tls_write` from a fuzzed server stream, plus the `tls=null` framing
+      walks; seeds from `tls_fuzz_seeds("tls_hs")`; ASan/UBSan via clang
       libFuzzer when available, else NOT RUN). Local continuous: see
       `sh test/run fuzz` / `MOONWATER_FUZZ_*`.
 - [x] Optional verify fuzz (`tls_verify_fuzz`; not lane_net smoke): same

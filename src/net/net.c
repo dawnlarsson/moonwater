@@ -4374,7 +4374,10 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #endif
 #include "wait.c"
 
-#define TLS_RECORD_MAX 16640
+/* RFC 8446 5.1 and 5.4: a record carries at most 2^14 bytes of content, and
+   under AES-128-GCM a protected one adds the inner type byte and the tag. */
+#define TLS_PLAINTEXT_MAX 16384
+#define TLS_RECORD_MAX (TLS_PLAINTEXT_MAX + 1 + 16)
 /* One receive takes as many whole records as the socket has queued and this
    room holds: about fifteen full records. At least two whole records must
    fit, since the unopened tail moves to the front only when a record would
@@ -4448,8 +4451,6 @@ typedef struct
         p8 s_hs_traffic[32];
         p8 c_ap_traffic[32];
         p8 s_ap_traffic[32];
-        p8 c_key[16];
-        p8 s_key[16];
         p8 c_iv[12];
         p8 s_iv[12];
         crypto_aesgcm_key c_gcm;
@@ -4510,7 +4511,7 @@ static fn tls_forget(tls_conn address_to tls)
 }
 
 static COLD fn tls_expand_label(p8 address_to secret, string_address label,
-                           p8 address_to context, positive context_length,
+                           const p8 address_to context, positive context_length,
                            p8 address_to out, positive out_length)
 {
         p8 info[256];
@@ -4554,139 +4555,106 @@ static COLD fn tls_derive_secret(p8 address_to secret, string_address label,
         crypto_forget(hash, sizeof hash);
 }
 
-static COLD fn tls_empty_hash(p8 address_to out)
-{
-        crypto_sha256 hash;
+/* With no PSK the early secret is a constant, and so is the salt derived
+   from it for the handshake secret; every "derived" is taken over SHA-256
+   of nothing (RFC 8446 7.1; the values are RFC 8448's). */
+static const p8 tls_derived_early[32] = {
+    0x6f, 0x26, 0x15, 0xa1, 0x08, 0xc7, 0x02, 0xc5, 0x67, 0x8f, 0x54, 0xfc,
+    0x9d, 0xba, 0xb6, 0x97, 0x16, 0xc0, 0x76, 0x18, 0x9c, 0x48, 0x25, 0x0c,
+    0xeb, 0xea, 0xc3, 0x57, 0x6c, 0x36, 0x11, 0xba};
+static const p8 tls_empty_sha256[32] = {
+    0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8,
+    0x99, 0x6f, 0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c,
+    0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55};
 
-        crypto_sha256_open(address_of hash);
-        crypto_sha256_close(address_of hash, out);
-        crypto_forget(address_of hash, sizeof hash);
-}
-
-static COLD fn tls_traffic_keys(p8 address_to traffic, p8 address_to key,
-                           p8 address_to iv)
+/* One direction's key and IV from its traffic secret, and the key prepared
+   for AES-GCM; the raw key lives only as long as preparing it takes. */
+static COLD fn tls_traffic_keys(p8 address_to traffic,
+                                crypto_aesgcm_key address_to gcm,
+                                p8 address_to iv)
 {
+        p8 key[16];
+
         tls_expand_label(traffic, "key", null, 0, key, 16);
         tls_expand_label(traffic, "iv", null, 0, iv, 12);
+        crypto_aesgcm_prepare(gcm, key);
+        crypto_forget(key, sizeof key);
 }
 
+/* RFC 8446 5.3: the sequence number, big-endian, xored into the IV's end. */
 static fn tls_nonce(p8 address_to iv, p64 seq, p8 address_to nonce)
 {
-        p8 seq_bytes[12];
-        positive i;
-
-        memory_fill(seq_bytes, 0, 12);
-        crypto_put_be64(seq_bytes + 4, seq);
-        for (i = 0; i < 12; i++)
-                nonce[i] = iv[i] ^ seq_bytes[i];
-        crypto_forget(seq_bytes, sizeof seq_bytes);
+        memory_copy(nonce, iv, 12);
+        for (positive i = 0; i < 8; i++)
+                nonce[11 - i] ^= (p8)(seq >> (8 * i));
 }
 
-/* A record leaves in one send. Sent in pieces, everything after the first
-   piece waits under Nagle for the peer to acknowledge it. */
-static COLD bipolar tls_send_plain(tls_conn address_to tls, p8 type, p8 address_to body,
-                              positive length)
+static fn tls_record_header(p8 address_to header, p8 type, positive length)
 {
-        p8 record[5 + TLS_HS_MAX];
-
-        if (length > TLS_HS_MAX)
-                return TLS_FAIL;
-        record[0] = type;
-        record[1] = 0x03;
-        record[2] = 0x03;
-        record[3] = (p8)(length >> 8);
-        record[4] = (p8)length;
-        memory_copy(record + 5, body, length);
-        return network_stream_send_all(tls->handle, record, 5 + length)
-                   ? TLS_OK : TLS_FAIL;
+        header[0] = type;
+        header[1] = 0x03;
+        header[2] = 0x03;
+        network_store_16(header + 3, (p16)length);
 }
 
+/* A record leaves in one send: sent in pieces, everything after the first
+   piece waits under Nagle for the peer to acknowledge it. It is sealed where
+   it lies, so what leaves and what stays behind on the stack is ciphertext;
+   the plaintext is the caller's. */
 static bipolar tls_send_enc(tls_conn address_to tls, p8 inner_type,
                             p8 address_to body, positive length)
 {
         p8 record[5 + TLS_RECORD_MAX];
-        p8 address_to header = record;
-        p8 address_to inner = record + 5;
         p8 nonce[12];
-        p8 tag[16];
-        p8 aad[5];
-        positive inner_length = 0;
-        positive record_length = 0;
-        bipolar status = TLS_FAIL;
 
-        if (length > TLS_RECORD_MAX - 17 ||
+        if (length > TLS_PLAINTEXT_MAX ||
             tls->seq_write >= TLS_AES_GCM_RECORD_LIMIT)
-                goto done;
-        inner_length = length + 1;
-        record_length = inner_length + 16;
-
-        memory_copy(inner, body, length);
-        inner[length] = inner_type;
-
-        header[0] = TLS_CT_APP;
-        header[1] = 0x03;
-        header[2] = 0x03;
-        header[3] = (p8)(record_length >> 8);
-        header[4] = (p8)record_length;
-        memory_copy(aad, header, 5);
-
-        tls_nonce(tls->c_iv, tls->seq_write, nonce);
-        crypto_aesgcm_seal(address_of tls->c_gcm, nonce, aad, 5, inner, inner_length,
-                              tag);
-        tls->seq_write++;
-
-        memory_copy(inner + inner_length, tag, 16);
-        status = network_stream_send_all(tls->handle, record, 5 + record_length)
-                     ? TLS_OK : TLS_FAIL;
-
-done:
-        if (record_length)
-                crypto_forget(record, 5 + record_length);
+                return TLS_FAIL;
+        tls_record_header(record, TLS_CT_APP, length + 1 + 16);
+        memory_copy(record + 5, body, length);
+        record[5 + length] = inner_type;
+        tls_nonce(tls->c_iv, tls->seq_write++, nonce);
+        crypto_aesgcm_seal(address_of tls->c_gcm, nonce, record, 5, record + 5,
+                           length + 1, record + 5 + length + 1);
         crypto_forget(nonce, sizeof nonce);
-        crypto_forget(tag, sizeof tag);
-        crypto_forget(aad, sizeof aad);
-        return status;
+        return network_stream_send_all(tls->handle, record, 5 + length + 17)
+                   ? TLS_OK : TLS_FAIL;
 }
 
+/* Open a record where it lies. The inner type is its last nonzero byte;
+   zeros after it are padding, and a record of nothing else is refused. A
+   failed open wipes what it decrypted and is fatal (RFC 8446 5.2): the read
+   keys are spent, so no later record opens behind a forged one. */
 static bipolar tls_decrypt_record(tls_conn address_to tls, p8 address_to payload,
                                   positive payload_length, p8 address_to aad,
-                                  p8 address_to inner, positive address_to inner_length,
+                                  positive address_to inner_length,
                                   p8 address_to type)
 {
         p8 nonce[12];
-        p8 tag[16];
-        positive at = 0;
-        bipolar status = TLS_FAIL;
+        positive at = payload_length - 16;
+        bool opened;
 
         if (payload_length < 16 ||
             tls->seq_read >= TLS_AES_GCM_RECORD_LIMIT)
-                goto done;
-
-        // The record layer opens records where they lie: inner is payload.
-        if (inner != payload)
-                memory_copy(inner, payload, payload_length - 16);
-        memory_copy(tag, payload + payload_length - 16, 16);
+                return TLS_FAIL;
         tls_nonce(tls->s_iv, tls->seq_read, nonce);
-        if (!crypto_aesgcm_open(address_of tls->s_gcm, nonce, aad, 5, inner,
-                                   payload_length - 16, tag))
-                goto done;
+        opened = crypto_aesgcm_open(address_of tls->s_gcm, nonce, aad, 5,
+                                    payload, at, payload + at);
+        crypto_forget(nonce, sizeof nonce);
+        if (!opened)
+        {
+                tls->seq_read = TLS_AES_GCM_RECORD_LIMIT;
+                return TLS_FAIL;
+        }
 
         tls->seq_read++;
-        at = payload_length - 16;
-        while (at && inner[at - 1] == 0)
+        while (at && payload[at - 1] == 0)
                 at--;
         if (!at)
-                goto done;
-        address_to type = inner[at - 1];
+                return TLS_FAIL;
+        address_to type = payload[at - 1];
         address_to inner_length = at - 1;
-        status = TLS_OK;
-
-done:
-        if (status && payload_length >= 16)
-                crypto_forget(inner, payload_length - 16);
-        crypto_forget(nonce, sizeof nonce);
-        crypto_forget(tag, sizeof tag);
-        return status;
+        return TLS_OK;
 }
 
 static bool tls_compatibility_ccs_valid(p8 address_to payload,
@@ -4823,7 +4791,8 @@ static bipolar tls_next_record(tls_conn address_to tls, p8 address_to type,
 
         if (!tls->encrypted)
         {
-                if (header[0] != TLS_CT_HANDSHAKE)
+                if (header[0] != TLS_CT_HANDSHAKE ||
+                    payload_length > TLS_PLAINTEXT_MAX)
                         return TLS_FAIL;
                 address_to type = TLS_CT_HANDSHAKE;
                 address_to inner = payload;
@@ -4831,9 +4800,11 @@ static bipolar tls_next_record(tls_conn address_to tls, p8 address_to type,
                 return TLS_OK;
         }
 
+        /* A change_cipher_spec that arrives protected is unexpected. */
         if (header[0] != TLS_CT_APP ||
-            tls_decrypt_record(tls, payload, payload_length, header, payload,
-                               address_of inner_length, address_of inner_type))
+            tls_decrypt_record(tls, payload, payload_length, header,
+                               address_of inner_length, address_of inner_type) ||
+            inner_type == TLS_CT_CCS)
                 return TLS_FAIL;
 
         if (inner_type == TLS_CT_ALERT)
@@ -4842,27 +4813,6 @@ static bipolar tls_next_record(tls_conn address_to tls, p8 address_to type,
 
         address_to type = inner_type;
         address_to inner = payload;
-        address_to length = inner_length;
-        return TLS_OK;
-}
-
-/* The handshake's copy of one record. */
-static bipolar tls_read_record(tls_conn address_to tls, p8 address_to type,
-                               p8 address_to body, positive room,
-                               positive address_to length,
-                               const network_deadline address_to deadline)
-{
-        p8 address_to inner = null;
-        positive inner_length = 0;
-        bipolar status = tls_next_record(tls, type, address_of inner,
-                                         address_of inner_length, deadline);
-
-        if (status)
-                return status;
-        if (inner_length > room)
-                return TLS_FAIL;
-        memory_copy(body, inner, inner_length);
-        crypto_forget(inner, inner_length);
         address_to length = inner_length;
         return TLS_OK;
 }
@@ -6314,53 +6264,36 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                                      positive address_to group)
 {
         positive at;
-        positive ext_end;
-        positive session;
         bool seen_share = false;
         bool seen_version = false;
 
-        if (length < 44 || hello[0] != TLS_HS_SERVER_HELLO)
-                return TLS_FAIL;
-        {
-                positive hs = tls_load_24(hello + 1);
-                if (hs + 4 != length)
-                        return TLS_FAIL;
-        }
-        if (hello[4] != 0x03 || hello[5] != 0x03)
+        if (length < 44 || hello[0] != TLS_HS_SERVER_HELLO ||
+            tls_load_24(hello + 1) != length - 4 || hello[4] != 0x03 ||
+            hello[5] != 0x03)
                 return TLS_FAIL;
 
         at = 4 + 2 + 32;
-        session = hello[at++];
         /* The client sent an empty legacy_session_id, so the echo is empty. */
-        if (session)
-                return TLS_FAIL;
-        at += session;
-        if (at + 3 > length)
+        if (hello[at++])
                 return TLS_FAIL;
         if (hello[at] != 0x13 || hello[at + 1] != 0x01)
                 return TLS_FAIL;
         at += 2;
         if (hello[at++] != 0)
                 return TLS_FAIL;
-        if (at + 2 > length)
+        if (length - at < 2 || network_load_16(hello + at) != length - at - 2)
                 return TLS_FAIL;
-        {
-                positive ext_length = network_load_16(hello + at);
-                at += 2;
-                ext_end = at + ext_length;
-                if (ext_end != length)
-                        return TLS_FAIL;
-        }
+        at += 2;
 
-        while (at < ext_end)
+        while (at < length)
         {
-                if (at + 4 > ext_end)
+                if (length - at < 4)
                         return TLS_FAIL;
 
                 positive id = network_load_16(hello + at);
                 positive elen = network_load_16(hello + at + 2);
                 at += 4;
-                if (at + elen > ext_end)
+                if (elen > length - at)
                         return TLS_FAIL;
 
                 if (id == 0x002b)
@@ -6379,7 +6312,7 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                                 return TLS_FAIL;
                         named = network_load_16(hello + at);
                         klen = network_load_16(hello + at + 2);
-                        if (4 + klen != elen)
+                        if (klen != elen - 4)
                                 return TLS_FAIL;
                         if (!((named == 0x001d && klen == 32) ||
                               (named == 0x0017 && klen == 65) ||
@@ -6437,68 +6370,47 @@ static COLD bipolar tls_handshake_one_append(p8 address_to held, positive room,
                                                    : TLS_FAIL;
 }
 
-static COLD bipolar tls_install_handshake_keys(tls_conn address_to tls,
+/* The handshake secret, its two traffic secrets and their keys: the flight
+   after ServerHello is protected under these. tls_connect left both
+   sequence numbers at zero. */
+static COLD fn tls_install_handshake_keys(tls_conn address_to tls,
                                           p8 address_to shared,
                                           positive shared_length)
 {
-        p8 early[32];
-        p8 zeros[32];
-        p8 derived[32];
-        p8 empty[32];
-
-        memory_fill(zeros, 0, 32);
-        tls_empty_hash(empty);
-        crypto_hkdf_extract(zeros, 32, zeros, 32, early);
-        tls_expand_label(early, "derived", empty, 32, derived, 32);
-        crypto_hkdf_extract(derived, 32, shared, shared_length, tls->hs_secret);
+        crypto_hkdf_extract((p8 address_to)tls_derived_early, 32, shared,
+                            shared_length, tls->hs_secret);
         tls_derive_secret(tls->hs_secret, "c hs traffic",
                           address_of tls->transcript, tls->c_hs_traffic);
         tls_derive_secret(tls->hs_secret, "s hs traffic",
                           address_of tls->transcript, tls->s_hs_traffic);
-        tls_traffic_keys(tls->c_hs_traffic, tls->c_key, tls->c_iv);
-        tls_traffic_keys(tls->s_hs_traffic, tls->s_key, tls->s_iv);
-        crypto_aesgcm_prepare(address_of tls->c_gcm, tls->c_key);
-        crypto_aesgcm_prepare(address_of tls->s_gcm, tls->s_key);
-        tls->seq_read = 0;
-        tls->seq_write = 0;
+        tls_traffic_keys(tls->c_hs_traffic, address_of tls->c_gcm, tls->c_iv);
+        tls_traffic_keys(tls->s_hs_traffic, address_of tls->s_gcm, tls->s_iv);
         tls->encrypted = true;
-        tls->application = false;
-
-        crypto_forget(early, sizeof early);
-        crypto_forget(zeros, sizeof zeros);
-        crypto_forget(derived, sizeof derived);
-        crypto_forget(empty, sizeof empty);
-        return TLS_OK;
 }
 
 static COLD fn tls_derive_app_keys(tls_conn address_to tls)
 {
         p8 zeros[32];
         p8 derived[32];
-        p8 empty[32];
         p8 master[32];
 
         memory_fill(zeros, 0, 32);
-        tls_empty_hash(empty);
-        tls_expand_label(tls->hs_secret, "derived", empty, 32, derived, 32);
+        tls_expand_label(tls->hs_secret, "derived", tls_empty_sha256, 32,
+                         derived, 32);
         crypto_hkdf_extract(derived, 32, zeros, 32, master);
         tls_derive_secret(master, "c ap traffic", address_of tls->transcript,
                           tls->c_ap_traffic);
         tls_derive_secret(master, "s ap traffic", address_of tls->transcript,
                           tls->s_ap_traffic);
 
-        crypto_forget(zeros, sizeof zeros);
         crypto_forget(derived, sizeof derived);
-        crypto_forget(empty, sizeof empty);
         crypto_forget(master, sizeof master);
 }
 
 static COLD fn tls_use_app_keys(tls_conn address_to tls)
 {
-        tls_traffic_keys(tls->c_ap_traffic, tls->c_key, tls->c_iv);
-        tls_traffic_keys(tls->s_ap_traffic, tls->s_key, tls->s_iv);
-        crypto_aesgcm_prepare(address_of tls->c_gcm, tls->c_key);
-        crypto_aesgcm_prepare(address_of tls->s_gcm, tls->s_key);
+        tls_traffic_keys(tls->c_ap_traffic, address_of tls->c_gcm, tls->c_iv);
+        tls_traffic_keys(tls->s_ap_traffic, address_of tls->s_gcm, tls->s_iv);
         tls->seq_read = 0;
         tls->seq_write = 0;
         tls->application = true;
@@ -6511,58 +6423,47 @@ static COLD fn tls_use_app_keys(tls_conn address_to tls)
         crypto_forget(address_of tls->transcript, sizeof tls->transcript);
 }
 
+/* A Finished's verify_data: HMAC over the transcript so far under the
+   finished key of one side's handshake traffic secret (RFC 8446 4.4.4). */
+static COLD fn tls_finished_mac(tls_conn address_to tls, p8 address_to traffic,
+                                p8 address_to out)
+{
+        p8 key[32];
+        p8 hash[32];
+        crypto_sha256 copy = tls->transcript;
+
+        tls_expand_label(traffic, "finished", null, 0, key, 32);
+        crypto_sha256_close(address_of copy, hash);
+        crypto_hmac_sha256(key, 32, hash, 32, out);
+        crypto_forget(key, sizeof key);
+        crypto_forget(hash, sizeof hash);
+        crypto_forget(address_of copy, sizeof copy);
+}
+
 static COLD bipolar tls_check_finished(tls_conn address_to tls, p8 address_to verify,
                                   positive length)
 {
-        p8 finished_key[32];
         p8 expect[32];
-        crypto_sha256 copy = tls->transcript;
-        p8 hash[32];
-        bipolar status = TLS_FAIL;
+        bool same;
 
         if (length != 32)
-                goto done;
-        tls_expand_label(tls->s_hs_traffic, "finished", null, 0, finished_key, 32);
-        crypto_sha256_close(address_of copy, hash);
-        crypto_hmac_sha256(finished_key, 32, hash, 32, expect);
-        status = crypto_same(expect, verify, 32) ? TLS_OK : TLS_FAIL;
-
-done:
-        crypto_forget(finished_key, sizeof finished_key);
+                return TLS_FAIL;
+        tls_finished_mac(tls, tls->s_hs_traffic, expect);
+        same = crypto_same(expect, verify, 32);
         crypto_forget(expect, sizeof expect);
-        crypto_forget(address_of copy, sizeof copy);
-        crypto_forget(hash, sizeof hash);
-        return status;
+        return same ? TLS_OK : TLS_FAIL;
 }
 
+/* Nothing reads the transcript after the client's Finished, so it is sent
+   without being added. */
 static COLD bipolar tls_send_finished(tls_conn address_to tls)
 {
-        p8 finished_key[32];
-        p8 verify[32];
-        p8 msg[36];
-        crypto_sha256 copy = tls->transcript;
-        p8 hash[32];
-        bipolar status = TLS_FAIL;
+        p8 msg[36] = {TLS_HS_FINISHED, 0, 0, 32};
+        bipolar status;
 
-        tls_expand_label(tls->c_hs_traffic, "finished", null, 0, finished_key, 32);
-        crypto_sha256_close(address_of copy, hash);
-        crypto_hmac_sha256(finished_key, 32, hash, 32, verify);
-        msg[0] = TLS_HS_FINISHED;
-        msg[1] = 0;
-        msg[2] = 0;
-        msg[3] = 32;
-        memory_copy(msg + 4, verify, 32);
-        if (tls_send_enc(tls, TLS_CT_HANDSHAKE, msg, 36))
-                goto done;
-        tls_transcript_add(tls, msg, 36);
-        status = TLS_OK;
-
-done:
-        crypto_forget(finished_key, sizeof finished_key);
-        crypto_forget(verify, sizeof verify);
+        tls_finished_mac(tls, tls->c_hs_traffic, msg + 4);
+        status = tls_send_enc(tls, TLS_CT_HANDSHAKE, msg, sizeof msg);
         crypto_forget(msg, sizeof msg);
-        crypto_forget(address_of copy, sizeof copy);
-        crypto_forget(hash, sizeof hash);
         return status;
 }
 
@@ -6588,7 +6489,7 @@ static COLD bipolar tls_check_cert_verify(tls_conn address_to tls, p8 address_to
         at += 2;
         sig_length = network_load_16(msg + at);
         at += 2;
-        if (at + sig_length != length)
+        if (sig_length != length - at)
                 return TLS_FAIL;
 
         memory_fill(signed_bytes, 0x20, 64);
@@ -6676,9 +6577,11 @@ static COLD bool tls_server_flight_step(p8 address_to state, p8 type)
    in a bitmap of the sixteen-bit space instead and the walk is one pass.  The
    nested scan's own framing tests were unreachable -- it only ever visited
    offsets this walk had already validated and placed -- so the predicate is
-   the same one. */
+   the same one. As answers, in EncryptedExtensions, only what the
+   ClientHello asked for may come back (RFC 8446 4.2): of what this client
+   sends, server_name and supported_groups. A ticket's may be anything. */
 static COLD bool tls_encrypted_extensions_valid(p8 address_to body,
-                                           positive length)
+                                           positive length, bool answers)
 {
         p8 seen[8192];
         positive at = 2;
@@ -6702,7 +6605,8 @@ static COLD bool tls_encrypted_extensions_valid(p8 address_to body,
                 if ((positive)size > length - at - 4)
                         return false;
 
-                if (seen[kind >> 3] & (p8)(1u << (kind & 7)))
+                if ((answers && kind != 0x0000 && kind != 0x000a) ||
+                    seen[kind >> 3] & (p8)(1u << (kind & 7)))
                         return false;
                 seen[kind >> 3] |= (p8)(1u << (kind & 7));
 
@@ -6735,7 +6639,7 @@ static COLD bool tls_new_session_ticket_valid(p8 address_to body,
                 return false;
         at += ticket_length;
 
-        return tls_encrypted_extensions_valid(body + at, length - at);
+        return tls_encrypted_extensions_valid(body + at, length - at, false);
 }
 
 /* This client does not resume sessions, but servers commonly send tickets.
@@ -6790,25 +6694,12 @@ static COLD bipolar tls_post_handshake_append(p8 address_to held,
         return TLS_OK;
 }
 
-static COLD bool tls_post_handshake_valid(p8 address_to messages,
-                                     positive length)
-{
-        p8 held[TLS_HS_MAX];
-        positive held_length = 0;
-        bool valid;
-
-        valid = tls_post_handshake_append(held, address_of held_length,
-                                          messages, length) == TLS_OK &&
-                !held_length;
-        crypto_forget(held, sizeof held);
-        return valid;
-}
-
 /* Encrypted server flight: handshake bytes are a stream across records, so
    each plaintext fragment is appended to hs[] and every complete message is
-   peeled from the front.  Unlike tls_handshake_one_append, an empty fragment
-   is a no-op (no !length guard) and several messages may share one record.
-   Leftover bytes after the flight reaches COMPLETE are refused.
+   peeled from the front.  Several messages may share one record; an empty
+   fragment is refused, as RFC 8446 5.1 forbids sending one and as the other
+   appends refuse it.  Leftover bytes after the flight reaches COMPLETE are
+   refused.
 
    tls may be null: then only framing and tls_server_flight_step run, which is
    how the unit checks exercise the same walk without keys or a peer. */
@@ -6820,17 +6711,17 @@ static COLD bipolar tls_encrypted_flight_append(
 {
         positive msg_at = 0;
 
-        if (*hs_used + length > room)
+        if (!length || *hs_used > room || length > room - *hs_used)
                 return TLS_FAIL;
         memory_copy(hs + *hs_used, fragment, length);
         *hs_used += length;
 
-        while (msg_at + 4 <= *hs_used)
+        while (*hs_used - msg_at >= 4)
         {
                 p8 hs_type = hs[msg_at];
                 positive hs_len = tls_load_24(hs + msg_at + 1);
 
-                if (msg_at + 4 + hs_len > *hs_used)
+                if (hs_len > *hs_used - msg_at - 4)
                         break;
 
                 if (!tls_server_flight_step(flight, hs_type))
@@ -6841,7 +6732,7 @@ static COLD bipolar tls_encrypted_flight_append(
                         if (hs_type == TLS_HS_ENCRYPTED_EXTS)
                         {
                                 if (!tls_encrypted_extensions_valid(
-                                        hs + msg_at + 4, hs_len))
+                                        hs + msg_at + 4, hs_len, true))
                                         return TLS_FAIL;
                                 tls_transcript_add(tls, hs + msg_at,
                                                    4 + hs_len);
@@ -6891,8 +6782,8 @@ static COLD bipolar tls_encrypted_flight_append(
 static COLD bipolar tls_handshake(
     tls_conn address_to tls, const network_deadline address_to deadline)
 {
-        p8 hello[1024];
-        p8 record[TLS_RECORD_MAX];
+        p8 hello[5 + 1024];
+        p8 address_to record = null;
         p8 peer[97];
         p8 shared[48];
         positive hello_length = 0;
@@ -6907,27 +6798,21 @@ static COLD bipolar tls_handshake(
         positive group = 0;
 
         crypto_sha256_open(address_of tls->transcript);
-        tls->receive_start = 0;
-        tls->receive_end = 0;
-        tls->plain_used = 0;
-        tls->closed = false;
-        tls->post_handshake_used = 0;
-        tls->encrypted = false;
-        tls->application = false;
 
-        if (tls_client_hello(tls, hello, sizeof(hello), address_of hello_length))
+        if (tls_client_hello(tls, hello + 5, sizeof hello - 5,
+                             address_of hello_length))
                 goto done;
-        tls_transcript_add(tls, hello, hello_length);
-        if (tls_send_plain(tls, TLS_CT_HANDSHAKE, hello, hello_length))
+        tls_transcript_add(tls, hello + 5, hello_length);
+        tls_record_header(hello, TLS_CT_HANDSHAKE, hello_length);
+        if (!network_stream_send_all(tls->handle, hello, 5 + hello_length))
                 goto done;
 
         for (;;)
         {
                 bipolar assembled;
 
-                if (tls_read_record(tls, address_of type, record,
-                                    sizeof(record), address_of length,
-                                    deadline))
+                if (tls_next_record(tls, address_of type, address_of record,
+                                    address_of length, deadline))
                         goto done;
                 if (type == TLS_CT_CCS)
                 {
@@ -6952,32 +6837,15 @@ static COLD bipolar tls_handshake(
                 goto done;
         hs_used = 0;
 
-        if (group == 0x001d)
-        {
-                if (share_length != 32 ||
-                    !crypto_x25519(shared, tls->x25519_scalar, peer))
-                        goto done;
-                if (tls_install_handshake_keys(tls, shared, 32))
-                        goto done;
-        }
-        else if (group == 0x0017)
-        {
-                if (share_length != 65 ||
-                    !crypto_ecdh_p256_shared(shared, tls->p256_scalar, peer))
-                        goto done;
-                if (tls_install_handshake_keys(tls, shared, 32))
-                        goto done;
-        }
-        else if (group == 0x0018)
-        {
-                if (share_length != 97 ||
-                    !crypto_ecdh_p384_shared(shared, tls->p384_scalar, peer))
-                        goto done;
-                if (tls_install_handshake_keys(tls, shared, 48))
-                        goto done;
-        }
-        else
+        /* tls_server_hello_keys admits only the three groups offered, each
+           at its own share length. */
+        if (!(group == 0x001d
+                  ? crypto_x25519(shared, tls->x25519_scalar, peer)
+              : group == 0x0017
+                  ? crypto_ecdh_p256_shared(shared, tls->p256_scalar, peer)
+                  : crypto_ecdh_p384_shared(shared, tls->p384_scalar, peer)))
                 goto done;
+        tls_install_handshake_keys(tls, shared, group == 0x0018 ? 48 : 32);
         crypto_forget(tls->x25519_scalar, sizeof tls->x25519_scalar);
         crypto_forget(tls->p256_scalar, sizeof tls->p256_scalar);
         crypto_forget(tls->p384_scalar, sizeof tls->p384_scalar);
@@ -6985,7 +6853,7 @@ static COLD bipolar tls_handshake(
 
         while (flight != TLS_SERVER_FLIGHT_COMPLETE)
         {
-                if (tls_read_record(tls, address_of type, record, sizeof(record),
+                if (tls_next_record(tls, address_of type, address_of record,
                                     address_of length, deadline))
                         goto done;
                 if (type == TLS_CT_CCS)
@@ -7011,7 +6879,6 @@ static COLD bipolar tls_handshake(
 
 done:
         crypto_forget(hello, sizeof hello);
-        crypto_forget(record, sizeof record);
         crypto_forget(peer, sizeof peer);
         crypto_forget(shared, sizeof shared);
         crypto_forget(hs, sizeof hs);
@@ -7044,10 +6911,8 @@ static bipolar tls_write(tls_conn address_to tls, p8 address_to data,
 {
         while (length)
         {
-                positive take = length;
+                positive take = min(length, (positive)TLS_PLAINTEXT_MAX);
 
-                if (take > 16384)
-                        take = 16384;
                 if (tls_send_enc(tls, TLS_CT_APP, data, take))
                         return TLS_FAIL;
                 data += take;
@@ -7066,7 +6931,9 @@ static bipolar tls_write(tls_conn address_to tls, p8 address_to data,
    renews: tickets, empty records and partial records all spend one budget.
    hold never receives: when the next record is not yet whole it answers
    TLS_AGAIN, so a writer can gather every record already here while the
-   spans it holds stay put. */
+   spans it holds stay put. A peer keeping the socket full of records that
+   deliver nothing never lets a read wait, so after each such record the
+   budget is asked here as well. */
 static bipolar tls_take(tls_conn address_to tls, positive room,
                         p8 address_to address_to span, positive address_to got,
                         const network_deadline address_to deadline,
@@ -7074,6 +6941,7 @@ static bipolar tls_take(tls_conn address_to tls, positive room,
 {
         network_deadline patience;
         bool waiting = !seconds && !nanoseconds;
+        positive left[2];
         p8 type = 0;
         p8 address_to inner = null;
         positive length = 0;
@@ -7090,13 +6958,16 @@ static bipolar tls_take(tls_conn address_to tls, positive room,
                 return TLS_OK;
         }
 
-        for (;;)
+        for (bool spent = false;; spent = true)
         {
                 if (tls->closed)
                 {
                         address_to got = 0;
                         return tls->post_handshake_used ? TLS_FAIL : TLS_OK;
                 }
+                if (spent && deadline &&
+                    !network_deadline_left(deadline, left, left + 1))
+                        return TLS_FAIL;
                 if (!tls_record_whole(tls))
                 {
                         if (hold)
@@ -7118,7 +6989,7 @@ static bipolar tls_take(tls_conn address_to tls, positive room,
                         tls->closed = true;
                         continue;
                 }
-                if (status || type == TLS_CT_CCS)
+                if (status)
                         return TLS_FAIL;
                 if (type == TLS_CT_HANDSHAKE)
                 {
@@ -7172,12 +7043,6 @@ static bipolar tls_read_until(
         if (!status && address_to got)
                 memory_copy(into, span, address_to got);
         return status;
-}
-
-static bipolar tls_read(tls_conn address_to tls, p8 address_to into,
-                        positive room, positive address_to got)
-{
-        return tls_read_until(tls, into, room, got, null);
 }
 
 #endif
