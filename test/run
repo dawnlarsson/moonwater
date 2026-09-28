@@ -165,7 +165,7 @@ describe()
         install)  echo "Moonwater installed to a disk, started from it, asked about and updated from a stick" ;;
         canvas)   echo "what is actually on the screen, read back a pixel at a time" ;;
         wifi)     echo "networks in the air of a machine with simulated radios, joined and listed" ;;
-        fuzz)     echo "the TLS DER, handshake and verify fuzz targets for an hour each, or a release report" ;;
+        fuzz)     echo "the TLS DER, handshake and verify and the waterlink pre-auth fuzz targets for an hour each, or a release report" ;;
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
         esac
 }
@@ -2544,6 +2544,8 @@ lane_waterlink()
         #       outside the native-binary gate above.
         python3 test/differential.py --harness waterlink_sanitized
         case $? in 0|2) ;; *) waterlink_outcome=1 ;; esac
+        python3 test/differential.py --harness waterlink_pre_fuzz
+        case $? in 0|2) ;; *) waterlink_outcome=1 ;; esac
         return "$waterlink_outcome"
 }
 
@@ -3643,7 +3645,7 @@ lane_net()
         return "$net_outcome"
 }
 #       The TLS fuzz targets for longer than lane_net's smoke: tls_der_fuzz,
-#       tls_hs_fuzz and tls_verify_fuzz, an hour each with no run cap unless
+#       tls_hs_fuzz and tls_verify_fuzz, and waterlink_pre_fuzz, an hour each with no run cap unless
 #       MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise.
 #       MOONWATER_FUZZ_REPORT=artifacts/fuzz-report.txt makes it the release
 #       attach instead: lane_net's budget unless the knobs are set, and a JSON

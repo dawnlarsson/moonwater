@@ -38255,9 +38255,11 @@ def tls_fuzz_seeds(corpus):
 
 
 def tls_fuzz_write_seeds(corpus, directory):
-    """The corpus written into directory, one file a seed; the paths, sorted."""
+    """The corpus (a tls_fuzz_seeds name, or name-to-bytes) written into
+    directory, one file a seed; the paths, sorted."""
     directory.mkdir(parents=True, exist_ok=True)
-    for name, data in tls_fuzz_seeds(corpus).items():
+    seeds = corpus if isinstance(corpus, dict) else tls_fuzz_seeds(corpus)
+    for name, data in seeds.items():
         (directory / name).write_bytes(data)
     return sorted(directory.iterdir())
 
@@ -39594,7 +39596,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
 
 def harness_tls_fuzz(argv):
-    """tls_der_fuzz, tls_hs_fuzz and tls_verify_fuzz in turn: `sh test/run fuzz`.
+    """tls_der_fuzz, tls_hs_fuzz, tls_verify_fuzz and waterlink_pre_fuzz in
+    turn: `sh test/run fuzz`.
 
     Continuous by default, an hour a target with no run cap, unless
     MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise. With
@@ -39612,12 +39615,16 @@ def harness_tls_fuzz(argv):
     os.environ.setdefault("MOONWATER_FUZZ_RUNS", "20000" if report else "-1")
     os.environ.setdefault("MOONWATER_FUZZ_SECONDS", "5" if report else "3600")
     runs, seconds, _ = tls_fuzz_budget()
-    print("tls fuzz: der then hs then verify (runs=%d seconds=%d)" % (runs, seconds))
+    print("tls fuzz: der then hs then verify then waterlink pre (runs=%d seconds=%d)" %
+          (runs, seconds))
     seeds = {corpus: len(tls_fuzz_seeds(corpus)) for corpus in ("tls_der", "tls_hs")}
+    seeds["waterlink_pre"] = len(waterlink_pre_seeds())
     targets = []
     for name, corpus, harness in (("tls_der_fuzz", "tls_der", harness_tls_der_fuzz),
                                   ("tls_hs_fuzz", "tls_hs", harness_tls_hs_fuzz),
-                                  ("tls_verify_fuzz", "tls_der", harness_tls_verify_fuzz)):
+                                  ("tls_verify_fuzz", "tls_der", harness_tls_verify_fuzz),
+                                  ("waterlink_pre_fuzz", "waterlink_pre",
+                                   harness_waterlink_pre_fuzz)):
         began = time.time()
         try:
             code = harness([])
@@ -45319,6 +45326,1153 @@ static void *memory_copy_apart(void *into, const void *from, positive size)
     return checks_run.verdict("waterlink sanitized:", "waterlink-sanitized")
 
 
+def waterlink_pre_source():
+    """The pre-authentication half of the listener as one hosted C unit.
+
+    Everything a stranger on the network reaches before a key is proved:
+    discover.c and handshake.c whole, nearby.c's greeting and answering,
+    and service.c's receive loop (recvmmsg and its UDP_GRO runs), dispatch,
+    initiation, carried-datagram checks, the stamp table and the client's
+    answer -- sliced from the tree by their source text, so what is fuzzed
+    is what ships. The system calls, the peers file and the cryptography
+    stand in: X25519 is multiplication mod 2^64 (so it commutes and a real
+    handshake completes), AES-GCM and the seal are a keyed mix with a tag,
+    and the seal.c/link.c datapath past the tag is a counting stub (the
+    core is waterlink_sanitized's)."""
+    root = HARNESS_ROOT
+
+    def read(path):
+        return (root / path).read_text()
+
+    def sec(text, first, following):
+        i = text.index(first)
+        return text[i:text.index(following, i)]
+
+    wl = sec(read("src/waterlink/waterlink.c"), "#ifndef WATERLINK_INCLUDED",
+             "#endif // WATERLINK_INCLUDED") + "\n#endif\n"
+    link = read("src/waterlink/link.c")
+    net = read("src/net/net.c")
+    hs = read("src/waterlink/handshake.c")
+    disc = read("src/waterlink/discover.c")
+    near = read("src/waterlink/nearby.c")
+    svc = read("src/waterlink/service.c")
+
+    SHIM = r'''#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+typedef uint8_t p8;
+typedef uint16_t p16;
+typedef uint32_t p32;
+typedef unsigned long long p64;
+typedef int16_t b16;
+typedef int32_t b32;
+typedef long long b64;
+typedef p64 positive;
+typedef b64 bipolar;
+typedef p8 *string_address;
+#define address_to *
+#define address_of &
+#define address_any void *
+#define null ((void *)0)
+#define fn void
+#define COLD
+#define HOT
+#define PURE
+#define CONST
+#define KEEP
+#define array_count(a) (sizeof(a) / sizeof((a)[0]))
+#define EPERM 1
+#define ENOENT 2
+#define EIO 5
+#define EAGAIN 11
+#define ENOMEM 12
+#define ERROR_EXISTS 17
+#define EADDRINUSE 98
+#define AF_INET 2
+#define AF_INET6 10
+#define SOL_SOCKET 1
+#define MSG_DONTWAIT 0x40
+#define MSG_NOSIGNAL 0x4000
+#define HOST_STATE "/run/moonwater"
+#define DNS_MALFORMED (-3)
+#define DIGEST_SHA256 3
+typedef struct { p16 family; p16 port; p32 host; p8 padding[8]; } socket_address_internet;
+typedef struct { p16 family; p16 port; p32 flow; p8 host[16]; p32 scope; } socket_address_internet6;
+
+static void *memory_copy(void *into, const void *from, positive size)
+{
+        if (size)
+                memcpy(into, from, size);
+        return into;
+}
+#define memory_copy_apart memory_copy
+static void memory_zero(void *into, positive size) { if (size) memset(into, 0, size); }
+static b32 memory_compare(const void *a, const void *b, positive size)
+{
+        return size ? memcmp(a, b, size) : 0;
+}
+static positive memory_span_byte(const void *block, p8 value, positive size)
+{
+        const p8 *bytes = block;
+        positive at = 0;
+
+        while (at < size && bytes[at] == value)
+                at++;
+        return at;
+}
+static b32 memory_compare_ascii_case(const void *one, const void *two, positive size)
+{
+        const p8 *a = one, *b = two;
+
+        for (positive at = 0; at < size; at++)
+        {
+                p8 x = a[at] >= 'A' && a[at] <= 'Z' ? a[at] + 32 : a[at];
+                p8 y = b[at] >= 'A' && b[at] <= 'Z' ? b[at] + 32 : b[at];
+
+                if (x != y)
+                        return x < y ? -1 : 1;
+        }
+        return 0;
+}
+static positive memory_into_hex(void *into, const void *from, positive size)
+{
+        static const char digits[] = "0123456789abcdef";
+        p8 *out = into;
+        const p8 *in = from;
+
+        for (positive at = 0; at < size; at++)
+        {
+                out[2 * at] = digits[in[at] >> 4];
+                out[2 * at + 1] = digits[in[at] & 15];
+        }
+        return 2 * size;
+}
+static positive string_length(const void *text) { return strlen(text); }
+static void *string_copy(void *into, const void *from) { return strcpy(into, from); }
+static bool string_equals(const void *a, const void *b) { return !strcmp(a, b); }
+static b32 byte_is_alnum(b32 c)
+{
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+static bool crypto_same(const void *one, const void *two, positive size)
+{
+        const p8 *a = one, *b = two;
+        p8 differ = 0;
+
+        for (positive at = 0; at < size; at++)
+                differ |= a[at] ^ b[at];
+        return !differ;
+}
+static void crypto_forget(void *into, positive size) { memory_zero(into, size); }
+static void network_store_16(p8 *at, p16 v) { at[0] = v >> 8; at[1] = (p8)v; }
+static void network_store_32(p8 *at, p32 v)
+{
+        at[0] = v >> 24; at[1] = v >> 16; at[2] = v >> 8; at[3] = (p8)v;
+}
+static p16 network_load_16(const p8 *at) { return (p16)(at[0] << 8 | at[1]); }
+static p32 network_load_32(const p8 *at)
+{
+        return (p32)at[0] << 24 | (p32)at[1] << 16 | (p32)at[2] << 8 | at[3];
+}
+static void crypto_put_be64(p8 *at, p64 v)
+{
+        for (int i = 0; i < 8; i++)
+                at[i] = (p8)(v >> (56 - 8 * i));
+}
+#define network_order_16(v) ((p16)((((p16)(v)) >> 8) | (((p16)(v)) << 8)))
+#define network_order_32(v) __builtin_bswap32((p32)(v))
+
+/*      The cryptography, standing in: a keyed mix for the hashes and the
+        MACs, and X25519 as multiplication of the scalar's low word by the
+        point's, mod 2^64 -- it commutes, so both ends of a handshake reach
+        the same secret and the code behind every tag is reachable. */
+typedef struct { p64 lane[4]; p64 length; } crypto_sha256;
+static p64 wl_mix(p64 x)
+{
+        x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ull;
+        x ^= x >> 27; x *= 0x94d049bb133111ebull;
+        return x ^ (x >> 31);
+}
+static void crypto_sha256_open(crypto_sha256 *h)
+{
+        for (int i = 0; i < 4; i++)
+                h->lane[i] = 0x6a09e667f3bcc908ull * (i + 1);
+        h->length = 0;
+}
+static void crypto_sha256_write(crypto_sha256 *h, const void *data, positive size)
+{
+        const p8 *bytes = data;
+
+        for (positive at = 0; at < size; at++, h->length++)
+                h->lane[h->length & 3] =
+                        wl_mix(h->lane[h->length & 3] ^ bytes[at] ^ h->length << 8);
+}
+static void crypto_sha256_close(crypto_sha256 *h, p8 *out)
+{
+        for (int i = 0; i < 4; i++)
+        {
+                p64 word = wl_mix(h->lane[i] ^ h->lane[(i + 1) & 3] ^ h->length);
+
+                memcpy(out + 8 * i, &word, 8);
+        }
+}
+static void crypto_sha256_of(const void *data, positive size, p8 *out)
+{
+        crypto_sha256 h;
+
+        crypto_sha256_open(&h);
+        crypto_sha256_write(&h, data, size);
+        crypto_sha256_close(&h, out);
+}
+static void crypto_hmac_sha256(const p8 *key, positive key_size, const void *message,
+                               positive size, p8 *out)
+{
+        crypto_sha256 h;
+
+        crypto_sha256_open(&h);
+        crypto_sha256_write(&h, key, key_size);
+        crypto_sha256_write(&h, "\x36", 1);
+        crypto_sha256_write(&h, message, size);
+        crypto_sha256_close(&h, out);
+}
+static void crypto_hkdf_extract(const p8 *salt, positive salt_size, const p8 *ikm,
+                                positive size, p8 *prk)
+{
+        crypto_hmac_sha256(salt, salt_size, ikm, size, prk);
+}
+static void crypto_hkdf_expand(const p8 *prk, const p8 *info, positive info_size,
+                               p8 *out, positive size)
+{
+        p8 block[32];
+        p8 input[64 + 33];
+
+        for (positive at = 0, round = 1; at < size; at += 32, round++)
+        {
+                positive take = size - at < 32 ? size - at : 32;
+
+                memcpy(input, info, info_size);
+                input[info_size] = (p8)round;
+                crypto_hmac_sha256(prk, 32, input, info_size + 1, block);
+                memcpy(out + at, block, take);
+        }
+}
+static void crypto_pbkdf2(positive algorithm, positive size, const p8 *secret,
+                          positive secret_size, const p8 *salt, positive salt_size,
+                          positive rounds, p8 *out, positive out_size)
+{
+        crypto_sha256 h;
+        p8 block[32];
+
+        (void)algorithm; (void)size; (void)rounds;
+        crypto_sha256_open(&h);
+        crypto_sha256_write(&h, secret, secret_size);
+        crypto_sha256_write(&h, salt, salt_size);
+        crypto_sha256_close(&h, block);
+        memcpy(out, block, out_size < 32 ? out_size : 32);
+}
+static bool crypto_x25519(p8 *out, const p8 *scalar, const p8 *point)
+{
+        p64 s, u, product;
+
+        memcpy(&s, scalar, 8);
+        memcpy(&u, point, 8);
+        product = (s | 1) * u;
+        memset(out, 0, 32);
+        memcpy(out, &product, 8);
+        return product != 0;
+}
+typedef struct { p8 raw[16]; } crypto_aesgcm_key;
+static void crypto_aesgcm_prepare(crypto_aesgcm_key *key, const p8 *raw)
+{
+        memcpy(key->raw, raw, 16);
+}
+static void wl_stream(const crypto_aesgcm_key *key, const p8 *iv, positive ivs,
+                      p8 *text, positive size)
+{
+        p64 state = 0x9e3779b97f4a7c15ull;
+
+        for (positive i = 0; i < 16; i++)
+                state = wl_mix(state ^ key->raw[i] ^ i << 8);
+        for (positive i = 0; i < ivs; i++)
+                state = wl_mix(state ^ iv[i] ^ i << 12);
+        for (positive at = 0; at < size; at++)
+                text[at] ^= (p8)wl_mix(state ^ at);
+}
+static void wl_tag(const crypto_aesgcm_key *key, const p8 *iv, positive ivs,
+                   const p8 *ad, positive ads, const p8 *text, positive size,
+                   p8 *tag)
+{
+        crypto_sha256 h;
+        p8 full[32];
+
+        crypto_sha256_open(&h);
+        crypto_sha256_write(&h, key->raw, 16);
+        crypto_sha256_write(&h, iv, ivs);
+        crypto_sha256_write(&h, ad, ads);
+        crypto_sha256_write(&h, text, size);
+        crypto_sha256_close(&h, full);
+        memcpy(tag, full, 16);
+}
+static void crypto_aesgcm_seal(crypto_aesgcm_key *key, const p8 *iv, const p8 *ad,
+                               positive ads, p8 *text, positive size, p8 *tag)
+{
+        wl_stream(key, iv, 12, text, size);
+        wl_tag(key, iv, 12, ad, ads, text, size, tag);
+}
+static bool crypto_aesgcm_open(crypto_aesgcm_key *key, const p8 *iv, const p8 *ad,
+                               positive ads, p8 *text, positive size, const p8 *tag)
+{
+        p8 want[16];
+
+        wl_tag(key, iv, 12, ad, ads, text, size, want);
+        if (!crypto_same(want, tag, 16))
+                return false;
+        wl_stream(key, iv, 12, text, size);
+        return true;
+}
+
+/*      The machine around it: a clock the driver moves, entropy it can cut
+        off, and system calls answered from what the driver queued. */
+static p64 wl_clock = 1000000000ull;
+static p64 wl_wall = 1700000000000000000ull;
+static bool wl_entropy_down;
+static p64 wl_random_state = 1;
+static p64 system_clock_ns(int which) { return which ? wl_clock : wl_wall + wl_clock; }
+static bipolar system_random_fill(void *into, positive size, positive flags)
+{
+        (void)flags;
+        if (wl_entropy_down)
+                return -EIO;
+        for (positive at = 0; at < size; at++)
+                ((p8 *)into)[at] = (p8)(wl_random_state = wl_mix(wl_random_state + at));
+        return (bipolar)size;
+}
+enum { WL_SYSCALL_mmap = 1, WL_SYSCALL_recvmmsg, WL_SYSCALL_recvmsg };
+#define syscall(name) WL_SYSCALL_##name
+static bipolar wl_system(positive n, positive a, positive b, positive c, positive d,
+                         positive e, positive f);
+#define system_call_3(n, a, b, c) wl_system(n, (positive)(a), (positive)(b), (positive)(c), 0, 0, 0)
+#define system_call_5(n, a, b, c, d, e) wl_system(n, (positive)(a), (positive)(b), (positive)(c), (positive)(d), (positive)(e), 0)
+#define system_call_6(n, a, b, c, d, e, f) wl_system(n, (positive)(a), (positive)(b), (positive)(c), (positive)(d), (positive)(e), (positive)(f))
+static bipolar socket_send(b32 socket, const void *bytes, positive size, b32 flags,
+                           const void *to, positive to_size);
+static bipolar socket_option_set(b32 s, b32 l, b32 o, const void *v, positive n)
+{
+        (void)s; (void)l; (void)o; (void)v; (void)n;
+        return 0;
+}
+static fn system_close(bipolar handle) { (void)handle; }
+'''
+
+    LINK_STUBS = r'''
+/*      Past the tag is the core's (waterlink_sanitized fuzzes it): a
+        counting stand-in here, with a body whose first byte is 0xff judged
+        malformed, so link_carried's refusal after a good tag is reachable. */
+static unsigned long wl_applied;
+fn waterlink_link_reset(struct waterlink_link *link) { memset(link, 0, sizeof *link); }
+p64 waterlink_wake(struct waterlink_link *link, p64 now) { (void)link; return now + 1000000; }
+bipolar waterlink_judge(address_any body, positive length, struct waterlink_part *parts)
+{
+        (void)parts;
+        return length && ((p8 *)body)[0] == 0xff ? -1 : 0;
+}
+fn waterlink_apply(struct waterlink_link *link, address_any body,
+                   struct waterlink_part *parts, positive count, p64 now,
+                   waterlink_sink sink, address_any context)
+{
+        (void)link; (void)body; (void)parts; (void)count; (void)now; (void)sink;
+        (void)context;
+        wl_applied++;
+}
+static positive waterlink_box(positive used)
+{
+        positive box = (used + 15) & ~15ull;
+
+        return box ? box : 16;
+}
+positive waterlink_seal(crypto_aesgcm_key *key, p8 *datagram, positive used)
+{
+        positive box;
+
+        if (used > WATERLINK_PAYLOAD)
+                return 0;
+        box = waterlink_box(used);
+        memset(datagram + 16 + used, 0, box - used);
+        wl_stream(key, datagram + 8, 8, datagram + 16, box);
+        wl_tag(key, datagram + 8, 8, datagram, 16, datagram + 16, box,
+               datagram + 16 + box);
+        return 16 + box + 16;
+}
+bool waterlink_open(crypto_aesgcm_key *key, p8 *datagram, positive length)
+{
+        p8 want[16];
+
+        if (length < 48 || length > WATERLINK_DATAGRAM || length % 16)
+                return false;
+        wl_tag(key, datagram + 8, 8, datagram, 16, datagram + 16, length - 32, want);
+        if (!crypto_same(want, datagram + length - 16, 16))
+                return false;
+        wl_stream(key, datagram + 8, 8, datagram + 16, length - 32);
+        return true;
+}
+'''
+
+    SERVICE_STUBS = r'''
+/*      The peers file, in memory: what pairing saved is what the next load
+        reads, and the driver can make it unreadable. Every name saved must
+        be one link_name_good takes -- the file is printed to terminals. */
+static link_peers wl_file;
+static bool wl_file_unreadable;
+static unsigned long wl_bad_names;
+static bipolar link_peers_read(link_peers *peers)
+{
+        memset(peers, 0, sizeof *peers);
+        if (wl_file_unreadable)
+                return -EPERM;
+        *peers = wl_file;
+        return 0;
+}
+static fn link_peers_load(link_peers *peers) { (void)link_peers_read(peers); }
+static bool link_peers_for_change(link_peers *peers)
+{
+        bipolar read = link_peers_read(peers);
+
+        return read >= 0 || read == -ENOENT;
+}
+static bipolar link_peers_save(link_peers *peers)
+{
+        for (positive at = 0; at < peers->count; at++)
+                if (!link_name_good((string_address)peers->peer[at].name))
+                        wl_bad_names++;
+        wl_file = *peers;
+        return 0;
+}
+static p16 link_port(void) { return LINK_PORT; }
+'''
+
+    NEARBY_STUBS = r'''
+static bipolar link_peers_lock(void) { return 5; }
+static fn link_peers_unlock(bipolar handle) { (void)handle; }
+'''
+
+    parts = [
+        SHIM, wl,
+        sec(link, "// The largest frame that can share", "fn waterlink_link_reset("),
+        sec(link, "typedef bool (address_to waterlink_sink)",
+            "// Hand one frame to the application"),
+        sec(link, "struct waterlink_part\n{", "/*\n        Judge an authenticated body whole"),
+        sec(link, "#define WATERLINK_REPLAY_BLOCKS", "#endif // WATERLINK_LINK_INCLUDED"),
+        LINK_STUBS,
+        sec(net, "static COLD bipolar dns_copy_name(",
+            "//      Where a name ends, for a caller"),
+        sec(hs, "#define WATERLINK_PROTOCOL", "#endif // WATERLINK_HANDSHAKE_INCLUDED"),
+        sec(disc, "#define WATERLINK_MDNS_PORT 5353", "#endif // WATERLINK_DISCOVER_INCLUDED"),
+        sec(svc, "#define LINK_PORT 22348", "/*      A grant by name"),
+        sec(svc, "static p64 link_now(void)", "// All digits and nothing else"),
+        sec(svc, "static bool link_name_good(", "/* Everything waterlink keeps"),
+        sec(svc, "typedef struct\n{\n        struct waterlink_peer peer[LINK_PEERS_MAX];",
+            "static bipolar link_peers_read("),
+        sec(svc, "static struct waterlink_peer address_to link_peer_named(",
+            "static p16 link_port(void)"),
+        sec(svc, "static fn link_address_v4(", "static bool link_hex_group("),
+        sec(svc, "static fn link_socket_address(", "// The lock ----"),
+        sec(svc, "// Sessions ----", "static bool link_part_owned("),
+        sec(svc, "static fn link_keys_install(", "// Sending ----"),
+        sec(svc, "static positive link_destination(",
+            "/*\n        A run of full datagrams to one place"),
+        sec(svc, "typedef struct\n{\n        address_any base;", "static fn link_batch_flush(void)"),
+        sec(svc, "// A sealed datagram of nothing", "static bool link_post("),
+        SERVICE_STUBS,
+        sec(near, "#define LINK_GROUPS_PATH", "fn link_groups_load("),
+        NEARBY_STUBS,
+        sec(near, "static fn link_name_for(", "// The listener's side of it"),
+        sec(near, "// The listener's side of it", "typedef struct\n{\n        p32 multiaddr;"),
+        sec(near, "typedef struct\n{\n        p32 multiaddr;",
+            "/*\n        Every interface with an IPv4 address"),
+        sec(near, "static fn link_nearby_send(", "// Goodbye, with TTL zero"),
+        sec(near, "// The same place is greeted once in a while",
+            "/*\n        The listener's turn:"),
+        sec(near, "// Read what is waiting on the mDNS socket",
+            "#endif // WATERLINK_NEARBY_INCLUDED"),
+        "static bool link_hear(address_any context, struct waterlink_frame *head, "
+        "p8 *payload)\n{\n        (void)context; (void)head; (void)payload;\n"
+        "        return true;\n}\n",
+        sec(svc, "// The handshake, at the machine's end", "// The state file, for"),
+        sec(svc, "static fn link_note_seen(struct link_session address_to s, p64 wall)\n{",
+            "//      Never more than once a fifth"),
+        sec(svc, "typedef struct\n{\n        struct waterlink_noise noise;",
+            "/*      The client's terminal goes raw"),
+        sec(svc, "// The initiator's half of the handshake", "static bool link_client_answer("),
+        sec(svc, "static fn link_client_answered(p8 address_to datagram, positive length);",
+            "/*\n        `moonwater link serve`"),
+        sec(svc, "static bool link_client_answer(", "static p64 link_rekey_after(void)"),
+        WATERLINK_PRE_DRIVER,
+    ]
+    return "\n".join(parts)
+
+
+WATERLINK_PRE_DRIVER = r'''
+/*      The driver: one input is a script of what arrives at a listener (or,
+        with the first byte odd, at a client waiting for its answer). Three
+        identities are in play -- two paired, one a stranger -- and one group.
+        After every step the invariants a stranger must not be able to move
+        are asked, and a broken one is an abort, which libFuzzer reports:
+
+          - the session table stays within LINK_SESSIONS, and within
+            LINK_SESSIONS_A_PEER of any one peer, and only a paired key holds
+            one; the stamp table stays within LINK_PEERS_MAX;
+          - a handshake that completes agrees on its keys at both ends;
+          - every name pairing saves is one link_name_good takes;
+          - greetings an mDNS packet provoked number at most LINK_GREETED in
+            any LINK_GREET_AGAIN, and one-shot answers at most one in any
+            LINK_ANSWER_AGAIN: nothing a spoofed packet says makes this an
+            amplifier.
+*/
+static const p8 *wl_in;
+static positive wl_left;
+static p8 take8(void) { if (!wl_left) return 0; wl_left--; return *wl_in++; }
+static p16 take16(void) { p16 v = take8(); return (p16)(v << 8 | take8()); }
+static p32 take32(void) { p32 v = take16(); return v << 16 | take16(); }
+static positive take_bytes(p8 *into, positive want)
+{
+        positive n = want < wl_left ? want : wl_left;
+
+        memcpy(into, wl_in, n);
+        wl_in += n;
+        wl_left -= n;
+        return n;
+}
+
+/*      What the system calls hand back: runs queued for recvmmsg, packets
+        for the mDNS socket's recvmsg. */
+struct wl_run { p8 *bytes; positive length; positive segment; p8 address[16]; p16 port; bool v4; };
+static struct wl_run wl_runs[4];
+static positive wl_run_count, wl_run_next;
+static struct wl_run wl_mdns[4];
+static positive wl_mdns_count, wl_mdns_next;
+static b32 wl_mdns_ttl[4];
+static void *wl_mapped[LINK_SESSIONS * 4];
+static positive wl_mapped_count;
+
+static bipolar wl_system(positive n, positive a, positive b, positive c, positive d,
+                         positive e, positive f)
+{
+        (void)a; (void)d; (void)e; (void)f;
+        if (n == WL_SYSCALL_mmap)
+        {
+                void *mapped;
+
+                if (wl_mapped_count == array_count(wl_mapped))
+                        return -ENOMEM;
+                mapped = calloc(1, b);
+                wl_mapped[wl_mapped_count++] = mapped;
+                return mapped ? (bipolar)(intptr_t)mapped : -ENOMEM;
+        }
+        if (n == WL_SYSCALL_recvmmsg)
+        {
+                link_received *got = (link_received *)(intptr_t)b;
+                bipolar count = 0;
+
+                for (; count < (bipolar)c && wl_run_next < wl_run_count; count++)
+                {
+                        struct wl_run *run = wl_runs + wl_run_next++;
+                        link_message *m = &got[count].message;
+                        positive take = run->length < m->parts[0].length
+                                                ? run->length : m->parts[0].length;
+                        p8 *control = m->control;
+
+                        memcpy(m->parts[0].base, run->bytes, take);
+                        got[count].length = (b32)take;
+                        if (run->v4)
+                        {
+                                socket_address_internet *from = m->name;
+
+                                memset(from, 0, sizeof *from);
+                                from->family = AF_INET;
+                                from->port = network_order_16(run->port);
+                                from->host = network_order_32(network_load_32(run->address + 12));
+                        }
+                        else
+                        {
+                                socket_address_internet6 *from = m->name;
+
+                                memset(from, 0, sizeof *from);
+                                from->family = AF_INET6;
+                                from->port = network_order_16(run->port);
+                                memcpy(from->host, run->address, 16);
+                        }
+                        if (run->segment && m->control_length >= 24)
+                        {
+                                p64 length = 20;
+                                b32 level = 17, type = 104, segment = (b32)run->segment;
+
+                                memcpy(control, &length, 8);
+                                memcpy(control + 8, &level, 4);
+                                memcpy(control + 12, &type, 4);
+                                memcpy(control + 16, &segment, 4);
+                                m->control_length = 24;
+                        }
+                        else
+                                m->control_length = 0;
+                }
+                return count ? count : -EAGAIN;
+        }
+        if (n == WL_SYSCALL_recvmsg)
+        {
+                link_message *m = (link_message *)(intptr_t)b;
+                struct wl_run *run;
+                socket_address_internet *from = m->name;
+                p8 *control = m->control;
+                positive take;
+                b32 ttl;
+
+                if (wl_mdns_next == wl_mdns_count)
+                        return -EAGAIN;
+                ttl = wl_mdns_ttl[wl_mdns_next];
+                run = wl_mdns + wl_mdns_next++;
+                take = run->length < m->parts[0].length ? run->length : m->parts[0].length;
+                memcpy(m->parts[0].base, run->bytes, take);
+                memset(from, 0, sizeof *from);
+                from->family = AF_INET;
+                from->port = network_order_16(run->port);
+                from->host = network_order_32(network_load_32(run->address + 12));
+                if (m->control_length >= 24)
+                {
+                        p64 length = 20;
+                        b32 level = 0, type = 2;
+
+                        memcpy(control, &length, 8);
+                        memcpy(control + 8, &level, 4);
+                        memcpy(control + 12, &type, 4);
+                        memcpy(control + 16, &ttl, 4);
+                        m->control_length = 24;
+                }
+                return (bipolar)run->length;
+        }
+        return -38;
+}
+
+/*      Every datagram sent, as the kernel would see it. */
+static int wl_phase; // 0 authenticated work, 1 mDNS heard
+static p64 wl_greeted_at[256];
+static positive wl_greeted_count;
+static p64 wl_answered_at[256];
+static positive wl_answered_count;
+static p8 wl_last_respond[WATERLINK_DATAGRAM];
+static p8 wl_client_first[WATERLINK_DATAGRAM];
+static bool wl_have_respond;
+static bipolar socket_send(b32 socket, const void *bytes, positive size, b32 flags,
+                           const void *to, positive to_size)
+{
+        const p8 *b = bytes;
+        p32 kind = size >= 4 ? (p32)b[0] | (p32)b[1] << 8 | (p32)b[2] << 16 |
+                                       (p32)b[3] << 24
+                             : 0;
+
+        (void)flags; (void)to; (void)to_size;
+        if (socket == 4 && wl_phase == 1)
+        {
+                /*      The mDNS socket answers a one-shot asker unicast; its
+                        announcements to the group are multicast. */
+                const socket_address_internet *where = to;
+
+                if (where->host != network_order_32(0xe00000fbu) &&
+                    wl_answered_count < array_count(wl_answered_at))
+                        wl_answered_at[wl_answered_count++] = wl_clock / 1000;
+        }
+        if (socket == 3 && kind == WATERLINK_KIND_INITIATE && wl_phase == 1 &&
+            wl_greeted_count < array_count(wl_greeted_at))
+                wl_greeted_at[wl_greeted_count++] = wl_clock / 1000;
+        if (socket == 3 && kind == WATERLINK_KIND_INITIATE && !link_self.server &&
+            size == WATERLINK_DATAGRAM)
+                memcpy(wl_client_first, bytes, size);
+        if (socket == 3 && kind == WATERLINK_KIND_RESPOND && size == WATERLINK_DATAGRAM)
+        {
+                memcpy(wl_last_respond, bytes, size);
+                wl_have_respond = true;
+        }
+        return (bipolar)size;
+}
+
+static struct waterlink_identity wl_id[3];
+static struct waterlink_group_keys wl_group;
+static p8 wl_addresses[4][16];
+
+static void wl_check(bool good, const char *what)
+{
+        if (!good)
+        {
+                fprintf(stderr, "waterlink pre: invariant broken: %s\n", what);
+                abort();
+        }
+}
+
+//      At most `most` of the times fall in any `span`.
+static bool wl_within(const p64 *at, positive count, positive most, p64 span)
+{
+        for (positive i = 0; i + most < count; i++)
+                if (at[i + most] - at[i] < span)
+                        return false;
+        return true;
+}
+
+static void wl_invariants(void)
+{
+        positive used = 0;
+
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+        {
+                struct link_session *s = link_self.session + at;
+                positive same = 0;
+                bool paired = false;
+
+                if (!s->used)
+                        continue;
+                used++;
+                for (positive other = 0; other < LINK_SESSIONS; other++)
+                        same += link_self.session[other].used &&
+                                !memcmp(link_self.session[other].peer, s->peer, 32);
+                wl_check(same <= LINK_SESSIONS_A_PEER, "sessions a peer");
+                for (positive p = 0; p < wl_file.count; p++)
+                        paired |= !memcmp(wl_file.peer[p].key, s->peer, 32);
+                wl_check(paired || !link_self.server, "a session for an unpaired key");
+        }
+        wl_check(used <= LINK_SESSIONS, "sessions");
+        wl_check(link_self.stamps <= LINK_PEERS_MAX, "stamps");
+        wl_check(!wl_bad_names, "a saved name link_name_good refuses");
+        wl_check(wl_within(wl_greeted_at, wl_greeted_count, LINK_GREETED,
+                           LINK_GREET_AGAIN),
+                 "greetings an mDNS packet provoked, over budget");
+        wl_check(wl_within(wl_answered_at, wl_answered_count, 1, LINK_ANSWER_AGAIN),
+                 "one-shot answers, over budget");
+}
+
+static void wl_reset(bool server)
+{
+        p8 secret[32];
+
+        for (positive at = 0; at < wl_mapped_count; at++)
+                free(wl_mapped[at]);
+        wl_mapped_count = 0;
+        memset(&link_self, 0, sizeof link_self);
+        memset(&link_nearby, 0, sizeof link_nearby);
+        memset(&link_client, 0, sizeof link_client);
+        memset(&wl_file, 0, sizeof wl_file);
+        wl_file_unreadable = wl_entropy_down = false;
+        wl_bad_names = 0;
+        wl_greeted_count = wl_answered_count = 0;
+        wl_run_count = wl_run_next = wl_mdns_count = wl_mdns_next = 0;
+        wl_have_respond = false;
+        wl_clock = 1000000000ull;
+        wl_random_state = 1;
+        for (int i = 0; i < 3; i++)
+        {
+                for (int b = 0; b < 32; b++)
+                        secret[b] = (p8)(i * 77 + b * 13 + 1);
+                waterlink_identity_from(&wl_id[i], secret);
+        }
+        for (int b = 0; b < 32; b++)
+                secret[b] = (p8)(b * 7 + 3);
+        waterlink_identity_from(&link_self.me, secret);
+        link_self.server = server;
+        link_self.socket = 3;
+        link_nearby.socket = 4;
+        for (int p = 0; p < 2; p++)
+        {
+                struct waterlink_peer *peer = wl_file.peer + wl_file.count++;
+
+                memcpy(peer->key, wl_id[p].public, 32);
+                strcpy(peer->name, p ? "peer-b" : "peer-a");
+                peer->may = 0xffffffffu;
+        }
+        link_nearby.groups.count = 1;
+        strcpy(link_nearby.groups.record[0].namespace, "office");
+        memset(link_nearby.groups.record[0].key, 0x5a, 32);
+        waterlink_group_keys_from(&wl_group, link_nearby.groups.record[0].key, "office");
+        link_nearby.keys[0] = wl_group;
+        strcpy((char *)link_nearby.name, "machine");
+        for (int a = 0; a < 4; a++)
+        {
+                link_address_v4(wl_addresses[a], 0x0a000001u + (p32)a);
+                if (a == 3)
+                        memset(wl_addresses[a], 0xfe, 8); // one IPv6
+        }
+}
+
+//      A first message from one of the three, stamped delta seconds on.
+static void wl_initiation(p8 *datagram, int who, bool group, p32 delta,
+                          p64 conversation, p32 index, struct waterlink_noise *noise)
+{
+        p8 hello[WATERLINK_HELLO_BYTES];
+        p8 ephemeral[32];
+
+        memset(hello, 0, sizeof hello);
+        waterlink_stamp(hello, 1700000000ull + delta, 0);
+        if (group)
+        {
+                positive n = take_bytes(hello + WATERLINK_STAMP_BYTES,
+                                        take8() % (WATERLINK_NAME_MAX + 1));
+                (void)n;
+        }
+        else
+        {
+                memcpy(hello + WATERLINK_STAMP_BYTES, &conversation, 8);
+                memcpy(hello + WATERLINK_STAMP_BYTES + 8, &index, 4);
+        }
+        system_random_fill(ephemeral, 32, 0);
+        (void)waterlink_initiate(noise, &wl_id[who], group ? wl_group.identity.public
+                                                           : link_self.me.public,
+                                 group ? wl_group.psk : null, ephemeral, hello,
+                                 datagram);
+}
+
+//      A byte or two spoiled, as the driver says, and mac1 made good again
+//      when it says that too, so what is behind the gate is reached.
+static void wl_spoil(p8 *datagram, struct waterlink_identity *to, bool initiation)
+{
+        p8 how = take8();
+
+        if (how & 1)
+        {
+                positive at = take16() % WATERLINK_DATAGRAM;
+
+                datagram[at] ^= take8() | 1;
+        }
+        if (how & 2)
+        {
+                positive at = take16() % WATERLINK_DATAGRAM;
+
+                datagram[at] = take8();
+        }
+        if (how & 4)
+        {
+                positive body = initiation ? WATERLINK_INITIATE_BYTES
+                                           : WATERLINK_RESPOND_BYTES;
+                p8 gate[32];
+
+                waterlink_gate_of(to->public, gate);
+                waterlink_mac1(gate, datagram, 16 + body - 16, datagram + body);
+        }
+}
+
+static void wl_step(bool server)
+{
+        p8 op = take8();
+        p8 *datagram = malloc(WATERLINK_DATAGRAM);
+        p8 *address = wl_addresses[take8() & 3];
+        p16 port = take8() & 1 ? WATERLINK_MDNS_PORT : take16();
+        p64 now = wl_clock / 1000;
+
+        switch (op % 9)
+        {
+        case 0:
+        {
+                //      Anything at all, at an exact length.
+                positive length = take16() % (WATERLINK_DATAGRAM + 64);
+                p8 *raw = malloc(length ? length : 1);
+
+                length = take_bytes(raw, length);
+                link_datagram(raw, length, address, port, now);
+                free(raw);
+                break;
+        }
+        case 1:
+        case 2:
+        {
+                //      A first message from a paired key, the stranger, or a
+                //      group member, then perhaps spoiled; a good one is
+                //      answered, and the answer must key both ends alike.
+                int who = take8() % 3;
+                bool group = op % 9 == 2;
+                struct waterlink_noise noise;
+                p64 conversation = take8() & 3;
+                p32 index = take32();
+                p32 delta = take16();
+                bool spoil = take8() & 1;
+
+                wl_initiation(datagram, who, group, delta, conversation, index, &noise);
+                if (spoil)
+                        wl_spoil(datagram, group ? &wl_group.identity : &link_self.me, true);
+                wl_have_respond = false;
+                if (server)
+                        link_datagram(datagram, WATERLINK_DATAGRAM, address, port, now);
+                if (server && !group && !spoil && wl_have_respond && who < 2 &&
+                    waterlink_gate_passes(&wl_id[who], wl_last_respond, WATERLINK_DATAGRAM))
+                {
+                        p32 theirs = 0;
+                        p8 send[16], receive[16];
+                        bool keyed = false;
+
+                        wl_check(waterlink_answered(&noise, &wl_id[who], wl_last_respond,
+                                                    &theirs),
+                                 "an answer the server made does not open");
+                        waterlink_split(&noise, true, send, receive);
+                        for (positive at = 0; at < LINK_SESSIONS; at++)
+                        {
+                                struct link_session *s = link_self.session + at;
+                                struct link_keys *k[] = {&s->now, &s->next};
+
+                                for (int i = 0; i < 2; i++)
+                                        keyed |= s->used && k[i]->live &&
+                                                 k[i]->ours == theirs &&
+                                                 !memcmp(k[i]->receive.raw, send, 16) &&
+                                                 !memcmp(k[i]->send.raw, receive, 16);
+                        }
+                        wl_check(keyed, "the two ends of a handshake keyed differently");
+                }
+                crypto_forget(&noise, sizeof noise);
+                break;
+        }
+        case 3:
+        {
+                //      A carried datagram for a session, sealed with the key
+                //      its sender holds or not, at a counter and length the
+                //      driver picks.
+                struct link_session *s = link_self.session + take8() % LINK_SESSIONS;
+                struct link_keys *keys = (take8() & 1) ? &s->next : &s->now;
+                struct waterlink_datagram head;
+                positive used = take16() % (WATERLINK_PAYLOAD + 32);
+                positive length;
+                p8 how = take8();
+
+                head.kind = how & 1 ? WATERLINK_KIND_CLOSE : WATERLINK_KIND_CARRY;
+                head.receiver = how & 2 ? take32() : keys->ours;
+                head.counter = how & 4 ? take32() : keys->counter;
+                memset(datagram, 0, WATERLINK_DATAGRAM);
+                memcpy(datagram, &head, 16);
+                take_bytes(datagram + 16, used < WATERLINK_PAYLOAD ? used : WATERLINK_PAYLOAD);
+                length = waterlink_seal(&keys->receive, datagram,
+                                        used < WATERLINK_PAYLOAD ? used : WATERLINK_PAYLOAD);
+                if (how & 8)
+                        length = take16() % (WATERLINK_DATAGRAM + 1);
+                if (how & 16 && length)
+                        datagram[take16() % length] ^= 1;
+                link_datagram(datagram, length, address, port, now);
+                break;
+        }
+        case 4:
+                wl_clock += (p64)take16() * (take8() & 1 ? 1000000ull : 1000ull);
+                break;
+        case 5:
+        {
+                //      An mDNS packet, from anywhere on the link.
+                positive length = take16() % (WATERLINK_MDNS_MAX + 2);
+                p8 *raw = malloc(length ? length : 1);
+
+                length = take_bytes(raw, length);
+                wl_phase = 1;
+                link_nearby_heard(raw, length, wl_addresses[0], port, now);
+                wl_phase = 0;
+                free(raw);
+                break;
+        }
+        case 6:
+        {
+                //      A run from the socket: datagrams coalesced by UDP_GRO
+                //      at a segment size, two runs a call.
+                positive runs = 1 + take8() % 3;
+                p8 *bytes[3] = {0, 0, 0};
+
+                wl_run_count = wl_run_next = 0;
+                for (positive r = 0; r < runs; r++)
+                {
+                        struct wl_run *run = wl_runs + wl_run_count++;
+                        positive length = take16() % 4096;
+
+                        bytes[r] = malloc(length ? length : 1);
+                        run->length = take_bytes(bytes[r], length);
+                        run->bytes = bytes[r];
+                        run->segment = take8() & 1 ? take16() : 0;
+                        memcpy(run->address, wl_addresses[take8() & 3], 16);
+                        run->v4 = take8() & 1;
+                        run->port = take16();
+                }
+                link_self.socket_quiet = false;
+                link_receive_all(now);
+                for (positive r = 0; r < runs; r++)
+                        free(bytes[r]);
+                wl_run_count = wl_run_next = 0;
+                break;
+        }
+        case 7:
+        {
+                //      mDNS through the socket, with whatever TTL it arrived at.
+                positive packets = 1 + take8() % 3;
+                p8 *bytes[3] = {0, 0, 0};
+
+                wl_mdns_count = wl_mdns_next = 0;
+                for (positive r = 0; r < packets; r++)
+                {
+                        struct wl_run *run = wl_mdns + wl_mdns_count;
+                        positive length = take16() % (WATERLINK_MDNS_MAX + 8);
+
+                        wl_mdns_ttl[wl_mdns_count++] = take8() & 1 ? 255 : take8();
+                        bytes[r] = malloc(length ? length : 1);
+                        run->length = take_bytes(bytes[r], length);
+                        run->bytes = bytes[r];
+                        memcpy(run->address, wl_addresses[take8() % 3], 16);
+                        run->port = take8() & 1 ? WATERLINK_MDNS_PORT : take16();
+                }
+                wl_phase = 1;
+                link_nearby_receive(now);
+                wl_phase = 0;
+                for (positive r = 0; r < packets; r++)
+                        free(bytes[r]);
+                wl_mdns_count = wl_mdns_next = 0;
+                break;
+        }
+        default:
+        {
+                //      At the client: the answer to the initiation it has out,
+                //      from the machine it asked, perhaps spoiled. If the
+                //      client keys, it keys what the machine keyed.
+                struct waterlink_noise noise;
+                p8 who[32], hello[WATERLINK_HELLO_BYTES], ephemeral[32];
+                p8 send[16], receive[16];
+                struct link_session *s = link_self.session;
+                p32 ours = link_client.ours;
+
+                if (server || !s->used)
+                        break;
+                if (!ours)
+                {
+                        (void)link_client_initiate(s, now);
+                        break;
+                }
+                memcpy(datagram, wl_client_first, WATERLINK_DATAGRAM);
+                if (!waterlink_accept(&noise, &wl_id[0], null, datagram, who, hello))
+                        break;
+                system_random_fill(ephemeral, 32, 0);
+                if (!waterlink_respond(&noise, ephemeral, ours, take32() | 1, datagram))
+                        break;
+                waterlink_split(&noise, false, send, receive);
+                if (take8() & 1)
+                        wl_spoil(datagram, &link_self.me, false);
+                link_datagram(datagram, WATERLINK_DATAGRAM, address, port, now);
+                if (!link_client.ours)
+                        wl_check(s->now.live && s->now.ours == ours &&
+                                         !memcmp(s->now.receive.raw, send, 16) &&
+                                         !memcmp(s->now.send.raw, receive, 16),
+                                 "the client keyed what the machine did not");
+                break;
+        }
+        }
+        free(datagram);
+        wl_invariants();
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        bool server;
+
+        wl_in = data;
+        wl_left = size;
+        server = !(take8() & 1);
+        wl_reset(server);
+        if (!server && link_session_open(link_self.session))
+        {
+                struct link_session *s = link_self.session;
+
+                memcpy(s->peer, wl_id[0].public, 32);
+                memcpy(s->address, wl_addresses[1], 16);
+                s->port = LINK_PORT;
+        }
+        for (int steps = 0; wl_left && steps < 64; steps++)
+                wl_step(server);
+        wl_reset(true);
+        return 0;
+}
+'''
+
+
+def waterlink_pre_seeds():
+    """Scripts for the pre-auth driver, built here: each reaches one of its
+    steps with the shape that matters (a handshake that completes, a carried
+    datagram to it, a greeting, announcements naming many ports, questions
+    from a one-shot asker, coalesced runs, mDNS through the socket, and the
+    client's answer)."""
+    def head(op, address=0, port=None):
+        return bytes([op, address]) + (b"\x01" if port is None else
+                                        b"\x00" + port.to_bytes(2, "big"))
+
+    def name(*labels):
+        return b"".join(bytes([len(l)]) + l for l in labels) + b"\x00"
+
+    service = (b"_waterlink", b"_udp", b"local")
+
+    def announce(ports, ident=0):
+        body = b""
+        for i, port in enumerate(ports):
+            body += name(b"wl-%02d" % i, *service) + b"\x00\x21\x80\x01" + \
+                b"\x00\x00\x11\x94" + (6 + len(name(b"h"))).to_bytes(2, "big") + \
+                b"\x00\x00\x00\x00" + port.to_bytes(2, "big") + name(b"h")
+        return ident.to_bytes(2, "big") + b"\x84\x00\x00\x00" + \
+            len(ports).to_bytes(2, "big") + b"\x00\x00\x00\x00" + body
+
+    query = b"\x12\x34\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00" + \
+        name(*service) + b"\x00\x0c\x00\x01"
+
+    def op5(packet, port=None):
+        return head(5, 0, port) + len(packet).to_bytes(2, "big") + packet
+
+    def initiation(who, conversation=0, index=0x01020304, delta=5, spoil=0):
+        return head(1) + bytes([who, conversation]) + index.to_bytes(4, "big") + \
+            delta.to_bytes(2, "big") + bytes([spoil])
+
+    carried = head(3) + bytes([0, 0]) + (24).to_bytes(2, "big") + b"\x00" + \
+        b"\x01\x02\x03" + bytes(21)
+    greeting = head(2) + bytes([2, 0]) + (1).to_bytes(4, "big") + \
+        (7).to_bytes(2, "big") + b"\x00" + bytes([6]) + b"newbox"
+    run = head(6) + b"\x00" + (2400).to_bytes(2, "big") + \
+        (b"\x03\x00\x00\x00" + bytes(1196)) * 2 + b"\x01" + (1200).to_bytes(2, "big") + \
+        b"\x00\x00" + (22348).to_bytes(2, "big")
+    socket_mdns = head(7) + b"\x00" + len(query).to_bytes(2, "big") + b"\x01" + query + \
+        b"\x00\x01"
+    many = [announce(range(1000 + 8 * k, 1008 + 8 * k)) for k in range(4)]
+    return {
+        "handshake_then_carried.bin": b"\x00" + initiation(0) + carried,
+        "rekey_and_replay.bin": b"\x00" + initiation(0) + initiation(0, delta=6) +
+        initiation(0, delta=6) + carried,
+        "stranger_and_spoiled.bin": b"\x00" + initiation(2) + initiation(1, spoil=1) +
+        b"\x05" + (100).to_bytes(2, "big") + b"\x07",
+        "greeting.bin": b"\x00" + greeting,
+        "announcements_many_ports.bin": b"\x00" + b"".join(op5(m) for m in many),
+        "one_shot_questions.bin": b"\x00" + b"".join(op5(query, 40000) for _ in range(4)),
+        "coalesced_run.bin": b"\x00" + run,
+        "mdns_socket.bin": b"\x00" + socket_mdns,
+        "client_answer.bin": b"\x01" + head(8) + head(8) + b"\x00\x00\x00\x07\x00",
+        "raw.bin": b"\x00" + head(0) + (64).to_bytes(2, "big") + bytes(range(64)),
+        "empty.bin": b"",
+    }
+
+
+def harness_waterlink_pre_fuzz(argv):
+    """Coverage-guided libFuzzer over waterlink's pre-authentication surface.
+
+    waterlink_pre_source() lifts it from the tree: discover.c's mDNS reader
+    and writer, handshake.c whole (gate, admission, Noise IK, stamps),
+    nearby.c's greeting and answering, and service.c's receive loop with
+    its UDP_GRO runs, datagram dispatch, initiation, carried-datagram checks
+    and the client's answer, driven as a script of arrivals at a listener
+    or a client. The invariants the driver asks after every step (session
+    and stamp tables bounded, handshakes that key both ends alike, saved
+    names printable, mDNS-provoked greetings and one-shot answers within
+    their budgets) turn a logic bug into a report as well as a sanitizer
+    finding. Bounded fixed-seed run; MOONWATER_FUZZ_RUNS / _SECONDS lengthen
+    it, MOONWATER_MSAN=1 runs it under MemorySanitizer, NOT RUN (2) without
+    clang's libFuzzer. --emit PATH writes the unit and exits.
+
+        python3 test/differential.py --harness waterlink_pre_fuzz
+    """
+    source = waterlink_pre_source()
+    if len(argv) >= 2 and argv[0] == "--emit":
+        Path(argv[1]).write_text(source)
+        return 0
+    return tls_fuzz_run("waterlink pre", waterlink_pre_seeds(), source, 16384)
+
+
 HARNESS_CHECKS = {
     "https_bench": harness_https_bench,
     "compression": harness_compression,
@@ -45370,6 +46524,7 @@ HARNESS_CHECKS = {
     "waterlink_noise": harness_waterlink_noise,
     "waterlink_mdns": harness_waterlink_mdns,
     "waterlink_sanitized": harness_waterlink_sanitized,
+    "waterlink_pre_fuzz": harness_waterlink_pre_fuzz,
     "waterlink_link": harness_waterlink_link,
 }
 
