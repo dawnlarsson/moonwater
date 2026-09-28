@@ -19320,6 +19320,10 @@ TEXT_UTILITIES = (
                    *({"argv": argv, "stdin": "text_sort_nul_fields", "fixture": "text"} for argv in (
                        ("-z", "-k2,2"), ("-zb", "-k2,2"), ("-z", "-k2b,2"), ("-zn",), ("-z", "-k1,1n"),
                        ("-z", "-k2M"), ("-zh",), ("-zg",), ("-zs", "-k2"), ("-z", "-t", "a", "-k2"))),
+                   #   Solaris's -y: its argument ignored, and the word after a
+                   #   bare -y taken for it only when it is all digits.
+                   ("-y0", "a.txt"), ("-y", "a.txt"), ("-y", "100", "a.txt"), ("-ry", "a.txt"), ("-y",),
+                   ("-yr", "a.txt"), ("-y", "-r", "a.txt"), ("-y", "", "a.txt"), ("-y", "1x", "a.txt"),
                    #   -g is strtold's order, long double and all.
                    *({"argv": argv, "stdin": "text_sort_general", "fixture": "text"} for argv in (
                        ("-g",), ("-gr",), ("-gs",), ("-gu",), ("-s", "-k1,1g"), ("-gm", "-", "-"), ("-gc",),

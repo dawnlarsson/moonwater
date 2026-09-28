@@ -31416,6 +31416,8 @@ static const argument_option sort_options[] = {
     {"unique", 'u'},
     {"zero-terminated", 'z'},
     {"Cc", 0},
+    // Solaris's -y, taken and ignored with its number; see sort_obsolete_words.
+    {"y", 0, ARGUMENT_REQUIRED},
     // The stand-in for an ambiguous abbreviation; no word can spell it.
     {"\001", 'A', ARGUMENT_LONG_ONLY},
     {null},
@@ -31566,7 +31568,9 @@ static bool sort_word_takes_next(string_address word)
 
         for (positive at = 1; word[at]; at++)
                 for (const argument_option address_to option = sort_options; option->name; option++)
-                        if (option->letter == word[at] && (option->mode & ARGUMENT_REQUIRED) &&
+                        if ((option->letter == word[at] ||
+                             (!option->letter && string_first_of(option->name, word[at]))) &&
+                            (option->mode & ARGUMENT_REQUIRED) &&
                             !(option->mode & ARGUMENT_LONG_ONLY))
                                 return !word[at + 1];
 
@@ -31655,7 +31659,8 @@ static bool sort_obsolete_words(file_taking address_to taking)
         sort_ambiguous_word = null;
 
         for (positive at = 1; at < count && !any; at++)
-                any = argv[at][0] == '+' || sort_long_ambiguous(argv[at]);
+                any = argv[at][0] == '+' || sort_long_ambiguous(argv[at]) ||
+                      (argv[at][0] == '-' && argv[at][1] != '-' && string_first_of(argv[at], 'y'));
 
         if (!any)
                 return true;
@@ -31706,6 +31711,31 @@ static bool sort_obsolete_words(file_taking address_to taking)
 
                 if (word[0] == '-' && word[1])
                 {
+                        /*
+                                -y, which Solaris 2.x through 7 had: its
+                                argument is ignored, and GNU takes the word
+                                after a bare -y as that argument only when it
+                                is all digits, an operand otherwise. Such a
+                                word is given a digit of its own to take.
+                        */
+                        positive length = string_length(word);
+                        string_address next = at + 1 < count ? argv[at + 1] : null;
+
+                        if (word[1] != '-' && word[length - 1] == 'y' && sort_word_takes_next(word) &&
+                            next && next[string_span(next, string_set_digits)])
+                        {
+                                p8 address_to spelled = utility_arena_take(length + 2);
+
+                                if (!spelled)
+                                        return false;
+
+                                memory_copy(spelled, word, length);
+                                spelled[length] = '0';
+                                spelled[length + 1] = 0;
+                                sort_words[at] = spelled;
+                                continue;
+                        }
+
                         if (sort_word_takes_next(word))
                                 at++;
                         continue;
