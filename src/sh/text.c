@@ -18744,8 +18744,14 @@ static p32 cut_fields[CUT_FIELDS];
         between them straight into the output. The output is never longer
         than what it is cut from, so the read's length is reserved once.
 */
-static positive cut_lines_range(p8 address_to base, positive left, p8 delimiter,
-                                bool only_delimited)
+/*
+        Kept out of line: inlined into cut_lines, whose field walk it
+        shares a frame with, its loop ran 17% more cycles on the same
+        instructions (cut -d: -f2 over 18 MB, 11.3 M cycles at 5f31feaf,
+        13.3 M after 0862f47f moved it); on its own it is back to 11.4 M.
+*/
+__attribute__((noinline)) static positive cut_lines_range(
+    p8 address_to base, positive left, p8 delimiter, bool only_delimited)
 {
         positive first = text_list_single_first;
         positive last = text_list_single_last == TEXT_UNSET ? positive_max
