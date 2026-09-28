@@ -10685,10 +10685,14 @@ MISC_UTILITIES = (
                        "04346046994430930304346046940094664449905590304464482454586302332293465458630233229"),
                       ("115792089237316195423570985008687907853269984665640564039457584007913129639936",
                        "1208925819614629174706177", "1267650600228229401496703205377",
-                       "324518553658426726783156020576257", "19807040628566084398385987585")),
+                       "324518553658426726783156020576257", "19807040628566084398385987585"),
+                      # The widest number carried, with its top bit set.
+                      (str(2003 ** 363 * 2011 ** 407),)),
             stdin=("misc_factor", "misc_factor_random", "numbers", "empty", "text", "nonl", "blanks", "long",
                    "many_lines", "nul", "high", "wide_words"),
-            fixture="misc", stderr="exact"),
+            # The widest operand costs a Miller-Rabin power over 8448 bits,
+            # a third of a second, which a loaded machine can stretch.
+            fixture="misc", stderr="exact", timeout=10.0),
 
     Utility("numfmt",
             options=(Option("--to", ("si", "iec", "iec-i", "none", "auto", "bad"), True),

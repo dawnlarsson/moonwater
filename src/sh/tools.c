@@ -6270,10 +6270,13 @@ static bool factor_collect(positive number, positive address_to factors,
 #define FACTOR_POOL (FACTOR_LIMBS * 2 + 8704)
 #define FACTOR_MOST 8704
 
+/*      One limb past the widest number read, for the doubling that
+        builds R mod n and walks a division: a residue below a modulus with
+        its top bit set is one limb wider for a moment before it is reduced. */
 typedef struct
 {
         positive size;
-        p64 limb[FACTOR_LIMBS];
+        p64 limb[FACTOR_LIMBS + 1];
 } factor_big;
 
 static fn factor_big_trim(factor_big address_to value)
@@ -6325,8 +6328,9 @@ static fn factor_big_half(factor_big address_to value)
         factor_big_trim(value);
 }
 
-// value = value * 2 + bit; false when it would pass the limbs there are.
-static bool factor_big_double(factor_big address_to value, p64 bit)
+// value = value * 2 + bit, in at most the spare limb past FACTOR_LIMBS; no
+// caller doubles a value wider than a modulus it is below.
+static fn factor_big_double(factor_big address_to value, p64 bit)
 {
         p64 carry = bit;
 
@@ -6338,12 +6342,7 @@ static bool factor_big_double(factor_big address_to value, p64 bit)
                 carry = top;
         }
         if (carry)
-        {
-                if (value->size == FACTOR_LIMBS)
-                        return false;
                 value->limb[value->size++] = carry;
-        }
-        return true;
 }
 
 static bool factor_big_multiply_add(factor_big address_to value, p64 times, p64 add)
@@ -7145,12 +7144,26 @@ static bool factor_big_collect(factor_big address_to number)
                 return factor_found_add(number->limb, number->size);
 
         factor_big divisor, quotient;
+        positive times = 1;
 
         if (!factor_big_rho(number, address_of divisor))
                 return false;
         factor_big_divide(number, address_of divisor, address_of quotient);
-        return factor_big_collect(address_of divisor) &&
-               factor_big_collect(address_of quotient);
+
+        /*      A divisor of half a word goes out as often as it divides, a
+                word division each, rather than a rho over the whole of what
+                is left each time: 2003^363 * 2011^407 took 52 s that way. */
+        if (divisor.size == 1 && divisor.limb[0] >> 32 == 0)
+                while (quotient.size > 1 &&
+                       !factor_big_remainder_word(address_of quotient, divisor.limb[0]))
+                {
+                        factor_big_divide_word(address_of quotient, divisor.limb[0]);
+                        times++;
+                }
+        for (; times; times--)
+                if (!factor_big_collect(address_of divisor))
+                        return false;
+        return factor_big_collect(address_of quotient);
 }
 
 static b32 factor_found_order(positive left, positive right)
