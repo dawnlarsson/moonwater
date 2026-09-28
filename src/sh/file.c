@@ -8377,32 +8377,62 @@ static bool ls_quote_heading;
 
 static bool text_locale_utf8();
 
+/*
+        The bytes a name can hold and still need no quotes in the shell styles,
+        or no escape under c-maybe, the second of each without a heading's
+        colon: string_span_max then finds the first byte that matters in one
+        call, where a set search a byte had string_first_of to itself.
+*/
+static b8 ls_plain_shell[2][STRING_SET_BYTES];
+static b8 ls_plain_c[2][STRING_SET_BYTES];
+
+static fn ls_plain_ready(void)
+{
+        static bool ready;
+
+        if (ready)
+                return;
+        for (positive heading = 0; heading < 2; heading++)
+        {
+                string_set_add(ls_plain_shell[heading],
+                               (string_address) "#%+,-./0123456789@ABCDEFGHIJKLM"
+                                                "NOPQRSTUVWXYZ]_abcdefghijklmnopqr"
+                                                "stuvwxyz{}~");
+                for (p8 byte = ' '; byte < 127; byte++)
+                        ls_plain_c[heading][byte] = byte != '"';
+        }
+        ls_plain_shell[0][':'] = 1;
+        ls_plain_c[1][':'] = 0;
+        ready = true;
+}
+
 static bool ls_shell_needs_quotes(string_address name, positive length, bool escaping)
 {
         if (!length)
                 return true;
 
-        for (positive at = 0; at < length; at++)
+        p8 first = string_get(name);
+
+        if (first == '#' || first == '~' ||
+            (length == 1 && (first == '{' || first == '}')))
+                return true;
+
+        ls_plain_ready();
+
+        const b8 address_to plain = ls_plain_shell[ls_quote_heading];
+
+        for (positive at = 0;
+             (at += string_span_max(name + at, length - at, plain)) < length; at++)
         {
                 p8 byte = string_get(name + at);
 
                 //      Without escapes an unprintable byte is written as it
                 //      is and needs no quotes, but a newline, a return or a
                 //      tab still does, as gnulib's quotearg has it; with
-                //      them every unprintable byte is a $'...' run.
-                if (byte < 32 || byte >= 127)
-                {
-                        if (escaping || byte == '\n' || byte == '\r' || byte == '\t')
-                                return true;
-                        continue;
-                }
-                if (string_first_of((string_address) " !\"$&'()*;<=>?[^`|\\", byte))
-                        return true;
-                if (byte == ':' && ls_quote_heading)
-                        return true;
-                if ((byte == '#' || byte == '~') && at == 0)
-                        return true;
-                if ((byte == '{' || byte == '}') && length == 1)
+                //      them every unprintable byte is a $'...' run. What
+                //      else stops the span is a byte the shell reads.
+                if ((byte >= 32 && byte < 127) || escaping ||
+                    byte == '\n' || byte == '\r' || byte == '\t')
                         return true;
         }
 
@@ -8587,15 +8617,8 @@ static fn writer_shell_name(writer output, string_address value)
 // quotes for something else.
 static bool ls_c_needs_escape(string_address name, positive length)
 {
-        for (positive at = 0; at < length; at++)
-        {
-                p8 byte = string_get(name + at);
-
-                if (byte == '"' || ls_byte_unprintable(byte) ||
-                    (byte == ':' && ls_quote_heading))
-                        return true;
-        }
-        return false;
+        ls_plain_ready();
+        return string_span_max(name, length, ls_plain_c[ls_quote_heading]) < length;
 }
 
 /*
