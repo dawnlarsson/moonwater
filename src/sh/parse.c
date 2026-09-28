@@ -1852,12 +1852,19 @@ static PURE b32 parse_redirect_prefix(b32 at)
             !parse_redirect_operator(next->op))
                 return -1;
 
-        // Classify digits before checking their range in parse_take_redirect,
-        // so overflowing bash prefixes fail before opening a redirection.
-        // Dash recognizes only a single descriptor digit.
-        if (string_digits_exact(token->text, null) &&
-            (shell_bash_compat || token->length == 1))
-                return 1;
+        // Digits that fit a descriptor are one; bash reads a number past
+        // INT_MAX in front of > as an ordinary word, so `echo a
+        // 2147483648>f` writes "a 2147483648" to f. Dash recognizes only a
+        // single descriptor digit.
+        {
+                positive parsed;
+
+                if (string_digits_checked_exact(token->text, 10,
+                                                address_of parsed) &&
+                    parsed <= 0x7fffffff &&
+                    (shell_bash_compat || token->length == 1))
+                        return 1;
+        }
 
         return parse_redirect_brace(token->text, token->length) ? 1 : -1;
 }

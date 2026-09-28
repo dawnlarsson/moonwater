@@ -14605,6 +14605,19 @@ def shell_lang_interactive_pipe(rng):
         'echo "end=$?"'))
 
 
+#       Digits in front of > are a descriptor only while they fit one: bash
+#       reads a number past INT_MAX there as an ordinary word, so `echo a
+#       2147483648>f` writes "a 2147483648" to f. This called it a syntax
+#       error; dash takes one digit only.
+def shell_lang_fd_prefix_range(rng):
+    number = rng.choice(("1", "9", "10", "1023", "99999", "2147483647", "2147483648", "9223372036854775808",
+                         "1111111111111111111111", "007", "0"))
+    op = rng.choice((">", ">>"))
+    return ("fd-prefix-range", shell_ALL, shell_program(
+        "echo a " + number + op + "f; echo \"s=$?\"", "cat f 2>/dev/null", 'echo "end=$?"'),
+        ("command", "stdin", "file"))
+
+
 #       What bash does with a builtin handed words it has no place for, and
 #       with a subscript it cannot evaluate: the whole command the reader was
 #       running is dropped -- through eval, a sourced file and a function --
@@ -17442,6 +17455,7 @@ SHELL_FAMILIES = (
     shell_lang_regex_operand,
     shell_lang_loop_control_arguments,
     shell_lang_builtin_discard,
+    shell_lang_fd_prefix_range,
     shell_lang_set_lone_plus,
     shell_lang_directory_state,
     shell_lang_builtin_refusals,
