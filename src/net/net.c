@@ -1090,6 +1090,10 @@ static bipolar netlink_dump(b32 handle, p16 type, positive body, p8 family,
 
 #define DNS_MAX_MESSAGE 4096
 #define DNS_CNAME_HOPS 16
+//      A wire name is at most 255 bytes, so at most 127 labels, and no
+//      encoder needs more jumps than a name has labels.
+#define DNS_NAME_MAX 255
+#define DNS_POINTER_HOPS 127
 //      Everything the caller may want to tell apart.
 #define DNS_OK 0
 #define DNS_NO_SERVER (-1)
@@ -1135,7 +1139,7 @@ static COLD bipolar dns_write_name(p8 address_to into, positive room, string_add
                 name = dot + string_is(dot, '.');
         }
 
-        if (used + 1 > room || used + 1 > 255)
+        if (used + 1 > room || used + 1 > DNS_NAME_MAX)
                 return DNS_MALFORMED;
 
         into[used++] = 0;
@@ -1151,8 +1155,12 @@ static COLD bipolar dns_write_name(p8 address_to into, positive room, string_add
         is two bytes on from where it began however far away the pointer led.
         Each jump lowers the ceiling to its own offset: merely moving
         backwards is insufficient because labels can step forwards to that
-        same pointer again. The spelling is kept as sent; DNS names compare
-        without regard to ASCII case.
+        same pointer again. The ceiling alone still let a chain of pointers,
+        each one two bytes before the last, cost two thousand jumps a name,
+        and a reply of names at the end of such a chain four milliseconds, so
+        the jumps are counted too. A name longer than 255 bytes is refused
+        whatever the room (RFC 1035 3.1). The spelling is kept as sent; DNS
+        names compare without regard to ASCII case.
 */
 static COLD bipolar dns_copy_name(p8 address_to message, positive size,
                              positive at, p8 address_to into, positive room,
@@ -1160,8 +1168,11 @@ static COLD bipolar dns_copy_name(p8 address_to message, positive size,
 {
         positive ceiling = size;
         positive used = 0;
+        positive jumps = 0;
 
         address_to ended = 0;
+        if (room > DNS_NAME_MAX)
+                room = DNS_NAME_MAX;
 
         for (;;)
         {
@@ -1184,7 +1195,7 @@ static COLD bipolar dns_copy_name(p8 address_to message, positive size,
 
                         target = network_load_16(message + at) & 0x3fff;
 
-                        if (target >= at)
+                        if (target >= at || ++jumps > DNS_POINTER_HOPS)
                                 return DNS_MALFORMED;
 
                         ceiling = at;

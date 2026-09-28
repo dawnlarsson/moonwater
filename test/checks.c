@@ -49667,6 +49667,40 @@ static fn resolving(void)
         }
 
         {
+                //      A name is at most 255 bytes on the wire (RFC 1035
+                //      3.1), and a chain of pointers at most one jump a
+                //      label: 127. Each was one past, and a reply of names
+                //      at the end of a two-thousand-jump chain cost 4 ms.
+                p8 message[512];
+                positive at = 0;
+
+                memory_fill(message, 0, sizeof message);
+                for (positive label = 0; label < 4; label++)
+                {
+                        message[at] = label < 3 ? 63 : 62;
+                        memory_fill(message + at + 1, 'a', message[at]);
+                        at += 1 + message[at];
+                }
+                check("a 256-byte wire name is refused",
+                      at + 1 == 256 && dns_skip_name(message, sizeof message, 0) < 0);
+                message[at - 63] = 61;
+                message[at - 1] = 0;
+                check("a 255-byte wire name is taken",
+                      dns_skip_name(message, sizeof message, 0) == 255);
+
+                memory_fill(message, 0, sizeof message);
+                for (positive hop = 1; hop <= 128; hop++)
+                {
+                        message[2 * hop] = 0xc0;
+                        message[2 * hop + 1] = (p8)(2 * hop - 2);
+                }
+                check("a name 127 pointers deep is followed",
+                      dns_skip_name(message, sizeof message, 2 * 127) == 2 * 127 + 2);
+                check("a name 128 pointers deep is refused",
+                      dns_skip_name(message, sizeof message, 2 * 128) < 0);
+        }
+
+        {
                 p16 secure = 0;
 
                 check("a DNS transaction id comes from ready kernel randomness",
@@ -49914,8 +49948,8 @@ static fn resolving_edges(void)
         }
 
         /* Answer-section hop budget is answers+1 passes. A two-record CNAME
-           cycle burns every pass without a separate decompress step counter
-           (dns_copy_name bounds jumps by lowering its ceiling instead). */
+           cycle burns every pass; dns_copy_name bounds each name's jumps by
+           lowering its ceiling and counting them to DNS_POINTER_HOPS. */
         {
                 p8 reply[512] = {0};
                 bipolar question = dns_write_name(
