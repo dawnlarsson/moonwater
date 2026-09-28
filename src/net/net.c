@@ -666,6 +666,16 @@ static COLD address_any netlink_find(netlink_header address_to header, positive 
                                  header->length - at, type, size);
 }
 
+/* The fixed body a family puts after the header. Visitors are also used
+   directly by tests and by callers parsing multicast frames, so none is
+   handed a body pointer until that body is present in full. */
+static COLD address_any netlink_message_body(netlink_header address_to header,
+                                             positive body)
+{
+        return header->length < NETLINK_HEADER + body
+                   ? null : (p8 address_to)header + NETLINK_HEADER;
+}
+
 /*
         What the four things actually are, on the wire.
 
@@ -727,16 +737,9 @@ static inline INLINE string_address netlink_link_name(
         positive length = 0;
         string_address name;
 
-        address_to link = null;
-
-        /* Visitors are also used directly by tests and by callers parsing
-           multicast frames.  Do not hand either one a body pointer until the
-           fixed family-specific body is present in full. */
-        if (header->length < NETLINK_HEADER + sizeof(netlink_link))
+        address_to link = netlink_message_body(header, sizeof(netlink_link));
+        if (!address_to link)
                 return null;
-
-        address_to link = (netlink_link address_to)((p8 address_to)header +
-                                                     NETLINK_HEADER);
         name = (string_address)netlink_find(
             header, sizeof(netlink_link), IFLA_IFNAME, address_of length);
         return name && length && memory_first_of(name, 0, length) ? name : null;
