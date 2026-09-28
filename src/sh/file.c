@@ -9019,7 +9019,15 @@ static fn writer_shell_quoted_name(writer output, string_address value)
    what a coreutils filter puts in front of a reason: "cat: 'sp ace': ...". */
 static fn writer_shell_name(writer output, string_address value)
 {
-        ls_quote_shell(output, value, string_length(value), false, true);
+        positive length = string_length(value);
+
+        //      quotef is the colon flavor of shell-escape quoting: a colon
+        //      would read as the end of the name in "prog: name: reason", so
+        //      a name holding one is quoted though a shell would not need it
+        //      (cat: 'a:b': No such file or directory).
+        ls_quote_shell(output, value, length,
+                       length && memory_first_of(value, ':', length) != null,
+                       true);
 }
 
 // The C styles: a quoted string a C compiler would read back, the same
