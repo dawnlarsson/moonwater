@@ -27370,254 +27370,223 @@ static string_address dircolors_key(string_address word, positive length)
 static bool dircolors_add(dircolors_builder address_to builder,
                           string_address text, positive length)
 {
-        /* One byte always remains for the table terminator. */
-        if (builder->used >= builder->room ||
-            length >= builder->room - builder->used)
+        if (builder->used > positive_max - length - 1)
                 return false;
+        if (builder->used + length + 1 > builder->room)
+        {
+                positive room = max(builder->room * 2, builder->used + length + 1024);
+                p8 address_to grown = (p8 address_to)memory_take(room);
 
+                if (!grown)
+                        return false;
+                if (builder->text)
+                {
+                        memory_copy_apart(grown, builder->text, builder->used);
+                        memory_give(builder->text);
+                }
+                builder->text = grown;
+                builder->room = room;
+        }
         memory_copy_apart(builder->text + builder->used, text, length);
         builder->used += length;
         return true;
 }
 
-static bool dircolors_add_entry(dircolors_builder address_to builder,
-                                string_address key, positive key_length,
-                                bool extension, string_address value,
-                                positive value_length)
+/*
+        A key or a value as GNU writes it into the table: a single quote as
+        '\'' for the shell the table is read by, and a colon or an equals
+        sign behind a backslash, unless a backslash or a caret already
+        escapes it -- so ls reads it back as the byte it is. The table
+        --print-ls-colors writes is for a terminal, and takes every byte
+        as it stands.
+*/
+static bool dircolors_quoted(dircolors_builder address_to builder, string_address text,
+                             positive length, bool plain)
 {
-        //      The reference writes a colon inside a key or a value with a
-        //      backslash in front of it. This reader has no escape -- the
-        //      one scanner that splits an LS_COLORS table cuts at every
-        //      colon there is, for ls as well as here -- so such a table is
-        //      refused rather than written and then misread.
-        if ((memory_first_of(key, ':', key_length) ||
-             memory_first_of(value, ':', value_length)))
-                return string_report(log_error, false, "dircolors: ':' in keys or values is unsupported by the shared LS_COLORS grammar\n");
+        bool escape = true;
 
-        positive prefix = extension && string_is(key, '.') ? 1 : 0;
+        for (positive at = 0; at < length; at++)
+        {
+                p8 byte = string_get(text + at);
 
-        if (key_length > positive_max - value_length - 2 - prefix ||
-            builder->used >= builder->room ||
-            key_length + value_length + 2 + prefix >=
-                builder->room - builder->used)
-                return string_report(log_error, false, "dircolors: translated table is too large\n");
+                if (!plain)
+                {
+                        if (byte == '\'')
+                        {
+                                if (!dircolors_add(builder, (string_address) "'\\'", 3))
+                                        return false;
+                                escape = true;
+                        }
+                        else if (byte == '\\' || byte == '^')
+                                escape = !escape;
+                        else
+                        {
+                                if ((byte == ':' || byte == '=') && escape &&
+                                    !dircolors_add(builder, (string_address) "\\", 1))
+                                        return false;
+                                escape = true;
+                        }
+                }
+                if (!dircolors_add(builder, address_of byte, 1))
+                        return false;
+        }
+        return true;
+}
 
-        return (!extension || !string_is(key, '.') ||
-                dircolors_add(builder, (string_address) "*", 1)) &&
-               dircolors_add(builder, key, key_length) &&
-               dircolors_add(builder, (string_address) "=", 1) &&
-               dircolors_add(builder, value, value_length) &&
-               dircolors_add(builder, (string_address) ":", 1);
+static bool dircolors_add_entry(dircolors_builder address_to builder, p8 prefix,
+                                string_address key, positive key_length,
+                                string_address value, positive value_length, bool print)
+{
+        if (print && (!dircolors_quoted(builder, (string_address) "\033[", 2, true) ||
+                      !dircolors_quoted(builder, value, value_length, true) ||
+                      !dircolors_add(builder, (string_address) "m", 1)))
+                return false;
+
+        return (!prefix || dircolors_add(builder, address_of prefix, 1)) &&
+               dircolors_quoted(builder, key, key_length, print) &&
+               dircolors_add(builder, print ? (string_address) "\t" : (string_address) "=", 1) &&
+               dircolors_quoted(builder, value, value_length, print) &&
+               (!print || dircolors_add(builder, (string_address) "\033[0m", 4)) &&
+               dircolors_add(builder, print ? (string_address) "\n" : (string_address) ":", 1);
 }
 
 static fn dircolors_line_message(string_address name, positive line,
                                   string_address after)
 {
-        string_format(log_error, "dircolors: %w:", writer_terminal_name, name);
+        string_format(log_error, "dircolors: %w:", writer_shell_name, name);
         positive_to_string(log_error, line);
         log_error(after, 0);
 }
 
-/* Translate once, then immediately pass the result through file_color_next
-   and ls_color_parse.  This is only the line-oriented front end to the one
-   colour-table engine, not a parallel lookup structure. */
-static string_address dircolors_parse(string_address input, positive length,
-                                      string_address name)
+/*
+        GNU's reading of a database, line by line: a keyword and the rest of
+        the line up to a #, the TERM and COLORTERM lines gating what follows
+        them -- a run of gates opens when any of them matches, and the next
+        gate after a keyword starts a new run -- and every keyword inside an
+        open gate that is not one dircolors knows is an error that still
+        lets the rest be read. A keyword outside any gate that it does not
+        know is passed over, which lets one file serve old and new systems.
+        TERM that is unset or empty is "none", COLORTERM that is unset is
+        empty, and the keywords are matched without regard to case.
+*/
+static bool dircolors_parse(string_address input, positive length, string_address name,
+                            dircolors_builder address_to builder, bool print)
 {
-        if (memory_first_of(input, 0, length))
-        {
-                string_format(log_error, "dircolors: %w: embedded NUL byte\n",
-                              writer_terminal_name, name);
-                return null;
-        }
-
-        positive room = length <= (positive_max - 64) / 2
-                            ? length + length / 2 + 64 : 0;
-        dircolors_builder builder = {
-            .text = room ? (p8 address_to)utility_arena_take(room) : null,
-            .room = room,
-        };
-
-        if (!builder.text)
-        {
-                log_error("dircolors: configuration is too large\n", 0);
-                return null;
-        }
-
         string_address term = file_environment((string_address) "TERM");
         string_address colorterm = file_environment((string_address) "COLORTERM");
-        bool gated = false;
-        bool gate_matches = false;
-        bool invalid = false;
+        enum { DC_NO, DC_YES, DC_SURE, DC_GLOBAL } state = DC_GLOBAL;
+        bool ok = true;
         positive line_number = 0;
+
+        if (!term || !string_get(term))
+                term = (string_address) "none";
+        if (!colorterm)
+                colorterm = (string_address) "";
 
         for (positive at = 0; at < length;)
         {
-                positive stop = at + memory_span_without_byte(input + at, '\n',
-                                                              length - at);
+                positive stop = at + memory_span_without_byte(input + at, '\n', length - at);
+                positive nul = at + memory_span_without_byte(input + at, 0, stop - at);
+                positive first = at;
+                positive finish = nul;
 
                 line_number++;
-                positive first = at;
-
-                if (first < stop)
-                        first += string_span_max(input + first, stop - first,
-                                                 string_set_space);
-
-                positive finish = stop;
-
-                while (finish > first &&
-                       byte_is_space(string_get(input + finish - 1)))
-                        finish--;
-
                 at = stop < length ? stop + 1 : stop;
 
+                while (first < finish && byte_is_space(string_get(input + first)))
+                        first++;
                 if (first == finish || string_is(input + first, '#'))
                         continue;
 
                 positive key_end = first;
 
-                while (key_end < finish &&
-                       !byte_is_space(string_get(input + key_end)))
+                while (key_end < finish && !byte_is_space(string_get(input + key_end)))
                         key_end++;
 
                 positive value = key_end;
 
-                while (value < finish &&
-                       byte_is_space(string_get(input + value)))
+                while (value < finish && byte_is_space(string_get(input + value)))
                         value++;
 
-                for (positive i = value; i < finish; i++)
-                        if (string_is(input + i, '#') &&
-                            (i == value ||
-                             byte_is_space(string_get(input + i - 1))))
-                        {
-                                finish = i;
+                positive value_end = value;
 
-                                while (finish > value &&
-                                       byte_is_space(
-                                           string_get(input + finish - 1)))
-                                        finish--;
-                                break;
-                        }
+                while (value_end < finish && !string_is(input + value_end, '#'))
+                        value_end++;
+                while (value_end > value && byte_is_space(string_get(input + value_end - 1)))
+                        value_end--;
 
-                //      A line with a key and nothing after it is invalid,
-                //      and the reference reads the whole file before it
-                //      leaves: every such line is named, not just the first.
-                if (value == finish)
+                string_address key = input + first;
+                positive key_length = key_end - first;
+
+                if (value == value_end)
                 {
-                        dircolors_line_message(
-                            name, line_number,
-                            (string_address)
-                                ": invalid line;  missing second token\n");
-                        invalid = true;
+                        dircolors_line_message(name, line_number,
+                                               (string_address) ": invalid line;  missing second token\n");
+                        ok = false;
                         continue;
                 }
 
-                positive key_length = key_end - first;
-                positive value_length = finish - value;
-                bool term_gate = dircolors_word_is(input + first, key_length,
-                                                   (string_address) "TERM");
-                bool color_gate = dircolors_word_is(
-                    input + first, key_length, (string_address) "COLORTERM");
+                bool term_gate = dircolors_word_is(key, key_length, (string_address) "TERM");
+                bool color_gate = dircolors_word_is(key, key_length, (string_address) "COLORTERM");
 
                 if (term_gate || color_gate)
                 {
-                        if (value_length >= FILE_PATH_MAX)
-                        {
-                                dircolors_line_message(
-                                    name, line_number,
-                                    (string_address)
-                                        ": terminal pattern is too long\n");
-                                return null;
-                        }
+                        if (state == DC_SURE)
+                                continue;
 
-                        p8 pattern[FILE_PATH_MAX];
-                        memory_copy_apart(pattern, input + value, value_length);
-                        pattern[value_length] = end;
-                        string_address against = term_gate ? term : colorterm;
+                        p8 small[FILE_PATH_MAX];
+                        positive size = value_end - value;
+                        p8 address_to pattern = size < sizeof(small) ? small : memory_take(size + 1);
 
-                        gated = true;
-                        gate_matches = gate_matches ||
-                                       (against && file_fnmatch(pattern, against));
+                        if (!pattern)
+                                return string_report(log_error, false, "dircolors: memory exhausted\n");
+                        memory_copy_apart(pattern, input + value, size);
+                        pattern[size] = end;
+                        state = file_fnmatch(pattern, term_gate ? term : colorterm) ? DC_SURE : DC_NO;
+                        if (pattern != small)
+                                memory_give(pattern);
                         continue;
                 }
 
-                string_address short_key =
-                    dircolors_key(input + first, key_length);
-                bool extension = string_is(input + first, '.') ||
-                                 string_is(input + first, '*');
+                if (state == DC_SURE)
+                        state = DC_YES;
 
-                /* GNU ignores unknown historical directives.  Keeping that
-                   behavior lets one shared file serve old and new systems;
-                   recognized rows are never accepted partially. */
-                if (!short_key && !extension)
-                        continue;
+                bool unknown = false;
 
-                string_address output_key = short_key ? short_key : input + first;
-                positive output_key_length = short_key ? 2 : key_length;
-
-                if (!dircolors_add_entry(address_of builder, output_key,
-                                         output_key_length, extension,
-                                         input + value, value_length))
-                        return null;
-        }
-
-        if (invalid)
-                return null;
-
-        if (gated && !gate_matches)
-                builder.used = 0;
-
-        builder.text[builder.used] = end;
-
-        if (!file_color_table_valid(builder.text, false))
-        {
-                log_error("dircolors: configuration cannot be represented by LS_COLORS\n",
-                          0);
-                return null;
-        }
-
-        ls_colors = builder.text;
-        ls_color_parse();
-        return builder.text;
-}
-
-static fn dircolors_shell_quote(string_address table, bool csh)
-{
-        log(csh ? (string_address) "setenv LS_COLORS '"
-                : (string_address) "LS_COLORS='",
-            0);
-
-        for (positive i = 0; string_get(table + i); i++)
-        {
-                p8 character = string_get(table + i);
-
-                if (character == '\'')
-                        log("'\\''", 4);
+                if (state == DC_NO)
+                        unknown = true;
+                else if (string_is(key, '.') || string_is(key, '*'))
+                {
+                        if (!dircolors_add_entry(builder, string_is(key, '.') ? '*' : 0, key,
+                                                 key_length, input + value, value_end - value,
+                                                 print))
+                                return string_report(log_error, false, "dircolors: memory exhausted\n");
+                }
+                else if (dircolors_word_is(key, key_length, (string_address) "OPTIONS") ||
+                         dircolors_word_is(key, key_length, (string_address) "COLOR") ||
+                         dircolors_word_is(key, key_length, (string_address) "EIGHTBIT"))
+                        ;
                 else
-                        log(address_of character, 1);
+                {
+                        string_address short_key = dircolors_key(key, key_length);
+
+                        if (!short_key)
+                                unknown = true;
+                        else if (!dircolors_add_entry(builder, 0, short_key, 2, input + value,
+                                                      value_end - value, print))
+                                return string_report(log_error, false, "dircolors: memory exhausted\n");
+                }
+
+                if (unknown && (state == DC_SURE || state == DC_YES))
+                {
+                        dircolors_line_message(name, line_number, (string_address) ": unrecognized keyword ");
+                        log_error(key, key_length);
+                        log_error("\n", 1);
+                        ok = false;
+                }
         }
 
-        log(csh ? (string_address) "'\n"
-                : (string_address) "';\nexport LS_COLORS\n",
-            0);
-}
-
-static fn dircolors_print_table(string_address table)
-{
-        file_color_entry entry;
-
-        while (file_color_next(address_of table, address_of entry))
-        {
-                if (!entry.assigned || !entry.key.length)
-                        continue;
-
-                file_color_sgr(log, entry.value);
-                log(entry.key.text, entry.key.length);
-                log("\t", 1);
-                log(entry.value.text, entry.value.length);
-                log("\033[0m\n", 5);
-        }
+        return ok;
 }
 
 //      Every dircolors refusal is its own sentence and then the line that
@@ -27685,10 +27654,39 @@ static b32 file_dircolors()
                 return 0;
         }
 
+        /*
+                The shell the table is written for, when no option names
+                one: csh or tcsh by SHELL's last name is the C shell,
+                anything else the Bourne shell, and no SHELL at all is an
+                error before anything is read.
+        */
+        bool csh = dircolors_shell_option == 'c';
+
+        if (!dircolors_shell_option && !print_table)
+        {
+                string_address shell = file_environment((string_address) "SHELL");
+
+                if (!shell || !string_get(shell))
+                        return string_report(log_error, 1,
+                                             "dircolors: no SHELL environment variable, and no shell type option given\n");
+
+                string_address last = shell + string_length(shell);
+
+                while (last > shell && last[-1] == '/')
+                        last--;
+
+                string_address base = last;
+
+                while (base > shell && base[-1] != '/')
+                        base--;
+                csh = (last - base == 3 && !string_compare_max(base, "csh", 3)) ||
+                      (last - base == 4 && !string_compare_max(base, "tcsh", 4));
+        }
+
         utility_arena.used = 0;
         string_address input = dircolors_database;
         positive length = string_length(dircolors_database);
-        string_address name = (string_address) "built-in database";
+        string_address name = (string_address) "<internal>";
         bipolar handle = -1;
 
         if (file_operand_count)
@@ -27747,37 +27745,24 @@ static b32 file_dircolors()
                 }
         }
 
-        string_address table = dircolors_parse(input, length, name);
+        dircolors_builder builder = {0};
+        bool parsed = dircolors_parse(input, length, name, address_of builder, print_table);
 
-        if (!table)
+        if (parsed && print_table)
+                log(builder.text ? builder.text : (p8 address_to) "", builder.used);
+        else if (parsed)
         {
-                utility_arena.used = 0;
-                return 1;
+                log(csh ? (string_address) "setenv LS_COLORS '" : (string_address) "LS_COLORS='",
+                    0);
+                log(builder.text ? builder.text : (p8 address_to) "", builder.used);
+                log(csh ? (string_address) "'\n" : (string_address) "';\nexport LS_COLORS\n", 0);
         }
 
-        if (print_table)
-                dircolors_print_table(table);
-        else
-        {
-                bool csh = dircolors_shell_option == 'c';
-
-                if (!dircolors_shell_option)
-                {
-                        string_address shell =
-                            file_environment((string_address) "SHELL");
-                        positive shell_length = shell ? string_length(shell) : 0;
-
-                        csh = shell_length >= 3 &&
-                              !string_compare_max(shell + shell_length - 3,
-                                                  (string_address) "csh", 3);
-                }
-
-                dircolors_shell_quote(table, csh);
-        }
-
+        if (builder.text)
+                memory_give(builder.text);
         log_flush();
         utility_arena.used = 0;
-        return 0;
+        return parsed ? 0 : 1;
 }
 
 // rmdir ------------------------------------------------------------
