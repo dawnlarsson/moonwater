@@ -3073,6 +3073,21 @@ static fn crypto_point_set_xy(crypto_point address_to q, const p64 address_to x,
         memory_copy(q->z, f->one, f->n * 8);
 }
 
+/* The Jacobian formulas' temporaries, one block a call: the private
+   callers wipe it once, where wiping each field element was a fill a
+   temporary, and the public ones need not. After a sum, h is U2 - U1 and
+   rr is S2 - S1, which say whether the points were equal or opposite. */
+typedef struct
+{
+        p64 z1z1[CRYPTO_FE_MAX], z2z2[CRYPTO_FE_MAX];
+        p64 u1[CRYPTO_FE_MAX], u2[CRYPTO_FE_MAX];
+        p64 s1[CRYPTO_FE_MAX], s2[CRYPTO_FE_MAX];
+        p64 h[CRYPTO_FE_MAX], rr[CRYPTO_FE_MAX], hh[CRYPTO_FE_MAX];
+        p64 hhh[CRYPTO_FE_MAX], v[CRYPTO_FE_MAX];
+        p64 tmp[CRYPTO_FE_MAX], tmp2[CRYPTO_FE_MAX];
+        crypto_point out;
+} crypto_jacobian_work;
+
 /* dbl-2001-b for a = -3, three multiplies and five squarings:
        delta = Z^2, gamma = Y^2, beta = X gamma,
        alpha = 3 (X - delta)(X + delta),
@@ -3081,20 +3096,26 @@ static fn crypto_point_set_xy(crypto_point address_to q, const p64 address_to x,
    Z = 0 gives Z3 = 0, so infinity doubles to itself with no branch.  The
    same operations run for every input, and r may be p. */
 static fn crypto_point_double_formula(crypto_point address_to r,
-                                      const crypto_point address_to p)
+                                      const crypto_point address_to p,
+                                      crypto_jacobian_work address_to w)
 {
         const crypto_field address_to f = p->field;
-        p64 delta[CRYPTO_FE_MAX], gamma[CRYPTO_FE_MAX], beta[CRYPTO_FE_MAX];
-        p64 alpha[CRYPTO_FE_MAX], tmp[CRYPTO_FE_MAX], tmp2[CRYPTO_FE_MAX];
-        p64 x3[CRYPTO_FE_MAX], y3[CRYPTO_FE_MAX], z3[CRYPTO_FE_MAX];
+        p64 address_to delta = w->z1z1;
+        p64 address_to gamma = w->z2z2;
+        p64 address_to beta = w->u1;
+        p64 address_to alpha = w->u2;
+        p64 address_to tmp = w->tmp;
+        p64 address_to x3 = w->out.x;
+        p64 address_to y3 = w->out.y;
+        p64 address_to z3 = w->out.z;
 
         crypto_fe_sqr(delta, p->z, f);
         crypto_fe_sqr(gamma, p->y, f);
         crypto_fe_mul(beta, p->x, gamma, f);
 
         crypto_fe_sub(tmp, p->x, delta, f);
-        crypto_fe_add(tmp2, p->x, delta, f);
-        crypto_fe_mul(alpha, tmp, tmp2, f);
+        crypto_fe_add(w->tmp2, p->x, delta, f);
+        crypto_fe_mul(alpha, tmp, w->tmp2, f);
         crypto_fe_add(tmp, alpha, alpha, f);
         crypto_fe_add(alpha, tmp, alpha, f);
 
@@ -3117,43 +3138,69 @@ static fn crypto_point_double_formula(crypto_point address_to r,
         crypto_fe_add(tmp, tmp, tmp, f);
         crypto_fe_sub(y3, y3, tmp, f);
 
-        memory_copy(r->x, x3, sizeof x3);
-        memory_copy(r->y, y3, sizeof y3);
-        memory_copy(r->z, z3, sizeof z3);
-        r->n = p->n;
-        r->field = f;
+        w->out.n = p->n;
+        w->out.field = f;
+        *r = w->out;
+}
 
-        crypto_forget(delta, sizeof delta);
-        crypto_forget(gamma, sizeof gamma);
-        crypto_forget(beta, sizeof beta);
-        crypto_forget(alpha, sizeof alpha);
-        crypto_forget(tmp, sizeof tmp);
-        crypto_forget(tmp2, sizeof tmp2);
-        crypto_forget(x3, sizeof x3);
-        crypto_forget(y3, sizeof y3);
-        crypto_forget(z3, sizeof z3);
+/* add-2007-bl without its exceptions: into w->out, with w->h and w->rr
+   left for the caller that has to tell equal and opposite points apart.
+   p and q are read only. */
+static fn crypto_point_sum(crypto_jacobian_work address_to w,
+                           const crypto_point address_to p,
+                           const crypto_point address_to q)
+{
+        const crypto_field address_to f = p->field;
+
+        crypto_fe_sqr(w->z1z1, p->z, f);
+        crypto_fe_sqr(w->z2z2, q->z, f);
+        crypto_fe_mul(w->u1, p->x, w->z2z2, f);
+        crypto_fe_mul(w->u2, q->x, w->z1z1, f);
+        crypto_fe_mul(w->tmp, q->z, w->z2z2, f);
+        crypto_fe_mul(w->s1, p->y, w->tmp, f);
+        crypto_fe_mul(w->tmp, p->z, w->z1z1, f);
+        crypto_fe_mul(w->s2, q->y, w->tmp, f);
+
+        crypto_fe_sub(w->h, w->u2, w->u1, f);
+        crypto_fe_sub(w->rr, w->s2, w->s1, f);
+        crypto_fe_sqr(w->hh, w->h, f);
+        crypto_fe_mul(w->hhh, w->h, w->hh, f);
+        crypto_fe_mul(w->v, w->u1, w->hh, f);
+
+        crypto_fe_sqr(w->tmp, w->rr, f);
+        crypto_fe_sub(w->tmp, w->tmp, w->hhh, f);
+        crypto_fe_add(w->tmp2, w->v, w->v, f);
+        crypto_fe_sub(w->out.x, w->tmp, w->tmp2, f);
+
+        crypto_fe_sub(w->tmp, w->v, w->out.x, f);
+        crypto_fe_mul(w->tmp2, w->rr, w->tmp, f);
+        crypto_fe_mul(w->tmp, w->s1, w->hhh, f);
+        crypto_fe_sub(w->out.y, w->tmp2, w->tmp, f);
+
+        crypto_fe_mul(w->tmp, p->z, q->z, f);
+        crypto_fe_mul(w->out.z, w->tmp, w->h, f);
+        w->out.n = p->n;
+        w->out.field = f;
 }
 
 /* Public points only: infinity returns at once. */
 static fn crypto_point_double(crypto_point address_to r, crypto_point address_to p)
 {
+        crypto_jacobian_work w;
+
         if (crypto_fe_is_zero(p->z, p->n))
         {
                 *r = *p;
                 return;
         }
-        crypto_point_double_formula(r, p);
+        crypto_point_double_formula(r, p, address_of w);
 }
 
 static fn crypto_point_add(crypto_point address_to r, crypto_point address_to p,
                            crypto_point address_to q)
 {
-        p64 z1z1[CRYPTO_FE_MAX], z2z2[CRYPTO_FE_MAX];
-        p64 u1[CRYPTO_FE_MAX], u2[CRYPTO_FE_MAX], s1[CRYPTO_FE_MAX], s2[CRYPTO_FE_MAX];
-        p64 h[CRYPTO_FE_MAX], rr[CRYPTO_FE_MAX], hh[CRYPTO_FE_MAX], hhh[CRYPTO_FE_MAX];
-        p64 v[CRYPTO_FE_MAX], tmp[CRYPTO_FE_MAX], tmp2[CRYPTO_FE_MAX];
+        crypto_jacobian_work w;
         positive n = p->n;
-        const crypto_field address_to f = p->field;
 
         if (crypto_fe_is_zero(p->z, n))
         {
@@ -3166,47 +3213,13 @@ static fn crypto_point_add(crypto_point address_to r, crypto_point address_to p,
                 return;
         }
 
-        crypto_fe_sqr(z1z1, p->z, f);
-        crypto_fe_sqr(z2z2, q->z, f);
-        crypto_fe_mul(u1, p->x, z2z2, f);
-        crypto_fe_mul(u2, q->x, z1z1, f);
-        crypto_fe_mul(tmp, q->z, z2z2, f);
-        crypto_fe_mul(s1, p->y, tmp, f);
-        crypto_fe_mul(tmp, p->z, z1z1, f);
-        crypto_fe_mul(s2, q->y, tmp, f);
-
-        crypto_fe_sub(h, u2, u1, f);
-        crypto_fe_sub(rr, s2, s1, f);
-
-        if (crypto_fe_is_zero(h, n))
-        {
-                if (crypto_fe_is_zero(rr, n))
-                {
-                        crypto_point_double(r, p);
-                        return;
-                }
-                crypto_point_zero(r, f);
-                return;
-        }
-
-        crypto_fe_sqr(hh, h, f);
-        crypto_fe_mul(hhh, h, hh, f);
-        crypto_fe_mul(v, u1, hh, f);
-
-        crypto_fe_sqr(tmp, rr, f);
-        crypto_fe_sub(tmp, tmp, hhh, f);
-        crypto_fe_add(tmp2, v, v, f);
-        crypto_fe_sub(r->x, tmp, tmp2, f);
-
-        crypto_fe_sub(tmp, v, r->x, f);
-        crypto_fe_mul(tmp2, rr, tmp, f);
-        crypto_fe_mul(tmp, s1, hhh, f);
-        crypto_fe_sub(r->y, tmp2, tmp, f);
-
-        crypto_fe_mul(tmp, p->z, q->z, f);
-        crypto_fe_mul(r->z, tmp, h, f);
-        r->n = n;
-        r->field = f;
+        crypto_point_sum(address_of w, p, q);
+        if (!crypto_fe_is_zero(w.h, n))
+                *r = w.out;
+        else if (crypto_fe_is_zero(w.rr, n))
+                crypto_point_double(r, p);
+        else
+                crypto_point_zero(r, p->field);
 }
 
 /* The ECDH multiplier cannot use the public-signature helpers above: their
@@ -3214,14 +3227,12 @@ static fn crypto_point_add(crypto_point address_to r, crypto_point address_to p,
    scalar to a branch or cache observer.  These helpers select infinity cases
    with masks, and crypto_point_scalar_private says why no other exception
    reaches them.  Field reduction is likewise branchless, so every scalar
-   follows the same operations and addresses. */
+   follows the same operations and addresses. mask is all ones to take b. */
 static fn crypto_point_select(crypto_point address_to d,
                               const crypto_point address_to a,
-                              const crypto_point address_to b, p64 choose_b)
+                              const crypto_point address_to b, p64 mask)
 {
-        p64 mask = 0 - choose_b;
-
-        for (positive i = 0; i < CRYPTO_FE_MAX; i++)
+        for (positive i = 0; i < a->n; i++)
         {
                 d->x[i] = (a->x[i] & ~mask) | (b->x[i] & mask);
                 d->y[i] = (a->y[i] & ~mask) | (b->y[i] & mask);
@@ -3229,84 +3240,35 @@ static fn crypto_point_select(crypto_point address_to d,
         }
         d->n = a->n;
         d->field = a->field;
-        crypto_forget(address_of mask, sizeof mask);
 }
 
 static fn crypto_point_double_private(crypto_point address_to r,
                                       const crypto_point address_to p)
 {
-        crypto_point_double_formula(r, p);
+        crypto_jacobian_work w;
+
+        crypto_point_double_formula(r, p, address_of w);
+        crypto_forget(address_of w, sizeof w);
 }
 
 static fn crypto_point_add_private(crypto_point address_to r,
                                    const crypto_point address_to p,
                                    const crypto_point address_to q)
 {
-        p64 z1z1[CRYPTO_FE_MAX], z2z2[CRYPTO_FE_MAX];
-        p64 u1[CRYPTO_FE_MAX], u2[CRYPTO_FE_MAX];
-        p64 s1[CRYPTO_FE_MAX], s2[CRYPTO_FE_MAX];
-        p64 h[CRYPTO_FE_MAX], rr[CRYPTO_FE_MAX], hh[CRYPTO_FE_MAX];
-        p64 hhh[CRYPTO_FE_MAX], v[CRYPTO_FE_MAX];
-        p64 tmp[CRYPTO_FE_MAX], tmp2[CRYPTO_FE_MAX];
-        positive n = p->n;
-        const crypto_field address_to f = p->field;
-        crypto_point sum;
-        p64 p_infinity;
-        p64 q_infinity;
-
-        crypto_point_zero(address_of sum, f);
-        crypto_fe_sqr(z1z1, p->z, f);
-        crypto_fe_sqr(z2z2, q->z, f);
-        crypto_fe_mul(u1, p->x, z2z2, f);
-        crypto_fe_mul(u2, q->x, z1z1, f);
-        crypto_fe_mul(tmp, q->z, z2z2, f);
-        crypto_fe_mul(s1, p->y, tmp, f);
-        crypto_fe_mul(tmp, p->z, z1z1, f);
-        crypto_fe_mul(s2, q->y, tmp, f);
-
-        crypto_fe_sub(h, u2, u1, f);
-        crypto_fe_sub(rr, s2, s1, f);
-        crypto_fe_sqr(hh, h, f);
-        crypto_fe_mul(hhh, h, hh, f);
-        crypto_fe_mul(v, u1, hh, f);
-
-        crypto_fe_sqr(tmp, rr, f);
-        crypto_fe_sub(tmp, tmp, hhh, f);
-        crypto_fe_add(tmp2, v, v, f);
-        crypto_fe_sub(sum.x, tmp, tmp2, f);
-
-        crypto_fe_sub(tmp, v, sum.x, f);
-        crypto_fe_mul(tmp2, rr, tmp, f);
-        crypto_fe_mul(tmp, s1, hhh, f);
-        crypto_fe_sub(sum.y, tmp2, tmp, f);
-
-        crypto_fe_mul(tmp, p->z, q->z, f);
-        crypto_fe_mul(sum.z, tmp, h, f);
+        crypto_jacobian_work w;
+        p64 p_infinity = 0 - crypto_fe_zero_bit(p->z, p->n);
+        p64 q_infinity = 0 - crypto_fe_zero_bit(q->z, p->n);
 
         /* The window multiplier never adds equal points (see
            crypto_point_scalar_private), and opposite points already produce
            z=0.  Only the infinity cases need masked selection.  r may be
            p: nothing is written through it before the last line. */
-        p_infinity = crypto_fe_zero_bit(p->z, n);
-        q_infinity = crypto_fe_zero_bit(q->z, n);
-        crypto_point_select(address_of sum, address_of sum, p, q_infinity);
-        crypto_point_select(address_of sum, address_of sum, q, p_infinity);
-        *r = sum;
+        crypto_point_sum(address_of w, p, q);
+        crypto_point_select(address_of w.out, address_of w.out, p, q_infinity);
+        crypto_point_select(address_of w.out, address_of w.out, q, p_infinity);
+        *r = w.out;
 
-        crypto_forget(z1z1, sizeof z1z1);
-        crypto_forget(z2z2, sizeof z2z2);
-        crypto_forget(u1, sizeof u1);
-        crypto_forget(u2, sizeof u2);
-        crypto_forget(s1, sizeof s1);
-        crypto_forget(s2, sizeof s2);
-        crypto_forget(h, sizeof h);
-        crypto_forget(rr, sizeof rr);
-        crypto_forget(hh, sizeof hh);
-        crypto_forget(hhh, sizeof hhh);
-        crypto_forget(v, sizeof v);
-        crypto_forget(tmp, sizeof tmp);
-        crypto_forget(tmp2, sizeof tmp2);
-        crypto_forget(address_of sum, sizeof sum);
+        crypto_forget(address_of w, sizeof w);
         crypto_forget(address_of p_infinity, sizeof p_infinity);
         crypto_forget(address_of q_infinity, sizeof q_infinity);
 }
@@ -3372,7 +3334,7 @@ static fn crypto_point_scalar_private(
                         crypto_point_select(address_of chosen,
                                             address_of chosen,
                                             address_of table[j],
-                                            ((j ^ digit) - 1) >> 63);
+                                            0 - (((j ^ digit) - 1) >> 63));
                 crypto_point_add_private(address_of accumulator,
                                          address_of accumulator,
                                          address_of chosen);
@@ -4026,7 +3988,8 @@ static bool crypto_comb_base(p64 address_to x, p64 address_to y,
                 }
 
                 //      Infinity, then each entry kept under a mask that is
-                //      all ones for the one the column names.
+                //      all ones for the one the column names. Every entry's
+                //      z is one, so z is one unless the column is zero.
                 memory_fill(address_of chosen, 0, sizeof chosen);
                 memory_copy(chosen.y, f->one, n * sizeof(p64));
                 for (p64 e = 1; e < (1u << CRYPTO_COMB_TEETH); e++)
@@ -4040,10 +4003,10 @@ static bool crypto_comb_base(p64 address_to x, p64 address_to y,
                                               (entry[i] & mask);
                                 chosen.y[i] = (chosen.y[i] & ~mask) |
                                               (entry[n + i] & mask);
-                                chosen.z[i] = (chosen.z[i] & ~mask) |
-                                              (f->one[i] & mask);
                         }
                 }
+                for (positive i = 0; i < n; i++)
+                        chosen.z[i] = f->one[i] & (0 - ((0 - digit) >> 63));
                 crypto_projective_add(address_of r, address_of r,
                                       address_of chosen, b, f);
         }
