@@ -1085,12 +1085,9 @@ static HOT fn awk_piece_add(positive start, positive length)
         awk_pieces[awk_piece_count++] = (awk_piece){start, length};
 }
 
-/*
-        The two byte sets the default separator is made of, built once at
-        startup because building one costs more than the scan it drives.
-*/
-static b8 awk_blank_bytes[STRING_SET_BYTES];
-static b8 awk_field_bytes[STRING_SET_BYTES];
+// The field edges of a record split by the default separator.
+#define AWK_EDGE_FIELDS 256
+static p32 awk_edges[2 * AWK_EDGE_FIELDS];
 
 /*
         One splitter, for fields and for split().
@@ -1107,22 +1104,27 @@ static fn awk_split_pieces(string_address text, positive length, string_address 
 
         // A string of one space is the default splitting; a pattern of one
         // space, written / /, is a space and nothing more.
+        //
+        // The runs outside space, tab and newline come from one pass of
+        // memory_offsets_fields_blank a record, where two string_span_max a
+        // field were a quarter of awk '{print $2}'.
         if (separator_length == 1 && separator[0] == ' ' && !as_pattern)
         {
                 positive at = 0;
 
-                while (at < length)
+                for (;;)
                 {
-                        at += string_span_max(text + at, length - at, awk_blank_bytes);
+                        positive found = memory_offsets_fields_blank(
+                            awk_edges, text + at, length - at, '\n', AWK_EDGE_FIELDS);
 
-                        if (at >= length)
+                        for (positive f = 0; f < found; f++)
+                                awk_piece_add(at + awk_edges[2 * f],
+                                              awk_edges[2 * f + 1] - awk_edges[2 * f]);
+
+                        if (found < AWK_EDGE_FIELDS)
                                 break;
 
-                        positive start = at;
-
-                        at += string_span_max(text + at, length - at, awk_field_bytes);
-
-                        awk_piece_add(start, at - start);
+                        at += awk_edges[2 * found - 1];
                 }
 
                 return;
@@ -6566,12 +6568,6 @@ static fn awk_start()
         awk_not_a_number = awk_from_bits((positive)0xfff8000000000000ull);
         awk_returned.state = AWK_UNSET;
         awk_field_nothing.state = AWK_UNSET;
-
-        string_set_add(awk_blank_bytes, " \t\n");
-        memory_fill(awk_field_bytes, 1, sizeof(awk_field_bytes));
-        awk_field_bytes[' '] = 0;
-        awk_field_bytes['\t'] = 0;
-        awk_field_bytes['\n'] = 0;
 
         awk_standard_out.handle = 1;
         awk_standard_out.used = 0;
