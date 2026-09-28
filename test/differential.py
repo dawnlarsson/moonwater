@@ -19398,6 +19398,21 @@ _TEXT_META_CASES = tuple(
 )
 
 
+#       wc --debug names its line counter's hardware, and GLIBC_TUNABLES'
+#       glibc.cpu.hwcaps=-NAME turns a body off for GNU's cpu_supports: the
+#       words are the tunables and wc's own.
+_TEXT_HWCAPS_CASES = tuple((tunables,) + words for tunables in (
+    "", "glibc.cpu.hwcaps=-AVX512F", "glibc.cpu.hwcaps=-AVX2,-AVX512F",
+    "glibc.cpu.hwcaps=-ASIMD,-AVX2,-AVX512F", "glibc.cpu.hwcaps=-AVX512BW", "glibc.cpu.hwcaps=AVX2")
+    for words in (("-l", "--debug", "/dev/null"), ("-lc", "--debug", "/dev/null"), ("-w", "--debug", "/dev/null")))
+
+
+def _text_hwcaps_script(argv, stdin_name):
+    body = ("GLIBC_TUNABLES=" + shlex.quote(argv[0]) + " run " + ul_words(argv[1:]) +
+            "\nstatus=$?\nexit $status\n")
+    return ul_live("wc", body)
+
+
 def _text_meta_valid(argv):
     return len(argv) >= 3 and argv[1] in ("POSIX", "-")
 
@@ -19450,6 +19465,9 @@ def _text_help_valid(argv):
 # ----------------------------------------------------------------------------
 
 TEXT_UTILITIES = (
+    Utility("wc_hwcaps", operands=_TEXT_HWCAPS_CASES, stdin=("empty",), fixture="text",
+            stderr="exact", modes=("bash",), script=_text_hwcaps_script,
+            valid=lambda argv: tuple(argv) in _TEXT_HWCAPS_CASES),
     Utility("meta_words", operands=_TEXT_META_CASES, stdin=("empty",), fixture="text",
             stderr="ignore", modes=BASH, script=_text_meta_script, valid=_text_meta_valid),
     Utility("help_options", operands=_TEXT_HELP_TOOLS, stdin=("empty",), fixture="text",

@@ -5816,6 +5816,8 @@ static fn wc_bytes_longest(const p8 address_to at, positive left, bool want_line
         address_to column_out = column;
 }
 
+static bool cksum_hwcap_allowed(string_address name);
+
 static b32 text_wc()
 {
         file_taking taking = {
@@ -5957,14 +5959,23 @@ static b32 text_wc()
                 {
                         debug_said = true;
                         text_flush();
+                        // GLIBC_TUNABLES=glibc.cpu.hwcaps=-AVX512F,... turns
+                        // a body off for GNU's cpu_supports, and wc-cpu.sh
+                        // checks that the words follow.
 #if X64 && !defined(KERNEL_MODE)
-                        if (!cpu_has_avx512)
+                        bool wide = cpu_has_avx512 && cksum_hwcap_allowed("AVX512F") &&
+                                    cksum_hwcap_allowed("AVX512BW");
+                        bool narrow = cpu_has_avx2 && cksum_hwcap_allowed("AVX2");
+
+                        if (!wide)
                                 log_error("wc: avx512 support not detected\n", 0);
-                        log_error(cpu_has_avx512 ? "wc: using avx512 hardware support\n"
-                                  : cpu_has_avx2 ? "wc: using avx2 hardware support\n"
-                                                 : "wc: avx2 support not detected\n", 0);
+                        log_error(wide ? "wc: using avx512 hardware support\n"
+                                  : narrow ? "wc: using avx2 hardware support\n"
+                                           : "wc: avx2 support not detected\n", 0);
 #elif ARM64
-                        log_error("wc: using neon hardware support\n", 0);
+                        log_error(cksum_hwcap_allowed("ASIMD")
+                                      ? "wc: using neon hardware support\n"
+                                      : "wc: neon support not detected\n", 0);
 #endif
                 }
 
