@@ -29778,10 +29778,18 @@ def harness_image_nodes(argv):
     check('"' not in body.split('*/')[-1],
           'spawn_terminal spells no path of its own')
 
-    #   The build's side of the same agreement: SYSTEM is what makes the link.
-    check('word_is(build_tool_table[at].category, "SYSTEM") &&' in build and
-          'build_link("shell",' in build,
-          'the build links every SYSTEM applet at the root to the shell')
+    #   The build's side of the same agreement: SYSTEM is what makes the
+    #   link, and the terminal is one of the programs no switch can take
+    #   out of the image.
+    check('word_is(one->category, "SYSTEM") && build_tool_on(one) &&' in build and
+          'build_tool_links(image, applet, false)' in build and
+          'applet = "shell";' in build,
+          'the build links every enabled SYSTEM applet at the root to the shell')
+    if terminal:
+        fixed_at = build.index('static bool build_tool_fixed(')
+        fixed = build[fixed_at:build.index('\n}', fixed_at)]
+        check('word_is(name, "%s")' % terminal.strip('"').lstrip('/') in fixed,
+              '%s has no switch, so no configuration can drop it' % terminal)
 
     #   One place says where a bowl root lives. Anything else spelling it is
     #   the drift this whole harness exists to catch.

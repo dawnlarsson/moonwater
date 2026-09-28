@@ -216,6 +216,8 @@ pieces:
 ./build floor [arch]                            prove the ISA floor
 ./build key <name>                              a value from artifacts/.config
 ./build config-header <config> <header>         the header a .config gives the programs
+./build surface <config>                        the names that .config links into an image
+./build switches [check]                        write or check the per-tool Kconfig switches
 ```
 
 Nothing in it names this project; every path and setting can be overridden
@@ -237,6 +239,15 @@ The bundled userspace is two Kconfig options, both on by default:
 from the binary, not just from the path. The `.config` reaches the programs
 as one header, `artifacts/moonwater_config.h`, and the build refuses an image
 that does not carry that header's record.
+
+Every tool has a switch of its own, `CONFIG_MOONWATER_TOOL_<NAME>` (`TOOL_TAC`,
+`TOOL_WGET`), in a menuconfig menu under its category. One switched off is
+compiled out of the shell's table and linked nowhere, so its name is not
+found. `CONFIG_MOONWATER_TOOLS_ALL=n` turns the default of every one off, for
+an allow list. `/init`, `/term` and `/moonwater` have no switch, because the
+kernel and init run them by path. The switches live in
+`src/moonwater/Kconfig.switches`, which `./build switches` writes from
+`src/sh/tools.inc`.
 
 ## Tests
 

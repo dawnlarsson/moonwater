@@ -9898,6 +9898,36 @@ else
         lost 'components build' 'the header or the shell did not build'
 fi
 
+#       One tool off, and its neighbours in tools.inc still there: gone from
+#       the table, from every name the image links, and from the shell.
+group tool
+printf '%s\n' 'CONFIG_MOONWATER_CORE=y' \
+        '# CONFIG_MOONWATER_TOOL_TAC is not set' > "$work/switch-single.config"
+if switch_header "$work/switch-single.config" "$work/switch-single.h" &&
+        switch_shell "$work/switch-single.h" "$work/switch-single"; then
+        won
+        switch_bin=$work/switch-single
+        same 'tac not found' 127 "$(switch_status "$switch_bin" 'tac /dev/null')"
+        same 'tac not its own' no "$(switch_own "$switch_bin" tac)"
+        same 'tail its own' yes "$(switch_own "$switch_bin" tail)"
+        same 'sum still on' 0 "$(switch_status "$switch_bin" 'sum /dev/null')"
+        same 'tail still on' 0 "$(switch_status "$switch_bin" 'tail /dev/null')"
+        if build_tool surface "$work/switch-single.config" \
+                > "$work/switch-single.surface" 2>&1; then
+                same 'tac not linked' '' \
+                        "$(grep -x -e tac -e bin/tac "$work/switch-single.surface")"
+                same 'tail linked' 'tail bin/tail' \
+                        "$(grep -x -e tail -e bin/tail "$work/switch-single.surface" |
+                                tr '\n' ' ' | sed 's/ $//')"
+                same 'init always linked' init \
+                        "$(grep -x init "$work/switch-single.surface")"
+        else
+                lost 'surface' "$(head -3 "$work/switch-single.surface")"
+        fi
+else
+        lost 'single build' 'the header or the shell did not build'
+fi
+
 counted
 )
 
@@ -9923,6 +9953,7 @@ if [ "$(uname -s)" = Darwin ]; then
         python3 test/differential.py --harness macos_read_retry || kit_failed=1
 fi
 python3 test/function_audit.py --check || kit_failed=1
+build_tool switches check || kit_failed=1
 python3 test/differential.py --harness floodlight || kit_failed=1
 python3 test/differential.py --harness surface_coreutils_gap || kit_failed=1
 python3 test/differential.py --harness image_nodes || kit_failed=1

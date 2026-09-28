@@ -185,4 +185,6 @@ menu "Moonwater"
           the module; they do not each scan a private copy. A regular
           file at /root/main.moonwater.sh, owned by root and not group-
           or world-writable, overlays the baked text after boot.
+    # Per-tool and per-builtin switches, generated: ./build switches
+    source "kernel/moonwater/Kconfig.switches"
 endmenu # Moonwater

@@ -15465,6 +15465,29 @@ __asm__(
 #endif
 
 /*
+        Which single tools this build keeps.
+
+        The configuration header defines MOONWATER_TOOL_OFF_<name> as 1 for
+        each tool its .config switched off, and a macro cannot ask #ifdef of
+        a name it was handed. So the gate asks the way the kernel's
+        IS_ENABLED does: pasted onto a prefix, a name defined as 1 becomes a
+        placeholder holding a comma, which moves which of two words comes
+        second. Every other name pastes into a word that means nothing and
+        the keeper comes second. The count the header asserts below is what
+        catches a gate that ever stops choosing.
+*/
+#define SHELL_GATE_PROBE_1 ~,
+#define SHELL_GATE_SECOND(ignored, chosen, ...) chosen
+#define SHELL_GATE_CHOOSE(probe, off, on) SHELL_GATE_SECOND(probe off, on, ~)
+#define SHELL_GATE_PASTE(value, off, on) \
+        SHELL_GATE_CHOOSE(SHELL_GATE_PROBE_##value, off, on)
+#define SHELL_GATE(flag, off, on) SHELL_GATE_PASTE(flag, off, on)
+#define SHELL_TOOL_DROP(name, function)
+#define SHELL_TOOL_GATE(name, function) \
+        SHELL_GATE(MOONWATER_TOOL_OFF_##name, SHELL_TOOL_DROP, \
+                   SHELL_TOOL_KEEP)(name, function)
+
+/*
         Which categories this build keeps, decided once.
 
         The table below and the key array beside it both expand through
@@ -15479,24 +15502,24 @@ __asm__(
 #define SHELL_TOOL_UTIL_SBIN(name, function)
 #define SHELL_TOOL_MONITOR(name, function)
 #else
-#define SHELL_TOOL_GENERAL(name, function) SHELL_TOOL_KEEP(name, function)
+#define SHELL_TOOL_GENERAL(name, function) SHELL_TOOL_GATE(name, function)
 #ifdef SHELL_NO_UTIL_LINUX
 #define SHELL_TOOL_UTIL_BIN(name, function)
 #define SHELL_TOOL_UTIL_SBIN(name, function)
 #else
-#define SHELL_TOOL_UTIL_BIN(name, function) SHELL_TOOL_KEEP(name, function)
-#define SHELL_TOOL_UTIL_SBIN(name, function) SHELL_TOOL_KEEP(name, function)
+#define SHELL_TOOL_UTIL_BIN(name, function) SHELL_TOOL_GATE(name, function)
+#define SHELL_TOOL_UTIL_SBIN(name, function) SHELL_TOOL_GATE(name, function)
 #endif
 #ifdef SHELL_NO_MONITOR
 #define SHELL_TOOL_MONITOR(name, function)
 #else
-#define SHELL_TOOL_MONITOR(name, function) SHELL_TOOL_KEEP(name, function)
+#define SHELL_TOOL_MONITOR(name, function) SHELL_TOOL_GATE(name, function)
 #endif
 #endif
 #ifdef SHELL_UTILITY_PROGRAM
 #define SHELL_TOOL_SYSTEM(name, function)
 #else
-#define SHELL_TOOL_SYSTEM(name, function) SHELL_TOOL_KEEP(name, function)
+#define SHELL_TOOL_SYSTEM(name, function) SHELL_TOOL_GATE(name, function)
 #endif
 #define SHELL_TOOL(category, name, function) \
         SHELL_TOOL_##category(name, function)
