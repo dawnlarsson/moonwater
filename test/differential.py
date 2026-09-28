@@ -35574,7 +35574,7 @@ def dhcp_lift():
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     head = net[net.index("#define DHCP_HEAD 236"):net.index("static COLD positive dhcp_build(")]
     walk = net[net.index("/*\n        A reply read for what it says."):
-               net.index("static COLD bipolar dhcp_open(")]
+               net.index("/*\n        The exchange, confined.")]
     shim = r'''
 #include <stdio.h>
 #include <stdlib.h>

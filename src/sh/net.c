@@ -1360,6 +1360,81 @@ static COLD p8 net_internet_prefer(void)
                                            : NETLINK_PREFER_WIRED;
 }
 
+/*
+        A lease exchange, apart from the process that applies it.
+
+        The child confines itself once its socket is open (dhcp_confine) and
+        hands back one fixed-size answer. That answer is judged here the way
+        a reply is: a usable lease with its timers in RFC 2131's order, and on
+        renewal the address already held -- the child can say only what a
+        server could have. A child that says nothing within the exchange's
+        own schedule is killed rather than waited for.
+*/
+typedef struct
+{
+        bipolar status;
+        dhcp_lease lease;
+} net_dhcp_answer;
+
+static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware,
+                                   dhcp_lease address_to lease, bool renew,
+                                   bool rebinding, positive wait)
+{
+        b32 ends[2];
+        net_dhcp_answer answer = {DHCP_NO_SOCKET, *lease};
+        network_deadline deadline;
+        bool heard;
+
+        if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) < 0)
+                return DHCP_NO_SOCKET;
+
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                dhcp_apart = ends[1];
+                answer.status = renew ? dhcp_reacquire(device, hardware,
+                                                       address_of answer.lease,
+                                                       rebinding, wait)
+                                      : dhcp_ask(device, hardware,
+                                                 address_of answer.lease);
+                system_write_all((positive)dhcp_apart, address_of answer,
+                                 sizeof answer);
+                system_call_1(syscall(exit_group), 0);
+        }
+
+        system_close(ends[1]);
+        //      dhcp_ask's schedule is 75 s of sends after a CSPRNG that
+        //      may take a second; a renewal is its own wait.
+        heard = child > 0 &&
+                network_deadline_begin(address_of deadline,
+                                       renew ? wait + 5 : 120, 0) &&
+                network_wait_readable_until(ends[0], address_of deadline) > 0 &&
+                system_read_retry((positive)ends[0], address_of answer,
+                                  sizeof answer) == (bipolar)sizeof answer;
+        if (child > 0)
+        {
+                system_call_2(syscall(kill), (positive)child, SIGKILL);
+                system_call_4(syscall(wait4), (positive)child, 0, 0, 0);
+        }
+        system_close(ends[0]);
+
+        if (!heard)
+                return DHCP_NO_SOCKET;
+        if (answer.status != DHCP_OK)
+                return answer.status == DHCP_NO_OFFER ||
+                               answer.status == DHCP_REFUSED ||
+                               answer.status == DHCP_NO_RANDOM
+                           ? answer.status
+                           : DHCP_NO_SOCKET;
+        if (!dhcp_lease_usable(address_of answer.lease) ||
+            !dhcp_lease_timers(address_of answer.lease) ||
+            (renew && answer.lease.address != lease->address))
+                return DHCP_NO_OFFER;
+        *lease = answer.lease;
+        return DHCP_OK;
+}
+
 static COLD b32 net_auto(b32 handle, net_holding address_to held)
 {
         netlink_search search;
@@ -1401,7 +1476,8 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         string_format(net_out, "ip: asking for a lease\n");
         net_flush();
 
-        status = dhcp_ask(search.name, search.hardware, address_of lease);
+        status = net_dhcp_apart(search.name, search.hardware, address_of lease,
+                                false, false, 0);
 
         if (status != DHCP_OK)
         {
@@ -1768,9 +1844,10 @@ static COLD b32 net_watch(void)
                                 positive attempt = net_lease_attempt_time(
                                     address_of held, now, rebinding);
                                 dhcp_lease renewed = held.lease;
-                                bipolar renewal = dhcp_reacquire(
+                                bipolar renewal = net_dhcp_apart(
                                     held.name, held.hardware,
-                                    address_of renewed, rebinding, attempt);
+                                    address_of renewed, true, rebinding,
+                                    attempt);
 
                                 if (renewal == DHCP_OK)
                                 {

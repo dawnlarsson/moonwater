@@ -58426,6 +58426,58 @@ static fn fetching_for_real(void)
 }
 
 /*
+        The exchange's confinement, as net_dhcp_apart's child meets it: the
+        socket and the answer's pipe stay open and nothing else does, the
+        answer's write is allowed, and a call beyond the exchange's own kills
+        the child with SIGSYS. qemu-user cannot filter itself, so there the
+        last step is NOT RUN rather than a pass.
+*/
+static fn dhcp_confinement(void)
+{
+        b32 ends[2];
+        b32 status = 0;
+        p8 byte = 0;
+        bipolar spare = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+
+        check("DHCP confinement fixture opens",
+              spare >= 0 &&
+                  system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) == 0);
+        if (spare < 0)
+                return;
+        bipolar child = system_fork();
+        if (child == 0)
+        {
+                bipolar handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+
+                dhcp_apart = ends[1];
+                if (handle < 0 || !dhcp_confine((b32)handle))
+                        system_call_1(syscall(exit_group), 3);
+                if (system_call_1(syscall(close), (positive)spare) != -EBADF ||
+                    system_call_1(syscall(close), (positive)ends[0]) != -EBADF)
+                        system_call_1(syscall(exit_group), 4);
+                byte = 1;
+                system_call_3(syscall(write), (positive)ends[1],
+                              (positive)address_of byte, 1);
+                system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+                system_call_1(syscall(exit_group), 5);
+        }
+        system_close(ends[1]);
+        system_read_retry((positive)ends[0], address_of byte, 1);
+        if (child > 0)
+                system_call_4(syscall(wait4), (positive)child,
+                              (positive)address_of status, 0, 0);
+        system_close(ends[0]);
+        system_close(spare);
+        check("the confined exchange keeps only its socket and pipe, and may answer",
+              child > 0 && byte == 1);
+        if (net_as_emulated() && status == 5 << 8)
+                log_direct(str("net: DHCP seccomp filter NOT RUN -- qemu-user\n"));
+        else
+                check("the confined exchange dies on a call outside its own",
+                      (status & 0x7f) == 31);
+}
+
+/*
         The lease, built and read, without a server.
 
         The socket dance -- broadcast from an address we do not have yet, out
@@ -59278,6 +59330,7 @@ b32 main(void)
         redirect_urls();
         fetching_for_real();
         leasing();
+        dhcp_confinement();
         dhcp_reacquisition_state_matrix();
         leasing_datagrams();
         dhcp_transaction_randomness();
@@ -71971,6 +72024,29 @@ static fn storage_test_lease_clock_origin(void)
                       child > 0 && status == 0);
 }
 
+/* A renewal with nothing to renew answers DHCP_NO_OFFER from inside the
+   child, so the status crossed the pipe; the child is reaped and no
+   descriptor is left behind. */
+static fn storage_test_dhcp_apart(void)
+{
+        p8 hardware[6] = {2, 0, 0, 0, 0, 1};
+        dhcp_lease lease = {0};
+        bipolar before = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+
+        if (before >= 0)
+                system_close(before);
+        bipolar status = net_dhcp_apart("moonwater-no-interface", hardware,
+                                        address_of lease, true, false, 1);
+        bipolar after = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+
+        if (after >= 0)
+                system_close(after);
+        check("a lease exchange apart hands its answer back and leaves nothing",
+              status == DHCP_NO_OFFER && before >= 0 && after == before &&
+                  system_call_4(syscall(wait4), (positive)-1, 0, 1, 0) ==
+                      -ECHILD);
+}
+
 static fn storage_test_netlink_output(void)
 {
         writer saved = net_out;
@@ -72615,6 +72691,7 @@ b32 main(void)
         storage_test_script_rollback();
         storage_test_link_state();
         storage_test_lease_clock_origin();
+        storage_test_dhcp_apart();
         storage_test_netlink_output();
         storage_test_net_files();
         return test_report(null);

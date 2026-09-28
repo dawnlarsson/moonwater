@@ -9344,6 +9344,105 @@ static COLD bool dhcp_reacquisition_answer_matches(
         return kind != DHCP_ACK || answer->address == lease->address;
 }
 
+/*
+        The exchange, confined.
+
+        A reply is parsed as root, and any host on the wire can write one. So
+        the watcher runs each exchange in a child (net_dhcp_apart), which
+        opens and binds the client socket while it may and then comes here:
+        every descriptor but that socket and the answer's pipe is closed,
+        every id becomes nobody's, no exec may grant anything back, and a
+        filter kills any call beyond the exchange's own -- sendto, recvfrom,
+        ppoll, clock_gettime, close -- the answer's write, and exit. What a
+        crafted packet could make of the child is then DHCP from port 68 on
+        that link, which any host on it can send already, and one lease,
+        which the parent judges as it would a packet.
+
+        Only that child is confined; the checks call dhcp_ask directly. A
+        kernel without seccomp (or qemu-user, which cannot filter itself)
+        leaves the child unprivileged but unfiltered rather than offline.
+*/
+static b32 dhcp_apart = -1;
+
+#define DHCP_NOBODY 65534
+
+#if defined(__x86_64__)
+#define DHCP_AUDIT_ARCH 0xc000003eu
+#elif defined(__aarch64__)
+#define DHCP_AUDIT_ARCH 0xc00000b7u
+#else
+#define DHCP_AUDIT_ARCH 0xc00000f3u
+#endif
+
+typedef struct
+{
+        p16 code;
+        p8 jump_true;
+        p8 jump_false;
+        p32 value;
+} dhcp_filter_step;
+
+static COLD bool dhcp_confine(b32 handle)
+{
+        static const p32 allowed[] = {
+            (p32)syscall(sendto), (p32)syscall(recvfrom), (p32)syscall(ppoll),
+            (p32)syscall(clock_gettime), (p32)syscall(close),
+            (p32)syscall(write), (p32)syscall(exit_group), (p32)syscall(exit),
+            (p32)syscall(rt_sigreturn), (p32)syscall(restart_syscall)};
+        dhcp_filter_step steps[6 + array_count(allowed)];
+        struct
+        {
+                p16 count;
+                dhcp_filter_step address_to steps;
+        } filter = {0, steps};
+        p32 keep[2] = {(p32)handle, (p32)dhcp_apart};
+        p32 from = 0;
+        positive at = 0;
+        bipolar status;
+
+        if (dhcp_apart < 0)
+                return true;
+        if (keep[0] > keep[1])
+                keep[0] = keep[1], keep[1] = (p32)handle;
+        //      Below, between and above the two kept.
+        for (positive i = 0; i < 3; i++)
+        {
+                if ((i == 2 || keep[i] > from) &&
+                    system_call_3(syscall(close_range), from,
+                                  i < 2 ? keep[i] - 1 : ~0u, 0) < 0)
+                        return false;
+                if (i < 2)
+                        from = keep[i] + 1;
+        }
+
+        if ((!system_call_1(syscall(getuid), 0) &&
+             (system_call_2(syscall(setgroups), 0, 0) < 0 ||
+              system_call_3(syscall(setresgid), DHCP_NOBODY, DHCP_NOBODY,
+                            DHCP_NOBODY) < 0 ||
+              system_call_3(syscall(setresuid), DHCP_NOBODY, DHCP_NOBODY,
+                            DHCP_NOBODY) < 0)) ||
+            system_call_5(syscall(prctl), 38 /* PR_SET_NO_NEW_PRIVS */, 1, 0,
+                          0, 0) < 0)
+                return false;
+
+        //      The architecture, then the call. x32's bit-30 numbers match
+        //      nothing listed and are killed with the rest.
+        steps[at++] = (dhcp_filter_step){0x20, 0, 0, 4};
+        steps[at++] = (dhcp_filter_step){0x15, 1, 0, DHCP_AUDIT_ARCH};
+        steps[at++] = (dhcp_filter_step){0x06, 0, 0, 0x80000000u};
+        steps[at++] = (dhcp_filter_step){0x20, 0, 0, 0};
+        for (positive i = 0; i < array_count(allowed); i++)
+                steps[at++] = (dhcp_filter_step){
+                    0x15, (p8)(array_count(allowed) - i), 0, allowed[i]};
+        steps[at++] = (dhcp_filter_step){0x06, 0, 0, 0x80000000u};
+        steps[at++] = (dhcp_filter_step){0x06, 0, 0, 0x7fff0000u};
+        filter.count = (p16)at;
+
+        status = system_call_3(syscall(seccomp), 1 /* SET_MODE_FILTER */, 0,
+                               (positive)address_of filter);
+        return status >= 0 || status == -ENOSYS;
+}
+
 static COLD bipolar dhcp_open(string_address device, p32 host, bool broadcast)
 {
         bipolar handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
@@ -9362,7 +9461,8 @@ static COLD bipolar dhcp_open(string_address device, p32 host, bool broadcast)
                               address_of one, sizeof one) < 0 ||
             socket_option_set((b32)handle, SOL_SOCKET, SO_BINDTODEVICE, device,
                               string_length(device) + 1) < 0 ||
-            socket_bind((b32)handle, address_of mine, sizeof mine) < 0)
+            socket_bind((b32)handle, address_of mine, sizeof mine) < 0 ||
+            !dhcp_confine((b32)handle))
         {
                 socket_close((b32)handle);
                 return -1;
