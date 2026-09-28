@@ -9448,17 +9448,31 @@ static fn ls_print(string_address directory)
 
 // ---- Gathering entries ---------------------------------------------------
 
+/*
+        -I and --hide match as fnmatch does under FNM_PERIOD, which is how
+        GNU's ls asks: a leading dot is matched only by a dot written in the
+        pattern, never by *, ? or a bracket, so -I '[^a]*' -a still lists
+        .hidden, . and ..
+*/
+static bool ls_pattern_matches(string_address pattern, string_address name)
+{
+        if (string_is(name, '.') && !string_is(pattern, '.') &&
+            !(string_is(pattern, '\\') && pattern[1] == '.'))
+                return false;
+        return file_fnmatch(pattern, name);
+}
+
 static bool ls_pattern_hidden(string_address name)
 {
         for (positive i = 0; i < ls_ignore_count; i++)
-                if (file_fnmatch(ls_ignore_patterns[i], name))
+                if (ls_pattern_matches(ls_ignore_patterns[i], name))
                         return true;
 
         if (ls_hidden || ls_almost)
                 return false;
 
         for (positive i = 0; i < ls_hide_count; i++)
-                if (file_fnmatch(ls_hide_patterns[i], name))
+                if (ls_pattern_matches(ls_hide_patterns[i], name))
                         return true;
 
         return false;
@@ -9630,9 +9644,11 @@ static bool ls_add(bipolar directory, string_address path, string_address shown,
                 {
                         p8 full[FILE_PATH_MAX];
 
+                        //      GNU names an entry of . by its name alone.
                         string_format(log_error, "%s: cannot access %w: %s\n", ls_program,
                                       writer_shell_quoted_name,
-                                      file_path_join(full, under, shown) ? full : shown,
+                                      string_equals(under, ".") || !file_path_join(full, under, shown)
+                                          ? shown : (string_address)full,
                                       file_reason(looked));
                         ls_status = 1;
                 }
