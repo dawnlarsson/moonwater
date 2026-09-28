@@ -529,7 +529,9 @@ static COLD bipolar netlink_transact(b32 handle, netlink_buffer address_to reque
         with EBUSY -- which arrives long after the abandoned one, attached to
         an innocent request, and reads as though the second question were the
         problem. So the remaining messages are drawn and dropped, and the
-        socket is handed back clean.
+        socket is handed back clean. An interrupted dump is drained the same
+        way before it fails: it returned at its first marked message and left
+        the rest of the dump on the socket.
 */
 static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
                             p32 sequence, netlink_buffer address_to reply,
@@ -538,6 +540,7 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
         netlink_header address_to header;
         network_deadline deadline;
         bool enough = false;
+        bool interrupted = false;
         bipolar sent;
         positive at;
 
@@ -595,16 +598,21 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
                                 continue;
                         }
 
-                        if (header->flags & NLM_DUMP_INTERRUPTED)
-                                return -1;
+                        interrupted |= (header->flags &
+                                        NLM_DUMP_INTERRUPTED) != 0;
 
                         if (header->type == NLMSG_IS_DONE)
-                                return netlink_status(header, true);
+                        {
+                                bipolar status = netlink_status(header, true);
+
+                                return interrupted && !status ? -1 : status;
+                        }
 
                         if (header->type == NLMSG_IS_ERROR)
                                 return netlink_status(header, false);
 
-                        if (!enough && header->type != NLMSG_IS_NOOP && visit &&
+                        if (!enough && !interrupted &&
+                            header->type != NLMSG_IS_NOOP && visit &&
                             !visit(header, context))
                                 enough = true;
 

@@ -49398,6 +49398,31 @@ static fn error_frames(void)
                       netlink_transact(-1, &request, 91, null, null) == -1 &&
                           !request.bytes && !request.room && !request.used && !request.failed);
         }
+        /* An interrupted dump fails only once the rest of it is drawn: it
+           returned at the first marked message and left the others queued,
+           where the kernel holds the socket's next dump off with EBUSY. */
+        if (netlink_begin(&request, RTM_GETLINK, NLM_REQUEST | NLM_DUMP, 91, 0))
+        {
+                netlink_header marked = {.length = NETLINK_HEADER,
+                                         .type = RTM_NEWLINK,
+                                         .flags = 2 | NLM_DUMP_INTERRUPTED,
+                                         .sequence = 91};
+                netlink_header more = marked;
+                netlink_header finished = marked;
+                p8 left[NETLINK_HEADER];
+
+                more.flags = 2;
+                finished.type = NLMSG_IS_DONE;
+                socket_send(pair[1], &marked, sizeof marked, 0, null, 0);
+                socket_send(pair[1], &more, sizeof more, 0, null, 0);
+                socket_send(pair[1], &finished, sizeof finished, 0, null, 0);
+                check("an interrupted netlink dump fails after draining the rest",
+                      netlink_walk(pair[0], &request, 91, &reply, null, null) == -1 &&
+                          socket_receive(pair[0], left, sizeof left, MSG_DONTWAIT,
+                                         null, null) == NETWORK_TRY_AGAIN);
+                p8 discarded[NETLINK_HEADER];
+                socket_receive(pair[1], discarded, sizeof discarded, 0, null, null);
+        }
         netlink_forget(&request);
         netlink_forget(&reply);
         socket_close(pair[0]);
