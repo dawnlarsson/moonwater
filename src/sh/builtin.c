@@ -21136,6 +21136,7 @@ fn shell_enable(writer write, string_address input)
         p8 which;
         bool off = false;
         bool every = false;
+        bool special = false;
         b32 bad = 0;
 
         while (shell_option_letter(address_of walk, address_of which))
@@ -21146,7 +21147,9 @@ fn shell_enable(writer write, string_address input)
                         continue;
                 else if (which == 'a')
                         every = true;
-                else if (which == 'f' || which == 'd' || which == 's')
+                else if (which == 's')
+                        special = true;
+                else if (which == 'f' || which == 'd')
                 {
                         // Dynamic builtin loading is not supported.
                         return shell_answered(2, "enable: not supported\n");
@@ -21157,6 +21160,32 @@ fn shell_enable(writer write, string_address input)
         }
 
         positive index = walk.index;
+
+        /*
+                -s: the POSIX special builtins, in bash's own order, which is
+                how enable -s and enable -ps list them.
+        */
+        if (special && index >= shell_argc)
+        {
+                static const string_address specials[] = {
+                    ".", ":", "break", "continue", "eval", "exec", "exit",
+                    "export", "readonly", "return", "set", "shift", "source",
+                    "times", "trap", "unset"};
+
+                for (positive at = 0; at < array_count(specials); at++)
+                {
+                        positive found = shell_command_index_hashed(
+                            specials[at], string_hash_33_length(specials[at]));
+                        bool here = found >= SHELL_COMMAND_COUNT ||
+                                    !shell_disabled[found];
+
+                        if (here == !off || every)
+                                string_format(write, "enable %s%s\n",
+                                              here ? "" : "-n ", specials[at]);
+                }
+                return shell_answer(0);
+        }
+
         if (index >= shell_argc)
         {
                 shell_command address_to command = shell_commands;
