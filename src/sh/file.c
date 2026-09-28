@@ -7232,6 +7232,17 @@ static bool ls_keep(string_address name, positive address_to where)
         and a brace standing alone. Under the escaping styles a byte outside
         ASCII is spelled in octal and so needs quoting too.
 */
+/*
+        A directory's heading is quoted as its name is, and a colon in it as
+        well, since the colon after the heading is what ends it: the shell
+        styles put such a name in quotes, and the escaping styles write the
+        colon as \:. A space in a heading is left alone by -b, which escapes
+        it only in a file name.
+*/
+static bool ls_quote_heading;
+
+static bool text_locale_utf8();
+
 static bool ls_shell_needs_quotes(string_address name, positive length, bool escaping)
 {
         if (!length)
@@ -7241,15 +7252,19 @@ static bool ls_shell_needs_quotes(string_address name, positive length, bool esc
         {
                 p8 byte = string_get(name + at);
 
-                if (byte < 32 || byte == 127)
-                        return true;
-                if (byte >= 128)
+                //      Without escapes an unprintable byte is written as it
+                //      is and needs no quotes, but a newline, a return or a
+                //      tab still does, as gnulib's quotearg has it; with
+                //      them every unprintable byte is a $'...' run.
+                if (byte < 32 || byte >= 127)
                 {
-                        if (escaping)
+                        if (escaping || byte == '\n' || byte == '\r' || byte == '\t')
                                 return true;
                         continue;
                 }
                 if (string_first_of((string_address) " !\"$&'()*;<=>?[^`|\\", byte))
+                        return true;
+                if (byte == ':' && ls_quote_heading)
                         return true;
                 if ((byte == '#' || byte == '~') && at == 0)
                         return true;
@@ -7424,12 +7439,41 @@ static fn writer_shell_name(writer output, string_address value)
 // The C styles: a quoted string a C compiler would read back, the same
 // without its quotes and with spaces escaped, and the locale style that in
 // the C locale is the C string in single quotes.
+// Whether a name must be escaped at all, which is what c-maybe quotes on.
+static bool ls_c_needs_escape(string_address name, positive length)
+{
+        for (positive at = 0; at < length; at++)
+        {
+                p8 byte = string_get(name + at);
+
+                if (byte == '\\' || byte == '"' || ls_byte_unprintable(byte) ||
+                    (byte == ':' && ls_quote_heading))
+                        return true;
+        }
+        return false;
+}
+
+/*
+        The C styles, gnulib's way: c in double quotes, c-maybe the same only
+        where something needed escaping, escape with no quotes and a space
+        escaped too, and the two locale styles -- which in a UTF-8 locale
+        quote with U+2018 and U+2019 and leave an ASCII quote inside alone,
+        and in the C locale are ' ' for locale and " " for clocale. Whatever
+        the quotes are, a closing quote inside the name is escaped.
+*/
 static fn ls_quote_c(writer write, string_address name, positive length, p8 style)
 {
-        p8 quote = style == 'c' ? '"' : style == 'o' ? '\'' : 0;
+        bool utf8 = (style == 'o' || style == 'C') && text_locale_utf8();
+        string_address left = utf8             ? (string_address) "\xe2\x80\x98"
+                              : style == 'o'   ? (string_address) "'"
+                              : style == 'b'   ? (string_address) ""
+                              : style == 'm' && !ls_c_needs_escape(name, length)
+                                  ? (string_address) ""
+                                  : (string_address) "\"";
+        string_address right = utf8 ? (string_address) "\xe2\x80\x99" : left;
+        positive quote_length = string_length(right);
 
-        if (quote)
-                write(address_of quote, 1);
+        write(left, string_length(left));
 
         for (positive at = 0; at < length; at++)
         {
@@ -7438,21 +7482,26 @@ static fn ls_quote_c(writer write, string_address name, positive length, p8 styl
 
                 if (byte == '\\')
                         write("\\\\", 2);
-                else if (quote && byte == quote)
+                else if (quote_length && at + quote_length <= length &&
+                         !string_compare_max(name + at, right, quote_length))
                 {
                         write("\\", 1);
-                        write(address_of quote, 1);
+                        write(name + at, quote_length);
+                        at += quote_length - 1;
                 }
-                else if (style == 'b' && byte == ' ')
+                else if (style == 'b' && byte == ' ' && !ls_quote_heading)
                         write("\\ ", 2);
+                //      c-maybe only quotes for a colon; the quoting it
+                //      then does knows nothing of the heading's colon.
+                else if (byte == ':' && ls_quote_heading && style != 'm')
+                        write("\\:", 2);
                 else if (ls_byte_unprintable(byte))
                         write(spelled, ls_escape_byte(byte, spelled, true));
                 else
                         write(name + at, 1);
         }
 
-        if (quote)
-                write(address_of quote, 1);
+        write(right, quote_length);
 }
 
 /* GNU's unquoted diagnostic spelling, streamed so a path cannot be cut at a
@@ -7492,9 +7541,42 @@ static fn ls_quote_literal(writer write, string_address name, positive length)
         }
 }
 
+/*
+        -q under the plain shell styles: the name is quoted as it stands and
+        what is unprintable in the result is shown as ?, so the ? does not
+        itself call for quotes -- ls --quoting=shell -q over q\a is q?.
+*/
+static writer ls_hidden_writer;
+
+static fn ls_write_hidden(address_any text, positive length)
+{
+        string_address at = (string_address)text;
+
+        if (!length)
+                length = string_length(at);
+        for (positive done = 0; done < length;)
+        {
+                positive plain = done;
+
+                while (plain < length && !ls_byte_unprintable(string_get(at + plain)))
+                        plain++;
+                if (plain > done)
+                        ls_hidden_writer(at + done, plain - done);
+                if (plain < length)
+                        ls_hidden_writer("?", 1);
+                done = plain + 1;
+        }
+}
+
 static fn ls_quote(writer write, string_address name)
 {
         positive length = string_length(name);
+
+        if ((ls_quoting == 's' || ls_quoting == 'S') && ls_hide_controls)
+        {
+                ls_hidden_writer = write;
+                write = ls_write_hidden;
+        }
 
         switch (ls_quoting)
         {
@@ -7509,6 +7591,8 @@ static fn ls_quote(writer write, string_address name)
         case 'c':
         case 'b':
         case 'o':
+        case 'C':
+        case 'm':
                 return ls_quote_c(write, name, length, ls_quoting);
         }
 
@@ -7520,6 +7604,8 @@ static fn ls_quote(writer write, string_address name)
 // space in front so the columns still line up.
 static bool ls_name_quoted(string_address name)
 {
+        if (ls_quoting == 'm')
+                return ls_c_needs_escape(name, string_length(name));
         if (ls_quoting != 's' && ls_quoting != 'e')
                 return false;
 
@@ -7529,13 +7615,17 @@ static bool ls_name_quoted(string_address name)
 static bool ls_aligns_quotes()
 {
         return (ls_format == 'l' || ((ls_format == 'C' || ls_format == 'x') && ls_width)) &&
-               (ls_quoting == 's' || ls_quoting == 'e');
+               (ls_quoting == 's' || ls_quoting == 'e' || ls_quoting == 'm');
 }
 
 static positive ls_quoted_width(ls_entry address_to entry)
 {
         ls_counted = 0;
         ls_quote(ls_count_bytes, ls_arena + entry->name);
+
+        //      Each of U+2018 and U+2019 is three bytes and one column.
+        if ((ls_quoting == 'o' || ls_quoting == 'C') && text_locale_utf8())
+                ls_counted -= 4;
 
         if (ls_aligns_quotes() && ls_some_quoted && !entry->quoted)
                 ls_counted++;
@@ -9472,7 +9562,9 @@ static fn ls_directory(string_address path, bool heading, positive depth,
 
                 positive begin = ls_out_bytes;
 
+                ls_quote_heading = true;
                 ls_quote(ls_out, path);
+                ls_quote_heading = false;
 
                 if (ls_dired && ls_subdired_count + 2 <= array_count(ls_subdired_marks))
                 {
@@ -9572,9 +9664,8 @@ static const file_word ls_time_words[] = {
     {"mtime", 'm'}, {"modification", 'm'}, {"birth", 'b'}, {"creation", 'b'}};
 static const file_word ls_quoting_words[] = {
     {"literal", 'L'}, {"shell", 's'}, {"shell-always", 'S'}, {"shell-escape", 'e'},
-    {"shell-escape-always", 'E'}, {"c", 'c'}, {"c-maybe", 'c', true}, {"escape", 'b'},
-    // clocale in the C locale quotes with the C string's double quotes.
-    {"locale", 'o'}, {"clocale", 'c', true}};
+    {"shell-escape-always", 'E'}, {"c", 'c'}, {"c-maybe", 'm'}, {"escape", 'b'},
+    {"locale", 'o'}, {"clocale", 'C'}};
 static const file_word ls_indicator_words[] = {
     {"none", 'N'}, {"slash", '/'}, {"file-type", 'f'}, {"classify", 'F'}};
 
@@ -9875,6 +9966,8 @@ static fn ls_dired_finish()
                                : ls_quoting == 'c' ? "c"
                                : ls_quoting == 'b' ? "escape"
                                : ls_quoting == 'o' ? "locale"
+                               : ls_quoting == 'C' ? "clocale"
+                               : ls_quoting == 'm' ? "c-maybe"
                                                    : "literal";
 
         string_format(ls_out, "//DIRED-OPTIONS// --quoting-style=%s\n", style);
@@ -10157,8 +10250,28 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
         if (ls_selected.stamp == 'M')
                 ls_time_style = 'f';
 
-        // How a name is spelled.
+        // How a name is spelled: an option, or QUOTING_STYLE when it names
+        // a style (and a warning when it does not), or the default.
         ls_quoting = default_quoting ? default_quoting : ls_terminal ? 'e' : 'L';
+        if (!ls_selected.quote)
+        {
+                string_address style = file_environment((string_address) "QUOTING_STYLE");
+
+                if (style)
+                {
+                        positive word = 0;
+
+                        while (word < array_count(ls_quoting_words) &&
+                               !string_equals(style, ls_quoting_words[word].word))
+                                word++;
+                        if (word < array_count(ls_quoting_words))
+                                ls_quoting = ls_quoting_words[word].answer;
+                        else
+                                string_format(log_error,
+                                              "%s: ignoring invalid value of environment variable QUOTING_STYLE: '%w'\n",
+                                              program, writer_terminal_quoted_name, style);
+                }
+        }
         if (ls_selected.quote == 'z')
                 ls_quoting = ls_quote_word;
         else if (ls_selected.quote == 'N')
@@ -15224,7 +15337,7 @@ static b32 file_stat()
                                         ls_quoting = ls_quoting_words[word].answer;
                                 else
                                         string_format(log_error,
-                                                      "stat: ignoring invalid value of environment variable QUOTING_STYLE: %w\n",
+                                                      "stat: ignoring invalid value of environment variable QUOTING_STYLE: '%w'\n",
                                                       writer_terminal_quoted_name, style);
                         }
                         break;
