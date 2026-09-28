@@ -8452,14 +8452,6 @@ static fn dd_report(address_any data, positive length)
                 dd_report_failed = true;
 }
 
-static positive dd_now()
-{
-        p64 wall[2] = {0, 0};
-
-        system_call_2(syscall(clock_gettime), 1, (positive)wall);
-        return (positive)wall[0] * 1000000000u + (positive)wall[1];
-}
-
 /* coreutils' print_xfer_stats: the bytes, the time and the rate, on a line
    of its own at the end or rewritten in place once a second under
    status=progress, where the seconds are whole. */
@@ -8471,7 +8463,7 @@ static fn dd_transfer(bool progress)
                                                                  false);
         positive iec_length = positive_into_human_nearest_string(iec, dd_written,
                                                                   true);
-        positive elapsed = dd_now() - dd_started;
+        positive elapsed = clock_monotonic_nanoseconds() - dd_started;
 
         if (!elapsed)
                 elapsed = 1;
@@ -9492,7 +9484,7 @@ static b32 tools_dd(void)
         utility_arena.used = 0;
         dd_report_failed = false;
         dd_progress_length = 0;
-        dd_started = dd_now();
+        dd_started = clock_monotonic_nanoseconds();
         dd_progress_next = dd_started + 1000000000u;
 
         bool progress = false;
@@ -10042,7 +10034,7 @@ static b32 tools_dd(void)
 
                 if (progress)
                 {
-                        positive now = dd_now();
+                        positive now = clock_monotonic_nanoseconds();
 
                         if (now >= dd_progress_next)
                         {
@@ -10153,8 +10145,7 @@ static b32 tools_dd(void)
                                         memory_to_upper_ascii(dd_ibuf, read_bytes);
                         }
                         else
-                                for (positive at = 0; at < read_bytes; at++)
-                                        dd_ibuf[at] = table[dd_ibuf[at]];
+                                memory_translate(dd_ibuf, read_bytes, table);
                 }
 
                 p8 address_to start = dd_ibuf;
