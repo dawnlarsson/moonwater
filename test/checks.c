@@ -73589,6 +73589,130 @@ static fn storage_test_lease_inherited(void)
         }
 }
 
+/* A dummy link of the namespace's own, whose carrier can be set. */
+static bipolar storage_test_dummy(b32 handle, string_address name)
+{
+        netlink_buffer request = {0};
+        p32 sequence = netlink_sequence_take();
+        //      IFLA_LINKINFO's payload: IFLA_INFO_KIND "dummy", padded.
+        static const p8 kind[12] = {10, 0, IFLA_INFO_KIND, 0,
+                                    'd', 'u', 'm', 'm', 'y', 0, 0, 0};
+
+        if (!netlink_begin(address_of request, RTM_NEWLINK,
+                           NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_EXCLUSIVE,
+                           sequence, sizeof(netlink_link)))
+                return -1;
+        netlink_attribute_add(address_of request, IFLA_IFNAME, name,
+                              string_length(name) + 1);
+        netlink_attribute_add(address_of request, IFLA_LINKINFO,
+                              (address_any)kind, sizeof kind);
+        return netlink_transact(handle, address_of request, sequence, null, null);
+}
+
+#define STORAGE_TEST_IFLA_CARRIER 33
+
+//      IFLA_CARRIER (one byte) or IFLA_MTU set on a link.
+static bipolar storage_test_link_set(b32 handle, p32 index, p16 type, p32 value)
+{
+        netlink_buffer request = {0};
+        p32 sequence = netlink_sequence_take();
+        p8 carrier = (p8)value;
+
+        if (!netlink_begin(address_of request, RTM_NEWLINK,
+                           NLM_REQUEST | NLM_ACK, sequence, sizeof(netlink_link)))
+                return -1;
+        ((netlink_link address_to)netlink_body(address_of request))->index = index;
+        if (type == STORAGE_TEST_IFLA_CARRIER)
+                netlink_attribute_add(address_of request, type, address_of carrier, 1);
+        else
+                netlink_attribute_add(address_of request, type, address_of value, 4);
+        return netlink_transact(handle, address_of request, sequence, null, null);
+}
+
+/* The news a link change made, fed to the watcher as it would read it:
+   every datagram that comes within the wait, which ends early once the
+   lease is lost. Carrier news goes through linkwatch, up to a second late. */
+static fn storage_test_link_news(b32 events, net_holding address_to held,
+                                 positive nanoseconds)
+{
+        netlink_buffer message = {0};
+        network_deadline deadline;
+
+        if (!network_deadline_begin(address_of deadline, nanoseconds /
+                                        NETWORK_NANOSECONDS,
+                                    nanoseconds % NETWORK_NANOSECONDS))
+                return;
+        while (!held->lost &&
+               network_wait_readable_until(events, address_of deadline) > 0 &&
+               netlink_receive(events, address_of message, null) > 0)
+                for (positive at = 0; at + NETLINK_HEADER <= message.used;)
+                {
+                        netlink_header address_to header =
+                            (netlink_header address_to)(message.bytes + at);
+
+                        if (header->length < NETLINK_HEADER ||
+                            at + header->length > message.used)
+                                break;
+                        at += netlink_align(header->length);
+                        (void)net_link_event(header, held);
+                }
+        netlink_forget(address_of message);
+}
+
+/* A cable pulled and put back while the watcher was busy: both events are
+   read after the carrier is back, and only the kernel's count of carrier
+   losses says the link went away -- perhaps into another network. Other
+   news about the link (an MTU change) is not a loss. Exit 4: an MTU change
+   lost the lease; 5: the bounce did not. */
+static fn storage_test_carrier_bounce(void)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                bipolar handle = storage_test_net_namespace();
+                netlink_search link = {.wanted = (string_address) "wd0"};
+                net_holding held = {0};
+                bipolar events;
+
+                if (storage_test_dummy((b32)handle, "wd0") < 0 ||
+                    netlink_link_find((b32)handle, address_of link) < 0 ||
+                    netlink_link_up((b32)handle, link.index) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                if (netlink_link_find((b32)handle, address_of link) < 0 ||
+                    !link.carrier_counted ||
+                    (events = netlink_open_groups(RTNLGRP_LINK_MASK)) < 0)
+                        system_call_1(syscall(exit_group), 1);
+                held.index = link.index;
+                held.lease.address = 0x0a090b0b;
+                held.lease.seconds = 60;
+                held.carrier_counted = link.carrier_counted;
+                held.carrier_downs = link.carrier_downs;
+                string_copy_max_end(held.name, "wd0", IFNAME_SIZE - 1);
+                storage_test_link_set((b32)handle, link.index, IFLA_MTU, 1400);
+                storage_test_link_news((b32)events, address_of held, 1500000000);
+                if (held.lost)
+                        system_call_1(syscall(exit_group), 4);
+                storage_test_link_set((b32)handle, link.index,
+                                      STORAGE_TEST_IFLA_CARRIER, 0);
+                storage_test_link_set((b32)handle, link.index,
+                                      STORAGE_TEST_IFLA_CARRIER, 1);
+                storage_test_link_news((b32)events, address_of held, 3000000000);
+                system_call_1(syscall(exit_group), held.lost ? 0 : 5);
+        }
+        b32 status = storage_test_child_status(child);
+        if (status == 2)
+                log_direct(str("storage_io: carrier bounce NOT RUN -- no namespaces or dummy links\n"));
+        else
+        {
+                check("other news about the held link keeps the lease",
+                      status != 4 && status != 1);
+                check("a carrier lost and back while the watcher was busy loses the lease",
+                      status == 0);
+        }
+        netlink_forget(address_of net_states);
+}
+
 static fn storage_test_netlink_output(void)
 {
         writer saved = net_out;
@@ -74236,6 +74360,7 @@ b32 main(void)
         storage_test_dhcp_apart();
         storage_test_lease_over_existing();
         storage_test_lease_inherited();
+        storage_test_carrier_bounce();
         storage_test_netlink_output();
         storage_test_net_files();
         return test_report(null);

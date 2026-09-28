@@ -87,6 +87,7 @@
 #define IFLA_WIRELESS 11
 #define IFLA_LINKINFO 18
 #define IFLA_INFO_KIND 1
+#define IFLA_CARRIER_DOWN_COUNT 48
 #define NLA_TYPE_MASK 0x3fff
 
 #define NETLINK_PREFER_ANY 0
@@ -738,6 +739,9 @@ typedef struct
         bool skip_loopback;
         bool has_hardware;
         bool wireless;
+        //      The kernel's count of carrier losses, where it says one.
+        bool carrier_counted;
+        p32 carrier_downs;
         p8 name[IFNAME_SIZE];
         p8 hardware[6];
 } netlink_search;
@@ -757,6 +761,23 @@ static inline INLINE string_address netlink_link_name(
         name = (string_address)netlink_find(
             header, sizeof(netlink_link), IFLA_IFNAME, address_of length);
         return name && length && memory_first_of(name, 0, length) ? name : null;
+}
+
+/* IFLA_CARRIER_DOWN_COUNT, which counts every loss of carrier: a cable
+   pulled and put back -- into another network, perhaps -- leaves it higher
+   even after both events have passed. */
+static bool netlink_link_carrier_downs(netlink_header address_to header,
+                                       p32 address_to downs)
+{
+        positive width = 0;
+        p8 address_to count = (p8 address_to)netlink_find(
+            header, sizeof(netlink_link), IFLA_CARRIER_DOWN_COUNT,
+            address_of width);
+
+        if (!count || width != 4)
+                return false;
+        address_to downs = memory_load_unaligned(p32, count);
+        return true;
 }
 
 static bool netlink_link_is_wireless(netlink_header address_to header,
@@ -864,6 +885,8 @@ static bool netlink_link_seen(netlink_header address_to header, address_any cont
                         search->has_hardware = true;
                 }
         }
+        search->carrier_counted = netlink_link_carrier_downs(
+            header, address_of search->carrier_downs);
 
         return search->skip_loopback;
 }

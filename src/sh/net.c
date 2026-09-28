@@ -1074,6 +1074,10 @@ typedef struct
         bool address_owned;
         bool route_owned;
         bool lost;
+        //      The link's count of carrier losses when the lease was asked
+        //      for, where the kernel keeps one.
+        bool carrier_counted;
+        p32 carrier_downs;
 } net_holding;
 
 static positive net_seconds(void)
@@ -1462,6 +1466,8 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
                     .route_owned = net_ownership_next(
                         net_owns_route(previous), route_changed,
                         route_applied, lease->router != 0),
+                    .carrier_counted = previous && previous->carrier_counted,
+                    .carrier_downs = previous ? previous->carrier_downs : 0,
                 };
                 string_copy_max_end(next.name, name, IFNAME_SIZE - 1);
                 memory_copy(next.hardware, hardware, 6);
@@ -1644,8 +1650,17 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
                 return 1;
         }
 
-        return net_apply_lease(handle, search.index, search.name,
-                               search.hardware, address_of lease, held, true);
+        if (net_apply_lease(handle, search.index, search.name,
+                            search.hardware, address_of lease, held, true))
+                return 1;
+        //      Counted before the exchange: a carrier lost while it ran is
+        //      a carrier lost since the lease.
+        if (held)
+        {
+                held->carrier_counted = search.carrier_counted;
+                held->carrier_downs = search.carrier_downs;
+        }
+        return 0;
 }
 
 static COLD b32 net_reconfigure(b32 handle, net_holding address_to held)
@@ -1718,19 +1733,33 @@ static COLD net_state address_to net_state_of(p32 index)
         return null;
 }
 
+/* Whether the held link lost its carrier since the lease was asked for, by
+   the kernel's count: a cable pulled and put back while the watcher was
+   busy -- into another network, perhaps -- leaves the link looking as it
+   did, and only the count says otherwise. Only a count that went up does;
+   news queued from before the lease carries an older one. */
+static COLD bool net_link_bounced(const net_holding address_to held,
+                                  bool counted, p32 downs)
+{
+        return held->carrier_counted && counted &&
+               (b32)(downs - held->carrier_downs) > 0;
+}
+
 /* News without IFF_RUNNING is also what the kernel sends the moment a link
    is brought up; linkwatch says RUNNING up to a second later, and the lease
    is taken between the two, so every boot released a lease a millisecond
-   old and asked again. The held link is asked as it is now, and carrier
-   (IFF_LOWER_UP) counts. */
-static COLD bool net_link_carrier_now(const net_holding address_to held)
+   old and asked again. The held link is asked as it is now: carrier
+   (IFF_LOWER_UP) counts, and so does a carrier lost and found since. */
+static COLD bool net_link_carrier_kept(const net_holding address_to held)
 {
         netlink_search now = {.wanted = (string_address)held->name};
         bipolar handle = netlink_open_groups(0);
         bool carrier = handle >= 0 &&
                        netlink_link_find((b32)handle, address_of now) >= 0 &&
                        now.index == held->index &&
-                       (now.flags & (IFF_RUNNING | IFF_LOWER_UP));
+                       (now.flags & (IFF_RUNNING | IFF_LOWER_UP)) &&
+                       !net_link_bounced(held, now.carrier_counted,
+                                         now.carrier_downs);
 
         if (handle >= 0)
                 socket_close((b32)handle);
@@ -1763,7 +1792,7 @@ static COLD bool net_link_news(p32 index, p32 flags, net_holding address_to held
         entry->flags = flags;
 
         if (held && held->index == index && !(flags & IFF_RUNNING) &&
-            !net_link_carrier_now(held))
+            !net_link_carrier_kept(held))
                 held->lost = true;
         if (!held || held->index == 0 || held->lost)
                 return true;
@@ -1805,6 +1834,19 @@ static COLD bool net_link_event(netlink_header address_to header,
                 return net_link_removed(link->index, held);
         if (header->type != RTM_NEWLINK || (link->flags & IFF_LOOPBACK))
                 return false;
+        {
+                p32 downs = 0;
+                bool counted = netlink_link_carrier_downs(header,
+                                                          address_of downs);
+
+                if (held && held->index == link->index && !held->lost &&
+                    net_link_bounced(held, counted, downs))
+                {
+                        (void)net_link_news(link->index, link->flags, held);
+                        held->lost = true;
+                        return true;
+                }
+        }
         return net_link_news(link->index, link->flags, held);
 }
 
