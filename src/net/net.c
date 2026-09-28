@@ -9084,21 +9084,15 @@ static COLD positive dhcp_build(p8 address_to into, positive room, p8 kind,
         into[at++] = 1;
         into[at++] = kind;
 
-        if (wanted)
-        {
-                into[at++] = DHCP_OPTION_REQUESTED;
-                into[at++] = 4;
-                network_store_32(into + at, wanted);
-                at += 4;
-        }
-
-        if (server)
-        {
-                into[at++] = DHCP_OPTION_SERVER;
-                into[at++] = 4;
-                network_store_32(into + at, server);
-                at += 4;
-        }
+        //      The address asked for and the server chosen, when there are.
+        for (positive i = 0; i < 2; i++)
+                if (i ? server : wanted)
+                {
+                        into[at++] = i ? DHCP_OPTION_SERVER : DHCP_OPTION_REQUESTED;
+                        into[at++] = 4;
+                        network_store_32(into + at, i ? server : wanted);
+                        at += 4;
+                }
 
         //      What we would like to be told, which a server may ignore, and
         //      the end. Short packets are dropped by some servers and by some
