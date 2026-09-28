@@ -4932,27 +4932,6 @@ static bipolar tls_next_record(tls_conn address_to tls, p8 address_to type,
         return TLS_OK;
 }
 
-/* The handshake's copy of one record. */
-static bipolar tls_read_record(tls_conn address_to tls, p8 address_to type,
-                               p8 address_to body, positive room,
-                               positive address_to length,
-                               const network_deadline address_to deadline)
-{
-        p8 address_to inner = null;
-        positive inner_length = 0;
-        bipolar status = tls_next_record(tls, type, address_of inner,
-                                         address_of inner_length, deadline);
-
-        if (status)
-                return status;
-        if (inner_length > room)
-                return TLS_FAIL;
-        memory_copy(body, inner, inner_length);
-        crypto_forget(inner, inner_length);
-        address_to length = inner_length;
-        return TLS_OK;
-}
-
 static fn tls_transcript_add(tls_conn address_to tls, p8 address_to msg,
                              positive length)
 {
@@ -6986,7 +6965,7 @@ static COLD bipolar tls_handshake(
     tls_conn address_to tls, const network_deadline address_to deadline)
 {
         p8 hello[1024];
-        p8 record[TLS_RECORD_MAX];
+        p8 address_to record = null;
         p8 peer[97];
         p8 shared[48];
         positive hello_length = 0;
@@ -7019,9 +6998,8 @@ static COLD bipolar tls_handshake(
         {
                 bipolar assembled;
 
-                if (tls_read_record(tls, address_of type, record,
-                                    sizeof(record), address_of length,
-                                    deadline))
+                if (tls_next_record(tls, address_of type, address_of record,
+                                    address_of length, deadline))
                         goto done;
                 if (type == TLS_CT_CCS)
                 {
@@ -7079,7 +7057,7 @@ static COLD bipolar tls_handshake(
 
         while (flight != TLS_SERVER_FLIGHT_COMPLETE)
         {
-                if (tls_read_record(tls, address_of type, record, sizeof(record),
+                if (tls_next_record(tls, address_of type, address_of record,
                                     address_of length, deadline))
                         goto done;
                 if (type == TLS_CT_CCS)
@@ -7105,7 +7083,6 @@ static COLD bipolar tls_handshake(
 
 done:
         crypto_forget(hello, sizeof hello);
-        crypto_forget(record, sizeof record);
         crypto_forget(peer, sizeof peer);
         crypto_forget(shared, sizeof shared);
         crypto_forget(hs, sizeof hs);
