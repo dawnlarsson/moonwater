@@ -422,6 +422,7 @@ static bool shell_exit_was_previous HOT_STATE;
 static bool shell_exit_is_current HOT_STATE;
 static fn exec_command_reader_finish();
 static fn exec_input_finish();
+static fn exec_wait_background(bipolar child);
 static positive shell_command_reader_depth;
 static bool env_attribute_target_span(const_string name, positive length,
                                       const_string address_to target,
@@ -18037,6 +18038,7 @@ static bool shell_tool_run_hashed(string_address name, positive2 named)
                 return true;
         }
 
+        exec_wait_background(child);
         system_wait4_retry(child, address_of status, 0, null);
         shell_answer(wait_status_code(status));
 

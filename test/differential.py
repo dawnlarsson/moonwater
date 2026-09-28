@@ -14584,6 +14584,17 @@ def shell_lang_builtin_refusals(rng):
     return ("builtin-refusals", shell_ALL, shell_program(line + " 2>/dev/null", 'echo "s=$?"'))
 
 
+#       A background job that ends while the shell waits on a foreground
+#       command is reaped then, as bash does: it stayed a zombie until the
+#       command was over, so `sleep 1 & tail -f --pid=$! file` never ended.
+def shell_lang_background_reap(rng):
+    watch = rng.choice(("tail -f --pid=$! /dev/null", "/usr/bin/tail -f --pid=$! /dev/null",
+                        "while kill -0 $p 2>/dev/null; do sleep 0.05; done"))
+    job = rng.choice(("sleep 0.2", "(sleep 0.2; exit 3)", "{ sleep 0.1; }"))
+    return ("background-reap", shell_ALL, shell_program(
+        job + " &", "p=$!", watch, 'echo "watched=$?"', 'wait "$p"; echo "wait=$?"'))
+
+
 #       What bash does with a builtin handed words it has no place for, and
 #       with a subscript it cannot evaluate: the whole command the reader was
 #       running is dropped -- through eval, a sourced file and a function --
@@ -17424,6 +17435,7 @@ SHELL_FAMILIES = (
     shell_lang_set_lone_plus,
     shell_lang_directory_state,
     shell_lang_builtin_refusals,
+    shell_lang_background_reap,
     shell_lang_count_operators,
     shell_lang_brace_continuation,
     shell_lang_trap_return,

@@ -1726,6 +1726,8 @@ static fn shell_spawn_device_disable()
         spawn_device_opened = true;
 }
 
+static fn exec_wait_background(bipolar child);
+
 /* argv[0] selects a utility in the kernel-owned /shell image. The caller has
    already established that this launch is unrestricted. */
 static bipolar shell_spawn_tool_preflighted(
@@ -1803,8 +1805,10 @@ fn shell_execute_command()
         if (child > 0)
         {
                 positive status = 0;
-                bipolar waited =
-                    system_wait4_retry(child, address_of status, 0, null);
+                bipolar waited;
+
+                exec_wait_background(child);
+                waited = system_wait4_retry(child, address_of status, 0, null);
 
                 if (waited < 0)
                 {

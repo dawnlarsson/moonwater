@@ -12495,6 +12495,60 @@ static b32 exec_if(b32 index)
         return 0;
 }
 
+/*
+        A foreground wait that still hears the background.
+
+        Blocked in wait4 on the foreground child, the shell left a background
+        job that ended a zombie until the command was over, so `sleep 1 &
+        tail -f --pid=$! x` never ended: the pid tail watches still existed.
+        bash reaps as each child ends. waitid with WNOWAIT says which child
+        ended without taking it; one of this shell's background jobs is swept
+        into its table, and anything else -- the foreground child, or a
+        pipeline stage another waiter owns -- is left to the ordinary wait.
+*/
+#define WAIT_EXITED 4
+#define WAIT_NO_WAIT 0x01000000
+
+static COLD fn exec_wait_hearing(bipolar child)
+{
+        for (positive round = 0; round < 4096; round++)
+        {
+                b32 info[32] = {0};
+                bipolar got = system_call_5(syscall(waitid), 0, 0,
+                                            (positive)info,
+                                            WAIT_EXITED | WAIT_NO_WAIT, 0);
+                bipolar pid;
+                bool background = false;
+
+                if (got == -4)
+                        continue;
+                pid = info[4];
+                if (got < 0 || pid <= 0 || pid == child)
+                        return;
+                for (positive at = 0; at < shell_wait_count; at++)
+                        if (shell_wait_table[at].pid == pid &&
+                            !(shell_wait_table[at].flags & SHELL_WAIT_DONE))
+                                background = true;
+                if (!background)
+                        return;
+                job_reap();
+        }
+}
+
+static PURE bool exec_background_live()
+{
+        for (positive at = 0; at < shell_wait_count; at++)
+                if (!(shell_wait_table[at].flags & SHELL_WAIT_DONE))
+                        return true;
+        return false;
+}
+
+static fn exec_wait_background(bipolar child)
+{
+        if (shell_wait_count && exec_background_live())
+                exec_wait_hearing(child);
+}
+
 static b32 exec_wait_status(bipolar child, positive flags,
                             positive address_to raw)
 {
@@ -12502,6 +12556,9 @@ static b32 exec_wait_status(bipolar child, positive flags,
 
         if (child < 0)
                 return 1;
+
+        if (!flags)
+                exec_wait_background(child);
 
         if (system_wait4_retry(child, raw, flags, null) < 0)
                 return 1;
