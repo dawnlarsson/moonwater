@@ -10,8 +10,8 @@ gap below.
 
 The stack has strong hand-written boundary checks and unusually broad
 deterministic regression coverage. Local lanes now exist for coverage-guided
-TLS fuzzing under ASan/UBSan (`sh test/fuzz_net`), MSan over hosted parser
-lifts (`sh test/msan_net`), resource-exhaustion and mid-path fault sweeps, and
+TLS fuzzing under ASan/UBSan (`sh test/run fuzz`), MSan over hosted parser
+lifts (`sh test/run msan`), resource-exhaustion and mid-path fault sweeps, and
 an `http.client` response-framing oracle. It is **not yet release-grade
 evidence for memory safety or parser completeness** because those lanes are
 not mandatory (the CI `security` job is parked, `workflow_dispatch` only),
@@ -36,14 +36,14 @@ does not convert those protocols into authenticated ones.
 ### P0 — evidence needed before a high-assurance claim
 
 1. Extend persistent fuzzing beyond TLS (DER, certificate lists and
-   handshake fragmentation are covered by `test/fuzz_net`) to DNS names/RRs,
+   handshake fragmentation are covered by `sh test/run fuzz`) to DNS names/RRs,
    HTTP response framing/chunks, DHCP option streams, and SNTP control
    messages. Seed them from the unit corpus and run ASan+UBSan.
 2. Make x86-64 ASan+UBSan and native namespace/netem runs required CI jobs.
-   `sh test/fuzz_net --report` already records compiler and sanitizer
+   `MOONWATER_FUZZ_REPORT=… sh test/run fuzz` already records compiler and sanitizer
    versions, seed counts, budgets and exits; it has to run on every release,
    not by hand.
-3. Keep MSan (`sh test/msan_net`) separate from UBSan and widen it from hosted
+3. Keep MSan (`sh test/run msan`) separate from UBSan and widen it from hosted
    lifts toward a full freestanding `CHECK_net`; today it is exercised on
    aarch64 Linux clang only.
 4. Add a second mature implementation beside `http.client` to the response

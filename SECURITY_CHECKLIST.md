@@ -12,12 +12,12 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
 - [x] HTTP lengths and chunk sizes reject native-word overflow.
 - [x] Guard-page coverage exists for shared bounded primitives and codecs.
 - [x] Run network parser fuzz targets continuously under ASan and UBSan
-  (local via `sh test/fuzz_net`; defaults one hour / unbounded run count;
+  (local via `sh test/run fuzz`; defaults one hour / unbounded run count;
   override with `MOONWATER_FUZZ_SECONDS` / `MOONWATER_FUZZ_RUNS`. lane_net
   keeps the short bounded smoke only).
 - [x] Run an MSan lane on a hosted build to find uninitialized wire padding
-  (local/hosted via `sh test/msan_net` or
-  `python3 test/differential.py --harness msan_net`; also
+  (local/hosted via `sh test/run msan` or
+  `MOONWATER_MSAN=1 python3 test/differential.py --harness msan_net`; also
   `MOONWATER_MSAN=1` on `tls_der_fuzz` / `tls_hs_fuzz`. Scope under
   `-fsanitize=memory`: intentional ABI pad proves (generic wire header and
   a netlink-attr-shaped hole); hosted freestanding lifts of `dns_copy_name`,
@@ -97,23 +97,23 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
       clang libFuzzer when available, else NOT RUN). Lifts also hit EKU/SAN/BC/KU
       value parsers (magic C2–C5), host-aware SAN (C6–C7), ECDSA sig / alg-id
       junk (C8–C9), and pure path policy (`names_chain`, leaf/issuer auth).
-      Local continuous: see `test/fuzz_net` / `MOONWATER_FUZZ_*`.
+      Local continuous: see `sh test/run fuzz` / `MOONWATER_FUZZ_*`.
 - [x] Bounded lane-smoke coverage-guided fuzzing for certificate-list framing
       (same `tls_der_fuzz` 5s/20k smoke: seeds plus `tls_certificate_body_open` /
       list walk with `tls_parse_cert` on slices, then the same empty-list /
       leftover refuse as `tls_verify_chain`; expected `TLS_FAIL` ignored). Local
-      continuous: see `test/fuzz_net` / `MOONWATER_FUZZ_*`.
+      continuous: see `sh test/run fuzz` / `MOONWATER_FUZZ_*`.
 - [x] Bounded lane-smoke coverage-guided fuzzing for handshake fragmentation
       (`python3 test/differential.py --harness tls_hs_fuzz`, 5s / 20k; lifts
       `tls_handshake_one_append` / `tls_encrypted_flight_append` with `tls=null`
-      framing; seeds under `test/fuzz_corpus/tls_hs/`; ASan/UBSan via clang
+      framing; seeds from `tls_fuzz_seeds("tls_hs")`; ASan/UBSan via clang
       libFuzzer when available, else NOT RUN). Local continuous: see
-      `test/fuzz_net` / `MOONWATER_FUZZ_*`.
+      `sh test/run fuzz` / `MOONWATER_FUZZ_*`.
 - [x] Optional verify fuzz (`tls_verify_fuzz`; not lane_net smoke): same
       `tls_der` corpus; mirrors `tls_verify_chain` through parse/policy/names and
       calls production `tls_verify_one` (hosted C montgomery + pure SHA; WR2→GTS
       accept + flipped-sig refuse prove before fuzz). Wired into
-      `sh test/fuzz_net`; hand-run via
+      `sh test/run fuzz`; hand-run via
       `python3 test/differential.py --harness tls_verify_fuzz`.
 
 ## Shell and operating-system boundary
@@ -188,12 +188,10 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
   reacquire send `ENOSPC` when `BINDTODEVICE lo` works (else honest NOT RUN).
   Open-time `EMFILE` remains the socket-open gate only.
 - [x] Publish fuzz corpus coverage and sanitizer versions with each release.
-  Run `sh test/fuzz_net --report` (writes `artifacts/fuzz-report.txt` and
-  stdout: clang/sanitizer version, seed counts, runs/duration/exit per
-  `tls_der_fuzz` / `tls_hs_fuzz` / `tls_verify_fuzz`). Attach that report
-  plus `test/fuzz_corpus/generate_seeds.py` (hex source of truth; `*.bin`
-  is gitignored and materialized at run time) or a tarball of generated
-  seeds — never commit `.bin` files. Defaults match lane_net smoke
-  (20k/5s); set `MOONWATER_FUZZ_*` or use `sh test/fuzz_campaign` for
-  longer evidence. Exit 2 means libFuzzer unavailable (NOT RUN) — still
+  Run `MOONWATER_FUZZ_REPORT=artifacts/fuzz-report.txt sh test/run fuzz`
+  (writes that file and stdout: clang/sanitizer version, seed counts,
+  runs/duration/exit per `tls_der_fuzz` / `tls_hs_fuzz` / `tls_verify_fuzz`,
+  and the commit whose `tls_fuzz_seeds` in `test/differential.py` made the
+  seeds). Attach that report. Defaults match lane_net smoke (20k/5s); set
+  `MOONWATER_FUZZ_*` for longer evidence. Exit 2 means libFuzzer unavailable (NOT RUN) — still
   attach the honest report. See `SECURITY_TEST_MATRIX.md`.

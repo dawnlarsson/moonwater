@@ -37421,7 +37421,7 @@ def tls_fuzz_budget(default_runs=20000, default_seconds=5):
 
     MOONWATER_FUZZ_RUNS / MOONWATER_FUZZ_SECONDS override the libFuzzer
     -runs / -max_total_time knobs. Lane_net leaves them unset (20000 / 5).
-    test/fuzz_net sets longer values for continuous local fuzzing.
+    `sh test/run fuzz` sets longer values for continuous local fuzzing.
     """
     runs = int(os.environ.get("MOONWATER_FUZZ_RUNS", str(default_runs)))
     seconds = int(os.environ.get("MOONWATER_FUZZ_SECONDS", str(default_seconds)))
@@ -37474,21 +37474,251 @@ def tls_fuzz_sanitize_config(clang):
             "libFuzzer ASan/UBSan")
 
 
-def ensure_tls_fuzz_seeds():
-    """Materialize gitignored *.bin seeds from test/fuzz_corpus/generate_seeds.py."""
-    import importlib.util
+#       Seed bytes for the tls_*_fuzz harnesses: hex where the fixture was
+#       taken from checks.c's refuse cases, built below where the shape is the
+#       point. Each run writes them into its own temporary corpus; none is
+#       kept in the tree. Expected TLS_FAIL is ignored, so a seed only has to
+#       reach a parser; empty is the one intentionally empty control.
+TLS_FUZZ_SEED_HEX = {
+    "tls_der": {
+        "cert_list_c1_leftover": "c1000000c90000c33081c03081a6020101300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a8648ce3d03010703420004f56ea07c0c20d314d89a2494012155867696f9a0e5a5762815b1d197bd642aa41ed0ed17eaa6c29b36260c365cd172577bd180bf5ef812f790e65142d3a8cd17300a06082a8648ce3d04030203090030060201010201010000ee",
+        "cert_list_empty": "00000000",
+        "cert_list_trunc_len1": "0000000100",
+        "cert_list_trunc_len2": "000000020000",
+        "cert_list_trunc_mid_cert": "000000640000c33081c03081a6020101300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a",
+        "cert_list_trunc_mid_ext": "0000000c000005300302010100080001",
+        "cert_list_trunc_prefix": "000000c80000c33081c0",
+        "cert_oversize_outer": "3081c13081a6020101300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a8648ce3d03010703420004f56ea07c0c20d314d89a2494012155867696f9a0e5a5762815b1d197bd642aa41ed0ed17eaa6c29b36260c365cd172577bd180bf5ef812f790e65142d3a8cd17300a06082a8648ce3d0403020309003006020101020101",
+        "cert_serial_padded": "3081c13081a702020001300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a8648ce3d03010703420004f56ea07c0c20d314d89a2494012155867696f9a0e5a5762815b1d197bd642aa41ed0ed17eaa6c29b36260c365cd172577bd180bf5ef812f790e65142d3a8cd17300a06082a8648ce3d0403020309003006020101020101",
+        "cert_sig_oid_mismatch": "3081c03081a6020101300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a8648ce3d03010703420004f56ea07c0c20d314d89a2494012155867696f9a0e5a5762815b1d197bd642aa41ed0ed17eaa6c29b36260c365cd172577bd180bf5ef812f790e65142d3a8cd17300a06082a8648ce3d0403030309003006020101020101",
+        "cert_spki_unused_bits": "3081c03081a6020101300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a8648ce3d03010703420104f56ea07c0c20d314d89a2494012155867696f9a0e5a5762815b1d197bd642aa41ed0ed17eaa6c29b36260c365cd172577bd180bf5ef812f790e65142d3a8cd17300a06082a8648ce3d0403020309003006020101020101",
+        "cert_trailing": "3081c03081a6020101300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a8648ce3d03010703420004f56ea07c0c20d314d89a2494012155867696f9a0e5a5762815b1d197bd642aa41ed0ed17eaa6c29b36260c365cd172577bd180bf5ef812f790e65142d3a8cd17300a06082a8648ce3d0403020309003006020101020101ff",
+        "cert_v1_with_extensions": "3081cb3081b1020101300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a8648ce3d03010703420004f56ea07c0c20d314d89a2494012155867696f9a0e5a5762815b1d197bd642aa41ed0ed17eaa6c29b36260c365cd172577bd180bf5ef812f790e65142d3a8cd17a3093007300506012a0400300a06082a8648ce3d0403020309003006020101020101",
+        "empty": "",
+        "ext_bc_canonical": "a3133011300f0603551d13040830060101ff020100",
+        "ext_bc_canonical_then_overlong": "a31c301a30090603551d1304023000300d0604551d8013040530030101ff",
+        "ext_bc_oid_long_form": "a311300f300d068103551d13040530030101ff",
+        "ext_bc_overlong_oid": "a314301230100604551d8013040830060101ff020100",
+        "ext_claim_past_end": "a30a3007300506012a0400",
+        "ext_duplicate_bc": "a318301630090603551d130402300030090603551d1304023000",
+        "ext_duplicate_ku": "a31c301a300b0603551d0f040403020780300b0603551d0f040403020780",
+        "ext_duplicate_mixed_critical": "a3173015300706022a03040100300a06022a030101ff040100",
+        "ext_duplicate_nonadjacent": "a31d301b300706022a03040100300706022a04040100300706022a03040100",
+        "ext_duplicate_san": "a31e301c300c0603551d1104053003820161300c0603551d1104053003820162",
+        "ext_duplicate_unknown": "a3143012300706022a03040100300706022a03040100",
+        "ext_indefinite": "a3803007300506012a04000000",
+        "ext_indefinite_nested": "a30b3080300506012a04000000",
+        "ext_minimal": "a3093007300506012a0400",
+        "ext_name_constraints": "a30d300b30090603551d1e04023000",
+        "ext_octet_overrun": "a30a3008300606012a040200",
+        "ext_oversize": "a38201003000",
+        "ext_trailing_after_short": "a3083006300406012a0400ff",
+        "minimal_cert": "3081c03081a6020101300a06082a8648ce3d040302300c310a300806035504030c0161301e170d3031303130313030303030305a170d3439313233313233353935395a300c310a300806035504030c01613059301306072a8648ce3d020106082a8648ce3d03010703420004f56ea07c0c20d314d89a2494012155867696f9a0e5a5762815b1d197bd642aa41ed0ed17eaa6c29b36260c365cd172577bd180bf5ef812f790e65142d3a8cd17300a06082a8648ce3d0403020309003006020101020101",
+    },
+    "tls_hs": {
+        "cert_3way_chunks": "00030b0000000a18ababababababababab000fababababababababababababababab",
+        "cert_empty_mid_chunks": "00060b000008111100000006111111111111",
+        "cert_whole": "0b000018abababababababababababababababababababababababab",
+        "ee_cert_shared": "0800000200000b000008aabb",
+        "ee_cert_shared_then_rest_chunks": "000c0800000200000b000008aabb0006cccccccccccc",
+        "ee_empty_exts": "080000020000",
+        "empty": "",
+        "flight_3way_chunks": "00050800000200000f000b0000000f000000140000205555001e555555555555555555555555555555555555555555555555555555555555",
+        "flight_cert_before_ee": "0b000000",
+        "flight_complete": "0800000200000b0000000f000000140000205555555555555555555555555555555555555555555555555555555555555555",
+        "flight_complete_then_junk_chunks": "f1000a0800000200000b00000000140f0000001400002055555555555555555555555500155555555555555555555555555555555555555555aa",
+        "flight_ee_overrun": "080000060004000a0001",
+        "flight_empty_mid_chunk": "f100060b000008111100000006111111111111",
+        "flight_trailing_junk": "0800000200000b0000000f000000140000205555555555555555555555555555555555555555555555555555555555555555ff",
+        "one_byte": "08",
+        "sh_2way_chunks": "00020200005800560303000000000000000000000000000000000000000000000000000000000000000000130100002e002b0002030400330024001d00200900000000000000000000000000000000000000000000000000000000000000",
+        "sh_complete": "020000560303000000000000000000000000000000000000000000000000000000000000000000130100002e002b0002030400330024001d00200900000000000000000000000000000000000000000000000000000000000000",
+        "sh_header_prefix": "0200",
+        "sh_magic_2way": "f200020200005800560303000000000000000000000000000000000000000000000000000000000000000000130100002e002b0002030400330024001d00200900000000000000000000000000000000000000000000000000000000000000",
+        "sh_overlong_x25519": "020000570303000000000000000000000000000000000000000000000000000000000000000000130100002f002b0002030400330025001d0020090000000000000000000000000000000000000000000000000000000000000000",
+        "sh_trailing_junk": "020000560303000000000000000000000000000000000000000000000000000000000000000000130100002e002b0002030400330024001d0020090000000000000000000000000000000000000000000000000000000000000000",
+        "sh_wrong_legacy": "020000560302000000000000000000000000000000000000000000000000000000000000000000130100002e002b0002030400330024001d00200900000000000000000000000000000000000000000000000000000000000000",
+    },
+}
 
-    generator = HARNESS_ROOT / "test/fuzz_corpus/generate_seeds.py"
-    if not generator.is_file():
-        return False, "missing " + str(generator)
-    spec = importlib.util.spec_from_file_location(
-        "moonwater_fuzz_generate_seeds", generator)
-    if spec is None or spec.loader is None:
-        return False, "cannot load " + str(generator)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    module.materialize()
-    return True, None
+
+def tls_seed_len(n):
+    return bytes([n]) if n < 128 else (
+        bytes([0x81, n]) if n < 256 else bytes([0x82, n >> 8 & 0xff, n & 0xff]))
+
+
+def tls_seed_tlv(tag, *parts):
+    body = b"".join(parts)
+    return bytes([tag]) + tls_seed_len(len(body)) + body
+
+
+def tls_seed_ext(oid, value, critical=False):
+    return tls_seed_tlv(0x30, tls_seed_tlv(0x06, oid),
+                        b"\x01\x01\xff" if critical else b"",
+                        tls_seed_tlv(0x04, value))
+
+
+def tls_seed_extensions(*extensions):
+    return tls_seed_tlv(0xa3, tls_seed_tlv(0x30, *extensions))
+
+
+def tls_seed_cert_list(*certs):
+    """A Certificate handshake body: each cert with an empty extension list."""
+    blob = b"".join(len(c).to_bytes(3, "big") + c + b"\0\0" for c in certs)
+    return b"\0" + len(blob).to_bytes(3, "big") + blob
+
+
+def tls_fuzz_seeds(corpus):
+    """Name to bytes for the tls_der or tls_hs corpus: the hex fixtures, and the
+    hostile NC/EKU/SAN/ceiling/alg-id/BMPString/chain shapes built here. The
+    tls_der magic first bytes pick a lane: C1 list body, C2 EKU value, C3 SAN,
+    C4 basicConstraints, C5 keyUsage, C6 cert+host, C7 extensions+host, C8
+    ECDSA signature DER, C9 AlgorithmIdentifier."""
+    seeds = {name + ".bin": bytes.fromhex(hx)
+             for name, hx in TLS_FUZZ_SEED_HEX[corpus].items()}
+    if corpus == "tls_hs":
+        fill = b"\x0b\x00\x40\x00" + b"\xcd" * 16380
+        seeds["hs_max_fill.bin"] = fill
+        seeds["hs_max_plus_chunks.bin"] = b"\x40\x00" + fill + b"\x00\x01\x00"
+        return seeds
+    minimal = seeds["minimal_cert.bin"]
+    for count, name in ((1, "cert_list_1"), (7, "cert_list_7"), (8, "cert_list_8"),
+                        (9, "cert_list_9_leftover"), (2, "cert_list_two_minimal")):
+        seeds[name + ".bin"] = tls_seed_cert_list(*[minimal] * count)
+    two = seeds["cert_list_two_minimal.bin"]
+    unknown = [bytes([0x30, 7, 6, 2, 0x2a, i, 4, 1, 0]) for i in range(65)]
+    eku, nc, san, bc = b"\x55\x1d\x25", b"\x55\x1d\x1e", b"\x55\x1d\x11", b"\x55\x1d\x13"
+    server_auth = tls_seed_tlv(0x06, b"\x2b\x06\x01\x05\x05\x07\x03\x01")
+    client_auth = tls_seed_tlv(0x06, b"\x2b\x06\x01\x05\x05\x07\x03\x02")
+    eku_server = tls_seed_tlv(0x30, server_auth)
+    eku_client = tls_seed_tlv(0x30, client_auth)
+    eku_many = tls_seed_tlv(0x30, *[tls_seed_tlv(0x06, bytes([0x2a, i])) for i in range(40)])
+    nc_perm = tls_seed_tlv(0x30, tls_seed_tlv(0xa0, tls_seed_tlv(0x30, b"\x82\x07foo.com")))
+    nc_excl = tls_seed_tlv(0x30, tls_seed_tlv(0xa1, tls_seed_tlv(0x30, b"\x82\x07bad.com")))
+    nc_both = tls_seed_tlv(0x30, tls_seed_tlv(0xa0, tls_seed_tlv(0x30, b"\x82\x03a.b")),
+                           tls_seed_tlv(0xa1, tls_seed_tlv(0x30, b"\x82\x03x.y")))
+    #   The wildcard and URI names claim fewer bytes than follow them (11 of
+    #   13, 15 of 17); they are kept as they were seeded.
+    san_dns = tls_seed_tlv(0x30, b"\x82\x0bexample.com")
+    san_multi = tls_seed_tlv(0x30, b"\x82\x0bexample.com", b"\x82\x07foo.com",
+                             b"\x87\x04\xc0\x00\x02\x01")
+    bmp = b"\x1e" + tls_seed_len(2048) + b"\x00A" * 1024
+    huge_name = tls_seed_tlv(0x30, tls_seed_tlv(0x31, tls_seed_tlv(
+        0x30, tls_seed_tlv(0x06, b"\x55\x04\x03"), bmp)))
+    one = lambda oid, value, critical=False: tls_seed_extensions(
+        tls_seed_ext(oid, value, critical))
+    seeds.update({
+        "ext_too_many_65.bin": tls_seed_extensions(*unknown),
+        "ext_ceiling_64.bin": tls_seed_extensions(*unknown[:64]),
+        "ext_eku_server_auth.bin": one(eku, eku_server),
+        "ext_eku_client_only.bin": one(eku, eku_client),
+        "ext_eku_server_and_client.bin": one(
+            eku, tls_seed_tlv(0x30, server_auth, client_auth)),
+        "ext_eku_empty.bin": one(eku, tls_seed_tlv(0x30)),
+        "ext_eku_many_oids.bin": one(eku, eku_many),
+        "ext_eku_critical_client.bin": one(eku, eku_client, True),
+        "ext_eku_duplicate.bin": tls_seed_extensions(
+            tls_seed_ext(eku, eku_server), tls_seed_ext(eku, eku_server)),
+        "ext_nc_empty.bin": one(nc, tls_seed_tlv(0x30)),
+        "ext_nc_permitted_dns.bin": one(nc, nc_perm),
+        "ext_nc_excluded_dns.bin": one(nc, nc_excl),
+        "ext_nc_both.bin": one(nc, nc_both),
+        "ext_nc_critical.bin": one(nc, nc_perm, True),
+        "ext_san_dns.bin": one(san, san_dns),
+        "ext_san_wildcard.bin": one(san, tls_seed_tlv(0x30, b"\x82\x0b*.example.com")),
+        "ext_san_ipv4.bin": one(san, tls_seed_tlv(0x30, b"\x87\x04\xc0\x00\x02\x01")),
+        "ext_san_ipv6.bin": one(san, tls_seed_tlv(0x30, b"\x87\x10" + b"\0" * 16)),
+        "ext_san_control.bin": one(san, tls_seed_tlv(0x30, b"\x82\x05a\x01b.c")),
+        "ext_san_multi.bin": one(san, san_multi),
+        "ext_san_uri.bin": one(san, tls_seed_tlv(0x30, b"\x86\x0fhttps://evil.test")),
+        "ext_bc_pathlen_without_ca.bin": one(bc, tls_seed_tlv(0x30, b"\x02\x01\x00")),
+        "ext_bc_pathlen_huge.bin": one(
+            bc, tls_seed_tlv(0x30, b"\x01\x01\xff\x02\x05\x01\x00\x00\x00\x00")),
+        "ext_bc_bool_bad.bin": one(bc, tls_seed_tlv(0x30, b"\x01\x01\x01")),
+        "ext_unknown_critical.bin": one(
+            b"\x2a\x03", tls_seed_tlv(0x30, b"\x02\x01\x01"), True),
+        "magic_eku_server.bin": b"\xc2" + eku_server,
+        "magic_eku_many.bin": b"\xc2" + eku_many,
+        "magic_san_dns.bin": b"\xc3" + san_dns,
+        "magic_san_multi.bin": b"\xc3" + san_multi,
+        "magic_bc_ca.bin": b"\xc4" + tls_seed_tlv(0x30, b"\x01\x01\xff\x02\x01\x00"),
+        "magic_ku_ds.bin": b"\xc5\x03\x02\x07\x80",
+        "magic_cert_host.bin": b"\xc6" + minimal,
+        "magic_ext_host.bin": b"\xc7" + one(san, san_dns),
+        "magic_ecdsa_sig.bin": b"\xc8\x30\x06\x02\x01\x01\x02\x01\x02",
+        "magic_alg_ecdsa.bin": bytes.fromhex("c9300a06082a8648ce3d040302"),
+        "magic_alg_ecdsa_null.bin": bytes.fromhex("c9300c06082a8648ce3d0403020500"),
+        "magic_alg_rsa_missing_null.bin": bytes.fromhex("c9300b06092a864886f70d01010b"),
+        "magic_alg_unknown.bin": bytes.fromhex("c9300706052b0e03021a"),
+        "magic_alg_oid_long_form.bin": bytes.fromhex("c9300b0681082a8648ce3d040302"),
+        "name_huge_bmpstring.bin": huge_name,
+        "magic_name_huge_bmp.bin": b"\xc9" + huge_name,
+        "cert_list_two_trunc_second.bin": two[:len(two) // 2],
+        "cert_list_two_host.bin": b"\xc1" + two,
+    })
+    return seeds
+
+
+def tls_fuzz_write_seeds(corpus, directory):
+    """The corpus written into directory, one file a seed; the paths, sorted."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, data in tls_fuzz_seeds(corpus).items():
+        (directory / name).write_bytes(data)
+    return sorted(directory.iterdir())
+
+
+def tls_fuzz_run(label, corpus, source, max_len):
+    """Build source as a libFuzzer target and run it over corpus's seeds.
+
+    The bounded fixed-seed run the lanes use; MOONWATER_FUZZ_RUNS and
+    MOONWATER_FUZZ_SECONDS lengthen it. Returns 2 (NOT RUN) when clang,
+    libFuzzer or the asked-for sanitizer is missing; 1 on any sanitizer
+    report; expected TLS_FAIL verdicts are ignored."""
+    runs, seconds, timeout = tls_fuzz_budget()
+    name = label.replace(" ", "_") + "_fuzz"
+    clang = shutil.which("clang")
+    if not clang:
+        print("%s fuzz: NOT RUN -- no clang" % label)
+        return 2
+    sanitize, environment, san_label = tls_fuzz_sanitize_config(clang)
+    if sanitize is None:
+        print("%s fuzz: NOT RUN -- %s" % (label, san_label))
+        return 2
+    with tempfile.TemporaryDirectory(prefix=name.replace("_", "-") + "-") as temporary:
+        work = Path(temporary)
+        unit = work / (name + ".c")
+        binary = work / name
+        unit.write_text(source)
+        built = subprocess.run(
+            [clang, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
+             "-fno-sanitize-recover=all", sanitize,
+             str(unit), "-o", str(binary)],
+            capture_output=True, text=True)
+        if built.returncode:
+            need = "fuzzer,memory" if moonwater_msan_requested() else "fuzzer"
+            print("%s fuzz: NOT RUN -- clang lacks libFuzzer "
+                  "(need -fsanitize=%s):\n" % (label, need) + built.stderr[-2000:])
+            return 2
+        seeds = tls_fuzz_write_seeds(corpus, work / "corpus")
+        ran = subprocess.run(
+            [str(binary), str(work / "corpus"),
+             "-seed=1", "-runs=%d" % runs, "-max_total_time=%d" % seconds,
+             "-max_len=%d" % max_len,
+             "-artifact_prefix=" + str(work) + "/",
+             "-print_final_stats=0"],
+            capture_output=True, text=True, env=environment, timeout=timeout)
+        tally = name.replace("_", "-")
+        ok = ran.returncode == 0 and "ERROR" not in ran.stderr and \
+            "Sanitizer" not in ran.stderr and "runtime error" not in ran.stderr
+        if not ok:
+            print("  FAIL %s libFuzzer:\n" % label +
+                  (ran.stderr or ran.stdout)[-3000:])
+            write_tally(tally, 0, 1)
+            return 1
+        print("  %s fuzz: %d seeds, %s (-runs=%d -max_total_time=%d) clean" %
+              (label, len(seeds), san_label, runs, seconds))
+        write_tally(tally, 1, 1)
+        return 0
 
 
 def tls_fuzz_sec(text, first, following):
@@ -37624,49 +37854,485 @@ static bipolar string_to_host(string_address host)
     return oids, parsers, policy, framing, shim
 
 
+#       What tls_verify_fuzz adds to tls_der_fuzz's hosted shim so production
+#       tls_verify_one links without the freestanding library: the crypto_*
+#       helpers it calls, and a compact SHA-256 / SHA-384. CHECK_net proves
+#       the freestanding path with lib.c's assembly; this lets libFuzzer run
+#       the same verify under ASan/UBSan/MSan.
+TLS_VERIFY_HOSTED_C = r"""
+typedef unsigned __int128 crypto_wide;
+static void crypto_forget(address_any secret, positive length)
+{
+        volatile p8 *at = secret;
+        while (length)
+        {
+                *at++ = 0;
+                length--;
+        }
+}
+static p64 crypto_be64(const p8 *bytes)
+{
+        return ((p64)(((p32)bytes[0] << 24) | ((p32)bytes[1] << 16) |
+                      ((p32)bytes[2] << 8) | (p32)bytes[3])
+                << 32) |
+               (p64)(((p32)bytes[4] << 24) | ((p32)bytes[5] << 16) |
+                     ((p32)bytes[6] << 8) | (p32)bytes[7]);
+}
+static void crypto_put_be64(p8 *bytes, p64 value)
+{
+        bytes[0] = (p8)(value >> 56);
+        bytes[1] = (p8)(value >> 48);
+        bytes[2] = (p8)(value >> 40);
+        bytes[3] = (p8)(value >> 32);
+        bytes[4] = (p8)(value >> 24);
+        bytes[5] = (p8)(value >> 16);
+        bytes[6] = (p8)(value >> 8);
+        bytes[7] = (p8)value;
+}
+static positive memory_span_byte(const void *block, p8 byte, positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[i] == byte)
+                i++;
+        return i;
+}
+/* Compact SHA-256 / SHA-384 for hosted tls_verify_fuzz (public-domain style). */
+typedef struct {
+        p64 len;
+        p32 state[8];
+        p8 buf[64];
+        positive used;
+} fuzz_sha256;
+
+static void fuzz_sha256_init(fuzz_sha256 *h)
+{
+        h->len = 0;
+        h->used = 0;
+        h->state[0] = 0x6a09e667u;
+        h->state[1] = 0xbb67ae85u;
+        h->state[2] = 0x3c6ef372u;
+        h->state[3] = 0xa54ff53au;
+        h->state[4] = 0x510e527fu;
+        h->state[5] = 0x9b05688cu;
+        h->state[6] = 0x1f83d9abu;
+        h->state[7] = 0x5be0cd19u;
+}
+
+static p32 fuzz_rotr32(p32 x, positive n)
+{
+        return (x >> n) | (x << (32 - n));
+}
+
+static void fuzz_sha256_block(fuzz_sha256 *h, const p8 *block)
+{
+        static const p32 K[64] = {
+            0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u, 0x3956c25bu,
+            0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u, 0xd807aa98u, 0x12835b01u,
+            0x243185beu, 0x550c7dc3u, 0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u,
+            0xc19bf174u, 0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+            0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau, 0x983e5152u,
+            0xa831c66du, 0xb00327c8u, 0xbf597fc7u, 0xc6e00bf3u, 0xd5a79147u,
+            0x06ca6351u, 0x14292967u, 0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu,
+            0x53380d13u, 0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+            0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u, 0xd192e819u,
+            0xd6990624u, 0xf40e3585u, 0x106aa070u, 0x19a4c116u, 0x1e376c08u,
+            0x2748774cu, 0x34b0bcb5u, 0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu,
+            0x682e6ff3u, 0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+            0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u};
+        p32 w[64];
+        p32 a, b, c, d, e, f, g, hh;
+        positive i;
+
+        for (i = 0; i < 16; i++)
+                w[i] = ((p32)block[i * 4] << 24) | ((p32)block[i * 4 + 1] << 16) |
+                       ((p32)block[i * 4 + 2] << 8) | (p32)block[i * 4 + 3];
+        for (; i < 64; i++)
+        {
+                p32 s0 = fuzz_rotr32(w[i - 15], 7) ^ fuzz_rotr32(w[i - 15], 18) ^
+                         (w[i - 15] >> 3);
+                p32 s1 = fuzz_rotr32(w[i - 2], 17) ^ fuzz_rotr32(w[i - 2], 19) ^
+                         (w[i - 2] >> 10);
+                w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        }
+        a = h->state[0];
+        b = h->state[1];
+        c = h->state[2];
+        d = h->state[3];
+        e = h->state[4];
+        f = h->state[5];
+        g = h->state[6];
+        hh = h->state[7];
+        for (i = 0; i < 64; i++)
+        {
+                p32 S1 = fuzz_rotr32(e, 6) ^ fuzz_rotr32(e, 11) ^ fuzz_rotr32(e, 25);
+                p32 ch = (e & f) ^ ((~e) & g);
+                p32 t1 = hh + S1 + ch + K[i] + w[i];
+                p32 S0 = fuzz_rotr32(a, 2) ^ fuzz_rotr32(a, 13) ^ fuzz_rotr32(a, 22);
+                p32 maj = (a & b) ^ (a & c) ^ (b & c);
+                p32 t2 = S0 + maj;
+                hh = g;
+                g = f;
+                f = e;
+                e = d + t1;
+                d = c;
+                c = b;
+                b = a;
+                a = t1 + t2;
+        }
+        h->state[0] += a;
+        h->state[1] += b;
+        h->state[2] += c;
+        h->state[3] += d;
+        h->state[4] += e;
+        h->state[5] += f;
+        h->state[6] += g;
+        h->state[7] += hh;
+}
+
+static void fuzz_sha256_update(fuzz_sha256 *h, const p8 *data, positive n)
+{
+        h->len += (p64)n * 8;
+        while (n)
+        {
+                positive take = 64 - h->used;
+                if (take > n)
+                        take = n;
+                memory_copy(h->buf + h->used, data, take);
+                h->used += take;
+                data += take;
+                n -= take;
+                if (h->used == 64)
+                {
+                        fuzz_sha256_block(h, h->buf);
+                        h->used = 0;
+                }
+        }
+}
+
+static void fuzz_sha256_final(fuzz_sha256 *h, p8 *out)
+{
+        p8 pad[64];
+        p64 bits = h->len;
+        positive i;
+
+        memory_fill(pad, 0, sizeof pad);
+        pad[0] = 0x80;
+        if (h->used > 55)
+        {
+                fuzz_sha256_update(h, pad, 64 - h->used);
+                memory_fill(pad, 0, 56);
+                fuzz_sha256_update(h, pad, 56);
+        }
+        else
+                fuzz_sha256_update(h, pad, 56 - h->used);
+        for (i = 0; i < 8; i++)
+                pad[i] = (p8)(bits >> (56 - 8 * i));
+        fuzz_sha256_update(h, pad, 8);
+        for (i = 0; i < 8; i++)
+        {
+                out[i * 4] = (p8)(h->state[i] >> 24);
+                out[i * 4 + 1] = (p8)(h->state[i] >> 16);
+                out[i * 4 + 2] = (p8)(h->state[i] >> 8);
+                out[i * 4 + 3] = (p8)h->state[i];
+        }
+}
+
+typedef struct {
+        p64 len_hi;
+        p64 len_lo;
+        p64 state[8];
+        p8 buf[128];
+        positive used;
+} fuzz_sha512;
+
+static p64 fuzz_rotr64(p64 x, positive n)
+{
+        return (x >> n) | (x << (64 - n));
+}
+
+static void fuzz_sha384_init(fuzz_sha512 *h)
+{
+        h->len_hi = 0;
+        h->len_lo = 0;
+        h->used = 0;
+        h->state[0] = 0xcbbb9d5dc1059ed8ull;
+        h->state[1] = 0x629a292a367cd507ull;
+        h->state[2] = 0x9159015a3070dd17ull;
+        h->state[3] = 0x152fecd8f70e5939ull;
+        h->state[4] = 0x67332667ffc00b31ull;
+        h->state[5] = 0x8eb44a8768581511ull;
+        h->state[6] = 0xdb0c2e0d64f98fa7ull;
+        h->state[7] = 0x47b5481dbefa4fa4ull;
+}
+
+static void fuzz_sha512_block(fuzz_sha512 *h, const p8 *block)
+{
+        static const p64 K[80] = {
+            0x428a2f98d728ae22ull, 0x7137449123ef65cdull, 0xb5c0fbcfec4d3b2full,
+            0xe9b5dba58189dbbcull, 0x3956c25bf348b538ull, 0x59f111f1b605d019ull,
+            0x923f82a4af194f9bull, 0xab1c5ed5da6d8118ull, 0xd807aa98a3030242ull,
+            0x12835b0145706fbeull, 0x243185be4ee4b28cull, 0x550c7dc3d5ffb4e2ull,
+            0x72be5d74f27b896full, 0x80deb1fe3b1696b1ull, 0x9bdc06a725c71235ull,
+            0xc19bf174cf692694ull, 0xe49b69c19ef14ad2ull, 0xefbe4786384f25e3ull,
+            0x0fc19dc68b8cd5b5ull, 0x240ca1cc77ac9c65ull, 0x2de92c6f592b0275ull,
+            0x4a7484aa6ea6e483ull, 0x5cb0a9dcbd41fbd4ull, 0x76f988da831153b5ull,
+            0x983e5152ee66dfabull, 0xa831c66d2db43210ull, 0xb00327c898fb213full,
+            0xbf597fc7beef0ee4ull, 0xc6e00bf33da88fc2ull, 0xd5a79147930aa725ull,
+            0x06ca6351e003826full, 0x142929670a0e6e70ull, 0x27b70a8546d22ffcull,
+            0x2e1b21385c26c926ull, 0x4d2c6dfc5ac42aedull, 0x53380d139d95b3dfull,
+            0x650a73548baf63deull, 0x766a0abb3c77b2a8ull, 0x81c2c92e47edaee6ull,
+            0x92722c851482353bull, 0xa2bfe8a14cf10364ull, 0xa81a664bbc423001ull,
+            0xc24b8b70d0f89791ull, 0xc76c51a30654be30ull, 0xd192e819d6ef5218ull,
+            0xd69906245565a910ull, 0xf40e35855771202aull, 0x106aa07032bbd1b8ull,
+            0x19a4c116b8d2d0c8ull, 0x1e376c085141ab53ull, 0x2748774cdf8eeb99ull,
+            0x34b0bcb5e19b48a8ull, 0x391c0cb3c5c95a63ull, 0x4ed8aa4ae3418acbull,
+            0x5b9cca4f7763e373ull, 0x682e6ff3d6b2b8a3ull, 0x748f82ee5defb2fcull,
+            0x78a5636f43172f60ull, 0x84c87814a1f0ab72ull, 0x8cc702081a6439ecull,
+            0x90befffa23631e28ull, 0xa4506cebde82bde9ull, 0xbef9a3f7b2c67915ull,
+            0xc67178f2e372532bull, 0xca273eceea26619cull, 0xd186b8c721c0c207ull,
+            0xeada7dd6cde0eb1eull, 0xf57d4f7fee6ed178ull, 0x06f067aa72176fbaull,
+            0x0a637dc5a2c898a6ull, 0x113f9804bef90daeull, 0x1b710b35131c471bull,
+            0x28db77f523047d84ull, 0x32caab7b40c72493ull, 0x3c9ebe0a15c9bebcull,
+            0x431d67c49c100d4cull, 0x4cc5d4becb3e42b6ull, 0x597f299cfc657e2aull,
+            0x5fcb6fab3ad6faecull, 0x6c44198c4a475817ull};
+        p64 w[80];
+        p64 a, b, c, d, e, f, g, hh;
+        positive i;
+
+        for (i = 0; i < 16; i++)
+        {
+                w[i] = ((p64)block[i * 8] << 56) | ((p64)block[i * 8 + 1] << 48) |
+                       ((p64)block[i * 8 + 2] << 40) | ((p64)block[i * 8 + 3] << 32) |
+                       ((p64)block[i * 8 + 4] << 24) | ((p64)block[i * 8 + 5] << 16) |
+                       ((p64)block[i * 8 + 6] << 8) | (p64)block[i * 8 + 7];
+        }
+        for (; i < 80; i++)
+        {
+                p64 s0 = fuzz_rotr64(w[i - 15], 1) ^ fuzz_rotr64(w[i - 15], 8) ^
+                         (w[i - 15] >> 7);
+                p64 s1 = fuzz_rotr64(w[i - 2], 19) ^ fuzz_rotr64(w[i - 2], 61) ^
+                         (w[i - 2] >> 6);
+                w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        }
+        a = h->state[0];
+        b = h->state[1];
+        c = h->state[2];
+        d = h->state[3];
+        e = h->state[4];
+        f = h->state[5];
+        g = h->state[6];
+        hh = h->state[7];
+        for (i = 0; i < 80; i++)
+        {
+                p64 S1 = fuzz_rotr64(e, 14) ^ fuzz_rotr64(e, 18) ^ fuzz_rotr64(e, 41);
+                p64 ch = (e & f) ^ ((~e) & g);
+                p64 t1 = hh + S1 + ch + K[i] + w[i];
+                p64 S0 = fuzz_rotr64(a, 28) ^ fuzz_rotr64(a, 34) ^ fuzz_rotr64(a, 39);
+                p64 maj = (a & b) ^ (a & c) ^ (b & c);
+                p64 t2 = S0 + maj;
+                hh = g;
+                g = f;
+                f = e;
+                e = d + t1;
+                d = c;
+                c = b;
+                b = a;
+                a = t1 + t2;
+        }
+        h->state[0] += a;
+        h->state[1] += b;
+        h->state[2] += c;
+        h->state[3] += d;
+        h->state[4] += e;
+        h->state[5] += f;
+        h->state[6] += g;
+        h->state[7] += hh;
+}
+
+static void fuzz_sha512_update(fuzz_sha512 *h, const p8 *data, positive n)
+{
+        p64 add = (p64)n * 8;
+        h->len_lo += add;
+        if (h->len_lo < add)
+                h->len_hi++;
+        while (n)
+        {
+                positive take = 128 - h->used;
+                if (take > n)
+                        take = n;
+                memory_copy(h->buf + h->used, data, take);
+                h->used += take;
+                data += take;
+                n -= take;
+                if (h->used == 128)
+                {
+                        fuzz_sha512_block(h, h->buf);
+                        h->used = 0;
+                }
+        }
+}
+
+static void fuzz_sha384_final(fuzz_sha512 *h, p8 *out)
+{
+        p8 pad[128];
+        p64 hi = h->len_hi;
+        p64 lo = h->len_lo;
+        positive i;
+
+        memory_fill(pad, 0, sizeof pad);
+        pad[0] = 0x80;
+        if (h->used > 111)
+        {
+                fuzz_sha512_update(h, pad, 128 - h->used);
+                memory_fill(pad, 0, 112);
+                fuzz_sha512_update(h, pad, 112);
+        }
+        else
+                fuzz_sha512_update(h, pad, 112 - h->used);
+        for (i = 0; i < 8; i++)
+                pad[i] = (p8)(hi >> (56 - 8 * i));
+        for (i = 0; i < 8; i++)
+                pad[8 + i] = (p8)(lo >> (56 - 8 * i));
+        fuzz_sha512_update(h, pad, 16);
+        for (i = 0; i < 6; i++)
+        {
+                out[i * 8] = (p8)(h->state[i] >> 56);
+                out[i * 8 + 1] = (p8)(h->state[i] >> 48);
+                out[i * 8 + 2] = (p8)(h->state[i] >> 40);
+                out[i * 8 + 3] = (p8)(h->state[i] >> 32);
+                out[i * 8 + 4] = (p8)(h->state[i] >> 24);
+                out[i * 8 + 5] = (p8)(h->state[i] >> 16);
+                out[i * 8 + 6] = (p8)(h->state[i] >> 8);
+                out[i * 8 + 7] = (p8)h->state[i];
+        }
+}
+
+typedef fuzz_sha256 crypto_sha256;
+typedef fuzz_sha512 crypto_sha512;
+static void crypto_sha256_open(crypto_sha256 *h) { fuzz_sha256_init(h); }
+static void crypto_sha256_write(crypto_sha256 *h, p8 *d, positive n)
+{
+        fuzz_sha256_update(h, d, n);
+}
+static void crypto_sha256_close(crypto_sha256 *h, p8 *out)
+{
+        fuzz_sha256_final(h, out);
+}
+static void crypto_sha256_of(p8 *d, positive n, p8 *out)
+{
+        crypto_sha256 h;
+        fuzz_sha256_init(&h);
+        fuzz_sha256_update(&h, d, n);
+        fuzz_sha256_final(&h, out);
+}
+static void crypto_sha384(p8 *d, positive n, p8 *out)
+{
+        crypto_sha512 h;
+        fuzz_sha384_init(&h);
+        fuzz_sha512_update(&h, d, n);
+        fuzz_sha384_final(&h, out);
+}
+
+"""
+
+
+def tls_verify_hosted_source(net, checks, driver):
+    """tls_verify_fuzz's program: tls_der_fuzz's lifts, the ECDSA/RSA verify
+    from net.c with lib.c's p256_/p384_ field fast paths cut so the C
+    montgomery from checks.c's SHARED_montgomery_reference carries them,
+    production tls_verify_one, and fuzz_prove_wr2_gts built from checks.c's
+    WR2 and GTS Root R1 certificates. Raises ValueError when a slice is gone
+    and RuntimeError when a field fast path survived the cut."""
+    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
+    ecdsa = tls_fuzz_sec(
+        net, "#define CRYPTO_FE_MAX 6\n",
+        "static bool crypto_scalar_reduce_be(p8 address_to out, const p8 address_to bytes,")
+    for field_op in ("add", "subtract"):
+        ecdsa = re.sub(
+            r"if \(f == address_of crypto_p256_field\)\s*\{\s*p256_%s\(d, a, b\);\s*return;\s*\}\s*"
+            r"if \(f == address_of crypto_p384_field\)\s*\{\s*p384_%s\(d, a, b\);\s*return;\s*\}"
+            % (field_op, field_op), "", ecdsa)
+    for field_op, args in (("multiply", "d, a, b"), ("square", "d, a")):
+        ecdsa = re.sub(
+            r"if \(f == address_of crypto_p256_field\)\s*p256_%s\(%s\);\s*"
+            r"else if \(f == address_of crypto_p384_field\)\s*p384_%s\(%s\);\s*"
+            r"else\s*" % (field_op, args, field_op, args), "", ecdsa)
+    rsa = tls_fuzz_sec(
+        net,
+        "/* x = 2x mod m for x below m.  Public moduli only: the reduction branches. */\n"
+        "static fn crypto_rsa_double",
+        "static fn crypto_mgf1_sha256")
+    montgomery = tls_fuzz_sec(checks, "#elif defined(SHARED_montgomery_reference)",
+                              "#elif defined(SHARED_unicode_width_reference)")
+    montgomery = montgomery.split("\n", 1)[1]
+    montgomery = montgomery[:montgomery.rfind("#endif") + len("#endif")].replace(
+        "montgomery_reference_multiply", "montgomery_multiply")
+    verify_one = tls_fuzz_sec(
+        net,
+        "static COLD bool tls_verify_one(tls_cert address_to child, tls_cert address_to issuer)",
+        "/* The last certificate served names its issuer.")
+
+    def der(name):
+        found = re.search(r'static const char %s\[\] =\s*((?:"[0-9a-fA-F]+"\s*)+);' % name,
+                          checks)
+        if not found:
+            raise ValueError("missing %s in checks.c" % name)
+        return ", ".join("0x%02x" % b for b in bytes.fromhex(
+            re.sub(r'["\s]', "", found.group(1))))
+
+    prove = r"""
+static const p8 fuzz_wr2_der[] = { %s };
+static const p8 fuzz_gts_der[] = { %s };
+
+static bool fuzz_prove_wr2_gts(void)
+{
+        p8 wr2_buf[sizeof fuzz_wr2_der];
+        p8 gts_buf[sizeof fuzz_gts_der];
+        tls_cert wr2, gts;
+
+        memory_copy(wr2_buf, fuzz_wr2_der, sizeof fuzz_wr2_der);
+        memory_copy(gts_buf, fuzz_gts_der, sizeof fuzz_gts_der);
+        memory_fill(address_of wr2, 0, sizeof wr2);
+        memory_fill(address_of gts, 0, sizeof gts);
+        if (tls_parse_cert(wr2_buf, sizeof fuzz_wr2_der, address_of wr2, null))
+                return false;
+        if (tls_parse_cert(gts_buf, sizeof fuzz_gts_der, address_of gts, null))
+                return false;
+        if (!tls_certificate_names_chain(address_of wr2, address_of gts))
+                return false;
+        if (!tls_verify_one(address_of wr2, address_of gts))
+                return false;
+        wr2.sig[wr2.sig_length - 1] ^= 1;
+        if (tls_verify_one(address_of wr2, address_of gts))
+                return false;
+        return true;
+}
+""" % (der("wr2_hex"), der("gts_r1_hex"))
+    source = "\n".join((shim + TLS_VERIFY_HOSTED_C, montgomery, ecdsa, rsa, oids,
+                        parsers, policy, verify_one, prove, framing, driver))
+    left = re.search(r"\bp(?:256|384)_(?:multiply|add|square|subtract)\s*\(", source)
+    if left:
+        raise RuntimeError("hosted tls_verify lift still calls " + left.group(0))
+    return source
+
+
 def harness_tls_der_fuzz(argv):
     """Coverage-guided libFuzzer over DER certs and Certificate HS framing.
 
     Lifts DER readers, certificate-list framing, and pure verify-path policy
     (names_chain, leaf/issuer authorization) from src/net/net.c. Magic-prefix
     lanes hit EKU/SAN/BC/KU value parsers, host-aware SAN, ECDSA sig DER, and
-    AlgorithmIdentifier junk. Seed bytes under test/fuzz_corpus/tls_der/ from
-    generate_seeds.py. Bounded fixed-seed run; return 2 (NOT RUN) when
-    clang/libFuzzer is unavailable. Expected TLS_FAIL is ignored; only
-    ASan/UBSan aborts fail (or MSan when MOONWATER_MSAN=1). Override
-    MOONWATER_FUZZ_RUNS / MOONWATER_FUZZ_SECONDS for longer local runs.
+    AlgorithmIdentifier junk. Seeds come from tls_fuzz_seeds("tls_der").
+    Bounded fixed-seed run; return 2 (NOT RUN) when clang/libFuzzer is
+    unavailable. Expected TLS_FAIL is ignored; only ASan/UBSan aborts fail
+    (or MSan when MOONWATER_MSAN=1). Override MOONWATER_FUZZ_RUNS /
+    MOONWATER_FUZZ_SECONDS for longer local runs.
 
         python3 test/differential.py --harness tls_der_fuzz
     """
     del argv
-    import shutil
-    import tempfile
-
-    runs, seconds, timeout = tls_fuzz_budget()
-    clang = shutil.which("clang")
-    if not clang:
-        print("tls der fuzz: NOT RUN -- no clang")
-        return 2
-    sanitize, environment, san_label = tls_fuzz_sanitize_config(clang)
-    if sanitize is None:
-        print("tls der fuzz: NOT RUN -- " + san_label)
-        return 2
-
-    ok, why = ensure_tls_fuzz_seeds()
-    if not ok:
-        print("tls der fuzz: NOT RUN -- " + why)
-        return 2
-
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
-    corpus = HARNESS_ROOT / "test/fuzz_corpus/tls_der"
-    if not corpus.is_dir():
-        print("tls der fuzz: NOT RUN -- missing seed corpus at " + str(corpus))
-        return 2
-    seeds = sorted(p for p in corpus.iterdir() if p.is_file() and p.suffix == ".bin")
-    if not seeds:
-        print("tls der fuzz: NOT RUN -- seed corpus is empty")
-        return 2
-
     oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
 
     driver = r"""
@@ -37839,48 +38505,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 }
 """
 
-    source = shim + oids + "\n" + parsers + policy + framing + driver
-
-    with tempfile.TemporaryDirectory(prefix="tls-der-fuzz-") as temporary:
-        work = Path(temporary)
-        unit = work / "tls_der_fuzz.c"
-        binary = work / "tls_der_fuzz"
-        unit.write_text(source)
-        built = subprocess.run(
-            [clang, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
-             "-fno-sanitize-recover=all", sanitize,
-             str(unit), "-o", str(binary)],
-            capture_output=True, text=True)
-        if built.returncode:
-            need = "fuzzer,memory" if moonwater_msan_requested() else "fuzzer"
-            print("tls der fuzz: NOT RUN -- clang lacks libFuzzer "
-                  "(need -fsanitize=%s):\n" % need + built.stderr[-2000:])
-            return 2
-
-        run_corpus = work / "corpus"
-        run_corpus.mkdir()
-        for seed in seeds:
-            (run_corpus / seed.name).write_bytes(seed.read_bytes())
-
-        ran = subprocess.run(
-            [str(binary), str(run_corpus),
-             "-seed=1", "-runs=%d" % runs, "-max_total_time=%d" % seconds,
-             "-max_len=4096",
-             "-artifact_prefix=" + str(work) + "/",
-             "-print_final_stats=0"],
-            capture_output=True, text=True, env=environment, timeout=timeout)
-        ok = ran.returncode == 0 and "ERROR" not in ran.stderr and \
-            "Sanitizer" not in ran.stderr and "runtime error" not in ran.stderr
-        if not ok:
-            print("  FAIL tls der libFuzzer:\n" +
-                  (ran.stderr or ran.stdout)[-3000:])
-            write_tally("tls-der-fuzz", 0, 1)
-            return 1
-        print("  tls der fuzz: %d seeds, %s "
-              "(-runs=%d -max_total_time=%d) clean" %
-              (len(seeds), san_label, runs, seconds))
-        write_tally("tls-der-fuzz", 1, 1)
-        return 0
+    return tls_fuzz_run("tls der", "tls_der",
+                        shim + oids + "\n" + parsers + policy + framing + driver,
+                        4096)
 
 
 def harness_tls_hs_fuzz(argv):
@@ -37888,48 +38515,19 @@ def harness_tls_hs_fuzz(argv):
 
     Lifts production tls_handshake_one_append, tls_server_flight_step, and
     tls_encrypted_flight_append (tls=null framing mode) from src/net/net.c the
-    way tls_der_fuzz lifts DER parsers. Seed corpus under
-    test/fuzz_corpus/tls_hs/ mirrors ServerHello fragment and encrypted-flight
-    cases from checks.c. Bounded fixed-seed run; return 2 (NOT RUN) when
+    way tls_der_fuzz lifts DER parsers. Seeds from tls_fuzz_seeds("tls_hs")
+    mirror ServerHello fragment and encrypted-flight cases from checks.c.
+    Bounded fixed-seed run; return 2 (NOT RUN) when
     clang/libFuzzer is unavailable. Expected TLS_FAIL is ignored; only
     ASan/UBSan aborts fail the lane (or MSan when MOONWATER_MSAN=1). Override
     MOONWATER_FUZZ_RUNS / MOONWATER_FUZZ_SECONDS for longer local runs (see
-    test/fuzz_net and test/msan_net).
+    `sh test/run fuzz` and `sh test/run msan`).
 
         python3 test/differential.py --harness tls_hs_fuzz
     """
     del argv
-    import shutil
-    import tempfile
-
-    runs, seconds, timeout = tls_fuzz_budget()
-    clang = shutil.which("clang")
-    if not clang:
-        print("tls hs fuzz: NOT RUN -- no clang")
-        return 2
-    sanitize, environment, san_label = tls_fuzz_sanitize_config(clang)
-    if sanitize is None:
-        print("tls hs fuzz: NOT RUN -- " + san_label)
-        return 2
-
-    ok, why = ensure_tls_fuzz_seeds()
-    if not ok:
-        print("tls hs fuzz: NOT RUN -- " + why)
-        return 2
-
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
-    corpus = HARNESS_ROOT / "test/fuzz_corpus/tls_hs"
-    if not corpus.is_dir():
-        print("tls hs fuzz: NOT RUN -- missing seed corpus at " + str(corpus))
-        return 2
-    seeds = sorted(p for p in corpus.iterdir() if p.is_file() and p.suffix == ".bin")
-    if not seeds:
-        print("tls hs fuzz: NOT RUN -- seed corpus is empty")
-        return 2
-
-    def sec(text, first, following):
-        i = text.index(first)
-        return text[i:text.index(following, i)]
+    sec = tls_fuzz_sec
 
     load24 = sec(
         net,
@@ -38245,49 +38843,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 }
 """
 
-    source = (shim + "\n" + load24 + "\n" + one_append + "\n" + flight_step +
-              "\n" + flight_append + "\n" + driver)
-
-    with tempfile.TemporaryDirectory(prefix="tls-hs-fuzz-") as temporary:
-        work = Path(temporary)
-        unit = work / "tls_hs_fuzz.c"
-        binary = work / "tls_hs_fuzz"
-        unit.write_text(source)
-        built = subprocess.run(
-            [clang, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
-             "-fno-sanitize-recover=all", sanitize,
-             str(unit), "-o", str(binary)],
-            capture_output=True, text=True)
-        if built.returncode:
-            need = "fuzzer,memory" if moonwater_msan_requested() else "fuzzer"
-            print("tls hs fuzz: NOT RUN -- clang lacks libFuzzer "
-                  "(need -fsanitize=%s):\n" % need + built.stderr[-2000:])
-            return 2
-
-        run_corpus = work / "corpus"
-        run_corpus.mkdir()
-        for seed in seeds:
-            (run_corpus / seed.name).write_bytes(seed.read_bytes())
-
-        ran = subprocess.run(
-            [str(binary), str(run_corpus),
-             "-seed=1", "-runs=%d" % runs, "-max_total_time=%d" % seconds,
-             "-max_len=20480",
-             "-artifact_prefix=" + str(work) + "/",
-             "-print_final_stats=0"],
-            capture_output=True, text=True, env=environment, timeout=timeout)
-        ok = ran.returncode == 0 and "ERROR" not in ran.stderr and \
-            "Sanitizer" not in ran.stderr and "runtime error" not in ran.stderr
-        if not ok:
-            print("  FAIL tls hs libFuzzer:\n" +
-                  (ran.stderr or ran.stdout)[-3000:])
-            write_tally("tls-hs-fuzz", 0, 1)
-            return 1
-        print("  tls hs fuzz: %d seeds, %s "
-              "(-runs=%d -max_total_time=%d) clean" %
-              (len(seeds), san_label, runs, seconds))
-        write_tally("tls-hs-fuzz", 1, 1)
-        return 0
+    return tls_fuzz_run("tls hs", "tls_hs",
+                        shim + "\n" + load24 + "\n" + one_append + "\n" +
+                        flight_step + "\n" + flight_append + "\n" + driver,
+                        20480)
 
 
 def harness_tls_verify_fuzz(argv):
@@ -38297,51 +38856,15 @@ def harness_tls_verify_fuzz(argv):
     hosted ECDSA/RSA verify (C montgomery from SHARED_montgomery_reference,
     pure SHA-256/384) so each Certificate-list link calls production
     ``tls_verify_one``. LLVMFuzzerInitialize proves WR2→GTS accept and a
-    flipped-signature refuse before fuzzing. Seed corpus is tls_der/ (same
-    hex source). Not in lane_net smoke; hand-run / fuzz_net only. Bounded
+    flipped-signature refuse before fuzzing. Seeds are tls_der's. Not in
+    lane_net smoke; `sh test/run fuzz` runs it through tls_fuzz. Bounded
     fixed-seed; return 2 when clang/libFuzzer is unavailable.
 
         python3 test/differential.py --harness tls_verify_fuzz
     """
     del argv
-    import shutil
-    import tempfile
-
-    import importlib.util as _ilu
-    _spec = _ilu.spec_from_file_location(
-        "tls_verify_hosted",
-        HARNESS_ROOT / "test" / "tls_verify_hosted.py")
-    _mod = _ilu.module_from_spec(_spec)
-    _spec.loader.exec_module(_mod)
-    build_tls_verify_fuzz_source = _mod.build_tls_verify_fuzz_source
-
-    runs, seconds, timeout = tls_fuzz_budget()
-    clang = shutil.which("clang")
-    if not clang:
-        print("tls verify fuzz: NOT RUN -- no clang")
-        return 2
-    sanitize, environment, san_label = tls_fuzz_sanitize_config(clang)
-    if sanitize is None:
-        print("tls verify fuzz: NOT RUN -- " + san_label)
-        return 2
-
-    ok, why = ensure_tls_fuzz_seeds()
-    if not ok:
-        print("tls verify fuzz: NOT RUN -- " + why)
-        return 2
-
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     checks = (HARNESS_ROOT / "test/checks.c").read_text()
-    corpus = HARNESS_ROOT / "test/fuzz_corpus/tls_der"
-    if not corpus.is_dir():
-        print("tls verify fuzz: NOT RUN -- missing seed corpus at " + str(corpus))
-        return 2
-    seeds = sorted(p for p in corpus.iterdir() if p.is_file() and p.suffix == ".bin")
-    if not seeds:
-        print("tls verify fuzz: NOT RUN -- seed corpus is empty")
-        return 2
-
-    oids, parsers, policy, framing, _shim = tls_der_fuzz_lift_parts(net)
 
     driver = r"""
 enum { FUZZ_TLS_NOW = 20200101000000ull };
@@ -38457,53 +38980,94 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 """
 
     try:
-        source = build_tls_verify_fuzz_source(
-            net, oids, parsers, policy, framing, driver, checks)
-    except Exception as exc:
+        source = tls_verify_hosted_source(net, checks, driver)
+    except (ValueError, RuntimeError) as exc:
         print("tls verify fuzz: NOT RUN -- hosted lift failed: " + str(exc))
         return 2
+    return tls_fuzz_run("tls verify", "tls_der", source, 4096)
 
-    with tempfile.TemporaryDirectory(prefix="tls-verify-fuzz-") as temporary:
-        work = Path(temporary)
-        unit = work / "tls_verify_fuzz.c"
-        binary = work / "tls_verify_fuzz"
-        unit.write_text(source)
-        built = subprocess.run(
-            [clang, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
-             "-fno-sanitize-recover=all", sanitize,
-             str(unit), "-o", str(binary)],
-            capture_output=True, text=True)
-        if built.returncode:
-            need = "fuzzer,memory" if moonwater_msan_requested() else "fuzzer"
-            print("tls verify fuzz: NOT RUN -- clang lacks libFuzzer "
-                  "(need -fsanitize=%s):\n" % need + built.stderr[-2000:])
-            return 2
 
-        run_corpus = work / "corpus"
-        run_corpus.mkdir()
-        for seed in seeds:
-            (run_corpus / seed.name).write_bytes(seed.read_bytes())
+def harness_tls_fuzz(argv):
+    """tls_der_fuzz, tls_hs_fuzz and tls_verify_fuzz in turn: `sh test/run fuzz`.
 
-        ran = subprocess.run(
-            [str(binary), str(run_corpus),
-             "-seed=1", "-runs=%d" % runs, "-max_total_time=%d" % seconds,
-             "-max_len=4096",
-             "-artifact_prefix=" + str(work) + "/",
-             "-print_final_stats=0"],
-            capture_output=True, text=True, env=environment, timeout=timeout)
-        ok = ran.returncode == 0 and "ERROR" not in ran.stderr and \
-            "Sanitizer" not in ran.stderr and "runtime error" not in ran.stderr
-        if not ok:
-            print("  FAIL tls verify libFuzzer:\n" +
-                  (ran.stderr or ran.stdout)[-3000:])
-            write_tally("tls-verify-fuzz", 0, 1)
-            return 1
-        print("  tls verify fuzz: %d seeds, %s "
-              "(-runs=%d -max_total_time=%d) clean" %
-              (len(seeds), san_label, runs, seconds))
-        write_tally("tls-verify-fuzz", 1, 1)
-        return 0
+    Continuous by default, an hour a target with no run cap, unless
+    MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise. With
+    MOONWATER_FUZZ_REPORT=PATH the default budget is lane_net's smoke (20000
+    runs / 5 s), and a JSON report of the toolchain, seed counts, budget and
+    each target's exit and duration is printed and written to PATH (relative
+    to the tree). Coverage here is seed inventory plus a clean sanitizer run,
+    not source-line coverage. Exit 1 when a target failed, else 2 when one
+    did not run.
+    """
+    del argv
+    import traceback
 
+    report = os.environ.get("MOONWATER_FUZZ_REPORT")
+    os.environ.setdefault("MOONWATER_FUZZ_RUNS", "20000" if report else "-1")
+    os.environ.setdefault("MOONWATER_FUZZ_SECONDS", "5" if report else "3600")
+    runs, seconds, _ = tls_fuzz_budget()
+    print("tls fuzz: der then hs then verify (runs=%d seconds=%d)" % (runs, seconds))
+    seeds = {corpus: len(tls_fuzz_seeds(corpus)) for corpus in ("tls_der", "tls_hs")}
+    targets = []
+    for name, corpus, harness in (("tls_der_fuzz", "tls_der", harness_tls_der_fuzz),
+                                  ("tls_hs_fuzz", "tls_hs", harness_tls_hs_fuzz),
+                                  ("tls_verify_fuzz", "tls_der", harness_tls_verify_fuzz)):
+        began = time.time()
+        try:
+            code = harness([])
+        except Exception:
+            traceback.print_exc()
+            code = 1
+        targets.append(dict(name=name, seeds=seeds[corpus], runs=runs,
+                            max_total_time_seconds=seconds,
+                            duration_seconds=int(time.time() - began), exit=code))
+    codes = [target["exit"] for target in targets]
+    overall = 1 if any(code not in (0, 2) for code in codes) else (2 if 2 in codes else 0)
+    if not report:
+        return overall
+
+    clang = shutil.which("clang")
+
+    def first_line(command):
+        try:
+            done = subprocess.run(command, capture_output=True, text=True)
+        except OSError:
+            return ""
+        return (done.stdout.splitlines() or [""])[0].strip()
+
+    text = json.dumps({
+        "schema": "moonwater.fuzz_report.v1",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "git_commit": first_line(["git", "-C", str(HARNESS_ROOT), "rev-parse", "HEAD"])
+                      or "unknown",
+        "host": {"system": os.uname().sysname, "arch": os.uname().machine},
+        "sanitizer": {
+            "clang": clang,
+            "version": first_line([clang, "--version"]) if clang else "(no clang)",
+            "flags": "-fsanitize=fuzzer," + (
+                "memory" if moonwater_msan_requested() else "address,undefined"),
+            "note": "Targets exit 2 (NOT RUN) when clang cannot link libFuzzer.",
+        },
+        "corpora": {corpus: {"path": 'tls_fuzz_seeds("%s") in test/differential.py' % corpus,
+                             "seed_count": count} for corpus, count in seeds.items()},
+        "budget": {"runs": runs, "seconds": seconds},
+        "targets": targets,
+        "coverage_note": (
+            "Seed inventory plus sanitizer libFuzzer completion under the "
+            "recorded budget, not LLVM source-line coverage. The seeds are "
+            "test/differential.py's tls_fuzz_seeds at git_commit."),
+        "overall_exit": overall,
+    }, indent=2)
+    print(text)
+    path = Path(report) if Path(report).is_absolute() else HARNESS_ROOT / report
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text + "\n")
+        print("tls fuzz: wrote " + str(path), file=sys.stderr)
+    except OSError as error:
+        print("tls fuzz: could not write %s (%s); the report is above" % (path, error),
+              file=sys.stderr)
+    return overall
 
 
 def harness_msan_net(argv):
@@ -38523,7 +39087,7 @@ def harness_msan_net(argv):
     Returns 2 (NOT RUN) when MSan is unavailable (Apple clang, many qemu
     images).
 
-        sh test/msan_net
+        sh test/run msan
         MOONWATER_MSAN=1 python3 test/differential.py --harness tls_der_fuzz
     """
     del argv
@@ -39481,16 +40045,10 @@ int main(void)
 }
 """
 
-    ok_seeds, seed_why = ensure_tls_fuzz_seeds()
-    seed_paths = []
-    if ok_seeds:
-        corpus = HARNESS_ROOT / "test/fuzz_corpus/tls_der"
-        seed_paths = sorted(
-            str(p) for p in corpus.iterdir()
-            if p.is_file() and p.suffix == ".bin")[:24]
-
     with tempfile.TemporaryDirectory(prefix="msan-tlsder-") as temporary:
         work = Path(temporary)
+        seed_paths = [str(p) for p in
+                      tls_fuzz_write_seeds("tls_der", work / "corpus")[:24]]
         der_clean_source = tls_der_shim + oids + "\n" + parsers + framing + tls_der_driver
         ran, err = msan_build_run(work, "tls_der_clean", der_clean_source,
                                   run_args=seed_paths)
@@ -39499,11 +40057,7 @@ int main(void)
                   (err or "")[-2000:])
             return 2
         label = ("tls_parse_extensions/cert clean under MSan without fuzzer "
-                 "(fully-initialized hostile seeds")
-        if seed_paths:
-            label += ", %d corpus files)" % len(seed_paths)
-        else:
-            label += "; corpus unavailable: %s)" % (seed_why or "none")
+                 "(fully-initialized hostile seeds, %d corpus files)" % len(seed_paths))
         msan_expect_clean(ran, label, err)
 
         ran, err = msan_build_run(work, "tls_der_uninit", tls_der_uninit)
@@ -39610,6 +40164,122 @@ int main(void)
     checks(der == 0, "tls_der_fuzz clean under MSan")
     checks(hs == 0, "tls_hs_fuzz clean under MSan")
     return checks.verdict("msan net", "msan-net")
+
+
+def harness_security_hygiene(argv):
+    """Guards on the net/tar security tests that no single harness sees, run at
+    the top of lane_net and lane_tar. Untallied, like the script it replaced:
+    it prints "security hygiene N/N" and returns 1 on any failure.
+
+    - the security harnesses stay registered, HARNESS_CHECKS has no key twice,
+      and test/run asks for them, with lane_net's and lane_tar's soft skips
+    - neither seed corpus is empty, only empty.bin is empty, and no seed file
+      sits in test/ (they are written to each run's temporary directory)
+    - tls_verify_fuzz calls production tls_verify_one with the WR2/GTS prove
+      over the hosted crypto lift, and CHECK_net keeps its freestanding proves
+    - the security docs never say tls_verify_fuzz's signatures are mocked, and
+      the harness names SECURITY_TEST_MATRIX.md gives are registered
+    - http_response_framing's CASES / MUST_ACCEPT / DELIBERATE agree, and its
+      DELIBERATE rows keep the must-disagree assert against http.client
+    - https_downgrade keeps several Location shapes
+    """
+    del argv
+    checks = Checks()
+    run = (HARNESS_ROOT / "test/run").read_text()
+    source = Path(__file__).resolve().read_text()
+
+    security = ("tls_chains", "https_downgrade", "http_response_framing", "tls_der_fuzz",
+                "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race")
+    for name in security + ("tls_verify_fuzz",):
+        checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
+    table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
+    keys = re.findall(r'^\s*"(\w+)":', table.group(1), re.M) if table else []
+    checks(bool(keys), "differential.py: cannot find the HARNESS_CHECKS literal")
+    twice = sorted({key for key in keys if keys.count(key) > 1})
+    checks(not twice, "differential.py: registered twice: " + ", ".join(twice))
+    for name in security:
+        checks("--harness " + name in run, "test/run: no lane asks for --harness " + name)
+    for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race"):
+        checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
+
+    names = set()
+    for corpus in ("tls_der", "tls_hs"):
+        seeds = tls_fuzz_seeds(corpus)
+        names.update(seeds)
+        checks(bool(seeds), "tls_fuzz_seeds(%r) is empty" % corpus)
+        empty = sorted(name for name, data in seeds.items()
+                       if not data and name != "empty.bin")
+        checks(not empty, "%s: empty hostile seeds (empty.bin is the one control): %s"
+               % (corpus, ", ".join(empty)))
+    stale = sorted(str(path.relative_to(HARNESS_ROOT))
+                   for path in (HARNESS_ROOT / "test").rglob("*.bin") if path.name in names)
+    checks(not stale, "seed files in the tree (seeds are written per run; remove them): "
+           + ", ".join(stale[:8]))
+
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    checks_c = (HARNESS_ROOT / "test/checks.c").read_text()
+    verify = inspect.getsource(harness_tls_verify_fuzz)
+    checks("tls_verify_one(" in verify and "fuzz_prove_wr2_gts()" in verify and
+           "tls_verify_hosted_source(" in verify and "Mocked signature" not in verify,
+           "tls_verify_fuzz: must drive production tls_verify_one after the WR2/GTS prove")
+    try:
+        lifted = tls_verify_hosted_source(net, checks_c, "")
+    except (ValueError, RuntimeError) as error:
+        lifted = ""
+        checks(False, "tls_verify_hosted_source: " + str(error))
+    for needle in ("montgomery_multiply", "crypto_sha256_of", "crypto_sha384",
+                   "static COLD bool tls_verify_one", "fuzz_prove_wr2_gts"):
+        checks(not lifted or needle in lifted, "hosted tls_verify lift lacks " + needle)
+    start = checks_c.find("#ifdef CHECK_net")
+    following = re.search(r"\n#ifdef CHECK_", checks_c[start + 1:])
+    region = checks_c[start:start + 1 + following.start()] if following else checks_c[start:]
+    for needle in ('check("WR2 chains to the served GTS Root R1"',
+                   "tls_verify_one(address_of wr2_cert, address_of gts_cert)",
+                   'check("the SHA-384 PKCS#1 verify refuses one flipped signature bit"'):
+        checks(start >= 0 and needle in region,
+               "CHECK_net: missing freestanding verify proof: " + needle[:60])
+
+    for doc in ("SECURITY_CHECKLIST.md", "SECURITY_TEST_MATRIX.md"):
+        path = HARNESS_ROOT / doc
+        lower = path.read_text().lower() if path.is_file() else ""
+        for phrase in ("signatures mocked", "mocked signature", "mocked refuse",
+                       "signatures always refuse"):
+            for found in re.finditer(re.escape(phrase), lower):
+                window = lower[max(0, found.start() - 120):found.end() + 120]
+                checks("tls_verify" not in window and "verify_fuzz" not in window,
+                       "%s: still says %r near tls_verify_fuzz" % (doc, phrase))
+    matrix = HARNESS_ROOT / "SECURITY_TEST_MATRIX.md"
+    named = set(re.findall(r"`([a-z][a-z0-9_]*(?:_fuzz|_race))`",
+                           matrix.read_text() if matrix.is_file() else ""))
+    unknown = sorted(named - set(HARNESS_CHECKS))
+    checks(not unknown, "SECURITY_TEST_MATRIX.md names unregistered harnesses: "
+           + ", ".join(unknown))
+
+    framing = inspect.getsource(harness_http_response_framing)
+    cases = re.search(r"CASES\s*=\s*\[(.*?)\n\s*\]", framing, re.S)
+    accept = re.search(r"MUST_ACCEPT\s*=\s*\{(.*?)\n\s*\}", framing, re.S)
+    deliberate = re.search(r"DELIBERATE\s*=\s*\{(.*?)\n\s*\}", framing, re.S)
+    checks(cases and accept and deliberate,
+           "http_response_framing: cannot find CASES / MUST_ACCEPT / DELIBERATE")
+    if cases and accept and deliberate:
+        rows = re.findall(r'\(\s*"([^"]+)"\s*,', cases.group(1))
+        checks(len(rows) == len(set(rows)), "http_response_framing: a CASES name twice")
+        for table_name, found in (("MUST_ACCEPT", re.findall(r'"([^"]+)"', accept.group(1))),
+                                  ("DELIBERATE", re.findall(r'"([^"]+)"\s*:',
+                                                            deliberate.group(1)))):
+            loose = sorted(set(found) - set(rows))
+            checks(not loose, "http_response_framing: %s not in CASES: %s"
+                   % (table_name, ", ".join(loose[:8])))
+    checks("listed deliberate but http.client now agrees" in framing,
+           "http_response_framing: DELIBERATE must still assert http.client disagrees")
+
+    downgrade = inspect.getsource(harness_https_downgrade)
+    shapes = sum(needle in downgrade for needle in ("http://", "HTTP://", "//", "user@",
+                                                    "http:///"))
+    checks(shapes >= 4, "https_downgrade: %d Location shapes, want several" % shapes)
+
+    print("security hygiene %d/%d" % (checks.checks - checks.failures, checks.checks))
+    return 1 if checks.failures else 0
 
 
 def pathname_race_budget(default_rounds=80, default_seconds=2.0):
@@ -44075,7 +44745,9 @@ HARNESS_CHECKS = {
     "tls_der_fuzz": harness_tls_der_fuzz,
     "tls_hs_fuzz": harness_tls_hs_fuzz,
     "tls_verify_fuzz": harness_tls_verify_fuzz,
+    "tls_fuzz": harness_tls_fuzz,
     "msan_net": harness_msan_net,
+    "security_hygiene": harness_security_hygiene,
     "pathname_race": harness_pathname_race,
     "machine_scan": harness_machine_scan,
     "waterlink_noise": harness_waterlink_noise,

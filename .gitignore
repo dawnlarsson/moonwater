@@ -27,11 +27,6 @@
 *.dylib
 *.dwo
 
-# TLS fuzz seed bytes are materialized from test/fuzz_corpus/generate_seeds.py
-# (hex source of truth). Do not commit *.bin under the corpus tree.
-/test/fuzz_corpus/tls_der/*.bin
-/test/fuzz_corpus/tls_hs/*.bin
-
 # patch leftovers, which have shipped by accident once
 *.orig
 *.rej
