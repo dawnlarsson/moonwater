@@ -45971,7 +45971,7 @@ static bipolar socket_send(b32 socket, const void *bytes, positive size, b32 fla
                                        (p32)b[3] << 24
                              : 0;
 
-        (void)flags; (void)to; (void)to_size;
+        (void)flags; (void)to_size;
         if (socket == 4 && wl_phase == 1)
         {
                 /*      The mDNS socket answers a one-shot asker unicast; its
@@ -45993,7 +45993,9 @@ static bipolar socket_send(b32 socket, const void *bytes, positive size, b32 fla
                 memcpy(wl_last_respond, bytes, size);
                 wl_have_respond = true;
         }
-        return (bipolar)size;
+        //      As the kernel: no datagram goes to port zero. What was made
+        //      for it is counted above all the same.
+        return ((const socket_address_internet *)to)->port ? (bipolar)size : -22;
 }
 
 static struct waterlink_identity wl_id[3];
@@ -46439,6 +46441,8 @@ def waterlink_pre_seeds():
         b"\x05" + (100).to_bytes(2, "big") + b"\x07",
         "greeting.bin": b"\x00" + greeting,
         "announcements_many_ports.bin": b"\x00" + b"".join(op5(m) for m in many),
+        "announcements_port_zero.bin": b"\x00" + b"".join(
+            op5(announce([0] * 8, k)) for k in range(4)),
         "one_shot_questions.bin": b"\x00" + b"".join(op5(query, 40000) for _ in range(4)),
         "coalesced_run.bin": b"\x00" + run,
         "mdns_socket.bin": b"\x00" + socket_mdns,

@@ -63737,10 +63737,12 @@ b32 main(void)
 #undef system_random_fill
 
 static bool entropy_down;
+static positive entropy_draws;
 
 static bipolar system_random_fill(address_any into, positive length,
                                   positive flags)
 {
+        entropy_draws++;
         if (entropy_down)
                 return -5;
         return system_random_fill_kernel(into, length, flags);
@@ -65047,6 +65049,28 @@ static fn mdns_amplification(void)
         check("sec: made-up announcements are greeted at most LINK_GREETED "
               "times in LINK_GREET_AGAIN",
               greeted == LINK_GREETED);
+
+        //      A place that refuses the greeting (port zero, from any
+        //      address) costs the curve work all the same, so it spends the
+        //      same budget.
+        wls_group();
+        greeted = entropy_draws;
+        for (positive at = 0; at < LINK_GREETED + 8; at++)
+        {
+                p8 instance[10], host[6], place[16];
+
+                wls_seeded(instance, 10, (p8)(at + 60));
+                wls_seeded(host, 6, (p8)at);
+                memory_copy(place, wls_loopback, 16);
+                place[14] = (p8)(at + 1);
+                length = waterlink_mdns_announce(packet, sizeof packet, instance,
+                                                 host, 0, 0, 4500, 0, null, 0);
+                link_nearby_heard(packet, length, place, WATERLINK_MDNS_PORT,
+                                  5000000 + at);
+        }
+        check("sec: announcements naming a place that refuses a greeting "
+              "spend the same budget",
+              entropy_draws - greeted == LINK_GREETED);
 
         link_nearby.socket = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC |
                                                          SOCK_NONBLOCK, 0);

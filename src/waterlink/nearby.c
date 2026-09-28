@@ -535,14 +535,17 @@ static fn link_pair_begin(positive group, p8 address_to address, p16 port,
                         (p32)(wall % 1000000000ull));
         memory_copy(hello + WATERLINK_STAMP_BYTES, link_nearby.name,
                     WATERLINK_NAME_MAX);
+        //      Counted whether or not it could be sent: the curve work is
+        //      done, and a place that refuses it (port zero, say) is neither
+        //      greeted again at once nor outside the budget.
         if (waterlink_initiate(address_of noise, address_of link_self.me,
                                keys->identity.public, keys->psk, ephemeral,
-                               hello, datagram) &&
-            link_send_to(datagram, WATERLINK_DATAGRAM, address, port) >= 0)
+                               hello, datagram))
         {
                 struct link_greeted address_to next =
                         link_nearby.greeted + link_nearby.greeted_next;
 
+                (void)link_send_to(datagram, WATERLINK_DATAGRAM, address, port);
                 link_nearby.greeted_next =
                         (link_nearby.greeted_next + 1) % LINK_GREETED;
                 memory_copy(next->address, address, 16);
