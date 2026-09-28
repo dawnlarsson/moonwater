@@ -17,7 +17,7 @@
 | Codec hostile lengths and guard pages | codec-specific and floor lanes | `sh test/run codec compression_floor` |
 | Waterlink replay, seal and lossy delivery (separate review scope) | pure transform and namespace integration | `sh test/run waterlink link` |
 | Whole available suite | all locally supported lanes | `sh test/run` |
-| TLS DER / handshake fuzz (lane smoke) | bounded libFuzzer ASan/UBSan; soft NOT RUN without clang fuzzer | `sh test/run net` (via `tls_der_fuzz` / `tls_hs_fuzz`, 20k/5s) |
+| TLS DER / handshake fuzz (lane smoke) | bounded libFuzzer ASan/UBSan; soft NOT RUN without clang fuzzer | `sh test/run net` (via `tls_der_fuzz` / `tls_hs_fuzz` / `dhcp_fuzz`, 20k/5s) |
 | TLS net fuzz continuous (local) | same harnesses plus `tls_verify_fuzz`; longer budget | `sh test/run fuzz` (`MOONWATER_FUZZ_*`) |
 | TLS net fuzz deeper campaign (local) | same harnesses; bounded deeper-than-smoke | `MOONWATER_FUZZ_SECONDS=120 MOONWATER_FUZZ_RUNS=200000 MOONWATER_FUZZ_REPORT=artifacts/fuzz-campaign-report.txt sh test/run fuzz` |
 | Release fuzz attach | machine-readable sanitizer + corpus inventory + run exits | `MOONWATER_FUZZ_REPORT=artifacts/fuzz-report.txt sh test/run fuzz` |
@@ -34,6 +34,7 @@ corpus directory; no seed file lives in the tree.
 | DER / Certificate list | `tls_der` | `tls_der_fuzz` | `tls_parse_extensions` / `tls_parse_cert` / certificate-list framing; EKU/SAN/BC/KU value lanes; names_chain + leaf/issuer policy; magic prefixes C1–C9 |
 | DER verify + sig | `tls_der` (same) | `tls_verify_fuzz` | `tls_verify_chain` parse/policy/names walker plus production `tls_verify_one` (hosted C montgomery + SHA); WR2→GTS prove in `LLVMFuzzerInitialize`; **not** lane_net smoke (hand / `sh test/run fuzz`) |
 | Handshake fragmentation | `tls_hs` | `tls_hs_fuzz` | `tls_handshake_one_append` / `tls_encrypted_flight_append` |
+| DHCP replies and lease clock | `dhcp` | `dhcp_fuzz` | `dhcp_read` / `dhcp_walk` against an RFC 2131/2132/3396 reference, `dhcp_lease_timers` / `dhcp_lease_acknowledge`, and the watcher's `net_lease_*` clock at fuzzed start and now |
 
 Seed counts are whatever `tls_fuzz_seeds` returns; the fuzz lane's report
 records them.
