@@ -303,8 +303,7 @@ struct waterlink_found_instance {
 struct waterlink_found {
         p16 id;
         bool response;
-        bool asked;     // a question for the service
-        bool asked_once; // a one-shot question (the reply goes back unicast)
+        bool asked; // a question for the service
         p8 question[WATERLINK_NAME_BYTES + 4];
         positive question_length;
         positive count;

@@ -85,7 +85,6 @@ struct waterlink_noise {
         p8 hash[32];
         p8 chain[32];
         p8 key[32];
-        bool keyed;
         p64 nonce;
         p8 ephemeral[32];      // ours, secret
         p8 ephemeral_public[32];
@@ -115,7 +114,6 @@ static fn waterlink_mix_key(struct waterlink_noise address_to noise,
         crypto_hkdf_expand(prk, (p8 address_to) "", 0, out, 64);
         memory_copy(noise->chain, out, 32);
         memory_copy(noise->key, out + 32, 32);
-        noise->keyed = true;
         noise->nonce = 0;
         crypto_forget(prk, sizeof prk);
         crypto_forget(out, sizeof out);
@@ -190,7 +188,6 @@ static fn waterlink_mix_key_hash(struct waterlink_noise address_to noise,
         memory_copy(noise->chain, out, 32);
         waterlink_mix_hash(noise, out + 32, 32);
         memory_copy(noise->key, out + 64, 32);
-        noise->keyed = true;
         noise->nonce = 0;
         crypto_forget(prk, sizeof prk);
         crypto_forget(out, sizeof out);
@@ -217,17 +214,14 @@ static fn waterlink_noise_start(struct waterlink_noise address_to noise,
 
 static p8 waterlink_base[32] = {9};
 
+static fn waterlink_gate_of(p8 address_to public, p8 address_to gate);
+
 fn waterlink_identity_from(struct waterlink_identity address_to identity,
                            p8 address_to secret)
 {
-        crypto_sha256 hash;
-
         memory_copy(identity->secret, secret, 32);
         crypto_x25519(identity->public, identity->secret, waterlink_base);
-        crypto_sha256_open(address_of hash);
-        crypto_sha256_write(address_of hash, (p8 address_to) "mac1----", 8);
-        crypto_sha256_write(address_of hash, identity->public, 32);
-        crypto_sha256_close(address_of hash, identity->gate);
+        waterlink_gate_of(identity->public, identity->gate);
 }
 
 // mac1's key for a datagram going to the holder of public.
