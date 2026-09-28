@@ -6549,7 +6549,7 @@ def reply(path):
     fixed = {
         "/404": (404, "", b"no\n"), "/500": (500, "", b"no\n"),
         "/401": (401, 'WWW-Authenticate: Basic realm="x"', b"no\n"),
-        "/407": (407, "", b"no\n"),
+        "/407": (407, "", b"no\n"), "/304": (304, "", b""),
         "/dots": (302, "Location: ../../a/./b/../file", b""),
         "/dots-absolute": (302, "Location: /x/../y/./%2e%2E/z", b""),
         "/loop": (302, "Location: /loop", b""),
@@ -6637,6 +6637,7 @@ PY
 500|8|*|||-q|URL/500
 401|6|Username/Password Authentication Failed.|||URL/401
 407|8|*|||-q|URL/407
+304|8|*|||-q|URL/304
 unsupported-scheme|1|gopher://127.0.0.1/x: Unsupported scheme.|||gopher://127.0.0.1/x
 location-ftp=|1|ftp://127.0.0.1/x: Unsupported scheme.|||URL/to/ftp:~~127.0.0.1~x
 location-mailto|1|mailto:x: Unsupported scheme.|||URL/to/mailto:x

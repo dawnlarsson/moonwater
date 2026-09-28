@@ -73826,7 +73826,7 @@ static fn storage_test_wget_304(string_address target)
                     "wget", "-q", "-O", target, url, null};
                 program_arguments_use(words, 5);
                 check("wget refuses a terminal 304",
-                      net_wget() == 1);
+                      net_wget() == 8);
                 if (saved_words)
                         program_arguments_use(saved_words, saved_count);
                 else
