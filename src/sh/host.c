@@ -3537,7 +3537,10 @@ static b32 host_canvas(string_address address_to arguments, positive count)
 #define NL80211_CMD_SET_STATION 18
 #define NL80211_CMD_NEW_STATION 19
 #define NL80211_CMD_CONNECT 46
+#define NL80211_CMD_DEAUTHENTICATE 39
+#define NL80211_CMD_DISASSOCIATE 40
 #define NL80211_CMD_DISCONNECT 48
+#define NL80211_CMD_SET_REKEY_OFFLOAD 79
 
 #define NL80211_ATTR_WIPHY 1
 #define NL80211_ATTR_IFINDEX 3
@@ -3550,8 +3553,10 @@ static b32 host_canvas(string_address address_to arguments, positive count)
 #define NL80211_ATTR_KEY_SEQ 10
 #define NL80211_ATTR_KEY_DEFAULT 11
 #define NL80211_ATTR_IE 42
+#define NL80211_ATTR_FRAME 51
 #define NL80211_ATTR_SSID 52
 #define NL80211_ATTR_AUTH_TYPE 53
+#define NL80211_ATTR_REASON_CODE 54
 #define NL80211_ATTR_KEY_TYPE 55
 #define NL80211_ATTR_TIMED_OUT 65
 #define NL80211_ATTR_STA_FLAGS2 67
@@ -3563,12 +3568,14 @@ static b32 host_canvas(string_address address_to arguments, positive count)
 #define NL80211_ATTR_WPA_VERSIONS 75
 #define NL80211_ATTR_AKM_SUITES 76
 #define NL80211_ATTR_REQ_IE 77
+#define NL80211_ATTR_REKEY_DATA 122
 #define NL80211_ATTR_EXT_FEATURES 217
 #define NL80211_ATTR_PMK 254
 
 #define NL80211_IFTYPE_ADHOC 1
 #define NL80211_IFTYPE_STATION 2
 #define NL80211_IFTYPE_P2P_CLIENT 8
+#define NLA_F_NESTED 0x8000
 #define NL80211_AUTHTYPE_OPEN 0
 #define NL80211_WPA_VERSION_2 2
 #define NL80211_KEYTYPE_GROUP 0
@@ -4001,6 +4008,7 @@ static COLD bool wifi_kw_unwrap(p8 address_to kek, p8 address_to wrap, positive 
         positive round;
         positive i;
         p64 t;
+        bool unwrapped;
 
         if (length < 24 || (length & 7) || length > WIFI_WRAP_MOST)
                 return false;
@@ -4020,14 +4028,18 @@ static COLD bool wifi_kw_unwrap(p8 address_to kek, p8 address_to wrap, positive 
                         memory_copy(r + (i - 1) * 8, block + 8, 8);
                 }
 
-        if (crypto_be64(a) != 0xa6a6a6a6a6a6a6a6ull)
-                return false;
-        memory_copy(plain, r, words * 8);
-        address_to plain_length = words * 8;
+        //      The check value, and the unwrapped key data forgotten here
+        //      whether it held or not.
+        unwrapped = crypto_be64(a) == 0xa6a6a6a6a6a6a6a6ull;
+        if (unwrapped)
+        {
+                memory_copy(plain, r, words * 8);
+                address_to plain_length = words * 8;
+        }
         crypto_forget(block, sizeof(block));
         crypto_forget(a, sizeof(a));
         crypto_forget(r, sizeof(r));
-        return true;
+        return unwrapped;
 }
 
 static COLD fn wifi_ptk(p8 address_to pmk, p8 address_to ap, p8 address_to sta,
@@ -4250,203 +4262,596 @@ static COLD bipolar nl80211_eapol_open(p32 index)
         return handle;
 }
 
-static COLD fn wifi_eapol_mic(p8 address_to kck, p8 address_to frame, positive length)
+/*
+        The joined link's keys, and one EAPOL-Key state machine that serves
+        both the join's four-way handshake and every rekey the access point
+        starts after it: a new four-way handshake for the pairwise key, or
+        the two-message group key handshake. Nothing answered those once the
+        join returned, so the access point gave up and sent the machine away
+        with reason 15 or 16 -- on one network, forty minutes in.
+*/
+#define WIFI_KEY_PAIRWISE 0x0008
+#define WIFI_KEY_INSTALL 0x0040
+#define WIFI_KEY_ACK 0x0080
+#define WIFI_KEY_MIC 0x0100
+#define WIFI_KEY_SECURE 0x0200
+#define WIFI_KEY_REQUEST 0x0800
+#define WIFI_KEY_ENCRYPTED 0x1000
+#define WIFI_KEEP_CHECK_SECONDS 30
+#define WIFI_NETLINK_DROP_MEMBERSHIP 2
+
+typedef struct
 {
-        p8 hash[20];
-        p8 saved[16];
-
-        memory_copy(saved, frame + 81, 16);
-        memory_fill(frame + 81, 0, 16);
-        wifi_hmac_sha1(kck, 16, frame, length, hash);
-        memory_copy(frame + 81, hash, 16);
-        crypto_forget(hash, sizeof(hash));
-        crypto_forget(saved, sizeof(saved));
-}
-
-static COLD bipolar wifi_eapol_send(b32 handle, p32 index, p8 address_to bssid,
-                               p8 address_to frame, positive length)
-{
-        socket_address_packet to = {.family = AF_PACKET,
-                                    .protocol = network_order_16(ETH_P_PAE),
-                                    .index = index,
-                                    .halen = 6};
-
-        memory_copy(to.addr, bssid, 6);
-        return socket_send(handle, frame, length, 0, address_of to, sizeof(to)) ==
-                       (bipolar)length
-                   ? 0
-                   : -1;
-}
-
-static COLD bipolar wifi_handshake(nl80211 address_to session, p32 index, b32 eapol,
-                              p8 address_to sta, p8 address_to bssid,
-                              p8 address_to pmk)
-{
+        nl80211 session;
+        p32 index;
+        b32 eapol;
+        p8 sta[6];
+        p8 bssid[6];
+        p8 pmk[32];
         p8 snonce[32];
         p8 anonce[32];
         p8 ptk[64];
-        p8 gtk[32];
-        p8 rsc[8];
-        p8 frame[512];
+        p8 pending[64];
+        p8 gtk[4][16];
         p8 replay[8];
-        socket_address_packet from;
-        network_deadline deadline;
-        positive gtk_length = 0;
-        p8 gtk_idx = 1;
-        bool have_anonce = false;
-        bipolar got;
+        p8 answered;
+        bool replay_set;
+        bool installed;
+        bool pending_set;
+        bool nonce_used;
+} wifi_link;
 
-        if (system_random_fill(snonce, sizeof(snonce), 0) < 0)
-                return -1;
-        if (!network_deadline_begin(address_of deadline, WIFI_EAPOL_SECONDS, 0))
+static COLD fn wifi_link_close(wifi_link address_to link)
+{
+        if (link->eapol >= 0)
+                socket_close(link->eapol);
+        nl80211_close(address_of link->session);
+        crypto_forget(link, sizeof(*link));
+        link->eapol = -1;
+        link->session.handle = -1;
+}
+
+/* A well-formed RSN EAPOL-Key frame's length, taken from its own body
+   length and never past what arrived; 0 for anything else. */
+static COLD positive wifi_eapol_length(p8 address_to frame, positive got)
+{
+        positive length;
+
+        if (got < WIFI_EAPOL_HDR || frame[1] != 3 || frame[4] != 2)
+                return 0;
+        length = 4 + (positive)network_load_16(frame + 2);
+        if (length < WIFI_EAPOL_HDR || length > got ||
+            network_load_16(frame + 97) > length - WIFI_EAPOL_HDR)
+                return 0;
+        return length;
+}
+
+/* HMAC-SHA1-128 over the frame with its MIC field zero: written into the
+   frame, or compared in constant time with the MIC it carries, which is
+   left in place so that another key can be tried. */
+static COLD bool wifi_eapol_mic(p8 address_to kck, p8 address_to frame, positive length,
+                                bool check)
+{
+        p8 hash[20];
+        p8 carried[16];
+        bool same;
+
+        memory_copy(carried, frame + 81, 16);
+        memory_fill(frame + 81, 0, 16);
+        wifi_hmac_sha1(kck, 16, frame, length, hash);
+        same = crypto_same(carried, hash, 16);
+        memory_copy(frame + 81, check ? carried : hash, 16);
+        crypto_forget(hash, sizeof(hash));
+        return same;
+}
+
+/* A key frame to the access point: its key information, the replay
+   counter it answers, the SNonce and RSN element for message 2, and its
+   MIC under kck. The key length is 0, as wpa_supplicant sends for RSN. */
+static COLD bipolar wifi_eapol_reply(wifi_link address_to link, p8 address_to kck,
+                                     p16 info, p8 address_to replay, bool nonce)
+{
+        p8 frame[WIFI_EAPOL_HDR + sizeof(wifi_rsn_ie)];
+        positive length = WIFI_EAPOL_HDR + (nonce ? sizeof(wifi_rsn_ie) : 0);
+        socket_address_packet to = {.family = AF_PACKET,
+                                    .protocol = network_order_16(ETH_P_PAE),
+                                    .index = link->index,
+                                    .halen = 6};
+        bipolar sent;
+
+        memory_fill(frame, 0, sizeof(frame));
+        frame[0] = 1;
+        frame[1] = 3;
+        network_store_16(frame + 2, (p16)(length - 4));
+        frame[4] = 2;
+        network_store_16(frame + 5, info);
+        memory_copy(frame + 9, replay, 8);
+        if (nonce)
         {
-                crypto_forget(snonce, sizeof(snonce));
-                return -1;
+                memory_copy(frame + 17, link->snonce, 32);
+                network_store_16(frame + 97, (p16)sizeof(wifi_rsn_ie));
+                memory_copy(frame + 99, wifi_rsn_ie, sizeof(wifi_rsn_ie));
         }
-
-        while (network_wait_readable_until(eapol, address_of deadline) > 0)
-        {
-                p32 from_length = sizeof(from);
-                p16 info;
-                positive length;
-                positive data_length;
-                p8 address_to data;
-
-                memory_fill(address_of from, 0, sizeof(from));
-                got = socket_receive(eapol, frame, sizeof(frame), 0, address_of from,
-                                     address_of from_length);
-                if (got < WIFI_EAPOL_HDR)
-                        continue;
-                length = (positive)got;
-                if (frame[1] != 3 || frame[4] != 2)
-                        continue;
-                info = network_load_16(frame + 5);
-                if ((info & 7) != 2 || !(info & 8))
-                        continue;
-                if (!(info & 0x80))
-                        continue;
-
-                if (!(info & 0x100))
-                {
-                        memory_copy(anonce, frame + 17, 32);
-                        memory_copy(replay, frame + 9, 8);
-                        have_anonce = true;
-                        wifi_ptk(pmk, bssid, sta, anonce, snonce, ptk);
-                        memory_fill(frame, 0, WIFI_EAPOL_HDR + sizeof(wifi_rsn_ie));
-                        frame[0] = 1;
-                        frame[1] = 3;
-                        network_store_16(frame + 2, (p16)(95 + sizeof(wifi_rsn_ie)));
-                        frame[4] = 2;
-                        network_store_16(frame + 5, 0x010a);
-                        network_store_16(frame + 7, 16);
-                        memory_copy(frame + 9, replay, 8);
-                        memory_copy(frame + 17, snonce, 32);
-                        network_store_16(frame + 97, (p16)sizeof(wifi_rsn_ie));
-                        memory_copy(frame + 99, wifi_rsn_ie, sizeof(wifi_rsn_ie));
-                        wifi_eapol_mic(ptk, frame, WIFI_EAPOL_HDR + sizeof(wifi_rsn_ie));
-                        wifi_eapol_send(eapol, index, bssid, frame,
-                                        WIFI_EAPOL_HDR + sizeof(wifi_rsn_ie));
-                        continue;
-                }
-
-                if (!have_anonce || !(info & 0x1000))
-                        continue;
-
-                data_length = network_load_16(frame + 97);
-                if (WIFI_EAPOL_HDR + data_length > length)
-                        continue;
-                {
-                        p8 mic[16];
-                        p8 check[20];
-
-                        memory_copy(mic, frame + 81, 16);
-                        memory_fill(frame + 81, 0, 16);
-                        wifi_hmac_sha1(ptk, 16, frame, WIFI_EAPOL_HDR + data_length,
-                                       check);
-                        if (!crypto_same(mic, check, 16))
-                        {
-                                crypto_forget(check, sizeof(check));
-                                continue;
-                        }
-                        crypto_forget(check, sizeof(check));
-                }
-
-                data = frame + 99;
-                if (data_length >= WIFI_GTK_WRAP)
-                {
-                        p8 unwrapped[WIFI_WRAP_MOST];
-                        positive plain = 0;
-                        positive at = 0;
-
-                        if (!wifi_kw_unwrap(ptk + 16, data, data_length, unwrapped,
-                                            address_of plain) &&
-                            !(data_length >= 8 + WIFI_GTK_WRAP &&
-                              wifi_kw_unwrap(ptk + 16, data + 8, data_length - 8,
-                                             unwrapped, address_of plain)))
-                                plain = 0;
-
-                        while (at + 2 <= plain)
-                        {
-                                p8 tag = unwrapped[at];
-                                p8 room = unwrapped[at + 1];
-
-                                if (at + 2 + room > plain)
-                                        break;
-                                if (tag == 0xdd && room >= 8 &&
-                                    unwrapped[at + 2] == 0 &&
-                                    unwrapped[at + 3] == 0x0f &&
-                                    unwrapped[at + 4] == 0xac &&
-                                    unwrapped[at + 5] == 1)
-                                {
-                                        gtk_idx = (p8)(unwrapped[at + 6] & 3);
-                                        gtk_length = room - 6;
-                                        if (gtk_length > sizeof(gtk))
-                                                gtk_length = sizeof(gtk);
-                                        memory_copy(gtk, unwrapped + at + 8, gtk_length);
-                                        break;
-                                }
-                                at += 2 + room;
-                        }
-                        crypto_forget(unwrapped, sizeof(unwrapped));
-                }
-
-                memory_copy(replay, frame + 9, 8);
-                memory_copy(rsc, frame + 65, 8);
-                memory_fill(frame, 0, WIFI_EAPOL_HDR);
-                frame[0] = 1;
-                frame[1] = 3;
-                network_store_16(frame + 2, 95);
-                frame[4] = 2;
-                network_store_16(frame + 5, 0x030a);
-                network_store_16(frame + 7, 16);
-                memory_copy(frame + 9, replay, 8);
-                wifi_eapol_mic(ptk, frame, WIFI_EAPOL_HDR);
-                if (wifi_eapol_send(eapol, index, bssid, frame, WIFI_EAPOL_HDR) < 0)
-                        break;
-                got = nl80211_new_key(session, index, 0, NL80211_KEYTYPE_PAIRWISE,
-                                      bssid, ptk + 32, 16, null, 0, false);
-                if (!got && gtk_length >= 16 && gtk_idx)
-                        got = nl80211_new_key(session, index, gtk_idx,
-                                              NL80211_KEYTYPE_GROUP, null, gtk, 16,
-                                              rsc, 6, true);
-                if (!got)
-                        nl80211_authorize(session, index, bssid);
-                crypto_forget(snonce, sizeof(snonce));
-                crypto_forget(anonce, sizeof(anonce));
-                crypto_forget(ptk, sizeof(ptk));
-                crypto_forget(gtk, sizeof(gtk));
-                crypto_forget(rsc, sizeof(rsc));
-                crypto_forget(frame, sizeof(frame));
-                return got;
-        }
-
-        crypto_forget(snonce, sizeof(snonce));
-        crypto_forget(anonce, sizeof(anonce));
-        crypto_forget(ptk, sizeof(ptk));
-        crypto_forget(gtk, sizeof(gtk));
-        crypto_forget(rsc, sizeof(rsc));
+        wifi_eapol_mic(kck, frame, length, false);
+        memory_copy(to.addr, link->bssid, 6);
+        sent = socket_send(link->eapol, frame, length, 0, address_of to, sizeof(to));
         crypto_forget(frame, sizeof(frame));
-        return -110;
+        return sent == (bipolar)length ? 0 : -1;
+}
+
+/* The GTK out of key data wrapped under the KEK: 1 with it, 0 when the
+   data unwraps and holds none, -1 when it does not unwrap. */
+static COLD bipolar wifi_gtk_take(p8 address_to kek, p8 address_to data, positive length,
+                                  p8 address_to gtk, p8 address_to idx)
+{
+        p8 plain[WIFI_WRAP_MOST];
+        positive size = 0;
+        bipolar found = 0;
+
+        if (!wifi_kw_unwrap(kek, data, length, plain, address_of size))
+                return -1;
+        for (positive at = 0; at + 2 <= size;)
+        {
+                p8 room = plain[at + 1];
+
+                if (room > size - at - 2)
+                        break;
+                //      The GTK KDE: 00-0F-AC:1, the key id, a reserved
+                //      byte, then a CCMP key of sixteen bytes.
+                if (plain[at] == 0xdd && room == 6 + 16 && plain[at + 2] == 0 &&
+                    plain[at + 3] == 0x0f && plain[at + 4] == 0xac &&
+                    plain[at + 5] == 1 && (plain[at + 6] & 3))
+                {
+                        address_to idx = (p8)(plain[at + 6] & 3);
+                        memory_copy(gtk, plain + at + 8, 16);
+                        found = 1;
+                        break;
+                }
+                at += 2 + room;
+        }
+        crypto_forget(plain, sizeof(plain));
+        return found;
+}
+
+/* The replay counter and keys for a driver that answers group rekeys by
+   itself while the machine sleeps. Most drivers do not, and nothing here
+   depends on it: the keeper answers every rekey it is awake for. */
+static COLD fn wifi_rekey_offload(wifi_link address_to link)
+{
+        netlink_buffer request = {0};
+        p32 sequence = netlink_sequence_take();
+        p8 nested[3 * 4 + 16 + 16 + 8];
+
+        netlink_attribute address_to kek = (netlink_attribute address_to)nested;
+        netlink_attribute address_to kck = (netlink_attribute address_to)(nested + 20);
+        netlink_attribute address_to replay = (netlink_attribute address_to)(nested + 40);
+
+        kek->length = 20;
+        kek->type = 1;
+        memory_copy(nested + 4, link->ptk + 16, 16);
+        kck->length = 20;
+        kck->type = 2;
+        memory_copy(nested + 24, link->ptk, 16);
+        replay->length = 12;
+        replay->type = 3;
+        memory_copy(nested + 44, link->replay, 8);
+        if (nl80211_begin(address_of request, link->session.family,
+                          NL80211_CMD_SET_REKEY_OFFLOAD, NLM_REQUEST | NLM_ACK, sequence))
+        {
+                nl80211_attribute_u32(address_of request, NL80211_ATTR_IFINDEX,
+                                      link->index);
+                netlink_attribute_add(address_of request,
+                                      NL80211_ATTR_REKEY_DATA | NLA_F_NESTED, nested,
+                                      sizeof(nested));
+                netlink_transact(link->session.handle, address_of request, sequence,
+                                 null, null);
+        }
+        crypto_forget(nested, sizeof(nested));
+}
+
+/*
+        One EAPOL-Key frame from the access point: 1 when a four-way
+        handshake completes, 2 when a group key handshake does, 0 for a
+        frame answered or ignored, negative when a key would not go in.
+
+        These frames arrive unencrypted from anyone in range, even with the
+        keys in. So nothing is taken from a frame whose replay counter is not
+        past the last one whose MIC checked. Message 1 has no MIC and only
+        makes a pending PTK, which replaces the installed one once a message
+        3 carrying the same ANonce checks under it. A key already in is not
+        put in again when a message is resent: that reinstallation is the
+        one KRACK used to reset the nonces.
+*/
+static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to frame,
+                                    positive got)
+{
+        positive length = wifi_eapol_length(frame, got);
+        p16 info = length ? network_load_16(frame + 5) : 0;
+        bool pairwise = (info & WIFI_KEY_PAIRWISE) != 0;
+        bool fresh = false;
+        p8 address_to kck = null;
+        p8 gtk[16];
+        p8 idx = 0;
+        bipolar found;
+        bipolar failed = 0;
+
+        if (!length || (info & 7) != 2 || !(info & WIFI_KEY_ACK) ||
+            (info & WIFI_KEY_REQUEST) ||
+            (link->replay_set && memory_compare(frame + 9, link->replay, 8) <= 0))
+                return 0;
+
+        if (!(info & WIFI_KEY_MIC))
+        {
+                if (!pairwise)
+                        return 0;
+                if (!link->nonce_used &&
+                    system_random_fill(link->snonce, sizeof(link->snonce), 0) < 0)
+                        return -1;
+                link->nonce_used = true;
+                memory_copy(link->anonce, frame + 17, 32);
+                wifi_ptk(link->pmk, link->bssid, link->sta, link->anonce, link->snonce,
+                         link->pending);
+                link->pending_set = true;
+                if (link->answered < 255)
+                        link->answered++;
+                wifi_eapol_reply(link, link->pending, 0x010a, frame + 9, true);
+                return 0;
+        }
+
+        if (!(info & WIFI_KEY_ENCRYPTED))
+                return 0;
+        if (!pairwise)
+        {
+                if (link->installed && (info & WIFI_KEY_SECURE) &&
+                    wifi_eapol_mic(link->ptk, frame, length, true))
+                        kck = link->ptk;
+        }
+        else if (info & WIFI_KEY_INSTALL)
+        {
+                //      The pending key for a new handshake's message 3; the
+                //      installed one for a message 3 resent after it.
+                fresh = link->pending_set && !memory_compare(frame + 17, link->anonce, 32) &&
+                        wifi_eapol_mic(link->pending, frame, length, true);
+                if (fresh)
+                        kck = link->pending;
+                else if (link->installed && wifi_eapol_mic(link->ptk, frame, length, true))
+                        kck = link->ptk;
+        }
+        if (!kck)
+                return 0;
+
+        found = wifi_gtk_take(kck + 16, frame + 99, network_load_16(frame + 97), gtk,
+                              address_of idx);
+        if (found < 0 || (!pairwise && !found))
+        {
+                crypto_forget(gtk, sizeof(gtk));
+                return 0;
+        }
+        memory_copy(link->replay, frame + 9, 8);
+        link->replay_set = true;
+
+        failed = wifi_eapol_reply(link, kck, pairwise ? 0x030a : 0x0302, link->replay,
+                                  false);
+        if (!failed && fresh && (!link->installed || memory_compare(link->ptk + 32,
+                                                                    kck + 32, 16)))
+                failed = nl80211_new_key(address_of link->session, link->index, 0,
+                                         NL80211_KEYTYPE_PAIRWISE, link->bssid, kck + 32,
+                                         16, null, 0, false);
+        if (!failed && fresh)
+        {
+                memory_copy(link->ptk, link->pending, sizeof(link->ptk));
+                link->pending_set = false;
+                link->nonce_used = false;
+                crypto_forget(link->pending, sizeof(link->pending));
+        }
+        //      A message 3 resent for a handshake already done is answered
+        //      and nothing more: held back and let through after a group
+        //      rekey, it carries a group key the access point has moved on
+        //      from, and putting that in again would reset its replay
+        //      counter. Each key id also keeps its own last key.
+        if (!failed && found && (fresh || !pairwise) &&
+            memory_compare(gtk, link->gtk[idx], 16))
+        {
+                failed = nl80211_new_key(address_of link->session, link->index, idx,
+                                         NL80211_KEYTYPE_GROUP, null, gtk, 16, frame + 65,
+                                         6, true);
+                if (!failed)
+                        memory_copy(link->gtk[idx], gtk, 16);
+        }
+        crypto_forget(gtk, sizeof(gtk));
+        if (!failed && pairwise && !link->installed)
+                failed = nl80211_authorize(address_of link->session, link->index,
+                                           link->bssid);
+        if (failed)
+                return failed;
+        link->installed = true;
+        wifi_rekey_offload(link);
+        return pairwise ? 1 : 2;
+}
+
+/* The link's news on the mlme socket: the 802.11 reason it went, 0 while
+   it stands, -1 when the socket lost events and the link has to be asked
+   after. Every interface's news comes here; only this one's counts. */
+static COLD b32 nl80211_link_news(nl80211 address_to session, p32 index)
+{
+        netlink_buffer reply = {0};
+        p32 local_port = 0;
+        positive at = 0;
+        b32 reason = 0;
+        bipolar got = netlink_receive(session->handle, address_of reply,
+                                      address_of local_port);
+
+        if (got < 0)
+        {
+                netlink_forget(address_of reply);
+                return got == NETWORK_INTERRUPTED ? 0 : -1;
+        }
+        while (!reason && at + NETLINK_HEADER <= reply.used)
+        {
+                netlink_header address_to header = (netlink_header address_to)(reply.bytes + at);
+                p8 address_to body = (p8 address_to)header + NETLINK_HEADER;
+                positive size = 0;
+                p8 address_to frame;
+
+                if (header->length < NETLINK_HEADER || header->length > reply.used - at)
+                        break;
+                at += netlink_align(header->length);
+                if (header->type != session->family ||
+                    header->length < NETLINK_HEADER + GENL_HEADER ||
+                    nl80211_find_u32(header, NL80211_ATTR_IFINDEX, 0) != index)
+                        continue;
+                if (body[0] == NL80211_CMD_DISCONNECT)
+                        reason = nl80211_find_u16(header, NL80211_ATTR_REASON_CODE, 1);
+                else if (body[0] == NL80211_CMD_DEAUTHENTICATE ||
+                         body[0] == NL80211_CMD_DISASSOCIATE)
+                {
+                        //      The frame itself: its reason follows the
+                        //      24-byte management header.
+                        frame = (p8 address_to)netlink_find(header, GENL_HEADER,
+                                                            NL80211_ATTR_FRAME,
+                                                            address_of size);
+                        reason = frame && size >= 26 ? frame[24] | frame[25] << 8 : 1;
+                        reason = reason ? reason : 1;
+                }
+        }
+        netlink_forget(address_of reply);
+        return reason;
+}
+
+/* The link's EAPOL socket and its mlme news, waited on together until the
+   deadline: bit 1 when a frame is waiting, bit 2 news, 0 at the deadline. */
+static COLD bipolar wifi_wait(wifi_link address_to link,
+                              const network_deadline address_to deadline)
+{
+        for (;;)
+        {
+                system_poll_descriptor waited[2] = {
+                    {link->eapol, SYSTEM_POLL_READ, 0},
+                    {link->session.handle, SYSTEM_POLL_READ, 0}};
+                positive seconds;
+                positive nanoseconds;
+                timespec limit;
+                bipolar ready;
+
+                if (!network_deadline_left(deadline, address_of seconds,
+                                           address_of nanoseconds))
+                        return 0;
+                limit.tv_sec = (b64)seconds;
+                limit.tv_nsec = (b64)nanoseconds;
+                ready = system_poll_wait(waited, 2, address_of limit, null);
+                if (ready == NETWORK_INTERRUPTED)
+                        continue;
+                if (ready <= 0)
+                        return ready;
+                if ((waited[0].returned | waited[1].returned) & SYSTEM_POLL_INVALID)
+                        return -9;
+                return (waited[0].returned ? 1 : 0) | (waited[1].returned ? 2 : 0);
+        }
+}
+
+/* One frame off the EAPOL socket, through the state machine. */
+static COLD bipolar wifi_eapol_take(wifi_link address_to link)
+{
+        p8 frame[512];
+        bipolar got = socket_receive(link->eapol, frame, sizeof(frame), MSG_DONTWAIT, null,
+                                     null);
+        bipolar step = got > 0 ? wifi_eapol_step(link, frame, (positive)got) : 0;
+
+        crypto_forget(frame, sizeof(frame));
+        return step;
+}
+
+/*
+        The join's four-way handshake, and what it says when it does not
+        finish. It used to wait eight seconds on the EAPOL socket alone and
+        call every failure a wrong password; now the access point sending
+        the machine away ends it at once, and how far it got says why:
+
+          no message 1 at all          -62  did not begin the handshake
+          message 1 answered, then
+            the access point asked
+            again                      -13  did not accept the password
+            sent the machine away    -1000-R ended the handshake (reason R)
+            nothing                   -121  stopped answering in the handshake
+
+        A message 1 resent after message 2 is the access point finding no
+        MIC it could make in it: a password it does not have.
+*/
+static COLD bipolar wifi_handshake(wifi_link address_to link)
+{
+        network_deadline deadline;
+        b32 reason = 0;
+        bipolar step = 0;
+
+        if (!network_deadline_begin(address_of deadline, WIFI_EAPOL_SECONDS, 0))
+                return -1;
+        while (step != 1 && step >= 0 && reason <= 0)
+        {
+                bipolar ready = wifi_wait(link, address_of deadline);
+
+                if (ready <= 0)
+                        break;
+                if (ready & 2)
+                        reason = nl80211_link_news(address_of link->session, link->index);
+                if (ready & 1)
+                        step = wifi_eapol_take(link);
+        }
+        if (step == 1)
+                return 0;
+        if (step < 0)
+                return step;
+        if (link->answered >= 2)
+                return -13;
+        if (reason > 0)
+                return -(1000 + (bipolar)reason);
+        return link->answered ? -121 : -62;
+}
+
+/*
+        The keeper: the link's keys, held past the join for as long as the
+        link stands, in a process of its own with nothing else open. It
+        answers the access point's rekeys and ends when the link goes, and
+        the machine's next pass joins again. One at a time: it holds a write
+        lock on wifi.keeper, and F_GETLK names it to whatever joins or
+        leaves next, which ends it and waits until it is gone.
+*/
+#define RADIO_KEEPER_PATH NET_STATE_DIR "/wifi.keeper"
+#define RADIO_FILE_GET_LOCK 5
+#define RADIO_FILE_SET_LOCK 6
+#define RADIO_FILE_SET_LOCK_WAIT 7
+#define RADIO_FILE_WRITE_LOCK 1
+#define RADIO_FILE_UNLOCKED 2
+
+typedef struct
+{
+        b16 type;
+        b16 whence;
+        b64 start;
+        b64 length;
+        b32 pid;
+        b32 pad;
+} radio_file_lock;
+
+static COLD bipolar radio_keeper_open(void)
+{
+        host_state_ready();
+        return system_open_at_mode(AT_FDCWD, RADIO_KEEPER_PATH,
+                                   FILE_READ_WRITE | FILE_CREATE | O_NOFOLLOW | O_CLOEXEC,
+                                   0600);
+}
+
+static COLD fn radio_keeper_stop(void)
+{
+        radio_file_lock lock = {.type = RADIO_FILE_WRITE_LOCK};
+        bipolar handle = radio_keeper_open();
+
+        if (handle < 0)
+                return;
+        if (system_call_3(syscall(fcntl), (positive)handle, RADIO_FILE_GET_LOCK,
+                          (positive)address_of lock) >= 0 &&
+            lock.type != RADIO_FILE_UNLOCKED && lock.pid > 0)
+        {
+                system_call_2(syscall(kill), (positive)lock.pid, SIGKILL);
+                lock.type = RADIO_FILE_WRITE_LOCK;
+                lock.pid = 0;
+                while (system_call_3(syscall(fcntl), (positive)handle,
+                                     RADIO_FILE_SET_LOCK_WAIT,
+                                     (positive)address_of lock) == -4)
+                        ;
+        }
+        system_close(handle);
+}
+
+static COLD fn wifi_keep(wifi_link address_to link)
+{
+        for (;;)
+        {
+                network_deadline check;
+                bipolar ready;
+                p8 now[6];
+
+                if (!network_deadline_begin(address_of check, WIFI_KEEP_CHECK_SECONDS, 0))
+                        return;
+                ready = wifi_wait(link, address_of check);
+                if (ready < 0)
+                        return;
+                if (ready & 2)
+                {
+                        b32 news = nl80211_link_news(address_of link->session,
+                                                     link->index);
+
+                        if (news > 0 ||
+                            (news < 0 && !nl80211_station(address_of link->session,
+                                                          link->index, now)))
+                                break;
+                }
+                if (ready & 1)
+                        wifi_eapol_take(link);
+                if (!ready && (!nl80211_station(address_of link->session, link->index, now) ||
+                               memory_compare(now, link->bssid, 6)))
+                        break;
+        }
+}
+
+/* The joined link, from the join until its keeper takes it or it is let go. */
+static wifi_link radio_joined = {.session = {.handle = -1}, .eapol = -1};
+
+/* The keeper for the link just joined, if it has keys to keep, started
+   once the joining process has said what it has to and forgotten the
+   passwords it read. Forked twice, so that init reaps it and not the
+   machine process, which waits only for its own join. */
+static COLD fn radio_keeper_start(void)
+{
+        wifi_link address_to link = address_of radio_joined;
+        radio_file_lock lock = {.type = RADIO_FILE_WRITE_LOCK};
+        positive low = link->eapol < link->session.handle ? (positive)link->eapol
+                                                          : (positive)link->session.handle;
+        positive high = link->eapol < link->session.handle ? (positive)link->session.handle
+                                                           : (positive)link->eapol;
+        positive status = 0;
+        bipolar quiet;
+        bipolar handle;
+        bipolar child = link->eapol >= 3 && link->session.handle >= 3 ? system_fork() : -1;
+
+        if (child)
+        {
+                if (child > 0)
+                        system_call_4(syscall(wait4), (positive)child,
+                                      (positive)address_of status, 0, 0);
+                wifi_link_close(link);
+                return;
+        }
+        if (system_fork())
+                system_call_1(syscall(exit_group), 0);
+
+        //      Its own session, and nothing of the joining process open: not
+        //      its terminal or pipes, which would never see an end, not the
+        //      radio lock, which would never come free, and none of the
+        //      machine process's descriptors either.
+        system_call(syscall(setsid));
+        quiet = system_open_at(AT_FDCWD, "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
+        for (positive at = 0; quiet >= 0 && at < 3; at++)
+                if ((positive)quiet != at)
+                        system_call_3(syscall(dup3), (positive)quiet, at, 0);
+        if (low > 3)
+                system_call_3(syscall(close_range), 3, low - 1, 0);
+        if (high > low + 1)
+                system_call_3(syscall(close_range), low + 1, high - 1, 0);
+        system_call_3(syscall(close_range), high + 1, ~(p32)0, 0);
+        //      The join's scan news is nothing to the keeper, which would
+        //      wake for every scan anyone asked for.
+        if (link->session.scan)
+                socket_option_set(link->session.handle, SOL_NETLINK,
+                                  WIFI_NETLINK_DROP_MEMBERSHIP,
+                                  address_of link->session.scan,
+                                  sizeof(link->session.scan));
+
+        handle = radio_keeper_open();
+        if (handle >= 0 && system_call_3(syscall(fcntl), (positive)handle,
+                                         RADIO_FILE_SET_LOCK, (positive)address_of lock) >= 0)
+                wifi_keep(link);
+        wifi_link_close(link);
+        system_call_1(syscall(exit_group), 0);
 }
 
 static COLD bool wifi_link_mac(string_address name, p8 address_to mac)
@@ -4674,31 +5079,38 @@ static COLD bool nl80211_associated(void)
         return up;
 }
 
-static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 address_to pmk)
+static COLD bool wifi_mac_set(p8 address_to mac)
 {
-        nl80211 session;
+        return (mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]) != 0;
+}
+
+/*
+        A join, into link: on success with a four-way handshake of its own,
+        the link keeps its sockets and keys for the keeper; otherwise they
+        are let go.
+*/
+static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 address_to pmk,
+                                 wifi_link address_to link)
+{
         nl80211_iface iface;
         bipolar route;
         bipolar failed;
-        bipolar eapol = -1;
-        p8 bssid[6];
-        p8 sta[6];
-        bool offload = false;
-        bool shook = false;
         bipolar sequence;
+        bool offload = false;
 
-        memory_fill(bssid, 0, 6);
-        memory_fill(sta, 0, 6);
-        failed = nl80211_open(address_of session);
-        if (failed < 0)
-                return failed;
-
-        failed = nl80211_interface(address_of session, address_of iface);
+        wifi_link_close(link);
+        //      Whatever keeps the last link's keys goes first: its EAPOL
+        //      socket would hear this join's message 1 as a rekey.
+        radio_keeper_stop();
+        failed = nl80211_open(address_of link->session);
+        if (!failed)
+                failed = nl80211_interface(address_of link->session, address_of iface);
         if (failed < 0)
         {
-                nl80211_close(address_of session);
+                wifi_link_close(link);
                 return failed;
         }
+        link->index = iface.index;
 
         route = netlink_open_groups(0);
         if (route >= 0)
@@ -4708,94 +5120,56 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
         }
 
         if (iface.has_mac)
-                memory_copy(sta, iface.mac, 6);
+                memory_copy(link->sta, iface.mac, 6);
         else
-                wifi_link_mac((string_address)iface.name, sta);
+                wifi_link_mac((string_address)iface.name, link->sta);
 
         if (pmk)
-                offload = nl80211_psk_offload(address_of session, iface.wiphy);
-
-        if (pmk && !offload)
         {
-                eapol = nl80211_eapol_open(iface.index);
-                if (eapol < 0)
-                {
-                        nl80211_close(address_of session);
-                        return eapol;
-                }
+                memory_copy(link->pmk, pmk, 32);
+                offload = nl80211_psk_offload(address_of link->session, iface.wiphy);
         }
 
-        nl80211_disconnect(address_of session, iface.index);
-
-        sequence = nl80211_connect(address_of session, iface.index, ssid,
-                                   ssid_length, pmk, offload);
-        if (sequence < 0)
+        //      The driver's own four-way handshake first where it has one;
+        //      if that fails, once more with this one.
+        for (;;)
         {
-                if (eapol >= 0)
-                        socket_close((b32)eapol);
-                nl80211_close(address_of session);
-                return sequence;
-        }
-
-        failed = nl80211_wait_associated(address_of session, (p32)sequence, iface.index,
-                                         bssid);
-        if (!failed && pmk && !offload)
-        {
-                if (!(bssid[0] | bssid[1] | bssid[2] | bssid[3] | bssid[4] |
-                      bssid[5]))
-                        nl80211_station(address_of session, iface.index, bssid);
-                if (!(sta[0] | sta[1] | sta[2] | sta[3] | sta[4] | sta[5]) ||
-                    !(bssid[0] | bssid[1] | bssid[2] | bssid[3] | bssid[4] |
-                      bssid[5]))
-                        failed = -1;
-                else
+                if (pmk && !offload && link->eapol < 0)
                 {
-                        shook = true;
-                        failed = wifi_handshake(address_of session, iface.index,
-                                                (b32)eapol, sta, bssid, pmk);
+                        failed = nl80211_eapol_open(iface.index);
+                        if (failed < 0)
+                                break;
+                        link->eapol = (b32)failed;
                 }
-        }
-        if (failed && pmk && offload)
-        {
-                nl80211_disconnect(address_of session, iface.index);
-                eapol = nl80211_eapol_open(iface.index);
-                if (eapol >= 0)
+                nl80211_disconnect(address_of link->session, iface.index);
+                memory_fill(link->bssid, 0, 6);
+                sequence = nl80211_connect(address_of link->session, iface.index, ssid,
+                                           ssid_length, pmk, offload);
+                failed = sequence < 0 ? sequence
+                                      : nl80211_wait_associated(address_of link->session,
+                                                                (p32)sequence, iface.index,
+                                                                link->bssid);
+                if (!failed && link->eapol >= 0)
                 {
-                        memory_fill(bssid, 0, 6);
-                        sequence = nl80211_connect(address_of session, iface.index,
-                                                   ssid, ssid_length, pmk, false);
-                        if (sequence >= 0)
-                        {
-                                failed = nl80211_wait_associated(
-                                    address_of session, (p32)sequence, iface.index,
-                                    bssid);
-                                if (!failed)
-                                {
-                                        if (!(bssid[0] | bssid[1] | bssid[2] |
-                                              bssid[3] | bssid[4] | bssid[5]))
-                                                nl80211_station(
-                                                    address_of session,
-                                                    iface.index, bssid);
-                                        shook = true;
-                                        failed = wifi_handshake(
-                                            address_of session, iface.index,
-                                            (b32)eapol, sta, bssid, pmk);
-                                }
-                        }
+                        if (!wifi_mac_set(link->bssid))
+                                nl80211_station(address_of link->session, iface.index,
+                                                link->bssid);
+                        failed = wifi_mac_set(link->sta) && wifi_mac_set(link->bssid)
+                                     ? wifi_handshake(link)
+                                     : -1;
                 }
+                if (!failed || !pmk || !offload)
+                        break;
+                offload = false;
         }
 
         if (failed)
-                nl80211_disconnect(address_of session, iface.index);
-        /* Associated, and the four-way handshake did not finish: the access
-           point heard a message 2 whose MIC its key did not make, which is a
-           password it does not have. */
-        if (failed && shook)
-                failed = -13;
-
-        if (eapol >= 0)
-                socket_close((b32)eapol);
-        nl80211_close(address_of session);
+        {
+                nl80211_disconnect(address_of link->session, iface.index);
+                wifi_link_close(link);
+        }
+        else if (link->eapol < 0)
+                wifi_link_close(link);
         return failed;
 }
 
@@ -6103,10 +6477,32 @@ static bool radio_security_joinable(p8 security)
 /* The reason a join gave, as the words that follow the network's name. */
 static string_address radio_join_words(bipolar failed)
 {
+        static p8 words[48];
+
+        if (failed <= -1000 && failed > -1000 - 65536)
+        {
+                p8 number[24];
+
+                bipolar_into_string(number, -1000 - failed);
+                radio_line(words, sizeof(words),
+                           (string_address) "ended the handshake (reason ", number,
+                           (string_address) ")", null, null);
+                return (string_address)words;
+        }
         return failed == -110   ? (string_address) "did not associate"
                : failed == -111 ? (string_address) "refused the join"
                : failed == -13  ? (string_address) "did not accept the password"
+               : failed == -62  ? (string_address) "did not begin the handshake"
+               : failed == -121 ? (string_address) "stopped answering in the handshake"
                                 : (string_address) "could not be joined";
+}
+
+/* A join's failure that is the network's doing, which radio_join_words
+   says, rather than the machine's. */
+static bool radio_join_said(bipolar failed)
+{
+        return failed == -110 || failed == -111 || failed == -13 || failed == -62 ||
+               failed == -121 || (failed <= -1000 && failed > -1000 - 65536);
 }
 
 /* The network the machine last failed to join and why, for bare wifi and
@@ -6267,7 +6663,7 @@ static bipolar radio_wifi_join(string_address ssid, string_address pass)
         for (;;)
         {
                 failed = nl80211_join((p8 address_to)ssid, ssid_length,
-                                      secured ? pmk : null);
+                                      secured ? pmk : null, address_of radio_joined);
                 if (failed != -19)
                         break;
                 if (system_clock_ns(HOST_CLOCK_BOOTTIME) - started >= 8000000000)
@@ -6289,6 +6685,7 @@ static bipolar radio_wifi_leave(void)
         if (failed < 0)
                 return failed;
 
+        radio_keeper_stop();
         failed = nl80211_interface(address_of session, address_of iface);
         if (!failed)
                 failed = nl80211_disconnect(address_of session, iface.index);
@@ -6360,7 +6757,7 @@ static b32 radio_wifi_bring(bool say)
                            : host_refuse("no wireless interface%s\n", "");
         }
         if (say)
-                return failed == -110 || failed == -111 || failed == -13
+                return radio_join_said(failed)
                            ? host_refuse("the network %s\n", radio_join_words(failed))
                            : host_fail("wifi", failed ? failed : -1);
         return 1;
@@ -6375,6 +6772,7 @@ static b32 radio_wifi_on(bool say)
                 return say ? host_fail("wifi", lock) : 1;
         result = radio_wifi_bring(say);
         radio_unlock(lock);
+        radio_keeper_start();
         return result;
 }
 
@@ -6500,7 +6898,7 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
                                    : host_refuse("saved, but there is no "
                                                  "wireless interface%s\n",
                                                  "");
-                if (failed == -110 || failed == -111 || failed == -13)
+                if (radio_join_said(failed))
                 {
                         radio_air air;
 
@@ -6846,6 +7244,7 @@ static fn radio_wifi_keep(void)
 
         radio_wifi_bring(false);
         radio_unlock(lock);
+        radio_keeper_start();
         system_call_1(syscall(exit), 0);
 }
 
@@ -6943,6 +7342,7 @@ static b32 host_radio(string_address address_to arguments, positive count)
                         }
                         result = radio_wifi_add(arguments[3], pass);
                         crypto_forget(pass, sizeof(pass));
+                        radio_keeper_start();
                         return result;
                 }
                 return host_usage();
