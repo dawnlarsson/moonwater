@@ -2485,6 +2485,8 @@ static PURE bool env_function_assignment(string_address entry)
                at[-1] == '%' && at[-2] == '%';
 }
 
+bool shell_directory_holds();
+
 fn shell_env_init(string_address address_to process_environment)
 {
         positive inherited = 0;
@@ -2643,13 +2645,23 @@ fn shell_env_init(string_address address_to process_environment)
                         string_copy_max_end(shell_directory,
                                             inherited_directory,
                                             SHELL_DIRECTORY_MAX - 1);
-                else
+                //      An inherited PWD is believed only while it names the
+                //      directory the shell started in, as bash and dash
+                //      check: a parent that changed directory without
+                //      telling the environment left $PWD a lie here.
+                if (!inherited_directory || !shell_directory_holds())
                 {
                         memory_copy(shell_directory - 4, "PWD=", 4);
                         shell_here(shell_directory, SHELL_DIRECTORY_MAX);
-                        env_borrow_assignment(shell_directory - 4, false);
+                        env_borrow_assignment(shell_directory - 4,
+                                              inherited_directory != null);
                 }
         }
+
+        //      bash starts with OLDPWD declared for export and no value, so
+        //      the first cd hands it to children; dash exports it from cd.
+        if (shell_bash_compat && !env_get("OLDPWD"))
+                env_export_mark("OLDPWD");
 }
 
 /*
@@ -5302,6 +5314,7 @@ bool shell_directory_moved(string_address logical)
            dash retains its historical short circuit. The directory has
            already changed in either case. */
         if ((env_assign("OLDPWD", shell_directory_was)
+            && (shell_bash_compat || env_export_mark("OLDPWD"))
             || string_report(log_error, false, env_readonly("OLDPWD")
                 ? "cd: %s: is read only\n"
                 : "cd: cannot assign %s\n", "OLDPWD")))
@@ -6707,6 +6720,17 @@ COLD fn shell_pwd(writer write, string_address input)
 
         if (!shell_here(out_buffer, sizeof(out_buffer)))
         {
+                //      The directory is gone from under the shell. Both
+                //      references still answer with the one they last
+                //      knew, as long as the logical form was asked for
+                //      and bash is not in posix mode, where it refuses.
+                if (!physical && string_is(shell_directory, '/') &&
+                    !shell_posix_on())
+                {
+                        string_format(write, "%s\n", shell_directory);
+                        return shell_answer(0);
+                }
+
                 log_error("pwd: cannot determine current directory\n", 0);
 
                 if (shell_bash_compat)
@@ -18196,6 +18220,17 @@ static bipolar shell_source_open(string_address name,
                 if (!path_walk_join(*found, *found_room, walk.segment,
                                     walk.length, name, ""))
                         continue;
+
+                //      A directory of the name is passed over, as a PATH
+                //      search for a command passes over one: the next
+                //      segment may hold the file.
+                {
+                        file_facts facts;
+
+                        if (test_facts(*found, address_of facts, true) &&
+                            (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                                continue;
+                }
 
                 handle = shell_source_direct(*found);
 
