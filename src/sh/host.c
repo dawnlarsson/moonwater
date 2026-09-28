@@ -168,6 +168,7 @@ static fn radio_recover(void);
 static b32 host_locale(string_address address_to arguments, positive count);
 static fn locale_restore(void);
 static fn locale_recover(void);
+static unsigned int locale_wake_ms(unsigned int most);
 static b32 host_wipe(void);
 
 static b32 host_refuse(string_address text, string_address name)
@@ -10011,6 +10012,32 @@ static fn locale_ntp_keep(void)
                                      ? LOCALE_NTP_EXIT_RATE
                                      : 1);
         }
+}
+
+/*
+        How long the machine loop may sleep before locale_ntp_keep must look
+        again, at most the loop's own wake. A query in flight is polled every
+        quarter second and a retry is woken for when it falls due: the first
+        ask of a boot can run before the lease (its DNS id waits on the same
+        entropy the DHCP transaction id does), and on the radio wake alone
+        that failed ask cost two three-second wakes before the retry went out.
+        Never 0, which the machine wait reads as not waiting at all; a retry
+        already past due (its fork failed) is looked at again in a quarter
+        second rather than in a spin.
+*/
+static unsigned int locale_wake_ms(unsigned int most)
+{
+        p64 now;
+        p64 due;
+
+        if (locale_ntp_child.pid > 0)
+                return most < 250 ? most : 250;
+        if (!locale_ntp_next || !locale_ntp_wanted())
+                return most;
+        now = system_clock_ns(HOST_CLOCK_BOOTTIME);
+        due = locale_ntp_next <= now ? 250
+                                     : (locale_ntp_next - now) / 1000000 + 1;
+        return due < most ? (unsigned int)due : most;
 }
 
 //      Daylight saving moves the offset twice a year without anyone setting

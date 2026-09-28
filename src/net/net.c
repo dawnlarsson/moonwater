@@ -9487,9 +9487,12 @@ static COLD bipolar dhcp_complete(bipolar handle, p8 address_to packet,
         on that same CSPRNG rather than drawing a guessable xid; if neither
         path can fill the transaction id, acquisition fails before I/O.
 
-        Three seconds to carrier, four to an address, when the pool is ready.
-        The second of those is qemu, not this. Early boot without entropy is
-        a failed lease, not a predictable one.
+        The wait is short now: the first blocking getrandom sets the kernel
+        generating entropy itself, and crng is ready about 0.85 s later. On
+        KVM with no RDRAND/RDSEED and no virtio-rng (kernel 7.2) the lease
+        came 0.6-0.95 s later than with GRND_INSECURE, and never failed;
+        with RDRAND or virtio-rng the pool is ready before DHCP asks and
+        nothing waits.
 */
 static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                         dhcp_lease address_to lease)
