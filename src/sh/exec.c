@@ -10442,6 +10442,8 @@ static bool exec_control_number(string_address word, bool allow_zero,
         return true;
 }
 
+//      The status a return with no operand gives inside a trap action: the
+//      one the interrupted command left, not the action's own last.
 static b32 exec_trap_status;
 
 static COLD fn exec_return_bash()
@@ -10822,8 +10824,6 @@ static b32 exec_dispatch(b32 command_word)
         status the interrupted command answered with, and a return or a break
         inside one belongs to the action and not to the loop it landed in.
 */
-/* exec_trap_status: the status a return with no operand gives inside a trap
-   action, the one the interrupted command left, not the action's own last. */
 fn exec_traps()
 {
         b32 kept_status = shell_status;
