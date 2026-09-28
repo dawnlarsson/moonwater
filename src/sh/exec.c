@@ -8356,9 +8356,9 @@ static string_address exec_source_intern(string_address name)
 
         length = string_length(name);
         if (length == positive_max ||
-            !shell_array_room(made, made_room, length + 1) ||
             !shell_array_room(exec_source_names, exec_source_names_room,
-                              exec_source_name_count + 1))
+                              exec_source_name_count + 1) ||
+            !shell_array_room(made, made_room, length + 1))
                 return shell_script_name;
 
         memory_copy_end(made, name, length);
@@ -8368,28 +8368,47 @@ static string_address exec_source_intern(string_address name)
 
 static COLD fn exec_frames_forget();
 
-// `.` and source: a frame named source for the file being read.
-fn exec_frames_source_enter(string_address path)
+/*
+        A frame for a function or a sourced file, on the line of the command
+        that made the call, and the frame taken down again. FUNCNAME,
+        BASH_SOURCE and BASH_LINENO are made only when something reads them,
+        and made inside the callee they name it: they go at either end, to
+        be made again for the frame then standing. A frame the table had no
+        room for is not pushed, and its caller does not pop one.
+*/
+static inline INLINE bool exec_frame_push(string_address name,
+                                          string_address source)
 {
         if (!shell_array_room(exec_frames, exec_frame_room,
                               exec_frame_count + 1))
-                return;
+                return false;
         exec_frames[exec_frame_count].line = (positive)exec_line;
-        exec_frames[exec_frame_count].name = (string_address) "source";
-        exec_frames[exec_frame_count++].source = exec_source_intern(path);
+        exec_frames[exec_frame_count].source = source;
+        exec_frames[exec_frame_count++].name = name;
+        exec_frames_published = false;
+        if (exec_frames_standing)
+                exec_frames_forget();
+        return true;
+}
+
+static inline INLINE fn exec_frame_pop()
+{
+        exec_frame_count--;
         exec_frames_published = false;
         if (exec_frames_standing)
                 exec_frames_forget();
 }
 
+// `.` and source: a frame named source for the file being read.
+bool exec_frames_source_enter(string_address path)
+{
+        return exec_frame_push((string_address) "source",
+                               exec_source_intern(path));
+}
+
 fn exec_frames_source_leave()
 {
-        if (!exec_frame_count)
-                return;
-        exec_frame_count--;
-        exec_frames_published = false;
-        if (exec_frames_standing)
-                exec_frames_forget();
+        exec_frame_pop();
 }
 
 static COLD fn exec_frames_forget()
@@ -8704,6 +8723,7 @@ static b32 exec_call(positive slot)
         shell_getopts_state saved_getopts;
         bool saved_replaced = shell_parameters_replaced;
         bool held_parameters;
+        bool framed;
 
         if (shell_dash_compat)
                 saved_getopts = shell_getopts_save();
@@ -8771,23 +8791,8 @@ static b32 exec_call(positive slot)
         exec_functions[slot].active++;
         parse_kept_bodies[body].references++;
 
-        if (shell_array_room(exec_frames, exec_frame_room,
-                             exec_frame_count + 1))
-        {
-                // Where the call was written, which is the line of the
-                // command making it and not the line the reader is on.
-                exec_frames[exec_frame_count].line = (positive)exec_line;
-                exec_frames[exec_frame_count].source =
-                    exec_function_source(slot);
-                exec_frames[exec_frame_count++].name =
-                    exec_functions[slot].name;
-                exec_frames_published = false;
-                // Arrays made for the caller answer a plain lookup, which
-                // does not ask again; take them down so this frame's are
-                // made when read.
-                if (exec_frames_standing)
-                        exec_frames_forget();
-        }
+        framed = exec_frame_push(exec_functions[slot].name,
+                                 exec_function_source(slot));
 
         //      Under set -T bash raises DEBUG once more as the body begins,
         //      for the call it is still reading, on the function's own line.
@@ -8814,19 +8819,8 @@ static b32 exec_call(positive slot)
                 exec_trap_condition(TRAP_RETURN);
         }
 
-        if (exec_frame_count)
-        {
-                exec_frame_count--;
-                exec_frames_published = false;
-
-                // The three only exist while a function does, and they were
-                // only ever made if something read them. Made inside the
-                // callee they name it, and $FUNCNAME in the caller read
-                // inner after inner had returned; they go, to be made again
-                // for this frame when read.
-                if (exec_frames_standing)
-                        exec_frames_forget();
-        }
+        if (framed)
+                exec_frame_pop();
 
         exec_functions[slot].active--;
         parse_release(body);

@@ -1164,7 +1164,7 @@ static bool exec_control_integer(string_address word, bipolar address_to answer)
 bool test_facts(string_address path, file_facts address_to out, bool follow);
 bool word_is(string_address word, string_address text);
 fn hash_forget();
-fn exec_frames_source_enter(string_address path);
+bool exec_frames_source_enter(string_address path);
 fn exec_frames_source_leave();
 bool shell_here(p8 address_to into, positive room);
 
@@ -19383,9 +19383,10 @@ COLD fn shell_dot(writer write, string_address input)
                         shell_syntax_command = named;
 
                 shell_dot_depth++;
-                exec_frames_source_enter(named);
+                bool framed = exec_frames_source_enter(named);
                 syntax = shell_source_execute(source_text, filled, false);
-                exec_frames_source_leave();
+                if (framed)
+                        exec_frames_source_leave();
                 shell_dot_depth--;
 
                 shell_syntax_file = saved_file;
