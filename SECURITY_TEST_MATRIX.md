@@ -8,7 +8,7 @@
 | Certificate path semantics | generated chains against OpenSSL | `python3 test/differential.py --harness tls_chains` |
 | HTTPS→HTTP redirect downgrade | TLS loopback 302 Location shapes under wget manners (9 checks: plain/`http://` sticky+nested, authority-only; uppercase/`//` stay HTTPS; credentialed/`http:///` refuse without silent fetch; no Refresh/meta path) | `python3 test/differential.py --harness https_downgrade` |
 | HTTP response framing (chunked, TE/CL, headers, trailers) | written MUST_ACCEPT/MUST_REFUSE matrix (54 cases / 136 checks); http.client as second oracle with named deliberate disagreements | `python3 test/differential.py --harness http_response_framing` |
-| Uninitialized wire / ABI padding (MSan) | pad proves (wire + nlattr-shaped) + hosted lifts (`dns_copy_name`, TLS record header, HTTP header/chunk, `dhcp_walk`, `netlink_find_span`, TLS ext/cert without fuzzer) on initialized hostile buffers with per-surface uninit catches + thin CHECK_net-equivalent probes + TLS DER/HS seed smoke under MemorySanitizer; not full CHECK_net; NOT RUN without clang MSan; not CI push | `sh test/msan_net` |
+| Uninitialized wire / ABI padding (MSan) | pad proves (wire + nlattr-shaped) + hosted lifts (`dns_copy_name`, TLS record header, HTTP header/chunk, `dhcp_walk`, `netlink_find_span`, TLS ext/cert without fuzzer) on initialized hostile buffers with per-surface uninit catches + thin CHECK_net-equivalent probes + TLS DER/HS seed smoke under MemorySanitizer; not full CHECK_net; NOT RUN without clang MSan; not CI push | `sh test/run msan` |
 | SNTP nonce, ancillary timestamps, timing arithmetic, server selection | machine checks | `sh test/run machine` |
 | Shell parsing, expansion, environment, status and effects | generated Bash/Dash comparison | `sh test/run shell builtins` |
 | File traversal, symlink and replacement behavior | effect-based coreutils differential | `sh test/run files` |
@@ -18,23 +18,24 @@
 | Waterlink replay, seal and lossy delivery (separate review scope) | pure transform and namespace integration | `sh test/run waterlink link` |
 | Whole available suite | all locally supported lanes | `sh test/run` |
 | TLS DER / handshake fuzz (lane smoke) | bounded libFuzzer ASan/UBSan; soft NOT RUN without clang fuzzer | `sh test/run net` (via `tls_der_fuzz` / `tls_hs_fuzz`, 20k/5s) |
-| TLS net fuzz continuous (local) | same harnesses; longer budget | `sh test/fuzz_net` (`MOONWATER_FUZZ_*`) |
-| TLS net fuzz deeper campaign (local) | same harnesses; bounded deeper-than-smoke | `sh test/fuzz_campaign` (200k/120s + report; see `test/fuzz_corpus/README.md`) |
-| Release fuzz attach | machine-readable sanitizer + corpus inventory + run exits | `sh test/fuzz_net --report` → `artifacts/fuzz-report.txt` |
-| Security test hygiene (procedural) | literal `check()` names in CHECK_net; no tracked corpus `*.bin`; harness wiring; soft-skip lanes; seed generator | `python3 test/security_hygiene.py` (also at start of `lane_net` / `lane_tar`) |
+| TLS net fuzz continuous (local) | same harnesses plus `tls_verify_fuzz`; longer budget | `sh test/run fuzz` (`MOONWATER_FUZZ_*`) |
+| TLS net fuzz deeper campaign (local) | same harnesses; bounded deeper-than-smoke | `MOONWATER_FUZZ_SECONDS=120 MOONWATER_FUZZ_RUNS=200000 MOONWATER_FUZZ_REPORT=artifacts/fuzz-campaign-report.txt sh test/run fuzz` |
+| Release fuzz attach | machine-readable sanitizer + corpus inventory + run exits | `MOONWATER_FUZZ_REPORT=artifacts/fuzz-report.txt sh test/run fuzz` |
+| Security test hygiene (procedural) | harness registration and wiring; soft-skip lanes; seed tables and no seed files in the tree; verify-lift proves; framing matrix consistency | `python3 test/differential.py --harness security_hygiene` (also at start of `lane_net` / `lane_tar`) |
 
 ## Fuzz corpora and release publish
 
-Seed bytes are hex in `test/fuzz_corpus/generate_seeds.py` (do not commit
-`*.bin`). Harnesses materialize gitignored working copies under:
+Seed bytes come from `tls_fuzz_seeds` in `test/differential.py` (hex
+fixtures plus built shapes). Each run writes them into its own temporary
+corpus directory; no seed file lives in the tree.
 
-| Corpus | Path (generated) | Harness | What it exercises |
+| Corpus | Seeds | Harness | What it exercises |
 | --- | --- | --- | --- |
-| DER / Certificate list | `test/fuzz_corpus/tls_der/` | `tls_der_fuzz` | `tls_parse_extensions` / `tls_parse_cert` / certificate-list framing; EKU/SAN/BC/KU value lanes; names_chain + leaf/issuer policy; magic prefixes C1–C9 |
-| DER verify + sig | `test/fuzz_corpus/tls_der/` (same) | `tls_verify_fuzz` | `tls_verify_chain` parse/policy/names walker plus production `tls_verify_one` (hosted C montgomery + SHA); WR2→GTS prove in `LLVMFuzzerInitialize`; **not** lane_net smoke (hand / `fuzz_net`) |
-| Handshake fragmentation | `test/fuzz_corpus/tls_hs/` | `tls_hs_fuzz` | `tls_handshake_one_append` / `tls_encrypted_flight_append` |
+| DER / Certificate list | `tls_der` | `tls_der_fuzz` | `tls_parse_extensions` / `tls_parse_cert` / certificate-list framing; EKU/SAN/BC/KU value lanes; names_chain + leaf/issuer policy; magic prefixes C1–C9 |
+| DER verify + sig | `tls_der` (same) | `tls_verify_fuzz` | `tls_verify_chain` parse/policy/names walker plus production `tls_verify_one` (hosted C montgomery + SHA); WR2→GTS prove in `LLVMFuzzerInitialize`; **not** lane_net smoke (hand / `sh test/run fuzz`) |
+| Handshake fragmentation | `tls_hs` | `tls_hs_fuzz` | `tls_handshake_one_append` / `tls_encrypted_flight_append` |
 
-Seed counts are whatever the generator writes; `sh test/fuzz_net --report`
+Seed counts are whatever `tls_fuzz_seeds` returns; the fuzz lane's report
 records them.
 **lane_net** leaves `MOONWATER_FUZZ_*` unset (20 000 runs / 5 s smoke). Harnesses
 print `N seeds, libFuzzer ASan/UBSan (-runs=… -max_total_time=…) clean` on
@@ -44,27 +45,23 @@ They do not emit LLVM source-line coverage; `-print_final_stats=0`.
 **Deeper local campaign (manual, no CI; does not change lane_net smoke):**
 
 ```sh
-MOONWATER_FUZZ_SECONDS=120 MOONWATER_FUZZ_RUNS=200000 sh test/fuzz_net --report
-# equivalent helper (writes artifacts/fuzz-campaign-report.txt by default):
-sh test/fuzz_campaign
+MOONWATER_FUZZ_SECONDS=120 MOONWATER_FUZZ_RUNS=200000 \
+MOONWATER_FUZZ_REPORT=artifacts/fuzz-campaign-report.txt sh test/run fuzz
 ```
 
 Budget is deeper than the 20k/5s lane smoke and shorter than the default
-one-hour continuous `sh test/fuzz_net`. Reports under `artifacts/` are
-gitignored — keep `generate_seeds.py` + this recipe; do not check in `*.bin`
-or large campaign dumps. Seed notes: `test/fuzz_corpus/README.md`.
+one-hour continuous `sh test/run fuzz`. Reports under `artifacts/` are
+gitignored; do not check in large campaign dumps.
 
 **Release attach (manual, no CI automation):**
 
-1. `sh test/fuzz_net --report` — smoke budget unless `MOONWATER_FUZZ_RUNS` /
-   `MOONWATER_FUZZ_SECONDS` already set; longer: e.g.
-   `MOONWATER_FUZZ_SECONDS=3600 sh test/fuzz_net --report` (or the deeper
-   campaign above / `sh test/fuzz_campaign`).
+1. `MOONWATER_FUZZ_REPORT=artifacts/fuzz-report.txt sh test/run fuzz` — smoke
+   budget unless `MOONWATER_FUZZ_RUNS` / `MOONWATER_FUZZ_SECONDS` already
+   set; longer: e.g. `MOONWATER_FUZZ_SECONDS=3600` (or the deeper campaign
+   above).
 2. Attach `artifacts/fuzz-report.txt` (JSON: clang version, seed counts,
-   budget, per-target duration/exit, `overall_exit`) and
-   `test/fuzz_corpus/generate_seeds.py` (or a tarball of materialized
-   seeds after `python3 test/fuzz_corpus/generate_seeds.py` — never commit
-   those `.bin` files).
+   budget, per-target duration/exit, `overall_exit`, and the commit whose
+   `tls_fuzz_seeds` made the seeds).
 3. `overall_exit` 0 = both clean; 1 = sanitizer/fail; 2 = NOT RUN on this
    host (still publish the report — it records the toolchain gap).
 
