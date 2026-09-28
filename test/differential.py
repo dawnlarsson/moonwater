@@ -19798,6 +19798,9 @@ _TEXT_LONG_RECORD_ROWS = {
     "uniq": ((), ("-c",), ("-f1",)),
     "join": (("-", "a.txt"),),
     "comm": (("-", "a.txt"),),
+    #   Pattern, hold and work spaces as long as the line or what N and H
+    #   gather: no store stops at a megabyte.
+    "sed": (("p",), ("s/a/b/g",), ("N;s/\\n/+/",), ("H;$!d;x;s/\\n/,/g",), ("y/a/c/",), ("-n", "$p")),
 }
 #       GNU's own fmt runs away under -c and -t on a word longer than its
 #       buffer (it fills the file-size limit), so those two are asked only of

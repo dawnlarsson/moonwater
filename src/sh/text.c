@@ -963,6 +963,12 @@ static bool text_reader_spill(text_reader address_to reader, p8 delimiter,
                                bool address_to ended, string_address about)
 {
         positive used = address_to length;
+        //      Every shared store holds TEXT_LINE_MAX, so only a record past
+        //      that asks whether its store can grow; a store of the caller's
+        //      own holds what its room says.
+        positive capacity = own && own->bytes == storage && own->room
+                                ? own->room - 1
+                                : TEXT_LINE_MAX;
 
         text_spill_moved = null;
         if (!text_reader_fill(reader))
@@ -975,9 +981,7 @@ static bool text_reader_spill(text_reader address_to reader, p8 delimiter,
                 p8 address_to found = memory_first_of(at, delimiter, left);
                 positive take = found ? (positive)(found - at) : left;
 
-                //      Every store holds TEXT_LINE_MAX, so only a record
-                //      past that asks whether its store can grow.
-                if (unlikely(used + take > TEXT_LINE_MAX))
+                if (unlikely(used + take > capacity))
                 {
                         if (!text_spill_room(address_of storage, used, used + take, own))
                         {
@@ -992,6 +996,8 @@ static bool text_reader_spill(text_reader address_to reader, p8 delimiter,
                         }
 
                         text_spill_moved = storage;
+                        if (own && own->bytes == storage)
+                                capacity = own->room - 1;
                 }
 
                 memory_copy(storage + used, at, take);
@@ -25746,19 +25752,23 @@ static bool sed_broken;
 static b32 sed_broken_status = 1;
 
 /* The three stores keep their distinct roles by pointer. Exchange and a
-   completed substitution publish a store; neither copies a whole line back. */
-static p8 (address_to sed_buffers_held)[3][TEXT_LINE_MAX];
-#define sed_buffers (*sed_buffers_held)  // held by text_sed as it starts
+   completed substitution publish a store; neither copies a whole line back.
+   Each store grows as its space needs, as GNU sed's do: a line, a pattern
+   space N has gathered or a hold space H has, is as long as it is, where
+   the stores were a megabyte each and "line too long" past it. */
+static byte_store sed_stores[3];
 typedef struct
 {
         p8 address_to bytes;
         positive length;
         bool ended;
+        byte_store address_to store;
 } sed_buffer;
-// Pointed at the buffers by text_sed before anything reads them.
-static sed_buffer sed_pattern = {null, 0, true};
-static sed_buffer sed_holding = {null, 0, true};
-static p8 address_to sed_work;
+// Pointed at the stores by text_sed before anything reads them.
+static sed_buffer sed_pattern = {null, 0, true, null};
+static sed_buffer sed_holding = {null, 0, true, null};
+static byte_store address_to sed_work_store;
+#define sed_work (sed_work_store->bytes)
 static positive sed_number;
 static bool sed_quiet;
 static bool sed_last;
@@ -25960,16 +25970,15 @@ static fn sed_write_diagnostic(bipolar reason, positive buffer)
         string_diagnostic(&text_diagnostic, 0, (string_address)said, file_reason(reason));
 }
 
-static text_reader (address_to sed_readers_held)[SED_FILES_MAX];
-#define sed_readers (*sed_readers_held)  // held by text_sed as it starts
+// Each R file's reader, taken the first time R reads that file.
+static text_reader address_to sed_readers[SED_FILES_MAX];
 static b32 sed_reader_names[SED_FILES_MAX];
 static bool sed_reader_open[SED_FILES_MAX];
 static b32 sed_reader_count;
 static p8 sed_line_scratch[TEXT_PATH_MAX];
 
 // What R appends is a whole line of its file, as long as any line may be.
-static p8 (address_to sed_reader_line_held)[TEXT_LINE_MAX];
-#define sed_reader_line (*sed_reader_line_held)  // held by text_sed as it starts
+static byte_store sed_reader_line;
 
 // Where w or R keeps a name: found among the names before it, or added.
 static b32 sed_name_of(b32 address_to names, b32 address_to count,
@@ -25996,10 +26005,21 @@ static b32 sed_name_of(b32 address_to names, b32 address_to count,
 // The next line of what R names, appended where the cycle's output stands.
 static fn sed_put_reader_line(b32 which)
 {
-        text_reader address_to reader = sed_readers + which;
+        text_reader address_to reader = sed_readers[which];
 
         if (!sed_reader_open[which])
         {
+                if (!reader)
+                {
+                        reader = (text_reader address_to)memory_take(sizeof(text_reader));
+                        if (!reader)
+                        {
+                                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                                exit(text_done(4));
+                        }
+                        sed_readers[which] = reader;
+                }
+
                 bool quiet = text_quiet_open;
 
                 sed_reader_open[which] = true;
@@ -26025,7 +26045,15 @@ static fn sed_put_reader_line(b32 which)
         positive length = 0;
         bool ended = false;
 
-        bool spilled = text_reader_spill(reader, '\n', sed_reader_line, null,
+        if (!sed_reader_line.bytes &&
+            !byte_store_reserve(address_of sed_reader_line, 4096, 4096))
+        {
+                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                exit(text_done(4));
+        }
+
+        bool spilled = text_reader_spill(reader, '\n', sed_reader_line.bytes,
+                                         address_of sed_reader_line,
                                          address_of length, address_of ended, null);
 
         text_quiet_read = false;
@@ -26035,7 +26063,7 @@ static fn sed_put_reader_line(b32 which)
 
         sed_output_start();
         sed_stdio(length + 1);
-        text_put(sed_reader_line, length);
+        text_put(sed_reader_line.bytes, length);
         text_put_character('\n');
 }
 
@@ -26057,16 +26085,25 @@ static bool sed_space_full;
 
 static bool sed_work_byte(positive address_to have, p8 value);
 
-static bool sed_space_fits(positive have, positive more)
+static bool sed_store_fits(byte_store address_to store, positive have, positive more)
 {
-        if (have <= TEXT_LINE_MAX && more <= TEXT_LINE_MAX - have)
+        if (more < positive_max - 1 - have &&
+            (have + more < store->room ||
+             byte_store_reserve(store, have + more + 1, (positive)1 << 16)))
                 return true;
 
         if (!sed_space_full)
-                string_diagnostic(&text_diagnostic, 0, null, "pattern space too large");
+                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
 
         sed_space_full = true;
         return false;
+}
+
+// Room in the work store, where a substitution is built.
+static inline INLINE bool sed_space_fits(positive have, positive more)
+{
+        return likely(have + more < sed_work_store->room) ||
+               sed_store_fits(sed_work_store, have, more);
 }
 
 static bool sed_work_byte(positive address_to have, p8 value)
@@ -26136,8 +26173,9 @@ static bool sed_transfer(sed_buffer address_to into,
                          const sed_buffer address_to from, bool append)
 {
         positive start = append ? into->length + 1 : 0;
-        if (!sed_space_fits(start, from->length))
+        if (!sed_store_fits(into->store, start, from->length))
                 return false;
+        into->bytes = into->store->bytes;
         if (append)
                 into->bytes[start - 1] = text_delimiter;
         memory_copy_apart(into->bytes + start, from->bytes, from->length);
@@ -27423,9 +27461,10 @@ static bool sed_substitute(sed_command address_to command)
                 have += sed_pattern.length - at;
         }
 
-        p8 address_to previous = sed_pattern.bytes;
-        sed_pattern.bytes = sed_work;
-        sed_work = previous;
+        byte_store address_to previous = sed_pattern.store;
+        sed_pattern.store = sed_work_store;
+        sed_pattern.bytes = sed_work_store->bytes;
+        sed_work_store = previous;
         sed_pattern.length = have;
         return true;
 }
@@ -27612,20 +27651,37 @@ publish:
         return false;
 }
 
+// The next line into the pattern space's own store, grown to hold it.
+static bool sed_line_next()
+{
+        byte_store address_to store = sed_pattern.store;
+
+        text_line_length = 0;
+        text_line_ended = false;
+
+        bool have = text_reader_spill(address_of text_input, text_delimiter,
+                                      store->bytes, store,
+                                      address_of text_line_length,
+                                      address_of text_line_ended, null);
+
+        sed_pattern.bytes = store->bytes;
+        if (text_input.failed)
+                text_status = text_status ? text_status : 1;
+        return have;
+}
+
 static b32 text_sed()
 {
         //      Held here, and ended here without them as GNU's xalloc_die
         //      ends: a way out of this function is one the compiler splits
         //      its hot loop away from.
-        if (!sed_buffers_held)
-                utility_held_now((address_any address_to)&sed_buffers_held,
-                                 sizeof(sed_buffers));
-        if (!sed_readers_held)
-                utility_held_now((address_any address_to)&sed_readers_held,
-                                 sizeof(sed_readers));
-        if (!sed_reader_line_held)
-                utility_held_now((address_any address_to)&sed_reader_line_held,
-                                 sizeof(sed_reader_line));
+        for (positive s = 0; s < array_count(sed_stores); s++)
+                if (!sed_stores[s].bytes &&
+                    !byte_store_reserve(address_of sed_stores[s], 4096, 4096))
+                {
+                        string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                        return 4;
+                }
         b32 leaving = -1;
         file_taking taking = {
             .program = (string_address) "sed",
@@ -27668,9 +27724,9 @@ static b32 text_sed()
         sed_in_place = null;
         sed_number = 0;
         sed_output_state = SED_OUTPUT_MODELLING;
-        sed_pattern = (sed_buffer){sed_buffers[0], 0, true};
-        sed_holding = (sed_buffer){sed_buffers[2], 0, true};
-        sed_work = sed_buffers[1];
+        sed_pattern = (sed_buffer){sed_stores[0].bytes, 0, true, sed_stores + 0};
+        sed_holding = (sed_buffer){sed_stores[2].bytes, 0, true, sed_stores + 2};
+        sed_work_store = sed_stores + 1;
 
         if (!file_take(address_of taking))
                 return text_done(sed_option_status);
@@ -27911,7 +27967,7 @@ static b32 text_sed()
                                         sed_commands[c].active = true;
                 }
 
-                while (text_line_next(sed_pattern.bytes, 0))
+                while (sed_line_next())
                 {
                         sed_pattern.length = text_line_length;
                         sed_pattern.ended = text_line_ended;
@@ -28209,9 +28265,9 @@ cycle_done:
                                 sed_io_failed = true;
 
         for (b32 c = 0; c < sed_reader_count; c++)
-                if (sed_reader_open[c])
-                        text_close_handle(address_of sed_readers[c].opened,
-                                          sed_readers[c].handle);
+                if (sed_reader_open[c] && sed_readers[c])
+                        text_close_handle(address_of sed_readers[c]->opened,
+                                          sed_readers[c]->handle);
 
         if (sed_io_failed)
                 return text_done(string_diagnostic(&text_diagnostic, 4, null, "write error"));
