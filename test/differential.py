@@ -7574,7 +7574,10 @@ FILES_UTILITIES = (
             #       and answers 1, -f takes the word away and leaves the
             #       answer, and the pool walk said nothing and answered 0.
             extra=(("-R", "a-w", "shut"), ("-fR", "a-w", "shut"),
-                   ("-R", "a-w", "dir/../shut")) + files_mode_word_cases()),
+                   ("-R", "a-w", "dir/../shut"),
+                   #   A class copied from is all that follows its operator.
+                   ("u+gr", "a.txt"), ("u+rg", "a.txt"), ("g=u", "a.txt"), ("o=g,u-x", "a.txt"), ("go+u-w", "a.txt"))
+            + files_mode_word_cases()),
     Utility("ln", options=(Option("-s"), Option("-f"), Option("-i"), Option("-n"), Option("-r"), Option("-v"),
                            Option("-T"), Option("-L"), Option("-P"), Option("-b"), Option("-d"), Option("-F"),
                            Option("--directory"), Option("--symbolic"),

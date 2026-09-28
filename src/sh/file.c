@@ -558,11 +558,25 @@ static bool file_mode_clauses(string_address specification, positive current,
                                 break;
                         }
 
+                        string_address letters = step;
+
                         while (string_get(step) && !string_is(step, ',') &&
                                !string_is(step, '+') && !string_is(step, '-') &&
                                !string_is(step, '='))
                         {
                                 p8 letter = string_get(step);
+
+                                /* A class copied from -- u, g or o -- is the
+                                   whole of what follows its operator, as
+                                   gnulib's grammar has it: u+gr and u+rg
+                                   are not modes. */
+                                if ((letter == 'u' || letter == 'g' ||
+                                     letter == 'o') &&
+                                    (step != letters ||
+                                     (step[1] && step[1] != ',' &&
+                                      step[1] != '+' && step[1] != '-' &&
+                                      step[1] != '=')))
+                                        return false;
 
                                 if (letter == 'r')
                                         bits |= 00444;
