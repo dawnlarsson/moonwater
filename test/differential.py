@@ -35013,7 +35013,9 @@ def harness_dhcp_packets(argv):
     well formed has to give the lease a model of the options the generator
     wrote says it gives -- every piece of a code joined in wire order,
     options then file then sname, as RFC 2131 and 3396 read it -- and every
-    reply has to be read without the sanitizers saying a word.
+    reply has to be read without the sanitizers saying a word. Well formed
+    includes the framing RFC 2131 and 2132 ask for: the options field and
+    each field option 52 names end in END, and option 52 is one byte.
 
         dhcp_packets [COUNT [SEED]]
     """
@@ -35046,6 +35048,13 @@ typedef int b32;
 #define memory_compare memcmp
 #define memory_zero(at, size) memset(at, 0, size)
 #define null 0
+static positive memory_span_byte(const void *block, p8 byte, positive size) {
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[i] == byte)
+                i++;
+        return i;
+}
 static p32 network_load_32(const p8 *at) {
         return (p32)at[0] << 24 | (p32)at[1] << 16 | (p32)at[2] << 8 | at[3];
 }
@@ -35160,6 +35169,7 @@ int main(int argc, char **argv) {
                 p32 model[8] = {0};
                 p8 kind = 0, overload = 0;
                 bool broken = false, ended = false, spare_ended = false;
+                bool file_ended = false, sname_ended = false;
                 memset(build, 0, sizeof build);
                 memset(&said_pieces, 0, sizeof said_pieces);
                 typed = false;
@@ -35175,10 +35185,18 @@ int main(int argc, char **argv) {
                    do; only when it does may they be read as options. */
                 if (draw(2)) {
                         positive end_file = fill(build, 108, 236, 1, &overload, &spare_ended);
-                        if (!spare_ended && end_file < 236 && draw(2)) build[end_file] = DHCP_OPTION_END;
+                        if (!spare_ended && end_file < 236 && draw(2)) {
+                                build[end_file] = DHCP_OPTION_END;
+                                spare_ended = true;
+                        }
+                        file_ended = spare_ended;
                         spare_ended = false;
                         positive end_sname = fill(build, 44, 108, 2, &overload, &spare_ended);
-                        if (!spare_ended && end_sname < 108 && draw(2)) build[end_sname] = DHCP_OPTION_END;
+                        if (!spare_ended && end_sname < 108 && draw(2)) {
+                                build[end_sname] = DHCP_OPTION_END;
+                                spare_ended = true;
+                        }
+                        sname_ended = spare_ended;
                 }
                 /* An option whose length runs past its field, now and then. */
                 if (overload & 1 && !draw(40)) { build[234] = 3; build[235] = 9; broken = true; }
@@ -35222,7 +35240,13 @@ int main(int argc, char **argv) {
                                 model[offsets[which]] = network_load_32(first[code]);
                 }
                 bool mask_ok = dhcp_mask_valid(model[1]);
-                bool want = kind && mask_ok;
+                /* Every field read ends in END (the rest is PAD, which the
+                   zeroed build gives), and 52 of any other length than one
+                   is a malformed control, not a field left unread. */
+                bool framed = ended && overload < 4 &&
+                              (!read_region[1] || file_ended) &&
+                              (!read_region[2] || sname_ended);
+                bool want = kind && mask_ok && framed;
                 p32 got[8];
                 memcpy(got, &lease, sizeof got);
                 if ((answer == 0) != want ||
@@ -37688,17 +37712,28 @@ def tls_fuzz_run(label, corpus, source, max_len):
         work = Path(temporary)
         unit = work / (name + ".c")
         binary = work / name
-        unit.write_text(source)
-        built = subprocess.run(
-            [clang, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
-             "-fno-sanitize-recover=all", sanitize,
-             str(unit), "-o", str(binary)],
-            capture_output=True, text=True)
-        if built.returncode:
+        flags = [clang, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
+                 "-fno-sanitize-recover=all", sanitize]
+        # A toolchain without libFuzzer is NOT RUN; the lift itself failing
+        # to build (a moved net.c slice anchor, say) is a failure, never a
+        # soft skip.
+        probe = work / "probe.c"
+        probe.write_text("int LLVMFuzzerTestOneInput(const unsigned char *d, "
+                         "unsigned long n) { (void)d; (void)n; return 0; }\n")
+        if subprocess.run(flags + [str(probe), "-o", str(work / "probe")],
+                          capture_output=True, text=True).returncode:
             need = "fuzzer,memory" if moonwater_msan_requested() else "fuzzer"
             print("%s fuzz: NOT RUN -- clang lacks libFuzzer "
-                  "(need -fsanitize=%s):\n" % (label, need) + built.stderr[-2000:])
+                  "(need -fsanitize=%s)" % (label, need))
             return 2
+        unit.write_text(source)
+        built = subprocess.run(flags + [str(unit), "-o", str(binary)],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print("  FAIL %s fuzz lift does not build:\n" % label +
+                  built.stderr[-2000:])
+            write_tally(name.replace("_", "-"), 0, 1)
+            return 1
         seeds = tls_fuzz_write_seeds(corpus, work / "corpus")
         ran = subprocess.run(
             [str(binary), str(work / "corpus"),
@@ -38940,7 +38975,7 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
         (void)argv;
         if (!fuzz_prove_wr2_gts())
         {
-                fprintf(stderr, "tls_verify_fuzz: WR2/GTS tls_verify_one prove failed\\n");
+                fprintf(stderr, "tls_verify_fuzz: WR2/GTS tls_verify_one prove failed\n");
                 exit(1);
         }
         return 0;
@@ -39137,8 +39172,9 @@ def harness_msan_net(argv):
 
     def msan_expect_clean(ran, label, err=None):
         if ran is None:
-            print("msan net: NOT RUN -- cannot link %s:\n" % label +
+            print("  FAIL msan net: cannot link %s:\n" % label +
                   (err or "")[-2000:])
+            checks(False, label)
             return False
         if ran.stderr:
             print(ran.stderr, end="" if ran.stderr.endswith("\n") else "\n")
@@ -39213,6 +39249,14 @@ static positive memory_span_without_byte(const void *block, p8 byte,
         const p8 *at = block;
         positive i = 0;
         while (i < size && at[i] != byte)
+                i++;
+        return i;
+}
+static positive memory_span_byte(const void *block, p8 byte, positive size)
+{
+        const p8 *at = block;
+        positive i = 0;
+        while (i < size && at[i] == byte)
                 i++;
         return i;
 }
@@ -39378,17 +39422,17 @@ int main(void)
         work = Path(temporary)
         ran, err = msan_build_run(work, "pad_prove", pad_source)
         if ran is None:
-            print("msan net: NOT RUN -- cannot link MSan probe:\n" +
+            print("  FAIL msan net: cannot link MSan probe:\n" +
                   (err or "")[-2000:])
-            return 2
+            return 1
         msan_expect_fire(
             ran, "intentional ABI wire-header padding is visible to MSan")
 
         ran, err = msan_build_run(work, "nlattr_pad", nlattr_pad_source)
         if ran is None:
-            print("msan net: NOT RUN -- cannot link nlattr pad probe:\n" +
+            print("  FAIL msan net: cannot link nlattr pad probe:\n" +
                   (err or "")[-2000:])
-            return 2
+            return 1
         msan_expect_fire(
             ran,
             "intentional netlink-attr-shaped ABI padding is visible to MSan")
@@ -39666,9 +39710,9 @@ int main(void)
         work = Path(temporary)
         ran, err = msan_build_run(work, "http_clean", http_clean_source)
         if ran is None:
-            print("msan net: NOT RUN -- cannot link HTTP framing lift:\n" +
+            print("  FAIL msan net: cannot link HTTP framing lift:\n" +
                   (err or "")[-2000:])
-            return 2
+            return 1
         msan_expect_clean(
             ran,
             "HTTP header/chunk framing clean under MSan "
@@ -39676,9 +39720,9 @@ int main(void)
             err)
         ran, err = msan_build_run(work, "http_uninit", http_uninit_source)
         if ran is None:
-            print("msan net: NOT RUN -- cannot link HTTP uninit probe:\n" +
+            print("  FAIL msan net: cannot link HTTP uninit probe:\n" +
                   (err or "")[-2000:])
-            return 2
+            return 1
         msan_expect_fire(
             ran,
             "intentional HTTP header-block uninit read is visible to MSan")
@@ -39788,11 +39832,14 @@ int main(void)
 
         memory_zero(gathered, sizeof gathered);
         memory_fill(buf, 0xcc, sizeof buf);
-        /* Type + length claim 10 payload bytes; poison the payload. */
+        /* Type + length claim 10 payload bytes; poison the payload. The
+           stream still needs its END, or the walk refuses it before the
+           payload is ever read. */
         buf[0] = DHCP_OPTION_TYPE;
         buf[1] = 10;
         __msan_poison(buf + 2, 10);
-        st = dhcp_walk(buf, 12, gathered, null);
+        buf[12] = DHCP_OPTION_END;
+        st = dhcp_walk(buf, 13, gathered, null);
         if (st != 0 || gathered[DHCP_OPTION_TYPE].length != 10) {
                 fprintf(stderr, "msan dhcp uninit: walk did not gather "
                         "(st=%ld len=%lu)\n",
@@ -39811,9 +39858,9 @@ int main(void)
         work = Path(temporary)
         ran, err = msan_build_run(work, "dhcp_clean", dhcp_clean_source)
         if ran is None:
-            print("msan net: NOT RUN -- cannot link DHCP walk lift:\n" +
+            print("  FAIL msan net: cannot link DHCP walk lift:\n" +
                   (err or "")[-2000:])
-            return 2
+            return 1
         msan_expect_clean(
             ran,
             "dhcp_walk option gather clean under MSan "
@@ -39821,9 +39868,9 @@ int main(void)
             err)
         ran, err = msan_build_run(work, "dhcp_uninit", dhcp_uninit_source)
         if ran is None:
-            print("msan net: NOT RUN -- cannot link DHCP uninit probe:\n" +
+            print("  FAIL msan net: cannot link DHCP uninit probe:\n" +
                   (err or "")[-2000:])
-            return 2
+            return 1
         msan_expect_fire(
             ran,
             "intentional DHCP option-payload uninit read is visible to MSan")
@@ -39947,9 +39994,9 @@ int main(void)
         work = Path(temporary)
         ran, err = msan_build_run(work, "nl_clean", nl_clean_source)
         if ran is None:
-            print("msan net: NOT RUN -- cannot link netlink walk lift:\n" +
+            print("  FAIL msan net: cannot link netlink walk lift:\n" +
                   (err or "")[-2000:])
-            return 2
+            return 1
         msan_expect_clean(
             ran,
             "netlink_find_span clean under MSan "
@@ -39957,9 +40004,9 @@ int main(void)
             err)
         ran, err = msan_build_run(work, "nl_uninit", nl_uninit_source)
         if ran is None:
-            print("msan net: NOT RUN -- cannot link netlink uninit probe:\n" +
+            print("  FAIL msan net: cannot link netlink uninit probe:\n" +
                   (err or "")[-2000:])
-            return 2
+            return 1
         msan_expect_fire(
             ran,
             "intentional netlink attribute-header uninit read is visible to MSan")
@@ -40053,18 +40100,18 @@ int main(void)
         ran, err = msan_build_run(work, "tls_der_clean", der_clean_source,
                                   run_args=seed_paths)
         if ran is None:
-            print("msan net: NOT RUN -- cannot link TLS DER MSan lift:\n" +
+            print("  FAIL msan net: cannot link TLS DER MSan lift:\n" +
                   (err or "")[-2000:])
-            return 2
+            return 1
         label = ("tls_parse_extensions/cert clean under MSan without fuzzer "
                  "(fully-initialized hostile seeds, %d corpus files)" % len(seed_paths))
         msan_expect_clean(ran, label, err)
 
         ran, err = msan_build_run(work, "tls_der_uninit", tls_der_uninit)
         if ran is None:
-            print("msan net: NOT RUN -- cannot link TLS DER uninit probe:\n" +
+            print("  FAIL msan net: cannot link TLS DER uninit probe:\n" +
                   (err or "")[-2000:])
-            return 2
+            return 1
         msan_expect_fire(
             ran,
             "intentional TLS DER body uninit read is visible to MSan")
@@ -40136,9 +40183,9 @@ int main(void)
         work = Path(temporary)
         ran, err = msan_build_run(work, "check_net_thin", check_net_thin)
         if ran is None:
-            print("msan net: NOT RUN -- cannot link CHECK_net-thin probes:\n" +
+            print("  FAIL msan net: cannot link CHECK_net-thin probes:\n" +
                   (err or "")[-2000:])
-            return 2
+            return 1
         msan_expect_clean(
             ran,
             "CHECK_net-equivalent thin probes clean under MSan "

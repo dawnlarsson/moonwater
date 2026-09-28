@@ -54441,10 +54441,10 @@ static fn tls_certificate_identity_rules(void)
         Empty, truncated-at-every-boundary, oversize length, indefinite BER
         lengths (including nested), duplicate OID encodings, and off-by-one
         length claims that would pass a confused `at + length` bound.  Run by
-        `sh test/run net` through CHECK_net.  The same fixture bytes seed
-        test/fuzz_corpus/tls_der/ for `python3 test/differential.py --harness
-        tls_der_fuzz`; this lane is the deterministic proving set that must
-        stay green under ASan/UBSan.
+        `sh test/run net` through CHECK_net.  The same fixture bytes seed the
+        corpus `python3 test/differential.py --harness tls_der_fuzz` writes
+        into its work directory; this lane is the deterministic proving set
+        that must stay green under ASan/UBSan.
 */
 static fn tls_certificate_extension_adversarial(void)
 {
