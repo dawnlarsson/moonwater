@@ -1222,12 +1222,15 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
                              : netlink_address_acquire(
                                    handle, index, lease->address,
                                    dhcp_prefix_of(lease->mask));
-                if (status < 0)
+                /* EEXIST from the exclusive create is the address already
+                   there -- an operator's, or this watcher's before init
+                   restarted it -- which stays theirs: present, not owned. */
+                address_applied = status >= 0;
+                if (status < 0 && status != -EEXIST)
                 {
                         doing = (string_address) "addr add";
                         goto failed;
                 }
-                address_applied = true;
         }
 
         if (route_changed && lease->router)
@@ -1237,12 +1240,12 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
                                                  index)
                              : netlink_route_acquire(handle, 0, 0,
                                                      lease->router, index);
-                if (status < 0)
+                route_applied = status >= 0;
+                if (status < 0 && status != -EEXIST)
                 {
                         doing = (string_address) "route add";
                         goto failed;
                 }
-                route_applied = true;
         }
 
         if (route_changed && net_owns_route(previous))
