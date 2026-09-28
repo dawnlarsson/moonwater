@@ -205,6 +205,30 @@ static bool checksum_digest_read(string_address text, positive length,
         return true;
 }
 
+/*
+        A standard output that refused the sums: coreutils says write error,
+        with the kernel's reason -- except for cksum's own CRC, BSD and SysV
+        lines on a device that took the bytes and refused them at the flush,
+        where the reason is lost by the time close_stdout asks and it says
+        write error alone. A descriptor that was never open keeps its
+        reason either way.
+*/
+static b32 checksum_done(b32 code, bool plain)
+{
+        text_flush();
+        if (!text_out_failed || (text_out_error && text_out_error_handle != 1))
+                return text_done(code);
+
+        bipolar reason = text_out_error ? text_out_error : -ERROR_INPUT_OUTPUT;
+
+        if (plain && reason != -ERROR_BAD_DESCRIPTOR)
+                string_diagnostic(&text_diagnostic, 0, null, "write error");
+        else
+                string_diagnostic(&text_diagnostic, 0, (string_address) "write error",
+                                  file_reason(reason));
+        return 1;
+}
+
 /* coreutils' complaint about an option out of place, with its usage hint. */
 static b32 checksum_usage_error(string_address command, string_address message)
 {
@@ -1322,6 +1346,8 @@ typedef struct
         positive mismatched;
         positive unreadable;
         positive verified;
+        // The manifest's line number, carried from batch to batch.
+        positive line;
 } checksum_check_run;
 
 /* A mapped region grown by doubling on the calling thread. */
@@ -1350,11 +1376,20 @@ static bool checksum_region_grow(p8 address_to address_to region,
         return true;
 }
 
-static fn checksum_check_collect(checksum_check_run address_to run)
-{
-        positive line = 0;
+/*
+        A manifest is read and checked a batch of records at a time, as GNU
+        checks it a line at a time: a standard output that has stopped
+        taking the answers stops the reading too, so `yes RECORD | cksum
+        -c >/dev/full` ends at its first refused write. Answers true when
+        the batch is full and more may follow.
+*/
+#define CHECKSUM_BATCH 65536
 
-        while (text_line_next(text_line, 0))
+static bool checksum_check_collect(checksum_check_run address_to run)
+{
+        positive line = run->line;
+
+        while (run->count < CHECKSUM_BATCH && text_line_next(text_line, 0))
         {
                 checksum_record record = {0};
                 string_address filename;
@@ -1398,6 +1433,9 @@ static fn checksum_check_collect(checksum_check_run address_to run)
                 run->records = (checksum_record address_to)records;
                 run->records[run->count++] = record;
         }
+
+        run->line = line;
+        return run->count == CHECKSUM_BATCH;
 }
 
 static string_address checksum_record_name(checksum_check_run address_to run,
@@ -1618,17 +1656,38 @@ static b32 checksum_verify(const checksum_algorithm address_to algorithm,
                     .slots = parallel_slots(),
                 };
 
-                checksum_check_collect(address_of run);
+                bool more;
 
-                if (text_input.failed)
+                do
                 {
-                        // The shared reader has already named it; GNU says
-                        // nothing further about a manifest it cannot read.
-                        failed = true;
-                        read_failed = true;
-                }
+                        more = checksum_check_collect(address_of run);
 
-                checksum_check_records(address_of run);
+                        if (text_input.failed)
+                        {
+                                // The shared reader has already named it;
+                                // GNU says nothing further about a manifest
+                                // it cannot read.
+                                failed = true;
+                                read_failed = true;
+                        }
+
+                        checksum_check_records(address_of run);
+                        text_flush();
+                        run.records = null;
+                        run.room = run.count = 0;
+                        run.names = null;
+                        run.names_room = run.names_used = 0;
+                        run.blocks = null;
+                        run.spread = false;
+                } while (more && !text_out_failed);
+
+                //      A refused answer ends the check where it stands, as
+                //      GNU's write_error does: no summary follows it.
+                if (text_out_failed)
+                {
+                        text_close();
+                        return 1;
+                }
 
                 positive malformed = run.malformed;
                 positive formatted = run.formatted;
@@ -1743,9 +1802,9 @@ static b32 checksum_main()
                 return checksum_usage_error(command, "--tag does not support --text mode");
 
         if (checking)
-                return text_done(checksum_verify(algorithm, address_of taking));
+                return checksum_done(checksum_verify(algorithm, address_of taking), false);
 
-        return text_done(checksum_generate(algorithm, taking.first, tagged, false));
+        return checksum_done(checksum_generate(algorithm, taking.first, tagged, false), false);
 }
 
 /* ---- POSIX cksum, which is a CRC and a policy rather than a digest. ---- */
@@ -2008,7 +2067,7 @@ static b32 cksum_others(p8 kind, bool debug)
                 cksum_other_put(kind, sum, bytes, said, named);
         }
 
-        return text_done(answer);
+        return checksum_done(answer, !checksum_raw);
 }
 
 /* -a sha2 or sha3 -l N: the family's digest N bits wide, or null for any
@@ -2202,7 +2261,7 @@ static b32 cksum_main()
                                        : sha3 ? (string_address) "SHA3"
                                        : digest ? digest->label
                                                 : (string_address) "CRC";
-                return text_done(checksum_verify(digest, address_of taking));
+                return checksum_done(checksum_verify(digest, address_of taking), false);
         }
 
         if (algorithm && !string_equals(algorithm, "crc"))
@@ -2219,7 +2278,7 @@ static b32 cksum_main()
                         return cksum_others('s', debug);
 
                 if (digest)
-                        return text_done(checksum_generate(digest, 0, checksum_selected.style != 'U', true));
+                        return checksum_done(checksum_generate(digest, 0, checksum_selected.style != 'U', true), false);
 
                 return text_done(string_diagnostic(address_of text_diagnostic, 1, algorithm, "algorithm is not supported by the available checksum engine"));
         }

@@ -10228,6 +10228,7 @@ _MISC_WRITE_SOURCES = {
     "words": "run {words} {target}",
     "file": "run {words} source {target}",
     "small": "run {words} small {target}",
+    "manifest": "env yes 'MD5 (small) = d41d8cd98f00b204e9800998ecf8427e' | run {words} {target}",
 }
 _MISC_WRITE_CASES = (
     ("factor", "endless", "full"), ("factor", "endless", "tmpfs"), ("factor", "endless", "closed"),
@@ -10244,11 +10245,18 @@ _MISC_WRITE_CASES = (
     ("yes", "words", "broken"), ("yes", "words", "reading", "a", "b"), ("yes", "words", "full", "-x"),
     ("yes", "words", "full", "--foo"), ("yes", "words", "full", "-/"), ("yes", "words", "full", "--", "-x"),
     ("yes", "words", "full", "-"),
+    # The sums: write error with the reason, save for cksum's own CRC, BSD
+    # and SysV lines on a full device, which say it bare; and checking an
+    # endless manifest stops at the first refused answer.
+    ("md5sum", "small", "full"), ("md5sum", "small", "closed"), ("cksum", "small", "full"),
+    ("cksum", "small", "closed"), ("cksum", "small", "full", "-a", "md5"), ("cksum", "small", "full", "-a", "bsd"),
+    ("cksum", "small", "full", "--raw"), ("cksum", "manifest", "full", "-c"), ("md5sum", "manifest", "full", "-c"),
+    ("cksum", "manifest", "closed", "-c"),
 )
 
 
 def _misc_write_valid(argv):
-    return (len(argv) >= 3 and argv[0] in ("factor", "numfmt", "hexdump", "yes") and
+    return (len(argv) >= 3 and argv[0] in ("factor", "numfmt", "hexdump", "yes", "md5sum", "cksum") and
             argv[1] in _MISC_WRITE_SOURCES and argv[2] in _TEXT_WRITE_TARGETS)
 
 
