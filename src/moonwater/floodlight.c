@@ -154,6 +154,9 @@ static const struct rule baseline[] = {
 	{ "setpgid", SPAWN, 1 },   /* NAMED */
 	{ "setpriv", SPAWN, 1 },   /* NAMED */
 	{ "setsid", SPAWN, 1 },    /* NAMED */
+	{ "sort", SPAWN, 1 },      /* NAMED: --compress-program names it */
+	{ "split", SPAWN, 1 },     /* NAMED: --filter runs what the line named,
+				      through sh -c as GNU's split does */
 	{ "stdbuf", SPAWN, 1 },    /* NAMED */
 	{ "taskset", SPAWN, 1 },   /* NAMED */
 	{ "timeout", SPAWN, 1 },   /* NAMED */
