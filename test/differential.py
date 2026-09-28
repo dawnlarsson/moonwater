@@ -38279,6 +38279,12 @@ def tls_fuzz_seeds(corpus):
         "magic_name_huge_bmp.bin": b"\xc9" + huge_name,
         "cert_list_two_trunc_second.bin": two[:len(two) // 2],
         "cert_list_two_host.bin": b"\xc1" + two,
+        # tls_verify_fuzz's generated chain: in order, shuffled behind the
+        # unrelated RSA root, cycling, and one overwrite of the served bytes.
+        "verify_chain_in_order.bin": b"\xcb\x00\x01\x02",
+        "verify_chain_shuffled.bin": b"\xcb\x00\x04\x02\x01\x03",
+        "verify_chain_repeats.bin": b"\xcb\x00\x01\x01\x02\x01\x02\x03\x03\x04",
+        "verify_chain_overwrite.bin": b"\xca\x01\x00\xff\x00",
     })
     return seeds
 
