@@ -9346,52 +9346,75 @@ static fn dd_copy_simple(const p8 address_to from, positive length)
         }
 }
 
+// count copies of byte, whole output blocks written as they fill.
+static fn dd_fill(p8 byte, positive count)
+{
+        while (count && !dd_quit)
+        {
+                positive take = min(count, dd_obs - dd_oc);
+
+                memory_fill(dd_obuf + dd_oc, byte, take);
+                count -= take;
+                dd_oc += take;
+                if (dd_oc >= dd_obs)
+                        dd_write_output();
+        }
+}
+
 /* conv=block: each newline-ended record padded with spaces to cbs, the
-   newline gone, and a record longer than cbs cut there and counted. */
+   newline gone, and a record longer than cbs cut there and counted once. */
 static fn dd_copy_block(const p8 address_to from, positive length)
 {
-        for (positive at = 0; at < length && !dd_quit; at++)
+        while (length && !dd_quit)
         {
-                if (from[at] == dd_newline)
-                {
-                        for (positive column = dd_col; column < dd_cbs; column++)
-                                dd_put(dd_space);
-                        dd_col = 0;
-                }
-                else
-                {
-                        if (dd_col == dd_cbs)
-                                dd_truncated++;
-                        else if (dd_col < dd_cbs)
-                                dd_put(from[at]);
-                        dd_col++;
-                }
+                const p8 address_to newline = memory_first_of((address_any)from,
+                                                              dd_newline, length);
+                positive run = newline ? (positive)(newline - from) : length;
+                positive room = dd_col < dd_cbs ? dd_cbs - dd_col : 0;
+
+                dd_copy_simple(from, min(run, room));
+                if (run > room && dd_col <= dd_cbs)
+                        dd_truncated++;
+                dd_col += run;
+                if (!newline)
+                        return;
+
+                if (dd_col < dd_cbs)
+                        dd_fill(dd_space, dd_cbs - dd_col);
+                dd_col = 0;
+                from += run + 1;
+                length -= run + 1;
         }
 }
 
 /* conv=unblock: every cbs bytes a record, its trailing spaces dropped and a
    newline after it; spaces are held until something other than a space
-   shows they were not trailing. */
+   shows they were not trailing, and the newline until a byte of the next
+   record comes. */
 static fn dd_copy_unblock(const p8 address_to from, positive length)
 {
-        for (positive at = 0; at < length && !dd_quit; at++)
+        while (length && !dd_quit)
         {
-                p8 byte = from[at];
-
-                if (dd_col++ >= dd_cbs)
+                if (dd_col >= dd_cbs)
                 {
                         dd_col = dd_pending_spaces = 0;
-                        at--;
                         dd_put(dd_newline);
+                        continue;
                 }
-                else if (byte == dd_space)
-                        dd_pending_spaces++;
-                else
+
+                positive take = min(length, dd_cbs - dd_col);
+                positive spaces = memory_span_byte_reverse((address_any)from, dd_space, take);
+
+                if (take > spaces)
                 {
-                        for (; dd_pending_spaces; dd_pending_spaces--)
-                                dd_put(dd_space);
-                        dd_put(byte);
+                        dd_fill(dd_space, dd_pending_spaces);
+                        dd_pending_spaces = 0;
+                        dd_copy_simple(from, take - spaces);
                 }
+                dd_pending_spaces += spaces;
+                dd_col += take;
+                from += take;
+                length -= take;
         }
 }
 
@@ -10176,9 +10199,8 @@ static b32 tools_dd(void)
                         dd_put(held);
         }
 
-        if ((conv & DD_BLOCK) && dd_col > 0)
-                for (positive column = dd_col; column < cbs; column++)
-                        dd_put(dd_space);
+        if ((conv & DD_BLOCK) && dd_col > 0 && dd_col < cbs)
+                dd_fill(dd_space, cbs - dd_col);
 
         if (dd_col && (conv & DD_UNBLOCK))
                 dd_put(dd_newline);

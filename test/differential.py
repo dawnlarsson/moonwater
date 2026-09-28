@@ -10521,6 +10521,12 @@ MISC_UTILITIES = (
             fixture="misc", stderr="exact", normalize=misc_dd_normalize, valid=misc_dd_valid, max_flags=5,
             extra=(("conv=block", "cbs=4", "if=ten", "status=noxfer"),
                    ("conv=unblock", "cbs=4", "if=ten", "status=noxfer"),
+                   # Records against reads: a record and its trailing
+                   # spaces cut across one read or many, longer and
+                   # shorter than cbs.
+                   *(("conv=" + conv, "cbs=%d" % cbs, "ibs=%d" % ibs, "if=" + name, "status=noxfer")
+                     for conv in ("block", "unblock") for cbs in (1, 3, 7, 80) for ibs in (1, 5, 512)
+                     for name in ("a.txt", "spaced.txt", "long", "binary")),
                    ("conv=ascii", "if=ten", "status=noxfer"), ("conv=ebcdic", "if=ten", "status=noxfer"),
                    ("conv=ibm", "if=ten", "status=noxfer"),
                    # The record conversions and the character sets together,
