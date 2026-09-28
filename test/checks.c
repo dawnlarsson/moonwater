@@ -48956,9 +48956,11 @@ static bool net_as_emulated(void)
                              / "a DNS name of two hundred fifty-six octets is refused"
           decompress jumps   structural (ceiling lowers; no step counter)
             hit:             "a pointer loop is refused", forward/cycle sweeps
-          CNAME hop passes   answers + 1
+          CNAME hop passes   min(answers, DNS_CNAME_HOPS (16)) + 1
             exact path:      "DNS follows a case-insensitive CNAME chain by owner"
             hop exhaust:     "a DNS CNAME cycle exhausts the answer-section hop budget"
+            exact+one-over:  "a DNS CNAME chain of DNS_CNAME_HOPS links resolves"
+                             / "a DNS CNAME chain one link past DNS_CNAME_HOPS is refused"
 
         TLS
           record payload     TLS_RECORD_MAX (16640)
@@ -49947,6 +49949,57 @@ static fn resolving_edges(void)
                       dns_answer_address(reply, at, (positive)question, 2, 0,
                                          address_of found) == DNS_MALFORMED &&
                           !found);
+        }
+
+        /* A chain of links CNAMEs from c0.chain, each record spelling its
+           owner, and the last name's A: DNS_CNAME_HOPS links resolve and one
+           more is refused, however many answers the reply declares. */
+        for (positive links = DNS_CNAME_HOPS; links <= DNS_CNAME_HOPS + 1; links++)
+        {
+                p8 reply[1024] = {0};
+                p8 name[16] = "c";
+                bipolar question;
+                positive at;
+                p32 found = 0;
+
+                memory_copy(name + 1 + positive_into(name + 1, 0), ".chain", 7);
+                question = dns_write_name(reply, sizeof reply, (string_address)name);
+                at = (positive)question;
+                for (positive link = 0; link <= links; link++)
+                {
+                        positive length;
+
+                        memory_copy(name + 1 + positive_into(name + 1, link),
+                                    ".chain", 7);
+                        at += (positive)dns_write_name(reply + at, sizeof reply - at,
+                                                       (string_address)name);
+                        network_store_16(reply + at, link < links ? DNS_TYPE_CNAME
+                                                                  : DNS_TYPE_A);
+                        network_store_16(reply + at + 2, DNS_CLASS_IN);
+                        memory_copy(name + 1 + positive_into(name + 1, link + 1),
+                                    ".chain", 7);
+                        length = link < links
+                            ? (positive)dns_write_name(reply + at + 10, 64,
+                                                       (string_address)name)
+                            : 4;
+                        if (link == links)
+                                network_store_32(reply + at + 10, 0xc000020a);
+                        network_store_16(reply + at + 8, (p16)length);
+                        at += 10 + length;
+                }
+                if (links == DNS_CNAME_HOPS)
+                        check("a DNS CNAME chain of DNS_CNAME_HOPS links resolves",
+                              dns_answer_address(reply, at, (positive)question,
+                                                 (p16)(links + 1), 0,
+                                                 address_of found) == DNS_OK &&
+                                  found == 0xc000020a);
+                else
+                        check("a DNS CNAME chain one link past DNS_CNAME_HOPS is refused",
+                              dns_answer_address(reply, at, (positive)question,
+                                                 (p16)(links + 1), 0,
+                                                 address_of found) ==
+                                      DNS_MALFORMED &&
+                                  !found);
         }
 
         {

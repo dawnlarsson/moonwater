@@ -1085,6 +1085,7 @@ static bipolar netlink_dump(b32 handle, p16 type, positive body, p8 family,
 #define DNS_CODE_MASK 0x000f
 
 #define DNS_MAX_MESSAGE 4096
+#define DNS_CNAME_HOPS 16
 //      Everything the caller may want to tell apart.
 #define DNS_OK 0
 #define DNS_NO_SERVER (-1)
@@ -1236,8 +1237,12 @@ static COLD bipolar dns_answer_address(p8 address_to message, positive size,
                 return DNS_MALFORMED;
 
         /* A cycle needs no more links than there are answer records to show
-           itself.  The extra pass is the one that can find the terminal A. */
-        for (positive hop = 0; hop <= (positive)answers; hop++)
+           itself.  The extra pass is the one that can find the terminal A.
+           Every pass walks every record, so the passes are the quadratic a
+           hostile reply buys: no chain goes past DNS_CNAME_HOPS links, where
+           systemd-resolved stops and short of which recursors give up. */
+        for (positive hop = 0; hop <= (positive)answers &&
+                               hop <= DNS_CNAME_HOPS; hop++)
         {
                 positive at = records_at;
                 bool has_alias = false;
