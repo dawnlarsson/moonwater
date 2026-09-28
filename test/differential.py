@@ -14995,6 +14995,17 @@ def shell_lang_editing_modes(rng):
         ("command", "stdin", "file"))
 
 
+#       ${!ref} of a nameref is the name it refers to, not the value of the
+#       variable it holds, and a nameref that refers to nothing is an invalid
+#       indirect expansion. These read through it twice.
+def shell_lang_nameref_indirect(rng):
+    line = rng.choice(('typeset -n ref=x; echo "${!ref}"', 'ref=x; typeset -n ref; echo "${!ref}|$ref"',
+                       'typeset -n a2=arr; arr=(1 2); echo "${!a2}"', 'typeset -n el=arr[1]; arr=(1 2); echo "${!el} $el"',
+                       'typeset -n e; echo "[${!e}]"; echo same', 'ref=x; echo "${!ref}"'))
+    return ("nameref-indirect", shell_BASH, shell_program(
+        "foo=FOO; x=foo", line, 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
 #       printf's quoting and time conversions as bash 5.3 has them: %q takes
 #       a width and cuts the quoted text to the precision, %Q cuts the
 #       argument and quotes the rest, a quoted character is its code point
@@ -17944,6 +17955,7 @@ SHELL_FAMILIES = (
     shell_lang_readonly_discard_scope,
     shell_lang_readonly_subshell_status,
     shell_lang_editing_modes,
+    shell_lang_nameref_indirect,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,

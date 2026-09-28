@@ -215,6 +215,7 @@ typedef struct
 } shell_array_item;
 
 PURE p8 shell_variable_attributes(const_string name, positive length);
+string_address shell_nameref_target(const_string name, positive length);
 PURE p8 shell_array_attributes(const_string name, positive length);
 PURE bool shell_variable_exported(const_string name, positive length);
 bool shell_variable_attribute_set(const_string name, positive length,
@@ -8586,6 +8587,32 @@ static string_address expand_braced_body(string_address step,
                 string_address source = name;
                 positive target_length;
                 bool present;
+
+                //      ${!ref} of a nameref is the name it refers to, in
+                //      bash, and not the value of the variable it holds.
+                //      One that refers to nothing is no indirection at all.
+                if (shell_bash_compat && !reference.key &&
+                    (shell_variable_attributes(source, length) &
+                     SHELL_ARRAY_NAMEREF))
+                {
+                        string_address target =
+                            shell_nameref_target(source, length);
+
+                        if (!target)
+                        {
+                                expand_where();
+                                string_format(writer_stderr_once,
+                                              "%s: invalid indirect expansion\n",
+                                              expand_reference_text(reference));
+                                expand_indirect_error();
+                                return close + 1;
+                        }
+                        if (!operation && !want_length)
+                        {
+                                expand_push_string(target, mark);
+                                return close + 1;
+                        }
+                }
 
                 name = expand_value_of(reference, indirect_scratch,
                                        address_of present,

@@ -3585,6 +3585,18 @@ COLD PURE p8 shell_variable_attributes(const_string name, positive length)
         return found < shell_var_count ? shell_vars[found].attributes : 0;
 }
 
+// The name a nameref holds, as written, or nothing for any other variable.
+COLD string_address shell_nameref_target(const_string name, positive length)
+{
+        positive found = env_find_span(name, length);
+
+        return found < shell_var_count &&
+                       (shell_vars[found].attributes & SHELL_ARRAY_NAMEREF) &&
+                       env_variable_has_value(shell_vars + found)
+                   ? shell_vars[found].text + length + 1
+                   : null;
+}
+
 /* Array syntax acts on a nameref's target, while declaration syntax still
    needs shell_variable_attributes() above to describe the reference itself. */
 COLD PURE p8 shell_array_attributes(const_string name, positive length)
