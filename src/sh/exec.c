@@ -158,6 +158,12 @@ static fn exec_saves_child_drop();
 fn exec_child_began()
 {
         exec_forked = true;
+        //      A child does not inherit the right to become its parent's
+        //      final command: a substitution forked while a pipeline stage
+        //      expands its one command's words ran `env true; echo b` as
+        //      if env were that command, execed true and never echoed. A
+        //      child that is one command's process says so after this.
+        shell_tail_command = false;
         exec_saves_child_drop();
         exec_floodlight_child_began();
         trap_child_began();

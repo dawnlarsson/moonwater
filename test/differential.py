@@ -15130,6 +15130,21 @@ def shell_lang_locale_quoting(rng):
     return ("locale-quoting", shell_BASH, shell_program(locale, line, 'echo "end=$?"'), ("command", "stdin", "file"))
 
 
+#       A command substitution inside a pipeline stage runs every command
+#       of its body: forked while the stage expanded its one command's words,
+#       it took that command's right to exec in place, so a wrapper utility
+#       first in the body (env, nice, unshare) replaced it and the rest never
+#       ran -- `echo "$(env true; echo b)" | cat` printed an empty line.
+def shell_lang_substitution_tail(rng):
+    first = rng.choice(("env true", "nice true", "unshare -U true", "true", "env true > /dev/null 2>&1",
+                        "nice echo a", "ls /nonexistent 2>/dev/null"))
+    shape = rng.choice(('printf "[%%s]" "$(%s; echo $?)" | cat; echo', 'echo "$(%s; echo b)" | cat',
+                        'x=$(%s; echo c) | cat; echo "st=$?"', '{ echo "$(%s; echo d)"; } | cat',
+                        'echo "$(%s; echo e)" | cat | cat',
+                        'echo "$(%s; echo g)" &\nwait'))
+    return ("substitution-tail", shell_ALL, shell_program(shape % first, 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
 #       bash's kill takes -n signum where it takes -s, and -L where it
 #       takes -l; both were unknown signals named n and L.
 def shell_lang_kill_bash_options(rng):
@@ -18114,6 +18129,7 @@ SHELL_FAMILIES = (
     shell_lang_dynamic_set_tests,
     shell_lang_for_variable_names,
     shell_lang_locale_quoting,
+    shell_lang_substitution_tail,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,
