@@ -14503,6 +14503,23 @@ def shell_lang_regex_operand(rng):
         before + "[[ " + subject + " =~ " + pattern + " ]] 2>/dev/null; echo \"s=$?\"",
         "echo \"${#BASH_REMATCH[@]}\"; printf '<%s>' \"${BASH_REMATCH[@]}\"; echo",
         "[[ " + subject + " =~ " + pattern + " && -n x ]] && echo both || echo not"))
+
+
+#       ${#...} is a length only when a whole parameter and the brace follow
+#       the #; otherwise the # is $# and the rest its operator. ${###} is $#
+#       with nothing taken off and ${##2} takes a 2 off 25, as both shells
+#       read them; this shell called every one a bad substitution, and took
+#       ${#!r} for the length of an indirection bash refuses.
+def shell_lang_count_operators(rng):
+    count = rng.choice((0, 1, 3, 12, 25))
+    op = rng.choice(("##", "###", "####", "##2", "###2", "#%2", "#%%5", "#-x", "#:-y", "#+z", "#:+w",
+                     "#=q", "#?", "#-", "#", "#1", "#?x", "##1*"))
+    extra = rng.choice(("", "", "; r=x; x=abc; echo ${#!r}"))
+    return ("count-operators", shell_ALL, shell_program(
+        "set -- $(seq " + str(count) + ")", "echo \"[${" + op + "}]\"" + extra, 'echo "end=$?"'),
+        ("command", "stdin", "file"))
+
+
 #       What bash does with a builtin handed words it has no place for, and
 #       with a subscript it cannot evaluate: the whole command the reader was
 #       running is dropped -- through eval, a sourced file and a function --
@@ -17340,6 +17357,7 @@ SHELL_FAMILIES = (
     shell_lang_regex_operand,
     shell_lang_loop_control_arguments,
     shell_lang_builtin_discard,
+    shell_lang_count_operators,
     shell_lang_trap_return,
     shell_lang_funcname_stack,
     shell_lang_empty_at_joins,

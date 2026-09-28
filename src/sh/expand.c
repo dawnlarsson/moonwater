@@ -8010,6 +8010,38 @@ static PURE bool expand_indirect_element(string_address name, positive length)
         return shut == name + length - 1;
 }
 
+/*
+        Whether ${#...} asks for a length. Only a whole parameter may follow
+        the #: a name, a positional number or one special character, with a
+        subscript, and then the brace. Anything else makes the # the
+        parameter $# and what follows its operator, so ${###} is $# with an
+        empty prefix taken off (25) and ${##2} takes the 2 off 25, as bash
+        and dash read them; ${##} is still the length of $#.
+*/
+static PURE bool expand_length_form(string_address at, string_address close)
+{
+        p8 first = string_get(at);
+
+        if (at >= close)
+                return false;
+        if (first == '@' || first == '*' || first == '#' || first == '?' ||
+            first == '$' || first == '!' || first == '-')
+                at++;
+        else if (byte_is_digit(first))
+                at += string_span(at, string_set_digits);
+        else
+                at += string_span(at, string_set_name);
+        if (at < close && string_is(at, '['))
+        {
+                string_address shut = expand_bracket_end(at + 1, '[', ']');
+
+                if (!shut)
+                        return false;
+                at = shut + 1;
+        }
+        return at == close;
+}
+
 static string_address expand_braced_body(string_address step,
                                         string_address close, bool quoted)
 {
@@ -8039,7 +8071,7 @@ static string_address expand_braced_body(string_address step,
         step += 2;
 
         // ${#} is how many parameters there are; ${#x} is how long one is.
-        if (string_is(step, '#') && string_not(step + 1, '}'))
+        if (string_is(step, '#') && expand_length_form(step + 1, close))
         {
                 want_length = true;
                 step++;
