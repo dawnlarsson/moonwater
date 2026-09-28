@@ -14805,6 +14805,20 @@ def shell_lang_ps4_errors(rng):
         ("command", "stdin", "file"))
 
 
+#       A subscript PS4 cannot evaluate is the discard bash takes for the
+#       whole command, and in PS4 it is only reported; it left the mark of
+#       that discard behind, so the next recoverable error inside eval, a
+#       function or a sourced file was not caught there and took the rest of
+#       the line with it.
+def shell_lang_ps4_discard(rng):
+    ps4 = rng.choice(("'+${a[1/0]} '", "'+${b[x/0]}${a[0]} '", "'+$((a[1/0])) '", "'+ok '"))
+    after = rng.choice(("eval 'echo $((1/0))'; echo after", "f() { echo $((1/0)); }; f; echo after",
+                        ". ./s.sh; echo after", "eval 'echo ${a[1/0]}'; echo after"))
+    return ("ps4-discard", shell_BASH, shell_program(
+        "a=(1); b=(2); x=0; printf 'echo $((1/0))\\n' > s.sh", "PS4=" + ps4, "{ set -x; : traced; set +x; } 2>/dev/null",
+        after + " 2>/dev/null", 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
 #       read from a directory, and ulimit with a negative number: each is a
 #       plain failure of 1 in dash too, where this answered 2, and a negative
 #       limit was taken as a number.
@@ -18397,6 +18411,7 @@ SHELL_FAMILIES = (
     shell_lang_set_lone_plus,
     shell_lang_directory_state,
     shell_lang_ps4_errors,
+    shell_lang_ps4_discard,
     shell_lang_builtin_refusals,
     shell_lang_background_reap,
     shell_lang_interactive_pipe,

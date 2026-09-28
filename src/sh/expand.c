@@ -5179,7 +5179,11 @@ static COLD fn expand_discard_whole(b32 status)
 {
         if (string_is(shell_option_flags, 'c') || expand_in_substitution)
                 status = 1;
-        expand_discard_whole_line = shell_bash_compat;
+        //      A soft failure -- PS4's -- discards nothing, and the mark would
+        //      outlive it: the next eval or function would refuse to catch a
+        //      recoverable error because of it.
+        if (!expand_errors_soft)
+                expand_discard_whole_line = shell_bash_compat;
         expand_discard(status);
 }
 
