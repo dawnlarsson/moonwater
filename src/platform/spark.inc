@@ -15,6 +15,10 @@
    until the program installs one of its own, and saves it reading and
    authenticating /proc/self/status to prove the same. */
 #define SPARK_ENTRY_UNFILTERED 0x01UL
+/* An auxiliary vector follows the environment's null on the stack, as it
+   does for an ELF: AT_SYSINFO_EHDR (when a vDSO was mapped), AT_PAGESZ and
+   AT_NULL. Older loaders put nothing there but the strings. */
+#define SPARK_ENTRY_AUXV 0x02UL
 /* Version 2 changes the feature word from packed bits to Boolean byte lanes.
    Keeping that change in the magic makes either side of a mixed old/new pair
    reject the private handoff and use the ordinary CPUID fallback instead of

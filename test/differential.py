@@ -25331,10 +25331,10 @@ int main(void) {
                             "-DCHECK_spark_entry", str(root / "test/checks.c"),
                             "-o", str(binary)], check=True)
             passed = sum(subprocess.run([str(binary), chr(48 + mode)]).returncode == 0
-                         for mode in range(14))
-            print(f"spark old/new/fallback entry: {passed} of 14")
-            write_tally("spark-entry", passed, 14)
-            return 0 if passed == 14 else 1
+                         for mode in range(15))
+            print(f"spark old/new/fallback entry: {passed} of 15")
+            write_tally("spark-entry", passed, 15)
+            return 0 if passed == 15 else 1
         print("spark x86 entry: not run (requires native Linux x86-64)")
     return 0
 

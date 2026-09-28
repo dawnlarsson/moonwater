@@ -847,10 +847,11 @@ static int execute_spark(struct linux_binprm *bprm);
 static unsigned long spark_entry_facts(void)
 {
 #ifdef CONFIG_SECCOMP
-        return current->seccomp.mode == SECCOMP_MODE_DISABLED
-                   ? SPARK_ENTRY_UNFILTERED : 0;
+        return SPARK_ENTRY_AUXV |
+               (current->seccomp.mode == SECCOMP_MODE_DISABLED
+                    ? SPARK_ENTRY_UNFILTERED : 0);
 #else
-        return SPARK_ENTRY_UNFILTERED;
+        return SPARK_ENTRY_AUXV | SPARK_ENTRY_UNFILTERED;
 #endif
 }
 
@@ -950,9 +951,16 @@ static struct linux_binfmt format = {
         main() here took no arguments and the shell had nowhere to send what it
         had parsed.
 
-        No auxiliary vector. A spark image is mapped at a fixed base by the
-        loader above and has no interpreter to inform, which is the whole of
-        what auxv is for here.
+        And a short auxiliary vector after the environment's null, the way
+        create_elf_tables ends it: AT_SYSINFO_EHDR, where the vDSO went, when
+        one was mapped, AT_PAGESZ, and AT_NULL. A Spark image has no
+        interpreter to inform, but the runtime reads the clock through the
+        vDSO and has to be told where that is; without it every clock read
+        in every Spark program was a trap (3250 in one 200 MB HTTPS
+        download in a KVM guest). The same pairs go into saved_auxv, so
+        /proc/PID/auxv says what the stack says, and snapshot.c's page size
+        reads AT_PAGESZ from it. _start trusts the words only under
+        SPARK_ENTRY_AUXV, because an older loader left the strings there.
 
         And where the strings end, which create_elf_tables also says and this
         did not: setup_arg_pages leaves arg_start, and arg_end, env_start and
@@ -968,12 +976,18 @@ static int spark_stack(struct linux_binprm *bprm, unsigned long *out)
         unsigned long __user *slot;
         unsigned long bottom;
         int count = bprm->argc + bprm->envc;
+        unsigned long vdso = (unsigned long)mm->context.vdso;
+        unsigned long auxv[] = {AT_SYSINFO_EHDR, vdso, AT_PAGESZ, PAGE_SIZE,
+                                AT_NULL, 0};
+        unsigned long *pairs = vdso ? auxv : auxv + 2;
+        unsigned long words = vdso ? 6 : 4;
         int i;
 
         mm->arg_end = mm->env_start = mm->env_end = walk;
 
-        // A count, every pointer, and the two nulls that end each list.
-        bottom = (walk - (unsigned long)(count + 3) * sizeof(unsigned long)) & ~15UL;
+        // A count, every pointer, the two nulls that end each list, and the
+        // auxiliary vector.
+        bottom = (walk - ((unsigned long)(count + 3) + words) * sizeof(unsigned long)) & ~15UL;
         slot = (unsigned long __user *)bottom;
 
         if (put_user((unsigned long)bprm->argc, slot++))
@@ -1005,8 +1019,10 @@ static int spark_stack(struct linux_binprm *bprm, unsigned long *out)
         if (!bprm->envc && put_user(0UL, slot++))
                 return -EFAULT;
 
-        if (put_user(0UL, slot))
+        if (put_user(0UL, slot++) ||
+            copy_to_user(slot, pairs, words * sizeof(unsigned long)))
                 return -EFAULT;
+        memcpy(mm->saved_auxv, pairs, words * sizeof(unsigned long));
 
         *out = bottom;
         return 0;
@@ -1193,23 +1209,29 @@ int execute_spark(struct linux_binprm *bprm)
 
         atomic_long_add(ktime_get_ns() - map_started, &stat_map_ns);
 
-#ifdef CONFIG_RISCV
         /*
-                riscv64 returns from every signal handler to the vDSO's
+                The vDSO, mapped the way the ELF loader maps it, after the
+                image so nothing lands on it and before the stack names it
+                in the auxiliary vector: the runtime reads the clock there
+                without a trap.
+
+                riscv64 also returns from every signal handler to the vDSO's
                 rt_sigreturn and has no sa_restorer to name anything else, so
                 an image mapped without one returned from its first handler to
                 the trampoline's offset from zero: the shell died after every
-                command that had a child. x86_64 and arm64 hand the kernel
-                their own trampoline through SA_RESTORER; here the loader maps
-                the vDSO the way the ELF loader does.
+                command that had a child. There a failure is fatal. x86_64 and
+                arm64 hand the kernel their own trampoline through
+                SA_RESTORER, so without a vDSO they only keep the clock trap:
+                the auxiliary vector then leaves AT_SYSINFO_EHDR out, as it
+                does when x86_64 boots with vdso=0 and nothing is mapped.
         */
         ret = arch_setup_additional_pages(bprm, 0);
         if (ret)
         {
                 pr_alert_ratelimited("[moonwater] " "mapping the vDSO failed: %d\n", ret);
-                goto fatal;
+                if (IS_ENABLED(CONFIG_RISCV))
+                        goto fatal;
         }
-#endif
 
         current->mm->start_code = header->base;
         current->mm->end_code = header->base + header->text_size;

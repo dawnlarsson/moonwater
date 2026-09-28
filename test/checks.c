@@ -81537,12 +81537,16 @@ b32 main(void)
    loader handoff, one mode a digit from '0' on: the feature word, the magic
    and the entry facts each from a table. Modes 7 and 13 carry no Spark magic
    and prove CPUID was actually run; 10 and 11 are version 3 with and without
-   the facts, and 12 is version 2 with garbage where version 3 keeps them. */
+   the facts, and 12 is version 2 with garbage where version 3 keeps them.
+   14 is version 3 saying SPARK_ENTRY_AUXV: the probe runs on the stack Linux
+   built, whose auxiliary vector names the host's vDSO, so the clock must
+   resolve through it, as a Spark program's does from the loader's vector;
+   its feature word is empty, since the lookup runs library code. */
 __asm__(
     ASM_SECTION
     ASM_FUNC(spark_entry_probe)
     "mov 16(%rsp), %rax\n   movzbl (%rax), %eax\n   sub $48, %eax\n"
-    "cmp $13, %eax\n   ja 1f\n"
+    "cmp $14, %eax\n   ja 1f\n"
     "lea spark_entry_words(%rip), %rcx\n   mov (%rcx,%rax,8), %r13\n"
     "lea spark_entry_magics(%rip), %rcx\n   mov (%rcx,%rax,8), %r12\n"
     "lea spark_entry_facts_in(%rip), %rcx\n   mov (%rcx,%rax,8), %r15\n"
@@ -81552,7 +81556,7 @@ __asm__(
     ASM_RODATA_OBJECT_BEGIN(spark_entry_words, 8)
     ".quad 0, 1, 257, 16777216, 16777217, 16777473, 16843009, 0\n"
     ".quad 0x0101010101010101, 0x0101010100000000\n"
-    ".quad 0x0101010101010101, 257, 16777217, 0\n"
+    ".quad 0x0101010101010101, 257, 16777217, 0, 0\n"
     ASM_OBJECT_END(spark_entry_words)
     ASM_RODATA_OBJECT_BEGIN(spark_entry_magics, 8)
     ".quad " SPARK_TEST_TEXT(SPARK_START_MAGIC) ", " SPARK_TEST_TEXT(SPARK_START_MAGIC)
@@ -81561,11 +81565,12 @@ __asm__(
     ", " SPARK_TEST_TEXT(SPARK_START_MAGIC) ", 0\n"
     ".quad " SPARK_TEST_TEXT(SPARK_START_MAGIC) ", " SPARK_TEST_TEXT(SPARK_START_MAGIC) "\n"
     ".quad " SPARK_TEST_TEXT(SPARK_START_MAGIC_FACTS) ", " SPARK_TEST_TEXT(SPARK_START_MAGIC_FACTS)
-    ", " SPARK_TEST_TEXT(SPARK_START_MAGIC) ", " SPARK_TEST_TEXT(SPARK_START_MAGIC_FACTS) " + 1\n"
+    ", " SPARK_TEST_TEXT(SPARK_START_MAGIC) ", " SPARK_TEST_TEXT(SPARK_START_MAGIC_FACTS) " + 1, "
+    SPARK_TEST_TEXT(SPARK_START_MAGIC_FACTS) "\n"
     ASM_OBJECT_END(spark_entry_magics)
     ASM_RODATA_OBJECT_BEGIN(spark_entry_facts_in, 8)
     ".quad 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n"
-    ".quad 1, 0, 0xff, 1\n"
+    ".quad 1, 0, 0xff, 1, 3\n"
     ASM_OBJECT_END(spark_entry_facts_in)
 );
 
@@ -81586,10 +81591,23 @@ b32 main(void)
                                     16777473, 16843009, 0,
                                     0x0101010101010101ull,
                                     0x0101010100000000ull,
-                                    0x0101010101010101ull, 257, 16777217, 0};
+                                    0x0101010101010101ull, 257, 16777217, 0,
+                                    0};
         positive mode = program_argument(1)[0] - '0';
         positive got = spark_entry_published();
         p8 facts = program_entry_facts;
+        positive clock = program_vdso_clock;
+        timespec now = {0, 0};
+
+        //      An auxiliary vector is looked in only where _start was told
+        //      there is one: every ELF, and a loader saying SPARK_ENTRY_AUXV.
+        if (clock != (mode == 7 || mode == 13 || mode == 14))
+                return 1;
+        if (mode == 14)
+                return got != words[mode] ||
+                       facts != (SPARK_ENTRY_UNFILTERED | SPARK_ENTRY_AUXV) ||
+                       clock_gettime(CLOCK_MONOTONIC, address_of now) != 0 ||
+                       program_vdso_clock <= 2 || now.tv_nsec >= 1000000000;
         if (mode == 7 || mode == 13)
         {
                 cpu_has_avx2 = cpu_has_avx512 = cpu_has_avx512_vbmi = cpu_has_fma = 0;
