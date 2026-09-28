@@ -13866,6 +13866,9 @@ typedef struct
         byte_span text;
         string_address name;
         positive lines;
+        // Newlines the reference scan passed over, as GNU's file_line_count
+        // counts them: up to the last keyword it kept.
+        positive counted;
 } ptx_file;
 
 typedef struct
@@ -14018,6 +14021,20 @@ static positive ptx_context_next(ptx_file address_to file, positive from,
 
         if (ptx_input_reference && !ptx_custom_sentence)
         {
+                // With -r the sentence expression is a newline, and one at
+                // the very place the scan stands -- an empty line -- is a
+                // match at the start, which GNU refuses.
+                if (file->text.bytes[from] == '\n')
+                {
+                        text_flush();
+                        string_format(writer_stderr,
+                                      "%s: error: regular expression has a match of length zero: '%w'\n",
+                                      text_name, writer_terminal_quoted_name,
+                                      (string_address) "\n");
+                        ptx_failed = true;
+                        return file->text.length;
+                }
+
                 p8 address_to newline = memory_first_of(
                     file->text.bytes + from, '\n', file->text.length - from);
                 after = newline ? (positive)(newline - file->text.bytes) + 1
@@ -14030,7 +14047,11 @@ static positive ptx_context_next(ptx_file address_to file, positive from,
 
                 if (match == from)
                 {
-                        string_diagnostic(&text_diagnostic, 0, null, "sentence expression matches empty text");
+                        text_flush();
+                        string_format(writer_stderr,
+                                      "%s: error: regular expression has a match of length zero: '%w'\n",
+                                      text_name, writer_terminal_quoted_name,
+                                      (string_address) "[.?!][]\"')}]*\\($\\|\t\\|  \\)[ \t\n]*");
                         ptx_failed = true;
                         return file->text.length;
                 }
@@ -14043,9 +14064,15 @@ static positive ptx_context_next(ptx_file address_to file, positive from,
                 positive begin = from + regex_slots[0];
                 after = from + regex_slots[1];
 
-                if (begin == from || after == begin)
+                // re_search answering the place it started from, whatever
+                // the match's length, is what GNU refuses.
+                if (begin == from)
                 {
-                        string_diagnostic(&text_diagnostic, 0, ptx_sentence_pattern, "sentence expression matches empty text");
+                        text_flush();
+                        string_format(writer_stderr,
+                                      "%s: error: regular expression has a match of length zero: '%w'\n",
+                                      text_name, writer_terminal_quoted_name,
+                                      ptx_sentence_pattern);
                         ptx_failed = true;
                         return file->text.length;
                 }
@@ -14084,25 +14111,6 @@ static positive ptx_plan_contexts(bool fill)
                                 context->reference = cursor;
                                 context->reference_length = 0;
                                 context->line = line;
-
-                                if (ptx_input_reference)
-                                {
-                                        positive scan = cursor;
-
-                                        while (scan < visible &&
-                                               !byte_is_space(
-                                                   file->text.bytes[scan]))
-                                                scan++;
-
-                                        context->reference_length = scan - cursor;
-                                        context->content = ptx_skip_white(
-                                            file, scan, visible);
-
-                                        if (context->reference_length >
-                                            ptx_reference_width)
-                                                ptx_reference_width =
-                                                    context->reference_length;
-                                }
                         }
 
                         line += memory_count(file->text.bytes + cursor,
@@ -14199,23 +14207,60 @@ static bool ptx_next_word(ptx_context address_to context,
         return true;
 }
 
-static positive ptx_word_line(ptx_context address_to context, positive word)
-{
-        ptx_file address_to file = ptx_files + context->file;
-        return context->line + memory_count(file->text.bytes + context->start,
-                                             word - context->start, '\n');
-}
-
+/*
+        The keywords, as GNU's find_occurs_in_text walks a file: a reference
+        (-r) is the non-blank run at the start of a line, found by a scan
+        that follows the words and passes over the blanks after the first
+        line's reference only -- so a first line that is nothing but its
+        reference lends that reference to the words of the line after it --
+        and a word inside a reference is no keyword. Where a context begins
+        with the reference, the reference and its blanks are cut from the
+        context for the words that follow. Lines are counted by the same
+        scan, up to the last keyword, for -A.
+*/
 static positive ptx_scan_occurrences(bool fill)
 {
         positive made = 0;
+        positive file_index = positive_max;
+        positive line_start = 0;
+        positive line_scan = 0;
+        positive reference_length = 0;
+        positive lines = 0;
+        p8 address_to bytes = null;
+        positive text_end = 0;
+        positive reference_from = positive_max;
+        positive reference_bound = 0;
+        positive reference_to = 0;
 
         for (positive context_index = 0;
              context_index < ptx_context_count; context_index++)
         {
                 ptx_context address_to context = ptx_contexts + context_index;
                 ptx_file address_to file = ptx_files + context->file;
-                positive cursor = context->content;
+
+                if (context->file != file_index)
+                {
+                        if (file_index != positive_max)
+                                ptx_files[file_index].counted = lines;
+                        file_index = context->file;
+                        reference_from = positive_max;
+                        bytes = file->text.bytes;
+                        text_end = file->text.length;
+                        line_start = 0;
+                        line_scan = 0;
+                        lines = 0;
+                        if (ptx_input_reference)
+                        {
+                                while (line_scan < text_end && !byte_is_space(bytes[line_scan]))
+                                        line_scan++;
+                                reference_length = line_scan - line_start;
+                                while (line_scan < text_end && byte_is_space(bytes[line_scan]))
+                                        line_scan++;
+                        }
+                }
+
+                positive context_start = context->start;
+                positive cursor = context->start;
                 positive start;
                 positive finish;
 
@@ -14231,29 +14276,99 @@ static positive ptx_scan_occurrences(bool fill)
                         if (length > ptx_maximum_word)
                                 ptx_maximum_word = length;
 
-                        if (!ptx_selected(file->text.bytes + start, length))
+                        if (ptx_input_reference)
+                        {
+                                while (line_scan < start)
+                                        if (bytes[line_scan] == '\n')
+                                        {
+                                                lines++;
+                                                line_start = ++line_scan;
+                                                while (line_scan < text_end &&
+                                                       !byte_is_space(bytes[line_scan]))
+                                                        line_scan++;
+                                                reference_length = line_scan - line_start;
+                                        }
+                                        else
+                                                line_scan++;
+                                if (line_scan > start)
+                                        continue;
+                        }
+
+                        if (!ptx_selected(bytes + start, length))
                                 continue;
+
+                        if (ptx_auto_reference)
+                        {
+                                while (line_scan < start)
+                                        if (bytes[line_scan] == '\n')
+                                        {
+                                                lines++;
+                                                line_start = ++line_scan;
+                                                while (line_scan < text_end &&
+                                                       !byte_is_space(bytes[line_scan]))
+                                                        line_scan++;
+                                        }
+                                        else
+                                                line_scan++;
+                        }
+                        else if (ptx_input_reference &&
+                                 reference_length > ptx_reference_width)
+                                ptx_reference_width = reference_length;
+
+                        if (ptx_input_reference && line_start == context_start)
+                        {
+                                while (context_start < context->finish &&
+                                       !byte_is_space(bytes[context_start]))
+                                        context_start++;
+                                while (context_start < context->finish &&
+                                       byte_is_space(bytes[context_start]))
+                                        context_start++;
+                        }
 
                         if (fill)
                         {
                                 ptx_occurrence address_to occurrence =
                                     ptx_occurrences + made;
+                                positive reference_end = line_start;
+
+                                // The reference runs to a blank or the
+                                // context's end; measured once a line.
+                                if (ptx_input_reference)
+                                {
+                                        if (line_start == reference_from &&
+                                            context->finish == reference_bound)
+                                                reference_end = reference_to;
+                                        else
+                                        {
+                                                while (reference_end < context->finish &&
+                                                       !byte_is_space(bytes[reference_end]))
+                                                        reference_end++;
+                                                reference_from = line_start;
+                                                reference_bound = context->finish;
+                                                reference_to = reference_end;
+                                        }
+                                }
+
                                 occurrence->file = context->file;
                                 occurrence->key = start;
                                 occurrence->key_length = length;
-                                occurrence->left = context->content;
+                                occurrence->left = context_start;
                                 occurrence->right = context->finish;
-                                occurrence->reference = context->reference;
+                                occurrence->reference = line_start;
                                 occurrence->reference_length =
-                                    context->reference_length;
-                                occurrence->line = ptx_word_line(context,
-                                                                 start);
+                                    ptx_input_reference && reference_end > line_start
+                                        ? reference_end - line_start
+                                        : 0;
+                                occurrence->line = lines + 1;
                                 occurrence->order = made;
                         }
 
                         made++;
                 }
         }
+
+        if (file_index != positive_max)
+                ptx_files[file_index].counted = lines;
 
         return made;
 }
@@ -14371,6 +14486,139 @@ static fn ptx_put_reference(ptx_occurrence address_to occurrence)
                                               true});
 }
 
+/*
+        The roff and TeX forms (-O, -T, --format): the same five fields as
+        the dumb terminal lines, each written through print_field's edits --
+        every blank of any kind one space, a double quote doubled for roff,
+        $ % & # _ behind a backslash, braces in math mode and a backslash as
+        \backslash{} for TeX -- inside the .xx "..." or \xx {..} call named
+        by -M.
+*/
+static p8 ptx_format;
+static string_address ptx_macro;
+
+static fn ptx_put_edited(p8 address_to bytes, positive length)
+{
+        for (positive at = 0; at < length; at++)
+        {
+                p8 c = bytes[at];
+
+                if (byte_is_space(c) || c == '\f')
+                        text_put_character(' ');
+                else if (ptx_format == 'r' && c == '"')
+                        text_put_string("\"\"");
+                else if (ptx_format == 't' && string_first_of("$%&#_", c))
+                {
+                        text_put_character('\\');
+                        text_put_character(c);
+                }
+                else if (ptx_format == 't' && (c == '{' || c == '}'))
+                {
+                        text_put_string("$\\");
+                        text_put_character(c);
+                        text_put_character('$');
+                }
+                else if (ptx_format == 't' && c == '\\')
+                        text_put_string("\\backslash{}");
+                else
+                        text_put_character(c);
+        }
+}
+
+static fn ptx_put_edited_span(ptx_file address_to file, ptx_span span)
+{
+        if (span.have && span.finish > span.start)
+                ptx_put_edited(file->text.bytes + span.start, span.finish - span.start);
+}
+
+static fn ptx_put_edited_reference(ptx_occurrence address_to occurrence)
+{
+        ptx_file address_to file = ptx_files + occurrence->file;
+
+        if (ptx_auto_reference)
+        {
+                if (file->name)
+                        ptx_put_edited((p8 address_to)file->name, string_length(file->name));
+
+                p8 digits[64];
+
+                digits[0] = ':';
+                ptx_put_edited(digits, 1 + positive_into(digits + 1, occurrence->line));
+        }
+        else if (ptx_input_reference)
+                ptx_put_edited_span(file, (ptx_span){occurrence->reference,
+                                                     occurrence->reference +
+                                                         occurrence->reference_length,
+                                                     true});
+}
+
+static fn ptx_output_formatted(ptx_occurrence address_to occurrence, ptx_span tail,
+                               bool tail_truncated, ptx_span before,
+                               bool before_truncated, ptx_span keyafter,
+                               bool keyafter_truncated, ptx_span head,
+                               bool head_truncated)
+{
+        ptx_file address_to file = ptx_files + occurrence->file;
+        bool references = ptx_auto_reference || ptx_input_reference;
+
+        if (ptx_format == 'r')
+        {
+                text_put_character('.');
+                text_put_string(ptx_macro);
+                text_put_string(" \"");
+                ptx_put_edited_span(file, tail);
+                if (tail_truncated)
+                        text_put(ptx_truncation, ptx_truncation_length);
+                text_put_string("\" \"");
+                if (before_truncated)
+                        text_put(ptx_truncation, ptx_truncation_length);
+                ptx_put_edited_span(file, before);
+                text_put_string("\" \"");
+                ptx_put_edited_span(file, keyafter);
+                if (keyafter_truncated)
+                        text_put(ptx_truncation, ptx_truncation_length);
+                text_put_string("\" \"");
+                if (head_truncated)
+                        text_put(ptx_truncation, ptx_truncation_length);
+                ptx_put_edited_span(file, head);
+                text_put_character('"');
+                if (references)
+                {
+                        text_put_string(" \"");
+                        ptx_put_edited_reference(occurrence);
+                        text_put_character('"');
+                }
+                text_put_character('\n');
+                return;
+        }
+
+        // TeX parts the keyword from what follows it at the first word.
+        positive key_finish = keyafter.start < keyafter.finish
+                                  ? ptx_skip_something(file, keyafter.start, keyafter.finish)
+                                  : keyafter.start;
+
+        text_put_character('\\');
+        text_put_string(ptx_macro);
+        text_put_string(" {");
+        ptx_put_edited_span(file, tail);
+        text_put_string("}{");
+        ptx_put_edited_span(file, before);
+        text_put_string("}{");
+        ptx_put_edited_span(file, (ptx_span){keyafter.start, key_finish, true});
+        text_put_string("}{");
+        ptx_put_edited_span(file, (ptx_span){key_finish, keyafter.finish, true});
+        text_put_string("}{");
+        ptx_put_edited_span(file, head);
+        text_put_character('}');
+        if (references)
+        {
+                text_put_character('{');
+                ptx_put_edited_reference(occurrence);
+                text_put_character('}');
+        }
+        text_put_character('\n');
+}
+
 static fn ptx_output_one(ptx_occurrence address_to occurrence)
 {
         ptx_file address_to file = ptx_files + occurrence->file;
@@ -14397,7 +14645,10 @@ static fn ptx_output_one(ptx_occurrence address_to occurrence)
 
         positive left_field_start;
 
-        if (key_start - left_context > ptx_half_width + ptx_maximum_word)
+        // Signed, as GNU's offsets are: where a reference was cut from the
+        // context, the context may begin after the keyword.
+        if ((bipolar)key_start - (bipolar)left_context >
+            (bipolar)(ptx_half_width + ptx_maximum_word))
         {
                 left_field_start =
                     key_start - (ptx_half_width + ptx_maximum_word);
@@ -14480,6 +14731,16 @@ static fn ptx_output_one(ptx_occurrence address_to occurrence)
                         head.start = ptx_skip_white(file, head.start,
                                                    head.finish);
                 }
+        }
+
+        if (ptx_format != 'd')
+        {
+                ptx_output_formatted(occurrence, tail, tail_truncated,
+                                     (ptx_span){before_start, before_finish, true},
+                                     before_truncated,
+                                     (ptx_span){key_start, keyafter_finish, true},
+                                     keyafter_truncated, head, head_truncated);
+                return;
         }
 
         positive reference_length = ptx_reference_length(occurrence);
@@ -14683,13 +14944,101 @@ static positive ptx_unescape(p8 address_to text)
         return into;
 }
 
-// Every -g and -w is checked where it is written, not only the last.
+/*
+        Every -g and -w is checked where it is written, not only the last, as
+        xstrtoimax reads it in base 0: blanks and a sign may lead, 0x is hex
+        and a leading 0 octal, and the value must be above nought. -O, -T and
+        --format choose the output form, the last of them winning.
+*/
+static bool ptx_width_given;
+
+static bool ptx_number(string_address text, positive address_to value)
+{
+        string_address at = text + string_span(text, string_set_space);
+        bool negative = at[0] == '-';
+        positive base = 10;
+        positive made = 0;
+        bool any = false;
+
+        if (negative || at[0] == '+')
+                at++;
+        if (at[0] == '0' && (at[1] == 'x' || at[1] == 'X') &&
+            byte_is_hexadecimal(at[2]))
+        {
+                base = 16;
+                at += 2;
+        }
+        else if (at[0] == '0')
+                base = 8;
+
+        for (;; at++)
+        {
+                p8 c = (p8)at[0];
+                positive digit = byte_is_digit(c) ? (positive)(c - '0')
+                                 : base == 16 && byte_is_hexadecimal(c) ? (positive)((c | 32) - 'a' + 10)
+                                                                        : 99;
+
+                if (digit >= base)
+                        break;
+                if (made > ((positive_max >> 1) - digit) / base)
+                        return false;
+                made = made * base + digit;
+                any = true;
+        }
+
+        if (!any || at[0] || negative || !made)
+                return false;
+        address_to value = made;
+        return true;
+}
+
 static bool ptx_option_seen(p8 letter, string_address value)
 {
-        if ((letter == 'g' || letter == 'w') &&
-            !pr_parse_positive(value, letter == 'g' ? address_of ptx_gap
-                                                    : address_of ptx_width))
-                return string_diagnostic(&text_diagnostic, 0, value, letter == 'g' ? "invalid gap width" : "invalid line width");
+        if (letter == 'g' || letter == 'w')
+        {
+                if (!ptx_number(value, letter == 'g' ? address_of ptx_gap
+                                                     : address_of ptx_width))
+                {
+                        text_flush();
+                        string_format(writer_stderr, "%s: %s: '%w'\n", text_name,
+                                      letter == 'g' ? "invalid gap width" : "invalid line width",
+                                      writer_terminal_quoted_name, value);
+                        return false;
+                }
+                if (letter == 'w')
+                        ptx_width_given = true;
+        }
+        else if (letter == 't' && !ptx_width_given)
+        {
+                ptx_width = 100;
+                ptx_width_given = true;
+        }
+        else if (letter == 'O')
+                ptx_format = 'r';
+        else if (letter == 'T')
+                ptx_format = 't';
+        else if (letter == 'Q')
+        {
+                positive length = string_length(value);
+
+                if (!length)
+                {
+                        text_flush();
+                        string_format(writer_stderr,
+                                      "%s: ambiguous argument '' for '--format'\n"
+                                      "Valid arguments are:\n  - 'roff'\n  - 'tex'\n"
+                                      "Try '%s --help' for more information.\n",
+                                      text_name, text_name);
+                        return false;
+                }
+                if (length <= 4 && !memory_compare("roff", value, length))
+                        ptx_format = 'r';
+                else if (length && length <= 3 && !memory_compare("tex", value, length))
+                        ptx_format = 't';
+                else
+                        return !text_argmatch("--format", value,
+                                              "Valid arguments are:\n  - 'roff'\n  - 'tex'\n", null);
+        }
 
         return true;
 }
@@ -14705,15 +15054,21 @@ static b32 text_ptx()
 
         text_begin("ptx");
         utility_arena.used = 0;
+        ptx_format = 'd';
+        ptx_width_given = false;
+        ptx_width = 72;
+        ptx_gap = 3;
 
         if (!text_took(address_of taking))
                 return text_done(1);
 
         positive flags = taking.flags;
 
-        if (flags & (FILE_FLAG('G') | FILE_FLAG('O') | FILE_FLAG('T') |
-                     FILE_FLAG('Q')))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "traditional and typesetter formats are unsupported"));
+        if (flags & FILE_FLAG('G'))
+                return text_done(string_diagnostic(&text_diagnostic, 1, null, "traditional format is unsupported"));
+
+        ptx_macro = (flags & FILE_FLAG('M')) ? file_option_value(address_of taking, 'M')
+                                             : (string_address) "xx";
 
         ptx_fold = (flags & FILE_FLAG('f')) != 0;
         ptx_auto_reference = (flags & FILE_FLAG('A')) != 0;
@@ -14732,18 +15087,11 @@ static b32 text_ptx()
         ptx_truncation = (flags & FILE_FLAG('F'))
                              ? file_option_value(address_of taking, 'F')
                              : (string_address)"/";
-        if (!(flags & FILE_FLAG('w')))
-                ptx_width = (flags & FILE_FLAG('t')) ? 100 : 72;
-        if (!(flags & FILE_FLAG('g')))
-                ptx_gap = 3;
         ptx_failed = false;
         ptx_ignore = (byte_span){null, 0};
         ptx_only = (byte_span){null, 0};
         ptx_reference_width = 0;
         ptx_maximum_word = 0;
-
-        if (ptx_input_reference && ptx_custom_sentence)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "--references with --sentence-regexp is unsupported"));
 
         if (flags & FILE_FLAG('F'))
                 ptx_unescape((p8 address_to)ptx_truncation);
@@ -14782,6 +15130,15 @@ static b32 text_ptx()
                            address_of ptx_only))
                 return text_done(1);
 
+        // A break file is read whatever else says what a word is, as GNU
+        // reads it, so one that is not there is refused either way.
+        byte_span breaks = {null, 0};
+
+        if ((flags & FILE_FLAG('b')) &&
+            !text_blob_read(file_option_value(address_of taking, 'b'),
+                           address_of breaks))
+                return text_done(1);
+
         if (ptx_custom_word)
         {
                 if (!regex_compile(ptx_word_pattern, true, ptx_fold, false,
@@ -14798,12 +15155,6 @@ static b32 text_ptx()
         }
         else if (flags & FILE_FLAG('b'))
         {
-                byte_span breaks;
-
-                if (!text_blob_read(file_option_value(address_of taking, 'b'),
-                                   address_of breaks))
-                        return text_done(1);
-
                 memory_fill(ptx_word_bytes, 1, sizeof(ptx_word_bytes));
 
                 for (positive at = 0; at < breaks.length; at++)
@@ -14825,7 +15176,7 @@ static b32 text_ptx()
         {
                 string_address name = text_file_name(input);
 
-                if (name && !name[0])
+                if (name && (!name[0] || string_equals(name, "-")))
                         name = null;
 
                 ptx_files[input].name = name;
@@ -14896,7 +15247,7 @@ static b32 text_ptx()
                                  ? string_length(ptx_files[file_index].name)
                                  : 0) +
                             1 + positive_digits(
-                                    ptx_files[file_index].lines + 1);
+                                    ptx_files[file_index].counted + 1);
 
                         if (width > ptx_reference_width)
                                 ptx_reference_width = width;
