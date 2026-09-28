@@ -117,10 +117,26 @@ static bipolar network_wait_writable_until(
         return network_wait_until(handle, SYSTEM_POLL_WRITE, deadline);
 }
 
+/* What is already queued, taken without waiting; an interrupted receive
+   is asked again, and NETWORK_TRY_AGAIN says nothing was there. */
+static bipolar network_stream_read_now(bipolar handle, p8 address_to into,
+                                       positive length)
+{
+        bipolar got;
+
+        do
+                got = socket_receive((b32)handle, into, length, MSG_DONTWAIT,
+                                     null, 0);
+        while (got == NETWORK_INTERRUPTED);
+        return got;
+}
+
 /* Deadline-bound stream reads must not enter a blocking read merely because
    one byte was ready: a peer could then trickle the rest forever under the
    socket's renewing idle timeout. Poll the absolute budget and consume only
-   bytes immediately available before recomputing what remains. */
+   bytes immediately available before recomputing what remains. The poll
+   comes first: a caller here has usually just asked, and a receive before
+   it found nothing nine times in ten, one system call more per answer. */
 static bipolar network_stream_read_some_until(
     bipolar handle, p8 address_to into, positive length,
     const network_deadline address_to deadline)
@@ -132,13 +148,29 @@ static bipolar network_stream_read_some_until(
                 if (ready <= 0)
                         return ready < 0 ? ready : -1;
 
-                bipolar got = socket_receive((b32)handle, into, length,
-                                             MSG_DONTWAIT, null, 0);
+                bipolar got = network_stream_read_now(handle, into, length);
 
-                if (got == NETWORK_INTERRUPTED || got == NETWORK_TRY_AGAIN)
-                        continue;
-                return got;
+                if (got != NETWORK_TRY_AGAIN)
+                        return got;
         }
+}
+
+/* A read in the middle of a stream, where bytes are usually queued already:
+   they are taken without a poll, and the clock -- a system call here -- is
+   read only once nothing is queued and a wait of that long begins. */
+static bipolar network_stream_read_some_for(bipolar handle, p8 address_to into,
+                                            positive length, positive seconds,
+                                            positive nanoseconds)
+{
+        network_deadline deadline;
+        bipolar got = network_stream_read_now(handle, into, length);
+
+        if (got != NETWORK_TRY_AGAIN)
+                return got;
+        return network_deadline_begin(address_of deadline, seconds, nanoseconds)
+                   ? network_stream_read_some_until(handle, into, length,
+                                                    address_of deadline)
+                   : -1;
 }
 
 /* Stream protocols share exact-record reads and complete writes.  A read

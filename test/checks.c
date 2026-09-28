@@ -6936,6 +6936,401 @@ static u64 next(void)
 }
 #endif
 
+#elif defined(SHARED_x25519_reference)
+/*
+        RFC 7748 X25519 as crypto.c ran it in C before lib.c's x25519: five
+        51-bit limbs, field reduce, freeze and the Montgomery step after the
+        public-domain 64-bit curve25519-donna, the volatile wipes included.
+        Kept whole so BENCH_montgomery can time the assembly against it at
+        crypto_x25519, its caller, and crypto_fuzz can run it where the
+        assembly cannot be lifted (MemorySanitizer, a host that is not
+        x86_64). Include it after crypto.c.
+*/
+#ifndef DAWNING_X25519_REFERENCE_C
+#define DAWNING_X25519_REFERENCE_C
+
+typedef unsigned __int128 x25519_reference_wide;
+
+//      crypto.c's crypto_forget as it stood.
+static fn x25519_reference_forget(address_any secret, positive length)
+{
+        memory_fill(secret, 0, length);
+        __asm__ __volatile__("" : : "r"(secret) : "memory");
+}
+
+typedef p64 x25519_reference_fe[5];
+
+static p64 x25519_reference_load64(p8 address_to in)
+{
+        return (p64)in[0] | ((p64)in[1] << 8) | ((p64)in[2] << 16) |
+               ((p64)in[3] << 24) | ((p64)in[4] << 32) | ((p64)in[5] << 40) |
+               ((p64)in[6] << 48) | ((p64)in[7] << 56);
+}
+
+static fn x25519_reference_store64(p8 address_to out, p64 in)
+{
+        out[0] = (p8)in;
+        out[1] = (p8)(in >> 8);
+        out[2] = (p8)(in >> 16);
+        out[3] = (p8)(in >> 24);
+        out[4] = (p8)(in >> 32);
+        out[5] = (p8)(in >> 40);
+        out[6] = (p8)(in >> 48);
+        out[7] = (p8)(in >> 56);
+}
+
+static fn x25519_reference_copy(x25519_reference_fe o, x25519_reference_fe a)
+{
+        o[0] = a[0];
+        o[1] = a[1];
+        o[2] = a[2];
+        o[3] = a[3];
+        o[4] = a[4];
+}
+
+static fn x25519_reference_load(x25519_reference_fe out, p8 address_to in)
+{
+        out[0] = x25519_reference_load64(in) & 0x7ffffffffffffull;
+        out[1] = (x25519_reference_load64(in + 6) >> 3) & 0x7ffffffffffffull;
+        out[2] = (x25519_reference_load64(in + 12) >> 6) & 0x7ffffffffffffull;
+        out[3] = (x25519_reference_load64(in + 19) >> 1) & 0x7ffffffffffffull;
+        out[4] = (x25519_reference_load64(in + 24) >> 12) & 0x7ffffffffffffull;
+}
+
+/*
+        One pass of the 51 bit carry chain.
+
+        Each limb hands what will not fit to the one above it. wrap folds the
+        carry leaving the top limb back into the bottom one at the weight the
+        prime gives it -- 2^255 is 19 -- and is how the chain stays inside
+        the field. The pass that finishes a store is the one exception: there
+        the carry out of the top is the answer to the conditional
+        subtraction, and dropping it is what performs the subtraction.
+*/
+static fn x25519_reference_carry(x25519_reference_wide address_to t, bool wrap)
+{
+        for (positive i = 0; i < 4; i++)
+        {
+                t[i + 1] += t[i] >> 51;
+                t[i] &= 0x7ffffffffffffull;
+        }
+
+        if (wrap)
+                t[0] += 19 * (t[4] >> 51);
+        t[4] &= 0x7ffffffffffffull;
+}
+
+static fn x25519_reference_store(p8 address_to out, x25519_reference_fe in)
+{
+        x25519_reference_wide t[5];
+
+        for (positive i = 0; i < 5; i++)
+                t[i] = in[i];
+
+        x25519_reference_carry(t, true);
+        x25519_reference_carry(t, true);
+
+        //      Adding 19 and carrying turns a value in [p, 2p) into one in
+        //      [0, p) with the top limb's bit set, which the constants below
+        //      then clear; a value already below p is unchanged by the pair.
+        t[0] += 19;
+        x25519_reference_carry(t, true);
+
+        t[0] += 0x8000000000000ull - 19;
+        for (positive i = 1; i < 5; i++)
+                t[i] += 0x8000000000000ull - 1;
+        x25519_reference_carry(t, false);
+
+        x25519_reference_store64(out, (p64)(t[0] | (t[1] << 51)));
+        x25519_reference_store64(out + 8, (p64)((t[1] >> 13) | (t[2] << 38)));
+        x25519_reference_store64(out + 16, (p64)((t[2] >> 26) | (t[3] << 25)));
+        x25519_reference_store64(out + 24, (p64)((t[3] >> 39) | (t[4] << 12)));
+        x25519_reference_forget(t, sizeof t);
+}
+
+static fn x25519_reference_sum(x25519_reference_fe o, x25519_reference_fe in)
+{
+        o[0] += in[0];
+        o[1] += in[1];
+        o[2] += in[2];
+        o[3] += in[3];
+        o[4] += in[4];
+}
+
+static fn x25519_reference_diff(x25519_reference_fe o, x25519_reference_fe in)
+{
+        o[0] = in[0] + 0x3fffffffffff68ull - o[0];
+        o[1] = in[1] + 0x3ffffffffffff8ull - o[1];
+        o[2] = in[2] + 0x3ffffffffffff8ull - o[2];
+        o[3] = in[3] + 0x3ffffffffffff8ull - o[3];
+        o[4] = in[4] + 0x3ffffffffffff8ull - o[4];
+}
+
+static fn x25519_reference_mul(x25519_reference_fe o, x25519_reference_fe in2,
+                            x25519_reference_fe in)
+{
+        x25519_reference_wide t[5];
+        p64 r0, r1, r2, r3, r4, s0, s1, s2, s3, s4, c;
+
+        r0 = in[0];
+        r1 = in[1];
+        r2 = in[2];
+        r3 = in[3];
+        r4 = in[4];
+        s0 = in2[0];
+        s1 = in2[1];
+        s2 = in2[2];
+        s3 = in2[3];
+        s4 = in2[4];
+
+        t[0] = (x25519_reference_wide)r0 * s0;
+        t[1] = (x25519_reference_wide)r0 * s1 + (x25519_reference_wide)r1 * s0;
+        t[2] = (x25519_reference_wide)r0 * s2 + (x25519_reference_wide)r2 * s0 + (x25519_reference_wide)r1 * s1;
+        t[3] = (x25519_reference_wide)r0 * s3 + (x25519_reference_wide)r3 * s0 + (x25519_reference_wide)r1 * s2 +
+               (x25519_reference_wide)r2 * s1;
+        t[4] = (x25519_reference_wide)r0 * s4 + (x25519_reference_wide)r4 * s0 + (x25519_reference_wide)r3 * s1 +
+               (x25519_reference_wide)r1 * s3 + (x25519_reference_wide)r2 * s2;
+
+        //      Limbs stay below 2^55 (a difference is at most 2^52 + 8p's
+        //      2^54 limb), so nineteen of one fits a word and each wrapped
+        //      product is one 64 by 64 multiply rather than a 128 by 64.
+        r1 *= 19;
+        r2 *= 19;
+        r3 *= 19;
+        r4 *= 19;
+        t[0] += (x25519_reference_wide)r4 * s1 + (x25519_reference_wide)r1 * s4 +
+                (x25519_reference_wide)r2 * s3 + (x25519_reference_wide)r3 * s2;
+        t[1] += (x25519_reference_wide)r4 * s2 + (x25519_reference_wide)r2 * s4 +
+                (x25519_reference_wide)r3 * s3;
+        t[2] += (x25519_reference_wide)r4 * s3 + (x25519_reference_wide)r3 * s4;
+        t[3] += (x25519_reference_wide)r4 * s4;
+
+        r0 = (p64)t[0] & 0x7ffffffffffffull;
+        c = (p64)(t[0] >> 51);
+        t[1] += c;
+        r1 = (p64)t[1] & 0x7ffffffffffffull;
+        c = (p64)(t[1] >> 51);
+        t[2] += c;
+        r2 = (p64)t[2] & 0x7ffffffffffffull;
+        c = (p64)(t[2] >> 51);
+        t[3] += c;
+        r3 = (p64)t[3] & 0x7ffffffffffffull;
+        c = (p64)(t[3] >> 51);
+        t[4] += c;
+        r4 = (p64)t[4] & 0x7ffffffffffffull;
+        c = (p64)(t[4] >> 51);
+        r0 += c * 19;
+        c = r0 >> 51;
+        r0 &= 0x7ffffffffffffull;
+        r1 += c;
+        c = r1 >> 51;
+        r1 &= 0x7ffffffffffffull;
+        r2 += c;
+
+        o[0] = r0;
+        o[1] = r1;
+        o[2] = r2;
+        o[3] = r3;
+        o[4] = r4;
+        x25519_reference_forget(t, sizeof t);
+}
+
+/* o = a^(2^n), n at least one: each square makes each cross product once
+   and doubles it, fifteen multiplies where x25519_reference_mul makes
+   twenty five, with the same carry chain. */
+static fn x25519_reference_sqr_n(x25519_reference_fe o, x25519_reference_fe a, positive n)
+{
+        x25519_reference_wide t[5];
+        p64 r0 = a[0], r1 = a[1], r2 = a[2], r3 = a[3], r4 = a[4];
+
+        while (n--)
+        {
+                p64 d0 = r0 * 2;
+                p64 d1 = r1 * 2;
+                p64 d2 = r2 * 2 * 19;
+                p64 d419 = r4 * 19;
+                p64 d4 = d419 * 2;
+                p64 c;
+
+                t[0] = (x25519_reference_wide)r0 * r0 + (x25519_reference_wide)d4 * r1 +
+                       (x25519_reference_wide)d2 * r3;
+                t[1] = (x25519_reference_wide)d0 * r1 + (x25519_reference_wide)d4 * r2 +
+                       (x25519_reference_wide)r3 * (r3 * 19);
+                t[2] = (x25519_reference_wide)d0 * r2 + (x25519_reference_wide)r1 * r1 +
+                       (x25519_reference_wide)d4 * r3;
+                t[3] = (x25519_reference_wide)d0 * r3 + (x25519_reference_wide)d1 * r2 +
+                       (x25519_reference_wide)r4 * d419;
+                t[4] = (x25519_reference_wide)d0 * r4 + (x25519_reference_wide)d1 * r3 +
+                       (x25519_reference_wide)r2 * r2;
+
+                t[1] += (p64)(t[0] >> 51);
+                r0 = (p64)t[0] & 0x7ffffffffffffull;
+                t[2] += (p64)(t[1] >> 51);
+                r1 = (p64)t[1] & 0x7ffffffffffffull;
+                t[3] += (p64)(t[2] >> 51);
+                r2 = (p64)t[2] & 0x7ffffffffffffull;
+                t[4] += (p64)(t[3] >> 51);
+                r3 = (p64)t[3] & 0x7ffffffffffffull;
+                r4 = (p64)t[4] & 0x7ffffffffffffull;
+                r0 += 19 * (p64)(t[4] >> 51);
+                c = r0 >> 51;
+                r0 &= 0x7ffffffffffffull;
+                r1 += c;
+                c = r1 >> 51;
+                r1 &= 0x7ffffffffffffull;
+                r2 += c;
+        }
+
+        o[0] = r0;
+        o[1] = r1;
+        o[2] = r2;
+        o[3] = r3;
+        o[4] = r4;
+        x25519_reference_forget(t, sizeof t);
+}
+
+static fn x25519_reference_mul121665(x25519_reference_fe o, x25519_reference_fe a)
+{
+        x25519_reference_wide w;
+
+        w = (x25519_reference_wide)a[0] * 121665;
+        o[0] = (p64)w & 0x7ffffffffffffull;
+        w = (w >> 51) + (x25519_reference_wide)a[1] * 121665;
+        o[1] = (p64)w & 0x7ffffffffffffull;
+        w = (w >> 51) + (x25519_reference_wide)a[2] * 121665;
+        o[2] = (p64)w & 0x7ffffffffffffull;
+        w = (w >> 51) + (x25519_reference_wide)a[3] * 121665;
+        o[3] = (p64)w & 0x7ffffffffffffull;
+        w = (w >> 51) + (x25519_reference_wide)a[4] * 121665;
+        o[4] = (p64)w & 0x7ffffffffffffull;
+        o[0] += 19 * (p64)(w >> 51);
+        x25519_reference_forget(address_of w, sizeof w);
+}
+
+static fn x25519_reference_invert(x25519_reference_fe o, x25519_reference_fe z)
+{
+        x25519_reference_fe a, t0, b, c;
+
+        x25519_reference_sqr_n(a, z, 1);
+        x25519_reference_sqr_n(t0, a, 2);
+        x25519_reference_mul(b, t0, z);
+        x25519_reference_mul(a, b, a);
+        x25519_reference_sqr_n(t0, a, 1);
+        x25519_reference_mul(b, t0, b);
+        x25519_reference_sqr_n(t0, b, 5);
+        x25519_reference_mul(b, t0, b);
+        x25519_reference_sqr_n(t0, b, 10);
+        x25519_reference_mul(c, t0, b);
+        x25519_reference_sqr_n(t0, c, 20);
+        x25519_reference_mul(t0, t0, c);
+        x25519_reference_sqr_n(t0, t0, 10);
+        x25519_reference_mul(b, t0, b);
+        x25519_reference_sqr_n(t0, b, 50);
+        x25519_reference_mul(c, t0, b);
+        x25519_reference_sqr_n(t0, c, 100);
+        x25519_reference_mul(t0, t0, c);
+        x25519_reference_sqr_n(t0, t0, 50);
+        x25519_reference_mul(t0, t0, b);
+        x25519_reference_sqr_n(t0, t0, 5);
+        x25519_reference_mul(o, t0, a);
+
+        x25519_reference_forget(a, sizeof a);
+        x25519_reference_forget(t0, sizeof t0);
+        x25519_reference_forget(b, sizeof b);
+        x25519_reference_forget(c, sizeof c);
+}
+
+static fn x25519_reference_cswap(x25519_reference_fe a, x25519_reference_fe b, p64 swap)
+{
+        positive i;
+
+        swap = 0 - swap;
+        for (i = 0; i < 5; i++)
+        {
+                p64 t = swap & (a[i] ^ b[i]);
+                a[i] ^= t;
+                b[i] ^= t;
+        }
+}
+
+static fn x25519_reference(p8 address_to out, const p8 address_to scalar,
+                             const p8 address_to u)
+{
+        //      Everything the ladder derives from the scalar, wiped as one.
+        struct
+        {
+                p8 e[32];
+                x25519_reference_fe x1, x2, z2, x3, z3;
+                x25519_reference_fe a, b, c, d, aa, bb, ee, da, cb, t;
+                p64 bit;
+                p64 swap;
+        } w;
+        positive i;
+
+        memory_copy(w.e, scalar, 32);
+        w.swap = 0;
+        w.e[0] &= 248;
+        w.e[31] &= 127;
+        w.e[31] |= 64;
+
+        x25519_reference_load(w.x1, (p8 address_to)u);
+        memory_fill(w.x2, 0, sizeof(w.x2));
+        w.x2[0] = 1;
+        memory_fill(w.z2, 0, sizeof(w.z2));
+        x25519_reference_copy(w.x3, w.x1);
+        memory_fill(w.z3, 0, sizeof(w.z3));
+        w.z3[0] = 1;
+
+        for (i = 254; i < 256; i--)
+        {
+                w.bit = (w.e[i >> 3] >> (i & 7)) & 1;
+                w.swap ^= w.bit;
+                x25519_reference_cswap(w.x2, w.x3, w.swap);
+                x25519_reference_cswap(w.z2, w.z3, w.swap);
+                w.swap = w.bit;
+
+                x25519_reference_copy(w.a, w.x2);
+                x25519_reference_sum(w.a, w.z2);
+                x25519_reference_copy(w.b, w.z2);
+                x25519_reference_diff(w.b, w.x2);
+                x25519_reference_copy(w.c, w.x3);
+                x25519_reference_sum(w.c, w.z3);
+                x25519_reference_copy(w.d, w.z3);
+                x25519_reference_diff(w.d, w.x3);
+
+                x25519_reference_mul(w.da, w.d, w.a);
+                x25519_reference_mul(w.cb, w.c, w.b);
+                x25519_reference_sqr_n(w.aa, w.a, 1);
+                x25519_reference_sqr_n(w.bb, w.b, 1);
+
+                x25519_reference_copy(w.t, w.da);
+                x25519_reference_sum(w.t, w.cb);
+                x25519_reference_sqr_n(w.x3, w.t, 1);
+
+                x25519_reference_copy(w.t, w.cb);
+                x25519_reference_diff(w.t, w.da);
+                x25519_reference_sqr_n(w.t, w.t, 1);
+                x25519_reference_mul(w.z3, w.x1, w.t);
+
+                x25519_reference_mul(w.x2, w.aa, w.bb);
+
+                x25519_reference_copy(w.ee, w.bb);
+                x25519_reference_diff(w.ee, w.aa);
+                x25519_reference_mul121665(w.t, w.ee);
+                x25519_reference_sum(w.t, w.aa);
+                x25519_reference_mul(w.z2, w.ee, w.t);
+        }
+
+        x25519_reference_cswap(w.x2, w.x3, w.swap);
+        x25519_reference_cswap(w.z2, w.z3, w.swap);
+        x25519_reference_invert(w.z2, w.z2);
+        x25519_reference_mul(w.x2, w.x2, w.z2);
+        x25519_reference_store(out, w.x2);
+
+        x25519_reference_forget(address_of w, sizeof w);
+}
+
+#endif
 #elif defined(SHARED_number_stream)
 /*
         The float conversions over generated text, written once for two sides.
@@ -25029,6 +25424,28 @@ static positive lengths[] = {
 
 #define LENGTHS (sizeof(lengths) / sizeof(lengths[0]))
 
+/*
+        A stopping table is asked, before it is used, for one entry a table
+        folded from the literal holds as 1: a byte outside the set. It asked
+        for the terminator, which a stopping table holds as 0 however it was
+        built, so every set of two or more members went to the routine and
+        the table was never read -- about eighty instructions a call where
+        the table's scan is a handful, on every arithmetic body the shell
+        expanded. The table the macro reads has to answer 1 at the byte it
+        is asked about, whenever the set leaves one out.
+*/
+static void witness(string_address set, bool asked, b8 answer)
+{
+        checks++;
+
+        if (asked && answer != 1)
+        {
+                failures++;
+                string_format(log, "  FAIL witness: [%s] folds to a table that "
+                                   "stops at the byte it is asked about\n", set);
+        }
+}
+
 //      The literal has to be written into every call, because a set held in a
 //      variable is a set the compiler has not been told.
 #define CHECK_SET(literal)                                                    \
@@ -25047,6 +25464,10 @@ static positive lengths[] = {
                                               string_span_without_set(at, literal), \
                                               string_first_of_set(at, literal)); \
                                 }                                             \
+                witness(set, set_known_length(literal) > 1 &&                 \
+                                     set_known_outside(literal),              \
+                        set_known_table(literal, set_known_stops)             \
+                                [set_known_outside(literal)]);                \
         } while (0)
 
 //      A set the compiler cannot see, so that the other arm of every macro is
@@ -40799,6 +41220,62 @@ static fn check_live(void)
                     (bipolar)difftime((time_t)3, (time_t)1000000), -999997);
 }
 
+/*
+        The vDSO clock against the trap it replaces.
+
+        An ELF _start marks program_vdso_clock 1, and the first read looks
+        the entry up. Wherever the auxiliary vector names a vDSO -- the host
+        kernel, and qemu-user where it maps one -- the lookup must find the
+        clock, and its readings must sit between two trapped readings of the
+        same clock. Marked as having none, the reads fall back to the trap;
+        marked unresolved again, the lookup finds the same entry.
+*/
+static fn check_vdso_clock(void)
+{
+        string_address address_to walk = program_environment_list();
+        positive named = 0;
+        positive entry;
+        bool ordered = true;
+
+        good((string_address) "_start marked an auxiliary vector",
+             program_vdso_clock != 0);
+        while (!is_null(walk) && !is_null(address_to walk))
+                walk++;
+        if (!is_null(walk))
+                for (const p64 address_to aux = (const p64 address_to)(walk + 1);
+                     aux[0]; aux += 2)
+                        named += aux[0] == 33;
+
+        timespec first = {0, 0}, middle = {0, 0}, last = {0, 0};
+        clock_gettime(CLOCK_MONOTONIC, address_of middle);
+        entry = program_vdso_clock;
+        good((string_address) "the vDSO the auxiliary vector names is found",
+             named ? entry > 2 : entry == 2);
+        for (positive round = 0; round < 1000; round++)
+        {
+                system_call_2(syscall(clock_gettime), CLOCK_MONOTONIC,
+                              (positive)address_of first);
+                clock_gettime(CLOCK_MONOTONIC, address_of middle);
+                system_call_2(syscall(clock_gettime), CLOCK_MONOTONIC,
+                              (positive)address_of last);
+                positive a = first.tv_sec * 1000000000 + first.tv_nsec;
+                positive b = middle.tv_sec * 1000000000 + middle.tv_nsec;
+                positive c = last.tv_sec * 1000000000 + last.tv_nsec;
+                ordered = ordered && a <= b && b <= c;
+        }
+        good((string_address) "vDSO monotonic readings sit between trapped ones",
+             ordered);
+
+        program_vdso_clock = 2;
+        good((string_address) "marked without a vDSO, the trap answers",
+             clock_gettime(CLOCK_MONOTONIC, address_of middle) == 0 &&
+                 program_vdso_clock == 2 && middle.tv_nsec < 1000000000);
+        program_vdso_clock = 1;
+        clock_gettime(CLOCK_REALTIME, address_of middle);
+        good((string_address) "marked unresolved, the lookup finds the same entry",
+             program_vdso_clock == entry);
+}
+
 static fn check_failure_and_precision(void)
 {
         timespec reading;
@@ -40865,6 +41342,7 @@ b32 main(void)
         check_scan();
         check_asctime();
         check_live();
+        check_vdso_clock();
         check_failure_and_precision();
 
         same((string_address) "every day from 1900 to 2100", clock_test_dense(),
@@ -48721,7 +49199,8 @@ static bool http_writev_error_hit;
         which trap sendto/recvfrom directly and never pass through system_call_N.
         Parallel thin wrappers around the net.c include arm mid-path faults after
         the socket already exists: EINTR-once-then-fail, EAGAIN, short progress,
-        hard ENOSPC/EIO, and sticky EINTR for deadline exhaustion.
+        hard ENOSPC/EIO, and a sticky hard send error for a server that never
+        takes a datagram.
 */
 static bipolar net_send_error;
 static bool net_send_error_hit;
@@ -48729,7 +49208,7 @@ static bool net_send_eintr_once;
 static bool net_send_eintr_hit;
 static positive net_send_short_limit;
 static bool net_send_short_hit;
-static bool net_send_eintr_sticky;
+static bool net_send_error_sticky;
 static positive net_send_arm_after;
 static positive net_send_calls;
 
@@ -48827,7 +49306,7 @@ static bipolar net_test_socket_send(b32 handle, address_any data, positive size,
                                      (positive)data, size, (positive)flags,
                                      (positive)to, to_size);
         }
-        if (net_send_eintr_sticky || net_send_eintr_once)
+        if (net_send_eintr_once)
         {
                 net_send_eintr_once = false;
                 net_send_eintr_hit = true;
@@ -48851,7 +49330,8 @@ static bipolar net_test_socket_send(b32 handle, address_any data, positive size,
         {
                 bipolar fault = net_send_error;
 
-                net_send_error = 0;
+                if (!net_send_error_sticky)
+                        net_send_error = 0;
                 net_send_error_hit = true;
                 return fault;
         }
@@ -48994,8 +49474,8 @@ static bool net_as_emulated(void)
           body / store       HTTP_FETCH_MAX (16MiB)
             exact framing:   "Content-Length of exactly HTTP_FETCH_MAX is framed"
             one-over e2e:    "Content-Length past HTTP_FETCH_MAX is refused in memory"
-          redirect hops      HTTP_HOPS (10)
-            exact+one-over:  fetching_for_real HTTP_HOPS nine-then-refuse coverage
+          redirect hops      HTTP_HOPS (21)
+            exact+one-over:  fetching_for_real HTTP_HOPS twenty-then-refuse coverage
           writev gather      HTTP_WRITE_SPANS (64)
             hit:             TLS write-span flush with HTTP_WRITE_SPANS + 1 records;
                              http_write_spans_partial short-write resume
@@ -49029,9 +49509,9 @@ static bool net_as_emulated(void)
             connected socketpair body → writev once-armed -ENOSPC → HTTP_WRITE
           writev       http_write_spans_midpath_fault
             short writev prefix then once-armed -ENOSPC → HTTP write refuse
-          TLS framing  tls_midpath_append_refusal
-            plaintext ServerHello / encrypted-flight append past a tight
-            hold room after a retained prefix → TLS_FAIL (no hang).
+          TLS framing  tls_encrypted_flight_hs_reassembly
+            handshake records past the TLS_HS_MAX hold room after a
+            retained prefix → TLS_FAIL (no hang).
             TLS flight/hs buffers are fixed (TLS_HS_MAX); no mmap/heap path.
           DNS TCP      stack frame/reply only (DNS_MAX_MESSAGE); no heap
             growth — oversized frame is refused without byte_store_reserve.
@@ -49396,6 +49876,31 @@ static fn error_frames(void)
                       netlink_transact(-1, &request, 91, null, null) == -1 &&
                           !request.bytes && !request.room && !request.used && !request.failed);
         }
+        /* An interrupted dump fails only once the rest of it is drawn: it
+           returned at the first marked message and left the others queued,
+           where the kernel holds the socket's next dump off with EBUSY. */
+        if (netlink_begin(&request, RTM_GETLINK, NLM_REQUEST | NLM_DUMP, 91, 0))
+        {
+                netlink_header marked = {.length = NETLINK_HEADER,
+                                         .type = RTM_NEWLINK,
+                                         .flags = 2 | NLM_DUMP_INTERRUPTED,
+                                         .sequence = 91};
+                netlink_header more = marked;
+                netlink_header finished = marked;
+                p8 left[NETLINK_HEADER];
+
+                more.flags = 2;
+                finished.type = NLMSG_IS_DONE;
+                socket_send(pair[1], &marked, sizeof marked, 0, null, 0);
+                socket_send(pair[1], &more, sizeof more, 0, null, 0);
+                socket_send(pair[1], &finished, sizeof finished, 0, null, 0);
+                check("an interrupted netlink dump fails after draining the rest",
+                      netlink_walk(pair[0], &request, 91, &reply, null, null) == -1 &&
+                          socket_receive(pair[0], left, sizeof left, MSG_DONTWAIT,
+                                         null, null) == NETWORK_TRY_AGAIN);
+                p8 discarded[NETLINK_HEADER];
+                socket_receive(pair[1], discarded, sizeof discarded, 0, null, null);
+        }
         netlink_forget(&request);
         netlink_forget(&reply);
         socket_close(pair[0]);
@@ -49705,6 +50210,40 @@ static fn resolving(void)
         }
 
         {
+                //      A name is at most 255 bytes on the wire (RFC 1035
+                //      3.1), and a chain of pointers at most one jump a
+                //      label: 127. Each was one past, and a reply of names
+                //      at the end of a two-thousand-jump chain cost 4 ms.
+                p8 message[512];
+                positive at = 0;
+
+                memory_fill(message, 0, sizeof message);
+                for (positive label = 0; label < 4; label++)
+                {
+                        message[at] = label < 3 ? 63 : 62;
+                        memory_fill(message + at + 1, 'a', message[at]);
+                        at += 1 + message[at];
+                }
+                check("a 256-byte wire name is refused",
+                      at + 1 == 256 && dns_skip_name(message, sizeof message, 0) < 0);
+                message[at - 63] = 61;
+                message[at - 1] = 0;
+                check("a 255-byte wire name is taken",
+                      dns_skip_name(message, sizeof message, 0) == 255);
+
+                memory_fill(message, 0, sizeof message);
+                for (positive hop = 1; hop <= 128; hop++)
+                {
+                        message[2 * hop] = 0xc0;
+                        message[2 * hop + 1] = (p8)(2 * hop - 2);
+                }
+                check("a name 127 pointers deep is followed",
+                      dns_skip_name(message, sizeof message, 2 * 127) == 2 * 127 + 2);
+                check("a name 128 pointers deep is refused",
+                      dns_skip_name(message, sizeof message, 2 * 128) < 0);
+        }
+
+        {
                 p16 secure = 0;
 
                 check("a DNS transaction id comes from ready kernel randomness",
@@ -49952,8 +50491,8 @@ static fn resolving_edges(void)
         }
 
         /* Answer-section hop budget is answers+1 passes. A two-record CNAME
-           cycle burns every pass without a separate decompress step counter
-           (dns_copy_name bounds jumps by lowering its ceiling instead). */
+           cycle burns every pass; dns_copy_name bounds each name's jumps by
+           lowering its ceiling and counting them to DNS_POINTER_HOPS. */
         {
                 p8 reply[512] = {0};
                 bipolar question = dns_write_name(
@@ -50358,7 +50897,8 @@ static positive dns_servers_asked(const char address_to text, positive length)
         if (system_write_all((positive)file, (address_any)text, length) == length)
         {
                 net_io_faults_clear();
-                net_send_eintr_sticky = true;
+                net_send_error_sticky = true;
+                net_send_error = -ENETUNREACH;
                 net_send_calls = 0;
                 (void)dns_resolve_any((string_address)path,
                                       (string_address)"servers.example",
@@ -50651,7 +51191,7 @@ static fn fetching(void)
         check("unsupported explicit schemes are not reinterpreted as hosts",
               http_split_into((string_address) "gopher://127.0.0.1/", name,
                          sizeof name, address_of port, address_of path,
-                         address_of tls) == HTTP_BAD_URL);
+                         address_of tls) == HTTP_SCHEME);
         check("userinfo cannot disguise the connected HTTP host",
               http_split_into((string_address) "http://allowed@127.0.0.1/", name,
                          sizeof name, address_of port, address_of path,
@@ -52080,7 +52620,7 @@ static fn http_tls_resource_exhaustion(void)
 
                         status = http_fetch_to(
                             (string_address)"https://127.0.0.1:1/", -1, false,
-                            address_of code);
+                            address_of code, null);
                         check("HTTPS fetch fails closed when TLS open cannot get a socket",
                               status == HTTP_NO_ROUTE);
 
@@ -52702,7 +53242,7 @@ static fn net_io_faults_clear(void)
         net_send_eintr_hit = false;
         net_send_short_limit = 0;
         net_send_short_hit = false;
-        net_send_eintr_sticky = false;
+        net_send_error_sticky = false;
         net_send_arm_after = 0;
         net_recv_error = 0;
         net_recv_error_hit = false;
@@ -52824,13 +53364,14 @@ static fn dns_dhcp_midpath_faults(void)
 
         /* UDP send does not retry EINTR; a single interrupted send refuses. */
         net_send_eintr_once = true;
+        net_send_calls = 0;
         found = 0;
         status = dns_resolve_at(HOST_LOOPBACK, DNS_PORT,
                                 (string_address)"send.eintr.example",
                                 address_of found, 1);
-        check("DNS UDP send EINTR fails closed mid-path without retrying",
-              status == DNS_NO_REPLY && !found && net_send_eintr_hit &&
-                  !net_send_eintr_once);
+        check("DNS UDP send EINTR sends the question again",
+              !found && net_send_eintr_hit && !net_send_eintr_once &&
+                  net_send_calls == 2);
         net_io_faults_clear();
 
         /* --- DNS UDP: recv EINTR then hard I/O refuse after a junk peer --- */
@@ -53388,18 +53929,21 @@ static bipolar tls_read(tls_conn address_to tls, p8 address_to into,
         return tls_read_until(tls, into, room, got, null);
 }
 
+/* A connection for the post-handshake checks: nothing sent, no keys. */
+static tls_conn tls_post_handshake_conn;
+
 /* A post-handshake stream, whole: every message complete and allowed. */
 static bool tls_post_handshake_valid(p8 address_to messages,
                                      positive length)
 {
-        p8 held[TLS_HS_MAX];
-        positive held_length = 0;
+        tls_conn address_to tls = address_of tls_post_handshake_conn;
         bool valid;
 
-        valid = tls_post_handshake_append(held, address_of held_length,
-                                          messages, length) == TLS_OK &&
-                !held_length;
-        crypto_forget(held, sizeof held);
+        memory_fill(tls, 0, TLS_CONN_HEAD);
+        tls->handle = -1;
+        valid = tls_post_handshake_append(tls, messages, length) == TLS_OK &&
+                !tls->post_handshake_used;
+        tls_forget(tls);
         return valid;
 }
 
@@ -54065,6 +54609,44 @@ static fn tls_seal_in_receive(tls_conn address_to tls, positive content)
    plaintext record and for a protected record's inner plaintext, so
    TLS_RECORD_MAX, the header's gate, is that plus the type byte and the
    AES-GCM tag. Exact fills are accepted, one past and empty are refused. */
+/*
+        A receive behind a partial record moves it to the front first, so
+        the read has the whole room: with 200,000 bytes opened and three of
+        the next record's header held, 64 KiB queued on the socket come in
+        one read. Left where it was, the partial record's 62,141 bytes of
+        room took the first read and the rest a second.
+*/
+static tls_conn tls_receive_conn;
+
+static fn tls_receive_whole_room(void)
+{
+        static p8 queued[65536];
+        tls_conn address_to tls = address_of tls_receive_conn;
+        b32 pair[2];
+        bool opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM,
+                                    0, (positive)pair) == 0;
+
+        check("TLS receive-room socket pair opens", opened);
+        if (!opened)
+                return;
+        memory_fill(tls, 0, TLS_CONN_HEAD);
+        tls->handle = pair[0];
+        memory_fill(queued, 0x5a, sizeof queued);
+        memory_copy(tls->receive + 200000, "\x17\x03\x03", 3);
+        tls->receive_start = 200000;
+        tls->receive_end = tls->receive_high = 200003;
+        check("TLS receive-room bytes queue",
+              socket_send(pair[1], queued, sizeof queued, 0, null, 0) ==
+                  (bipolar)sizeof queued);
+        check("a receive behind a partial record takes the whole room in one read",
+              tls_receive(tls, null) && tls->receive_start == 0 &&
+                  tls->receive_end == 3 + sizeof queued &&
+                  !memory_compare(tls->receive, "\x17\x03\x03", 3));
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+        tls_forget(tls);
+}
+
 static fn tls_record_payload_ceiling(void)
 {
         tls_conn tls = {0};
@@ -54269,10 +54851,10 @@ static fn tls_sensitive_state_erasure(void)
                                           sizeof zeros) &&
                           !memory_compare(connection.s_hs_traffic, zeros,
                                           sizeof zeros) &&
-                          !memory_compare(connection.c_ap_traffic, zeros,
-                                          sizeof zeros) &&
-                          !memory_compare(connection.s_ap_traffic, zeros,
-                                          sizeof zeros) &&
+                          memory_compare(connection.c_ap_traffic, zeros,
+                                         sizeof zeros) &&
+                          memory_compare(connection.s_ap_traffic, zeros,
+                                         sizeof zeros) &&
                           !memory_compare(address_of connection.transcript,
                                           address_of empty_transcript,
                                           sizeof empty_transcript));
@@ -54670,8 +55252,28 @@ static fn tls_certificate_identity_rules(void)
                     {"a.b.example.com", "*.example.com", false},
                     {"www.example.com.evil", "*.example.com", false},
                     {"example.com", "*.com", false},
+                    {"a.co.uk", "*.co.uk", false},
+                    {"a.CO.UK", "*.Co.Uk.", false},
+                    {"www.example.co.uk", "*.example.co.uk", true},
+                    {"a.b.ck", "*.b.ck", false},
+                    {"a.www.ck", "*.www.ck", true},
+                    {"a.x.kawasaki.jp", "*.x.kawasaki.jp", false},
+                    {"a.city.kawasaki.jp", "*.city.kawasaki.jp", true},
+                    {"a.aisai.aichi.jp", "*.aisai.aichi.jp", false},
+                    {"a.xn--55qx5d.cn", "*.xn--55qx5d.cn", false},
+                    {"a.appspot.com", "*.appspot.com", true},
+                    {"a.example.foo", "*.example.foo", true},
                     {"www.example.com", "w*.example.com", false},
-                    {"www.example.com", "*.example.com.", false},
+                    {"www.example.com", "*.example.com.", true},
+                    {"example.com", "example.com.", true},
+                    {"example.com", "example.com..", false},
+                    {"example.com", ".", false},
+                    {"XN--BCHER-KVA.example.com", "xn--bcher-kva.EXAMPLE.com", true},
+                    {"xn--bcher-kva.example.com", "*.xn--EXAMPLE-abc.com", false},
+                    {"a.xn--example-abc.com", "*.xn--EXAMPLE-abc.com", true},
+                    {"www.example.com", "www.*.com", false},
+                    {"www.example.com", "*.*.com", false},
+                    {"www.example.com", "*example.com", false},
                     {"a", "*", false},
                     {"a.", "*.", false},
                     {"example.co", "example.com", false},
@@ -54684,8 +55286,92 @@ static fn tls_certificate_identity_rules(void)
                                                 string_length(names[i].name)) !=
                                  names[i].match;
                 check("dNSName matching: case, one-label wildcards, no empty "
-                      "label, no public-suffix star",
+                      "label, no star on an ICANN public suffix",
                       wrong == 0);
+        }
+        {
+                /* An IPv6 literal and the 16 bytes it stands for, or a
+                   refusal. */
+                static const struct
+                {
+                        string_address text;
+                        bool parsed;
+                        p8 address[16];
+                } literals[] = {
+                    {"::1", true, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}},
+                    {"[::1]", true, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}},
+                    {"2001:DB8::1", true, {0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}},
+                    {"2001:db8:0:0:0:0:0:1", true, {0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}},
+                    {"::", true, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+                    {"1::", true, {0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+                    {"::ffff:192.0.2.1", true, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xc0, 0x00, 0x02, 0x01}},
+                    {"1:2:3:4:5:6:7:8", true, {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07, 0x00, 0x08}},
+                    {"1:2:3:4:5:6:192.0.2.1", true, {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0xc0, 0x00, 0x02, 0x01}},
+                    {"1:2:3:4:5:6:7::", true, {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07, 0x00, 0x00}},
+                    {"1:2:3:4:5:6:7:8:9", false, {0}},
+                    {"1::2::3", false, {0}},
+                    {":1", false, {0}},
+                    {"1:", false, {0}},
+                    {"12345::", false, {0}},
+                    {"1:2:3:4:5:6:7:8::", false, {0}},
+                    {"::1%eth0", false, {0}},
+                    {"[::1", false, {0}},
+                    {"::1]", false, {0}},
+                    {"1:::2", false, {0}},
+                    {"::g", false, {0}},
+                    {"1:2:3:4:5:6:7:192.0.2.1", false, {0}},
+                    {"::1.2.3", false, {0}},
+                    {"example.com", false, {0}},
+                    {"192.0.2.1", false, {0}},
+                    {"\x10::1", false, {0}},
+                    {"::\x19", false, {0}},
+                };
+                positive wrong = 0;
+
+                for (positive i = 0; i < array_count(literals); i++)
+                {
+                        p8 text[64];
+                        p8 address[16];
+                        positive length = string_length(literals[i].text);
+                        bool parsed;
+
+                        memory_copy(text, literals[i].text, length + 1);
+                        parsed = tls_ipv6_literal(text, length, address);
+                        wrong += parsed != literals[i].parsed ||
+                                 (parsed && memory_compare(address,
+                                                           literals[i].address,
+                                                           16));
+                }
+                check("IPv6 literals: groups, one ::, IPv4 tails, brackets; "
+                      "zones and malformed spellings refused",
+                      wrong == 0);
+        }
+        {
+                static p8 v6_one[16] = {[15] = 1};
+                static p8 v4_mapped[16] = {[10] = 0xff, [11] = 0xff, [12] = 192,
+                                           [14] = 2, [15] = 1};
+
+                check("an IPv6 host is identified by its 16-byte iPAddress",
+                      tls_general_name_match("::1", 0x87, v6_one, 16) &&
+                          tls_general_name_match("[::1]", 0x87, v6_one, 16) &&
+                          tls_general_name_match("0:0::0:1", 0x87, v6_one, 16));
+                check("an IPv6 host is never a dNSName or an IPv4 iPAddress",
+                      !tls_general_name_match("::1", 0x82, (p8 address_to)"::1", 3) &&
+                          !tls_general_name_match("::ffff:192.0.2.1", 0x87,
+                                                  ip, sizeof ip) &&
+                          tls_general_name_match("::ffff:192.0.2.1", 0x87,
+                                                 v4_mapped, 16));
+                check("an IPv4 host is never a 16-byte iPAddress",
+                      !tls_general_name_match("192.0.2.1", 0x87, v4_mapped, 16));
+                check("a host's trailing dot is dropped before matching",
+                      tls_general_name_match("example.com.", 0x82, dns,
+                                             sizeof dns - 1) &&
+                          tls_general_name_match("192.0.2.1.", 0x87, ip,
+                                                 sizeof ip) &&
+                          !tls_general_name_match("example.com..", 0x82, dns,
+                                                  sizeof dns - 1) &&
+                          !tls_general_name_match(".", 0x82, (p8 address_to)"", 0) &&
+                          !tls_general_name_match("", 0x82, (p8 address_to)"", 0));
         }
         check("an exact dNSName identifies a named host",
               tls_general_name_match("example.com", 0x82, dns,
@@ -54731,7 +55417,7 @@ static fn tls_certificate_identity_rules(void)
               !tls_parse_san(san_registered_empty,
                              sizeof san_registered_empty, null,
                              address_of matched));
-        check("name constraints are refused even when non-critical",
+        check("an empty NameConstraints value is refused",
               tls_parse_extensions(constrained, sizeof constrained, 0, 2,
                                    address_of cert, null) == TLS_FAIL);
         memory_fill(address_of cert, 0, sizeof cert);
@@ -55378,7 +56064,7 @@ static fn tls_client_hello_bounds(void)
         memory_fill(hello, 0xa5, sizeof hello);
         check("an undersized ClientHello buffer is refused",
               tls_client_hello(address_of client, hello, 50,
-                               address_of used) == TLS_FAIL);
+                               address_of used, null, 0) == TLS_FAIL);
         check("a refused ClientHello leaves its result length alone", used == 99);
         {
                 bool bounded = true;
@@ -55391,16 +56077,16 @@ static fn tls_client_hello_bounds(void)
 
         used = 0;
         check("a ClientHello fits its exact named-host bound",
-              tls_client_hello(address_of client, hello, 310,
-                               address_of used) == TLS_OK &&
-                  used == 310);
+              tls_client_hello(address_of client, hello, 165,
+                               address_of used, null, 0) == TLS_OK &&
+                  used == 165);
 
         client.host = "127.0.0.1";
         used = 0;
         check("a numeric-host ClientHello omits SNI at its exact bound",
-              tls_client_hello(address_of client, hello, 290,
-                               address_of used) == TLS_OK &&
-                  used == 290);
+              tls_client_hello(address_of client, hello, 145,
+                               address_of used, null, 0) == TLS_OK &&
+                  used == 145);
 }
 
 /*
@@ -55569,11 +56255,64 @@ static fn tls_client_hello_groups(void)
         static string_address hosts[] = {
             "example.com", "repo.chimera-linux.org", "geo.mirror.pkgbuild.com",
             "dl-cdn.alpinelinux.org", "127.0.0.1", "192.0.2.1"};
-        static const positive ciphers[] = {0x1301};
+        static const positive ciphers[] = {0x1301, 0xc02b, 0xc02f};
         tls_conn client = {0};
         p8 hello[512];
         positive host;
         positive at;
+
+        {
+                static const struct
+                {
+                        string_address host;
+                        string_address sni;
+                } names[] = {
+                    {"example.com", "example.com"},
+                    {"example.com.", "example.com"},
+                    {"123.example", "123.example"},
+                    {"xn--bcher-kva.example", "xn--bcher-kva.example"},
+                    {"127.0.0.1", null},
+                    {"127.0.0.1.", null},
+                    {"127.1", null},
+                    {"::1", null},
+                    {"[2001:db8::1]", null},
+                    {"fe80::1%eth0", null},
+                    {".", null},
+                };
+                bool all = true;
+
+                for (positive row = 0; row < array_count(names); row++)
+                {
+                        tls_conn named = {.host = names[row].host};
+                        p8 out[512];
+                        positive length = 0;
+                        positive at = 0;
+                        positive size = 0;
+                        bool has;
+
+                        if (tls_client_hello(address_of named, out, sizeof out,
+                                             address_of length, null, 0))
+                        {
+                                all = false;
+                                continue;
+                        }
+                        has = tls_hello_extension(out, length, 0, address_of at,
+                                                  address_of size);
+                        if (names[row].sni
+                                ? !has || !named.named ||
+                                      size != 5 + string_length(names[row].sni) ||
+                                      memory_compare(out + at + 5, names[row].sni,
+                                                     size - 5)
+                                : has || named.named)
+                        {
+                                all = false;
+                                string_format(log, "  SNI row: %s\n",
+                                              names[row].host);
+                        }
+                        crypto_forget(named.scalar, sizeof named.scalar);
+                }
+                check("server_name names DNS hosts only, without a trailing dot", all);
+        }
 
         for (host = 0; host < array_count(hosts); host++)
         {
@@ -55582,7 +56321,7 @@ static fn tls_client_hello_groups(void)
                 client.host = hosts[host];
                 check("a ClientHello can be built to inspect its groups",
                       tls_client_hello(address_of client, hello, sizeof hello,
-                                       address_of used) == TLS_OK &&
+                                       address_of used, null, 0) == TLS_OK &&
                           used);
                 check("ClientHello advertises its implemented X25519 group",
                       tls_hello_offers_group(hello, used, 0x001d));
@@ -55592,15 +56331,66 @@ static fn tls_client_hello_groups(void)
                       tls_hello_offers_group(hello, used, 0x0018));
                 check("ClientHello includes an X25519 key share",
                       tls_hello_offers_share(hello, used, 0x001d, 32));
-                check("ClientHello includes a P-256 key share",
-                      tls_hello_offers_share(hello, used, 0x0017, 65));
-                check("ClientHello includes a P-384 key share",
-                      tls_hello_offers_share(hello, used, 0x0018, 97));
+                check("ClientHello carries no P-256 key share until asked",
+                      !tls_hello_offers_share(hello, used, 0x0017, 65));
+                check("ClientHello carries no P-384 key share until asked",
+                      !tls_hello_offers_share(hello, used, 0x0018, 97));
                 for (at = 0; at < array_count(ciphers); at++)
-                        check("ClientHello offers the TLS 1.3 ciphers it implements",
+                        check("ClientHello offers the TLS 1.3 and 1.2 ciphers it implements",
                               tls_hello_offers_cipher(hello, used, ciphers[at]));
         }
 }
+
+/*
+        The handshake byte stream, walked: handshake records laid in a
+        connection's receive buffer as the peer sends them before keys (so
+        tls_next_record hands them over as they are), pulled a message at a
+        time by tls_handshake_next and placed by tls_server_flight_step --
+        the same two functions tls_handshake runs, without the checks that
+        need keys. A walk ends at COMPLETE with nothing left behind, or
+        fails; the buffer running dry reads as the peer going away.
+*/
+static tls_conn tls_walk_conn;
+static p8 tls_walk_hs[TLS_HS_MAX];
+static bool tls_walk_ccs;
+
+static positive tls_walk_record(p8 address_to out, p8 type,
+                                const p8 address_to bytes, positive length)
+{
+        tls_record_header(out, type, length);
+        memory_copy(out + 5, bytes, length);
+        return 5 + length;
+}
+
+static fn tls_walk_load(const p8 address_to records, positive length)
+{
+        memory_fill(address_of tls_walk_conn, 0, TLS_CONN_HEAD);
+        tls_walk_conn.handle = -1;
+        memory_copy(tls_walk_conn.receive, records, length);
+        tls_walk_conn.receive_end = length;
+        tls_walk_conn.receive_high = length;
+        tls_walk_ccs = false;
+}
+
+static bipolar tls_walk(p8 flight, positive address_to messages)
+{
+        positive used = 0;
+        positive length = 0;
+
+        *messages = 0;
+        while (flight != TLS_SERVER_FLIGHT_COMPLETE)
+        {
+                if (tls_handshake_next(address_of tls_walk_conn, tls_walk_hs,
+                                       address_of used, address_of length,
+                                       address_of tls_walk_ccs, null) ||
+                    !tls_server_flight_step(address_of flight, tls_walk_hs[0]))
+                        return TLS_FAIL;
+                (*messages)++;
+        }
+        return used == length ? TLS_OK : TLS_FAIL;
+}
+
+static tls_conn tls_hello_conn;
 
 static fn tls_server_hello_validation(void)
 {
@@ -55608,8 +56398,11 @@ static fn tls_server_hello_validation(void)
         p8 peer[32] = {0};
         positive share = 0;
         positive group = 0;
+        p8 address_to cookie = null;
+        positive cookie_length = 0;
         p8 changed[91];
 
+        tls_hello_conn.group = 0x1d;
         hello[0] = TLS_HS_SERVER_HELLO;
         hello[3] = 86;
         hello[4] = 0x03;
@@ -55639,41 +56432,41 @@ static fn tls_server_hello_validation(void)
         hello[58] = 9;
 
         check("a complete TLS 1.3 ServerHello is accepted",
-              tls_server_hello_keys(hello, 90, peer, sizeof peer, &share, &group) ==
+              tls_server_hello_keys(hello, 90, &tls_hello_conn, peer, sizeof peer, &share, &group, &cookie, &cookie_length) ==
                       TLS_OK && group == 0x001d && share == 32 &&
                   !memory_compare(peer, hello + 58, 32));
 
         memory_copy(changed, hello, 90);
         changed[5] = 0x02;
         check("a ServerHello with the wrong legacy version is refused",
-              tls_server_hello_keys(changed, 90, peer, sizeof peer, &share, &group) == TLS_FAIL);
+              tls_server_hello_keys(changed, 90, &tls_hello_conn, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[38] = 1;
         check("a ServerHello cannot invent a session id echo",
-              tls_server_hello_keys(changed, 90, peer, sizeof peer, &share, &group) == TLS_FAIL);
+              tls_server_hello_keys(changed, 90, &tls_hello_conn, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[41] = 1;
         check("a ServerHello with compression is refused",
-              tls_server_hello_keys(changed, 90, peer, sizeof peer, &share, &group) == TLS_FAIL);
+              tls_server_hello_keys(changed, 90, &tls_hello_conn, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[49] = 0x03;
         check("a ServerHello must select TLS 1.3",
-              tls_server_hello_keys(changed, 90, peer, sizeof peer, &share, &group) == TLS_FAIL);
+              tls_server_hello_keys(changed, 90, &tls_hello_conn, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[45] = 0x34;
         check("an unexpected ServerHello extension is refused",
-              tls_server_hello_keys(changed, 90, peer, sizeof peer, &share, &group) == TLS_FAIL);
+              tls_server_hello_keys(changed, 90, &tls_hello_conn, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[3] = 87;
         changed[43] = 47;
         changed[90] = 0;
         check("trailing ServerHello extension bytes are refused",
-              tls_server_hello_keys(changed, 91, peer, sizeof peer, &share, &group) == TLS_FAIL);
+              tls_server_hello_keys(changed, 91, &tls_hello_conn, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[3] = 87;
@@ -55681,35 +56474,171 @@ static fn tls_server_hello_validation(void)
         changed[53] = 37;
         changed[90] = 0;
         check("an overlong X25519 ServerHello share is refused",
-              tls_server_hello_keys(changed, 91, peer, sizeof peer, &share, &group) == TLS_FAIL);
+              tls_server_hello_keys(changed, 91, &tls_hello_conn, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         {
-                p8 assembled[128];
+                p8 records[2 * 5 + 90];
                 positive used = 0;
+                positive length = 0;
 
-                check("a fragmented ServerHello header is retained",
-                      tls_handshake_one_append(
-                          assembled, sizeof assembled, address_of used,
-                          hello, 2) == TLS_HANDSHAKE_MORE && used == 2);
-                check("a fragmented ServerHello body is reassembled",
-                      tls_handshake_one_append(
-                          assembled, sizeof assembled, address_of used,
-                          hello + 2, 88) == TLS_HANDSHAKE_COMPLETE &&
-                          used == 90 &&
-                          tls_server_hello_keys(assembled, used, peer, sizeof peer, &share, &group) ==
+                tls_walk_record(records, TLS_CT_HANDSHAKE, hello, 2);
+                tls_walk_record(records + 7, TLS_CT_HANDSHAKE, hello + 2, 88);
+                tls_walk_load(records, sizeof records);
+                check("a ServerHello split across records is reassembled",
+                      tls_handshake_next(address_of tls_walk_conn, tls_walk_hs,
+                                         address_of used, address_of length,
+                                         address_of tls_walk_ccs, null) ==
+                              TLS_OK &&
+                          used == 90 && length == 90 &&
+                          tls_server_hello_keys(tls_walk_hs, length, &tls_hello_conn, peer,
+                                                sizeof peer, &share, &group,
+                                                &cookie, &cookie_length) ==
                               TLS_OK);
+                tls_forget(address_of tls_walk_conn);
+        }
+}
 
-                memory_copy(changed, hello, 90);
-                changed[90] = 0;
-                used = 0;
-                check("bytes after a plaintext ServerHello are refused",
-                      tls_handshake_one_append(
-                          assembled, sizeof assembled, address_of used,
-                          changed, 91) == TLS_FAIL);
-                check("an empty ServerHello fragment is refused",
-                      tls_handshake_one_append(
-                          assembled, sizeof assembled, address_of used,
-                          hello, 0) == TLS_FAIL);
+/*
+        HelloRetryRequest rows: the extension block after a retry's fixed
+        fields, and what tls_server_hello_keys answers -- the group asked
+        for and the cookie body's length when it is a retry. A retry has to
+        ask for a group this client offers or bring a non-empty cookie, and
+        may carry nothing else; a cookie in a plain ServerHello is refused.
+*/
+static fn tls_hello_retry_rows(void)
+{
+        static const struct
+        {
+                string_address name;
+                bool retry;
+                p16 offered;
+                p8 length;
+                p8 bytes[48];
+                bipolar expect;
+                positive group;
+                positive cookie;
+        } rows[] = {
+            {"P-256 asked", true, 0x1d, 12,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 2, 0, 0x17}, TLS_RETRY, 0x17, 0},
+            {"P-384 asked", true, 0x1d, 12,
+             {0, 0x33, 0, 2, 0, 0x18, 0, 0x2b, 0, 2, 3, 4}, TLS_RETRY, 0x18, 0},
+            {"the group already shared asked again", true, 0x1d, 12,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 2, 0, 0x1d}, TLS_FAIL, 0, 0},
+            {"X25519 asked after a P-256 share", true, 0x17, 12,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 2, 0, 0x1d}, TLS_RETRY, 0x1d, 0},
+            {"cookie alone", true, 0x1d, 15,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x2c, 0, 5, 0, 3, 0xaa, 0xbb, 0xcc},
+             TLS_RETRY, 0, 5},
+            {"cookie and group", true, 0x1d, 21,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 2, 0, 0x17, 0, 0x2c, 0, 5, 0,
+              3, 1, 2, 3}, TLS_RETRY, 0x17, 5},
+            {"asks nothing", true, 0x1d, 6, {0, 0x2b, 0, 2, 3, 4}, TLS_FAIL, 0, 0},
+            {"group not offered", true, 0x1d, 12,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 2, 0, 0x19}, TLS_FAIL, 0, 0},
+            {"share bytes in a retry", true, 0x1d, 14,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 4, 0, 0x17, 0, 0}, TLS_FAIL, 0, 0},
+            {"empty cookie", true, 0x1d, 12,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x2c, 0, 2, 0, 0}, TLS_FAIL, 0, 0},
+            {"cookie length short of its body", true, 0x1d, 13,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x2c, 0, 3, 0, 2, 7}, TLS_FAIL, 0, 0},
+            {"two cookies", true, 0x1d, 20,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x2c, 0, 3, 0, 1, 7, 0, 0x2c, 0, 3, 0, 1, 7},
+             TLS_FAIL, 0, 0},
+            {"two key shares", true, 0x1d, 18,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 2, 0, 0x17, 0, 0x33, 0, 2, 0, 0x18},
+             TLS_FAIL, 0, 0},
+            {"no supported_versions", true, 0x1d, 6, {0, 0x33, 0, 2, 0, 0x17}, TLS_FAIL,
+             0, 0},
+            {"an unknown extension", true, 0x1d, 16,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 2, 0, 0x17, 0xfe, 0, 0, 0},
+             TLS_FAIL, 0, 0},
+            {"a ServerHello answering its share", false, 0x1d, 46,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 36, 0, 0x1d, 0, 32, 9},
+             TLS_OK, 0, 0},
+            {"a ServerHello answering a share not sent", false, 0x17, 46,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 36, 0, 0x1d, 0, 32, 9},
+             TLS_FAIL, 0, 0},
+            {"a cookie in a ServerHello", false, 0x1d, 15,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x2c, 0, 5, 0, 3, 1, 2, 3}, TLS_FAIL, 0, 0},
+        };
+        static const p8 retry_random[32] = {
+            0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c,
+            0x02, 0x1e, 0x65, 0xb8, 0x91, 0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb,
+            0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c};
+        bool all = true;
+
+        for (positive row = 0; row < array_count(rows); row++)
+        {
+                p8 hello[44 + 48] = {TLS_HS_SERVER_HELLO, 0, 0, 0, 3, 3};
+                p8 peer[97];
+                positive share = 0;
+                positive group = 99;
+                p8 address_to cookie = null;
+                positive cookie_length = 0;
+                positive length = 44 + rows[row].length;
+                bipolar got;
+
+                hello[3] = (p8)(length - 4);
+                if (rows[row].retry)
+                        memory_copy(hello + 6, retry_random, 32);
+                hello[39] = 0x13;
+                hello[40] = 0x01;
+                hello[43] = rows[row].length;
+                memory_copy(hello + 44, rows[row].bytes, rows[row].length);
+                tls_hello_conn.group = rows[row].offered;
+                got = tls_server_hello_keys(hello, length, &tls_hello_conn,
+                                            peer, sizeof peer,
+                                            &share, &group, &cookie,
+                                            &cookie_length);
+                if (got != rows[row].expect ||
+                    (got == TLS_RETRY &&
+                     (group != rows[row].group || share ||
+                      cookie_length != rows[row].cookie ||
+                      (cookie_length && cookie != hello + length - cookie_length))))
+                {
+                        all = false;
+                        string_format(log, "  HelloRetryRequest row: %s\n",
+                                      rows[row].name);
+                }
+        }
+        check("each HelloRetryRequest row answers its verdict", all);
+
+        /* The second hello is the first with the asked-for share and the
+           cookie: the same random, one P-256 share, the cookie verbatim. */
+        {
+                tls_conn client = {.host = "example.com"};
+                static const p8 cookie[] = {0, 3, 0xaa, 0xbb, 0xcc};
+                p8 first[512];
+                p8 second[512];
+                positive first_used = 0;
+                positive second_used = 0;
+                positive at = 0;
+                positive length = 0;
+
+                check("a first ClientHello builds for a retry",
+                      tls_client_hello(address_of client, first, sizeof first,
+                                       address_of first_used, null, 0) == TLS_OK &&
+                          client.group == 0x001d);
+                check("the asked-for P-256 share is drawn",
+                      tls_share_scalar(address_of client, 0x0017));
+                check("the retry ClientHello builds with its cookie",
+                      tls_client_hello(address_of client, second, sizeof second,
+                                       address_of second_used, cookie,
+                                       sizeof cookie) == TLS_OK);
+                check("the retry ClientHello keeps the first one's random",
+                      !memory_compare(first + 6, second + 6, 32));
+                check("the retry ClientHello carries only the asked-for share",
+                      tls_hello_offers_share(second, second_used, 0x0017, 65) &&
+                          !tls_hello_offers_share(second, second_used, 0x001d, 32));
+                check("the retry ClientHello echoes the cookie verbatim",
+                      tls_hello_extension(second, second_used, 0x002c,
+                                          address_of at, address_of length) &&
+                          length == sizeof cookie &&
+                          !memory_compare(second + at, cookie, sizeof cookie));
+                check("the first ClientHello carries no cookie",
+                      !tls_hello_extension(first, first_used, 0x002c,
+                                           address_of at, address_of length));
+                crypto_forget(client.scalar, sizeof client.scalar);
         }
 }
 
@@ -55746,6 +56675,20 @@ static fn tls_server_flight_validation(void)
         check("TLS server flight rejects duplicate EncryptedExtensions",
               !tls_server_flight_step(address_of state,
                                       TLS_HS_ENCRYPTED_EXTS));
+        check("TLS server flight takes a CertificateRequest after EncryptedExtensions",
+              tls_server_flight_step(address_of state, TLS_HS_CERT_REQUEST) &&
+                  state == TLS_SERVER_FLIGHT_CERTIFICATE);
+        check("TLS server flight rejects a second CertificateRequest",
+              !tls_server_flight_step(address_of state, TLS_HS_CERT_REQUEST) &&
+                  state == TLS_SERVER_FLIGHT_CERTIFICATE);
+        check("TLS server flight takes the Certificate after a request",
+              tls_server_flight_step(address_of state, TLS_HS_CERTIFICATE));
+        check("TLS server flight rejects a CertificateRequest after the Certificate",
+              !tls_server_flight_step(address_of state, TLS_HS_CERT_REQUEST));
+        state = TLS_SERVER_FLIGHT_EE;
+        check("TLS server flight rejects a CertificateRequest first",
+              !tls_server_flight_step(address_of state, TLS_HS_CERT_REQUEST) &&
+                  state == TLS_SERVER_FLIGHT_EE);
 
         {
                 p8 one = 1;
@@ -55816,264 +56759,137 @@ static fn tls_server_flight_validation(void)
         */
         {
                 static tls_conn tls;
-                static p8 hs[TLS_HS_MAX];
                 static p8 unasked[] = {TLS_HS_ENCRYPTED_EXTS, 0, 0, 6,
                                        0, 4, 0, 16, 0, 0};
                 static p8 asked[] = {TLS_HS_ENCRYPTED_EXTS, 0, 0, 14,
                                      0, 12, 0, 0, 0, 0, 0, 10, 0, 4, 0, 2,
                                      0, 29};
-                positive used = 0;
-                p8 flight = TLS_SERVER_FLIGHT_EE;
 
                 crypto_sha256_open(address_of tls.transcript);
                 tls.named = true;
                 check("EncryptedExtensions may answer server_name and supported_groups",
-                      tls_encrypted_flight_append(address_of tls, hs, sizeof hs,
-                                                  address_of used,
-                                                  address_of flight, asked,
-                                                  sizeof asked, null) ==
-                              TLS_OK &&
-                          flight == TLS_SERVER_FLIGHT_CERTIFICATE);
-                used = 0;
-                flight = TLS_SERVER_FLIGHT_EE;
+                      tls_flight_message(address_of tls, asked, sizeof asked, null) ==
+                          TLS_OK);
                 check("EncryptedExtensions answering what was never offered is refused",
-                      tls_encrypted_flight_append(address_of tls, hs, sizeof hs,
-                                                  address_of used,
-                                                  address_of flight, unasked,
-                                                  sizeof unasked, null) ==
-                          TLS_FAIL);
-                used = 0;
-                flight = TLS_SERVER_FLIGHT_EE;
+                      tls_flight_message(address_of tls, unasked,
+                                         sizeof unasked, null) == TLS_FAIL);
                 tls.named = false;
                 check("EncryptedExtensions answering server_name without SNI is refused",
-                      tls_encrypted_flight_append(address_of tls, hs, sizeof hs,
-                                                  address_of used,
-                                                  address_of flight, asked,
-                                                  sizeof asked, null) ==
+                      tls_flight_message(address_of tls, asked, sizeof asked, null) ==
                           TLS_FAIL);
         }
-}
-
-/* After ServerHello the encrypted flight uses tls_encrypted_flight_append
-   (same static tls_handshake calls).  Full loopback needs a peer and keys;
-   these unit proofs feed plaintext fragments with tls=null so only framing
-   and flight-step run — one implementation, no mirrored walk. */
-typedef struct
-{
-        p8 hs[TLS_HS_MAX];
-        positive used;
-        p8 flight;
-        positive messages;
-} tls_flight_hs_walk;
-
-static bipolar tls_flight_hs_append(tls_flight_hs_walk address_to walk,
-                                    p8 address_to fragment, positive length)
-{
-        return tls_encrypted_flight_append(
-            null, walk->hs, sizeof(walk->hs), address_of walk->used,
-            address_of walk->flight, fragment, length,
-            address_of walk->messages);
-}
-
-static fn tls_flight_hs_put_header(p8 address_to at, p8 type, positive body)
-{
-        at[0] = type;
-        at[1] = (p8)(body >> 16);
-        at[2] = (p8)(body >> 8);
-        at[3] = (p8)body;
 }
 
 /*
-        Mid-path framing refuse after a retained handshake prefix: open-time
-        TLS EMFILE is covered elsewhere; these prove a tight hold room refuses
-        the next fragment closed once some bytes are already kept.
+        Flight rows: records written as type, then body bytes, each record
+        one entry of up to 40 bytes; a type of 0 ends the row. The messages
+        are EncryptedExtensions (08 000002 0000), a 2-byte Certificate
+        (0b 000002 abab), CertificateVerify (0f 000000), a 1-byte Finished
+        (14 000001 55) and CertificateRequest (0d 000000).
 */
-static fn tls_midpath_append_refusal(void)
-{
-        {
-                p8 held[16];
-                positive used = 0;
-                p8 fragment[12];
-
-                memory_fill(fragment, 0xee, sizeof fragment);
-                check("a plaintext ServerHello prefix is retained in a tight room",
-                      tls_handshake_one_append(held, 8, address_of used,
-                                               fragment, 3) ==
-                              TLS_HANDSHAKE_MORE &&
-                          used == 3);
-                check("a plaintext ServerHello fragment past the hold room is refused mid-reassembly",
-                      tls_handshake_one_append(held, 8, address_of used,
-                                               fragment + 3, 6) == TLS_FAIL &&
-                          used == 3);
-        }
-
-        {
-                p8 hs[16];
-                positive used = 0;
-                p8 flight = TLS_SERVER_FLIGHT_CERTIFICATE;
-                positive messages = 0;
-                p8 fragment[20];
-
-                tls_flight_hs_put_header(fragment, TLS_HS_CERTIFICATE, 100);
-                memory_fill(fragment + 4, 0xab, sizeof fragment - 4);
-                check("an encrypted-flight Certificate prefix is retained in a tight room",
-                      tls_encrypted_flight_append(
-                          null, hs, sizeof hs, address_of used,
-                          address_of flight, fragment, 10,
-                          address_of messages) == TLS_OK &&
-                          used == 10 && !messages);
-                check("an encrypted-flight fragment past the hold room is refused mid-reassembly",
-                      tls_encrypted_flight_append(
-                          null, hs, sizeof hs, address_of used,
-                          address_of flight, fragment + 10, 7,
-                          address_of messages) == TLS_FAIL &&
-                          used == 10 && !messages &&
-                          flight == TLS_SERVER_FLIGHT_CERTIFICATE);
-        }
-}
-
 static fn tls_encrypted_flight_hs_reassembly(void)
 {
-        /* 1. Certificate (type 11) split across appends: incomplete then complete. */
+#define EE 8, 0, 0, 2, 0, 0
+#define CERT 11, 0, 0, 2, 0xab, 0xab
+#define CV 15, 0, 0, 0
+#define FIN 20, 0, 0, 1, 0x55
+#define CR 13, 0, 0, 0
+        static const struct
         {
-                p8 cert[4 + 24];
-                tls_flight_hs_walk walk = {.flight = TLS_SERVER_FLIGHT_CERTIFICATE};
-
-                tls_flight_hs_put_header(cert, TLS_HS_CERTIFICATE, 24);
-                memory_fill(cert + 4, 0xab, 24);
-
-                check("a fragmented Certificate header is retained",
-                      tls_flight_hs_append(address_of walk, cert, 3) == TLS_OK &&
-                          walk.used == 3 && !walk.messages);
-                check("a fragmented Certificate body waits for its declared end",
-                      tls_flight_hs_append(address_of walk, cert + 3, 10) ==
-                          TLS_OK &&
-                          walk.used == 13 && !walk.messages);
-                check("a fragmented Certificate is consumed when complete",
-                      tls_flight_hs_append(address_of walk, cert + 13,
-                                          sizeof cert - 13) == TLS_OK &&
-                          !walk.used && walk.messages == 1 &&
-                          walk.flight == TLS_SERVER_FLIGHT_CERT_VERIFY);
-        }
-
-        /* 2. Exact TLS_HS_MAX fill is accepted; one octet past refuses. */
-        {
-                p8 chunk[TLS_HS_MAX];
-                p8 one = 0;
-                tls_flight_hs_walk walk = {.flight = TLS_SERVER_FLIGHT_CERTIFICATE};
-
-                /* Declare a body larger than the buffer so the message stays
-                   incomplete while the flight hs[] fills to its ceiling. */
-                tls_flight_hs_put_header(chunk, TLS_HS_CERTIFICATE, TLS_HS_MAX);
-                memory_fill(chunk + 4, 0xcd, sizeof chunk - 4);
-
-                check("encrypted-flight hs may fill exactly to TLS_HS_MAX",
-                      tls_flight_hs_append(address_of walk, chunk,
-                                          sizeof chunk) == TLS_OK &&
-                          walk.used == TLS_HS_MAX && !walk.messages &&
-                          sizeof(walk.hs) == (positive)TLS_HS_MAX);
-                check("one byte past the encrypted-flight hs buffer is refused",
-                      tls_flight_hs_append(address_of walk, address_of one, 1) ==
-                          TLS_FAIL &&
-                          walk.used == TLS_HS_MAX);
-        }
-
-        /* 3. Empty mid-message fragment: RFC 8446 5.1 forbids sending one,
-           and the flight refuses it as the other appends do, leaving the
-           held prefix alone. */
-        {
-                p8 cert[4 + 8];
-                tls_flight_hs_walk walk = {.flight = TLS_SERVER_FLIGHT_CERTIFICATE};
-
-                tls_flight_hs_put_header(cert, TLS_HS_CERTIFICATE, 8);
-                memory_fill(cert + 4, 0x11, 8);
-
-                check("an empty encrypted-flight fragment is refused mid-message",
-                      tls_flight_hs_append(address_of walk, cert, 6) == TLS_OK &&
-                          walk.used == 6 &&
-                          tls_flight_hs_append(address_of walk, cert, 0) ==
-                              TLS_FAIL &&
-                          walk.used == 6 && !walk.messages);
-        }
-
-        /* 4. Two HS messages in one record: tiny EE consumed, Certificate start held. */
-        {
-                p8 record[6 + 4 + 2];
-                tls_flight_hs_walk walk = {.flight = TLS_SERVER_FLIGHT_EE};
-
-                /* EncryptedExtensions with empty extension vector (body 2). */
-                tls_flight_hs_put_header(record, TLS_HS_ENCRYPTED_EXTS, 2);
-                record[4] = 0;
-                record[5] = 0;
-                /* Start of Certificate: header + two body bytes of eight. */
-                tls_flight_hs_put_header(record + 6, TLS_HS_CERTIFICATE, 8);
-                record[10] = 0xaa;
-                record[11] = 0xbb;
-
-                check("EncryptedExtensions in a shared record is consumed",
-                      tls_flight_hs_append(address_of walk, record,
-                                          sizeof record) == TLS_OK &&
-                          walk.messages == 1 &&
-                          walk.flight == TLS_SERVER_FLIGHT_CERTIFICATE &&
-                          walk.used == 6 &&
-                          walk.hs[0] == TLS_HS_CERTIFICATE &&
-                          walk.hs[3] == 8 && walk.hs[4] == 0xaa &&
-                          walk.hs[5] == 0xbb);
-
+                string_address name;
+                struct
                 {
-                        p8 rest[6];
+                        p8 type;
+                        p8 length;
+                        p8 bytes[40];
+                } records[5];
+                bipolar expect;
+                positive messages;
+        } rows[] = {
+            {"a flight in one record", {{22, 21, {EE, CERT, CV, FIN}}}, TLS_OK, 4},
+            {"a flight one message a record",
+             {{22, 6, {EE}}, {22, 6, {CERT}}, {22, 4, {CV}}, {22, 5, {FIN}}},
+             TLS_OK, 4},
+            {"a flight split inside headers",
+             {{22, 2, {8, 0}}, {22, 10, {0, 2, 0, 0, CERT}}, {22, 1, {15}},
+              {22, 8, {0, 0, 0, FIN}}},
+             TLS_OK, 4},
+            {"a flight with a CertificateRequest",
+             {{22, 25, {EE, CR, CERT, CV, FIN}}}, TLS_OK, 5},
+            {"a Certificate before EncryptedExtensions", {{22, 6, {CERT}}},
+             TLS_FAIL, 0},
+            {"a CertificateRequest after the Certificate",
+             {{22, 16, {EE, CERT, CR}}}, TLS_FAIL, 2},
+            {"bytes after Finished in its record",
+             {{22, 22, {EE, CERT, CV, FIN, 0}}}, TLS_FAIL, 4},
+            {"an empty record inside a message",
+             {{22, 3, {EE}}, {22, 0, {0}}, {22, 3, {2, 0, 0}}}, TLS_FAIL, 0},
+            {"a compatibility CCS inside a split message",
+             {{22, 3, {EE}}, {20, 1, {1}}, {22, 18, {2, 0, 0, CERT, CV, FIN}}},
+             TLS_OK, 4},
+            {"a second compatibility CCS",
+             {{20, 1, {1}}, {22, 6, {EE}}, {20, 1, {1}}}, TLS_FAIL, 1},
+            {"a CCS of another byte", {{20, 1, {2}}, {22, 21, {EE, CERT, CV, FIN}}},
+             TLS_FAIL, 0},
+            {"a message past the hold room", {{22, 4, {11, 0, 0x40, 0}}},
+             TLS_FAIL, 0},
+            {"an alert in the flight", {{22, 6, {EE}}, {21, 2, {2, 40}}},
+             TLS_FAIL, 1},
+            {"the flight ends early", {{22, 12, {EE, CERT}}}, TLS_FAIL, 2},
+        };
+#undef EE
+#undef CERT
+#undef CV
+#undef FIN
+#undef CR
+        bool all = true;
 
-                        memory_fill(rest, 0xcc, sizeof rest);
-                        check("the Certificate remainder after a shared record completes",
-                              tls_flight_hs_append(address_of walk, rest,
-                                                  sizeof rest) == TLS_OK &&
-                                  !walk.used && walk.messages == 2 &&
-                                  walk.flight == TLS_SERVER_FLIGHT_CERT_VERIFY);
+        for (positive row = 0; row < array_count(rows); row++)
+        {
+                static p8 records[5 * 45];
+                positive at = 0;
+                positive messages = 0;
+                bipolar got;
+
+                for (positive r = 0; r < 5 && rows[row].records[r].type; r++)
+                        at += tls_walk_record(records + at,
+                                              rows[row].records[r].type,
+                                              rows[row].records[r].bytes,
+                                              rows[row].records[r].length);
+                tls_walk_load(records, at);
+                got = tls_walk(TLS_SERVER_FLIGHT_EE, address_of messages);
+                if (got != rows[row].expect || messages != rows[row].messages)
+                {
+                        all = false;
+                        string_format(log, "  flight row: %s\n", rows[row].name);
                 }
         }
+        check("each handshake flight row walks to its verdict", all);
 
-        /* 5. Trailing junk after Finished when the flight is COMPLETE fails. */
+        /* Two records that together pass the hold room: the second is
+           refused whole, not truncated. */
         {
-                p8 flight_bytes[6 + 4 + 4 + 4 + 32 + 1];
+                static p8 records[2 * (5 + 10000)];
+                static p8 bytes[10000];
                 positive at = 0;
-                tls_flight_hs_walk walk = {.flight = TLS_SERVER_FLIGHT_EE};
+                positive messages = 0;
 
-                tls_flight_hs_put_header(flight_bytes + at, TLS_HS_ENCRYPTED_EXTS,
-                                        2);
-                at += 4;
-                flight_bytes[at++] = 0;
-                flight_bytes[at++] = 0;
-
-                tls_flight_hs_put_header(flight_bytes + at, TLS_HS_CERTIFICATE, 0);
-                at += 4;
-
-                tls_flight_hs_put_header(flight_bytes + at, TLS_HS_CERT_VERIFY, 0);
-                at += 4;
-
-                tls_flight_hs_put_header(flight_bytes + at, TLS_HS_FINISHED, 32);
-                at += 4;
-                memory_fill(flight_bytes + at, 0x55, 32);
-                at += 32;
-                flight_bytes[at++] = 0xff; /* junk past Finished */
-
-                check("trailing junk after a COMPLETE encrypted flight is refused",
-                      tls_flight_hs_append(address_of walk, flight_bytes, at) ==
-                          TLS_FAIL &&
-                          walk.flight == TLS_SERVER_FLIGHT_COMPLETE &&
-                          walk.messages == 4);
-
-                /* Same flight without the junk clears cleanly. */
-                walk.used = 0;
-                walk.flight = TLS_SERVER_FLIGHT_EE;
-                walk.messages = 0;
-                memory_fill(walk.hs, 0, sizeof walk.hs);
-                check("a COMPLETE encrypted flight with no leftover clears",
-                      tls_flight_hs_append(address_of walk, flight_bytes,
-                                          at - 1) == TLS_OK &&
-                          !walk.used &&
-                          walk.flight == TLS_SERVER_FLIGHT_COMPLETE &&
-                          walk.messages == 4);
+                memory_fill(bytes, 0xab, sizeof bytes);
+                bytes[0] = TLS_HS_CERTIFICATE;
+                bytes[1] = 0;
+                bytes[2] = 0x3e;
+                bytes[3] = 0x80;
+                at += tls_walk_record(records, TLS_CT_HANDSHAKE, bytes,
+                                      sizeof bytes);
+                at += tls_walk_record(records + at, TLS_CT_HANDSHAKE, bytes,
+                                      sizeof bytes);
+                tls_walk_load(records, at);
+                check("handshake records past the hold room are refused",
+                      tls_walk(TLS_SERVER_FLIGHT_CERTIFICATE,
+                               address_of messages) == TLS_FAIL &&
+                          !messages);
         }
+        tls_forget(address_of tls_walk_conn);
 }
 
 static fn tls_post_handshake_framing(void)
@@ -56090,18 +56906,18 @@ static fn tls_post_handshake_framing(void)
         check("a complete post-handshake session ticket may be ignored",
               tls_post_handshake_valid(ticket, sizeof ticket));
         {
-                p8 held[TLS_HS_MAX];
-                positive held_length = 0;
+                tls_conn address_to tls = address_of tls_post_handshake_conn;
 
+                memory_fill(tls, 0, TLS_CONN_HEAD);
+                tls->handle = -1;
                 check("a fragmented post-handshake ticket is held",
-                      tls_post_handshake_append(
-                          held, address_of held_length, ticket, 7) == TLS_OK &&
-                          held_length == 7);
+                      tls_post_handshake_append(tls, ticket, 7) == TLS_OK &&
+                          tls->post_handshake_used == 7);
                 check("a fragmented post-handshake ticket is reassembled",
-                      tls_post_handshake_append(
-                          held, address_of held_length, ticket + 7,
-                          sizeof ticket - 7) == TLS_OK &&
-                          !held_length);
+                      tls_post_handshake_append(tls, ticket + 7,
+                                                sizeof ticket - 7) == TLS_OK &&
+                          !tls->post_handshake_used);
+                tls_forget(tls);
         }
 
         /* TLS_HS_MAX is both the hold buffer and the largest handshake body
@@ -56133,8 +56949,53 @@ static fn tls_post_handshake_framing(void)
                 check("a post-handshake body past the handshake-size ceiling is refused",
                       !tls_post_handshake_valid(over, sizeof over));
         }
-        check("an unsupported TLS KeyUpdate is not silently ignored",
-              !tls_post_handshake_valid(key_update, sizeof key_update));
+        check("a KeyUpdate asking nothing is taken",
+              tls_post_handshake_valid(key_update, sizeof key_update));
+        {
+                static p8 asked_bad[] = {24, 0, 0, 1, 2};
+                static p8 long_update[] = {24, 0, 0, 2, 0, 0};
+                static p8 update_ticket[sizeof key_update + sizeof ticket];
+                tls_conn address_to tls = address_of tls_post_handshake_conn;
+                p8 zeros[32] = {0};
+
+                check("a KeyUpdate byte past update_requested is refused",
+                      !tls_post_handshake_valid(asked_bad, sizeof asked_bad));
+                check("a KeyUpdate body of two bytes is refused",
+                      !tls_post_handshake_valid(long_update,
+                                                sizeof long_update));
+                memory_copy(update_ticket, key_update, sizeof key_update);
+                memory_copy(update_ticket + sizeof key_update, ticket,
+                            sizeof ticket);
+                check("a KeyUpdate that does not end its record is refused",
+                      !tls_post_handshake_valid(update_ticket,
+                                                sizeof update_ticket));
+                memory_copy(update_ticket, ticket, sizeof ticket);
+                memory_copy(update_ticket + sizeof ticket, key_update,
+                            sizeof key_update);
+                check("a KeyUpdate ending a record behind a ticket is taken",
+                      tls_post_handshake_valid(update_ticket,
+                                               sizeof update_ticket));
+
+                memory_fill(tls, 0, TLS_CONN_HEAD);
+                tls->handle = -1;
+                tls->seq_read = 9;
+                check("a KeyUpdate split across records is held",
+                      tls_post_handshake_append(tls, key_update, 3) == TLS_OK &&
+                          tls->seq_read == 9);
+                check("a KeyUpdate split across records rekeys when whole",
+                      tls_post_handshake_append(tls, key_update + 3, 2) ==
+                              TLS_OK &&
+                          !tls->seq_read &&
+                          memory_compare(tls->s_ap_traffic, zeros, 32) &&
+                          !memory_compare(tls->c_ap_traffic, zeros, 32));
+                memory_fill(tls, 0, TLS_CONN_HEAD);
+                tls->handle = -1;
+                key_update[4] = 1;
+                check("a KeyUpdate asking for one cannot be answered unsent",
+                      tls_post_handshake_append(tls, key_update, 5) == TLS_FAIL);
+                key_update[4] = 0;
+                tls_forget(tls);
+        }
         check("an empty authenticated handshake record is refused",
               !tls_post_handshake_valid(ticket, 0));
 
@@ -56191,6 +57052,125 @@ static fn tls_post_handshake_framing(void)
         check("a zero-length TLS session ticket is refused",
               !tls_post_handshake_valid(ticket, sizeof ticket));
         ticket[14] = 1;
+}
+
+/*
+        KeyUpdate over a socket pair, both ends this file's own record layer
+        under zero traffic secrets: client writes with c_ keys and reads
+        with s_, so each end's reading keys are the other's writing keys.
+        The writer rekeys half way to the AES-GCM record limit; the reader
+        asks the peer to rekey at the same mark and answers a peer that
+        asks; a round is proven by the data after it opening under the new
+        keys.
+*/
+static tls_conn tls_update_near;
+static tls_conn tls_update_far;
+
+static fn tls_key_update_rounds(void)
+{
+        tls_conn address_to near = address_of tls_update_near;
+        tls_conn address_to far = address_of tls_update_far;
+        b32 pair[2];
+        p8 got_bytes[8];
+        positive got = 0;
+        bool opened;
+
+        opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM, 0,
+                               (positive)pair) == 0;
+        check("KeyUpdate socket pair opens", opened);
+        if (!opened)
+                return;
+        memory_fill(near, 0, TLS_CONN_HEAD);
+        memory_fill(far, 0, TLS_CONN_HEAD);
+        near->handle = pair[0];
+        far->handle = pair[1];
+        near->encrypted = far->encrypted = true;
+        near->application = far->application = true;
+
+        /* The writer's key reaches the mark: KeyUpdate, then the data. */
+        near->seq_write = TLS_KEY_UPDATE_AT;
+        far->seq_read = TLS_KEY_UPDATE_AT;
+        check("a write at the key-update mark sends KeyUpdate first",
+              tls_write(near, (p8 address_to)"hi", 2) == TLS_OK &&
+                  near->seq_write == 1 && !near->update_asked);
+        check("the peer opens the data after the writer's KeyUpdate",
+              tls_read(far, got_bytes, sizeof got_bytes, address_of got) ==
+                      TLS_OK &&
+                  got == 2 && !memory_compare(got_bytes, "hi", 2) &&
+                  far->seq_read == 1 &&
+                  !memory_compare(far->s_ap_traffic, near->c_ap_traffic, 32));
+
+        /* The reader's key reaches the mark: it asks, the peer answers with
+           its own KeyUpdate and writes under the new key. */
+        near->seq_write = TLS_KEY_UPDATE_AT - 1;
+        far->seq_read = TLS_KEY_UPDATE_AT - 1;
+        check("a record at the read mark queues",
+              tls_send_enc(near, TLS_CT_APP, (p8 address_to)"ab", 2) == TLS_OK);
+        check("reading at the key-update mark asks the peer to update",
+              tls_read(far, got_bytes, sizeof got_bytes, address_of got) ==
+                      TLS_OK &&
+                  got == 2 && !memory_compare(got_bytes, "ab", 2) &&
+                  far->update_asked && far->seq_write == 0);
+        check("the asking side writes on under its new key",
+              tls_write(far, (p8 address_to)"zz", 2) == TLS_OK);
+        check("the asked side rekeys, answers, and opens what follows",
+              tls_read(near, got_bytes, sizeof got_bytes, address_of got) ==
+                      TLS_OK &&
+                  got == 2 && !memory_compare(got_bytes, "zz", 2) &&
+                  near->seq_read == 1 && near->seq_write == 0 &&
+                  !memory_compare(near->s_ap_traffic, far->c_ap_traffic, 32));
+        check("the answered side opens data under the answer's keys",
+              tls_write(near, (p8 address_to)"ok", 2) == TLS_OK &&
+                  tls_read(far, got_bytes, sizeof got_bytes,
+                           address_of got) == TLS_OK &&
+                  got == 2 && !memory_compare(got_bytes, "ok", 2) &&
+                  !far->update_asked && far->seq_read == 1 &&
+                  !memory_compare(far->s_ap_traffic, near->c_ap_traffic, 32));
+
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+        tls_forget(near);
+        tls_forget(far);
+}
+
+/*
+        HKDF-Expand at its ceiling (RFC 5869 2.3): 255 blocks come out, the
+        last one chained from the 254th under counter 255; one byte more is
+        refused and the output wiped, where the one-byte counter used to
+        wrap to zero and restart the chain.
+*/
+static p8 tls_hkdf_long[255 * 32 + 1];
+
+static fn tls_hkdf_expand_ceiling(void)
+{
+        p8 prk[32];
+        p8 info[3] = {'i', 'n', 'f'};
+        p8 last[32];
+        p8 counter = 255;
+        crypto_mac mac;
+        bool zeros = true;
+
+        memory_fill(prk, 0x0b, sizeof prk);
+        check("HKDF-Expand gives 255 blocks",
+              crypto_hkdf_expand(prk, info, sizeof info, tls_hkdf_long,
+                                 255 * 32));
+        crypto_hmac_open(address_of mac, DIGEST_SHA256, 32, prk, 32);
+        crypto_hmac_write(address_of mac, tls_hkdf_long + 253 * 32, 32);
+        crypto_hmac_write(address_of mac, info, sizeof info);
+        crypto_hmac_write(address_of mac, address_of counter, 1);
+        crypto_hmac_close(address_of mac, last);
+        check("HKDF-Expand's 255th block chains from the 254th",
+              !memory_compare(last, tls_hkdf_long + 254 * 32, 32));
+
+        memory_fill(tls_hkdf_long, 0xa5, sizeof tls_hkdf_long);
+        (void)crypto_hkdf_expand(prk, info, sizeof info, tls_hkdf_long,
+                                 sizeof tls_hkdf_long);
+        for (positive at = 0; at < sizeof tls_hkdf_long; at++)
+                zeros &= !tls_hkdf_long[at];
+        check("HKDF-Expand past 255 blocks writes no key stream", zeros);
+        check("HKDF-Expand past 255 blocks is refused",
+              !crypto_hkdf_expand(prk, info, sizeof info, tls_hkdf_long,
+                                  sizeof tls_hkdf_long));
 }
 
 static fn tls_certificate_framing(void)
@@ -56833,6 +57813,646 @@ static fn aes_reference_encrypt(const p8 address_to round,
 
 #define AES_CHECK_BLOCKS 41
 
+#define SHARED_x25519_reference
+#include "checks.c"
+#undef SHARED_x25519_reference
+
+/*
+        lib.c's x25519, and the field operations it is made of, on operands
+        the ladder almost never meets.
+
+        A random key reaches the second fold after a carry out of the top,
+        or a carry that runs the length of the add chain, about once in 2^59
+        operations, so the vectors and the fuzzer cannot be what holds those
+        instructions. Here the X25519_ macros are expanded a second time
+        into test-only entry points -- the same text, frame slots and all --
+        and run on the ends of every range: zero, one, p and its
+        neighbours, 2^255 and 2^256 and theirs, limbs of all ones and of
+        zeros, then drawn values with such limbs sprinkled in. The four-limb
+        bodies (x86_64's mulx and mulq, arm64) are held to arithmetic mod p
+        done here in C, and riscv64's five-limb ones to the C they
+        transliterate (SHARED_x25519_reference), limb for limb, on operands
+        at the bounds the C was written for. Then x25519 itself against the
+        reference over drawn keys and edge u, each x86_64 body in turn.
+*/
+#if !defined(KERNEL_MODE) && (X64 || ARM64)
+static const p64 x25519_check_p[4] = {0xffffffffffffffedull, ~0ull, ~0ull,
+                                      0x7fffffffffffffffull};
+
+//      in mod p, below p. Any 256-bit number.
+static fn x25519_check_canonical(p64 address_to out, const p64 address_to in)
+{
+        p64 v[4], w[4];
+        crypto_wide carry = 19 * (in[3] >> 63);
+
+        memory_copy(v, in, 32);
+        v[3] &= 0x7fffffffffffffffull;
+        for (positive i = 0; i < 4; i++)
+        {
+                carry += v[i];
+                v[i] = (p64)carry;
+                carry >>= 64;
+        }
+        carry = 19;
+        for (positive i = 0; i < 4; i++)
+        {
+                carry += v[i];
+                w[i] = (p64)carry;
+                carry >>= 64;
+        }
+        if (w[3] >> 63)
+        {
+                w[3] &= 0x7fffffffffffffffull;
+                memory_copy(v, w, 32);
+        }
+        memory_copy(out, v, 32);
+}
+
+//      (low + 2^256 high) mod p, below p; high is up to four limbs.
+static fn x25519_check_fold(p64 address_to out, const p64 address_to low,
+                            const p64 address_to high)
+{
+        p64 v[4];
+        crypto_wide carry = 0;
+        p64 top;
+
+        for (positive i = 0; i < 4; i++)
+        {
+                carry += (crypto_wide)high[i] * 38 + low[i];
+                v[i] = (p64)carry;
+                carry >>= 64;
+        }
+        top = (p64)carry;
+        carry = (crypto_wide)top * 38;
+        for (positive i = 0; i < 4; i++)
+        {
+                carry += v[i];
+                v[i] = (p64)carry;
+                carry >>= 64;
+        }
+        //      A last carry of one is 38 more; there is room for it now.
+        v[0] += 38 * (p64)carry;
+        x25519_check_canonical(out, v);
+}
+
+static fn x25519_check_product(p64 address_to out, const p64 address_to a,
+                               const p64 address_to b)
+{
+        p64 wide[8] = {0};
+
+        for (positive i = 0; i < 4; i++)
+        {
+                crypto_wide carry = 0;
+
+                for (positive j = 0; j < 4; j++)
+                {
+                        carry += (crypto_wide)a[i] * b[j] + wide[i + j];
+                        wide[i + j] = (p64)carry;
+                        carry >>= 64;
+                }
+                wide[i + 4] = (p64)carry;
+        }
+        x25519_check_fold(out, wide, wide + 4);
+}
+
+//      a + b or a - b mod p, below p.
+static fn x25519_check_sum(p64 address_to out, const p64 address_to a,
+                           const p64 address_to b, bool subtract)
+{
+        p64 x[4], y[4], v[4];
+        crypto_wide carry = 0;
+
+        x25519_check_canonical(x, a);
+        x25519_check_canonical(y, b);
+        if (subtract)
+        {
+                //      p - y, which is below 2^255, then the sum.
+                bipolar borrow = 0;
+
+                for (positive i = 0; i < 4; i++)
+                {
+                        crypto_wide d = (crypto_wide)x25519_check_p[i] - y[i] - (p64)borrow;
+
+                        y[i] = (p64)d;
+                        borrow = (bipolar)((d >> 64) & 1);
+                }
+        }
+        for (positive i = 0; i < 4; i++)
+        {
+                carry += (crypto_wide)x[i] + y[i];
+                v[i] = (p64)carry;
+                carry >>= 64;
+        }
+        x25519_check_canonical(out, v);
+}
+
+static bool x25519_check_same(const p64 address_to got, const p64 address_to want)
+{
+        p64 canonical[4];
+
+        x25519_check_canonical(canonical, got);
+        return memory_compare(canonical, want, 32) == 0;
+}
+#endif
+
+#if !defined(KERNEL_MODE) && X64
+/*
+        Each operation as a function: rdi the output, rsi and rdx the
+        operands; the frame operations copy theirs into slots 0 and 32 and
+        the answers out of 64 and 96, which is where the macros look.
+*/
+fn x25519_check_multiply_mulx(p64 address_to d, const p64 address_to a,
+                              const p64 address_to b);
+fn x25519_check_square_mulx(p64 address_to d, const p64 address_to a);
+fn x25519_check_multiply_mulq(p64 address_to d, const p64 address_to a,
+                              const p64 address_to b);
+fn x25519_check_square_mulq(p64 address_to d, const p64 address_to a);
+fn x25519_check_add_sub(p64 address_to d, const p64 address_to a,
+                        const p64 address_to b);
+fn x25519_check_subtract(p64 address_to d, const p64 address_to a,
+                         const p64 address_to b);
+fn x25519_check_a24(p64 address_to d, const p64 address_to e,
+                    const p64 address_to a);
+fn x25519_check_fold_step(p64 address_to d, const p64 address_to five);
+
+#define X25519_CHECK_X64_SAVE                                                  \
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n"
+#define X25519_CHECK_X64_RESTORE                                               \
+    "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n   ret\n"
+#define X25519_CHECK_X64_FRAME_IN                                              \
+    X25519_CHECK_X64_SAVE "sub $136, %rsp\n   mov %rdi, 128(%rsp)\n"               \
+    "mov (%rsi), %rax\n   mov %rax, 0(%rsp)\n   mov 8(%rsi), %rax\n   mov %rax, 8(%rsp)\n" \
+    "mov 16(%rsi), %rax\n   mov %rax, 16(%rsp)\n   mov 24(%rsi), %rax\n   mov %rax, 24(%rsp)\n" \
+    "mov (%rdx), %rax\n   mov %rax, 32(%rsp)\n   mov 8(%rdx), %rax\n   mov %rax, 40(%rsp)\n" \
+    "mov 16(%rdx), %rax\n   mov %rax, 48(%rsp)\n   mov 24(%rdx), %rax\n   mov %rax, 56(%rsp)\n"
+#define X25519_CHECK_X64_FRAME_OUT                                             \
+    "mov 128(%rsp), %rdi\n"                                                      \
+    "mov 64(%rsp), %rax\n   mov %rax, (%rdi)\n   mov 72(%rsp), %rax\n   mov %rax, 8(%rdi)\n" \
+    "mov 80(%rsp), %rax\n   mov %rax, 16(%rdi)\n   mov 88(%rsp), %rax\n   mov %rax, 24(%rdi)\n" \
+    "mov 96(%rsp), %rax\n   mov %rax, 32(%rdi)\n   mov 104(%rsp), %rax\n   mov %rax, 40(%rdi)\n" \
+    "mov 112(%rsp), %rax\n   mov %rax, 48(%rdi)\n   mov 120(%rsp), %rax\n   mov %rax, 56(%rdi)\n" \
+    "add $136, %rsp\n" X25519_CHECK_X64_RESTORE
+
+__asm__(
+    ".text\n"
+    ".balign 16\n"
+    "x25519_check_multiply_mulx:\n" X25519_CHECK_X64_SAVE "mov %rdx, %rbp\n"
+    X25519_X64_MULTIPLY_MULX("0", "%rdi", "0", "%rsi", "0", "%rbp")
+    X25519_CHECK_X64_RESTORE
+    "x25519_check_square_mulx:\n" X25519_CHECK_X64_SAVE
+    X25519_X64_SQUARE_MULX("0", "%rdi", "0", "%rsi")
+    X25519_CHECK_X64_RESTORE
+    "x25519_check_multiply_mulq:\n" X25519_CHECK_X64_SAVE "mov %rdx, %rbp\n"
+    X25519_X64_MULTIPLY_MULQ("0", "%rdi", "0", "%rsi", "0", "%rbp")
+    X25519_CHECK_X64_RESTORE
+    "x25519_check_square_mulq:\n" X25519_CHECK_X64_SAVE
+    X25519_X64_SQUARE_MULQ("0", "%rdi", "0", "%rsi")
+    X25519_CHECK_X64_RESTORE
+    "x25519_check_add_sub:\n" X25519_CHECK_X64_FRAME_IN
+    X25519_X64_ADD_SUB("64", "96", "0", "32")
+    X25519_CHECK_X64_FRAME_OUT
+    "x25519_check_subtract:\n" X25519_CHECK_X64_FRAME_IN
+    X25519_X64_SUB("64", "0", "32")
+    X25519_CHECK_X64_FRAME_OUT
+    "x25519_check_a24:\n" X25519_CHECK_X64_FRAME_IN
+    X25519_X64_A24("64", "0", "32")
+    X25519_CHECK_X64_FRAME_OUT
+    "x25519_check_fold_step:\n" X25519_CHECK_X64_SAVE
+    "mov (%rsi), %r8\n   mov 8(%rsi), %r9\n   mov 16(%rsi), %r10\n   mov 24(%rsi), %r11\n"
+    "mov 32(%rsi), %rax\n   xor %ebx, %ebx\n"
+    X25519_X64_FOLD("%rax")
+    X25519_X64_STORE("0", "%rdi")
+    X25519_CHECK_X64_RESTORE
+);
+#elif !defined(KERNEL_MODE) && ARM64
+fn x25519_check_multiply_a64(p64 address_to d, const p64 address_to a,
+                             const p64 address_to b);
+fn x25519_check_square_a64(p64 address_to d, const p64 address_to a);
+fn x25519_check_add_sub(p64 address_to d, const p64 address_to a,
+                        const p64 address_to b);
+fn x25519_check_subtract(p64 address_to d, const p64 address_to a,
+                         const p64 address_to b);
+fn x25519_check_a24(p64 address_to d, const p64 address_to e,
+                    const p64 address_to a);
+fn x25519_check_fold_step(p64 address_to d, const p64 address_to five);
+
+#define X25519_CHECK_ARM64_SAVE                                                \
+    "stp x21, x22, [sp, #-64]!\n   stp x23, x24, [sp, #16]\n"                      \
+    "stp x25, x26, [sp, #32]\n   str x30, [sp, #48]\n"                              \
+    "mov x25, #38\n   movz x26, #0xdb41\n   movk x26, #1, lsl #16\n"
+#define X25519_CHECK_ARM64_RESTORE                                             \
+    "ldp x23, x24, [sp, #16]\n   ldp x25, x26, [sp, #32]\n   ldr x30, [sp, #48]\n" \
+    "ldp x21, x22, [sp], #64\n   ret\n"
+#define X25519_CHECK_ARM64_FRAME_IN                                            \
+    X25519_CHECK_ARM64_SAVE "sub sp, sp, #144\n   str x0, [sp, #128]\n"              \
+    "ldp x3, x4, [x1]\n   ldp x5, x6, [x1, #16]\n   stp x3, x4, [sp, #0]\n   stp x5, x6, [sp, #16]\n" \
+    "ldp x3, x4, [x2]\n   ldp x5, x6, [x2, #16]\n   stp x3, x4, [sp, #32]\n   stp x5, x6, [sp, #48]\n"
+#define X25519_CHECK_ARM64_FRAME_OUT                                           \
+    "ldr x0, [sp, #128]\n"                                                       \
+    "ldp x3, x4, [sp, #64]\n   ldp x5, x6, [sp, #80]\n   stp x3, x4, [x0]\n   stp x5, x6, [x0, #16]\n" \
+    "ldp x3, x4, [sp, #96]\n   ldp x5, x6, [sp, #112]\n   stp x3, x4, [x0, #32]\n   stp x5, x6, [x0, #48]\n" \
+    "add sp, sp, #144\n" X25519_CHECK_ARM64_RESTORE
+
+__asm__(
+    ".text\n"
+    ".balign 16\n"
+    "x25519_check_multiply_a64:\n" X25519_CHECK_ARM64_SAVE
+    X25519_ARM64_MULTIPLY("0", "x0", "0", "x1", "0", "x2")
+    X25519_CHECK_ARM64_RESTORE
+    "x25519_check_square_a64:\n" X25519_CHECK_ARM64_SAVE
+    X25519_ARM64_SQUARE("0", "x0", "0", "x1")
+    X25519_CHECK_ARM64_RESTORE
+    "x25519_check_add_sub:\n" X25519_CHECK_ARM64_FRAME_IN
+    X25519_ARM64_ADD_SUB("64", "96", "0", "32")
+    X25519_CHECK_ARM64_FRAME_OUT
+    "x25519_check_subtract:\n" X25519_CHECK_ARM64_FRAME_IN
+    X25519_ARM64_SUB("64", "0", "32")
+    X25519_CHECK_ARM64_FRAME_OUT
+    "x25519_check_a24:\n" X25519_CHECK_ARM64_FRAME_IN
+    X25519_ARM64_A24("64", "0", "32")
+    X25519_CHECK_ARM64_FRAME_OUT
+    "x25519_check_fold_step:\n" X25519_CHECK_ARM64_SAVE
+    "ldp x11, x12, [x1]\n   ldp x13, x14, [x1, #16]\n   ldr x15, [x1, #32]\n"
+    X25519_ARM64_FOLD_STORE("x15", "0", "x0")
+    X25519_CHECK_ARM64_RESTORE
+);
+#elif !defined(KERNEL_MODE) && RISCV64
+fn x25519_check_multiply_rv(p64 address_to d, const p64 address_to s,
+                            const p64 address_to r);
+fn x25519_check_square_rv(p64 address_to d, const p64 address_to a);
+//      d = a + b, a + 8p - b and 121665 a + b, fifteen limbs.
+fn x25519_check_frame_rv(p64 address_to d, const p64 address_to a,
+                         const p64 address_to b);
+
+#define X25519_CHECK_RV_SAVE                                                   \
+    "addi sp, sp, -112\n   sd s1, 0(sp)\n   sd s2, 8(sp)\n   sd s3, 16(sp)\n"        \
+    "sd s4, 24(sp)\n   sd s5, 32(sp)\n   sd s6, 40(sp)\n   sd s7, 48(sp)\n"          \
+    "sd s8, 56(sp)\n   sd s9, 64(sp)\n   sd s10, 72(sp)\n   sd s11, 80(sp)\n"        \
+    "li s10, 19\n   li s11, 0x7ffffffffffff\n"
+#define X25519_CHECK_RV_RESTORE                                                \
+    "ld s1, 0(sp)\n   ld s2, 8(sp)\n   ld s3, 16(sp)\n   ld s4, 24(sp)\n"           \
+    "ld s5, 32(sp)\n   ld s6, 40(sp)\n   ld s7, 48(sp)\n   ld s8, 56(sp)\n"          \
+    "ld s9, 64(sp)\n   ld s10, 72(sp)\n   ld s11, 80(sp)\n   addi sp, sp, 112\n   ret\n"
+#define X25519_CHECK_RV_COPY(from, fr, to, tr)                                 \
+    "ld t0, " from "(" fr ")\n   sd t0, " to "(" tr ")\n"                            \
+    "ld t0, " from "+8(" fr ")\n   sd t0, " to "+8(" tr ")\n"                        \
+    "ld t0, " from "+16(" fr ")\n   sd t0, " to "+16(" tr ")\n"                      \
+    "ld t0, " from "+24(" fr ")\n   sd t0, " to "+24(" tr ")\n"                      \
+    "ld t0, " from "+32(" fr ")\n   sd t0, " to "+32(" tr ")\n"
+
+__asm__(
+    ".text\n"
+    ".balign 16\n"
+    "x25519_check_multiply_rv:\n" X25519_CHECK_RV_SAVE
+    X25519_RV_MULTIPLY("0", "a0", "0", "a1", "0", "a2")
+    X25519_CHECK_RV_RESTORE
+    "x25519_check_square_rv:\n" X25519_CHECK_RV_SAVE
+    X25519_RV_SQUARE("0", "a0", "0", "a1")
+    X25519_CHECK_RV_RESTORE
+    "x25519_check_frame_rv:\n" X25519_CHECK_RV_SAVE
+    "addi sp, sp, -208\n   sd a0, 200(sp)\n"
+    X25519_CHECK_RV_COPY("0", "a1", "0", "sp")
+    X25519_CHECK_RV_COPY("0", "a2", "40", "sp")
+    "li a0, 0x3fffffffffff68\n   li a2, 0x3ffffffffffff8\n"
+    X25519_RV_ADD("80", "0", "40")
+    X25519_RV_SUB("120", "0", "40")
+    X25519_RV_A24("160", "0", "40")
+    "ld a0, 200(sp)\n"
+    X25519_CHECK_RV_COPY("80", "sp", "0", "a0")
+    X25519_CHECK_RV_COPY("120", "sp", "40", "a0")
+    X25519_CHECK_RV_COPY("160", "sp", "80", "a0")
+    "addi sp, sp, 208\n"
+    X25519_CHECK_RV_RESTORE
+);
+#endif
+
+#ifndef KERNEL_MODE
+static p64 x25519_check_seed = 0x6a09e667f3bcc909ull;
+
+static p64 x25519_check_next(void)
+{
+        x25519_check_seed ^= x25519_check_seed << 13;
+        x25519_check_seed ^= x25519_check_seed >> 7;
+        x25519_check_seed ^= x25519_check_seed << 17;
+        return x25519_check_seed;
+}
+
+//      The ends: 0, 1, 19, 38, p - 1, p, p + 1, 2^255 - 1, 2^255, 2^255 +
+//      18, 2^256 - 39, 2^256 - 38, 2^256 - 19, 2^256 - 1, alternating
+//      limbs, 2^192 and 2^128 - 1; then drawn values with all-ones and
+//      zero limbs sprinkled in.
+static fn x25519_check_operand(p64 address_to x, positive kind)
+{
+        static const p64 ends[][4] = {
+            {0, 0, 0, 0}, {1, 0, 0, 0}, {19, 0, 0, 0}, {38, 0, 0, 0},
+            {0xffffffffffffffecull, ~0ull, ~0ull, 0x7fffffffffffffffull},
+            {0xffffffffffffffedull, ~0ull, ~0ull, 0x7fffffffffffffffull},
+            {0xffffffffffffffeeull, ~0ull, ~0ull, 0x7fffffffffffffffull},
+            {~0ull, ~0ull, ~0ull, 0x7fffffffffffffffull},
+            {0, 0, 0, 0x8000000000000000ull},
+            {18, 0, 0, 0x8000000000000000ull},
+            {0xffffffffffffffd9ull, ~0ull, ~0ull, ~0ull},
+            {0xffffffffffffffdaull, ~0ull, ~0ull, ~0ull},
+            {0xffffffffffffffedull, ~0ull, ~0ull, ~0ull},
+            {~0ull, ~0ull, ~0ull, ~0ull},
+            {~0ull, 0, ~0ull, 0}, {0, ~0ull, 0, ~0ull},
+            {0, 0, 0, 1}, {~0ull, ~0ull, 0, 0}};
+
+        if (kind < array_count(ends))
+        {
+                memory_copy(x, ends[kind], 32);
+                return;
+        }
+        for (positive i = 0; i < 4; i++)
+        {
+                p64 pick = x25519_check_next() & 7;
+
+                x[i] = pick == 0 ? ~0ull : pick == 1 ? 0 : x25519_check_next();
+        }
+}
+
+#define X25519_CHECK_ENDS 18
+#endif
+
+#if !defined(KERNEL_MODE) && (X64 || ARM64)
+typedef fn (*x25519_check_binary)(p64 address_to, const p64 address_to,
+                                  const p64 address_to);
+typedef fn (*x25519_check_unary)(p64 address_to, const p64 address_to);
+
+//      Every operation of one four-limb body on one pair: the number wrong.
+static positive x25519_check_pair(x25519_check_binary product_body,
+                                  x25519_check_unary square_body,
+                                  const p64 address_to a, const p64 address_to b)
+{
+        static const p64 a24[4] = {121665};
+        p64 got[8], want[4], product[4];
+        positive wrong = 0;
+
+        product_body(got, a, b);
+        x25519_check_product(want, a, b);
+        wrong += !x25519_check_same(got, want);
+        memory_copy(got, a, 32);
+        product_body(got, got, b);
+        wrong += !x25519_check_same(got, want);
+        square_body(got, a);
+        x25519_check_product(want, a, a);
+        wrong += !x25519_check_same(got, want);
+        memory_copy(got, a, 32);
+        square_body(got, got);
+        wrong += !x25519_check_same(got, want);
+
+        x25519_check_add_sub(got, a, b);
+        x25519_check_sum(want, a, b, false);
+        wrong += !x25519_check_same(got, want);
+        x25519_check_sum(want, a, b, true);
+        wrong += !x25519_check_same(got + 4, want);
+        x25519_check_subtract(got, a, b);
+        wrong += !x25519_check_same(got, want);
+        x25519_check_a24(got, a, b);
+        x25519_check_product(product, a, a24);
+        x25519_check_sum(want, product, b, false);
+        wrong += !x25519_check_same(got, want);
+        return wrong;
+}
+
+static positive x25519_check_bodies(x25519_check_binary product_body,
+                                    x25519_check_unary square_body)
+{
+        positive wrong = 0;
+        p64 a[4], b[4];
+
+        for (positive i = 0; i < X25519_CHECK_ENDS; i++)
+                for (positive j = 0; j < X25519_CHECK_ENDS; j++)
+                {
+                        x25519_check_operand(a, i);
+                        x25519_check_operand(b, j);
+                        wrong += x25519_check_pair(product_body, square_body, a, b);
+                }
+        for (positive round = 0; round < 3000; round++)
+        {
+                x25519_check_operand(a, X25519_CHECK_ENDS);
+                x25519_check_operand(b, round % 3 ? X25519_CHECK_ENDS : round / 3 % X25519_CHECK_ENDS);
+                wrong += x25519_check_pair(product_body, square_body, a, b);
+        }
+        return wrong;
+}
+
+//      The single fold every product ends in, over the top word it can be
+//      handed -- a product leaves at most 40, a24 below 2^17 -- and limbs
+//      that make its carry run the length of the chain.
+static positive x25519_check_folds(void)
+{
+        static const p64 tops[] = {0, 1, 2, 3, 38, 39, 40, 63, 121664, 121665};
+        positive wrong = 0;
+
+        for (positive kind = 0; kind < X25519_CHECK_ENDS + 200; kind++)
+                for (positive t = 0; t < array_count(tops); t++)
+                {
+                        p64 five[5], got[4], want[4], high[4] = {0};
+
+                        x25519_check_operand(five, kind);
+                        five[4] = high[0] = tops[t];
+                        x25519_check_fold_step(got, five);
+                        x25519_check_fold(want, five, high);
+                        wrong += !x25519_check_same(got, want);
+                }
+        return wrong;
+}
+#endif
+
+#if !defined(KERNEL_MODE) && RISCV64
+/*
+        Five limbs below bound, a power of two at least 2^52. Beside the ends
+        and drawn limbs, limbs e with 121665 e just short of a multiple of
+        2^64: after a limb of all ones below them, the carry a24 hands up
+        pushes the low word over, which nothing drawn does.
+*/
+static fn x25519_check_limbs(p64 address_to x, positive kind, p64 bound)
+{
+        for (positive i = 0; i < 5; i++)
+        {
+                p64 pick = kind < 4 ? kind : x25519_check_next() & 7;
+                //      (k 2^64 - 1) / 121665 in words: 2^64 = q 121665 + r + 1.
+                p64 k = 1 + x25519_check_next() % 29;
+                p64 q = ~0ull / 121665, r = ~0ull - q * 121665;
+
+                x[i] = pick == 0 ? bound - 1 : pick == 1 ? 0 :
+                       pick == 2 ? 0x7ffffffffffffull : pick == 3 ? bound / 2 :
+                       pick == 4 ? k * q + (k * (r + 1) - 1) / 121665 :
+                       x25519_check_next() & (bound - 1);
+        }
+}
+
+//      Against the C, limb for limb, at the bounds the ladder keeps: sums
+//      below 2^53, differences below 2^54, products and squares a little
+//      over 2^51, in the places the ladder puts each.
+static positive x25519_check_bodies_rv(void)
+{
+        static const p64 bounds[][2] = {{1ull << 54, 1ull << 53}, {1ull << 53, 1ull << 54},
+                                        {1ull << 52, 1ull << 52}, {1ull << 54, 1ull << 52}};
+        positive wrong = 0;
+
+        for (positive round = 0; round < 4000; round++)
+        {
+                p64 s[5], r[5], got[15], want[5], other[5];
+                const p64 address_to bound = bounds[round % 4];
+
+                x25519_check_limbs(s, round < 64 ? round % 4 : 8, bound[0]);
+                x25519_check_limbs(r, round < 64 ? round / 4 % 4 : 8, bound[1]);
+                x25519_check_multiply_rv(got, s, r);
+                x25519_reference_mul(want, s, r);
+                wrong += memory_compare(got, want, 40) != 0;
+                x25519_check_square_rv(got, s);
+                x25519_reference_sqr_n(want, s, 1);
+                wrong += memory_compare(got, want, 40) != 0;
+                //      The frame operations take products' limbs, as the
+                //      ladder hands them.
+                x25519_check_limbs(s, round < 64 ? round % 4 : 8, 1ull << 52);
+                x25519_check_limbs(r, round < 64 ? round / 4 % 4 : 8, 1ull << 52);
+                x25519_check_frame_rv(got, s, r);
+                memory_copy(want, s, 40);
+                x25519_reference_sum(want, r);
+                wrong += memory_compare(got, want, 40) != 0;
+                memory_copy(want, r, 40);
+                x25519_reference_diff(want, s);
+                wrong += memory_compare(got + 5, want, 40) != 0;
+                x25519_reference_mul121665(other, s);
+                x25519_reference_sum(other, r);
+                wrong += memory_compare(got + 10, other, 40) != 0;
+        }
+        return wrong;
+}
+#endif
+
+#ifndef KERNEL_MODE
+//      x25519 against the C over drawn keys and edge u, every body.
+static positive x25519_check_whole(void)
+{
+        static const p8 edges[][32] = {
+            {0}, {1}, {9},
+            {0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f},
+            {0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+            {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}};
+        p8 scalar[32], u[32], got[32], want[32];
+        positive wrong = 0;
+        p8 mulx;
+
+        memory_fill(scalar, 7, 32);
+        x25519(got, scalar, edges[2]);
+        mulx = cpu_has_mulx;
+        for (positive round = 0; round < 60; round++)
+        {
+                for (positive i = 0; i < 32; i++)
+                {
+                        scalar[i] = (p8)x25519_check_next();
+                        u[i] = (p8)x25519_check_next();
+                }
+                if (round < array_count(edges))
+                        memory_copy(u, edges[round], 32);
+                x25519_reference(want, scalar, u);
+                for (positive body = 0; body < 2; body++)
+                {
+                        cpu_has_mulx = body ? 0 : mulx;
+                        memory_fill(got, 0x5a, 32);
+                        x25519(got, scalar, u);
+                        wrong += memory_compare(got, want, 32) != 0;
+                }
+        }
+        cpu_has_mulx = mulx;
+        return wrong;
+}
+#endif
+
+#ifndef KERNEL_MODE
+/*
+        What x25519 leaves under the stack once it returns: its frame holds
+        the clamped scalar a word at a time through the whole ladder, so a
+        wipe that is missing leaves the secret key below the stack pointer.
+        One call a frame down, then a sibling reads the two kilobytes under
+        it -- every body's frame fits -- for any word of the clamped scalar.
+*/
+static __attribute__((noinline, noclone)) fn x25519_residue_call(
+    p8 address_to out, const p8 address_to scalar, const p8 address_to u)
+{
+        x25519(out, scalar, u);
+}
+
+static __attribute__((noinline, noclone)) positive x25519_residue_scan(
+    const p64 address_to words)
+{
+        volatile p64 window[256];
+        positive found = 0;
+
+        for (positive i = 0; i < array_count(window); i++)
+                for (positive j = 0; j < 4; j++)
+                        found += window[i] == words[j];
+        return found;
+}
+
+static positive x25519_residue(void)
+{
+        static const p8 nine[32] = {9};
+        p8 scalar[32], out[32];
+        p64 words[4];
+        positive found = 0;
+        p8 mulx;
+
+        x25519(out, nine, nine);
+        mulx = cpu_has_mulx;
+        for (positive i = 0; i < 32; i++)
+                scalar[i] = (p8)(0xa5 ^ (i * 29));
+        memory_copy(words, scalar, 32);
+        words[0] &= ~7ull;
+        words[3] = (words[3] & 0x7fffffffffffffffull) | 0x4000000000000000ull;
+        for (positive body = 0; body < 2; body++)
+        {
+                cpu_has_mulx = body ? 0 : mulx;
+                x25519_residue_call(out, scalar, nine);
+                found += x25519_residue_scan(words);
+        }
+        cpu_has_mulx = mulx;
+        return found;
+}
+#endif
+
+static fn crypto_floor_x25519(void)
+{
+#ifndef KERNEL_MODE
+        check("x25519 leaves no word of the clamped scalar on the stack",
+              x25519_residue() == 0);
+#if X64
+        static const p8 nine[32] = {9};
+        p8 probe[32];
+        positive wrong = x25519_check_bodies(x25519_check_multiply_mulq,
+                                             x25519_check_square_mulq);
+
+        //      The first x25519 asks whether there is a mulx body to hold.
+        x25519(probe, nine, nine);
+        if (cpu_has_mulx)
+                wrong += x25519_check_bodies(x25519_check_multiply_mulx,
+                                             x25519_check_square_mulx);
+        wrong += x25519_check_folds();
+        check("x25519's x86_64 field operations agree with arithmetic mod p at the ends",
+              wrong == 0);
+#elif ARM64
+        check("x25519's arm64 field operations agree with arithmetic mod p at the ends",
+              x25519_check_bodies(x25519_check_multiply_a64, x25519_check_square_a64) +
+                      x25519_check_folds() ==
+                  0);
+#elif RISCV64
+        check("x25519's riscv64 field operations agree with the C limb for limb",
+              x25519_check_bodies_rv() == 0);
+#endif
+        check("x25519 agrees with the C it replaced, every body", x25519_check_whole() == 0);
+#endif
+}
+
 static fn crypto_floor_aes_ctr(void)
 {
         static p8 text[16 * AES_CHECK_BLOCKS + 1];
@@ -57061,12 +58681,203 @@ static positive field_check_wrong(const crypto_field address_to f,
         return wrong;
 }
 
+/*
+        What a field body leaves on the stack once it has returned.
+
+        A square or product of a secret is as secret as the operand, so a
+        body that spills part of one must wipe it before it pops its frame.
+        field_residue_call runs the body one frame down; field_residue_scan,
+        called next from the same frame, reads the kilobyte of stack that
+        now lies under it -- where the body's frame was -- and counts the
+        words that are a limb of the double-width square the body computed.
+        x86_64's p384_square spilled t0 and the high half t6..t11 there and
+        left them; the other bodies keep everything in registers.
+*/
+static __attribute__((noinline, noclone)) fn field_residue_call(
+    fn (*body)(p64 address_to, const p64 address_to), p64 address_to d,
+    const p64 address_to a)
+{
+        body(d, a);
+}
+
+static __attribute__((noinline, noclone)) positive field_residue_scan(
+    const p64 address_to limbs, positive count)
+{
+        volatile p64 window[128];
+        positive found = 0;
+
+        for (positive i = 0; i < array_count(window); i++)
+                for (positive j = 0; j < count; j++)
+                        found += window[i] == limbs[j];
+        return found;
+}
+
+static positive field_residue(fn (*body)(p64 address_to, const p64 address_to),
+                              positive n)
+{
+        p64 a[CRYPTO_FE_MAX], d[CRYPTO_FE_MAX], wide[2 * CRYPTO_FE_MAX];
+
+        for (positive i = 0; i < n; i++)
+                a[i] = 0x9e3779b97f4a7c15ull * (i + 3) ^ 0x0123456789abcdefull;
+        a[n - 1] >>= 1;
+        memory_fill(wide, 0, sizeof wide);
+        for (positive i = 0; i < n; i++)
+        {
+                p64 carry = 0;
+
+                for (positive j = 0; j < n; j++)
+                {
+                        crypto_wide t = (crypto_wide)a[i] * a[j] + wide[i + j] + carry;
+
+                        wide[i + j] = (p64)t;
+                        carry = (p64)(t >> 64);
+                }
+                wide[i + n] = carry;
+        }
+        field_residue_call(body, d, a);
+        return field_residue_scan(wide, 2 * n);
+}
+
+/*
+        The same for the hash cores HMAC, HKDF and PBKDF2 run keys through.
+        A block of key ^ ipad is as secret as the key, and so is its
+        schedule: the last sixteen words of one determine every word before
+        them. Each core runs one block, floor and extension body both where
+        the machine has an extension, and the stack under the call is
+        searched for any 32-bit word of the message schedule (sha1, sha256,
+        sha512 by halves) or of the message (blake2b).
+*/
+static __attribute__((noinline, noclone)) fn hash_residue_call(
+    positive which, p64 address_to state, const p8 address_to block)
+{
+        if (which == 0)
+                sha1_blocks((p32 address_to)state, block, 1);
+        else if (which == 1)
+                sha256_blocks((p32 address_to)state, block, 1);
+        else if (which == 2)
+                sha512_blocks(state, block, 1);
+        else
+                blake2b_blocks(state, block, 1, 128);
+}
+
+static __attribute__((noinline, noclone)) positive hash_residue_scan(
+    const p32 address_to words, positive count)
+{
+        volatile p32 window[512];
+        positive found = 0;
+
+        for (positive i = 0; i < array_count(window); i++)
+                for (positive j = 0; j < count; j++)
+                        found += window[i] == words[j];
+        return found;
+}
+
+static p32 hash_residue_rotate(p32 x, positive n)
+{
+        return x >> n | x << (32 - n);
+}
+
+static p64 hash_residue_rotate64(p64 x, positive n)
+{
+        return x >> n | x << (64 - n);
+}
+
+static positive hash_residue(positive which, p8 address_to block)
+{
+        p64 state[11];
+        p64 wide[80];
+        p32 words[160];
+        positive count = 0;
+
+        memory_fill(state, 0, sizeof state);
+        if (which <= 1)
+        {
+                p32 w[80];
+                positive rounds = which ? 64 : 80;
+
+                for (positive t = 0; t < 16; t++)
+                        w[t] = (p32)block[4 * t] << 24 | (p32)block[4 * t + 1] << 16 |
+                               (p32)block[4 * t + 2] << 8 | block[4 * t + 3];
+                for (positive t = 16; t < rounds; t++)
+                        w[t] = which ? (hash_residue_rotate(w[t - 2], 17) ^
+                                        hash_residue_rotate(w[t - 2], 19) ^ w[t - 2] >> 10) +
+                                           w[t - 7] +
+                                           (hash_residue_rotate(w[t - 15], 7) ^
+                                            hash_residue_rotate(w[t - 15], 18) ^ w[t - 15] >> 3) +
+                                           w[t - 16]
+                                     : hash_residue_rotate(w[t - 3] ^ w[t - 8] ^ w[t - 14] ^
+                                                               w[t - 16], 31);
+                for (positive t = 0; t < rounds; t++)
+                        words[count++] = w[t];
+        }
+        else
+        {
+                positive rounds = which == 2 ? 80 : 16;
+
+                for (positive t = 0; t < 16; t++)
+                {
+                        p64 v = 0;
+
+                        for (positive k = 0; k < 8; k++)
+                                v = which == 2 ? v << 8 | block[8 * t + k]
+                                               : v | (p64)block[8 * t + k] << (8 * k);
+                        wide[t] = v;
+                }
+                for (positive t = 16; t < rounds; t++)
+                        wide[t] = (hash_residue_rotate64(wide[t - 2], 19) ^
+                                   hash_residue_rotate64(wide[t - 2], 61) ^ wide[t - 2] >> 6) +
+                                  wide[t - 7] +
+                                  (hash_residue_rotate64(wide[t - 15], 1) ^
+                                   hash_residue_rotate64(wide[t - 15], 8) ^ wide[t - 15] >> 7) +
+                                  wide[t - 16];
+                for (positive t = 0; t < rounds; t++)
+                {
+                        words[count++] = (p32)wide[t];
+                        words[count++] = (p32)(wide[t] >> 32);
+                }
+        }
+        hash_residue_call(which, state, block);
+        return hash_residue_scan(words, count);
+}
+
+static fn crypto_floor_hash_residue(void)
+{
+        p8 block[128];
+        p32 scratch[8] = {0};
+        positive found = 0;
+
+        for (positive i = 0; i < sizeof block; i++)
+                block[i] = (p8)(i * 167 + 29 ^ (i >> 3) * 91);
+        //      One dispatching call writes the bytes this machine has; the
+        //      floor pass then takes the extensions away.
+        sha256_blocks(scratch, block, 1);
+        p8 sha = cpu_has_sha;
+        p8 sha512 = cpu_has_sha512;
+
+        for (positive pass = 0; pass < 2; pass++)
+        {
+                cpu_has_sha = pass ? sha : 0;
+                cpu_has_sha512 = pass ? sha512 : 0;
+                for (positive which = 0; which < 4; which++)
+                        found += hash_residue(which, block);
+        }
+        cpu_has_sha = sha;
+        cpu_has_sha512 = sha512;
+        check("sha1, sha256, sha512 and blake2b cores leave no schedule word "
+              "on the stack",
+              found == 0);
+}
+
 static fn crypto_floor_field(void)
 {
+        crypto_floor_hash_residue();
         check("p256_ field routines agree with the C Montgomery arithmetic",
               field_check_wrong(address_of crypto_p256_field, 3000) == 0);
         check("p384_ field routines agree with the C Montgomery arithmetic",
               field_check_wrong(address_of crypto_p384_field, 3000) == 0);
+        check("p256_square and p384_square leave no limb of the square on the stack",
+              field_residue(p256_square, 4) == 0 &&
+                  field_residue(p384_square, 6) == 0);
 }
 
 /*
@@ -57447,6 +59258,15 @@ static fn crypto_floor_aes(void)
                               modulus, sizeof modulus - 1, 65537, signature,
                               sizeof modulus - 1, mod, base,
                               address_of limbs));
+                check("RSA takes public exponents up to BoringSSL's 33 bits",
+                      crypto_rsa_prepare(
+                          modulus, sizeof modulus, ((p64)1 << 33) - 1,
+                          signature, sizeof signature, mod, base,
+                          address_of limbs) &&
+                          !crypto_rsa_prepare(
+                              modulus, sizeof modulus, ((p64)1 << 33) + 1,
+                              signature, sizeof signature, mod, base,
+                              address_of limbs));
                 modulus[0] = 0x7f;
                 check("RSA enforces a full 2048-bit minimum modulus",
                       !crypto_rsa_prepare(
@@ -57770,6 +59590,352 @@ static fn crypto_rsa_served_sizes(void)
 }
 
 /*
+        RFC 5280 4.2.1.10 name constraints, one row a name against a
+        NameConstraints value (tag 0 checks the value itself, as the parser
+        does): dNSName subtrees the way Chrome reads them, a wildcard
+        against an excluded label, IPv4 and IPv6 ranges, directoryName
+        prefixes folded like OpenSSL's canonical form, rfc822Name hosts and
+        mailboxes, and the forms this client cannot evaluate, which fail
+        closed. Generated with ncrows in the sec2-x509 pass; the DER is
+        spelled out so a row reads without a decoder.
+*/
+static fn tls_name_constraint_rules(void)
+{
+        static const struct
+        {
+                string_address label;
+                string_address constraints;
+                p8 tag;
+                string_address name;
+                bool allowed;
+        } rows[] = {
+            {"dNSName equal to a permitted base",
+             "3011a00f300d820b6578616d706c652e636f6d",
+             0x82, "6578616d706c652e636f6d", true},
+            {"dNSName under a permitted base",
+             "3011a00f300d820b6578616d706c652e636f6d",
+             0x82, "7777772e6578616d706c652e636f6d", true},
+            {"dNSName case and trailing dot fold",
+             "3011a00f300d820b6578616d706c652e636f6d",
+             0x82, "5757572e4558414d504c452e434f4d2e", true},
+            {"dNSName sharing only a suffix string",
+             "3011a00f300d820b6578616d706c652e636f6d",
+             0x82, "6261646578616d706c652e636f6d", false},
+            {"dNSName past a permitted base",
+             "3011a00f300d820b6578616d706c652e636f6d",
+             0x82, "6578616d706c652e636f6d2e6576696c", false},
+            {"wildcard under a permitted base",
+             "3011a00f300d820b6578616d706c652e636f6d",
+             0x82, "2a2e6578616d706c652e636f6d", true},
+            {"iPAddress beside dNSName-only subtrees",
+             "3011a00f300d820b6578616d706c652e636f6d",
+             0x87, "c0000201", true},
+            {"a leading-dot base leaves out its own name",
+             "3012a010300e820c2e6578616d706c652e636f6d",
+             0x82, "6578616d706c652e636f6d", false},
+            {"a leading-dot base holds names under it",
+             "3012a010300e820c2e6578616d706c652e636f6d",
+             0x82, "612e6578616d706c652e636f6d", true},
+            {"dNSName under an excluded base",
+             "300fa10d300b82096576696c2e74657374",
+             0x82, "612e6576696c2e74657374", false},
+            {"dNSName equal to an excluded base",
+             "300fa10d300b82096576696c2e74657374",
+             0x82, "4556494c2e74657374", false},
+            {"dNSName beside an excluded base",
+             "300fa10d300b82096576696c2e74657374",
+             0x82, "6e6f746576696c2e74657374", true},
+            {"a wildcard whose star can be the excluded label",
+             "300fa10d300b82096576696c2e74657374",
+             0x82, "2a2e74657374", false},
+            {"a wildcard under an excluded base",
+             "300fa10d300b82096576696c2e74657374",
+             0x82, "2a2e6576696c2e74657374", false},
+            {"a wildcard two labels above an excluded base",
+             "300fa10d300b82096576696c2e74657374",
+             0x82, "2a2e782e6576696c2e74657374", false},
+            {"a wildcard beside an excluded base",
+             "300fa10d300b82096576696c2e74657374",
+             0x82, "2a2e676f6f642e74657374", true},
+            {"empty permitted dNSName base holds all",
+             "3006a00430028200",
+             0x82, "616e797468696e672e74657374", true},
+            {"IPv4 inside a permitted range",
+             "300ea00c300a87080a000000ff000000",
+             0x87, "0a010203", true},
+            {"IPv4 outside a permitted range",
+             "300ea00c300a87080a000000ff000000",
+             0x87, "0b000001", false},
+            {"IPv6 against an IPv4-only permitted range",
+             "300ea00c300a87080a000000ff000000",
+             0x87, "00000000000000000000000000000001", false},
+            {"dNSName beside iPAddress-only subtrees",
+             "300ea00c300a87080a000000ff000000",
+             0x82, "6578616d706c652e636f6d", true},
+            {"IPv4 inside an excluded range",
+             "300ea10c300a8708c0000200ffffff00",
+             0x87, "c0000207", false},
+            {"IPv4 outside an excluded range",
+             "300ea10c300a8708c0000200ffffff00",
+             0x87, "c0000301", true},
+            {"IPv6 inside a permitted range",
+             "3026a0243022872020010db8000000000000000000000000ffffffff000000000000000000000000",
+             0x87, "20010db8000000000000000000000001", true},
+            {"IPv6 outside a permitted range",
+             "3026a0243022872020010db8000000000000000000000000ffffffff000000000000000000000000",
+             0x87, "20010db9000000000000000000000001", false},
+            {"subject under a permitted directoryName",
+             "3027a0253023a421301f310b30090603550406130255533110300e060355040a13074578616d706c65",
+             0xa4, "302b310b30090603550406130255533110300e060355040a13074578616d706c65310a300806035504030c0178", true},
+            {"directoryName compares case-folded across string types",
+             "3027a0253023a421301f310b30090603550406130255533110300e060355040a13074578616d706c65",
+             0xa4, "301f310b30090603550406130255533110300e060355040a0c074558414d504c45", true},
+            {"directoryName folds outer and inner white space",
+             "3028a0263024a4223020310b30090603550406130255533111300f060355040a1308457820616d706c65",
+             0xa4, "3025310b300906035504061302555331163014060355040a0c0d20206578200920616d706c6520", true},
+            {"subject beside a permitted directoryName",
+             "3027a0253023a421301f310b30090603550406130255533110300e060355040a13074578616d706c65",
+             0xa4, "301d310b3009060355040613025553310e300c060355040a13054f74686572", false},
+            {"subject shorter than a permitted directoryName",
+             "3027a0253023a421301f310b30090603550406130255533110300e060355040a13074578616d706c65",
+             0xa4, "300d310b3009060355040613025553", false},
+            {"subject with another first attribute type",
+             "3027a0253023a421301f310b30090603550406130255533110300e060355040a13074578616d706c65",
+             0xa4, "301f310b3009060355040a130255533110300e060355040a13074578616d706c65", false},
+            {"subject under an excluded directoryName",
+             "3024a1223020a41e301c310b3009060355040613025553310d300b060355040a0c044576696c",
+             0xa4, "3028310b3009060355040613025553310d300b060355040a13046576696c310a300806035504030c0179", false},
+            {"subject beside an excluded directoryName",
+             "3024a1223020a41e301c310b3009060355040613025553310d300b060355040a0c044576696c",
+             0xa4, "301c310b3009060355040613025553310d300b060355040a1304476f6f64", true},
+            {"a BMPString the fold cannot read is unsure, so excluded",
+             "3024a1223020a41e301c310b3009060355040613025553310d300b060355040a0c044576696c",
+             0xa4, "3020310b30090603550406130255533111300f060355040a1e08004500760069006c", false},
+            {"a BMPString is unsure, so not permitted",
+             "3027a0253023a421301f310b30090603550406130255533110300e060355040a13074578616d706c65",
+             0xa4, "3026310b300906035504061302555331173015060355040a1e0e004500780061006d0070006c0065", false},
+            {"a multi-valued RDN that differs is unsure",
+             "3024a1223020a41e301c310b3009060355040613025553310d300b060355040a0c044576696c",
+             0xa4, "3026310b30090603550406130255533117300b060355040a13044576696c3008060355040313017a", false},
+            {"mailbox on a permitted host",
+             "3011a00f300d810b6578616d706c652e636f6d",
+             0x81, "61404578616d706c652e434f4d", true},
+            {"mailbox on a host under a permitted host",
+             "3011a00f300d810b6578616d706c652e636f6d",
+             0x81, "61407375622e6578616d706c652e636f6d", false},
+            {"rfc822Name without a mailbox is unsure",
+             "3011a00f300d810b6578616d706c652e636f6d",
+             0x81, "6578616d706c652e636f6d", false},
+            {"mailbox under a leading-dot host",
+             "3012a010300e810c2e6578616d706c652e636f6d",
+             0x81, "61407375622e6578616d706c652e636f6d", true},
+            {"mailbox on the leading-dot host itself",
+             "3012a010300e810c2e6578616d706c652e636f6d",
+             0x81, "61406578616d706c652e636f6d", false},
+            {"a whole-mailbox base, host case folded",
+             "3013a011300f810d61406578616d706c652e636f6d",
+             0x81, "61404558414d504c452e636f6d", true},
+            {"a whole-mailbox base, local part exact",
+             "3013a011300f810d61406578616d706c652e636f6d",
+             0x81, "41406578616d706c652e636f6d", false},
+            {"an emailAddress no subtree can vouch for",
+             "3013a011300f810d61406578616d706c652e636f6d",
+             0x81, null, false},
+            {"an emailAddress under excluded rfc822 subtrees",
+             "300fa10d300b81096576696c2e74657374",
+             0x81, null, false},
+            {"a URI under URI subtrees fails closed",
+             "3012a010300e860c2e6578616d706c652e636f6d",
+             0x86, "68747470733a2f2f612e6578616d706c652e636f6d2f", false},
+            {"a dNSName beside URI subtrees",
+             "3012a010300e860c2e6578616d706c652e636f6d",
+             0x82, "612e6578616d706c652e636f6d", true},
+            {"an otherName under otherName subtrees fails closed",
+             "3010a10e300ca00a060355040aa0030c0178",
+             0xa0, "060355040aa0030c0179", false},
+            {"permitted and excluded subtrees parse",
+             "3076a04e300d820b6578616d706c652e636f6d300a87080a000000ff0000003023a421301f310b30090603550406130255533110300e060355040a13074578616d706c65300781056140622e633003860178a1243022872020010db8000000000000000000000000ffffffff000000000000000000000000",
+             0, null, true},
+            {"an empty NameConstraints is refused",
+             "3000",
+             0, null, false},
+            {"an empty permitted list is refused",
+             "3002a000",
+             0, null, false},
+            {"excluded before permitted is refused",
+             "300ea1053003820161a0053003820162",
+             0, null, false},
+            {"two permitted lists are refused",
+             "300ea0053003820161a0053003820162",
+             0, null, false},
+            {"a subtree minimum is refused",
+             "300aa0083006820161800100",
+             0, null, false},
+            {"a subtree maximum is refused",
+             "300aa0083006820161810101",
+             0, null, false},
+            {"a non-contiguous IPv4 mask is refused",
+             "300ea00c300a87080a000000ff00ff00",
+             0, null, false},
+            {"an IPv6 mask with a hole is refused",
+             "3026a0243022872000000000000000000000000000000000ffffffff7f0000000000000000000000",
+             0, null, false},
+            {"a five-byte iPAddress base is refused",
+             "300ba009300787050a000000ff",
+             0, null, false},
+            {"a dNSName base with a control byte is refused",
+             "3009a00730058203610162",
+             0, null, false},
+            {"a directoryName base that is not a Name is refused",
+             "3008a0063004a4023100",
+             0, null, false},
+            {"trailing bytes after the subtrees are refused",
+             "3007a005300382016100",
+             0, null, false},
+            {"an unknown list tag is refused",
+             "3007a2053003820161",
+             0, null, false},
+        };
+
+        static p8 constraints[256];
+        static p8 name[256];
+
+        for (positive i = 0; i < array_count(rows); i++)
+        {
+                positive length;
+                positive name_length = 0;
+                bool allowed;
+
+                memory_fill(constraints, 0, sizeof constraints);
+                memory_fill(name, 0, sizeof name);
+                length = crypto_hex_into(constraints, sizeof constraints,
+                                         rows[i].constraints);
+                if (rows[i].name)
+                        name_length = crypto_hex_into(name, sizeof name,
+                                                      rows[i].name);
+                allowed = length &&
+                          tls_name_allowed(constraints, length, rows[i].tag,
+                                           rows[i].name ? name : null,
+                                           name_length);
+                checks++;
+                if (allowed != rows[i].allowed)
+                {
+                        failures++;
+                        string_format(log, "  FAIL name constraints: %s\n",
+                                      rows[i].label);
+                }
+        }
+
+        {
+                /* A subject carrying an emailAddress under rfc822Name
+                   subtrees, then the same certificate's SAN names. */
+                static p8 permitted[] = {
+                    0x30, 0x0c, 0xa0, 0x0a, 0x30, 0x08, 0x81, 0x06,
+                    'b', '.', 't', 'e', 's', 't'};
+                static p8 subject_mail[] = {
+                    0x30, 0x19, 0x31, 0x17, 0x30, 0x15, 0x06, 0x09, 0x2a,
+                    0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x01, 0x16,
+                    0x08, 'a', '@', 'b', '.', 't', 'e', 's', 't'};
+                static p8 subject_plain[] = {
+                    0x30, 0x0e, 0x31, 0x0c, 0x30, 0x0a, 0x06, 0x03, 0x55,
+                    0x04, 0x03, 0x0c, 0x03, 'a', 'b', 'c'};
+                static p8 san_inside[] = {
+                    0x30, 0x0a, 0x81, 0x08, 'a', '@', 'b', '.', 't', 'e',
+                    's', 't'};
+                static p8 san_outside[] = {
+                    0x30, 0x0a, 0x81, 0x08, 'a', '@', 'c', '.', 't', 'e',
+                    's', 't'};
+                tls_cert cert;
+
+                memory_fill(address_of cert, 0, sizeof cert);
+                cert.subject = subject_mail;
+                cert.subject_length = sizeof subject_mail;
+                check("an emailAddress in the subject fails rfc822Name constraints closed",
+                      !tls_cert_names_permitted(permitted, sizeof permitted,
+                                                address_of cert));
+                cert.subject = subject_plain;
+                cert.subject_length = sizeof subject_plain;
+                cert.san = san_inside;
+                cert.san_length = sizeof san_inside;
+                check("an rfc822Name SAN inside the permitted host passes",
+                      tls_cert_names_permitted(permitted, sizeof permitted,
+                                               address_of cert));
+                cert.san = san_outside;
+                check("an rfc822Name SAN on another host is refused",
+                      !tls_cert_names_permitted(permitted, sizeof permitted,
+                                                address_of cert));
+        }
+}
+
+/*
+        The caIssuers fetch's two gates that need no network: which
+        addresses a URL chosen by the peer may reach, and which location
+        tls_parse_ca_issuers takes from an AuthorityInfoAccess value.
+        CHECK_net builds without TLS_BENCH_ANCHOR, so loopback is refused
+        here as it is in wget.
+*/
+static fn tls_ca_issuers_rules(void)
+{
+        static const struct
+        {
+                p8 address[4];
+                bool reachable;
+        } addresses[] = {
+            {{8, 8, 8, 8}, true},          {{1, 1, 1, 1}, true},
+            {{0, 0, 0, 0}, false},         {{0, 1, 2, 3}, false},
+            {{10, 0, 0, 1}, false},        {{127, 0, 0, 1}, false},
+            {{100, 63, 255, 255}, true},   {{100, 64, 0, 1}, false},
+            {{100, 127, 255, 255}, false}, {{100, 128, 0, 0}, true},
+            {{169, 254, 169, 254}, false}, {{169, 253, 0, 1}, true},
+            {{172, 15, 0, 1}, true},       {{172, 16, 0, 1}, false},
+            {{172, 31, 255, 255}, false},  {{172, 32, 0, 1}, true},
+            {{192, 0, 0, 1}, false},       {{192, 0, 1, 1}, true},
+            {{192, 168, 1, 1}, false},     {{192, 169, 0, 1}, true},
+            {{198, 17, 255, 255}, true},   {{198, 18, 0, 1}, false},
+            {{198, 19, 255, 255}, false},  {{198, 20, 0, 0}, true},
+            {{223, 255, 255, 255}, true},  {{224, 0, 0, 1}, false},
+            {{239, 255, 255, 250}, false}, {{240, 0, 0, 1}, false},
+            {{255, 255, 255, 255}, false},
+        };
+        /* ocsp first, then an https caIssuers, then the http one taken. */
+        static p8 access[] = {
+            0x30, 0x43,
+            0x30, 0x15, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30,
+            0x01, 0x86, 0x09, 'h', 't', 't', 'p', ':', '/', '/', 'o', '/',
+            0x30, 0x14, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30,
+            0x02, 0x86, 0x08, 'h', 't', 't', 'p', 's', ':', '/', '/',
+            0x30, 0x14, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30,
+            0x02, 0x86, 0x08, 'H', 'T', 'T', 'P', ':', '/', '/', 'c'};
+        positive wrong = 0;
+        tls_cert cert;
+
+        for (positive i = 0; i < array_count(addresses); i++)
+                wrong += http_address_public(network_load_32(
+                             (p8 address_to)addresses[i].address)) !=
+                         addresses[i].reachable;
+        check("caIssuers reaches public addresses only: not this network, "
+              "private, loopback, shared, link-local, IETF, benchmarking, "
+              "multicast or reserved",
+              wrong == 0);
+
+        memory_fill(address_of cert, 0, sizeof cert);
+        tls_parse_ca_issuers(access, sizeof access, address_of cert);
+        check("the first http: caIssuers location is taken, past OCSP and https",
+              cert.ca_issuers == access + sizeof access - 8 &&
+                  cert.ca_issuers_length == 8);
+        memory_fill(address_of cert, 0, sizeof cert);
+        access[sizeof access - 1] = 0x01;
+        tls_parse_ca_issuers(access, sizeof access, address_of cert);
+        check("a caIssuers location with a control byte is not taken",
+              !cert.ca_issuers);
+        access[sizeof access - 1] = 'c';
+        memory_fill(address_of cert, 0, sizeof cert);
+        tls_parse_ca_issuers(access, sizeof access - 1, address_of cert);
+        check("a truncated AuthorityInfoAccess names nothing",
+              !cert.ca_issuers);
+}
+
+/*
         The anchor table against chains that failed before it existed.
 
         www.kernel.org serves its leaf and GlobalSign Atlas R3 DV TLS CA 2025
@@ -58085,6 +60251,435 @@ static fn tls_trust_anchor_chains(void)
               bad_anchors == 0 && array_count(tls_anchors) == 120);
 }
 
+/*
+        TLS 1.2, piece by piece. ServerHello rows: a 1.2 answer needs one of
+        the two suites, the extended master secret and an empty
+        renegotiation_info, may carry point formats holding uncompressed
+        and a server_name ack when a name was sent, and never the
+        downgrade sentinel; either version refuses the other's extensions
+        and suites. Then the PRF's published vector (the IETF TLS list's
+        P_SHA256 "test label"), the record layer both ways over a socket
+        pair, the Certificate relayout under a real P-256 leaf, a
+        ServerKeyExchange that leaf signed (SHA-256, and SHA-384, which
+        only 1.2 lets a P-256 key use), and the 1.2 flight's shape.
+*/
+static tls_conn tls12_near;
+static tls_conn tls12_far;
+
+static fn tls12_pieces(void)
+{
+        static const struct
+        {
+                string_address name;
+                bool named;
+                p8 session;
+                p16 suite;
+                p8 sentinel;
+                p8 length;
+                p8 bytes[24];
+                bool accept;
+        } rows[] = {
+            {"EMS and renegotiation_info", false, 0, 0xc02f, 0, 9,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, true},
+            {"ECDSA suite, point formats", false, 0, 0xc02b, 0, 15,
+             {0xff, 1, 0, 1, 0, 0, 0x0b, 0, 2, 1, 0, 0, 0x17, 0, 0}, true},
+            {"a server_name ack after SNI", true, 0, 0xc02f, 0, 13,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0, 0, 0, 0, 0}, true},
+            {"a 32-byte session id", false, 32, 0xc02f, 0, 9,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, true},
+            {"DOWNGRD with another last byte", false, 0, 0xc02f, 2, 9,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, true},
+            {"a server_name ack without SNI", false, 0, 0xc02f, 0, 13,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0, 0, 0, 0, 0}, false},
+            {"no extended master secret", false, 0, 0xc02f, 0, 5,
+             {0xff, 1, 0, 1, 0}, false},
+            {"no renegotiation_info", false, 0, 0xc02f, 0, 4,
+             {0, 0x17, 0, 0}, false},
+            {"no extensions", false, 0, 0xc02f, 0, 0, {0}, false},
+            {"renegotiation_info naming a connection", false, 0, 0xc02f, 0, 10,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 2, 1, 0}, false},
+            {"an extended master secret with a body", false, 0, 0xc02f, 0, 10,
+             {0, 0x17, 0, 1, 0, 0xff, 1, 0, 1, 0}, false},
+            {"point formats without uncompressed", false, 0, 0xc02f, 0, 15,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0, 0, 0x0b, 0, 2, 1, 1}, false},
+            {"two extended master secrets", false, 0, 0xc02f, 0, 13,
+             {0, 0x17, 0, 0, 0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, false},
+            {"a session ticket never offered", false, 0, 0xc02f, 0, 13,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0, 0, 0x23, 0, 0}, false},
+            {"a key share in TLS 1.2", false, 0, 0xc02f, 0, 17,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0, 0, 0x33, 0, 4, 0, 0x1d, 0, 0},
+             false},
+            {"a 33-byte session id", false, 33, 0xc02f, 0, 9,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, false},
+            {"the TLS 1.2 downgrade sentinel", false, 0, 0xc02f, 1, 9,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, false},
+            {"the TLS 1.1 downgrade sentinel", false, 0, 0xc02f, 3, 9,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, false},
+            {"a suite not offered", false, 0, 0xc030, 0, 9,
+             {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, false},
+            {"the TLS 1.3 suite without supported_versions", false, 0, 0x1301,
+             0, 9, {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, false},
+            {"a TLS 1.2 suite with supported_versions", false, 0, 0xc02f, 0, 15,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, false},
+            {"a TLS 1.3 hello with the extended master secret", false, 0, 0x1301,
+             0, 10, {0, 0x2b, 0, 2, 3, 4, 0, 0x17, 0, 0}, false},
+        };
+        static const char leaf_hex[] =
+            "3082016d30820113a003020102021455c272b1a79dee4b99d62c9376aefccc93"
+            "8e06b0300a06082a8648ce3d040302300c310a300806035504030c0174301e17"
+            "0d3236303932383139333632315a170d3336303932353139333632315a300c31"
+            "0a300806035504030c01743059301306072a8648ce3d020106082a8648ce3d03"
+            "0107034200048e06f0f7254a2e463f5e610d5a092058892a66a8fa8c88566142"
+            "732dab00bcd59d3bc5d840989aad6d4b46b326348c60186404341fa3b7968377"
+            "6d1a619256f8a3533051301d0603551d0e04160414ac137b72a7e6f580deb9f2"
+            "90665a39f4c9e57d67301f0603551d23041830168014ac137b72a7e6f580deb9"
+            "f290665a39f4c9e57d67300f0603551d130101ff040530030101ff300a06082a"
+            "8648ce3d0403020348003045022100966cb2113ba91368e1a98e15226125bb95"
+            "7aa536dc9b5c05a14ec1ea58b82dd202207d37421503a6147eb36d49a294c126"
+            "7c84712d513fd627dd39e49b9b7839ea82";
+        static const char exchange_hex[] =
+            "03001d208f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e"
+            "2138285f040300473045022037c0d819210f38a335325473e6244dc55af82d0b"
+            "5be7fe75e0be23fe2074a4f5022100e962d171c0a43631dfd14f1f1de8ca230c"
+            "1f659730c4b8b454f98382ac368cc8";
+        static const char exchange384_hex[] =
+            "03001d208f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e"
+            "2138285f05030046304402207df9f44ffb3548a58f822e8696b8c921f72ebfda"
+            "e656d71ede24ec576bb1a22c0220162c6a9afd763182574bf2612248d546ee5a"
+            "2157cab2bf19fb83e24eaf7dc098";
+        static const char prf_hex[] =
+            "e3f229ba727be17b8d122620557cd453c2aab21d07c3d495329b52d4e61edb5a"
+            "6b301791e90d35c9c9a46b4e14baf9af0fa022f7077def17abfd3797c0564bab"
+            "4fbc91666e9def9b97fce34f796789baa48082d122ee42c5a72e5a5110fff701"
+            "87347b66";
+        static p8 scratch[5 + TLS_PLAINTEXT_MAX];
+        tls_conn address_to tls = address_of tls_hello_conn;
+        bool all = true;
+
+        for (positive row = 0; row < array_count(rows); row++)
+        {
+                p8 hello[44 + 33 + 24] = {TLS_HS_SERVER_HELLO, 0, 0, 0, 3, 3};
+                p8 peer[97];
+                positive share = 0;
+                positive group = 0;
+                p8 address_to cookie = null;
+                positive cookie_length = 0;
+                positive at = 38;
+                bool accepted;
+
+                memory_fill(tls, 0, TLS_CONN_HEAD);
+                tls->group = 0x1d;
+                tls->named = rows[row].named;
+                memory_fill(hello + 6, 0x42, 32);
+                if (rows[row].sentinel)
+                {
+                        memory_copy(hello + 6 + 24, "DOWNGRD", 7);
+                        hello[6 + 31] = rows[row].sentinel == 3 ? 0
+                                                                : rows[row].sentinel - 1 ? 2 : 1;
+                }
+                hello[at++] = rows[row].session;
+                at += rows[row].session;
+                network_store_16(hello + at, rows[row].suite);
+                at += 3;
+                if (rows[row].length)
+                {
+                        network_store_16(hello + at, rows[row].length);
+                        memory_copy(hello + at + 2, rows[row].bytes,
+                                    rows[row].length);
+                        at += 2 + rows[row].length;
+                }
+                hello[3] = (p8)(at - 4);
+                accepted = tls_server_hello_keys(hello, at, tls, peer, sizeof peer,
+                                                 &share, &group, &cookie,
+                                                 &cookie_length) == TLS_OK &&
+                           tls->tls12 && tls->suite == rows[row].suite &&
+                           !memory_compare(tls->server_random, hello + 6, 32);
+                if (accepted != rows[row].accept)
+                {
+                        all = false;
+                        string_format(log, "  TLS 1.2 hello row: %s\n",
+                                      rows[row].name);
+                }
+        }
+        check("each TLS 1.2 ServerHello row answers its verdict", all);
+
+        {
+                p8 secret[16];
+                p8 seed[16];
+                p8 want[100];
+                p8 got[100];
+
+                crypto_hex_into(secret, sizeof secret,
+                                "9bbe436ba940f017b17652849a71db35");
+                crypto_hex_into(seed, sizeof seed,
+                                "a0ba9f936cda311827a6f796ffd5198c");
+                crypto_hex_into(want, sizeof want, prf_hex);
+                tls12_prf(secret, sizeof secret, "test label", seed, 8,
+                          seed + 8, 8, got, sizeof got);
+                check("the TLS 1.2 PRF gives the published P_SHA256 vector",
+                      !memory_compare(got, want, sizeof want));
+        }
+
+        /* Records both ways under zero keys: the explicit nonce is the
+           sequence, the header names the type, a close_notify alert ends
+           the stream, and a changed explicit nonce does not open. */
+        {
+                tls_conn address_to near = address_of tls12_near;
+                tls_conn address_to far = address_of tls12_far;
+                b32 pair[2];
+                p8 record[5 + 8 + 2 + 16];
+                p8 got_bytes[8];
+                positive got = 0;
+                p8 type = 0;
+                p8 address_to inner = null;
+                positive length = 0;
+                bool opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                            SOCK_STREAM, 0,
+                                            (positive)pair) == 0;
+
+                check("TLS 1.2 record socket pair opens", opened);
+                if (opened)
+                {
+                        memory_fill(near, 0, TLS_CONN_HEAD);
+                        memory_fill(far, 0, TLS_CONN_HEAD);
+                        near->handle = pair[0];
+                        far->handle = pair[1];
+                        near->tls12 = far->tls12 = true;
+                        near->encrypted = far->encrypted = true;
+                        near->application = far->application = true;
+                        /* Prepared keys: an unprepared all-zero GHASH
+                           table would authenticate no additional data. */
+                        memory_fill(got_bytes, 7, sizeof got_bytes);
+                        memory_copy(record, got_bytes, 8);
+                        memory_copy(record + 8, got_bytes, 8);
+                        crypto_aesgcm_prepare(address_of near->c_gcm, record);
+                        crypto_aesgcm_prepare(address_of far->s_gcm, record);
+                        near->seq_write = far->seq_read = 5;
+                        check("a TLS 1.2 record is sealed with its explicit nonce",
+                              tls_seal(near, TLS_CT_APP, (p8 address_to)"hi", 2,
+                                       record) == sizeof record &&
+                                  record[0] == TLS_CT_APP &&
+                                  network_load_16(record + 3) == 8 + 2 + 16 &&
+                                  crypto_be64(record + 5) == 5);
+                        check("a TLS 1.2 record does not open at another sequence",
+                              tls_send_enc(near, TLS_CT_APP,
+                                           (p8 address_to)"ok", 2) == TLS_OK &&
+                                  tls_read(far, got_bytes, 1,
+                                           address_of got) == TLS_FAIL);
+                        far->seq_read = 6;
+                        memory_fill(far->receive, 0, 64);
+                        far->receive_start = far->receive_end = 0;
+                        far->plain_used = 0;
+                        near->seq_write = 6;
+                        check("a TLS 1.2 record opens at its sequence",
+                              tls_send_enc(near, TLS_CT_APP,
+                                           (p8 address_to)"ok", 2) == TLS_OK &&
+                                  tls_read(far, got_bytes, sizeof got_bytes,
+                                           address_of got) == TLS_OK &&
+                                  got == 2 && !memory_compare(got_bytes, "ok", 2));
+                        check("a TLS 1.2 close_notify is a clean close",
+                              tls_send_enc(near, TLS_CT_ALERT,
+                                           (p8 address_to)"\1\0", 2) == TLS_OK &&
+                                  tls_read(far, got_bytes, sizeof got_bytes,
+                                           address_of got) == TLS_OK &&
+                                  !got);
+                        near->seq_write = 0;
+                        far->seq_read = 0;
+                        far->receive_start = far->receive_end = 0;
+                        far->handle = -1;
+                        tls_seal(near, TLS_CT_APP, (p8 address_to)"hi", 2,
+                                 far->receive);
+                        far->receive[12] ^= 1;
+                        far->receive_end = far->receive_high = sizeof record;
+                        check("a changed TLS 1.2 explicit nonce does not open",
+                              tls_next_record(far, address_of type,
+                                              address_of inner,
+                                              address_of length, null) ==
+                                  TLS_FAIL);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                        tls_forget(near);
+                        tls_forget(far);
+                }
+        }
+
+        /* The relayout: one real P-256 leaf in a TLS 1.2 list, checked
+           under the ECDSA suite and refused under the RSA one; broken
+           framing is refused before any certificate is read. */
+        {
+                p8 body[3 + 3 + 369];
+                p8 exchange[111];
+                p8 exchange384[110];
+
+                crypto_hex_into(body + 6, 369, leaf_hex);
+                body[0] = 0;
+                network_store_16(body + 1, 372);
+                body[3] = 0;
+                network_store_16(body + 4, 369);
+                memory_fill(tls, 0, TLS_CONN_HEAD);
+                tls->tls12 = true;
+                tls->host = "t";
+                tls->suite = 0xc02f;
+                check("a TLS 1.2 ECDSA leaf is refused under the RSA suite",
+                      !tls12_certificate(tls, body, sizeof body, scratch));
+                tls->suite = 0xc02b;
+                check("a TLS 1.2 Certificate is relaid and its leaf kept",
+                      tls12_certificate(tls, body, sizeof body, scratch) &&
+                          tls->leaf_curve == 1 && scratch[0] == 0 &&
+                          tls_load_24(scratch + 1) == 3 + 369 + 2);
+                body[2]++;
+                check("a TLS 1.2 certificate list longer than its message is refused",
+                      !tls12_certificate(tls, body, sizeof body, scratch));
+                body[2]--;
+                body[5]++;
+                check("a TLS 1.2 certificate longer than its list is refused",
+                      !tls12_certificate(tls, body, sizeof body, scratch));
+                body[5]--;
+
+                /* A Certificate the checker refuses marks the connection
+                   untrusted, for tls_connect's TLS_UNTRUSTED; unchecked,
+                   the same leaf is only kept. The leaf names no SAN. */
+                {
+                        static p8 message[4 + sizeof body];
+
+                        message[0] = TLS_HS_CERTIFICATE;
+                        message[1] = 0;
+                        network_store_16(message + 2, (p16)sizeof body);
+                        memory_copy(message + 4, body, sizeof body);
+                        crypto_sha256_open(address_of tls->transcript);
+                        tls->check_cert = true;
+                        check("a refused Certificate marks the connection untrusted",
+                              tls_flight_message(tls, message, sizeof message,
+                                                 scratch) == TLS_FAIL &&
+                                  tls->untrusted);
+                        tls->check_cert = false;
+                        check("an unchecked Certificate is kept, not untrusted",
+                              tls_flight_message(tls, message, sizeof message,
+                                                 scratch) == TLS_OK &&
+                                  !tls->untrusted);
+                        tls->suite = 0xc02f;
+                        tls->check_cert = true;
+                        check("a TLS 1.2 leaf the suite cannot use is untrusted too",
+                              tls_flight_message(tls, message, sizeof message,
+                                                 scratch) == TLS_FAIL &&
+                                  tls->untrusted);
+                        tls->check_cert = false;
+                        tls->suite = 0xc02b;
+                }
+
+                crypto_hex_into(exchange, sizeof exchange, exchange_hex);
+                crypto_hex_into(exchange384, sizeof exchange384,
+                                exchange384_hex);
+                memory_fill(tls->client_random, 0x11, 32);
+                memory_fill(tls->server_random, 0x22, 32);
+                {
+                        static const p8 zeros[32];
+
+                        check("a signed TLS 1.2 ServerKeyExchange draws the share",
+                              tls12_key_exchange(tls, exchange, sizeof exchange) &&
+                                  tls->group == 0x1d &&
+                                  memory_compare(tls->master, zeros, 32) &&
+                                  memory_compare(tls->share, zeros, 32) &&
+                                  !memory_compare(tls->scalar, zeros, 32));
+                }
+                {
+                        p8 signed_bytes[64 + 36];
+
+                        memory_fill(signed_bytes, 0x11, 32);
+                        memory_fill(signed_bytes + 32, 0x22, 32);
+                        memory_copy(signed_bytes + 64, exchange384, 36);
+                        check("TLS 1.2 lets a P-256 key sign with SHA-384",
+                              tls_signature_valid(tls, 0x0503, signed_bytes,
+                                                  sizeof signed_bytes,
+                                                  exchange384 + 40, 70) &&
+                                  tls12_key_exchange(tls, exchange384,
+                                                     sizeof exchange384));
+                        tls->tls12 = false;
+                        check("TLS 1.3 binds ecdsa_secp384r1_sha384 to P-384",
+                              !tls_signature_valid(tls, 0x0503, signed_bytes,
+                                                   sizeof signed_bytes,
+                                                   exchange384 + 40, 70));
+                        check("TLS 1.3 keeps RSA PKCS#1 v1.5 to certificates",
+                              !tls_signature_valid(tls, 0x0401, signed_bytes,
+                                                   sizeof signed_bytes,
+                                                   exchange384 + 40, 70));
+                        tls->tls12 = true;
+                }
+                exchange[50] ^= 1;
+                check("a TLS 1.2 ServerKeyExchange with a broken signature is refused",
+                      !tls12_key_exchange(tls, exchange, sizeof exchange));
+                exchange[50] ^= 1;
+                exchange[2] = 0x19;
+                check("a TLS 1.2 ServerKeyExchange on a group never offered is refused",
+                      !tls12_key_exchange(tls, exchange, sizeof exchange));
+                exchange[2] = 0x1d;
+                exchange[0] = 1;
+                check("a TLS 1.2 ServerKeyExchange with explicit curve parameters is refused",
+                      !tls12_key_exchange(tls, exchange, sizeof exchange));
+                exchange[0] = 3;
+                check("a TLS 1.2 ServerKeyExchange with bytes after its signature is refused",
+                      !tls12_key_exchange(tls, exchange, sizeof exchange - 1));
+                tls->suite = 0;
+                memory_fill(tls, 0, TLS_CONN_HEAD);
+        }
+
+        {
+                static const p8 request[] = {1, 64, 0, 2, 4, 3, 0, 0};
+                static const p8 request_trailing[] = {1, 64, 0, 2, 4, 3, 0, 0, 0};
+                static const p8 request_no_types[] = {0, 0, 2, 4, 3, 0, 0};
+                p8 state = TLS12_FLIGHT_CERTIFICATE;
+
+                check("a TLS 1.2 CertificateRequest is framed",
+                      tls12_certificate_request((p8 address_to)request,
+                                                sizeof request));
+                check("a TLS 1.2 CertificateRequest with trailing bytes is refused",
+                      !tls12_certificate_request((p8 address_to)request_trailing,
+                                                 sizeof request_trailing));
+                check("a TLS 1.2 CertificateRequest without types is refused",
+                      !tls12_certificate_request((p8 address_to)request_no_types,
+                                                 sizeof request_no_types));
+                check("a TLS 1.2 flight refuses EncryptedExtensions",
+                      !tls_server_flight_step(address_of state,
+                                              TLS_HS_ENCRYPTED_EXTS));
+                check("a TLS 1.2 flight refuses ServerKeyExchange before Certificate",
+                      !tls_server_flight_step(address_of state,
+                                              TLS_HS_SERVER_KEY_EXCHANGE));
+                check("a TLS 1.2 flight takes Certificate, ServerKeyExchange and a request",
+                      tls_server_flight_step(address_of state,
+                                             TLS_HS_CERTIFICATE) &&
+                          tls_server_flight_step(address_of state,
+                                                 TLS_HS_SERVER_KEY_EXCHANGE) &&
+                          tls_server_flight_step(address_of state,
+                                                 TLS_HS_CERT_REQUEST));
+                check("a TLS 1.2 flight refuses CertificateVerify from the server",
+                      !tls_server_flight_step(address_of state,
+                                              TLS_HS_CERT_VERIFY));
+                check("a TLS 1.2 flight refuses Finished before ServerHelloDone",
+                      !tls_server_flight_step(address_of state,
+                                              TLS_HS_FINISHED));
+                check("a TLS 1.2 flight pauses after ServerHelloDone",
+                      tls_server_flight_step(address_of state,
+                                             TLS_HS_SERVER_HELLO_DONE) &&
+                          state == TLS12_FLIGHT_FINISHED);
+                check("a TLS 1.2 flight ends with Finished and nothing after",
+                      tls_server_flight_step(address_of state,
+                                             TLS_HS_FINISHED) &&
+                          state == TLS12_FLIGHT_COMPLETE &&
+                          !tls_server_flight_step(address_of state,
+                                                  TLS_HS_CERTIFICATE));
+                state = TLS_SERVER_FLIGHT_EE;
+                check("a TLS 1.3 flight refuses ServerKeyExchange",
+                      !tls_server_flight_step(address_of state,
+                                              TLS_HS_SERVER_KEY_EXCHANGE));
+                state = TLS_SERVER_FLIGHT_CERTIFICATE;
+                check("a TLS 1.3 flight refuses ServerHelloDone",
+                      tls_server_flight_step(address_of state,
+                                             TLS_HS_CERTIFICATE) &&
+                          !tls_server_flight_step(address_of state,
+                                                  TLS_HS_SERVER_HELLO_DONE));
+        }
+}
+
 static fn redirect_urls(void)
 {
         p8 into[256];
@@ -58119,8 +60714,9 @@ static fn redirect_urls(void)
         /* One scheme rule for the parser and the redirect resolver: http and
            https in any case (RFC 3986 3.1), and any other scheme refused by
            both rather than read as a host or as a path on the current one.
-           split is the URL's verdict (1 plain, 2 TLS, 0 refused); location
-           is the Location's from https://h/dir/old, and 0 is refused. */
+           split is the URL's verdict (1 plain, 2 TLS, 0 refused, 3 an
+           unsupported scheme, GNU wget's words); location is the Location's
+           from https://h/dir/old, and 0 is an unsupported scheme. */
         {
                 static const struct
                 {
@@ -58131,9 +60727,9 @@ static fn redirect_urls(void)
                     {"HTTP://h/x", 1, "HTTP://h/x"},
                     {"Https://h/x", 2, "Https://h/x"},
                     {"hTtPs://h:444/x", 2, "hTtPs://h:444/x"},
-                    {"ftp://h/x", 0, 0},
-                    {"httpx://h/x", 0, 0},
-                    {"web+x.y-z://h/x", 0, 0},
+                    {"ftp://h/x", 3, 0},
+                    {"httpx://h/x", 3, 0},
+                    {"web+x.y-z://h/x", 3, 0},
                     {"javascript:alert(1)", 0, 0},
                     {"http:x", 0, 0},
                     {"h:81/x", 1, 0},
@@ -58152,14 +60748,15 @@ static fn redirect_urls(void)
                             (string_address)schemes[row].text, into, sizeof into);
 
                         check("a URL scheme splits in any case, and no other scheme does",
-                              schemes[row].split
-                                  ? split == HTTP_OK && tls == (schemes[row].split == 2)
-                                  : split == HTTP_BAD_URL);
+                              schemes[row].split == 3   ? split == HTTP_SCHEME
+                              : schemes[row].split      ? split == HTTP_OK &&
+                                                         tls == (schemes[row].split == 2)
+                                                        : split == HTTP_BAD_URL);
                         check("a Location scheme resolves in any case, and no other scheme does",
                               schemes[row].location
                                   ? placed == HTTP_OK &&
                                         string_equals(into, (string_address)schemes[row].location)
-                                  : placed == HTTP_BAD_URL);
+                                  : placed == HTTP_SCHEME);
                 }
         }
         {
@@ -58177,7 +60774,11 @@ static fn redirect_urls(void)
                     {"/..?x", "index.html"},
                     {"/a/..x", "..x"},
                     {"/a/...", "..."},
-                    {"/a/%2e%2e", "%2e%2e"},
+                    {"/a/%2e%2e", "index.html"},
+                    {"/a/.%2E", "index.html"},
+                    {"/a/%2e", "index.html"},
+                    {"/a/%2e%2e%2e", "%2e%2e%2e"},
+                    {"/a/%2", "%2"},
                 };
                 p8 overlong[HTTP_URL_MAX + 8];
 
@@ -58277,7 +60878,7 @@ static fn redirect_urls(void)
                           http_get(url, address_of body, address_of code) ==
                               HTTP_BAD_URL);
                 check("wget's start URL ceiling matches fetch",
-                      http_fetch_to(url, -1, false, address_of code) ==
+                      http_fetch_to(url, -1, false, address_of code, null) ==
                           HTTP_BAD_URL);
                 /* A target the request builder refuses is refused before
                    the connect: port 1 is closed, so a client that dials
@@ -58286,7 +60887,7 @@ static fn redirect_urls(void)
                       http_get((string_address)"http://127.0.0.1:1/caf\xe9",
                                address_of body, address_of code) == HTTP_BAD_URL &&
                           http_fetch_to((string_address)"http://127.0.0.1:1/%0d",
-                                        -1, false, address_of code) == HTTP_BAD_URL);
+                                        -1, false, address_of code, null) == HTTP_BAD_URL);
 
                 /* Absolute Location that already fills the next-URL buffer. */
                 {
@@ -58662,19 +61263,19 @@ static fn fetching_for_real(void)
 
                 {
                         status = http_fetch_to(url, -1, false,
-                                               address_of code);
+                                               address_of code, null);
                         check("a streaming 204 succeeds without writing its forbidden body",
                               status == HTTP_OK && code == 204);
                         status = http_fetch_to(url, -1, false,
-                                               address_of code);
+                                               address_of code, null);
                         check("a terminal 304 is not redirected or accepted as a download",
                               status == HTTP_STATUS && code == 304);
                         status = http_fetch_to(url, -1, false,
-                                               address_of code);
+                                               address_of code, null);
                         check("a 305 Location is not followed",
                               status == HTTP_STATUS && code == 305);
                         status = http_fetch_to(url, -1, false,
-                                               address_of code);
+                                               address_of code, null);
                         check("a 306 Location is not followed",
                               status == HTTP_STATUS && code == 306);
                 }
@@ -58737,9 +61338,10 @@ static fn fetching_for_real(void)
         system_wait4_retry((b32)child, null, 0, null);
         socket_close((b32)listening);
 
-        /* HTTP_HOPS: wget follows through nine redirects, then refuses a
-           tenth that still points elsewhere. Location stays on this
-           listener so the hop count is the only thing under test. */
+        /* HTTP_HOPS: wget follows through twenty redirects, as GNU wget
+           does, then refuses a twenty-first that still points elsewhere.
+           Location stays on this listener so the hop count is the only
+           thing under test. */
         {
                 socket_address_internet hops_where;
                 p32 hops_size = sizeof hops_where;
@@ -58782,8 +61384,8 @@ static fn fetching_for_real(void)
                         p8 answer_ok[] = "HTTP/1.1 200 OK\r\n"
                                          "Content-Length: 0\r\n"
                                          "\r\n";
-                        /* Nine redirects then a final body, then ten
-                           redirects that never land. */
+                        /* Twenty redirects then a final body, then
+                           twenty-one redirects that never land. */
                         positive answers = HTTP_HOPS - 1 + 1 + HTTP_HOPS;
 
                         for (positive at = 0; at < answers; at++)
@@ -58822,12 +61424,12 @@ static fn fetching_for_real(void)
                         url[url_used++] = '/';
                         url[url_used] = end;
 
-                        status = http_fetch_to(url, -1, false, address_of code);
-                        check("nine redirects then a final response succeed",
+                        status = http_fetch_to(url, -1, false, address_of code, null);
+                        check("twenty redirects then a final response succeed",
                               status == HTTP_OK && code == 200);
 
-                        status = http_fetch_to(url, -1, false, address_of code);
-                        check("ten redirects still pointing elsewhere are refused",
+                        status = http_fetch_to(url, -1, false, address_of code, null);
+                        check("twenty-one redirects still pointing elsewhere are refused",
                               status == HTTP_REDIRECTS);
                 }
 
@@ -58904,13 +61506,15 @@ static fn fetching_for_real(void)
                         p8 answer_ok[] = "HTTP/1.1 200 OK\r\n"
                                          "Content-Length: 0\r\n"
                                          "\r\n";
-                        /* Nine absolute redirects then a final body, then
-                           ten absolute redirects that never land. */
+                        /* Twenty absolute redirects then a final body,
+                           then twenty-one absolute redirects that never
+                           land. */
                         positive answers = HTTP_HOPS - 1 + 1 + HTTP_HOPS;
 
                         for (positive at = 0; at < answers; at++)
                         {
-                                bool on_a = (at & 1) == 0;
+                                //      Each fetch starts on 127.0.0.1.
+                                bool on_a = ((at < HTTP_HOPS ? at : at - HTTP_HOPS) & 1) == 0;
                                 bipolar listening = on_a ? listen_a : listen_b;
                                 p16 next_port = on_a ? port_b : port_a;
                                 string_address next_host =
@@ -58976,12 +61580,12 @@ static fn fetching_for_real(void)
                         url[url_used++] = '/';
                         url[url_used] = end;
 
-                        status = http_fetch_to(url, -1, false, address_of code);
-                        check("nine absolute multi-host redirects then a final response succeed",
+                        status = http_fetch_to(url, -1, false, address_of code, null);
+                        check("twenty absolute multi-host redirects then a final response succeed",
                               status == HTTP_OK && code == 200);
 
-                        status = http_fetch_to(url, -1, false, address_of code);
-                        check("ten absolute multi-host redirects are refused before a landing",
+                        status = http_fetch_to(url, -1, false, address_of code, null);
+                        check("twenty-one absolute multi-host redirects are refused before a landing",
                               status == HTTP_REDIRECTS);
                 }
 
@@ -59063,7 +61667,7 @@ static fn fetching_for_real(void)
                         url[url_used] = end;
 
                         check("a redirect Location of HTTP_URL_MAX is refused end to end",
-                              http_fetch_to(url, -1, false, address_of code) ==
+                              http_fetch_to(url, -1, false, address_of code, null) ==
                                   HTTP_BAD_URL);
                 }
 
@@ -59954,6 +62558,7 @@ b32 main(void)
         network_stream_sigpipe();
         tls_closure_boundaries();
         tls_record_payload_ceiling();
+        tls_receive_whole_room();
         tls_sensitive_state_erasure();
         tls_certificate_dates();
         tls_certificate_identity_rules();
@@ -59963,18 +62568,24 @@ b32 main(void)
         tls_client_hello_bounds();
         tls_client_hello_groups();
         tls_server_hello_validation();
+        tls_hello_retry_rows();
         tls_server_flight_validation();
-        tls_midpath_append_refusal();
         tls_encrypted_flight_hs_reassembly();
         tls_post_handshake_framing();
+        tls_key_update_rounds();
+        tls_hkdf_expand_ceiling();
         tls_certificate_framing();
         crypto_floor();
         crypto_floor_ghash();
         crypto_floor_field();
         crypto_floor_montgomery();
+        crypto_floor_x25519();
         crypto_floor_aes();
         crypto_rsa_served_sizes();
+        tls_name_constraint_rules();
+        tls_ca_issuers_rules();
         tls_trust_anchor_chains();
+        tls12_pieces();
         redirect_urls();
         fetching_for_real();
         leasing();
@@ -60250,7 +62861,7 @@ static bool crypto_vector_run(p8 address_to kind, positive kind_length,
 //      The kinds whose routines have a body for each feature byte.
 static bool crypto_vector_tiered(p8 address_to kind, positive length)
 {
-        static const char tiered[] = "sha2 sha3 hmac hkdf pbkd gcm  pss ";
+        static const char tiered[] = "sha2 sha3 hmac hkdf pbkd gcm  pss  x255 ";
 
         for (positive at = 0; length >= 3 && at < sizeof tiered - 1; at += 5)
                 if (memory_compare(kind, tiered + at, min(length, 4)) == 0)
@@ -60264,7 +62875,7 @@ b32 main(void)
         bipolar got;
         p8 address_to at = crypto_vector_text;
         p8 digest[32];
-        p8 pclmul, aes, vpclmul, vaes, sha, sha512;
+        p8 pclmul, aes, vpclmul, vaes, sha, sha512, mulx;
 
         while (have + 1 < sizeof crypto_vector_text &&
                (got = (bipolar)system_call_3(
@@ -60281,6 +62892,8 @@ b32 main(void)
         vaes = cpu_has_vaes;
         sha = cpu_has_sha;
         sha512 = cpu_has_sha512;
+        //      And x25519 on x86_64 asks the same question: BMI2 and ADX.
+        mulx = cpu_has_mulx;
 
         while (*at)
         {
@@ -60326,6 +62939,7 @@ b32 main(void)
                         cpu_has_aes = body == 2 ? 0 : aes;
                         cpu_has_sha = body == 2 ? 0 : sha;
                         cpu_has_sha512 = body == 2 ? 0 : sha512;
+                        cpu_has_mulx = body == 2 ? 0 : mulx;
                         checks++;
                         if (!parsed ||
                             !crypto_vector_run(kind, kind_length, expect))
@@ -60355,6 +62969,7 @@ b32 main(void)
                 cpu_has_vaes = vaes;
                 cpu_has_sha = sha;
                 cpu_has_sha512 = sha512;
+                cpu_has_mulx = mulx;
         }
 
         crypto_forget(address_of crypto_vector_gcm, sizeof crypto_vector_gcm);
@@ -61976,13 +64591,70 @@ static p64 fill_change(struct waterlink_link address_to link, p64 state,
         return state;
 }
 
+/*      The normal band counted again by walking it: the tally the bounded
+        walks trust has to be what is there, whoever moved the band, and
+        every key with a frame there has its bit (a bit may outlive its
+        frames; a walk clears it). */
+static bool band_counts_hold(struct waterlink_link address_to link)
+{
+        p16 counted[WATERLINK_KEYS];
+        p64 keys = 0;
+
+        memory_zero(counted, sizeof counted);
+        for (p32 at = link->head[WATERLINK_BAND_NORMAL]; at != WATERLINK_NONE;
+             at = link->slot[at].next)
+        {
+                counted[link->slot[at].key]++;
+                keys |= 1ull << link->slot[at].key;
+        }
+        return !(keys & ~link->banded) &&
+               !memory_compare(counted, link->queued, sizeof counted);
+}
+
+/*      Two links the same from a place on, but for which keys' bits are
+        set in banded past their last frame: the reference fill never clears
+        one, and waterlink_fill clears those its walk comes across. */
+static bool fill_links_apart(struct waterlink_link address_to one,
+                             struct waterlink_link address_to two,
+                             positive from)
+{
+        positive mark = __builtin_offsetof(struct waterlink_link, banded);
+
+        return memory_compare((p8 address_to)one + from,
+                              (p8 address_to)two + from, mark - from) ||
+               memory_compare(one->queued, two->queued, sizeof one->queued) ||
+               !band_counts_hold(one) || !band_counts_hold(two);
+}
+
+//      The walk wake did before it could end early: any frame the window lets by.
+static bool sendable_walk(struct waterlink_link address_to link)
+{
+        for (p32 at = link->head[WATERLINK_BAND_NORMAL]; at != WATERLINK_NONE;
+             at = link->slot[at].next)
+                if (!waterlink_key_blocked(link, link->slot + at))
+                        return true;
+        return false;
+}
+
+//      Whether a walk now ends early: a stream blocked with more behind it.
+static bool band_walk_bounded(struct waterlink_link address_to link)
+{
+        for (p32 at = link->head[WATERLINK_BAND_NORMAL]; at != WATERLINK_NONE;
+             at = link->slot[at].next)
+                if ((link->slot[at].flags & WATERLINK_FRAME_DURABLE) &&
+                    waterlink_key_blocked(link, link->slot + at) &&
+                    link->queued[link->slot[at].key] > 1)
+                        return true;
+        return false;
+}
+
 static fn fill_procedural(void)
 {
         static p8 body_one[WATERLINK_PAYLOAD + 64];
         static p8 body_two[WATERLINK_PAYLOAD + 64];
         p64 state = 0x243f6a8885a308d3ull;
         positive runs = 0, calls = 0, written = 0, wrong = 0, apart = 0;
-        positive missed = 0;
+        positive missed = 0, bounded = 0, miscounted = 0;
 
         memory_zero(fill_seen, sizeof fill_seen);
         for (positive run = 0; run < 300; run++)
@@ -62009,6 +64681,9 @@ static fn fill_procedural(void)
                                 for (positive byte = 0; byte < sizeof body_one; byte++)
                                         body_one[byte] = body_two[byte] =
                                                 (p8)(byte * 13 + step + fill);
+                                bounded += band_walk_bounded(address_of fill_two);
+                                miscounted += waterlink_sendable(address_of fill_two) !=
+                                              sendable_walk(address_of fill_two);
                                 used_one = fill_walk(address_of fill_one, body_one,
                                                      at, address_of alone_one);
                                 used_two = waterlink_fill(address_of fill_two,
@@ -62016,17 +64691,17 @@ static fn fill_procedural(void)
                                                           address_of alone_two);
                                 calls++;
                                 written += used_one;
+                                miscounted += !band_counts_hold(address_of fill_one) ||
+                                              !band_counts_hold(address_of fill_two);
                                 wrong += used_one != used_two ||
                                          alone_one != alone_two ||
                                          memory_compare(body_one, body_two,
                                                         sizeof body_one) != 0;
-                                apart += memory_compare(
-                                                 address_of fill_one.sending,
-                                                 address_of fill_two.sending,
-                                                 sizeof fill_one -
-                                                         __builtin_offsetof(
-                                                                 struct waterlink_link,
-                                                                 sending)) != 0;
+                                apart += fill_links_apart(address_of fill_one,
+                                                          address_of fill_two,
+                                                          __builtin_offsetof(
+                                                                  struct waterlink_link,
+                                                                  sending));
                                 for (positive slot = 0; slot < WATERLINK_SLOTS; slot++)
                                         apart += memory_compare(
                                                          fill_one.slot + slot,
@@ -62038,16 +64713,17 @@ static fn fill_procedural(void)
                         now += fill_next(address_of state) % 8 ? fill_next(address_of state) % 3000
                                                                : fill_next(address_of state) % 300000;
                 }
-                apart += memory_compare(address_of fill_one, address_of fill_two,
-                                        sizeof fill_one) != 0;
+                apart += fill_links_apart(address_of fill_one,
+                                          address_of fill_two, 0);
                 runs++;
         }
 
         for (positive seen = 0; seen < FILL_SEEN; seen++)
                 missed += fill_seen[seen] < 20;
         string_format(log, "  fill: %p calls in %p runs wrote %p bytes; "
-                           "%p paths taken under twenty times\n",
-                      calls, runs, written, missed);
+                           "%p paths taken under twenty times; %p calls "
+                           "past a blocked stream\n",
+                      calls, runs, written, missed, bounded);
         for (positive seen = 0; seen < FILL_SEEN; seen++)
                 if (fill_seen[seen] < 20)
                         string_format(log, "    fill path %p taken %p times\n",
@@ -62057,6 +64733,10 @@ static fn fill_procedural(void)
               runs == 300 && calls > 50000 && wrong == 0 && apart == 0);
         check("and the generated links took every path of it",
               missed == 0);
+        check("and the normal band's tally by key is the band after every "
+              "fill, and wake's bounded walk finds what the whole walk "
+              "does, many of them past a blocked stream",
+              miscounted == 0 && bounded > 1000);
 }
 
 /*
@@ -62198,6 +64878,7 @@ static fn apply_procedural(void)
         static p8 body[WATERLINK_PAYLOAD];
         p64 state = 0x13198a2e03707344ull;
         positive runs = 0, calls = 0, apart = 0, heard = 0, missed = 0;
+        positive miscounted = 0;
 
         memory_zero(apply_seen, sizeof apply_seen);
         for (positive run = 0; run < 240; run++)
@@ -62251,6 +64932,7 @@ static fn apply_procedural(void)
                         waterlink_apply(address_of fill_two, body, parts, count, at,
                                         sink, (address_any)2);
                         calls++;
+                        miscounted += !band_counts_hold(address_of fill_two);
                         apart += memory_compare(address_of fill_one.sending,
                                                 address_of fill_two.sending,
                                                 sizeof fill_one -
@@ -62297,6 +64979,9 @@ static fn apply_procedural(void)
               runs == 240 && calls > 25000 && heard > 10000 && apart == 0);
         check("and the generated links and bodies took every path of it",
               missed == 0);
+        check("and the normal band's tally by key is the band after every "
+              "apply",
+              miscounted == 0);
 }
 
 static fn replay(void)
@@ -63182,6 +65867,104 @@ static fn held_answer_lost(void)
                       held_sender.retransmitted == 1);
 }
 
+/*      A register's value replaced where it stands at the front of the
+        normal band takes the newest sequence and can be past its key's
+        window, with an older frame of the same key behind it that is not:
+        a walk that took the first as the key blocked would stop there, and
+        the older frame would wait for the window with nothing to open it. */
+static struct waterlink_link register_link;
+
+static fn register_behind_its_newest(void)
+{
+        struct waterlink_link address_to l = address_of register_link;
+        p8 body[WATERLINK_PAYLOAD];
+        bool alone = false;
+        p8 value = 'v';
+        p32 slot[5];
+        p64 now = 1000;
+        p64 wake;
+
+        waterlink_link_reset(l);
+        //      Normal, urgent, normal, urgent, normal: five slots of key 3.
+        for (positive at = 0; at < 5; at++)
+        {
+                (void)waterlink_post(l, 3,
+                                     WATERLINK_FRAME_REPLACEABLE |
+                                             (at & 1 ? WATERLINK_FRAME_URGENT : 0),
+                                     address_of value, 1, now);
+                slot[at] = l->sending[3].last;
+                while (waterlink_fill(l, body, now, address_of alone))
+                        ;
+        }
+        //      The newest lost first, then the older normal one behind it.
+        waterlink_lose(l, slot[4]);
+        waterlink_lose(l, slot[2]);
+        for (positive at = 0; at < WATERLINK_KEY_WINDOW; at++)
+                (void)waterlink_post(l, 3, WATERLINK_FRAME_REPLACEABLE,
+                                     address_of value, 1, now);
+        check("a register replaced where it stands, past its window, stands "
+              "ahead of an older frame of its key",
+              l->head[WATERLINK_BAND_NORMAL] == slot[4] &&
+                      l->slot[slot[4]].next == slot[2] &&
+                      waterlink_key_blocked(l, l->slot + slot[4]) &&
+                      !waterlink_key_blocked(l, l->slot + slot[2]));
+        wake = waterlink_wake(l, now);
+        (void)waterlink_fill(l, body, now, address_of alone);
+        check("sec: the older frame is not taken for blocked with it: wake "
+              "answers now, and fill sends it",
+              wake == now && l->slot[slot[2]].state == WATERLINK_SLOT_FLIGHT &&
+                      l->slot[slot[4]].state == WATERLINK_SLOT_QUEUED);
+}
+
+/*      A frame the path lost several times before it arrived and was held:
+        its first question is one probe timer away, not one doubled for
+        every time it went out. */
+static fn held_after_losses(void)
+{
+        p8 body[WATERLINK_PAYLOAD];
+        bool alone = false;
+        positive used = 0;
+        p64 now = 1000;
+        p64 wake;
+        p32 at;
+
+        waterlink_link_reset(address_of held_sender);
+        waterlink_link_reset(address_of held_reader);
+        heard = 0;
+        refusing = true;
+        for (positive at = 0; at < 2; at++)
+                (void)waterlink_post(address_of held_sender, 5,
+                                     WATERLINK_FRAME_DURABLE,
+                                     (p8 address_to) "ab" + at, 1, now);
+        //      Sent, lost, and sent again at each expiry.
+        for (positive round = 0; round < 6; round++)
+        {
+                used = waterlink_fill(address_of held_sender, body, now,
+                                      address_of alone);
+                now += 3000000;
+        }
+        now -= 3000000 - 10;
+        at = held_sender.sending[5].first;
+        (void)waterlink_deliver(address_of held_reader, body, used, now,
+                                hear_or_refuse, null);
+        now += WATERLINK_ACK_DELAY;
+        used = waterlink_fill(address_of held_reader, body, now, address_of alone);
+        (void)waterlink_deliver(address_of held_sender, body, used, now, null,
+                                null);
+        check("frames lost again and again, then held, went out five times",
+              held_sender.slot[at].tries == 5 &&
+                      held_sender.slot[at].state == WATERLINK_SLOT_HELD);
+        wake = waterlink_wake(address_of held_sender, now);
+        check("sec: its first question is one probe timer after it was sent",
+              wake > now &&
+                      wake <= held_sender.slot[at].sent +
+                                      waterlink_timeout(address_of held_sender));
+        check("and at it the frame goes back to be sent, its question counted",
+              waterlink_wake(address_of held_sender, wake) == wake &&
+                      held_sender.slot[at].state == WATERLINK_SLOT_QUEUED &&
+                      held_sender.slot[at].probed == 1);
+}
+
 /*      The wire judge already refuses channel bytes above 63.  The application
         entry points are also called by the service, though, so their own
         boundary is a fuse: a bad channel cannot index past a table, and a
@@ -64036,8 +66819,10 @@ static fn handshake(void)
         starting_kept = starting;
 
         /* Every individual bit is authenticated by mac1, including header,
-           ciphertext, tag and padding. This is exhaustive over both full
-           handshake datagrams rather than a sample of interesting offsets. */
+           ciphertext, tag and padding -- all but an initiation's mac2, which
+           the admission asks about, and only under load. This is exhaustive
+           over both full handshake datagrams rather than a sample of
+           interesting offsets. */
         {
                 p8 changed[WATERLINK_DATAGRAM];
                 positive first_refused = 0;
@@ -64057,8 +66842,9 @@ static fn handshake(void)
                                 !waterlink_gate_passes(address_of alice, changed,
                                                        sizeof changed);
                 }
-                check("sec: every one-bit initiation mutation fails its gate",
-                      first_refused == WATERLINK_DATAGRAM * 8);
+                check("sec: every one-bit initiation mutation fails its gate "
+                      "but in mac2",
+                      first_refused == (WATERLINK_DATAGRAM - 16) * 8);
                 check("sec: every one-bit answer mutation fails its gate",
                       second_refused == WATERLINK_DATAGRAM * 8);
         }
@@ -64139,7 +66925,7 @@ static fn handshake(void)
         {
                 static const positive where[] = {0, 5, 16, 16 + 40,
                                                  16 + WATERLINK_INITIATE_BYTES - 1,
-                                                 16 + WATERLINK_INITIATE_BYTES,
+                                                 16 + WATERLINK_INITIATE_BYTES + 16,
                                                  WATERLINK_DATAGRAM - 1};
                 positive refused = 0;
 
@@ -64218,17 +67004,21 @@ static fn handshake(void)
                       !waterlink_stamp_newer(now, last));
         }
 
+        static p8 unproven[WATERLINK_DATAGRAM];
+
         memory_zero(address_of admission, sizeof admission);
         for (positive at = 0; at < 50; at++)
-                admitted += waterlink_admit(address_of admission, source,
-                                            1000000 + at * 1000);
+                admitted += waterlink_admit(address_of admission, unproven,
+                                            source, 7, 1000000 + at * 1000) == 1;
         check("a flood from one source is held to its burst",
               admitted == WATERLINK_ADMIT_BURST);
         check("and it earns an initiation back in a fifth of a second",
-              waterlink_admit(address_of admission, source, 1000000 + 250000));
+              waterlink_admit(address_of admission, unproven, source, 7,
+                              1000000 + 250000) == 1);
         source[15] = 3;
         check("while another source is not held by it",
-              waterlink_admit(address_of admission, source, 1000000 + 50000));
+              waterlink_admit(address_of admission, unproven, source, 7,
+                              1000000 + 50000) == 1);
 
         memory_zero(address_of admission, sizeof admission);
         admitted = 0;
@@ -64237,13 +67027,18 @@ static fn handshake(void)
                 memory_zero(source, sizeof source);
                 source[14] = (p8)(at >> 8);
                 source[15] = (p8)at;
-                admitted += waterlink_admit(address_of admission, source,
-                                            2000000);
+                admitted += waterlink_admit(address_of admission, unproven,
+                                            source, 7, 2000000) == 1;
         }
-        check("sec: rotating source addresses are held to the global burst",
-              admitted == WATERLINK_ADMIT_GLOBAL_BURST);
-        check("sec: the global admission bucket refills",
-              waterlink_admit(address_of admission, source, 3000000));
+        check("sec: rotating source addresses reach the curve only up to the "
+              "load, past which they need mac2 and a secret to have it by",
+              admitted == WATERLINK_ADMIT_LOADED &&
+                      admission.all.tokens ==
+                              WATERLINK_ADMIT_GLOBAL_BURST -
+                                      WATERLINK_ADMIT_LOADED);
+        check("sec: the load passes as its bucket refills",
+              waterlink_admit(address_of admission, unproven, source, 7,
+                              3000000) == 1);
 
         check("a session is keyed again at two minutes",
               !waterlink_rekey_due(119999999, 5) &&
@@ -64857,6 +67652,8 @@ b32 main(void)
         full_frame_beside_owed_ack();
         reader_credit();
         held_answer_lost();
+        held_after_losses();
+        register_behind_its_newest();
         invalid_application_keys();
         network_generated();
         handshake();
@@ -65354,6 +68151,289 @@ static fn responder(bipolar listener, p16 port)
         for (positive at = 0; at < LINK_SESSIONS; at++)
                 if (link_self.session[at].used)
                         link_session_close(link_self.session + at);
+}
+
+/*
+        Admission under a flood. A sender that knows this machine's key makes
+        good mac1s from addresses it makes up; past WATERLINK_ADMIT_LOADED a
+        second the listener asks for mac2, answers an initiation without it
+        with a cookie reply, and spends none of the curve's bucket on it --
+        so a paired client, told its cookie, still gets in. The cookie is
+        bound to the address and port it was handed to, and is good for two
+        minutes of the listener's secret.
+*/
+static fn wls_flood(positive count, p64 now)
+{
+        p8 datagram[WATERLINK_DATAGRAM];
+        p8 hello[WATERLINK_HELLO_BYTES];
+        p8 ephemeral[32];
+        p8 somewhere[16] = {0x20, 0x01, 0x0d, 0xb8};
+        struct waterlink_noise noise;
+
+        for (positive at = 0; at < count; at++)
+        {
+                memory_zero(hello, sizeof hello);
+                waterlink_stamp(hello, 7000 + at, 0);
+                wls_seeded(ephemeral, 32, (p8)(at + 7));
+                (void)waterlink_initiate(address_of noise, address_of wls_b,
+                                         wls_server.public, null, ephemeral,
+                                         hello, datagram);
+                somewhere[14] = (p8)(at >> 8);
+                somewhere[15] = (p8)at;
+                link_server_initiation(datagram, WATERLINK_DATAGRAM, somewhere,
+                                       (p16)(1000 + at), now);
+        }
+}
+
+static fn cookies(bipolar listener, p16 port)
+{
+        p8 datagram[WATERLINK_DATAGRAM];
+        p8 heard[WATERLINK_DATAGRAM + 16];
+        p8 mac1[16], cookie[16], again[16];
+        p64 now = 50000000;
+        p32 tokens;
+        p64 handed;
+        positive refused = 0;
+
+        link_self.me = wls_server;
+        wls_peers_with(wls_client.public, WATERLINK_MAY_DEFAULT);
+        memory_zero(address_of link_self.admission, sizeof link_self.admission);
+        link_self.stamps = 0;
+        wls_drain(listener);
+
+        wls_flood(WATERLINK_ADMIT_LOADED, now);
+        tokens = link_self.admission.all.tokens;
+        wls_flood(200, now);
+        check("sec: a flood of initiations past the load spends none of the "
+              "curve's bucket",
+              link_self.admission.all.tokens == tokens && tokens &&
+                      link_self.admission.cookies == 200);
+
+        wls_initiation(datagram, 21, 8000, 0x0badcafe);
+        memory_copy(mac1, datagram + 16 + WATERLINK_INITIATE_BYTES - 16, 16);
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now);
+        check("sec: under it a paired client's initiation is answered with a "
+              "cookie reply, not a session",
+              wls_heard(listener, heard) == WATERLINK_COOKIE_DATAGRAM &&
+                      heard[0] == WATERLINK_KIND_COOKIE &&
+                      wls_sessions_used() == 0);
+        check("and the client opens the cookie, sealed to its mac1",
+              waterlink_cookie_take(wls_server.public, mac1, heard,
+                                    WATERLINK_COOKIE_DATAGRAM, cookie));
+        mac1[3] ^= 1;
+        check("sec: but not as the answer to another initiation",
+              !waterlink_cookie_take(wls_server.public, mac1, heard,
+                                     WATERLINK_COOKIE_DATAGRAM, again));
+        mac1[3] ^= 1;
+        for (positive length = 0; length <= WATERLINK_DATAGRAM; length++)
+                refused += length != WATERLINK_COOKIE_DATAGRAM &&
+                           !waterlink_cookie_take(wls_server.public, mac1, heard,
+                                                  length, again);
+        check("sec: nor at any other length",
+              refused == WATERLINK_DATAGRAM);
+
+        //      From another port the cookie is not the one it was given.
+        wls_initiation(datagram, 22, 8001, 0x0badcaff);
+        waterlink_mac2(cookie, datagram);
+        handed = link_self.admission.cookies;
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback,
+                               (p16)(port + 1), now);
+        check("sec: a cookie from another port is asked for again",
+              link_self.admission.cookies == handed + 1 &&
+                      wls_sessions_used() == 0);
+
+        wls_initiation(datagram, 21, 8002, 0x0badcafe);
+        waterlink_mac2(cookie, datagram);
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now);
+        check("sec: the client asking again under its cookie is answered and "
+              "keyed, the flood notwithstanding",
+              wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
+                      heard[0] == WATERLINK_KIND_RESPOND &&
+                      wls_sessions_used() == 1);
+
+        //      Two minutes on, the secret is another, and so is the cookie.
+        now += (p64)WATERLINK_COOKIE_SECONDS * 1000000 + 1000000;
+        wls_flood(WATERLINK_ADMIT_LOADED + 8, now);
+        wls_drain(listener);
+        wls_initiation(datagram, 23, 8003, 0x0badcb00);
+        memory_copy(mac1, datagram + 16 + WATERLINK_INITIATE_BYTES - 16, 16);
+        waterlink_mac2(cookie, datagram);
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now);
+        check("sec: a cookie older than the secret's two minutes is asked for "
+              "again, and the new one differs",
+              wls_heard(listener, heard) == WATERLINK_COOKIE_DATAGRAM &&
+                      waterlink_cookie_take(wls_server.public, mac1, heard,
+                                            WATERLINK_COOKIE_DATAGRAM, again) &&
+                      memory_compare(again, cookie, 16) &&
+                      wls_sessions_used() == 1);
+
+        entropy_down = true;
+        now += (p64)WATERLINK_COOKIE_SECONDS * 1000000 + 1000000;
+        wls_flood(WATERLINK_ADMIT_LOADED + 8, now);
+        handed = link_self.admission.cookies;
+        wls_initiation(datagram, 24, 8004, 0x0badcb01);
+        waterlink_mac2(again, datagram);
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now);
+        entropy_down = false;
+        check("sec: a secret that cannot be made again is not stretched: "
+              "under load nothing is admitted or handed out",
+              link_self.admission.cookies == handed && wls_sessions_used() == 1);
+
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used)
+                        link_session_close(link_self.session + at);
+}
+
+/*
+        The replay markers across a restart: an initiation taken, the
+        listener stopped and started again, and the same datagram played
+        back holds no session and draws no answer; a newer one from the
+        same peer is answered.
+*/
+static fn stamps_outlive(bipolar listener, p16 port)
+{
+        p8 datagram[WATERLINK_DATAGRAM];
+        p8 newer[WATERLINK_DATAGRAM];
+        p8 heard[WATERLINK_DATAGRAM + 16];
+        p64 now = 400000000;
+
+        link_self.me = wls_server;
+        link_self.server = true;
+        wls_peers_with(wls_client.public, WATERLINK_MAY_DEFAULT);
+        memory_zero(address_of link_self.admission, sizeof link_self.admission);
+        link_self.stamps = 0;
+        (void)system_remove_at(AT_FDCWD, LINK_STAMPS_PATH, 0);
+        wls_drain(listener);
+
+        wls_initiation(datagram, 31, 9000, 0x31313131);
+        wls_initiation(newer, 32, 9001, 0x32323232);
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now);
+        link_stamps_save();
+        check("an initiation is answered, and its marker written",
+              wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
+                      wls_sessions_used() == 1 && !link_self.stamps_dirty);
+
+        //      A restart: nothing of the listener is left but its files.
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used)
+                        link_session_close(link_self.session + at);
+        crypto_forget(link_self.stamp, sizeof link_self.stamp);
+        link_self.stamps = 0;
+        link_stamps_load();
+
+        link_server_initiation(datagram, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now + 1000000);
+        check("sec: after a restart a recorded initiation played back holds "
+              "no session and draws no answer",
+              wls_heard(listener, heard) <= 0 && wls_sessions_used() == 0);
+        link_server_initiation(newer, WATERLINK_DATAGRAM, wls_loopback, port,
+                               now + 2000000);
+        check("and a newer one from the same peer is answered",
+              wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
+                      wls_sessions_used() == 1);
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used)
+                        link_session_close(link_self.session + at);
+
+        //      A peer whose clock once ran a century ahead, now put right.
+        {
+                p8 future[WATERLINK_STAMP_BYTES];
+                p64 wall = system_clock_ns(0) / 1000000000ull;
+
+                waterlink_stamp(future, wall + 100ull * 365 * 86400, 0);
+                link_stamp_keep(wls_client.public, future);
+                link_stamps_save();
+                crypto_forget(link_self.stamp, sizeof link_self.stamp);
+                link_self.stamps = 0;
+                link_stamps_load();
+                wls_initiation(datagram, 33, wall, 0x33333333);
+                link_server_initiation(datagram, WATERLINK_DATAGRAM,
+                                       wls_loopback, port, now + 3000000);
+                check("sec: a marker dated far ahead of this machine's clock "
+                      "is not read back to lock its peer out",
+                      wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
+                              wls_sessions_used() == 1);
+                link_server_initiation(newer, WATERLINK_DATAGRAM, wls_loopback,
+                                       port, now + 4000000);
+                check("while a replay from the past stays refused",
+                      wls_heard(listener, heard) <= 0);
+        }
+        link_stamps_save();
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used)
+                        link_session_close(link_self.session + at);
+}
+
+/*
+        The client's half: a cookie reply to the initiation it has out is
+        kept and asked again under at once, and the next initiation carries
+        mac2 by it; a second reply, to an initiation that carried one, does
+        not make it ask again before its time.
+*/
+static fn client_cookie(bipolar listener, p16 port)
+{
+        struct link_session address_to s = link_self.session;
+        struct waterlink_admission table;
+        p8 heard[WATERLINK_DATAGRAM + 16];
+        p8 reply[WATERLINK_COOKIE_DATAGRAM];
+        p8 nonce[24];
+        p8 cookie[16];
+        p64 now = 90000000;
+
+        memory_zero(address_of table, sizeof table);
+        wls_seeded(table.secret, 32, 91);
+        table.secret_made = now;
+        wls_seeded(nonce, 24, 92);
+        link_self.me = wls_client;
+        link_self.server = false;
+        memory_zero(address_of link_client, sizeof link_client);
+        wls_drain(listener);
+        check("a client session opens for the cookie", link_session_open(s));
+        memory_copy(s->peer, wls_server.public, 32);
+        memory_copy(s->address, wls_loopback, 16);
+        s->port = port;
+
+        check("the client's first initiation goes out without mac2",
+              link_client_initiate(s, now) &&
+                      wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
+                      memory_span_byte(heard + 16 + WATERLINK_INITIATE_BYTES, 0,
+                                       16) == 16);
+        waterlink_cookie_reply(address_of wls_server, address_of table, heard,
+                               wls_loopback, port, nonce, reply);
+        link_datagram(reply, sizeof reply, wls_loopback, port, now + 10);
+        check("sec: a cookie reply to it is kept, and asks again at once",
+              link_client.cookie_at == now + 10 &&
+                      link_age(now + 10, link_client.initiated) > LINK_ATTEMPT);
+        check("and the next initiation carries mac2 by that cookie",
+              link_client_initiate(s, now + 20) &&
+                      wls_heard(listener, heard) == WATERLINK_DATAGRAM &&
+                      link_client.cookied &&
+                      waterlink_cookie_take(wls_server.public,
+                                            link_client.mac1, reply, sizeof reply,
+                                            cookie) == false);
+        waterlink_cookie_of(address_of table, wls_loopback, port, cookie);
+        {
+                p8 copy[WATERLINK_DATAGRAM];
+
+                memory_copy(copy, heard, WATERLINK_DATAGRAM);
+                memory_zero(copy + 16 + WATERLINK_INITIATE_BYTES, 16);
+                waterlink_mac2(cookie, copy);
+                check("sec: which the listener's cookie for this place makes",
+                      !memory_compare(copy, heard, WATERLINK_DATAGRAM));
+        }
+        waterlink_cookie_reply(address_of wls_server, address_of table, heard,
+                               wls_loopback, port, nonce, reply);
+        link_datagram(reply, sizeof reply, wls_loopback, port, now + 30);
+        check("sec: a reply to an initiation that carried a cookie does not "
+              "hurry the next",
+              link_client.initiated == now + 20);
+        link_session_close(s);
+        crypto_forget(address_of link_client, sizeof link_client);
 }
 
 /*
@@ -66470,6 +69550,105 @@ static fn places(void)
 }
 
 /*
+        The client's standard output, full: a pipe nobody reads, a socket
+        nobody reads. A write that waited there stopped the client's whole
+        loop -- keepalives, acknowledgements, the rekey -- until the machine
+        gave the link up. Each is filled and handed a frame in a child, which
+        must come back with the frame refused for now, not hang; a file is
+        written where it stands, its offset kept.
+*/
+static b32 wls_output_full(positive kind)
+{
+        struct link_session address_to s = link_self.session;
+        b32 ends[2];
+        p8 junk[4096];
+        p8 frame[] = "Dabc";
+        p8 file[8];
+
+        memory_zero(junk, sizeof junk);
+        if (kind == 2)
+        {
+                bipolar out = system_open_at_mode(AT_FDCWD, "/root/wls-out",
+                                                  FILE_WRITE | O_CLOEXEC, 0600);
+
+                if (out < 0 || system_write_all((positive)out, "xy", 2) != 2 ||
+                    system_descriptor_install((b32)out, 1) < 0)
+                        return 64;
+        }
+        else if ((kind ? system_call_4(syscall(socketpair), 1, 1, 0,
+                                       (positive)ends)
+                       : system_pipe(ends, 0)) < 0 ||
+                 system_descriptor_install(ends[1], 1) < 0)
+                return 64;
+        //      Filled through a description of its own: 1 stays blocking.
+        if (kind == 1)
+                while (socket_send(1, junk, sizeof junk, MSG_DONTWAIT, 0, 0) > 0)
+                        ;
+        else if (!kind)
+        {
+                bipolar filler = system_open_at(AT_FDCWD, "/proc/self/fd/1",
+                                                O_WRONLY | O_NONBLOCK);
+
+                while (filler >= 0 &&
+                       system_write_once(filler, junk, sizeof junk) > 0)
+                        ;
+        }
+        if (!link_session_open(s))
+                return 65;
+        link_stream_own(s->writes, 1, LINK_KEY_OUTPUT, 0, O_WRONLY);
+        if (kind == 2)
+                return link_stream_take(s, s->writes, frame, 4) &&
+                                       s->writes[0].fd == 1 &&
+                                       host_read_text("/root/wls-out", file,
+                                                      sizeof file) == 5 &&
+                                       !memory_compare(file, "xyabc", 5)
+                               ? 0
+                               : 1;
+        return !link_stream_take(s, s->writes, frame, 4) && s->writes[0].quiet
+                       ? 0
+                       : 1;
+}
+
+static fn client_never_waits(void)
+{
+        b32 code[3] = {255, 255, 255};
+
+        for (positive kind = 0; kind < 3; kind++)
+        {
+                bipolar child = system_fork();
+                positive status = 0;
+
+                if (!child)
+                        exit(wls_output_full(kind));
+                for (positive tick = 0; child > 0 && tick < 100; tick++)
+                {
+                        timespec pause = {0, 20000000};
+
+                        if (system_wait4_retry(child, address_of status, 1,
+                                               null) == child)
+                        {
+                                code[kind] = wait_status_code(status);
+                                break;
+                        }
+                        (void)system_call_2(syscall(nanosleep),
+                                            (positive)address_of pause, 0);
+                }
+                if (code[kind] == 255 && child > 0)
+                {
+                        (void)system_call_2(syscall(kill), (positive)child, 9);
+                        (void)system_wait4_retry(child, address_of status, 0,
+                                                 null);
+                }
+        }
+        check("sec: a full pipe as the client's standard output never holds "
+              "its loop",
+              code[0] == 0);
+        check("sec: nor does a full socket", code[1] == 0);
+        check("and a file is written where it stands, its offset kept",
+              code[2] == 0);
+}
+
+/*
         A machine with no IPv6 (the modern profile builds without it): the
         link's socket falls back to IPv4 and binds there, a datagram to an
         IPv4 peer goes out and comes back as that peer, and one to an IPv6
@@ -66676,6 +69855,9 @@ b32 main(void)
         staging();
         publication();
         responder(listener, port);
+        cookies(listener, port);
+        stamps_outlive(listener, port);
+        client_cookie(listener, port);
         initiator_answer();
         carried_is_atomic();
         seen_once_a_second();
@@ -66692,6 +69874,7 @@ b32 main(void)
         key_text();
         places();
         ipv4_only();
+        client_never_waits();
         indexes_and_commands();
         return test_report(null);
 }
@@ -73393,47 +76576,68 @@ static fn storage_test_dhcp_apart(void)
                       -ECHILD);
 }
 
-/* A restarted watcher meets the address its predecessor installed: the
-   exclusive create answers EEXIST. In a user, network and mount namespace
-   of its own (lo up, the address added first, a tmpfs over /etc for the
-   resolver), the lease must be taken, held without ownership, and released
-   without removing an address it never owned. NOT RUN without namespaces. */
-static fn storage_test_lease_over_existing(void)
+/* A user, network and mount namespace of the caller's own, which must be
+   a child: lo up, a tmpfs over /etc for the resolver file a lease writes,
+   and a routing socket, or exit 2 (NOT RUN) where namespaces are refused. */
+static bipolar storage_test_net_namespace(void)
+{
+        p8 map[48] = "0 ";
+        p8 groups[48] = "0 ";
+        bipolar handle;
+        //      The ids outside, read before the namespace hides them; a
+        //      file made under an unmapped id is EOVERFLOW.
+        positive at = 2 + positive_into(
+            map + 2, (positive)system_call_1(syscall(getuid), 0));
+        positive group = 2 + positive_into(
+            groups + 2, (positive)system_call_1(syscall(getgid), 0));
+
+        if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWNET |
+                                                CLONE_NEWNS) < 0)
+                system_call_1(syscall(exit_group), 2);
+        memory_copy(map + at, " 1\n", 4);
+        memory_copy(groups + group, " 1\n", 4);
+        if (!storage_test_write_text("/proc/self/uid_map", map, at + 3) ||
+            !storage_test_write_text("/proc/self/setgroups", "deny", 4) ||
+            !storage_test_write_text("/proc/self/gid_map", groups, group + 3) ||
+            system_call_5(syscall(mount), 0, (positive) "/", 0, MS_REC | MS_PRIVATE, 0) < 0 ||
+            system_call_5(syscall(mount), (positive) "tmpfs", (positive) "/etc",
+                          (positive) "tmpfs", 0, 0) < 0 ||
+            (handle = netlink_open_groups(0)) < 0 ||
+            netlink_link_up((b32)handle, 1) < 0)
+                system_call_1(syscall(exit_group), 2);
+        return handle;
+}
+
+//      A child's exit status, 2 being NOT RUN.
+static b32 storage_test_child_status(bipolar child)
 {
         b32 status = 0;
+
+        if (child < 0)
+                return -1;
+        system_call_4(syscall(wait4), (positive)child, (positive)address_of status,
+                      0, 0);
+        return (status & 0x7f) ? -1 : (status >> 8) & 0xff;
+}
+
+/* A restarted watcher meets the address its predecessor installed: the
+   exclusive create answers EEXIST. An operator's address there (added
+   first, no lease stamped on it) must be taken, held without ownership,
+   and released without removing an address it never owned. */
+static fn storage_test_lease_over_existing(void)
+{
         bipolar child = system_fork();
 
         if (child == 0)
         {
-                p8 map[48] = "0 ";
-                p8 groups[48] = "0 ";
                 p8 hardware[6] = {2, 0, 0, 0, 0, 1};
                 dhcp_lease lease = {.address = 0x0a090909, .mask = 0xffffff00,
                                     .server = 0x0a090901, .seconds = 60,
                                     .renewal = 30, .rebinding = 52};
                 net_holding held = {0};
-                bipolar handle;
-                //      The ids outside, read before the namespace hides them;
-                //      a file made under an unmapped id is EOVERFLOW.
-                positive at = 2 + positive_into(
-                    map + 2, (positive)system_call_1(syscall(getuid), 0));
-                positive group = 2 + positive_into(
-                    groups + 2, (positive)system_call_1(syscall(getgid), 0));
+                bipolar handle = storage_test_net_namespace();
 
-                if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWNET |
-                                                        CLONE_NEWNS) < 0)
-                        system_call_1(syscall(exit_group), 2);
-                memory_copy(map + at, " 1\n", 4);
-                memory_copy(groups + group, " 1\n", 4);
-                if (!storage_test_write_text("/proc/self/uid_map", map, at + 3) ||
-                    !storage_test_write_text("/proc/self/setgroups", "deny", 4) ||
-                    !storage_test_write_text("/proc/self/gid_map", groups, group + 3) ||
-                    system_call_5(syscall(mount), 0, (positive) "/", 0, MS_REC | MS_PRIVATE, 0) < 0 ||
-                    system_call_5(syscall(mount), (positive) "tmpfs", (positive) "/etc",
-                                  (positive) "tmpfs", 0, 0) < 0 ||
-                    (handle = netlink_open_groups(0)) < 0 ||
-                    netlink_link_up((b32)handle, 1) < 0 ||
-                    netlink_address_add((b32)handle, 1, lease.address, 24) < 0)
+                if (netlink_address_add((b32)handle, 1, lease.address, 24) < 0)
                         system_call_1(syscall(exit_group), 2);
                 if (net_apply_lease((b32)handle, 1, "lo", hardware, address_of lease,
                                     address_of held, false) != 0 ||
@@ -73445,14 +76649,304 @@ static fn storage_test_lease_over_existing(void)
                                                              24) == 0
                                   ? 0 : 3);
         }
-        if (child > 0)
-                system_call_4(syscall(wait4), (positive)child,
-                              (positive)address_of status, 0, 0);
-        if (child > 0 && status == 2 << 8)
+        b32 status = storage_test_child_status(child);
+        if (status == 2)
                 log_direct(str("storage_io: lease over an existing address NOT RUN -- no namespaces\n"));
         else
                 check("a lease over an address already there is taken, held unowned and left",
-                      child > 0 && status == 0);
+                      status == 0);
+}
+
+typedef struct
+{
+        p32 host;
+        bool found;
+        p32 valid;
+} storage_test_address_facts;
+
+static bool storage_test_address_seen(netlink_header address_to header,
+                                      address_any context)
+{
+        storage_test_address_facts address_to facts = context;
+        positive size = 0;
+        p8 address_to named = netlink_find(header, sizeof(netlink_address),
+                                           IFA_LOCAL, address_of size);
+        p8 address_to cache;
+
+        if (!named || size != 4 ||
+            memory_load_unaligned(p32, named) != network_order_32(facts->host))
+                return true;
+        facts->found = true;
+        cache = netlink_find(header, sizeof(netlink_address), IFA_CACHEINFO,
+                             address_of size);
+        facts->valid = cache && size >= 8 ? memory_load_unaligned(p32, cache + 4)
+                                         : 0;
+        return true;
+}
+
+/* The same address when the lease stamped it: a restarted watcher takes it
+   back, so a NAK or expiry removes it, and the kernel holds it to the
+   lease's lifetime on its own. A restarted watcher handed another address
+   removes the lease it inherited instead, and a one-shot ip auto, which
+   nothing renews, installs its address as it always did. Exit 4: no finite
+   lifetime; 5: not taken back; 6: not removed on release; 7: an inherited
+   lease outlived a new one; 8: a one-shot address expires. */
+static fn storage_test_lease_inherited(void)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                p8 hardware[6] = {2, 0, 0, 0, 0, 1};
+                dhcp_lease lease = {.address = 0x0a090a0a, .mask = 0xffffff00,
+                                    .server = 0x0a090a01, .seconds = 60,
+                                    .renewal = 30, .rebinding = 52};
+                dhcp_lease other = lease;
+                net_holding first = {0};
+                net_holding second = {0};
+                net_holding third = {0};
+                storage_test_address_facts facts = {.host = lease.address};
+                storage_test_address_facts moved = {.host = 0x0a090a0b};
+                bipolar handle = storage_test_net_namespace();
+
+                if (net_apply_lease((b32)handle, 1, "lo", hardware, address_of lease,
+                                    address_of first, false) != 0 ||
+                    !first.address_owned)
+                        system_call_1(syscall(exit_group), 1);
+                netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
+                             AF_INET, storage_test_address_seen, address_of facts);
+                if (!facts.found || !facts.valid || facts.valid > 60)
+                        system_call_1(syscall(exit_group), 4);
+                if (net_apply_lease((b32)handle, 1, "lo", hardware, address_of lease,
+                                    address_of second, false) != 0 ||
+                    !second.address_owned)
+                        system_call_1(syscall(exit_group), 5);
+                other.address = moved.host;
+                facts.found = false;
+                if (net_apply_lease((b32)handle, 1, "lo", hardware, address_of other,
+                                    address_of third, false) != 0 ||
+                    netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
+                                 AF_INET, storage_test_address_seen,
+                                 address_of facts) < 0 ||
+                    facts.found)
+                        system_call_1(syscall(exit_group), 7);
+                if (net_holding_release((b32)handle, address_of third) != 0 ||
+                    netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
+                                 AF_INET, storage_test_address_seen,
+                                 address_of moved) < 0 ||
+                    moved.found)
+                        system_call_1(syscall(exit_group), 6);
+                other.address = 0x0a090a0c;
+                moved.host = other.address;
+                if (net_apply_lease((b32)handle, 1, "lo", hardware, address_of other,
+                                    null, false) != 0 ||
+                    netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
+                                 AF_INET, storage_test_address_seen,
+                                 address_of moved) < 0 ||
+                    !moved.found || moved.valid != 0xffffffff)
+                        system_call_1(syscall(exit_group), 8);
+                system_call_1(syscall(exit_group), 0);
+        }
+        b32 status = storage_test_child_status(child);
+        if (status == 2)
+                log_direct(str("storage_io: inherited lease NOT RUN -- no namespaces\n"));
+        else
+        {
+                check("a leased address carries the lease's lifetime",
+                      status != 4 && status != 1);
+                check("a restarted watcher takes back the address its predecessor leased",
+                      status != 5 && status != 1);
+                check("a restarted watcher handed another address removes the one it inherited",
+                      status != 7 && status != 5 && status != 4 && status != 1);
+                check("an inherited lease is removed when it is released",
+                      status != 6 && status != 7 && status != 5 && status != 4 &&
+                          status != 1);
+                check("a one-shot ip auto address keeps no lifetime",
+                      status == 0);
+        }
+}
+
+/* A dummy link of the namespace's own, whose carrier can be set. */
+static bipolar storage_test_dummy(b32 handle, string_address name)
+{
+        netlink_buffer request = {0};
+        p32 sequence = netlink_sequence_take();
+        //      IFLA_LINKINFO's payload: IFLA_INFO_KIND "dummy", padded.
+        static const p8 kind[12] = {10, 0, IFLA_INFO_KIND, 0,
+                                    'd', 'u', 'm', 'm', 'y', 0, 0, 0};
+
+        if (!netlink_begin(address_of request, RTM_NEWLINK,
+                           NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_EXCLUSIVE,
+                           sequence, sizeof(netlink_link)))
+                return -1;
+        netlink_attribute_add(address_of request, IFLA_IFNAME, name,
+                              string_length(name) + 1);
+        netlink_attribute_add(address_of request, IFLA_LINKINFO,
+                              (address_any)kind, sizeof kind);
+        return netlink_transact(handle, address_of request, sequence, null, null);
+}
+
+#define STORAGE_TEST_IFLA_CARRIER 33
+
+//      IFLA_CARRIER (one byte) or IFLA_MTU set on a link.
+static bipolar storage_test_link_set(b32 handle, p32 index, p16 type, p32 value)
+{
+        netlink_buffer request = {0};
+        p32 sequence = netlink_sequence_take();
+        p8 carrier = (p8)value;
+
+        if (!netlink_begin(address_of request, RTM_NEWLINK,
+                           NLM_REQUEST | NLM_ACK, sequence, sizeof(netlink_link)))
+                return -1;
+        ((netlink_link address_to)netlink_body(address_of request))->index = index;
+        if (type == STORAGE_TEST_IFLA_CARRIER)
+                netlink_attribute_add(address_of request, type, address_of carrier, 1);
+        else
+                netlink_attribute_add(address_of request, type, address_of value, 4);
+        return netlink_transact(handle, address_of request, sequence, null, null);
+}
+
+/* The news a link change made, fed to the watcher as it would read it:
+   every datagram that comes within the wait, which ends early once the
+   lease is lost. Carrier news goes through linkwatch, up to a second late. */
+static fn storage_test_link_news(b32 events, net_holding address_to held,
+                                 positive nanoseconds)
+{
+        netlink_buffer message = {0};
+        network_deadline deadline;
+
+        if (!network_deadline_begin(address_of deadline, nanoseconds /
+                                        NETWORK_NANOSECONDS,
+                                    nanoseconds % NETWORK_NANOSECONDS))
+                return;
+        while (!held->lost &&
+               network_wait_readable_until(events, address_of deadline) > 0 &&
+               netlink_receive(events, address_of message, null) > 0)
+                for (positive at = 0; at + NETLINK_HEADER <= message.used;)
+                {
+                        netlink_header address_to header =
+                            (netlink_header address_to)(message.bytes + at);
+
+                        if (header->length < NETLINK_HEADER ||
+                            at + header->length > message.used)
+                                break;
+                        at += netlink_align(header->length);
+                        (void)net_link_event(header, held);
+                }
+        netlink_forget(address_of message);
+}
+
+/* A cable pulled and put back while the watcher was busy: both events are
+   read after the carrier is back, and only the kernel's count of carrier
+   losses says the link went away -- perhaps into another network. Other
+   news about the link (an MTU change) is not a loss. Exit 4: an MTU change
+   lost the lease; 5: the bounce did not. */
+static fn storage_test_carrier_bounce(void)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                bipolar handle = storage_test_net_namespace();
+                netlink_search link = {.wanted = (string_address) "wd0"};
+                net_holding held = {0};
+                bipolar events;
+
+                if (storage_test_dummy((b32)handle, "wd0") < 0 ||
+                    netlink_link_find((b32)handle, address_of link) < 0 ||
+                    netlink_link_up((b32)handle, link.index) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                //      A kernel, or an emulator, that keeps no count is
+                //      not a failure of the watcher's.
+                if (netlink_link_find((b32)handle, address_of link) < 0 ||
+                    !link.carrier_counted ||
+                    (events = netlink_open_groups(RTNLGRP_LINK_MASK)) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                held.index = link.index;
+                held.lease.address = 0x0a090b0b;
+                held.lease.seconds = 60;
+                held.carrier_counted = link.carrier_counted;
+                held.carrier_downs = link.carrier_downs;
+                string_copy_max_end(held.name, "wd0", IFNAME_SIZE - 1);
+                storage_test_link_set((b32)handle, link.index, IFLA_MTU, 1400);
+                storage_test_link_news((b32)events, address_of held, 1500000000);
+                if (held.lost)
+                        system_call_1(syscall(exit_group), 4);
+                storage_test_link_set((b32)handle, link.index,
+                                      STORAGE_TEST_IFLA_CARRIER, 0);
+                storage_test_link_set((b32)handle, link.index,
+                                      STORAGE_TEST_IFLA_CARRIER, 1);
+                storage_test_link_news((b32)events, address_of held, 3000000000);
+                system_call_1(syscall(exit_group), held.lost ? 0 : 5);
+        }
+        b32 status = storage_test_child_status(child);
+        if (status == 2)
+                log_direct(str("storage_io: carrier bounce NOT RUN -- no namespaces or dummy links\n"));
+        else
+        {
+                check("other news about the held link keeps the lease",
+                      status != 4 && status != 1);
+                check("a carrier lost and back while the watcher was busy loses the lease",
+                      status == 0);
+        }
+        netlink_forget(address_of net_states);
+}
+
+/* Link news faster than the watcher reads it: the kernel drops what does
+   not fit and says ENOBUFS, which must not end the watcher -- it asks
+   again instead, and forgets every carrier snapshot, where reading the
+   news would have kept one for the link. Exit 4: the watcher gave up; 5:
+   it read on as if nothing were lost. */
+static fn storage_test_link_news_overrun(void)
+{
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                bipolar handle = storage_test_net_namespace();
+                netlink_search link = {.wanted = (string_address) "wd1"};
+                netlink_buffer message = {0};
+                net_holding held = {0};
+                b32 small = 1;
+                bipolar events = netlink_open_groups(RTNLGRP_LINK_MASK);
+
+                if (events < 0 || storage_test_dummy((b32)handle, "wd1") < 0 ||
+                    netlink_link_find((b32)handle, address_of link) < 0 ||
+                    socket_option_set((b32)events, SOL_SOCKET, SO_RCVBUF,
+                                      address_of small, sizeof small) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                //      Every MTU change is news at once, where carrier news
+                //      waits on linkwatch and folds together.
+                for (positive flip = 0; flip < 64; flip++)
+                        storage_test_link_set((b32)handle, link.index, IFLA_MTU,
+                                              flip & 1 ? 1400 : 1500);
+                //      Gone again, so the resync finds nothing to ask a
+                //      lease for.
+                {
+                        netlink_buffer request = {0};
+                        p32 sequence = netlink_sequence_take();
+
+                        if (netlink_begin(address_of request, RTM_DELLINK,
+                                          NLM_REQUEST | NLM_ACK, sequence,
+                                          sizeof(netlink_link)))
+                        {
+                                ((netlink_link address_to)netlink_body(
+                                     address_of request))->index = link.index;
+                                netlink_transact((b32)handle, address_of request,
+                                                 sequence, null, null);
+                        }
+                }
+                if (net_watch_events((b32)events, address_of message,
+                                     address_of held) < 0)
+                        system_call_1(syscall(exit_group), 4);
+                system_call_1(syscall(exit_group), net_states.used ? 5 : 0);
+        }
+        b32 status = storage_test_child_status(child);
+        if (status == 2)
+                log_direct(str("storage_io: link news overrun NOT RUN -- no namespaces or dummy links\n"));
+        else
+                check("dropped link news resyncs the watcher instead of ending it",
+                      status == 0);
 }
 
 static fn storage_test_netlink_output(void)
@@ -73792,7 +77286,7 @@ static fn storage_test_wget_304(string_address target)
                     "wget", "-q", "-O", target, url, null};
                 program_arguments_use(words, 5);
                 check("wget refuses a terminal 304",
-                      net_wget() == 1);
+                      net_wget() == 8);
                 if (saved_words)
                         program_arguments_use(saved_words, saved_count);
                 else
@@ -74101,6 +77595,9 @@ b32 main(void)
         storage_test_lease_clock_origin();
         storage_test_dhcp_apart();
         storage_test_lease_over_existing();
+        storage_test_lease_inherited();
+        storage_test_carrier_bounce();
+        storage_test_link_news_overrun();
         storage_test_netlink_output();
         storage_test_net_files();
         return test_report(null);
@@ -91440,8 +94937,9 @@ b32 main(void)
         prints nothing, which is what perf stat -e instructions:u,cycles:u
         is pointed at: multiply-c, multiply, square-c and square take a limb
         count, and ecdsa-p256, ecdsa-p384, rsa-2048, rsa-4096, x25519,
-        p256-public, p256-shared, p384-public, p384-shared and gcm take only
-        the rounds. The RSA rows are the public operation a verify runs,
+        x25519-c (the C crypto.c ran before lib.c's x25519, at the same
+        caller), x25519-mulq (x86_64's body without BMI2 and ADX), p256-public, p256-shared, p384-public, p384-shared and gcm
+        take only the rounds. The RSA rows are the public operation a verify runs,
         crypto_rsa_modexp with e = 65537, over a fixed odd modulus whose top
         bit is set; the ECDSA rows verify real signatures, RFC 6979's P-256
         "sample" and a P-384 one made once with openssl.
@@ -91454,6 +94952,9 @@ b32 main(void)
 #define SHARED_montgomery_reference
 #include "checks.c"
 #undef SHARED_montgomery_reference
+#define SHARED_x25519_reference
+#include "checks.c"
+#undef SHARED_x25519_reference
 
 #define MONTGOMERY_BENCH_TRIES 7
 
@@ -91654,6 +95155,25 @@ static fn montgomery_bench_x25519_row(void)
         }
 }
 
+//      The same through the C crypto.c ran before lib.c's x25519, and the
+//      same verdict over its answer, so the pair differs in the arithmetic
+//      alone.
+static fn montgomery_bench_x25519_c_row(void)
+{
+        static const p8 nine[32] = {9};
+        p8 out[32];
+
+        for (positive i = 0; i < montgomery_bench_rounds; i++)
+        {
+                p8 nonzero = 0;
+
+                x25519_reference(out, montgomery_bench_scalar, nine);
+                for (positive j = 0; j < 32; j++)
+                        nonzero |= out[j];
+                montgomery_bench_sink += out[0] + (nonzero != 0);
+        }
+}
+
 static fn montgomery_bench_p256_public_row(void)
 {
         p8 out[65];
@@ -91785,6 +95305,18 @@ b32 main(void)
                         work = montgomery_bench_ecdsa_p384_row;
                 else if (string_compare(row, (string_address)"x25519") == 0)
                         work = montgomery_bench_x25519_row;
+                else if (string_compare(row, (string_address)"x25519-c") == 0)
+                        work = montgomery_bench_x25519_c_row;
+                else if (string_compare(row, (string_address)"x25519-mulq") == 0)
+                {
+                        //      The body a processor without BMI2 and ADX runs,
+                        //      after one call has asked the processor.
+                        p8 probe[32];
+
+                        x25519(probe, montgomery_bench_scalar, montgomery_bench_scalar);
+                        cpu_has_mulx = 0;
+                        work = montgomery_bench_x25519_row;
+                }
                 else if (string_compare(row, (string_address)"p256-public") == 0)
                         work = montgomery_bench_p256_public_row;
                 else if (string_compare(row, (string_address)"p256-shared") == 0)
@@ -91848,6 +95380,9 @@ b32 main(void)
                                 montgomery_bench_ecdsa_p384_row, 32,
                                 (string_address)"verify");
         string_format(log, " key exchange and one record\n");
+        montgomery_bench_report((string_address)"X25519, C  ",
+                                montgomery_bench_x25519_c_row, 64,
+                                (string_address)"multiply");
         montgomery_bench_report((string_address)"X25519     ",
                                 montgomery_bench_x25519_row, 64,
                                 (string_address)"multiply");

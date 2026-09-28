@@ -6534,7 +6534,16 @@ files_STAT_FORMATS = (
     # printf's %f made of two integers, and the halves of a device number.
     "%Hd,%Ld %Hr,%Lr", "%.9Y|%-18.10Y|%12.Y|%.0Y", "%010.3X|%-3.10Y|%18.3Y|%-18.3Y", "%+5d|%#x|%#a|% i",
     "%5%", "%-", "%.4W|%W|%-5h|%-8F|", "%'5s|%I5s|%0-6o|", "%.2U|%12G|%-12N|",
-)
+) + tuple(
+    # Every flag, width and precision shape on one letter a row: a flag
+    # said again and again, a width the seconds' point splits, a precision
+    # of none and of more digits than a number has, and an empty result
+    # between two that are not.
+    "|".join("%" + flags + width + precision + letter
+             for flags in ("", "-", "0", "+", " ", "#", "'", "-0", "+ #", "+" * 70, "0" * 40 + "-")
+             for width in ("", "1", "3", "12", "30")
+             for precision in ("", ".", ".0", ".1", ".3", ".12", ".100"))
+    for letter in "YXsfhnot")
 
 files_MKTEMP_TEMPLATES = (
     ("tmp.XXXXXXXXXX",), ("run.XXXXXX",), ("run.XXXXXXXXXXXX",), ("run.XXX",), ("run.XXXXXX.log",), ("run.XX",),
@@ -7044,11 +7053,17 @@ def files_owner_word_cases(group_only=False):
     import pwd
     user = pwd.getpwuid(os.getuid()).pw_name
     group = grp.getgrgid(os.getgid()).gr_name
+    #   A number as xstrtoumax reads one: blanks, then a plus, then
+    #   digits and nothing else, in either half.
+    numbers = tuple(lead + files_GID + tail for lead in ("", " ", "\t", "+", " +", "+ ", "++", "-")
+                    for tail in ("", " "))
     if group_only:
         return tuple(shape for spec in (group, group + ".", "." + group, ":" + group, files_GID)
                      for shape in ((spec, "a.txt"), ("-v", spec, "a.txt"), (spec, "a.txt", "-v"),
-                                   ("--", spec, "a.txt"), ("-v", "--", spec, "--", "a.txt"), (spec, "-R", "dir")))
-    cases = []
+                                   ("--", spec, "a.txt"), ("-v", "--", spec, "--", "a.txt"), (spec, "-R", "dir"))) + \
+            tuple(("-v", number, "a.txt") for number in numbers)
+    cases = [("-v", number.replace(files_GID, files_UID) + ":" + number, "a.txt") for number in numbers]
+    cases += [("-v", number.replace(files_GID, files_UID), "a.txt") for number in numbers]
     for spec in (user + ":", user + ".", user + "." + group, user + ":" + group, files_UID + ":", files_UID + ".",
                  files_UID + "." + files_GID, "nosuchuser.", "nosuchuser." + group, user + ".nosuchgroup",
                  user, "root.", "0.", user + "..", user + ":.", "+" + files_UID, "+" + files_UID + ":",
@@ -7134,6 +7149,42 @@ def files_cpcorner_cases():
              ("-b", "F", "F"), ("-f", "F", "F"), ("-fb", "./F", "F"), ("-fb", "F", "t/../F"), ("-fbv", "F", "F"),
              ("/sys/kernel/profiling", "c"), ("-f", "/sys/kernel/profiling", "F"), ("--sparse=always", "/sys/kernel/profiling", "c"))
     return tuple({"fixture": "files_cpcorner", "argv": argv} for argv in argvs)
+
+
+#       A tree copied into one that already holds its names: a file, a file
+#       one level down, a live and a dangling link, and a backup already
+#       there. Every name the walk meets below the operand is backed up as
+#       the operand itself is; cp -rb once overwrote them and kept nothing.
+FIXTURES["files_cpmerge"] = {
+    "m/d/f": files_file(b"new f\n", 1000000000),
+    "m/d/s/g": files_file(b"new g\n", 1010000000),
+    "m/d/h": files_file(b"new h\n", 1020000000),
+    "m/d/l": files_file(b"new l\n", 1025000000),
+    "m/d/s": files_dir(1030000000),
+    "m/d": files_dir(1040000000),
+    "m/one/f": files_file(b"one\n", 1045000000),
+    "m/one": files_dir(1046000000),
+    "m": files_dir(1050000000),
+    "t/d/f": files_file(b"old f\n", 1100000000),
+    "t/d/f~": files_file(b"older f\n", 1105000000),
+    "t/d/s/g": files_file(b"old g\n", 1110000000),
+    "t/d/h": files_link("nowhere", 1120000000),
+    "t/d/l": files_link("f", 1125000000),
+    "t/d/s": files_dir(1130000000),
+    "t/d": files_dir(1140000000),
+    "t/one/f": files_file(b"old one\n", 1145000000),
+    "t/one": files_dir(1146000000),
+    "t": files_dir(1150000000),
+}
+
+
+def files_cpmerge_cases():
+    controls = (("-b",), ("--backup=numbered",), ("--backup=existing",), ("-b", "-S", ".k"), ("--backup=none",))
+    copies = (("-r",), ("-a",), ("-rf",), ("-r", "--remove-destination"), ("-ru",))
+    cases = [("-r",) + control + ("m/d", "t") for control in controls]
+    cases += [copy + control + ("m/d", "t") for copy in copies[1:] for control in controls[:3]]
+    cases += [("-rbv", "m/one", "t"), ("-rv", "--backup=numbered", "m/one", "t"), ("-rb", "m/d", "m/d", "t")]
+    return tuple({"fixture": "files_cpmerge", "argv": argv} for argv in cases)
 
 
 FILES_UTILITIES = (
@@ -7858,6 +7909,15 @@ FILES_UTILITIES = (
                    #   name.
                    ("c.txt", "00"), ("c.txt", " 1"), ("c.txt", "+2"), ("c.txt", "0x1"), ("c.txt", "1 "),
                    ("c.txt", "9223372036854775808"), ("-k", "c.txt", "2", "0"),
+                   #   A line past the input, and the one just past it,
+                   #   with and without the line --suppress-matched drops
+                   #   there: GNU asks only that a line is left when it
+                   #   starts, so the line after the last is a target.
+                   ) + tuple(flags + (name,) + targets for flags in ((), ("--suppress-matched",), ("-k", "--suppress-matched"))
+                             for name, targets in (("c.txt", ("4",)), ("c.txt", ("5",)), ("c.txt", ("6",)),
+                                                   ("c.txt", ("5", "5")), ("c.txt", ("2", "{1}")), ("c.txt", ("2", "{2}")),
+                                                   ("c.txt", ("1", "{*}")), ("c.txt", ("/9/", "5")), ("c.txt", ("4", "5")),
+                                                   ("nonl", ("2",)), ("nonl", ("1", "2")))) + (
                    #   Every pattern is read, in order, once the input is
                    #   open and before anything is made: the first word
                    #   refused ends the run with no file left, -k or not;
@@ -7971,7 +8031,7 @@ FILES_UTILITIES = (
             + tuple({"fixture": "files_self", "argv": words + ("sl", "x")}
                     for words in (("-rl",), ("--link", "-R"), ("-rlP",), ("-rlH",), ("-rld",), ("-al",),
                                   ("-rlL",), ("-l",), ("-lP",)))
-            + files_skip_cases("cp") + files_readonly_cases() + files_cpcorner_cases()
+            + files_skip_cases("cp") + files_readonly_cases() + files_cpcorner_cases() + files_cpmerge_cases()
             + files_made_cases("cp", ("-f", "-b", "--backup=numbered", "-d", "-R", "-l", "-s", "-v", "-a",
                                       "-dR", "--remove-destination", "-n")),
             normalize=files_sorted_lines),
@@ -8058,7 +8118,11 @@ FILES_UTILITIES = (
             operands=(("a.txt",), ("dir",), ("missing",), ("link",), ("dangling",), ("dirlink",), ("dirlink/",), ("hollow",),
                       ("a.txt", "b.txt", "missing"), ("shut",), ("unreadable",), ("deep",), ("two words",), ("--", "-dash"), (),
                       ("dir", "a.txt", "hollow"), ("loop",), ("dir/sub/back",), (".",), ("./",), ("a.txt/",), ("dir/",), ("twin",),
-                      ("nest",), ("dup", "nest", "hollow"), ("a.txt", "a.txt"), ("new\nline",), ("shut/inside",), ("dir/sub",)),
+                      ("nest",), ("dup", "nest", "hollow"), ("a.txt", "a.txt"), ("new\nline",), ("shut/inside",), ("dir/sub",)) +
+                     # A dot below a name that is not there, or is not a
+                     # directory, is that failure first and a dot after.
+                     tuple((name + dot,) for name in ("missing", "a.txt", "dangling", "dir")
+                           for dot in ("/.", "/..", "/../", "//.")),
             stdin=("files_yes", "files_no", "files_mixed", "files_answers_nyy", "files_answers_yyn"),
             fixture="files", stderr="exact",
             extra=(("-rf", "dir", "a.txt", "missing"), ("-ri", "dir"), ("-rv", "dir"), ("-dv", "hollow"), ("-fd", "dir"),
@@ -8258,7 +8322,7 @@ FILES_UTILITIES = (
                                      ("-d", "@1000000000", "+%c|%x|%X|%r|%Ec|%EX|%%c|%p"), ("-u", "-d", "@0"))) +
                   # nstrftime's %F: a bare one signs a year past 9999, a flag
                   # or width goes to the year alone.
-                  tuple(("-u", "-d", "@%d" % moment, "+%F|%+F|%+12F|%12F|%-12F|%012F|%_12F|%^F|%3F")
+                  tuple(("-u", "-d", "@%d" % moment, "+%F|%+F|%+12F|%12F|%-12F|%012F|%_12F|%^F|%3F|%120F|%_110F")
                         for moment in (0, 253402300800, 327403900800, -62135596800)) +
                   # parse_datetime's grammar where it shifts: a lone number,
                   # DD.MM., comments, zone T after a time, a year in the way
@@ -8286,7 +8350,18 @@ FILES_UTILITIES = (
                         for zone, when in (("America/New_York", "2016-06-01 EDT + 6 months"),
                                            ("Europe/Helsinki", "2011-12-11 EET"), ("Europe/Helsinki", "2011-06-11 EEST"),
                                            ("America/Lima", "@1"), ("Europe/Berlin", "2021-03-28 02:30"),
-                                           ("Europe/Berlin", "2021-10-31 02:30"), ("Europe/Berlin", "2021-10-31 02:30 CEST")))),
+                                           ("Europe/Berlin", "2021-10-31 02:30"), ("Europe/Berlin", "2021-10-31 02:30 CEST"))) +
+                  # A TZ the environment holds at any length: a zone file
+                  # named through runs of ./ either side of the 255 bytes a
+                  # fixed buffer once held, which refused every date. The
+                  # dates are local and so is what is written, which keeps
+                  # the rows to the parse, whatever the zone reader makes
+                  # of so long a name.
+                  tuple({"argv": ("-d", when, "+%F %T"),
+                         "env": (("TZ", ":/usr/share/zoneinfo/" + "./" * run + "Asia/Tokyo"),)}
+                        for run in (100, 116, 117, 118, 300)
+                        for when in ("2001-09-09 01:46:40", "2001-09-09 01:46 tomorrow",
+                                     "292277026596-12-04 15:30:07 UTC"))),
 )
 
 #       Scenes a fixture cannot hold, made by the shell before the program
@@ -8331,6 +8406,14 @@ FILES_SCENES = {
     # sticky bit, and what is left of it looked at afterwards.
     "wide": ("(umask 000; env mkdir -p w/x/y && env touch w/x/f w/g) || exit 9\n", "",
              "env ls -d w w/x w/x/y 2>&1\n"),
+    # Moments with a fraction: two files a fifth of a second either side of
+    # N.5, and afterwards whether what touch made has a fraction at all --
+    # now has one, and a date that keeps now's time of day keeps it. What
+    # it made is then taken away, since its time is the clock's.
+    "fraction": ("python3 -c 'import os\nfor n, t in ((\"a\", .3), (\"b\", .7)):\n"
+                 "    open(n, \"w\").close(); os.utime(n, ns=(1700000000 * 10**9 + int(t * 10**9),) * 2)' "
+                 "|| exit 9\n", "",
+                 "[ -e t ] && env stat -c %y t | env grep -c '[.]000000000 '\nenv rm -f t\n"),
 }
 FILES_SCENE_CASES = (
     # rm and rmdir remove from a directory others can write into, as GNU's
@@ -8391,6 +8474,11 @@ FILES_SCENE_CASES = (
     ("tmax", "ls", "-lgo", "--time-style=+%Y", "f"),
     ("noco", "ls", "--color=always", "-d", "dir", "a.txt", "exe", "link", "dangling", "/dev/null", "loop"),
     ("dumbterm", "ls", "--color=always", "-d", "dir", "exe"), ("colorterm", "ls", "--color=always", "-d", "dir", "exe"),
+    ("fraction", "touch", "-d", "now", "t"), ("fraction", "touch", "-d", "1.5 seconds ago", "t"),
+    ("fraction", "touch", "-d", "+1 hour", "t"), ("fraction", "touch", "-d", "12:00", "t"),
+    ("fraction", "touch", "-d", "@5.25", "t"), ("fraction", "find", "a", "b", "-newermt", "@1700000000.5"),
+    ("fraction", "find", "a", "b", "-newerat", "@1700000000.5"), ("fraction", "find", "a", "b", "-newermt", "@1700000000"),
+    ("fraction", "find", "a", "b", "!", "-newermt", "@1700000000.7"),
 )
 
 
@@ -8849,6 +8937,19 @@ def files_tar_archives(rng, count):
         lambda: [member("dir", "ds"), member("file", "ds", data=b"now a file")],
         lambda: [member("file", "sp ace\ttab", data=b"s")],
         lambda: [member("file", "old", mtime=0, data=b"o")],
+        # Hard links to files made in directories the run made, which keep
+        # no identity until a link asks: in the same directory, from the
+        # root, after the name was overwritten, after it became a symlink
+        # and after it became a directory.
+        lambda: [member("file", "pd/t", data=b"pt"), member("hard", "pd/h", target="pd/t")],
+        lambda: [member("dir", "pe"), member("file", "pe/t", data=b"et"),
+                 member("hard", "he", target="pe/t")],
+        lambda: [member("file", "po/t", data=b"o1"), member("file", "po/t", data=b"o2"),
+                 member("hard", "po/h", target="po/t")],
+        lambda: [member("file", "pq/t", data=b"q"), member("sym", "pq/t", target="z"),
+                 member("hard", "pq/h", target="pq/t")],
+        lambda: [member("file", "pr/t", data=b"r"), member("dir", "pr/t"),
+                 member("hard", "pr/h", target="pr/t")],
         # The hostile: out through .., absolute, a link then a write through
         # it, a hard link to something outside, a link turned into a directory.
         lambda: [member("file", "../escape", data=b"out")],
@@ -9816,6 +9917,8 @@ INPUTS.update({
     "misc_journal": b"MESSAGE=mw-differential journald entry\nPRIORITY=6\nSYSLOG_IDENTIFIER=mwtest\n",
     "misc_dd_case": b"AaZz09-abcdefghijklmnopqrstuvwxyz-ABCDEFGHIJKLMNOPQRSTUVWXYZ" * 3,
     "misc_dd_1000": b"q" * 1000,
+    #   A printable run longer than od -S held, ended by a NUL.
+    "misc_od_printable_run": b"a" * 70000 + b"\0tail\0",
     "misc_sums_malformed": b"not a checksum\n\n garbage line\n",
 })
 
@@ -10384,6 +10487,17 @@ def _misc_write_script(argv, stdin_name):
     return ul_live(argv[0], body, wrap="unshare -Urm")
 
 
+#       Whole numbers either side of every place numfmt's rounding turns:
+#       each power of 1000 and 1024 up to the fifth, times a fraction a
+#       little under, at and over a tenth's edge, a half's and the base's,
+#       the one below and above each, and their negatives.
+_MISC_NUMFMT_EDGES = tuple(sorted({
+    str(sign * (int(base ** power * fraction) + nudge))
+    for base in (1000, 1024) for power in range(0, 6)
+    for fraction in (1, 1.05, 1.15, 1.25, 9.949, 9.95, 9.951, 99.95, 999.5, 1023.95, 1023.949)
+    for nudge in (-1, 0, 1) for sign in (1, -1)
+    if 0 < int(base ** power * fraction) + nudge < 10 ** 18}, key=lambda word: (len(word), word)))
+
 MISC_UTILITIES = (
     Utility("write_errors", operands=_MISC_WRITE_CASES, stdin=("empty",), fixture="misc",
             stderr="exact", modes=("bash",), script=_misc_write_script, valid=_misc_write_valid),
@@ -10422,6 +10536,12 @@ MISC_UTILITIES = (
             fixture="misc", stderr="exact", normalize=misc_dd_normalize, valid=misc_dd_valid, max_flags=5,
             extra=(("conv=block", "cbs=4", "if=ten", "status=noxfer"),
                    ("conv=unblock", "cbs=4", "if=ten", "status=noxfer"),
+                   # Records against reads: a record and its trailing
+                   # spaces cut across one read or many, longer and
+                   # shorter than cbs.
+                   *(("conv=" + conv, "cbs=%d" % cbs, "ibs=%d" % ibs, "if=" + name, "status=noxfer")
+                     for conv in ("block", "unblock") for cbs in (1, 3, 7, 80) for ibs in (1, 5, 512)
+                     for name in ("a.txt", "spaced.txt", "long", "binary")),
                    ("conv=ascii", "if=ten", "status=noxfer"), ("conv=ebcdic", "if=ten", "status=noxfer"),
                    ("conv=ibm", "if=ten", "status=noxfer"),
                    # The record conversions and the character sets together,
@@ -10571,7 +10691,21 @@ MISC_UTILITIES = (
                    ("-", "7" * 255), ("-", "9" * 254 + "."), ("-", "0x" + "f" * 253), ("+" + "7" * 30,),
                    ("a.txt", "7" * 30 + "x"), ("++0",), ("+-0",), ("+ 0",), ("--", "-0"), ("a.txt", "0x"),
                    ("a.txt", "1.b"), ("a.txt", "1.B"), ("long", "1B"), ("a.txt", "12."), ("a.txt", "0x1b"),
-                   ("a.txt", "1a."), ("a.txt", "8"), ("+0x1",), ("+1..",))),
+                   ("a.txt", "1a."), ("a.txt", "8"), ("+0x1",), ("+1..",),
+                   #   -j, -N and -S stop at intmax_t and take R, Q and the
+                   #   old D; -w is plain decimal with no suffix at all.
+                   {"argv": ("-S3",), "stdin": "misc_od_printable_run"},
+                   {"argv": ("-S5", "-j69990"), "stdin": "misc_od_printable_run"},
+                   #   Strings against the scan: -N and -j landing inside a
+                   #   run, at its NUL and past it, over text, binary and a
+                   #   run longer than a read.
+                   *(("-S%d" % least,) + skip + limit + (name,)
+                     for least in (1, 4) for name in ("blob", "long", "binary", "edge_65537")
+                     for skip in ((), ("-j7",), ("-j65530",))
+                     for limit in ((), ("-N1",), ("-N13",), ("-N70000",))),
+                   ("-j9223372036854775808", "a.txt"), ("-N8E", "a.txt"), ("-N1R", "a.txt"), ("-j0Q", "a.txt"),
+                   ("-j1KD", "long"), ("-S9223372036854775807", "a.txt"), ("-w0x10", "a.txt"), ("-w4x", "a.txt"),
+                   ("-w1k", "a.txt"), ("-w18446744073709551616", "a.txt"))),
 
     Utility("hexdump",
             options=(Option("-b"), Option("-c"), Option("-C"), Option("-d"), Option("-o"), Option("-x"),
@@ -10680,10 +10814,17 @@ MISC_UTILITIES = (
                        "04346046994430930304346046940094664449905590304464482454586302332293465458630233229"),
                       ("115792089237316195423570985008687907853269984665640564039457584007913129639936",
                        "1208925819614629174706177", "1267650600228229401496703205377",
-                       "324518553658426726783156020576257", "19807040628566084398385987585")),
+                       "324518553658426726783156020576257", "19807040628566084398385987585"),
+                      # The widest number carried, with its top bit set, and
+                      # past it only in leading zeros.
+                      (str(2003 ** 363 * 2011 ** 407),), ("0" * 2600 + "12",),
+                      # How a refused word is quoted.
+                      ("\t12", "a'b", "a\\b", "a\x01", "1 2")),
             stdin=("misc_factor", "misc_factor_random", "numbers", "empty", "text", "nonl", "blanks", "long",
                    "many_lines", "nul", "high", "wide_words"),
-            fixture="misc", stderr="exact"),
+            # The widest operand costs a Miller-Rabin power over 8448 bits,
+            # a third of a second, which a loaded machine can stretch.
+            fixture="misc", stderr="exact", timeout=10.0),
 
     Utility("numfmt",
             options=(Option("--to", ("si", "iec", "iec-i", "none", "auto", "bad"), True),
@@ -10724,7 +10865,9 @@ MISC_UTILITIES = (
             #   A field list is pieces split at commas or blanks, and a dash
             #   alone is every field wherever it stands. A second --field is
             #   refused whatever it says.
-            extra=(("--field", "-foo", "1"), ("--field", "--3", "1"), ("--field", "1-2-3", "1"),
+            extra=(*(("--to=" + to, "--round=" + mode, "--") + _MISC_NUMFMT_EDGES
+                     for to in ("si", "iec", "iec-i", "none") for mode in ("up", "down", "from-zero", "towards-zero", "nearest")),
+                   ("--field", "-foo", "1"), ("--field", "--3", "1"), ("--field", "1-2-3", "1"),
                    ("--field", "18446744073709551615,22", "1"), ("--field", "0-1", "1"),
                    ("--field", "1,2 4", "--to=si", "1000 2000 3000 4000"),
                    ("--field", "3,-", "--to=si", "1000 2000 3000 4000"),
@@ -10865,16 +11008,24 @@ MISC_UTILITIES = (
                       ("PIPE", "30", "sleep", "21.37"), ("HUP", "30", "sleep", "21.37"),
                       ("ALRM", "-s", "INT", "30", "sleep", "21.37"),
                       ("ALRM", "-k", ".2", "30", "sh", "-c", "trap '' TERM; sleep 21.37"),
-                      ("none", "5", "true"), ("none", "5", "sh", "-c", "exit 3"), ("pipe", "-v", ".1", "sleep", "7")),
+                      ("none", "5", "true"), ("none", "5", "sh", "-c", "exit 3"), ("pipe", "-v", ".1", "sleep", "7"),
+                      ("ALRM-ignored", "5", "sh", "-c", "kill -ALRM $$; echo survived"),
+                      ("ALRM-ignored", "-s", "HUP", "5", "sh", "-c", "kill -ALRM $$; echo survived")),
             stdin=("empty",), fixture="misc", stderr="exact", modes=("bash",), timeout=10.0,
+            #       "ALRM-ignored" starts timeout with ALRM ignored: timeout
+            #       takes ALRM whatever it inherited, so its command starts
+            #       with the default and dies of one, where an ignore handed
+            #       through let it live.
             script=lambda argv, stdin_name: ul_live("timeout", (
                 "env --ignore-signal=CHLD bash -c 'exec -a timeout \"$0\" \"$@\"' \"$tool\" " + ul_words(argv[1:]) +
                 "\nstatus=$?\n" if argv[0] == "none" else
+                "(trap '' ALRM; exec -a timeout \"$tool\" " + ul_words(argv[1:]) + ") &\np=$!\n"
+                "{ wait $p; } 2> /dev/null\nstatus=$?\n" if argv[0] == "ALRM-ignored" else
                 "run " + ul_words(argv[1:]) + " 2>&1 | :\nstatus=${PIPESTATUS[0]}\n" if argv[0] == "pipe" else
                 "(exec -a timeout \"$tool\" " + ul_words(argv[1:]) + ") &\np=$!\nsleep .3\nkill -" + argv[0] +
                 " $p\n{ wait $p; } 2> /dev/null\nstatus=$?\n")
                 + "exit $status\n"),
-            valid=lambda argv: len(argv) > 2 and argv[0].isupper() or argv[:1] in (["none"], ["pipe"])),
+            valid=lambda argv: len(argv) > 2 and argv[0].isupper() or argv[:1] in (["none"], ["pipe"], ["ALRM-ignored"])),
 
     Utility("nohup",
             operands=(("./exe", "a"), ("./exe",), ("missing",), (), ("--", "./exe"), ("dir",), ("unreadable",),
@@ -15055,6 +15206,123 @@ def shell_lang_array_element_refusals(rng):
         "a=(1 2); x=1", line, 'echo "next=$?"', "declare -p a x 2>&1"), ("command", "stdin", "file"))
 
 
+#       Tildes the way bash expands them: an argument spelled like an
+#       assignment, name=~ or PATH=a:~/b, is one for its tildes outside posix
+#       mode (not a list element, not --opt=~); the word of ${u-word} ends its
+#       tilde prefix at a colon too; and inside an assignment that word takes
+#       the value's rules, after each colon as well, as dash does. These left
+#       the tildes after = and : as they were written.
+def shell_lang_tilde_words(rng):
+    line = rng.choice(("echo x=~ x=~/a x=a:~ a:~ =~ 1x=~ --opt=~ y=~:~ a_b=~ x=\\~ 'x=~'", "echo ${u-~:~} ${u:-~/x:~}",
+                       "x=~:${undef-~:~}; echo $x", "a=(${u-~:~} ~ x=~); echo ${a[@]}", "for w in x=~ ${u-~:~}; do echo $w; done",
+                       "case x=~ in x=/h) echo matched;; esac", "y=\"${u-~}\"; echo $y", "export v=~ w=a:~; echo $v $w"))
+    return ("tilde-words", shell_ALL, shell_program("HOME=/h", line, 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
+#       An assigned $@ or ${a[@]} is joined with blanks in bash, as "$@" is,
+#       and so are a slice, a substitution and a case change of one, while a
+#       trim or a transform of one is joined by IFS and an assigned $* under
+#       an empty IFS by nothing. These joined all of them by IFS, and $* and
+#       ${a[*]} under an empty IFS with blanks.
+def shell_lang_assigned_list_joins(rng):
+    form = rng.choice(("$@", "${@}", "$*", "a$@b", "${a[@]}", "${a[*]}", "${@:1}", "${a[@]:0}", "${a[@]^}", "${@#x}",
+                       "${a[@]@Q}", "${a[@]%q}", "${a[@]/p/r}", "${@@Q}", "${@^}", "${@-d}"))
+    ifs = rng.choice(("IFS=:", "IFS=", "IFS=' :'", ""))
+    return ("assigned-list-joins", shell_BASH, shell_program(
+        'set -- x "y z"; a=(p q)', ifs, "s=" + form + '; echo "[$s]"'), ("command", "stdin", "file"))
+
+
+#       A failglob refusal drops the rest of the line in bash whatever holds
+#       the word -- a for list and a compound list as well as a command --
+#       eval answering 1, and under set -e it ends the shell. The for list
+#       answered 1 and went on to the next command.
+def shell_lang_failglob_discard(rng):
+    line = rng.choice(("a=(*.ZZ); echo same $?", "for x in *.ZZ; do echo $x; done; echo same $?", "echo *.ZZ; echo same",
+                       "f() { echo *.ZZ; echo in-f; }; f; echo after-f", 'eval "echo *.ZZ; echo in"; echo after-eval $?',
+                       'x=$(echo *.ZZ; echo in); echo "cs [$x]"', "set -e; for x in *.ZZ; do :; done; echo not",
+                       "set -e; echo *.ZZ || echo alt; echo not", "case *.ZZ in *) echo case;; esac"))
+    return ("failglob-discard", shell_BASH, shell_program("shopt -s failglob", line, 'echo "next=$?"'),
+            ("command", "stdin", "file"))
+
+
+#       The variables bash answers when read -- SHELLOPTS, BASHOPTS, RANDOM,
+#       LINENO, BASH_VERSION and the rest -- are set to test -v and [[ -v ]]
+#       until a script unsets one; BASH_TRAPSIG only inside a trap. These
+#       said none of them was set.
+def shell_lang_dynamic_set_tests(rng):
+    name = rng.choice(("SHELLOPTS", "BASHOPTS", "RANDOM", "LINENO", "BASH_VERSION", "EPOCHSECONDS", "SECONDS", "BASHPID",
+                       "GROUPS", "BASH_COMMAND", "SRANDOM", "BASH_TRAPSIG", "OSTYPE"))
+    form = rng.choice(("test -v %s", "[[ -v %s ]]", "unset %s; test -v %s", "[ -v %s ]"))
+    return ("dynamic-set-tests", shell_BASH, shell_program(
+        form.replace("%s", name) + '; echo "set=$?"', 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
+#       A for loop's variable that is no name: bash reads it and refuses it
+#       when the loop runs ("`i.j': not a valid identifier", 1, the line going
+#       on), dash refuses it as it parses ("Bad for loop variable"). Both
+#       loops ran with the word for a name.
+def shell_lang_for_variable_names(rng):
+    name = rng.choice(("i.j", "1x", "a-b", "'q'", "x"))
+    loop = rng.choice(("for %s in a b; do echo hi; done; echo same $?", "f() { for %s in a; do :; done; }; echo def; f; echo after $?",
+                       "for %s; do :; done; echo same $?"))
+    return ("for-variable-names", shell_ALL, shell_program(loop % name, 'echo "next=$?"'), ("command", "stdin", "file"))
+
+
+#       How bash writes a value back for its locale: printf %q, ${v@Q},
+#       declare -p and set keep a whole character of the locale as itself and
+#       spell a byte that is none in octal inside $'...', and declare -p
+#       writes an associative key bare unless it holds shell syntax (or is @
+#       alone). These wrote such bytes raw, escaped every high byte in a
+#       listing, and quoted every key that was not a name.
+def shell_lang_locale_quoting(rng):
+    value = rng.choice(("$'\\xff'", "$'\\xce\\xce\\xbc'", "$'a b\\xce'", "$'\\xce\\xbc'", "$'\\t\\xce'", "$'\\t\\xce\\xbc'",
+                        "$'\\xce\\xbc x'", "$'a\"b\\xce\\xbc'"))
+    key = rng.choice(("$'\\xce\\xbc'", "a-b", "x/y", "'a b'", "'~x'", "x~", "@", "'#x'", "a=b", "'*'", "a%", "$'\\xff'"))
+    line = rng.choice(("printf '%%q|' %s; echo" % value, "v=%s; echo \"${v@Q}\"" % value, "v=%s; declare -p v" % value,
+                       "v=%s; set | grep -a '^v=' | tail -1" % value, "declare -A A=([%s]=1); declare -p A" % key,
+                       "a=(%s x); declare -p a" % value))
+    locale = rng.choice(("LC_ALL=C.UTF-8", "LC_ALL=C"))
+    return ("locale-quoting", shell_BASH, shell_program(locale, line, 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
+#       A command substitution inside a pipeline stage runs every command
+#       of its body: forked while the stage expanded its one command's words,
+#       it took that command's right to exec in place, so a wrapper utility
+#       first in the body (env, nice, unshare) replaced it and the rest never
+#       ran -- `echo "$(env true; echo b)" | cat` printed an empty line.
+def shell_lang_substitution_tail(rng):
+    first = rng.choice(("env true", "nice true", "unshare -U true", "true", "env true > /dev/null 2>&1",
+                        "nice echo a", "ls /nonexistent 2>/dev/null"))
+    shape = rng.choice(('printf "[%%s]" "$(%s; echo $?)" | cat; echo', 'echo "$(%s; echo b)" | cat',
+                        'x=$(%s; echo c) | cat; echo "st=$?"', '{ echo "$(%s; echo d)"; } | cat',
+                        'echo "$(%s; echo e)" | cat | cat',
+                        'echo "$(%s; echo g)" &\nwait'))
+    return ("substitution-tail", shell_ALL, shell_program(shape % first, 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
+#       bash's kill takes -n signum where it takes -s, and -L where it
+#       takes -l; both were unknown signals named n and L.
+def shell_lang_kill_bash_options(rng):
+    line = rng.choice(("sleep 1 & kill -n 15 $!; wait $!; echo w=$?", "sleep 1 & kill -n TERM $!; wait $!; echo w=$?",
+                       "kill -L 10 12; echo st=$?", "kill -L USR1; echo st=$?", "kill -L | head -1",
+                       "sleep 1 & kill -n 9 -- $!; wait $!; echo w=$? 2>/dev/null"))
+    return ("kill-bash-options", shell_BASH, shell_program(line, 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
+#       bash 5.3's $BASH_TRAPSIG: the number of the signal whose trap is
+#       running, 0 in the EXIT trap, 65 66 and 67 for DEBUG ERR and RETURN,
+#       and unset outside a trap. It was never set.
+def shell_lang_bash_trapsig(rng):
+    line = rng.choice(("trap 'echo T=$BASH_TRAPSIG' USR1; kill -USR1 $$", "trap 'echo E=$BASH_TRAPSIG' EXIT",
+                       "trap 'echo R=$BASH_TRAPSIG' ERR; false", "trap 'echo D=$BASH_TRAPSIG' DEBUG; :; trap - DEBUG",
+                       "set -T; f() { :; }; trap 'echo F=$BASH_TRAPSIG' RETURN; f; trap - RETURN",
+                       "trap 'echo I=$BASH_TRAPSIG; trap - INT' INT; kill -INT $$",
+                       "trap 'echo \"${!BASH_TRAP*}\"' USR2; kill -USR2 $$", "(trap 'echo S=$BASH_TRAPSIG' EXIT)"))
+    return ("bash-trapsig", shell_BASH, shell_program(
+        'echo "[${BASH_TRAPSIG-unset}] ${!BASH_TRAP*}"', line, 'echo "after=${BASH_TRAPSIG-unset}"'),
+        ("command", "stdin", "file"))
+
+
 #       printf's quoting and time conversions as bash 5.3 has them: %q takes
 #       a width and cuts the quoted text to the precision, %Q cuts the
 #       argument and quotes the rest, a quoted character is its code point
@@ -18008,6 +18276,15 @@ SHELL_FAMILIES = (
     shell_lang_patsub_slash_tilde,
     shell_lang_array_indirect_operators,
     shell_lang_array_element_refusals,
+    shell_lang_bash_trapsig,
+    shell_lang_kill_bash_options,
+    shell_lang_tilde_words,
+    shell_lang_assigned_list_joins,
+    shell_lang_failglob_discard,
+    shell_lang_dynamic_set_tests,
+    shell_lang_for_variable_names,
+    shell_lang_locale_quoting,
+    shell_lang_substitution_tail,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,
@@ -18151,6 +18428,10 @@ INPUTS.update({
     "text_lines_two_long": b"d" * 1200000 + b"\n" + b"d" * 1200000 + b"\nx\n",
     "text_fmt_3000_words": b" ".join(b"%d" % n for n in range(1, 3001)) + b"\n",
     "text_fmt_yes": b"y\n" * 5000,
+    "text_sort_z_newlines": b"a\nz\0ab\0a\n\nb\0a b\0a\tc\0b\0",
+    "text_fmt_tagged": (b"> aaa bbb ccc ddd eee fff ggg hhh iii jjj\n\n>   kkk lll\n"
+                        b"> mmm nnn ooo ppp qqq rrr sss\n\n"
+                        b"#  one two three four five six seven eight nine\n"),
     "text_fmt_long_word": b"  " + b"a" * 12000 + b"\nb c.\n",
     "text_names0_empty": b"a.txt\x00\x00b.txt\x00",
     "text_names0_only_empty": b"\x00\x00",
@@ -19218,6 +19499,15 @@ def text_expr_operands():
         ("(", "1", "2"), ("(", "1", "+"), ("(", "("), ("x", ":"), ("length", "(", "1"), ("1", "2", "3"),
         ("0", "&", "abc", ":", "\\("), ("match", "x"),
     ]
+    #   regcomp's refusals -- a trailing backslash, a reference to a group
+    #   not yet closed, brackets left open or naming no class, an interval
+    #   with a second comma -- and the repeat an anchor leaves a character,
+    #   each after what can stand before it.
+    for lead in ("", "^", "a", "\\(", "\\(^"):
+        for piece in ("\\", "\\2", "\\1", "[", "[^", "[]", "[[:foo:]]", "[[:alpha:]", "[[:alpha",
+                      "[[:" + "x" * 31 + ":]]", "[[:" + "x" * 32 + ":]]", "\\{1,2,3", "\\{1,2,",
+                      "\\{1,2,3\\}", "\\+b", "\\?b", "*b", "\\{1\\}b"):
+            fixed.append(("+b", ":", lead + piece + ("\\)" if lead.startswith("\\(") else "")))
     operators = ["|", "&", "=", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%"]
     for left in operators:
         for right in operators:
@@ -19291,6 +19581,23 @@ _TEXT_ENCODING_OPTIONS = (
 )
 _TEXT_ENCODING_OPERANDS = ((), ("a.txt",), ("-",), ("missing",), ("empty",), ("binary",),
                            ("a.txt", "b.txt"), ("dir",), ("unreadable",), ("b64",), ("nonl",))
+#       base58 is one big number, converted digit group by digit group up
+#       to a few hundred digits and split by powers of 58 past that: sizes
+#       either side of each limb and of the split, all-ones runs that sit
+#       just below a power, and digits spelling 58^k - 1 and 58^k exactly.
+_TEXT_BASE58_SIZES = (7, 8, 9, 64, 257, 300, 2049, 9000, 40000)
+_TEXT_BASE58_POWERS = (10, 319, 321, 1281, 5121, 20481)
+INPUTS.update({
+    **{f"text_base58_bytes_{size}_{shape}":
+       (b"\0\0" if shape == "lead" else b"") +
+       (b"\xff" * size if shape == "ff" else
+        hashlib.shake_256(b"base58 %d" % size).digest(size))
+       for size in _TEXT_BASE58_SIZES for shape in ("mixed", "ff", "lead")},
+    **{f"text_base58_digits_{count}_{shape}":
+       b"z" * count if shape == "top" else b"2" + b"1" * count
+       for count in _TEXT_BASE58_POWERS for shape in ("top", "power")},
+})
+
 _TEXT_ENCODING_STDIN = ("text", "empty", "text_b64", "text_b64_garbage", "text_b64_badpad",
                         "text_b32", "text_b32_garbage", "text_encoding_binary", "edge_65537",
                         "nonl", "blanks", "text_bytes", "text_z85", "edge_131072", "edge_65535", "edge_65536")
@@ -19543,6 +19850,9 @@ _TEXT_STREAM_CASES = (
     #   tail -c +N seeks where the input seeks, from wherever it was left.
     ("tail", "offset", "-c", "+5"), ("tail", "file", "-c", "+100000"), ("tail", "offset", "-c", "+1"),
     ("tail", "shared", "-c", "+3"), ("tail", "big", "-c", "+6888890"),
+    #   ... and an N - 1 past the largest offset is no seek at all.
+    *(("tail", "offset", "-c", "+" + count)
+      for count in ("9223372036854775808", "9223372036854775809", "18446744073709551615")),
     ("od", "shared", "-An", "-N3", "-c"), ("od", "shared", "-N4", "-tx1"),
     ("od", "shared", "-An", "-j2", "-N2", "-c"), ("od", "shared", "-An", "-N3", "-S1"),
     ("od", "sharedpipe", "-An", "-N3", "-c"), ("od", "offset", "-An", "-tx1"),
@@ -19552,7 +19862,7 @@ _TEXT_STREAM_CASES = (
     ("head", "shared", "-c", "3"), ("head", "shared", "-n", "1"),
     ("wc", "offset"), ("wc", "offset", "-c"), ("nl", "pipe"),
 )
-_TEXT_STREAM_TOOLS = ("tac", "cat", "od", "head", "wc", "nl")
+_TEXT_STREAM_TOOLS = ("tac", "tail", "cat", "od", "head", "wc", "nl")
 
 
 def _text_stream_valid(argv):
@@ -19759,6 +20069,11 @@ TEXT_UTILITIES = (
                    *({"argv": argv, "stdin": stdin, "fixture": "text"}
                      for stdin in ("text_base58", "text_base58_garbage", "nul", "empty")
                      for argv in (("--base58",), ("--base58", "-d"), ("--base58", "-di"))),
+                   *({"argv": ("--base58",) + wrap, "stdin": f"text_base58_bytes_{size}_{shape}", "fixture": "text"}
+                     for size in _TEXT_BASE58_SIZES for shape in ("mixed", "ff", "lead")
+                     for wrap in ((), ("-w", "0"))),
+                   *({"argv": ("--base58", "-d"), "stdin": f"text_base58_digits_{count}_{shape}", "fixture": "text"}
+                     for count in _TEXT_BASE58_POWERS for shape in ("top", "power")),
                    ("--base2lsbf", "-di"), ("--base16", "-d", "-i"),
                    #   base64url refuses a 5600-byte block holding base64's
                    #   own + or / before decoding any of it; -i drops them.
@@ -20007,7 +20322,12 @@ TEXT_UTILITIES = (
                    ("--prefix", "-7", "-3"), ("-w", "30", "-72"), ("-w", "32768"), ("-w", "2501"),
                    ("-w", "99999999999999999999999"), ("-g", "80"), ("-w", "10", "-g", "11"), ("-72x",),
                    ("-w", "1k"), ("-w", "0x10"), ("-w", "010"), ("-w", "+5"), ("-w", " 5"), ("--w=3", "-4"),
-                   ("-g", "99999999999999999999999"))),
+                   ("-g", "99999999999999999999999"),
+                   #   A tagged paragraph's other lines can indent less
+                   #   than the prefix already written; GNU writes no
+                   #   space there, where this once wrote without end.
+                   *({"argv": ("-t", "-p", prefix) + width, "stdin": "text_fmt_tagged"}
+                     for prefix in (">", "#", "> ") for width in ((), ("-w", "20"), ("-u", "-w", "12"))))),
     Utility("fold",
             options=(Option("-b"), Option("--bytes"), Option("-c"), Option("--characters"), Option("-s"),
                      Option("--spaces"),
@@ -20116,7 +20436,18 @@ TEXT_UTILITIES = (
                       ("caseleft", "caseright"), ("badrun", "goodrun"), ("goodrun", "badrun"), ("left", "left"),
                       ("dir", "right"), ("wide", "wide"), ("a.txt", "b.txt"), ("-", "-")),
             stdin=("text_join_left", "empty", "nonl", "text", "text_sorted_a", "nul", "edge_65535", "edge_65536", "edge_65537", "text_utf8"), fixture="text",
+            stderr="exact",
             extra=(("--nosuchflag", "left", "right"), ("-Q", "left", "right"),
+                   #   -o as add_field_list reads it: every piece between a
+                   #   comma, blank or tab, an empty one too, refused in
+                   #   decode_field_spec's words and quote()d; auto beside
+                   #   a list; a field past ptrdiff_t is the largest.
+                   *(("-o", spec, "left", "right") for spec in (
+                       "1.1,,2.2", "1.1 x", "00", "1.+2", "1. 2", "1.99999999999999999999", "1.1  2.1",
+                       ",1.1", "1.1,", "2.0", "1.-1", "3", "1'", "auto,1.1", "1.1\t2.2", "1.x'y")),
+                   ("-o", "auto", "-o", "1.2", "left", "right"), ("-o", "1.2", "-o", "auto", "left", "right"),
+                   ("-1", "a'b", "left", "right"), ("-t", "a'b", "left", "right"),
+                   ("-1", "99999999999999999999", "-1", "1", "left", "right"),
                    #   An option the scan refuses is named with its Try line
                    #   and nothing else; only a refused value adds more.
                    ("-/", "left", "right"), ("-1", "0", "-/", "left", "right"),
@@ -20172,7 +20503,15 @@ TEXT_UTILITIES = (
                       ("nonl",), ("empty",), ("blank_runs",), ("big",), ("wide",), ("a.txt", "missing")),
             stdin=("text", "text_sections", "blanks", "blank_runs", "empty", "nonl", "text_nl_flush", "words",
                    "many_lines", "text_fifteen", "text_random_lines", "edge_65535", "edge_65536", "edge_65537", "text_utf8"),
-            fixture="text", extra=(("-Z",), ("--nosuchflag",), ("-w", "3", "-w", "6"), ("-b", "a", "-n", "rn", "nonl"),
+            fixture="text", stderr="exact",
+            extra=(("-Z",), ("--nosuchflag",), ("-w", "3", "-w", "6"), ("-b", "a", "-n", "rn", "nonl"),
+                   #   Numbers are read as xdectoimax reads them: blanks and
+                   #   a sign may lead, and one out of range says ERANGE or,
+                   #   past half an int or strtoimax's reach, EOVERFLOW.
+                   *((letter, value) for letter in ("-v", "-i", "-l", "-w")
+                     for value in ("+5", " 7", " -0", "+ 5", "5 ", "", "-", "2147483648",
+                                   "-1073741825", "9223372036854775808", "-9223372036854775809")),
+                   ("-b", "p["), ("-b", "pa\\{1,2,3"), ("-h", "p\\(a"), ("-b", "pa\\"),
                                    ("-w", "4", "-s", ";", "nonl"), ("-nln", "-w6"), ("-ha", "-fa", "sections"),
                                    ("-p", "-ha", "-fa", "sections"), ("-ba", "-l3"), ("-ba", "-l2"),
                                    #   A delimiter of any length is the whole of it,
@@ -20359,6 +20698,12 @@ TEXT_UTILITIES = (
                    ("-z", "-t", ":", "-k2,2n"), ("-t:", "-k2,2n"), ("-t:", "-k2,2nr", "-s"), ("-t:", "-k2,2n", "-u"),
                    ("-t:", "-k3,3", "-k2,2n"), ("-t:", "-k2.2,2.7n"), ("-k3n", "big"), ("-u", "big"), ("-n", "big"),
                    ("-g",), ("--random-source=a.txt", "-R"),
+                   #   Under -z a record holds newlines: -d keeps them as
+                   #   GNU's field_sep does, and a disorder -c reports ends
+                   #   the record the way it was read.
+                   *({"argv": argv, "stdin": "text_sort_z_newlines"}
+                     for argv in (("-zd",), ("-zdf",), ("-zdr",), ("-z", "-k1d"), ("-zc",), ("-zcd",),
+                                  ("-zcu",), ("-zC",))),
                    #   --debug underlines each key where it was read -- a
                    #   number or a month only as far as it went -- and the
                    #   whole line unless -s or -u stopped short of it.
@@ -20467,7 +20812,7 @@ TEXT_UTILITIES = (
             operands=_TEXT_TR_OPERANDS,
             stdin=("text", "empty", "nonl", "high", "nul", "edge_65537", "spaces", "text_tr", "text_tr_refill",
                    "mixed_case", "words", "controls", "text_tr_ds", "text_bytes", "text_random_lines", "edge_65535", "edge_65536", "text_utf8"),
-            fixture="text", extra=(("--nosuchflag", "a", "b"), ("-Q", "a", "b"), ("-ds", "a", "b"), ("-ds", "aeiou", " "),
+            fixture="text", stderr="exact", extra=(("--nosuchflag", "a", "b"), ("-Q", "a", "b"), ("-ds", "a", "b"), ("-ds", "aeiou", " "),
                                    ("-cs", "a"), ("-d", "-c", "0-9\\n"), ("-c", "o\\n", "X"), ("-cd", "a-z\\n"),
                                    ("-s", "\\000-\\377"), ("-ds", "a", "B"), ("-s", "a", "B"), ("-cs", "a", "B"),
                                    ("-ct", "a-z", "X"), ("-c", "-t", "a-z", "XY"), ("-d", "a", "A"), ("-s", "a", "b", "c"),
@@ -20487,7 +20832,13 @@ TEXT_UTILITIES = (
                                    ("a-z", "[:upper:]"), ("[:upper:]a", "[:lower:]"), ("-c", "a", "[:upper:]"),
                                    ("[:upper:]", "[:upper:]"), ("-t", "[:lower:]x", "[:upper:]"),
                                    ("-c", "[:print:]", "?"), ("-c", "[:alpha:]", "xy"), ("\\400", "x"), ("a\\", "x"),
-                                   ("-d", "[:digit:][=a=]"), ("-ds", "[:space:]", "[:alpha:]"), ("-s", "[a*3]b"))),
+                                   ("-d", "[:digit:][=a=]"), ("-ds", "[:space:]", "[:alpha:]"), ("-s", "[a*3]b"),
+                                   #   A refused class or count is named as
+                                   #   quote() names make_printable_str's
+                                   #   spelling of it, however long it is.
+                                   *((spec, "x") for spec in (
+                                       "[:a'b:]", "[:a\\nb:]", "[:a\\\\b:]", "[:\\001:]", "[a*'3]", "[a*1\\n]",
+                                       "[:" + "x" * 300 + ":]", "[a*" + "9" * 300 + "x]")))),
     Utility("ul",
             options=(Option("-t", ("dumb", "xterm", "vt100", "bogus", "", "ansi"), None), Option("-T", ("xterm",), None),
                      Option("--terminal", ("dumb", "xterm"), True), Option("-i"), Option("--indicated")),
@@ -20509,7 +20860,11 @@ TEXT_UTILITIES = (
                       ("repeats", "unreadable"), ("-", "out"), ("big",), ("wide",), ("keys",)),
             stdin=("repeats", "text", "empty", "nonl", "mixed_case", "nul", "edge_65536", "text_uniq", "unsorted", "blanks",
                    "text_uniq_edge", "text_random_lines", "text_sort_keys", "blank_runs", "edge_65535", "edge_65537", "text_utf8"),
-            fixture="text", extra=(("--nosuchflag",), ("-Q",), ("-cd",), ("-c", "-D"), ("--group", "-c"), ("-f1", "-f2", "keys"),
+            fixture="text", stderr="exact",
+            extra=(("--nosuchflag",), ("-Q",), ("-cd",), ("-c", "-D"), ("--group", "-c"), ("-f1", "-f2", "keys"),
+                                   #   An output that will not open is named
+                                   #   as quotef names it, with the reason.
+                                   ("repeats", ""), ("repeats", "missing/x"), ("repeats", "two words/x"),
                                    ("-z", "-c", "-"), ("-ic",), ("-f2", "keys"), ("-w2", "-s1"), ("-D", "-i"),
                                    #   The obsolete -N skips fields and +N skips
                                    #   bytes: each digit is an option of its own,
@@ -31922,6 +32277,36 @@ def harness_compression(argv):
                                               got.stdout == ref.stdout,
                                               '%d bytes, GNU %d; %s' % (len(got.stdout), len(ref.stdout),
                                                                         got.stderr.decode(errors='replace')))
+                        # -C and -e as xz spells them: each check word, the
+                        # default, and -e at a hash-chain and a binary-tree
+                        # preset. xz decodes ours, and the stream header and
+                        # footer name the check GNU's do. Refused words and a
+                        # missing value say what GNU says, with its status.
+                        exe = str(farms[label] / codec)
+                        body = data_sets[-1][1]
+                        for check_word in (None, 'none', 'crc32', 'crc64', 'sha256'):
+                            for preset in (['-0'], ['-6'], ['-0', '-e'], ['-e6']):
+                                args = preset + (['-C', check_word] if check_word else [])
+                                got = call(runner + [exe, '-c'] + args, body)
+                                ref = call([refs['xz'], '-c', '-T1'] + args, body)
+                                back = call([refs['xz'], '-dc'], got.stdout)
+                                check('%s/xz/check-%s%s' % (label, check_word or 'default', ''.join(preset)),
+                                      got.returncode == ref.returncode == back.returncode == 0 and
+                                      back.stdout == body and got.stdout[6:12] == ref.stdout[6:12] and
+                                      got.stdout[-4:] == ref.stdout[-4:],
+                                      got.stderr.decode(errors='replace') + back.stderr.decode(errors='replace'))
+                        for args in (['-C', 'bad'], ['--check='], ['--check=SHA256'], ['-Ccrc6'],
+                                     ['-C', '-c'], ['-C'], ['--check'], ['--check', 'none', '-e', '-1'],
+                                     ['-Csha256'], ['-9eCcrc32']):
+                            got = call(runner + [exe] + args, b'check words\n')
+                            ref = call([refs['xz']] + args, b'check words\n')
+                            back = call([refs['xz'], '-dc'], got.stdout) if got.returncode == 0 else ref
+                            check('%s/xz/cli%s' % (label, ''.join(args)),
+                                  got.returncode == ref.returncode and
+                                  got.stderr == ref.stderr.replace(refs['xz'].encode(), b'xz') and
+                                  (got.returncode != 0 or back.stdout == b'check words\n'),
+                                  'GNU %d %r, ours %d %r' % (ref.returncode, ref.stderr[:120],
+                                                             got.returncode, got.stderr[:120]))
 
                     # Damage, drawn: a stream the reference made, with a byte
                     # flipped, a run of bytes cut or inserted, or its tail cut,
@@ -33125,6 +33510,28 @@ def harness_compression(argv):
                           back.stdout == text and own.stdout == text,
                           (made.stderr + back.stderr + own.stderr).decode(errors='replace'))
                     sizes[name] = len(made.stdout)
+                # A pool of random bytes and then only slices of it: past the
+                # first block every sequence is a match with no literals, so
+                # the literal-length stream is one symbol block after block
+                # and the second block sends it as a repeat of the first's
+                # RLE cell, which carries no state bits.
+                splicer = random.Random(8878)
+                pool = bytes(splicer.getrandbits(8) for _ in range(1 << 16))
+                spliced = bytearray(pool)
+                while len(spliced) < 1 << 20:
+                    at = splicer.randrange(0, len(pool) - 1024)
+                    spliced += pool[at:at + splicer.randrange(16, 1024)]
+                spliced = bytes(spliced)
+                for argv in (['-1'], ['-3'], ['-6'], ['-9'], ['-13'], ['-16'], ['-19'],
+                             ['--single-thread', '-6']):
+                    name = ' '.join(argv)
+                    made = call(ours_zstd + argv + ['-c'], spliced)
+                    back = call([refs['zstd'], '-dc'], made.stdout)
+                    own = call(ours_zstd + ['-dc'], made.stdout)
+                    check(label + '/zstd/level/spliced ' + name,
+                          made.returncode == back.returncode == own.returncode == 0 and
+                          back.stdout == spliced and own.stdout == spliced,
+                          (made.stderr + back.stderr + own.stderr).decode(errors='replace'))
                 for workers in ('-T1', '-T8', '-T0'):
                     check(label + '/zstd/level/' + workers + ' -9 is the bytes of -9',
                           call(ours_zstd + [workers, '-9', '-c'], text).stdout ==
@@ -33213,7 +33620,8 @@ def harness_https_bench(argv):
     """Loopback HTTPS for wget: a CPU-bound download bench and a framing matrix.
 
     A forked Python TLS 1.3 server (TLS_AES_128_GCM_SHA256, the one suite the
-    client offers, key exchange on --group) serves over the chain shape the
+    client offers, key exchange on --group; --tls12 holds it to TLS 1.2 and
+    ECDHE-ECDSA-AES128-GCM-SHA256) serves over the chain shape the
     Arch mirror sends: a P-256 leaf under two P-384 intermediates under a P-384
     root that is itself in the chain, all generated under WORK/pki and reused
     while they stay valid. Only shells built here by --source trust that root:
@@ -33274,6 +33682,8 @@ def harness_https_bench(argv):
     parser.add_argument('--perf', action='store_true')
     parser.add_argument('--syscalls', action='store_true')
     parser.add_argument('--group', default='prime256v1')
+    parser.add_argument('--tls12', action='store_true',
+                        help='hold the server to TLS 1.2 (ECDHE-ECDSA-AES128-GCM-SHA256)')
     opts = parser.parse_args(argv)
     if opts.runs < 1:
         parser.error('--runs must be positive')
@@ -33380,6 +33790,9 @@ def harness_https_bench(argv):
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_3
+    if opts.tls12:
+        context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_2
+        context.set_ciphers('ECDHE-ECDSA-AES128-GCM-SHA256')
     context.load_cert_chain(pki / 'chain.pem', pki / 'leaf.key')
     context.set_ecdh_curve(opts.group)
 
@@ -36906,7 +37319,8 @@ def harness_tls_chains(argv):
     one fixed chain. This builds the shell trusting a P-384 root it makes
     (TLS_BENCH_ANCHOR), then walks a grammar of chains -- the leaf's key
     (P-256, P-384, RSA-2048) against every mutation below -- serving each
-    from a loopback TLS 1.3 server and asking wget for it, and asks openssl
+    from a loopback TLS 1.3 server and asking wget for it (and again over
+    TLS 1.2, whose verdict has to be the same), and asks openssl
     verify the same question with the same root, intermediates, name and
     purpose. The two verdicts have to agree, except where this tree refuses
     by policy what openssl accepts, which DELIBERATE names with its reason.
@@ -37005,6 +37419,96 @@ def harness_tls_chains(argv):
          {"first_extra": "nameConstraints=critical,permitted;IP:127.0.0.0/255.0.0.0\n"}),
         ("intermediate carries name constraints", 2, good_leaf,
          {"second_extra": "nameConstraints=critical,permitted;IP:127.0.0.0/255.0.0.0\n"}),
+        # RFC 5280 4.2.1.10 name constraints, one key type each (the
+        # evaluation is key-blind): every form the leaf or a lower CA
+        # carries against permitted and excluded subtrees of that form.
+        ("intermediate permits another range", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;IP:10.0.0.0/255.0.0.0\n",
+          "keys": ("P-256",)}),
+        ("intermediate excludes the leaf's address", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,excluded;IP:127.0.0.1/255.255.255.255\n",
+          "keys": ("P-256",)}),
+        ("noncritical name constraints still bind", 2, good_leaf,
+         {"second_extra": "nameConstraints=permitted;IP:10.0.0.0/255.0.0.0\n",
+          "keys": ("P-256",)}),
+        ("an IPv6-only range leaves the IPv4 leaf outside", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;IP:2001:db8::/ffff:ffff::\n",
+          "keys": ("P-256",)}),
+        ("intermediate permits the leaf's DNS name", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.example.com"),
+         {"second_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "keys": ("P-256",)}),
+        ("leaf DNS name outside the permitted names", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.evil.test"),
+         {"second_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "keys": ("P-256",)}),
+        ("leaf DNS name under an excluded name", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:a.evil.test"),
+         {"second_extra": "nameConstraints=critical,excluded;DNS:evil.test\n",
+          "keys": ("P-256",)}),
+        ("leaf wildcard whose star can be an excluded label", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:*.example.com"),
+         {"second_extra": "nameConstraints=critical,excluded;DNS:bad.example.com\n",
+          "keys": ("P-256",)}),
+        ("intermediate permits the leaf's subject", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;dirName:subtree\n"
+                          "[subtree]\nCN=127.0.0.1\n", "keys": ("P-256",)}),
+        ("intermediate permits another subject", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;dirName:subtree\n"
+                          "[subtree]\nCN=127.0.0.2\n", "keys": ("P-256",)}),
+        ("intermediate excludes the leaf's subject", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,excluded;dirName:subtree\n"
+                          "[subtree]\nCN=127.0.0.1\n", "keys": ("P-256",)}),
+        ("a permitted subject compared case-folded", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;dirName:subtree\n"
+                          "[subtree]\nO=EXAMPLE  ORG\n",
+          "leaf_subject": "/O=Example Org/CN=127.0.0.1", "keys": ("P-256",)}),
+        ("leaf mailbox on a permitted host", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,email:a@example.com"),
+         {"second_extra": "nameConstraints=critical,permitted;email:example.com\n",
+          "keys": ("P-256",)}),
+        ("leaf mailbox outside the permitted hosts", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,email:a@evil.test"),
+         {"second_extra": "nameConstraints=critical,permitted;email:example.com\n",
+          "keys": ("P-256",)}),
+        ("leaf URI under URI constraints", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,URI:https://a.example.com/"),
+         {"second_extra": "nameConstraints=critical,permitted;URI:.example.com\n",
+          "keys": ("P-256",)}),
+        ("first intermediate's range leaves the leaf outside", 2, good_leaf,
+         {"first_extra": "nameConstraints=critical,permitted;IP:10.0.0.0/255.0.0.0\n",
+          "keys": ("P-256",)}),
+        ("first intermediate excludes the second's subject", 2, good_leaf,
+         {"first_extra": "nameConstraints=critical,excluded;dirName:subtree\n"
+                         "[subtree]\nCN=tls chains second\n", "keys": ("P-256",)}),
+        # rsa8192.badssl.com's shape, the largest key browsers take: the
+        # leaf and the intermediate that signs it both RSA-8192.
+        ("RSA-8192 leaf under an RSA-8192 intermediate", 2, good_leaf,
+         {"keys": ("RSA-8192",), "second_key": "RSA-8192"}),
+        # A left-out intermediate named by the leaf's caIssuers location and
+        # served over plain HTTP from loopback, which the harness build may
+        # reach (TLS_BENCH_ANCHOR). openssl verify fetches nothing, so it is
+        # handed what a browser would have fetched.
+        ("a left-out intermediate fetched from the leaf's caIssuers", 2, good_leaf,
+         {"skip_second": True, "aia": "http://127.0.0.1:%d/second.der",
+          "openssl_untrusted": ["second"], "keys": ("P-256",)}),
+        ("caIssuers answers 404", 2, good_leaf,
+         {"skip_second": True, "aia": "http://127.0.0.1:%d/absent.der",
+          "keys": ("P-256",)}),
+        ("caIssuers serves PEM, not DER", 2, good_leaf,
+         {"skip_second": True, "aia": "http://127.0.0.1:%d/second.pem",
+          "keys": ("P-256",)}),
+        ("caIssuers is https", 2, good_leaf,
+         {"skip_second": True, "aia": "https://127.0.0.1:%d/second.der",
+          "keys": ("P-256",)}),
+        ("caIssuers serves another CA's certificate", 2, good_leaf,
+         {"skip_second": True, "aia": "http://127.0.0.1:%d/first.der",
+          "keys": ("P-256",)}),
+        ("two intermediates left out, each named by caIssuers", 2, good_leaf,
+         {"skip_second": True, "skip_first": True,
+          "aia": "http://127.0.0.1:%d/second.der",
+          "second_extra": "authorityInfoAccess=caIssuers;URI:http://127.0.0.1:%d/first.der\n",
+          "openssl_untrusted": ["second", "first"], "keys": ("P-256",)}),
         ("path length exceeded", 2, good_leaf, {"first_pathlen": 0}),
         ("leaf for clients only", 2, good_leaf.replace("serverAuth", "clientAuth"), {}),
         ("leaf may only sign certificates", 2, good_leaf.replace("digitalSignature", "keyCertSign"), {}),
@@ -37059,13 +37563,20 @@ def harness_tls_chains(argv):
     )
     keys = (("P-256", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"]),
             ("P-384", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]),
-            ("RSA-2048", ["-newkey", "rsa:2048"]))
+            ("RSA-2048", ["-newkey", "rsa:2048"]),
+            ("RSA-8192", ["-newkey", "rsa:8192"]))
+    #   Every row runs under these unless it names its own; an 8,192-bit key
+    #   takes seconds to make, so only the row about it pays for one.
+    every_key = ("P-256", "P-384", "RSA-2048")
     #       This tree's policy where it is stricter than openssl, on purpose.
     DELIBERATE = {
         "no subject alternative name": "a name is taken from subjectAltName only, never the CN",
         "leaf is a CA": "a certificate that says CA:TRUE is not an end entity (tls_leaf_authorized)",
-        "intermediate carries name constraints": "name constraints fail closed until implemented",
-        "first intermediate carries name constraints": "name constraints fail closed until implemented",
+        "leaf wildcard whose star can be an excluded label":
+            "a wildcard falls in an excluded subtree its star can name, as Chrome reads it",
+        "leaf URI under URI constraints": "a name form under constraints it cannot evaluate fails closed",
+        "two intermediates left out, each named by caIssuers":
+            "a caIssuers fetch is one level: a fetched certificate's own issuer is not fetched",
         "duplicate subjectAltName leaf extension": "RFC 5280 one-instance rule; OpenSSL may still accept",
         "leaf duplicate unknown extension": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
         "leaf nonadjacent duplicate unknown": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
@@ -37089,6 +37600,11 @@ def harness_tls_chains(argv):
         "intermediates served out of order", "root served before the intermediates",
         "an unrelated root served too", "a SHA-1 legacy root served too",
         "an impostor intermediate served first",
+        "first intermediate carries name constraints", "intermediate carries name constraints",
+        "intermediate permits the leaf's DNS name", "intermediate permits the leaf's subject",
+        "a permitted subject compared case-folded", "leaf mailbox on a permitted host",
+        "RSA-8192 leaf under an RSA-8192 intermediate",
+        "a left-out intermediate fetched from the leaf's caIssuers",
     }
 
     checks = Checks()
@@ -37253,8 +37769,23 @@ def harness_tls_chains(argv):
             return 1
         (work / "wget").symlink_to(work / "shell")
 
+        #   caIssuers locations are served from the work directory.
+        import functools
+        import http.server
+
+        class Quiet(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *arguments):
+                pass
+
+        files = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), functools.partial(Quiet, directory=str(work)))
+        threading.Thread(target=files.serve_forever, daemon=True).start()
+        files_port = files.server_address[1]
+
         for mutation, depth, leaf_ext, change in mutations:
             for key_name, key in keys:
+                if key_name not in change.get("keys", every_key):
+                    continue
                 top = "stranger" if change.get("stranger") else "root"
                 chain = []
                 issuer = top
@@ -37281,8 +37812,10 @@ def harness_tls_chains(argv):
                         "basicConstraints=critical,%s\nkeyUsage=critical,%s\n" %
                         (change.get("second_ca", "CA:TRUE,pathlen:0"),
                          change.get("second_key_usage", "keyCertSign,cRLSign")))
-                    second_extensions += change.get("second_extra", "")
-                    issue("second", p384, "/CN=tls chains second", "first",
+                    second_extensions += change.get("second_extra", "").replace(
+                        "%d", str(files_port))
+                    issue("second", dict(keys).get(change.get("second_key"), p384),
+                          "/CN=tls chains second", "first",
                           second_extensions,
                           change.get("second_dates", (-1, 90)))
                     if change.get("der_rewrite_oids_second") or change.get("der_dup_unknown_second"):
@@ -37293,13 +37826,20 @@ def harness_tls_chains(argv):
                     if change.get("impostor"):
                         issue("impostor", p384, "/CN=tls chains second", "first",
                               second_extensions)
-                issue("leaf", key, "/CN=127.0.0.1", issuer, leaf_ext,
+                if change.get("aia"):
+                    leaf_ext += "authorityInfoAccess=caIssuers;URI:%s\n" % (
+                        change["aia"] % files_port)
+                    for name in chain:
+                        openssl("x509", "-in", name + ".pem", "-outform", "DER",
+                                "-out", name + ".der")
+                issue("leaf", key, change.get("leaf_subject", "/CN=127.0.0.1"), issuer, leaf_ext,
                       change.get("leaf_dates", (-1, 90)),
                       change.get("leaf_digest", "sha384"))
                 if change.get("der_rewrite_oids") or change.get("der_dup_unknown"):
                     mutate_cert_der("leaf", issuer, change,
                                     "der_rewrite_oids", "der_dup_unknown")
-                served = [c for c in chain if not (change.get("skip_second") and c == "second")]
+                served = [c for c in chain if not (change.get("skip_second") and c == "second")
+                          and not (change.get("skip_first") and c == "first")]
                 if change.get("serve_root"):
                     served.append(top)
                 if change.get("reverse"):
@@ -37313,10 +37853,11 @@ def harness_tls_chains(argv):
                 (work / "chain.pem").write_text("".join(
                     (work / (n + ".pem")).read_text() for n in ["leaf"] + served))
                 (work / "untrusted.pem").write_text("".join(
-                    (work / (n + ".pem")).read_text() for n in served) or "")
+                    (work / (n + ".pem")).read_text()
+                    for n in served + change.get("openssl_untrusted", [])) or "")
                 verify = ["openssl", "verify", "-CAfile", "root.pem", "-purpose", "sslserver",
                           "-verify_ip", "127.0.0.1"]
-                if served:
+                if served or change.get("openssl_untrusted"):
                     verify += ["-untrusted", "untrusted.pem"]
                 openssl_ok = subprocess.run(verify + ["leaf.pem"], cwd=work,
                                             capture_output=True).returncode == 0
@@ -37348,37 +37889,54 @@ def harness_tls_chains(argv):
                                "accepts" if ours_ok else "refuses"))
                     continue
                 context.set_ecdh_curve("prime256v1")
-                listener = socket.socket()
-                listener.bind(("127.0.0.1", 0))
-                listener.listen(1)
-                listener.settimeout(20)
 
-                def serve():
-                    try:
-                        raw, _ = listener.accept()
-                        raw.settimeout(20)
-                        with context.wrap_socket(raw, server_side=True) as tls:
-                            head = b""
-                            while b"\r\n\r\n" not in head:
-                                got = tls.recv(4096)
-                                if not got:
-                                    return
-                                head += got
-                            tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n"
-                                        b"Connection: close\r\n\r\ntrusted")
-                    except (OSError, ssl.SSLError):
-                        pass
+                def fetch(context):
+                    listener = socket.socket()
+                    listener.bind(("127.0.0.1", 0))
+                    listener.listen(1)
+                    listener.settimeout(20)
 
-                server = threading.Thread(target=serve, daemon=True)
-                server.start()
-                fetched = subprocess.run(
-                    [str(work / "wget"), "-q", "-O", "-", "https://127.0.0.1:%d/" %
-                     listener.getsockname()[1]], capture_output=True, timeout=30,
-                    env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
-                server.join(25)
-                listener.close()
+                    def serve():
+                        try:
+                            raw, _ = listener.accept()
+                            raw.settimeout(20)
+                            with context.wrap_socket(raw, server_side=True) as tls:
+                                head = b""
+                                while b"\r\n\r\n" not in head:
+                                    got = tls.recv(4096)
+                                    if not got:
+                                        return
+                                    head += got
+                                tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n"
+                                            b"Connection: close\r\n\r\ntrusted")
+                        except (OSError, ssl.SSLError):
+                            pass
+
+                    server = threading.Thread(target=serve, daemon=True)
+                    server.start()
+                    fetched = subprocess.run(
+                        [str(work / "wget"), "-q", "-O", "-", "https://127.0.0.1:%d/" %
+                         listener.getsockname()[1]], capture_output=True, timeout=30,
+                        env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+                    server.join(25)
+                    listener.close()
+                    return fetched
+
+                fetched = fetch(context)
+                # The same chain over TLS 1.2, whose Certificate is relaid
+                # for the one chain check: the verdict may not move.
+                context12 = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context12.minimum_version = context12.maximum_version = \
+                    ssl.TLSVersion.TLSv1_2
+                context12.set_ciphers("ECDHE-ECDSA-AES128-GCM-SHA256:"
+                                      "ECDHE-RSA-AES128-GCM-SHA256")
+                context12.load_cert_chain(work / "chain.pem", work / "leaf.key")
+                fetched12 = fetch(context12)
                 ours_ok = fetched.returncode == 0 and fetched.stdout.startswith(b"truste")
                 name = "%s with a %s leaf" % (mutation, key_name)
+                checks(ours_ok == (fetched12.returncode == 0 and
+                                   fetched12.stdout.startswith(b"truste")),
+                       "%s: wget's TLS 1.2 verdict differs from its TLS 1.3 one" % name)
                 expected = mutation in MUST_ACCEPT
                 checks(openssl_ok == expected or mutation in DELIBERATE,
                        "%s: the OpenSSL oracle %s a chain the standards matrix says to %s" % (
@@ -37397,6 +37955,7 @@ def harness_tls_chains(argv):
                            name, "accepts" if openssl_ok else "refuses",
                            "accepts" if ours_ok else "refuses",
                            fetched.stderr.decode(errors="replace").strip()[:200]))
+        files.shutdown()
     return checks.verdict("tls chains", "tls-chains")
 
 
@@ -37408,11 +37967,21 @@ def harness_tls_peer(argv):
     middle: a TLS 1.3 server written here over the cryptography package
     (X25519, P-256 or P-384 shares, TLS_AES_128_GCM_SHA256, a P-256 leaf
     that signs its CertificateVerify) runs a grammar of flights and
-    post-handshake streams
-    -- tickets whole, split and at close, KeyUpdate, compatibility and
+    post-handshake streams -- HelloRetryRequests for a group, a cookie or
+    both, a second retry, a retry for a group already shared or never
+    offered, and a ServerHello that changes the retry's suite or group
+    -- tickets whole, split and at close, KeyUpdate asked and answered
+    (the answer opened under the client's old key, a second one under its
+    new key), a bad KeyUpdate byte or one not ending its record, compatibility and
     protected CCS, empty, padded and all-padding records, the 2^14 content
     edge, bad tags, alerts, truncation with and without close_notify, data
     after close_notify, unasked EncryptedExtensions and a CertificateRequest.
+    TLS 1.2 scripts (a server over the same package: ECDHE-ECDSA, AES-128-GCM,
+    the extended master secret) add their flights, the downgrade sentinel,
+    a retry before TLS 1.2, the other version's messages and extensions, a
+    Finished without change_cipher_spec, HelloRequest, KeyUpdate and an
+    unasked ticket; then real OpenSSL servers held to TLS 1.2 by s_server
+    serve wget over each leaf kind, scheme and group.
     Each script is served once to the shell's wget (--no-check-certificate,
     so the leaf is still the CertificateVerify key) and once to Python's ssl
     client, which is OpenSSL; both are asked whether the body arrived whole
@@ -37524,6 +38093,7 @@ def harness_tls_peer(argv):
         return ("inner", data + b"\x17" + b"\0" * padding)
 
     close = ("inner", b"\1\0\x15")
+    RETRY_RANDOM = sha256(b"HelloRetryRequest")
     CURVES = {None: (0x1d, None), "prime256v1": (0x17, ec.SECP256R1),
               "secp384r1": (0x18, ec.SECP384R1)}
     SCRIPTS = [
@@ -37567,14 +38137,47 @@ def harness_tls_peer(argv):
          [("inner", key_update(0) + b"\x16"), ("rekey", None),
           app(length_head + body), close]),
         ("KeyUpdate, update requested", {},
-         [("inner", key_update(1) + b"\x16"), ("rekey", None),
+         [("inner", key_update(1) + b"\x16"), ("rekey", None), ("answer", None),
           app(length_head + body), close]),
+        ("KeyUpdate asked twice", {},
+         [("inner", key_update(1) + b"\x16"), ("rekey", None), ("answer", None),
+          ("inner", key_update(1) + b"\x16"), ("rekey", None), ("answer", None),
+          app(length_head + body), close]),
+        ("KeyUpdate asking with a byte past update_requested", {},
+         [("inner", key_update(2) + b"\x16"), ("rekey", None),
+          app(length_head + body), close]),
+        ("KeyUpdate not ending its record", {},
+         [("inner", key_update(0) + ticket + b"\x16"), ("rekey", None),
+          app(length_head + body), close]),
+        ("KeyUpdate under the old key after a rekey", {},
+         [("inner", key_update(0) + b"\x16"), app(length_head + body), close]),
         ("compatibility CCS after ServerHello", {"ccs": True},
          [app(length_head + body), close]),
         ("a protected change_cipher_spec in the flight", {"protected_ccs": True},
          [app(length_head + body), close]),
         ("key share on P-256", {"curve": "prime256v1"}, [app(length_head + body), close]),
         ("key share on P-384", {"curve": "secp384r1"}, [app(length_head + body), close]),
+        ("HelloRetryRequest with a cookie", {"retry": {"cookie": b"c" * 40}},
+         [app(length_head + body), close]),
+        ("HelloRetryRequest to P-256 with a cookie",
+         {"curve": "prime256v1", "retry": {"cookie": os.urandom(300)}},
+         [app(length_head + body), close]),
+        ("HelloRetryRequest with a 3000-byte cookie", {"retry": {"cookie": b"k" * 3000}},
+         [app(length_head + body), close]),
+        ("compatibility CCS after HelloRetryRequest",
+         {"curve": "prime256v1", "retry": {"ccs": True}}, [app(length_head + body), close]),
+        ("a second HelloRetryRequest", {"retry": {"cookie": b"c" * 8, "twice": True}},
+         [app(length_head + body), close]),
+        ("HelloRetryRequest naming the group already shared", {"retry": {"group": 0x1d}},
+         [app(length_head + body), close]),
+        ("HelloRetryRequest naming an unoffered group", {"retry": {"group": 0x15}},
+         [app(length_head + body), close]),
+        ("ServerHello after HelloRetryRequest changes the suite",
+         {"curve": "prime256v1", "suite": b"\x13\2"}, [app(length_head + body), close]),
+        ("ServerHello after HelloRetryRequest changes the group",
+         {"curve": "prime256v1", "answer": 0x18}, [app(length_head + body), close]),
+        ("plaintext bytes after ServerHello in its record",
+         {"after_hello": message(8, b"\0\0")}, [app(length_head + body), close]),
         ("flight one message a record", {"split": True},
          [app(length_head + body), close]),
         ("EncryptedExtensions answering supported_groups",
@@ -37585,10 +38188,52 @@ def harness_tls_peer(argv):
          [app(length_head + body), close]),
         ("CertificateRequest in the flight", {"request": True},
          [app(length_head + body), close]),
+        ("CertificateRequest with a context", {"request": True,
+                                               "request_body": b"\2ab\0\x08\0\x0d\0\4\0\2\4\3"},
+         [app(length_head + body), close]),
+        ("CertificateRequest after the Certificate", {"request_late": True},
+         [app(length_head + body), close]),
+        ("two CertificateRequests", {"request": True, "request_late": True},
+         [app(length_head + body), close]),
         ("an empty handshake record in the flight", {"empty": True},
          [app(length_head + body), close]),
         ("a compatibility CCS inside a split flight message", {"ccs_inside": True},
          [app(length_head + body), close]),
+        ("TLS 1.2", {"tls12": True}, [app(length_head + body), close]),
+        ("TLS 1.2 close-delimited", {"tls12": True}, [app(close_head + body), close]),
+        ("TLS 1.2 flight one message a record", {"tls12": True, "split": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 CertificateRequest", {"tls12": True, "request": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 empty records", {"tls12": True},
+         [app(b""), app(length_head + body), close]),
+        ("TLS 1.2 without the extended master secret", {"tls12": True, "no_ems": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 ServerHello dropping the extended master secret it keys with",
+         {"tls12": True, "ems_unsent": True}, [app(length_head + body), close]),
+        ("TLS 1.2 with the downgrade sentinel", {"tls12": True, "sentinel": b"DOWNGRD\1"},
+         [app(length_head + body), close]),
+        ("TLS 1.2 after a HelloRetryRequest", {"tls12": True, "retry_first": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 ServerHello with a key share", {"tls12": True,
+                                                  "hello_extra": b"\0\x33\0\4\0\x1d\0\0"},
+         [app(length_head + body), close]),
+        ("TLS 1.2 flight with EncryptedExtensions", {"tls12": True,
+                                                    "extra": [message(8, b"\0\0")]},
+         [app(length_head + body), close]),
+        ("TLS 1.2 flight with a CertificateVerify", {"tls12": True,
+                                                    "extra": [message(15, b"\4\3\0\0")]},
+         [app(length_head + body), close]),
+        ("TLS 1.2 Finished without change_cipher_spec", {"tls12": True, "no_ccs": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 wrong server Finished", {"tls12": True, "bad_finished": True},
+         [app(length_head + body), close]),
+        ("TLS 1.2 KeyUpdate", {"tls12": True},
+         [("inner", key_update(0) + b"\x16"), app(length_head + body), close]),
+        ("TLS 1.2 HelloRequest", {"tls12": True},
+         [("inner", message(0, b"") + b"\x16"), app(length_head + body), close]),
+        ("TLS 1.2 NewSessionTicket never asked for", {"tls12": True},
+         [("inner", ticket + b"\x16"), app(length_head + body), close]),
         ("user_canceled then close_notify", {},
          [app(close_head + body), ("inner", b"\1\x5a\x15"), close]),
         ("a warning-level unknown alert", {},
@@ -37601,13 +38246,24 @@ def harness_tls_peer(argv):
         "two tickets in one record", "empty records before the response",
         "padded records", "a record of exactly 2^14 content",
         "KeyUpdate, no update requested", "KeyUpdate, update requested",
+        "KeyUpdate asked twice",
         "compatibility CCS after ServerHello", "flight one message a record",
         "key share on P-256", "key share on P-384",
+        "HelloRetryRequest with a cookie", "HelloRetryRequest to P-256 with a cookie",
+        "HelloRetryRequest with a 3000-byte cookie",
+        "TLS 1.2", "TLS 1.2 close-delimited", "TLS 1.2 flight one message a record",
+        "TLS 1.2 CertificateRequest", "TLS 1.2 empty records",
+        # RFC 7627 5.4: a client MAY abort without it; see DELIBERATE.
+        "TLS 1.2 without the extended master secret",
+        "compatibility CCS after HelloRetryRequest",
         "EncryptedExtensions answering supported_groups",
         "CertificateRequest in the flight",
     }
     # Where OpenSSL 3.6's client accepts what the RFC says to refuse.
     OPENSSL_LENIENT = {
+        "TLS 1.2 HelloRequest":
+            "RFC 5246 7.4.1.1 lets a client ignore a HelloRequest or answer "
+            "it; OpenSSL renegotiates",
         "close_notify inside a split ticket":
             "5.1 forbids interleaving another record type within a split "
             "handshake message; OpenSSL drops the partial ticket at close",
@@ -37626,14 +38282,133 @@ def harness_tls_peer(argv):
             "Finished (D.4)",
     }
     DELIBERATE = {
-        "KeyUpdate, no update requested":
-            "KeyUpdate is refused by design: this client keeps no traffic "
-            "secret past the handshake to rekey from",
-        "KeyUpdate, update requested": "as above",
-        "CertificateRequest in the flight":
-            "the flight's one legal shape has no CertificateRequest; this "
-            "client has no certificate to decline with",
+        "TLS 1.2 without the extended master secret":
+            "RFC 7627 lets a client go on without it; this one requires it, "
+            "so a TLS 1.2 master secret is always bound to its handshake",
+        "TLS 1.2 HelloRequest":
+            "renegotiation is refused, so a HelloRequest ends the connection",
     }
+
+    def prf(secret, label, seed, size):
+        """TLS 1.2's P_SHA256 (RFC 5246 5)."""
+        out, block = b"", label + seed
+        while len(out) < size:
+            block = hmac_module.new(secret, block, hashlib.sha256).digest()
+            out += hmac_module.new(secret, block + label + seed, hashlib.sha256).digest()
+        return out[:size]
+
+    class Direction12:
+        """One side's TLS 1.2 AES-128-GCM keys (RFC 5288): the salt and an
+        explicit nonce that is the sequence number."""
+
+        def __init__(self, key, salt):
+            self.aead, self.salt, self.seq = AESGCM(key), salt, 0
+
+        def seal(self, kind, content):
+            explicit = self.seq.to_bytes(8, "big")
+            aad = explicit + bytes([kind, 3, 3]) + len(content).to_bytes(2, "big")
+            self.seq += 1
+            return record(kind, explicit + self.aead.encrypt(self.salt + explicit, content, aad))
+
+        def open(self, header, payload):
+            aad = (self.seq.to_bytes(8, "big") + header[:3] +
+                   (len(payload) - 24).to_bytes(2, "big"))
+            self.seq += 1
+            return self.aead.decrypt(self.salt + payload[:8], payload[8:], aad)
+
+    def run12(sock, flight, steps):
+        """TLS 1.2 ECDHE-ECDSA-AES128-GCM-SHA256 with the extended master
+        secret, and the knobs that break it: a retry first, the downgrade
+        sentinel, no extended master secret, extra ServerHello extensions,
+        a message of another version in the flight, a CertificateRequest,
+        no change_cipher_spec before Finished, a wrong Finished. Steps
+        take the TLS 1.3 inner form -- content, type byte, padding -- and
+        seal the content under that record type."""
+        hello, session, shares, kinds = read_hello(sock)
+        transcript = b""
+        if flight.get("retry_first"):
+            # The keys follow the transcript a client that let TLS 1.2
+            # answer its retry would keep, so only the refusal refuses.
+            request = retry_request(session, b"\x13\1", 0x17, None)
+            sock.sendall(record(22, request))
+            transcript = message(254, sha256(hello)) + request
+            hello, session, shares, kinds = read_hello(sock)
+        client_random = hello[6:38]
+        server_random = os.urandom(24) + flight.get("sentinel", os.urandom(8))
+        extensions = (b"" if flight.get("no_ems") or flight.get("ems_unsent")
+                      else b"\0\x17\0\0") + \
+            b"\xff\1\0\1\0" + flight.get("hello_extra", b"")
+        mine = X25519PrivateKey.generate()
+        params = b"\3\0\x1d\x20" + mine.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        signature = leaf_key.sign(client_random + server_random + params,
+                                  ec.ECDSA(hashes.SHA256()))
+        messages = [message(2, b"\3\3" + server_random + b"\x20" + os.urandom(32) +
+                            b"\xc0\x2b\0" + len(extensions).to_bytes(2, "big") + extensions),
+                    message(11, (len(leaf) + 3).to_bytes(3, "big") +
+                            len(leaf).to_bytes(3, "big") + leaf),
+                    message(12, params + b"\4\3" + len(signature).to_bytes(2, "big") +
+                            signature)]
+        if flight.get("request"):
+            messages.append(message(13, b"\1\x40\0\2\4\3\0\0"))
+        messages[1:1] = flight.get("extra", [])
+        messages.append(message(14, b""))
+        transcript += hello + b"".join(messages)
+        if flight.get("split"):
+            for part in messages:
+                sock.sendall(record(22, part))
+        else:
+            sock.sendall(record(22, b"".join(messages)))
+        point = None
+        while point is None:
+            header, sent = read_record(sock)
+            if header[0] != 22:
+                raise ValueError("client sent record type %d before its key" % header[0])
+            while sent:
+                kind, size = sent[0], int.from_bytes(sent[1:4], "big")
+                part, sent = sent[:4 + size], sent[4 + size:]
+                if kind == 16:
+                    point = part[5:]
+                elif not (kind == 11 and flight.get("request") and part[4:] == b"\0\0\0"):
+                    raise ValueError("client sent handshake type %d" % kind)
+                transcript += part
+        if read_record(sock)[0][0] != 20:
+            raise ValueError("no change_cipher_spec from the client")
+        premaster = mine.exchange(X25519PublicKey.from_public_bytes(point))
+        if flight.get("no_ems"):
+            master = prf(premaster, b"master secret", client_random + server_random, 48)
+        else:
+            master = prf(premaster, b"extended master secret", sha256(transcript), 48)
+        keys = prf(master, b"key expansion", server_random + client_random, 40)
+        client, server = Direction12(keys[:16], keys[32:36]), Direction12(keys[16:32], keys[36:40])
+        finished = client.open(*read_record(sock))
+        if finished != message(20, prf(master, b"client finished", sha256(transcript), 12)):
+            raise ValueError("the client's Finished does not verify")
+        transcript += finished
+        verify = prf(master, b"server finished", sha256(transcript), 12)
+        finished = message(20, bytes(12) if flight.get("bad_finished") else verify)
+        if flight.get("no_ccs"):
+            sock.sendall(record(22, finished))
+        else:
+            sock.sendall(record(20, b"\1") + server.seal(22, finished))
+        request = b""
+        while b"\r\n\r\n" not in request:
+            header, payload = read_record(sock)
+            if header[0] != 23:
+                raise ValueError("client sent record type %d" % header[0])
+            request += client.open(header, payload)
+        for what, value in steps:
+            if what == "inner":
+                inner = value.rstrip(b"\0")
+                sock.sendall(server.seal(inner[-1], inner[:-1]))
+            elif what == "plain":
+                sock.sendall(value)
+        sock.shutdown(socket.SHUT_WR)
+        try:
+            while sock.recv(4096):
+                pass
+        except OSError:
+            pass
 
     def serve(listener, flight, steps, outcome):
         try:
@@ -37643,7 +38418,7 @@ def harness_tls_peer(argv):
         raw.settimeout(20)
         try:
             with raw:
-                run(raw, flight, steps)
+                (run12 if flight.get("tls12") else run)(raw, flight, steps)
                 outcome.append("served")
         except Exception as error:  # the client hung up or refused
             outcome.append("server: %r" % error)
@@ -37661,8 +38436,12 @@ def harness_tls_peer(argv):
         header = read_exact(sock, 5)
         return header, read_exact(sock, int.from_bytes(header[3:5], "big"))
 
-    def run(sock, flight, steps):
+    def read_hello(sock):
+        """The next ClientHello, past any compatibility CCS: the message,
+        its session id, its shares by group and its extensions by kind."""
         header, hello = read_record(sock)
+        while header[0] == 20:
+            header, hello = read_record(sock)
         if header[0] != 22 or hello[0] != 1:
             raise ValueError("no ClientHello")
         at = 4 + 2 + 32
@@ -37672,40 +38451,79 @@ def harness_tls_peer(argv):
         at += 1 + hello[at]
         end = at + 2 + int.from_bytes(hello[at:at + 2], "big")
         at += 2
-        peer = None
-        chosen = CURVES[flight.get("curve")][0]
+        shares, kinds = {}, {}
         while at < end:
             kind = int.from_bytes(hello[at:at + 2], "big")
             size = int.from_bytes(hello[at + 2:at + 4], "big")
             data = hello[at + 4:at + 4 + size]
+            kinds[kind] = data
             at += 4 + size
             if kind == 0x33:
                 share = 2
                 while share < len(data):
                     group = int.from_bytes(data[share:share + 2], "big")
                     width = int.from_bytes(data[share + 2:share + 4], "big")
-                    if group == chosen:
-                        peer = data[share + 4:share + 4 + width]
+                    shares[group] = data[share + 4:share + 4 + width]
                     share += 4 + width
-        if chosen == 0x1d:
+        return hello, session, shares, kinds
+
+    def retry_request(session, suite, group, cookie):
+        extensions = b"\0\x2b\0\2\3\4"
+        if group is not None:
+            extensions += b"\0\x33\0\2" + group.to_bytes(2, "big")
+        if cookie is not None:
+            extensions += b"\0\x2c" + (len(cookie) + 2).to_bytes(2, "big") + \
+                len(cookie).to_bytes(2, "big") + cookie
+        return message(2, b"\3\3" + RETRY_RANDOM + bytes([len(session)]) + session +
+                       suite + b"\0" + len(extensions).to_bytes(2, "big") + extensions)
+
+    def run(sock, flight, steps):
+        hello, session, shares, kinds = read_hello(sock)
+        chosen = CURVES[flight.get("curve")][0]
+        transcript = hello
+        # A HelloRetryRequest when the chosen group has no share or the
+        # script asks for one: the group it names (the chosen one unless the
+        # script overrides it), a cookie the second hello has to echo.
+        retry = flight.get("retry", {})
+        rounds = 2 if retry.get("twice") else 1
+        while rounds and (chosen not in shares or retry):
+            rounds -= 1
+            cookie = retry.get("cookie")
+            group = retry.get("group", chosen if chosen not in shares else None)
+            request = retry_request(session, b"\x13\1", group, cookie)
+            transcript = message(254, sha256(transcript)) + request
+            sock.sendall(record(22, request))
+            if retry.get("ccs"):
+                sock.sendall(record(20, b"\1"))
+            hello, session, shares, kinds = read_hello(sock)
+            if cookie is not None and kinds.get(0x2c) != len(cookie).to_bytes(2, "big") + cookie:
+                raise ValueError("the second ClientHello lost the cookie")
+            transcript += hello
+            if not retry.get("twice"):
+                break
+        # The answering share is on the chosen group unless the script
+        # names another; one the client never offered agrees on nothing.
+        answer = flight.get("answer", chosen)
+        peer = shares.get(answer)
+        if answer == 0x1d:
             mine = X25519PrivateKey.generate()
-            shared = mine.exchange(X25519PublicKey.from_public_bytes(peer))
+            shared = mine.exchange(X25519PublicKey.from_public_bytes(peer)) if peer else bytes(32)
             public = mine.public_key().public_bytes(serialization.Encoding.Raw,
                                                     serialization.PublicFormat.Raw)
         else:
-            curve = CURVES[flight.get("curve")][1]()
+            curve = {0x17: ec.SECP256R1, 0x18: ec.SECP384R1}[answer]()
             mine = ec.generate_private_key(curve)
-            shared = mine.exchange(ec.ECDH(),
-                                   ec.EllipticCurvePublicKey.from_encoded_point(curve, peer))
+            shared = mine.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(
+                curve, peer)) if peer else bytes(32)
             public = mine.public_key().public_bytes(serialization.Encoding.X962,
                                                     serialization.PublicFormat.UncompressedPoint)
-        share = chosen.to_bytes(2, "big") + len(public).to_bytes(2, "big") + public
+        share = answer.to_bytes(2, "big") + len(public).to_bytes(2, "big") + public
         extensions = (b"\0\x2b\0\2\3\4\0\x33" + len(share).to_bytes(2, "big") + share)
         server_hello = message(2, b"\3\3" + os.urandom(32) + bytes([len(session)]) +
-                               session + b"\x13\1\0" +
+                               session + flight.get("suite", b"\x13\1") + b"\0" +
                                len(extensions).to_bytes(2, "big") + extensions)
-        transcript = hello + server_hello
-        sock.sendall(record(22, server_hello))
+        transcript += server_hello
+        sock.sendall(record(22, server_hello + flight.get("after_hello", b"")))
         if flight.get("ccs"):
             sock.sendall(record(20, b"\1"))
         early = extract(b"\0" * 32, b"\0" * 32)
@@ -37714,9 +38532,12 @@ def harness_tls_peer(argv):
         server_hs = Direction(expand_label(secret, b"s hs traffic", sha256(transcript), 32))
         answers = flight.get("ee", b"")
         messages = [message(8, len(answers).to_bytes(2, "big") + answers)]
+        request = message(13, flight.get("request_body", b"\0\0\x08\0\x0d\0\4\0\2\4\3"))
         if flight.get("request"):
-            messages.append(message(13, b"\0\0\x08\0\x0d\0\4\0\2\4\3"))
+            messages.append(request)
         messages.append(message(11, certificate))
+        if flight.get("request_late"):
+            messages.append(request)
         for part in messages:
             transcript += part
         signature = leaf_key.sign(b" " * 64 + b"TLS 1.3, server CertificateVerify\0" +
@@ -37753,8 +38574,24 @@ def harness_tls_peer(argv):
             if header[0] != 23:
                 raise ValueError("client sent record type %d" % header[0])
             inner = reading.open(header, payload).rstrip(b"\0")
-            if inner[-1] == 22 and inner[0] == 20:
-                reading = client_ap
+            if inner[-1] == 22 and reading is client_hs:
+                # The client's flight: an empty Certificate when one was
+                # requested, then a Finished over everything before it.
+                sent = inner[:-1]
+                while sent:
+                    kind, size = sent[0], int.from_bytes(sent[1:4], "big")
+                    part, sent = sent[:4 + size], sent[4 + size:]
+                    if kind == 11 and flight.get("request") and \
+                            part == message(11, b"\0\0\0\0"):
+                        transcript += part
+                    elif kind == 20:
+                        key = expand_label(client_hs.secret, b"finished", b"", 32)
+                        if part[4:] != hmac_module.new(key, sha256(transcript),
+                                                       hashlib.sha256).digest():
+                            raise ValueError("the client's Finished does not verify")
+                        reading = client_ap
+                    else:
+                        raise ValueError("client sent handshake type %d" % kind)
             elif inner[-1] == 23:
                 request += inner[:-1]
             elif inner[-1] == 21:
@@ -37768,6 +38605,15 @@ def harness_tls_peer(argv):
                 sock.sendall(value)
             elif what == "rekey":
                 server_ap = server_ap.update()
+            elif what == "answer" and not flight.get("answer_deferred"):
+                # The client's own KeyUpdate, under its current key; what
+                # it writes next is under the one after. OpenSSL defers its
+                # answer to its next write (RFC 8446 4.6.3 allows either),
+                # and this client never writes again, so only wget's is read.
+                header, payload = read_record(sock)
+                if client_ap.open(header, payload).rstrip(b"\0") != key_update(0) + b"\x16":
+                    raise ValueError("the client did not answer the KeyUpdate")
+                client_ap = client_ap.update()
         sock.shutdown(socket.SHUT_WR)
         try:
             while sock.recv(4096):
@@ -37785,13 +38631,15 @@ def harness_tls_peer(argv):
                 return len(rest) >= int(value)
         return None
 
-    def openssl_client(port, expected, curve):
+    def openssl_client(port, expected, tls12):
+        # OpenSSL's default groups share X25519 (and a hybrid) and list
+        # P-256 and P-384 without shares, so it meets the same retries. It
+        # offers TLS 1.2 only against the TLS 1.2 scripts.
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        if curve:
-            context.set_ecdh_curve(curve)
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-        context.minimum_version = ssl.TLSVersion.TLSv1_3
+        context.minimum_version = (ssl.TLSVersion.TLSv1_2 if tls12
+                                   else ssl.TLSVersion.TLSv1_3)
         received = b""
         clean = False
         try:
@@ -37843,7 +38691,8 @@ def harness_tls_peer(argv):
                 port = listener.getsockname()[1]
                 outcome = []
                 server = threading.Thread(target=serve,
-                                          args=(listener, flight, steps, outcome),
+                                          args=(listener, dict(flight, answer_deferred=(
+                                              client == "openssl")), steps, outcome),
                                           daemon=True)
                 server.start()
                 if client == "wget":
@@ -37855,7 +38704,7 @@ def harness_tls_peer(argv):
                                         fetched.stdout == flight.get("body", body))
                 else:
                     verdicts[client] = bool(openssl_client(port, flight.get("body", body),
-                                                           flight.get("curve")))
+                                                           flight.get("tls12")))
                 server.join(25)
                 listener.close()
             expected = script in MUST_ACCEPT
@@ -37881,6 +38730,65 @@ def harness_tls_peer(argv):
                    "%s: wget %s what RFC 8446 says to %s" % (
                        script, "accepts" if ours else "refuses",
                        "accept" if expected else "refuse"))
+
+        # Real OpenSSL servers held to TLS 1.2: each leaf kind, signature
+        # scheme and key exchange group, a certificate request, and one
+        # without the extended master secret, which this client refuses by
+        # design (RFC 7627 lets it).
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        rsa_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        rsa_leaf = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+                    .public_key(rsa_key.public_key()).serial_number(8)
+                    .not_valid_before(now - datetime.timedelta(days=1))
+                    .not_valid_after(now + datetime.timedelta(days=30))
+                    .sign(rsa_key, hashes.SHA256()))
+        for kind, key, certificate_der in (("ec", leaf_key, leaf), ("rsa", rsa_key, rsa_leaf)):
+            (work / (kind + ".key")).write_bytes(key.private_bytes(
+                serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption()))
+            loaded = (certificate_der if kind == "rsa"
+                      else x509.load_der_x509_certificate(certificate_der))
+            (work / (kind + ".pem")).write_bytes(loaded.public_bytes(serialization.Encoding.PEM))
+        SERVERS12 = [
+            ("ECDSA P-256 leaf", "ec", [], True),
+            ("ECDSA P-256 leaf signing with SHA-384", "ec", ["-sigalgs", "ECDSA+SHA384"], True),
+            ("RSA leaf, RSA-PSS", "rsa", ["-sigalgs", "rsa_pss_rsae_sha256"], True),
+            ("RSA leaf, PKCS#1 v1.5 SHA-256", "rsa", ["-sigalgs", "RSA+SHA256"], True),
+            ("RSA leaf, PKCS#1 v1.5 SHA-384", "rsa", ["-sigalgs", "RSA+SHA384"], True),
+            ("P-256 key exchange", "ec", ["-groups", "P-256"], True),
+            ("P-384 key exchange", "ec", ["-groups", "P-384"], True),
+            ("a certificate requested", "ec", ["-verify", "1"], True),
+            ("no extended master secret", "ec", ["-no_ems"], False),
+        ]
+        if not shutil.which("openssl"):
+            print("tls peer: OpenSSL TLS 1.2 servers NOT RUN -- no openssl")
+            SERVERS12 = []
+        for label, kind, extra, expect in SERVERS12:
+            probe = socket.socket()
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+            probe.close()
+            server = subprocess.Popen(
+                ["openssl", "s_server", "-accept", "127.0.0.1:%d" % port, "-cert",
+                 str(work / (kind + ".pem")), "-key", str(work / (kind + ".key")),
+                 "-tls1_2", "-www", "-naccept", "1", *extra],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL)
+            ready = b""
+            for _ in range(8):
+                ready = server.stdout.readline()
+                if not ready or b"ACCEPT" in ready:
+                    break
+            fetched = subprocess.run(
+                [str(work / "wget"), "-q", "--no-check-certificate", "-O", "-",
+                 "https://127.0.0.1:%d/" % port], capture_output=True, timeout=40,
+                env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+            server.kill()
+            server.wait()
+            ours = (b"ACCEPT" in ready and fetched.returncode == 0 and
+                    b"TLSv1.2" in fetched.stdout)
+            checks(ours == expect, "OpenSSL TLS 1.2 server, %s: wget %s it" % (
+                label, "accepts" if ours else "refuses"))
     return checks.verdict("tls peer", "tls-peer")
 
 
@@ -38402,20 +39310,17 @@ static bool network_deadline_begin(network_deadline *d, positive s, positive n)
         abort();
         return false;
 }
-#define MSG_DONTWAIT 0x40
-#define NETWORK_INTERRUPTED (-4)
-#define NETWORK_TRY_AGAIN (-11)
-static bipolar socket_receive(b32 h, p8 *into, positive room, int flags,
-                              void *from, positive size)
-{
-        (void)h; (void)into; (void)room; (void)flags; (void)from; (void)size;
-        abort();
-        return -1;
-}
 static bipolar network_stream_read_some_until(bipolar h, p8 *into, positive room,
                                               const network_deadline *d)
 {
         (void)h; (void)into; (void)room; (void)d;
+        abort();
+        return -1;
+}
+static bipolar network_stream_read_some_for(bipolar h, p8 *into, positive room,
+                                            positive s, positive ns)
+{
+        (void)h; (void)into; (void)room; (void)s; (void)ns;
         abort();
         return -1;
 }
@@ -39131,17 +40036,12 @@ static bipolar network_stream_read_some_until(bipolar h, p8 *into, positive room
         return (bipolar)take;
 }
 
-/* A plaintext body read tries the socket without waiting first; now and
-   then nothing is queued, and it has to take the deadline path. */
-#define MSG_DONTWAIT 0x40
-#define NETWORK_INTERRUPTED (-4)
-#define NETWORK_TRY_AGAIN (-11)
-static bipolar socket_receive(b32 h, p8 *into, positive room, int flags,
-                              void *from, positive size)
+/* A plaintext body read waits a length of time rather than to an instant;
+   what it takes is the same segment. */
+static bipolar network_stream_read_some_for(bipolar h, p8 *into, positive room,
+                                            positive s, positive ns)
 {
-        (void)flags; (void)from; (void)size;
-        if (!fuzz_next(4))
-                return fuzz_next(2) ? NETWORK_TRY_AGAIN : NETWORK_INTERRUPTED;
+        (void)s; (void)ns;
         return network_stream_read_some_until(h, into, room, NULL);
 }
 
@@ -39388,7 +40288,7 @@ static void fuzz_run(const p8 *data, positive size, int lane)
         fuzz_requests = 0;
         fuzz_sink_used = 0;
         status = fetch ? http_get((string_address)start, &store, &code)
-                       : http_fetch_to((string_address)start, 7, true, &code);
+                       : http_fetch_to((string_address)start, 7, true, &code, null);
         if (fuzz_requests != fuzz_opened)
                 fuzz_die("a connection was opened with no request written on it");
 
@@ -39615,8 +40515,9 @@ def harness_http_urls(argv):
     host, port and origin-form target, and every URL urlsplit reads that way
     must be accepted. A resolved Location must name what urljoin names, less
     the fragment. DELIBERATE lists where this client refuses what urllib
-    takes; references with dot segments are not generated, since this client
-    sends them to the server as written and urljoin removes them.
+    takes. Paths and references carry dot segments too: the client resolves
+    them before it asks, as GNU wget does (http_path_simplify, %2e spellings
+    included), and the oracle by RFC 3986 5.2.4 over urllib's answer.
 
         python3 test/differential.py --harness http_urls
     """
@@ -39663,7 +40564,7 @@ static void answer(const p8 *url)
         p16 port = 0;
         bool tls = false;
         if (http_split_into((string_address)url, host, sizeof host, &port, &path, &tls) ||
-            http_origin_form(path, target, sizeof target)) {
+            (http_path_simplify((p8 *)path), http_origin_form(path, target, sizeof target))) {
                 printf("BAD\n");
                 return;
         }
@@ -39715,7 +40616,8 @@ int main(void)
     ports = ["", "", "", ":80", ":443", ":8080", ":65535", ":08", ":1"] * 2 + [
         ":0", ":65536", ":", ":+1", ":1x", ":99999999999999999999"]
     paths = ["", "/", "/a/b", "/a%20b", "/a;b,c", "/\u00e9", "/a:b@c", "/%0d%0a"] * 2 + [
-        "/a b", "/a\\b", "/a\tb", "/" + "p" * 2100]
+        "/a b", "/a\\b", "/a\tb", "/" + "p" * 2100, "/a/./b", "/a/../b", "/a/b/..",
+        "/..", "/./", "/a/%2e%2E/b", "/a/.%2e", "/a/...", "/a//../b", "/%2e/x"]
     queries = ["", "", "?", "?x=1", "?a/b?c", "?#"]
     fragments = ["", "", "#", "#f", "#a?b/c"]
 
@@ -39729,7 +40631,11 @@ int main(void)
     urls = sorted(urls)
     bases = ["http://example.com/dir/old", "https://example.com:8443/a/b?q=1",
              "http://h:80/", "https://h/x?y#z", "http://127.0.0.1:8080/d/e/f"]
-    segments = ["", "p", "p/q", "a%20b", "x;y", "\u00e9"]
+    segments = ["", "p", "p/q", "a%20b", "x;y", "\u00e9", "../x", "./y", "..", ".",
+                "a/../../b", "%2e%2e/z", "..%2f", "../../../up",
+                #   RFC 3986 5.4.2's abnormal examples.
+                "./../g", "./g/.", "g/./h", "g/../h", "g;x=1/./y", "g;x=1/../y",
+                "g.", ".g", "g..", "..g"]
     references = set()
     for _ in range(1500):
         shape = random_urls.randrange(7)
@@ -39745,6 +40651,25 @@ int main(void)
         return text.encode("utf-8").hex() or "-"
 
     scheme_shape = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):")
+
+    def dot_free(target):
+        """RFC 3986 5.2.4 over the path in front of the query, a segment
+        of dots spelled with %2e too."""
+        path, mark, query = target.partition("?")
+        if not path.startswith("/"):
+            return target
+        kept = []
+        segments = path.split("/")[1:]
+        for at, segment in enumerate(segments):
+            plain = re.sub("%2e", ".", segment, flags=re.I)
+            if plain in (".", ".."):
+                if plain == ".." and kept:
+                    kept.pop()
+                if at == len(segments) - 1:
+                    kept.append("")
+                continue
+            kept.append(segment)
+        return "/" + "/".join(kept) + mark + query
 
     def subset(url):
         """What this client must answer for url: a (tls, host, port, target)
@@ -39766,7 +40691,7 @@ int main(void)
             return "refuse"
         tls = scheme.group(1).lower() == "https"
         target = (parts.path or "/") + ("?" + parts.query if "?" in url.split("#", 1)[0] else "")
-        return (tls, host, int(port) if colon else 443 if tls else 80, target)
+        return (tls, host, int(port) if colon else 443 if tls else 80, dot_free(target))
 
     def same(got, want):
         """urljoin drops an empty query that RFC 3986 keeps; nothing else
@@ -40027,6 +40952,47 @@ def tls_seed_server_hello(group=0x1d, extra=b""):
                             len(extensions).to_bytes(2, "big") + extensions)
 
 
+def tls_seed_retry(group=None, cookie=None, suite=b"\x13\1"):
+    """A HelloRetryRequest record asking for group and echoing cookie."""
+    extensions = b"\0\x2b\0\2\3\4"
+    if group is not None:
+        extensions += b"\0\x33\0\2" + group.to_bytes(2, "big")
+    if cookie is not None:
+        extensions += (b"\0\x2c" + (len(cookie) + 2).to_bytes(2, "big") +
+                       len(cookie).to_bytes(2, "big") + cookie)
+    return tls_seed_record(22, tls_seed_message(
+        2, b"\3\3" + hashlib.sha256(b"HelloRetryRequest").digest() + b"\0" + suite +
+        b"\0" + len(extensions).to_bytes(2, "big") + extensions))
+
+
+def tls_seed_hello12(suite=0xc02b, extensions=b"\0\x17\0\0\xff\1\0\1\0", random=b"\x42" * 32):
+    """A TLS 1.2 ServerHello: the suite, a session id, extensions."""
+    return tls_seed_message(2, b"\3\3" + random + b"\x20" + b"\x5e" * 32 +
+                            suite.to_bytes(2, "big") + b"\0" +
+                            len(extensions).to_bytes(2, "big") + extensions)
+
+
+def tls_seed_flight12(leaf=0, group=0x1d, scheme=b"\4\3", request=False):
+    """Certificate (one entry whose last byte picks the stubbed leaf),
+    ServerKeyExchange on group, an optional CertificateRequest, and
+    ServerHelloDone."""
+    size = {0x1d: 32, 0x17: 65, 0x18: 97}[group]
+    point = (b"\4" if size > 32 else b"\x09") + b"\x09" * (size - 1)
+    signature = b"\x30\x06\1\1\1\1\1\1"
+    exchange = (b"\3" + group.to_bytes(2, "big") + bytes([size]) + point + scheme +
+                len(signature).to_bytes(2, "big") + signature)
+    return (tls_seed_message(11, b"\0\0\x05\0\0\2\x30" + bytes([leaf])) +
+            tls_seed_message(12, exchange) +
+            (tls_seed_message(13, b"\1\x40\0\2\4\3\0\0") if request else b"") +
+            tls_seed_message(14, b""))
+
+
+def tls_seed_sealed12(kind, content, tag=0):
+    """A TLS 1.2 record under the identity AEAD: explicit nonce, content,
+    the tag whose first byte opens it when zero."""
+    return tls_seed_record(kind, b"\0" * 8 + content + bytes([tag]) + b"\0" * 15)
+
+
 def tls_seed_flight(leaf=0, scheme=b"\4\3", signature=b"\x30\x06\1\1\1\1\1\1"):
     """EncryptedExtensions, Certificate (its last byte picks the stubbed
     leaf), CertificateVerify and a Finished of the stub MAC's zeros."""
@@ -40054,10 +41020,24 @@ def tls_seed_connections():
     control = b"\0\0\0\1"
     seeds = {
         "conn_x25519.bin": (control, hello, ccs, flight, data, close),
-        "conn_p256.bin": (control, tls_seed_record(22, tls_seed_server_hello(0x17)),
-                          flight, data, close),
-        "conn_p384_leaf.bin": (b"\0\0\1\2", tls_seed_record(22, tls_seed_server_hello(0x18)),
+        "conn_p256.bin": (control, tls_seed_retry(0x17),
+                          tls_seed_record(22, tls_seed_server_hello(0x17)), flight, data, close),
+        "conn_p384_leaf.bin": (b"\0\0\1\2", tls_seed_retry(0x18),
+                               tls_seed_record(22, tls_seed_server_hello(0x18)),
                                tls_seed_sealed(22, tls_seed_flight(1, b"\5\3")), data, close),
+        "conn_retry_cookie.bin": (control, tls_seed_retry(None, b"c" * 40), hello, flight,
+                                  data, close),
+        "conn_retry_group_cookie_ccs.bin": (control, tls_seed_retry(0x17, b"k" * 3000), ccs,
+                                            tls_seed_record(22, tls_seed_server_hello(0x17)),
+                                            flight, data, close),
+        "conn_retry_twice.bin": (control, tls_seed_retry(None, b"c"), tls_seed_retry(0x17),
+                                 tls_seed_record(22, tls_seed_server_hello(0x17)), flight, close),
+        "conn_retry_same_group.bin": (control, tls_seed_retry(0x1d), hello, flight, close),
+        "conn_retry_group_changed.bin": (control, tls_seed_retry(0x17),
+                                         tls_seed_record(22, tls_seed_server_hello(0x18)),
+                                         flight, close),
+        "conn_unasked_p256.bin": (control, tls_seed_record(22, tls_seed_server_hello(0x17)),
+                                  flight, close),
         "conn_rsa_leaf.bin": (b"\2\0\1\3", hello,
                               tls_seed_sealed(22, tls_seed_flight(2, b"\x08\4", b"\1" * 256)),
                               data, close),
@@ -40089,6 +41069,16 @@ def tls_seed_connections():
             tls_seed_sealed(22, tls_seed_ticket()[:9]), close),
         "conn_key_update.bin": (control,) + base + (
             tls_seed_sealed(22, tls_seed_message(24, b"\1")), data, close),
+        "conn_key_update_quiet.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\0")), data,
+            tls_seed_sealed(22, tls_seed_message(24, b"\1")), data, close),
+        "conn_key_update_bad_byte.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\2")), data, close),
+        "conn_key_update_split.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\1")[:2]),
+            tls_seed_sealed(22, tls_seed_message(24, b"\1")[2:]), data, close),
+        "conn_key_update_then_ticket.bin": (control,) + base + (
+            tls_seed_sealed(22, tls_seed_message(24, b"\0") + tls_seed_ticket()), data, close),
         "conn_empty_app.bin": (control,) + base + (tls_seed_sealed(23, b""),) * 8 + (data, close),
         "conn_empty_handshake_in_flight.bin": (control, hello, tls_seed_sealed(22, b""),
                                                flight, close),
@@ -40123,6 +41113,58 @@ def tls_seed_connections():
         "conn_ee_unrequested.bin": (control, hello, tls_seed_sealed(22, (
             tls_seed_message(8, b"\0\4\0\x10\0\0") + tls_seed_flight()[6:])), close),
     }
+    # TLS 1.2: the flight after its ServerHello in plaintext, the server's
+    # change_cipher_spec, then a Finished of the stub PRF's zeros.
+    hello12 = tls_seed_record(22, tls_seed_hello12() + tls_seed_flight12())
+    finished12 = tls_seed_sealed12(22, tls_seed_message(20, b"\0" * 12))
+    data12 = tls_seed_sealed12(23, b"GET-response " * 40)
+    close12 = tls_seed_sealed12(21, b"\1\0")
+    done12 = (hello12, ccs, finished12)
+    seeds.update({
+        "conn12_ecdsa.bin": (control,) + done12 + (data12, close12),
+        "conn12_rsa_pss.bin": (b"\2\0\1\5", tls_seed_record(22, tls_seed_hello12(0xc02f) +
+                                                             tls_seed_flight12(2, 0x1d, b"\x08\4")),
+                               ccs, finished12, data12, close12),
+        "conn12_rsa_pkcs1_p256.bin": (control, tls_seed_record(22, tls_seed_hello12(0xc02f) +
+                                                                tls_seed_flight12(2, 0x17, b"\4\1")),
+                                      ccs, finished12, data12, close12),
+        "conn12_p384_request.bin": (control, tls_seed_record(22, tls_seed_hello12() +
+                                                              tls_seed_flight12(1, 0x18, b"\5\3", True)),
+                                    ccs, finished12, data12, close12),
+        "conn12_split_records.bin": (control, tls_seed_record(22, tls_seed_hello12()),
+                                     tls_seed_record(22, tls_seed_flight12()[:7]),
+                                     tls_seed_record(22, tls_seed_flight12()[7:]),
+                                     ccs, finished12, data12, close12),
+        "conn12_empty_app.bin": (control,) + done12 + (tls_seed_sealed12(23, b""), data12, close12),
+        "conn12_sentinel.bin": (control, tls_seed_record(22, tls_seed_hello12(
+            random=b"\x42" * 24 + b"DOWNGRD\1") + tls_seed_flight12()), ccs, finished12),
+        "conn12_no_ems.bin": (control, tls_seed_record(22, tls_seed_hello12(
+            extensions=b"\xff\1\0\1\0") + tls_seed_flight12()), ccs, finished12),
+        "conn12_after_retry.bin": (control, tls_seed_retry(0x17), hello12, ccs, finished12),
+        "conn12_encrypted_extensions.bin": (control, tls_seed_record(22, tls_seed_hello12() +
+                                                                      tls_seed_message(8, b"\0\0") +
+                                                                      tls_seed_flight12()),
+                                            ccs, finished12),
+        "conn12_ccs_before_done.bin": (control, tls_seed_record(22, tls_seed_hello12()), ccs,
+                                       tls_seed_record(22, tls_seed_flight12()), finished12),
+        "conn12_bytes_after_done.bin": (control, tls_seed_record(22, tls_seed_hello12() +
+                                                                  tls_seed_flight12() + b"\x14"),
+                                        ccs, finished12),
+        "conn12_finished_unprotected.bin": (control, hello12,
+                                            tls_seed_record(22, tls_seed_message(20, b"\0" * 12))),
+        "conn12_two_ccs.bin": (control,) + done12[:2] + (ccs, finished12),
+        "conn12_hello_request.bin": (control,) + done12 + (
+            tls_seed_sealed12(22, tls_seed_message(0, b"")), data12),
+        "conn12_key_update.bin": (control,) + done12 + (
+            tls_seed_sealed12(22, tls_seed_message(24, b"\0")), data12),
+        "conn12_ticket.bin": (control,) + done12 + (tls_seed_sealed12(22, tls_seed_ticket()), data12),
+        "conn12_bad_tag.bin": (control,) + done12 + (tls_seed_sealed12(23, b"x", tag=1),),
+        "conn12_suite_leaf_mismatch.bin": (control, tls_seed_record(22, tls_seed_hello12(0xc02f) +
+                                                                     tls_seed_flight12(0)),
+                                           ccs, finished12),
+        "conn12_read_limit.bin": (b"\4\0\0\5",) + done12 + (data12,) * 4 + (close12,),
+        "conn12_write_limit.bin": (b"\x08\0\0\6",) + done12 + (data12, close12),
+    })
     return {name: tls_seed_connection(parts[0], *parts[1:]) for name, parts in seeds.items()}
 
 
@@ -40131,7 +41173,8 @@ def tls_fuzz_seeds(corpus):
     hostile NC/EKU/SAN/ceiling/alg-id/BMPString/chain shapes built here. The
     tls_der magic first bytes pick a lane: C1 list body, C2 EKU value, C3 SAN,
     C4 basicConstraints, C5 keyUsage, C6 cert+host, C7 extensions+host, C8
-    ECDSA signature DER, C9 AlgorithmIdentifier."""
+    ECDSA signature DER, C9 AlgorithmIdentifier, CC NameConstraints and a
+    name."""
     if corpus == "waterlink":
         return waterlink_fuzz_seeds()
     if corpus == "dhcp":
@@ -40147,11 +41190,36 @@ def tls_fuzz_seeds(corpus):
     seeds = {name + ".bin": bytes.fromhex(hx)
              for name, hx in TLS_FUZZ_SEED_HEX[corpus].items()}
     if corpus == "tls_hs":
+        # The framing fixtures are handshake bytes, some as chunks (a
+        # 16-bit length before each); they become the records of a
+        # connection: a ServerHello's own, or the flight after an X25519
+        # ServerHello, sealed.
+        hello = tls_seed_record(22, tls_seed_server_hello())
+        connections = {}
+        for name, raw in seeds.items():
+            if raw[:1] in (b"\xf1", b"\xf2"):
+                raw = raw[1:]
+            pieces = [raw]
+            if "chunks" in name:
+                pieces, at = [], 0
+                while at + 2 <= len(raw):
+                    size = int.from_bytes(raw[at:at + 2], "big")
+                    pieces.append(raw[at + 2:at + 2 + size])
+                    at += 2 + size
+            if name.startswith("sh_"):
+                records = tuple(tls_seed_record(22, piece) for piece in pieces)
+            else:
+                records = (hello,) + tuple(tls_seed_sealed(22, piece) for piece in pieces)
+            connections[name] = tls_seed_connection(b"\0\0\0\1", *records)
         fill = b"\x0b\x00\x40\x00" + b"\xcd" * 16380
-        seeds["hs_max_fill.bin"] = fill
-        seeds["hs_max_plus_chunks.bin"] = b"\x40\x00" + fill + b"\x00\x01\x00"
-        seeds.update(tls_seed_connections())
-        return seeds
+        connections["hs_max_fill.bin"] = tls_seed_connection(
+            b"\0\0\0\1", hello, tls_seed_sealed(22, fill[:16000]),
+            tls_seed_sealed(22, fill[16000:]))
+        connections["hs_max_plus.bin"] = tls_seed_connection(
+            b"\0\0\0\1", hello, tls_seed_sealed(22, fill[:16000]),
+            tls_seed_sealed(22, fill[16000:] + b"\0"))
+        connections.update(tls_seed_connections())
+        return connections
     minimal = seeds["minimal_cert.bin"]
     for count, name in ((1, "cert_list_1"), (7, "cert_list_7"), (8, "cert_list_8"),
                         (9, "cert_list_9_leftover"), (2, "cert_list_two_minimal")):
@@ -40168,6 +41236,33 @@ def tls_fuzz_seeds(corpus):
     nc_excl = tls_seed_tlv(0x30, tls_seed_tlv(0xa1, tls_seed_tlv(0x30, b"\x82\x07bad.com")))
     nc_both = tls_seed_tlv(0x30, tls_seed_tlv(0xa0, tls_seed_tlv(0x30, b"\x82\x03a.b")),
                            tls_seed_tlv(0xa1, tls_seed_tlv(0x30, b"\x82\x03x.y")))
+    #   Magic CC: form, constraint length, NameConstraints, then a name.
+    def nc_seed(form, constraints, name):
+        return b"\xcc" + bytes([form, len(constraints)]) + constraints + name
+    us = tls_seed_tlv(0x31, tls_seed_tlv(0x30, b"\x06\x03\x55\x04\x06",
+                                         tls_seed_tlv(0x13, b"US")))
+    org = tls_seed_tlv(0x31, tls_seed_tlv(0x30, b"\x06\x03\x55\x04\x0a",
+                                          tls_seed_tlv(0x0c, b" Ex  ample ")))
+    nc_dir = tls_seed_tlv(0x30, tls_seed_tlv(0xa1, tls_seed_tlv(0x30, tls_seed_tlv(
+        0xa4, tls_seed_tlv(0x30, us, org)))))
+    nc_ip = tls_seed_tlv(0x30, tls_seed_tlv(0xa0, tls_seed_tlv(
+        0x30, tls_seed_tlv(0x87, b"\x0a\0\0\0\xff\0\0\0")), tls_seed_tlv(
+        0x30, tls_seed_tlv(0x87, b"\x20\x01\x0d\xb8" + b"\0" * 12 +
+                           b"\xff" * 4 + b"\0" * 12))))
+    nc_mail = tls_seed_tlv(0x30, tls_seed_tlv(0xa0, tls_seed_tlv(
+        0x30, tls_seed_tlv(0x81, b".example.com")), tls_seed_tlv(
+        0x30, tls_seed_tlv(0x86, b"x"))))
+    nc_seeds = {
+        "magic_nc_dns_wildcard.bin": nc_seed(0x82, nc_excl, b"*.com"),
+        "magic_nc_dns_under.bin": nc_seed(0x82, nc_both, b"q.a.b."),
+        "magic_nc_ip_v6.bin": nc_seed(0x87, nc_ip, b"\x20\x01\x0d\xb8" + b"\0" * 11 + b"\x01"),
+        "magic_nc_ip_v4.bin": nc_seed(0x87, nc_ip, b"\x0a\x01\x02\x03"),
+        "magic_nc_dir_folded.bin": nc_seed(0xa4, nc_dir, tls_seed_tlv(0x30, us, tls_seed_tlv(
+            0x31, tls_seed_tlv(0x30, b"\x06\x03\x55\x04\x0a", tls_seed_tlv(0x13, b"EX AMPLE"))))),
+        "magic_nc_mail.bin": nc_seed(0x81, nc_mail, b"a@b.example.com"),
+        "magic_nc_san_list.bin": nc_seed(0x82, nc_mail, tls_seed_tlv(
+            0x30, b"\x81\x03a@b", b"\x86\x01x", b"\x82\x03a.b")),
+    }
     #   The wildcard and URI names claim fewer bytes than follow them (11 of
     #   13, 15 of 17); they are kept as they were seeded.
     san_dns = tls_seed_tlv(0x30, b"\x82\x0bexample.com")
@@ -40195,6 +41290,17 @@ def tls_fuzz_seeds(corpus):
         "ext_nc_excluded_dns.bin": one(nc, nc_excl),
         "ext_nc_both.bin": one(nc, nc_both),
         "ext_nc_critical.bin": one(nc, nc_perm, True),
+        "ext_nc_ip.bin": one(nc, nc_ip),
+        "ext_aia_ca_issuers.bin": one(b"\x2b\x06\x01\x05\x05\x07\x01\x01", tls_seed_tlv(
+            0x30, tls_seed_tlv(0x30, b"\x06\x08\x2b\x06\x01\x05\x05\x07\x30\x01",
+                               b"\x86\x0ehttp://ocsp.x/"),
+            tls_seed_tlv(0x30, b"\x06\x08\x2b\x06\x01\x05\x05\x07\x30\x02",
+                         b"\x86\x10http://ca.x/i.der"))),
+        "ext_aia_critical.bin": one(b"\x2b\x06\x01\x05\x05\x07\x01\x01", tls_seed_tlv(
+            0x30, tls_seed_tlv(0x30, b"\x06\x08\x2b\x06\x01\x05\x05\x07\x30\x02",
+                               b"\x86\x0bhttp://x/i")), True),
+        "ext_nc_directory.bin": one(nc, nc_dir, True),
+        **nc_seeds,
         "ext_san_dns.bin": one(san, san_dns),
         "ext_san_wildcard.bin": one(san, tls_seed_tlv(0x30, b"\x82\x0b*.example.com")),
         "ext_san_ipv4.bin": one(san, tls_seed_tlv(0x30, b"\x87\x04\xc0\x00\x02\x01")),
@@ -40212,6 +41318,9 @@ def tls_fuzz_seeds(corpus):
         "magic_eku_many.bin": b"\xc2" + eku_many,
         "magic_san_dns.bin": b"\xc3" + san_dns,
         "magic_san_multi.bin": b"\xc3" + san_multi,
+        "magic_san_ipv6.bin": b"\xc3" + tls_seed_tlv(
+            0x30, b"\x82\x10www.example.com.", b"\x87\x10\x20\x01\x0d\xb8" +
+            b"\0" * 8 + b"\xc0\0\x02\x01"),
         "magic_bc_ca.bin": b"\xc4" + tls_seed_tlv(0x30, b"\x01\x01\xff\x02\x01\x00"),
         "magic_ku_ds.bin": b"\xc5\x03\x02\x07\x80",
         "magic_cert_host.bin": b"\xc6" + minimal,
@@ -40232,6 +41341,7 @@ def tls_fuzz_seeds(corpus):
         "verify_chain_shuffled.bin": b"\xcb\x00\x04\x02\x01\x03",
         "verify_chain_repeats.bin": b"\xcb\x00\x01\x01\x02\x01\x02\x03\x03\x04",
         "verify_chain_overwrite.bin": b"\xca\x01\x00\xff\x00",
+        "verify_chain_short_of_one.bin": b"\xcb\x00\x02",
     })
     return seeds
 
@@ -40327,7 +41437,15 @@ def tls_der_fuzz_lift_parts(net):
     """
     oids = tls_fuzz_sec(net, "static const p8 tls_oid_ec[7] = {",
                         "typedef struct\n{\n        bipolar handle;")
-    oids = oids[:oids.rfind("};\n") + 3]
+    #   net.c includes suffixes.inc beside anchors.inc; the lift has no
+    #   include path, so the table comes in as text, and so do the RSA
+    #   limits tls_cert is sized by (the verify lift's crypto slice repeats
+    #   them word for word, which C allows).
+    limits = re.search(r"#define CRYPTO_RSA_LIMBS .*\n#define CRYPTO_RSA_BYTES .*\n#define CRYPTO_RSA_EXPONENT_BITS .*\n", net)
+    if not limits:
+        raise ValueError("CRYPTO_RSA_LIMBS / CRYPTO_RSA_BYTES")
+    oids = limits.group(0) + (HARNESS_ROOT / "src/net/suffixes.inc").read_text() + \
+        oids[:oids.rfind("};\n") + 3]
     parsers = tls_fuzz_sec(
         net,
         "static COLD bipolar tls_asn1_length(p8 address_to bytes, positive size,",
@@ -40380,6 +41498,7 @@ typedef const char *const_string;
 #define end ((p8)0)
 #define positive_max (~(positive)0)
 #define min(a, b) ((a) < (b) ? (a) : (b))
+#define array_count(a) (sizeof(a) / sizeof((a)[0]))
 #define memory_compare memcmp
 #define memory_copy memcpy
 #define memory_fill(at, v, n) memset((at), (int)(v), (n))
@@ -40883,7 +42002,11 @@ def tls_verify_ecdsa_chain():
     """C arrays of a fresh chain, leaf first, whose links are ECDSA P-256
     under SHA-256, P-384 under SHA-384, P-384 under SHA-512 and RSA-2048
     under SHA-512: the kinds WR2 under GTS Root R1 (RSA SHA-256) leaves.
-    The leaf names example.com and 192.0.2.1; the rest say CA:TRUE."""
+    The leaf names example.com and 192.0.2.1, and link 1 as its caIssuers
+    at http://example.com/link1.der; the rest say CA:TRUE. Link 2
+    permits example.com and 192.0.2.0/24, and a sixth certificate is link 2
+    again -- its name and key, under link 3 -- excluding example.com, the
+    constrained impostor a path must pass over."""
     import datetime
     import ipaddress
     from cryptography import x509
@@ -40903,6 +42026,11 @@ def tls_verify_ecdsa_chain():
             x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "link %d" % signer)])).public_key(
             key.public_key()).serial_number(at + 1).not_valid_before(
             datetime.datetime(2020, 1, 1)).not_valid_after(datetime.datetime(2040, 1, 1))
+        if at == 2:
+            signed = signed.add_extension(x509.NameConstraints(
+                permitted_subtrees=[x509.DNSName("example.com"), x509.IPAddress(
+                    ipaddress.ip_network("192.0.2.0/24"))], excluded_subtrees=None),
+                critical=True)
         if at:
             signed = signed.add_extension(x509.BasicConstraints(ca=True, path_length=None),
                                           critical=True)
@@ -40910,12 +42038,27 @@ def tls_verify_ecdsa_chain():
             signed = signed.add_extension(x509.SubjectAlternativeName([
                 x509.DNSName("example.com"),
                 x509.IPAddress(ipaddress.ip_address("192.0.2.1"))]), critical=False)
+            signed = signed.add_extension(x509.AuthorityInformationAccess([
+                x509.AccessDescription(x509.oid.AuthorityInformationAccessOID.CA_ISSUERS,
+                                       x509.UniformResourceIdentifier(
+                                           "http://example.com/link1.der"))]),
+                critical=False)
         ders.append(signed.sign(keys[signer], digests[at]).public_bytes(
             serialization.Encoding.DER))
-    return ("enum { FUZZ_ECDSA_CHAIN = %d };\n"
+    ders.append(x509.CertificateBuilder().subject_name(
+        x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "link 2")])).issuer_name(
+        x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "link 3")])).public_key(
+        keys[2].public_key()).serial_number(len(keys) + 1).not_valid_before(
+        datetime.datetime(2020, 1, 1)).not_valid_after(datetime.datetime(2040, 1, 1)).add_extension(
+        x509.NameConstraints(permitted_subtrees=None,
+                             excluded_subtrees=[x509.DNSName("example.com")]),
+        critical=True).add_extension(x509.BasicConstraints(ca=True, path_length=None),
+                                     critical=True).sign(keys[3], hashes.SHA512()).public_bytes(
+        serialization.Encoding.DER))
+    return ("enum { FUZZ_ECDSA_CHAIN = %d, FUZZ_ECDSA_LINKS = %d };\n"
             "static const positive fuzz_ecdsa_length[] = { %s };\n"
             "static const p8 fuzz_ecdsa_der[][1024] = { %s };\n" %
-            (len(ders), ", ".join(str(len(d)) for d in ders),
+            (len(ders), len(keys), ", ".join(str(len(d)) for d in ders),
              ", ".join("{ %s }" % ", ".join("0x%02x" % b for b in d) for d in ders)))
 
 
@@ -40992,7 +42135,7 @@ static bool fuzz_prove_wr2_gts(void)
         /* Each generated link accepts, and refuses one flipped signature
            bit: a verify that is never seen to pass proves nothing when it
            refuses. */
-        for (positive link = 0; link + 1 < FUZZ_ECDSA_CHAIN; link++)
+        for (positive link = 0; link + 1 < FUZZ_ECDSA_LINKS; link++)
         {
                 p8 child_buf[1024];
                 p8 issuer_buf[1024];
@@ -41101,9 +42244,9 @@ static void fuzz_certificate_list(p8 *body, positive body_length,
 
 /* Magic-prefix lanes deepen pure parsers the list walk alone under-hits:
    EKU OID walks, SAN GeneralNames, BC/KU values, host-aware SAN, ECDSA
-   signature DER, AlgorithmIdentifier junk. Prefixes: C1 list, C2 EKU,
-   C3 SAN+host, C4 BC, C5 KU, C6 cert+host, C7 exts+host, C8 ECDSA sig,
-   C9 AlgorithmIdentifier. */
+   signature DER, AlgorithmIdentifier junk, name constraints. Prefixes: C1
+   list, C2 EKU, C3 SAN+host, C4 BC, C5 KU, C6 cert+host, C7 exts+host, C8
+   ECDSA sig, C9 AlgorithmIdentifier, CC NameConstraints and a name. */
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         tls_cert cert;
@@ -41163,6 +42306,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         (void)tls_parse_san(rest, rest_len,
                                             (string_address)"192.0.2.1",
                                             address_of matched);
+                        /* An IPv6 literal and an absolute name reach the
+                           canonicalising half of tls_general_name_match. */
+                        matched = false;
+                        (void)tls_parse_san(rest, rest_len,
+                                            (string_address)"[2001:db8::c000:201]",
+                                            address_of matched);
+                        matched = false;
+                        (void)tls_parse_san(rest, rest_len,
+                                            (string_address)"www.example.com.",
+                                            address_of matched);
                         break;
                 case 0xc4:
                         memory_fill(address_of cert, 0, sizeof cert);
@@ -41191,6 +42344,41 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         (void)tls_parse_ecdsa_sig(rest, rest_len, r,
                                                   address_of r_length, s,
                                                   address_of s_length);
+                        break;
+                case 0xcc:
+                        /* A form, a NameConstraints length, the value, and
+                           a name: the value checked as the parser does,
+                           then walked for the name in every form, and as a
+                           certificate's subject and SAN list. */
+                        if (rest_len >= 2 && rest[1] <= rest_len - 2)
+                        {
+                                static const p8 forms[] = {
+                                    0x81, 0x82, 0x86, 0x87, 0xa0, 0xa4};
+                                p8 *constraints = rest + 2;
+                                positive constraints_length = rest[1];
+                                p8 *name = constraints + constraints_length;
+                                positive name_length =
+                                    rest_len - 2 - constraints_length;
+
+                                (void)tls_name_allowed(constraints,
+                                                       constraints_length, 0,
+                                                       null, 0);
+                                (void)tls_name_allowed(constraints,
+                                                       constraints_length, rest[0],
+                                                       name, name_length);
+                                for (positive k = 0; k < sizeof forms; k++)
+                                        (void)tls_name_allowed(
+                                            constraints, constraints_length,
+                                            forms[k], name, name_length);
+                                memory_fill(address_of cert, 0, sizeof cert);
+                                cert.subject = name;
+                                cert.subject_length = name_length;
+                                cert.san = name;
+                                cert.san_length = name_length;
+                                (void)tls_cert_names_permitted(
+                                    constraints, constraints_length,
+                                    address_of cert);
+                        }
                         break;
                 case 0xc9:
                         alg_at = 0;
@@ -41230,9 +42418,10 @@ def harness_tls_hs_fuzz(argv):
     tls_write, reads arriving in PRNG-sized pieces with interruptions. What
     ASan cannot see inside the connection is asserted: the buffer offsets,
     lent spans that must not move while tls_lend gathers more, and a closed
-    connection that must stay closed. Magics 0xf1 / 0xf2 keep the framing
-    walks over tls_encrypted_flight_append (tls=null) and
-    tls_handshake_one_append. Seeds from tls_fuzz_seeds("tls_hs"). Bounded
+    connection that must stay closed. Every input is a connection (the
+    seeds' leading 0xf3 is optional); the framing seeds of the old
+    ServerHello and flight walks arrive as records of one. Seeds from
+    tls_fuzz_seeds("tls_hs"). Bounded
     fixed-seed run; return 2 (NOT RUN) when clang/libFuzzer is unavailable.
     Expected TLS_FAIL is ignored; only sanitizer reports and the asserts fail
     the lane (or MSan when MOONWATER_MSAN=1). Override MOONWATER_FUZZ_RUNS /
@@ -41249,6 +42438,9 @@ def harness_tls_hs_fuzz(argv):
                   "/* One trust anchor from anchors.inc")
     connection = sec(net, "typedef struct\n{\n        bipolar handle;\n"
                      "        bool check_cert;", "static fn tls_forget(")
+    #   The leaf modulus room is sized in the crypto section.
+    connection = re.search(r"#define CRYPTO_RSA_LIMBS .*\n#define CRYPTO_RSA_BYTES .*\n#define CRYPTO_RSA_EXPONENT_BITS .*\n",
+                           net).group(0) + connection
     record = sec(net, "static fn tls_forget(",
                  "static COLD bipolar tls_asn1_length(")
     load24 = sec(
@@ -41451,6 +42643,22 @@ static bool crypto_rsa_pss_sha256(p8 address_to n, positive n_length, p64 e,
         fuzz_mix(sink, 1, message, message_length, sink[0]);
         return signature_length && signature[0] != 0xff;
 }
+static bool crypto_rsa_pkcs1(p8 address_to n, positive n_length, p64 e,
+                             p8 address_to signature, positive signature_length,
+                             const p8 address_to info, positive info_length,
+                             p8 address_to hash, positive hash_length)
+{
+        p8 sink[1];
+        fuzz_mix(sink, 1, n, n_length, e);
+        fuzz_mix(sink, 1, info, info_length, sink[0]);
+        fuzz_mix(sink, 1, hash, hash_length, sink[0]);
+        return signature_length && signature[0] != 0xff;
+}
+static fn crypto_put_be64(p8 address_to bytes, p64 value)
+{
+        for (int i = 0; i < 8; i++)
+                bytes[i] = (p8)(value >> (56 - 8 * i));
+}
 static fn crypto_aesgcm_prepare(crypto_aesgcm_key address_to key,
                                 p8 address_to raw)
 {
@@ -41479,8 +42687,13 @@ static bool crypto_aesgcm_open(crypto_aesgcm_key address_to key,
         fuzz_mix(sink, 1, iv, 12, sink[0]);
         fuzz_mix(sink, 1, aad, aad_length, sink[0]);
         fuzz_mix(sink, 1, text, text_length, sink[0]);
-        if (aad_length != 5 || aad[0] != 23 || aad[1] != 3 || aad[2] != 3 ||
-            network_load_16(aad + 3) != text_length + 16)
+        /* TLS 1.3's AAD is the record header; TLS 1.2's the sequence, the
+           header's type and version, and the plaintext's length. */
+        if (aad_length == 13
+                ? aad[8] < 21 || aad[8] > 23 || aad[9] != 3 || aad[10] != 3 ||
+                      network_load_16(aad + 11) != text_length
+                : aad_length != 5 || aad[0] != 23 || aad[1] != 3 ||
+                      aad[2] != 3 || network_load_16(aad + 3) != text_length + 16)
                 abort();
         if (tag[0])
         {
@@ -41553,6 +42766,18 @@ static bipolar network_stream_read_some_until(
                 abort();
         return fuzz_read(into, length);
 }
+/* wait.c's: what is queued, an interrupted receive asked again. */
+static bipolar network_stream_read_now(bipolar handle, p8 address_to into,
+                                       positive length)
+{
+        bipolar got;
+
+        do
+                got = socket_receive((b32)handle, into, length, MSG_DONTWAIT,
+                                     null, 0);
+        while (got == NETWORK_INTERRUPTED);
+        return got;
+}
 /* One wait in sixty-four finds the budget spent. */
 static bool network_deadline_left(const network_deadline address_to deadline,
                                   positive address_to seconds,
@@ -41571,19 +42796,30 @@ static bool network_deadline_begin(network_deadline address_to deadline,
         deadline->budget = seconds * 1000000000ul + nanoseconds;
         return deadline->budget != 0;
 }
-/* Whatever the client sends has to be one well-formed record, every byte
-   written. */
+/* Whatever the client sends has to be whole, well-formed records, every
+   byte written. */
 static bool network_stream_send_all(bipolar handle, p8 address_to data,
                                     positive length)
 {
         p8 sink[1];
 
         (void)handle;
-        if (length < 5 || data[1] != 3 || data[2] != 3 ||
-            network_load_16(data + 3) != length - 5 ||
-            (data[0] != 22 && data[0] != 23) ||
-            (data[0] == 23 && length < 5 + 17) || length > 5 + 16640)
+        if (!length)
                 abort();
+        for (positive at = 0; at < length;)
+        {
+                positive size;
+
+                if (length - at < 5 || data[at + 1] != 3 || data[at + 2] != 3)
+                        abort();
+                size = network_load_16(data + at + 3);
+                if (size > length - at - 5 ||
+                    (data[at] == 20 ? size != 1 || data[at + 5] != 1
+                                    : data[at] != 22 && data[at] != 23) ||
+                    (data[at] == 23 && size < 17) || size > 16640)
+                        abort();
+                at += 5 + size;
+        }
         fuzz_mix(sink, 1, data, length, 9);
         if (sink[0] == 0x5a && fuzz_state == 0)
                 abort();
@@ -41604,7 +42840,9 @@ static bipolar string_to_host(string_address host)
 
     stubs = r"""
 /* The certificate verdict is another lift's: here the Certificate body's last
-   byte picks the leaf (0 P-256, 1 P-384, 2 RSA) and 0xff refuses it. */
+   byte picks the leaf (0 P-256, 1 P-384, 2 RSA) and 0xff refuses it; when
+   that byte is 0, the one three before it picks, which is a TLS 1.2 list's
+   last certificate byte once relaid with its empty extensions. */
 static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                                   string_address host, tls_conn address_to tls)
 {
@@ -41612,7 +42850,12 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
 
         if (!body_length || !host || body[body_length - 1] == 0xff)
                 return false;
-        kind = body[body_length - 1] % 3;
+        kind = body[body_length - 1];
+        if (!kind && body_length > 3)
+                kind = body[body_length - 3];
+        if (kind == 0xff)
+                return false;
+        kind %= 3;
         tls->leaf_curve = (p8)(1 + kind);
         memset(tls->leaf_qx, 0x11, sizeof tls->leaf_qx);
         memset(tls->leaf_qy, 0x22, sizeof tls->leaf_qy);
@@ -41714,6 +42957,7 @@ static fn fuzz_connection(const p8 *data, positive length)
         network_deadline deadline = {1, 1};
         p8 flags;
         bool closed = false;
+        bipolar status;
 
         if (length < 4)
                 return;
@@ -41728,10 +42972,14 @@ static fn fuzz_connection(const p8 *data, positive length)
         tls = (tls_conn address_to)malloc(sizeof *tls);
         if (!tls)
                 return;
-        if (tls_connect(tls, 3, flags & 1 ? "192.0.2.1" : "example.test",
-                        flags & 2))
+        status = tls_connect(tls, 3, flags & 1 ? "192.0.2.1" : "example.test",
+                             flags & 2);
+        if (status)
         {
-                if (tls->handle != -1)
+                /* Only a checked Certificate can be the reason. */
+                if (tls->handle != -1 ||
+                    (status != TLS_FAIL &&
+                     (status != TLS_UNTRUSTED || !(flags & 2))))
                         abort();
                 free(tls);
                 return;
@@ -41792,147 +43040,6 @@ static fn fuzz_connection(const p8 *data, positive length)
         free(tls);
 }
 
-static void fuzz_flight_chunks(p8 *data, positive length)
-{
-        p8 *hs;
-        positive used = 0;
-        p8 flight = TLS_SERVER_FLIGHT_EE;
-        positive messages = 0;
-        positive at = 0;
-
-        hs = (p8 *)malloc(TLS_HS_MAX);
-        if (!hs)
-                return;
-        memory_fill(hs, 0, TLS_HS_MAX);
-
-        while (at + 2 <= length)
-        {
-                positive frag = ((positive)data[at] << 8) | data[at + 1];
-                at += 2;
-                if (at + frag > length)
-                        frag = length - at;
-                (void)tls_encrypted_flight_append(
-                    null, hs, TLS_HS_MAX, address_of used, address_of flight,
-                    data + at, frag, address_of messages);
-                at += frag;
-                if (used == TLS_HS_MAX)
-                {
-                        p8 one = 0;
-                        (void)tls_encrypted_flight_append(
-                            null, hs, TLS_HS_MAX, address_of used,
-                            address_of flight, address_of one, 1,
-                            address_of messages);
-                        break;
-                }
-        }
-        free(hs);
-}
-
-static void fuzz_flight_splits(p8 *data, positive length)
-{
-        p8 *hs;
-        positive used;
-        p8 flight;
-        positive messages;
-        positive split;
-
-        if (!length || length > 512)
-                return;
-
-        hs = (p8 *)malloc(TLS_HS_MAX);
-        if (!hs)
-                return;
-
-        for (split = 0; split <= length; split++)
-        {
-                used = 0;
-                flight = TLS_SERVER_FLIGHT_EE;
-                messages = 0;
-                memory_fill(hs, 0, TLS_HS_MAX);
-                if (split)
-                        (void)tls_encrypted_flight_append(
-                            null, hs, TLS_HS_MAX, address_of used,
-                            address_of flight, data, split,
-                            address_of messages);
-                if (split < length)
-                        (void)tls_encrypted_flight_append(
-                            null, hs, TLS_HS_MAX, address_of used,
-                            address_of flight, data + split, length - split,
-                            address_of messages);
-        }
-        free(hs);
-}
-
-static void fuzz_flight_whole(p8 *data, positive length)
-{
-        p8 *hs;
-        positive used = 0;
-        p8 flight = TLS_SERVER_FLIGHT_EE;
-        positive messages = 0;
-
-        hs = (p8 *)malloc(TLS_HS_MAX);
-        if (!hs)
-                return;
-        memory_fill(hs, 0, TLS_HS_MAX);
-        (void)tls_encrypted_flight_append(
-            null, hs, TLS_HS_MAX, address_of used, address_of flight, data,
-            length, address_of messages);
-        if (used == TLS_HS_MAX)
-        {
-                p8 one = 0;
-                (void)tls_encrypted_flight_append(
-                    null, hs, TLS_HS_MAX, address_of used, address_of flight,
-                    address_of one, 1, address_of messages);
-        }
-        free(hs);
-}
-
-static void fuzz_server_hello_chunks(p8 *data, positive length)
-{
-        p8 held[512];
-        positive used = 0;
-        positive at = 0;
-
-        memory_fill(held, 0, sizeof held);
-        while (at + 2 <= length)
-        {
-                positive frag = ((positive)data[at] << 8) | data[at + 1];
-                at += 2;
-                if (at + frag > length)
-                        frag = length - at;
-                (void)tls_handshake_one_append(held, sizeof held,
-                                               address_of used, data + at,
-                                               frag);
-                at += frag;
-                if (used >= sizeof held)
-                        break;
-        }
-}
-
-static void fuzz_server_hello_whole(p8 *data, positive length)
-{
-        p8 held[512];
-        positive used = 0;
-        positive split;
-
-        memory_fill(held, 0, sizeof held);
-        (void)tls_handshake_one_append(held, sizeof held, address_of used, data,
-                                       length);
-
-        if (!length || length > 256)
-                return;
-        for (split = 1; split < length; split++)
-        {
-                used = 0;
-                memory_fill(held, 0, sizeof held);
-                (void)tls_handshake_one_append(held, sizeof held,
-                                               address_of used, data, split);
-                (void)tls_handshake_one_append(held, sizeof held,
-                                               address_of used, data + split,
-                                               length - split);
-        }
-}
-
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         p8 *buf;
@@ -41949,30 +43056,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         if (length)
                 memcpy(buf, data, length);
 
-        payload = buf + 1;
-        payload_length = length ? length - 1 : 0;
-        /* Optional magic selects a focused path; remainder is the payload. */
+        /* The magic 0xf3 of the seeds is optional: every input is a
+           connection. */
+        payload = buf;
+        payload_length = length;
         if (length > 0 && buf[0] == 0xf3)
-                fuzz_connection(payload, payload_length);
-        else if (length > 0 && buf[0] == 0xf1)
         {
-                fuzz_flight_chunks(payload, payload_length);
-                fuzz_flight_whole(payload, payload_length);
-                fuzz_flight_splits(payload, payload_length);
+                payload = buf + 1;
+                payload_length = length - 1;
         }
-        else if (length > 0 && buf[0] == 0xf2)
-        {
-                fuzz_server_hello_chunks(payload, payload_length);
-                fuzz_server_hello_whole(payload, payload_length);
-        }
-        else
-        {
-                fuzz_flight_whole(buf, length);
-                fuzz_flight_chunks(buf, length);
-                fuzz_flight_splits(buf, length);
-                fuzz_server_hello_whole(buf, length);
-                fuzz_server_hello_chunks(buf, length);
-        }
+        fuzz_connection(payload, payload_length);
 
         free(buf);
         return 0;
@@ -41985,13 +43078,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         81920)
 
 
-def tls_verify_chain_lift(net, now=None):
+def tls_verify_chain_lift(net, now=None, aia=None):
     """Production tls_verify_chain and what it calls past tls_verify_one:
     anchors.inc, tls_anchor_key, tls_spki_is_anchor, tls_anchor_verifies,
     tls_keep_leaf over a tls_conn holding only what they touch, and
-    tls_date_now -- libc's clock, or the constant named by now. Appended to
-    tls_verify_hosted_source's program; a TLS_BENCH_ANCHOR defined before it
-    is used as net.c uses it. Raises ValueError when a slice is gone."""
+    tls_date_now -- libc's clock, or the constant named by now -- and
+    tls_aia_fetch, whose network half lives in the HTTP client: aia is the C
+    body that stands in for it, by default a fetch that finds nothing.
+    Appended to tls_verify_hosted_source's program; a TLS_BENCH_ANCHOR
+    defined before it is used as net.c uses it. Raises ValueError when a
+    slice is gone."""
     anchor_types = tls_fuzz_sec(net, "typedef struct\n{\n        p8 name[8];",
                                 '#include "anchors.inc"')
     anchor_code = tls_fuzz_sec(
@@ -42014,15 +43110,260 @@ typedef struct
         bool check_cert;
         p8 leaf_qx[48];
         p8 leaf_qy[48];
-        p8 leaf_n[512];
+        p8 leaf_n[CRYPTO_RSA_BYTES];
         positive leaf_n_length;
         p64 leaf_e;
         p8 leaf_curve;
 } tls_conn;
 """ + anchor_types + (HARNESS_ROOT / "src/net/anchors.inc").read_text() + anchor_code + date +
+            "static COLD positive tls_aia_fetch(const p8 address_to url, positive length,\n"
+            "                                   p8 address_to into, positive room)\n{\n" +
+            (aia or "        (void)url;\n        (void)length;\n        (void)into;\n"
+                    "        (void)room;\n        return 0;\n") + "}\n" +
             tls_fuzz_sec(net, "static COLD bool tls_verify_chain(p8 address_to body",
                          "static COLD bool tls_hello_append("))
 
+
+#       The Public Suffix List file suffixes.inc was generated from, fetched
+#       from https://publicsuffix.org/list/public_suffix_list.dat on the box
+#       2026-09-28. Only its ICANN section is used, the section Chrome's
+#       wildcard check reads.
+PUBLIC_SUFFIX_LIST_SHA256 = "257b298daca42f6d8ec964e238c2a55518e14f09d3117917ec8acee6f188503e"
+
+
+def public_suffix_rules(text):
+    """The ICANN section's rules, lower case, each U-label as its A-label."""
+    rules = []
+    icann = False
+    for line in text.splitlines():
+        line = line.strip()
+        if "===BEGIN ICANN DOMAINS===" in line:
+            icann = True
+        elif "===END ICANN DOMAINS===" in line:
+            icann = False
+        elif icann and line and not line.startswith("//"):
+            labels = []
+            for label in line.split()[0].split("."):
+                mark = "!" if label.startswith("!") else ""
+                label = label[len(mark):].lower()
+                if not label.isascii():
+                    label = "xn--" + label.encode("punycode").decode()
+                labels.append(mark + label)
+            rules.append(".".join(labels))
+    return rules
+
+
+def public_suffix_entries(rules):
+    """The multi-label rules as suffixes.inc keeps them, labels reversed
+    ("uk.co"): the plain rules sorted, the wildcards' parents ("ck" for
+    "*.ck") and the exceptions ("ck.www" for "!www.ck")."""
+    reverse = lambda name: ".".join(reversed(name.split(".")))
+    plain = sorted(reverse(r) for r in rules if "." in r and r[0] not in "*!")
+    wildcards = sorted(reverse(r[2:]) for r in rules if r.startswith("*."))
+    exceptions = sorted(reverse(r[1:]) for r in rules if r.startswith("!"))
+    return plain, wildcards, exceptions
+
+
+def public_suffix_compact(tables, name):
+    """What tls_public_suffix answers from the three tables."""
+    plain, wildcards, exceptions = tables
+    key = ".".join(reversed(name.lower().split(".")))
+    return key not in exceptions and (key.rpartition(".")[0] in wildcards or key in plain)
+
+
+def public_suffix_encode(entries):
+    """Front coding: a capital, 'A' plus the bytes shared with the entry
+    before (at most 25), then the rest of the entry. Each top-level label's
+    run starts from nothing, at the offsets returned beside the text."""
+    out = []
+    runs = []
+    before = ""
+    at = 0
+    for entry in entries:
+        shared = 0
+        if before.split(".")[0] != entry.split(".")[0]:
+            runs.append(at)
+        else:
+            while shared < min(len(before), len(entry), 25) and before[shared] == entry[shared]:
+                shared += 1
+        piece = chr(ord("A") + shared) + entry[shared:]
+        out.append(piece)
+        at += len(piece)
+        before = entry
+    return "".join(out), runs
+
+
+def public_suffix_decode(text):
+    entries = []
+    for found in re.finditer(r"([A-Z])([^A-Z]*)", text):
+        before = entries[-1] if entries else ""
+        entries.append(before[:ord(found.group(1)) - ord("A")] + found.group(2))
+    return entries
+
+
+def public_suffix_is_suffix(rules, name):
+    """The Public Suffix List algorithm itself: whether name is its own
+    public suffix under the prevailing rule (exception first, else the rule
+    of most labels, else the implicit "*")."""
+    labels = name.lower().split(".")
+    best = 1
+    for rule in rules:
+        parts = rule.lstrip("!").split(".")
+        if len(parts) <= len(labels) and all(
+                p == "*" or p == l for p, l in zip(reversed(parts), reversed(labels))):
+            if rule.startswith("!"):
+                return len(parts) - 1 == len(labels)
+            best = max(best, len(parts))
+    return best == len(labels)
+
+
+def public_suffix_probes(tables):
+    """Names derived from every entry: the rule, a name under it and its
+    parent, a wildcard's expansions and base, an exception and a name under
+    it, mixed case."""
+    plain, wildcards, exceptions = tables
+    names = set()
+    for entry in plain + wildcards + exceptions:
+        name = ".".join(reversed(entry.split(".")))
+        names.update((name, "zz." + name, "zz.zz." + name, name.upper(),
+                      name.partition(".")[2]))
+    names.update(("example.com", "example.foo", "co.uk.example", "github.io", "appspot.com"))
+    return sorted(n for n in names if n.count(".") >= 1)
+
+
+def harness_public_suffixes(argv):
+    """The wildcard public-suffix tables in src/net/suffixes.inc and the C
+    lookup that reads them.
+
+    With --list FILE (a copy of the Public Suffix List whose sha256 is
+    PUBLIC_SUFFIX_LIST_SHA256) and --write, regenerates suffixes.inc, after
+    proving that the compact test tls_public_suffix makes -- not an
+    exception, and a wildcard parent or a plain rule -- equals the Public
+    Suffix List algorithm over every rule-derived name. Without --list it
+    decodes suffixes.inc and holds the lifted tls_public_suffix and
+    tls_host_match to it over the same names: each is a suffix exactly when
+    the tables say so, and "*.<name>" identifies "a.<name>" exactly when it
+    is not.
+
+        python3 test/differential.py --harness public_suffixes
+        python3 test/differential.py --harness public_suffixes --list FILE --write
+
+    The list changes most days, and --list takes only the pinned copy: to
+    move to a newer one, fetch https://publicsuffix.org/list/public_suffix_list.dat,
+    set PUBLIC_SUFFIX_LIST_SHA256 and the date in its comment and in the
+    written header to the new copy's, rerun with --write (about 40 s, most
+    of it the reference algorithm), and commit suffixes.inc with the pin.
+    """
+    parser = argparse.ArgumentParser(prog="differential.py --harness public_suffixes")
+    parser.add_argument("--list")
+    parser.add_argument("--write", action="store_true")
+    args = parser.parse_args(argv)
+    path = HARNESS_ROOT / "src/net/suffixes.inc"
+    checks = Checks()
+
+    def c_list(name, items):
+        return "static const char %s[] =\n%s;\n" % (
+            name, "\n".join('    "%s\\0"' % item for item in items))
+
+    if args.list:
+        raw = Path(args.list).read_bytes()
+        if hashlib.sha256(raw).hexdigest() != PUBLIC_SUFFIX_LIST_SHA256:
+            print("public suffixes: FAIL -- %s is not the pinned list" % args.list)
+            return 1
+        rules = public_suffix_rules(raw.decode("utf-8"))
+        tables = public_suffix_entries(rules)
+        wrong = [name for name in public_suffix_probes(tables)
+                 if public_suffix_compact(tables, name) != public_suffix_is_suffix(rules, name)]
+        checks(not wrong, "the compact test differs from the list's algorithm for %s" %
+               " ".join(wrong[:10]))
+        encoded, runs = public_suffix_encode(tables[0])
+        checks(public_suffix_decode(encoded) == tables[0], "the front coding does not decode")
+        if args.write and not wrong:
+            lines = [encoded[at:at + 72] for at in range(0, len(encoded), 72)]
+            path.write_text(
+                "/*\n        Public suffixes a certificate wildcard may not stand on "
+                "(tls_public_suffix).\n\n"
+                "        Generated by test/differential.py --harness public_suffixes "
+                "--list FILE --write\n"
+                "        from the Public Suffix List, sha256 %s...,\n"
+                "        fetched from publicsuffix.org 2026-09-28: the %d multi-label "
+                "rules of its\n        ICANN section (U-labels as A-labels), labels "
+                "reversed. The plain rules are\n        sorted and front-coded -- a "
+                "capital letter, 'A' plus the bytes shared with\n        the entry "
+                "before, then the rest -- and each top-level label's run starts\n"
+                "        from 'A' at an offset in tls_public_suffix_runs. %d bytes "
+                "of text.\n*/\n\n"
+                "static const char tls_public_suffixes[] =\n%s;\n\n"
+                "static const p16 tls_public_suffix_runs[] = {\n%s};\n\n%s\n%s" % (
+                    PUBLIC_SUFFIX_LIST_SHA256[:16], sum(map(len, tables)), len(encoded),
+                    "\n".join('    "%s"' % line for line in lines),
+                    "".join("    %s,\n" % ", ".join(str(r) for r in runs[at:at + 10])
+                            for at in range(0, len(runs), 10)),
+                    c_list("tls_public_suffix_wildcards", tables[1]),
+                    c_list("tls_public_suffix_exceptions", tables[2])))
+            print("public suffixes: wrote %s (%d rules, %d bytes, %d runs)" % (
+                path, sum(map(len, tables)), len(encoded), len(runs)))
+        return checks.verdict("public suffixes", "public-suffixes")
+
+    text = path.read_text()
+
+    def c_strings(name):
+        found = re.search(r"%s\[\] =\n((?:\s*\"[^\"]*\"\n?)+);" % name, text)
+        return "".join(re.findall(r'"([^"]*)"', found.group(1))) if found else None
+
+    encoded = c_strings("tls_public_suffixes")
+    wildcards = c_strings("tls_public_suffix_wildcards")
+    exceptions = c_strings("tls_public_suffix_exceptions")
+    if None in (encoded, wildcards, exceptions):
+        print("public suffixes: FAIL -- a table is missing from suffixes.inc")
+        return 1
+    tables = (public_suffix_decode(encoded), wildcards.split("\\0")[:-1],
+              exceptions.split("\\0")[:-1])
+    names = public_suffix_probes(tables)
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
+    driver = r"""
+int main(void)
+{
+        char line[512];
+
+        while (fgets(line, sizeof line, stdin))
+        {
+                char star[520];
+                char host[520];
+                positive length = strcspn(line, "\n");
+
+                line[length] = 0;
+                snprintf(star, sizeof star, "*.%s", line);
+                snprintf(host, sizeof host, "a.%s", line);
+                printf("%d %d\n", tls_public_suffix((p8 *)line, length),
+                       tls_host_match(host, (p8 *)star, strlen(star)));
+        }
+        return 0;
+}
+"""
+    with tempfile.TemporaryDirectory(prefix="public-suffixes-") as temporary:
+        work = Path(temporary)
+        (work / "suffix.c").write_text(shim + oids + "\n" + parsers + driver)
+        built = subprocess.run([os.environ.get("CC", "cc"), "-O1", "-w", "-o",
+                                str(work / "suffix"), str(work / "suffix.c")],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print("public suffixes: FAIL -- the lift does not build:\n" + built.stderr[-2000:])
+            return 1
+        ran = subprocess.run([str(work / "suffix")], input="\n".join(names) + "\n",
+                             capture_output=True, text=True)
+    answers = ran.stdout.split("\n")
+    wrong = []
+    for name, answer in zip(names, answers):
+        suffix = public_suffix_compact(tables, name)
+        if answer != "%d %d" % (suffix, not suffix):
+            wrong.append("%s(%s)" % (name, answer))
+    checks(len(answers) > len(names) and not wrong,
+           "tls_public_suffix disagrees with suffixes.inc for %d of %d names: %s" % (
+               len(wrong), len(names), " ".join(wrong[:10])))
+    print("public suffixes: %d rules, %d names probed" % (sum(map(len, tables)), len(names)))
+    return checks.verdict("public suffixes", "public-suffixes")
 
 #       Public HTTPS hosts for x509_corpus: the popular sites, CDNs, clouds and
 #       registries, and a deliberate spread of governments, banks and national
@@ -42150,6 +43491,16 @@ def harness_x509_corpus(argv):
     2026-09-28, live: 644 chains, 635 of the 635 openssl accepts verify,
     and none of the 9 it refuses.
 
+    A certificate's http: caIssuers location is fetched too, once, into
+    --work/aia (the lift's tls_aia_fetch reads it from there), and handed
+    to openssl as untrusted, so openssl's verdict is the browser's that
+    completes a short chain the same way. 2026-09-28, live again after
+    name constraints, the suffix check, RSA-8192 and caIssuers: 642 chains,
+    openssl (with the fetched issuers) accepts 636 and this tree all 636,
+    none it refuses; the pinned base over the same chains accepted 633 of
+    the 633 openssl took without fetching (gob.mx, monster.com, ssa.gov are
+    the three a fetch completes).
+
         python3 test/differential.py --harness x509_corpus --work DIR
     """
     import base64
@@ -42182,8 +43533,61 @@ def harness_x509_corpus(argv):
     with concurrent.futures.ThreadPoolExecutor(24) as pool:
         chains = [(h, p) for h, p in zip(X509_CORPUS_HOSTS, pool.map(fetch, X509_CORPUS_HOSTS))
                   if p]
+    pem = re.compile(rb"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", re.S)
+    (work / "aia").mkdir(exist_ok=True)
+
+    def aia_name(url):
+        return re.sub(r"[^A-Za-z0-9._-]", "_", url)
+
+    def aia_urls(text):
+        from cryptography import x509
+        urls = []
+        for found in pem.finditer(text):
+            try:
+                cert = x509.load_der_x509_certificate(
+                    base64.b64decode(b"".join(found.group(1).split())))
+                access = cert.extensions.get_extension_for_class(
+                    x509.AuthorityInformationAccess).value
+            except Exception:
+                continue
+            urls += [d.access_location.value for d in access
+                     if d.access_method == x509.oid.AuthorityInformationAccessOID.CA_ISSUERS
+                     and isinstance(d.access_location, x509.UniformResourceIdentifier)
+                     and d.access_location.value.lower().startswith("http://")][:1]
+        return urls
+
+    def aia_fetch(url):
+        import urllib.request
+        path = work / "aia" / aia_name(url)
+        if not args.offline and not path.exists():
+            try:
+                with urllib.request.urlopen(url, timeout=10) as reply:
+                    path.write_bytes(reply.read(16384))
+            except Exception:
+                pass
+        return path
+
+    urls = sorted({u for _, path in chains for u in aia_urls(path.read_bytes())})
+    with concurrent.futures.ThreadPoolExecutor(16) as pool:
+        list(pool.map(aia_fetch, urls))
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
-    driver = tls_verify_chain_lift(net) + r"""
+    aia = r"""
+        char path[4096];
+        int at = snprintf(path, sizeof path, "%s/", getenv("X509_AIA"));
+        FILE *f;
+        positive got;
+
+        for (positive i = 0; i < length && at < (int)sizeof path - 1; i++)
+                path[at++] = isalnum(url[i]) || url[i] == '.' || url[i] == '-' ||
+                                     url[i] == '_' ? url[i] : '_';
+        path[at] = 0;
+        f = fopen(path, "rb");
+        got = f ? fread(into, 1, room, f) : 0;
+        if (f)
+                fclose(f);
+        return got;
+"""
+    driver = tls_verify_chain_lift(net, aia=aia) + r"""
 static p8 body[1 << 20];
 
 /* argv: host, then the served DER files in order; prints 1 or 0. */
@@ -42223,7 +43627,6 @@ int main(int argc, char **argv)
     if built.returncode:
         print("x509 corpus: FAIL -- the lift does not build:\n" + built.stderr[-2000:])
         return 1
-    pem = re.compile(rb"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", re.S)
 
     def judge(item):
         host, path = item
@@ -42237,6 +43640,15 @@ int main(int argc, char **argv)
         rest = work / "chains" / (host + ".rest.pem")
         blocks = [m.group(0) + b"\n" for m in pem.finditer(text)]
         leaf.write_bytes(blocks[0])
+        for url in aia_urls(text):
+            fetched = work / "aia" / aia_name(url)
+            try:
+                from cryptography import x509
+                from cryptography.hazmat.primitives import serialization
+                blocks.append(x509.load_der_x509_certificate(fetched.read_bytes()).public_bytes(
+                    serialization.Encoding.PEM))
+            except Exception:
+                pass
         rest.write_bytes(b"".join(blocks[1:]))
         verify = ["openssl", "verify", "-CAfile", args.bundle, "-purpose", "sslserver",
                   "-verify_ip" if re.fullmatch(r"[0-9.]+", host) else "-verify_hostname", host]
@@ -42244,7 +43656,8 @@ int main(int argc, char **argv)
             verify += ["-untrusted", str(rest)]
         theirs = subprocess.run(verify + [str(leaf)], capture_output=True).returncode == 0
         ours = subprocess.run([str(work / "verify"), host] + ders, capture_output=True,
-                              text=True).stdout.strip() == "1"
+                              text=True, env=dict(os.environ, X509_AIA=str(work / "aia"))
+                              ).stdout.strip() == "1"
         return host, ours, theirs
 
     with concurrent.futures.ThreadPoolExecutor(8) as pool:
@@ -42285,8 +43698,18 @@ def harness_tls_verify_fuzz(argv):
     del argv
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     checks = (HARNESS_ROOT / "test/checks.c").read_text()
+    #   The leaf's caIssuers location serves link 1 while fuzz_aia is set.
+    aia = r"""
+        static const char named[] = "http://example.com/link1.der";
+
+        if (!fuzz_aia || length != sizeof named - 1 ||
+            memory_compare(url, named, length) || fuzz_ecdsa_length[1] > room)
+                return 0;
+        memory_copy(into, fuzz_ecdsa_der[1], fuzz_ecdsa_length[1]);
+        return fuzz_ecdsa_length[1];
+"""
     try:
-        chain = tls_verify_chain_lift(net, "FUZZ_TLS_NOW")
+        chain = tls_verify_chain_lift(net, "FUZZ_TLS_NOW", aia)
     except ValueError as exc:
         print("tls verify fuzz: FAIL -- net.c slice anchor moved: %s" % exc)
         return 1
@@ -42296,6 +43719,7 @@ def harness_tls_verify_fuzz(argv):
 enum { FUZZ_TLS_NOW = 20200101000000ull };
 static p8 tls_bench_anchor_x[48];
 static p8 tls_bench_anchor_y[48];
+static bool fuzz_aia;
 """ + chain + r"""
 static p8 fuzz_body[9 * (1024 + 5) + 4];
 
@@ -42337,6 +43761,8 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 {
         static const p8 good[3] = {0, 1, 2};
         static const p8 shuffled[4] = {0, 4, 2, 1};
+        static const p8 impostor[4] = {0, 1, 5, 2};
+        static const p8 short_of_one[2] = {0, 2};
         tls_cert anchor;
         positive length;
         bool proved;
@@ -42362,6 +43788,25 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
         length = fuzz_chain_body(shuffled, 4);
         proved = proved &&
                  fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        /* Link 2's twin excludes example.com, a name the leaf carries
+           whichever host is asked for: alone it refuses, and served first
+           it is passed over for link 2, whose subtrees hold the leaf. */
+        length = fuzz_chain_body(impostor, 3);
+        proved = proved &&
+                 !fuzz_verify(fuzz_body, length, (string_address)"example.com") &&
+                 !fuzz_verify(fuzz_body, length, (string_address)"192.0.2.1");
+        length = fuzz_chain_body(impostor, 4);
+        proved = proved &&
+                 fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        /* Link 1 left out: refused until the leaf's caIssuers serves it,
+           then a path through the fetched link 1. */
+        length = fuzz_chain_body(short_of_one, 2);
+        proved = proved &&
+                 !fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        fuzz_aia = true;
+        proved = proved &&
+                 fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        fuzz_aia = false;
         if (!proved)
         {
                 fprintf(stderr, "tls_verify_fuzz: WR2/GTS or generated-chain prove failed\n");
@@ -42402,25 +43847,38 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         }
         if (length > 1 && buf[0] == 0xcb)
         {
-                /* The verdict is known exactly: every generated subject is
-                   distinct and key 3 is the anchor, so a path needs the
-                   leaf first, the first and second intermediates anywhere
-                   after it, and no more than eight entries. */
+                /* The verdict is known exactly: key 3 is the anchor and
+                   every generated subject but link 2's twin is distinct,
+                   so a path needs the leaf first, the first and second
+                   intermediates anywhere after it, and no more than eight
+                   entries; the twin, whose subtrees exclude the leaf's
+                   name, never stands in for link 2. */
                 positive n = min(length - 1, (positive)9);
                 positive body = fuzz_chain_body(buf + 1, n);
                 bool served[FUZZ_ECDSA_CHAIN] = {false};
                 bool framed = n <= 8;
+                bool first = buf[1] % FUZZ_ECDSA_CHAIN == 0;
 
                 for (positive i = 1; i < n; i++)
                         served[buf[1 + i] % FUZZ_ECDSA_CHAIN] = true;
+                /* With the leaf's caIssuers answering, link 1 need not be
+                   served: it is fetched, and still needs link 2 above it. */
+                fuzz_aia = false;
                 if (fuzz_verify(fuzz_body, body, (string_address)"example.com") !=
-                        (framed && buf[1] % FUZZ_ECDSA_CHAIN == 0 && served[1] &&
-                         served[2]) ||
+                        (framed && first && served[1] && served[2]) ||
                     fuzz_verify(fuzz_body, body, null) != framed)
                 {
                         fprintf(stderr, "tls_verify_fuzz: wrong verdict for a served order\n");
                         abort();
                 }
+                fuzz_aia = true;
+                if (fuzz_verify(fuzz_body, body, (string_address)"example.com") !=
+                    (framed && first && served[2]))
+                {
+                        fprintf(stderr, "tls_verify_fuzz: wrong verdict with caIssuers\n");
+                        abort();
+                }
+                fuzz_aia = false;
         }
 
         free(buf);
@@ -42892,7 +44350,8 @@ static p8 fuzz_faults;
 static const p8 *fuzz_file;
 static positive fuzz_file_length;
 enum { FAULT_SOCKET = 2, FAULT_CONNECTING = 4, FAULT_SO_ERROR = 8,
-       FAULT_POLL_INVALID = 16, FAULT_SEND = 32, FAULT_INTERRUPT = 64 };
+       FAULT_POLL_INVALID = 16, FAULT_SEND = 32, FAULT_INTERRUPT = 64,
+       FAULT_SEND_INTERRUPT = 128 };
 
 static bool fuzz_frame_is(positive at, b32 handle)
 {
@@ -43006,6 +44465,11 @@ static bipolar socket_send(b32 handle, address_any data, positive size,
         (void)handle, (void)flags, (void)to, (void)to_size;
         for (positive at = 0; at < size; at++)
                 touched ^= ((const p8 *)data)[at];
+        if (fuzz_faults & FAULT_SEND_INTERRUPT)
+        {
+                fuzz_faults &= (p8)~FAULT_SEND_INTERRUPT;
+                return -4;
+        }
         return (fuzz_faults & FAULT_SEND) ? -28 : (bipolar)size;
 }
 static bipolar socket_receive(b32 handle, address_any data, positive size,
@@ -43197,6 +44661,7 @@ def dns_fuzz_seeds():
         "faults_poll_invalid.bin": seed("example.com", udp(plain), mode=16),
         "faults_send.bin": seed("example.com", udp(plain), mode=32),
         "faults_interrupt.bin": seed("example.com", udp(plain), mode=64),
+        "faults_send_interrupt.bin": seed("example.com", udp(plain), mode=128),
     }
 
 
@@ -43242,6 +44707,22 @@ static void fuzz_own_question(fuzz_frame *frame)
         free(copy);
 }
 
+static bipolar fuzz_resolve(const char *name, const p8 *frames, positive left,
+                            p8 faults, p32 *found)
+{
+        bipolar status;
+
+        fuzz_frames_load(frames, left);
+        fuzz_faults = faults;
+        status = fuzz_file
+                     ? dns_resolve_any("/etc/resolv.conf", (string_address)name,
+                                       found, 3)
+                     : dns_resolve_at(0x7f000001, DNS_PORT, (string_address)name,
+                                      found, 3);
+        fuzz_faults = 0;
+        return status;
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         char name[256];
@@ -43249,6 +44730,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         const p8 *at;
         positive left;
         p32 found = 0;
+        p32 again = 0;
+        bipolar status;
 
         if (size < 2 || data[1] > size - 2)
                 return 0;
@@ -43269,13 +44752,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 at += 2 + fuzz_file_length;
                 left -= 2 + fuzz_file_length;
         }
-        fuzz_frames_load(at, left);
-        fuzz_faults = data[0];
-        if (fuzz_file)
-                (void)dns_resolve_any("/etc/resolv.conf", name, &found, 3);
-        else
-                (void)dns_resolve_at(0x7f000001, DNS_PORT, name, &found, 3);
-        fuzz_faults = 0;
+        status = fuzz_resolve(name, at, left, data[0], &found);
+        /* A send a signal interrupted is sent again: the same question has
+           the same answer with or without the interruption. */
+        if (!(data[0] & (FAULT_SEND | FAULT_SEND_INTERRUPT)) &&
+            (fuzz_resolve(name, at, left, data[0] | FAULT_SEND_INTERRUPT,
+                          &again) != status || again != found))
+        {
+                fprintf(stderr, "an interrupted send changed the answer\n");
+                abort();
+        }
         for (positive frame = 0; frame < fuzz_frame_count; frame++)
                 fuzz_own_question(&fuzz_frames[frame]);
         return 0;
@@ -44006,10 +45492,16 @@ def crypto_vectors_lines(seed):
              message if scheme == "pss" else digest)
 
     for bits, e in ((2048, 65537), (2049, 65537), (2055, 3), (3072, 65537),
-                    (4096, 65537), (2047, 65537), (2048, 3)):
+                    (4096, 65537), (8192, 65537), (2047, 65537), (2048, 3)):
         n, (one, two, d) = rsa_key(bits, e)
         k = (bits + 7) // 8
         policy = bits >= 2048
+        if bits == 8192:
+            #   Past 8,192 bits policy refuses before any arithmetic, so the
+            #   modulus need not factor: this key's, shifted a byte up.
+            wide = n << 8 | 0xff
+            rsa_add("pkcs256", wide, e, be(12345, k + 1), draw(32), policy=False)
+            rsa_add("pss", wide, e, be(12345, k + 1), message=draw(3), policy=False)
 
         def raw(em):
             m = int.from_bytes(em, "big")
@@ -44103,28 +45595,56 @@ def crypto_vectors_lines(seed):
     return out
 
 
+#       The only conditional branches the x25519 bodies may hold, each on
+#       the line that decides it: a count loaded as a constant and stepped
+#       down -- the ladder's bit index, a run of squares, the frame wipe --
+#       or, on x86_64, the feature bytes. Nothing the scalar or u reaches.
+CRYPTO_X25519_COUNTED = (
+    r'"decq 520\(%rsp\)\\n\s+jns \.Lx25519_x64_" s "_step\\n"',
+    r'"dec %ebp\\n\s+jnz \.Lx25519_x64_" s "_squares_" id "\\n"',
+    r'"cmpb \$0, cpu_hash_probed\(%rip\)\\n\s+jne \.Lx25519_x64_probed\\n"',
+    r'"cmpb \$0, cpu_has_mulx\(%rip\)\\n\s+je \.Lx25519_x64_mulq_step\\n"',
+    r'"subs x20, x20, #1\\n\s+b\.pl \.Lx25519_arm64_step\\n"',
+    r'"subs x20, x20, #1\\n\s+b\.ne \.Lx25519_arm64_squares_" id "\\n"',
+    r'stp xzr, xzr, \[x3\], #16\\n\s+subs x4, x4, #1\\n\s+b\.ne \.Lx25519_arm64_wipe\\n"',
+    r'"addi s0, s0, -1\\n\s+bgez s0, \.Lx25519_rv_step\\n"',
+    r'"addi s0, s0, -1\\n\s+bnez s0, \.Lx25519_rv_squares_" id "\\n"',
+    r'addi t0, t0, 8\\n\s+bltu t0, t1, \.Lx25519_rv_wipe\\n"',
+)
+
+
 def crypto_branchless_bodies():
-    """The P-256 and P-384 field bodies in lib.c, on every machine that has
-    them, and the FIELD_ macros they expand, with any conditional branch
-    they hold: (routine, line, text), text None for a body's first line.
-    ECDH runs its secret scalar through these, and each body promises that
-    nothing branches on a value, so there should be none."""
+    """The P-256, P-384 and X25519 field bodies in lib.c, on every machine
+    that has them, and the FIELD_ and X25519_ macros they expand, with any
+    conditional branch they hold: (routine, line, text), text None for a
+    body's first line. ECDH and X25519 run their secret scalars through
+    these, and each body promises that nothing branches on a value, so
+    there should be none -- save, in x25519, the counted loops
+    CRYPTO_X25519_COUNTED names."""
     lines = (HARNESS_ROOT / "src/lib.c").read_text().split("\n")
     branch = re.compile(r"\b(j(?!mp\b)[a-z]{1,3}|b\.[a-z]{2}|cbn?z|tbn?z|"
                         r"b(?:eq|ne|lt|ge|gt|le)u?z?)\s")
+    counted = [re.compile(pattern) for pattern in CRYPTO_X25519_COUNTED]
+
+    def refused(text):
+        code = text.split("//")[0]
+        return bool(branch.search(code)) and not any(
+            pattern.search(code) for pattern in counted)
+
     found = []
     for at, line in enumerate(lines):
         #   The rows, reductions and final subtractions the bodies expand.
-        macro = re.match(r"#define (FIELD_(?:X64|ARM64|RV)_\w+)", line)
+        macro = re.match(r"#define ((?:FIELD|X25519)_(?:X64|ARM64|RV)_\w+)", line)
         if macro:
             number = at
             while True:
-                if branch.search(lines[number].split("//")[0]):
+                if refused(lines[number]):
                     found.append((macro.group(1), number + 1, lines[number].strip()))
                 if not lines[number].rstrip().endswith("\\"):
                     break
                 number += 1
-        start = re.search(r"ASM_FUNC\((p(?:256|384)_(?:multiply|square|add|subtract))\)", line)
+        start = re.search(r"ASM_FUNC\((p(?:256|384)_(?:multiply|square|add|subtract)|x25519)\)",
+                          line)
         if not start:
             continue
         name = start.group(1)
@@ -44133,9 +45653,101 @@ def crypto_branchless_bodies():
             stop += 1
         found.append((name, at + 1, None))
         for number in range(at + 1, stop):
-            if branch.search(lines[number].split("//")[0]):
+            if refused(lines[number]):
                 found.append((name, number + 1, lines[number].strip()))
     return found
+
+
+#       One x25519 of a scalar and u drawn from argv[1]'s first byte, for
+#       crypto_x25519_instruction_counts: everything but the call runs the
+#       same instructions whatever the byte is.
+CRYPTO_X25519_COUNT_C = r"""
+#include "src/lib.c"
+b32 main(void)
+{
+        p8 scalar[32], u[32], out[32];
+        string_address which = program_argument(1);
+        p64 seed = 0x9e3779b97f4a7c15ull * (p64)(p8)which[0];
+
+        for (positive i = 0; i < 32; i++)
+        {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                scalar[i] = (p8)seed;
+                u[i] = (p8)(seed >> 8);
+        }
+        x25519(out, scalar, u);
+        return out[0] & 0;
+}
+"""
+
+
+def crypto_x25519_instruction_counts():
+    """x25519's guest instruction count under qemu-user and test/insn.c, for
+    six scalar and u pairs, on each machine and x86_64 body: a Nehalem
+    has no BMI2 or ADX and takes the mulq body, -cpu max has both. Every
+    pair must retire the same count -- what a branch or a
+    loop on a secret would change. Returns (lines, failed); a machine
+    whose cross compiler, qemu or the plugin's headers are missing says
+    NOT RUN in its line and does not fail."""
+    lines, failed = [], False
+    cc = shutil.which("gcc")
+    if not cc:
+        return ["x25519 instructions: NOT RUN -- no gcc for the qemu plugin"], False
+    with tempfile.TemporaryDirectory(prefix="x25519-count-") as temporary:
+        work = Path(temporary)
+        glib = subprocess.run(["pkg-config", "--cflags", "glib-2.0"], capture_output=True,
+                              text=True)
+        plugin = work / "insn.so"
+        if glib.returncode or subprocess.run(
+                [cc, "-O2", "-shared", "-fPIC"] + glib.stdout.split() +
+                ["-o", str(plugin), str(HARNESS_ROOT / "test/insn.c")],
+                capture_output=True).returncode:
+            return ["x25519 instructions: NOT RUN -- the qemu plugin does not build"], False
+        unit = work / "count.c"
+        unit.write_text(CRYPTO_X25519_COUNT_C)
+        for machine, compiler, flags, runner, cpus in (
+                ("x86_64", "x86_64-linux-gnu-gcc" if os.uname().machine != "x86_64" else "gcc",
+                 ["-march=x86-64"], "qemu-x86_64",
+                 (("mulq", ["-cpu", "Nehalem"]), ("mulx", ["-cpu", "max"]))),
+                ("arm64", "aarch64-linux-gnu-gcc", ["-mno-outline-atomics"], "qemu-aarch64",
+                 (("", []),)),
+                ("riscv64", "riscv64-linux-gnu-gcc",
+                 ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"], "qemu-riscv64", (("", []),))):
+            if not shutil.which(compiler) or not shutil.which(runner):
+                lines.append("x25519 instructions %s: NOT RUN -- no %s or %s"
+                             % (machine, compiler, runner))
+                continue
+            binary = work / ("count." + machine)
+            built = subprocess.run(
+                [compiler] + flags + ["-O2", "-static", "-nostdlib", "-nostartfiles",
+                                      "-fno-stack-protector", "-fno-builtin", "-w",
+                                      "-I", str(HARNESS_ROOT), "-T",
+                                      str(HARNESS_ROOT / "src/build/spark.ld"),
+                                      "-Wl,-e,_start", "-Wl,--build-id=none",
+                                      "-Wl,--no-warn-rwx-segments", "-o", str(binary),
+                                      str(unit)], capture_output=True, text=True)
+            if built.returncode:
+                lines.append("x25519 instructions %s: did not build\n%s"
+                             % (machine, built.stderr[-1500:]))
+                failed = True
+                continue
+            for body, cpu in cpus:
+                counts = []
+                for which in "anqz19":
+                    ran = subprocess.run([runner] + cpu + ["-plugin", str(plugin), str(binary),
+                                                           which],
+                                         capture_output=True, text=True)
+                    counts.append(ran.stderr.strip().split("\n")[-1] if ran.returncode == 0
+                                  else "exit %d" % ran.returncode)
+                same = len(set(counts)) == 1 and counts[0].isdigit()
+                failed = failed or not same
+                lines.append("x25519 instructions %s%s: %s" % (
+                    machine, " " + body if body else "",
+                    ("%s for each of six keys" % counts[0]) if same else
+                    "FAIL -- they differ: " + ", ".join(counts)))
+    return lines, failed
 
 
 def harness_crypto_vectors(argv):
@@ -44165,17 +45777,22 @@ def harness_crypto_vectors(argv):
       the curve, and constructed keys whose R has x above n, whose r and s
       are short, whose u1 G + u2 Q is infinity or a doubling
     - RSA PKCS#1 v1.5 (SHA-256/384) and PSS-SHA256 at 2048, 2049, 2055,
-      3072 and 4096 bits: malformed padding, the wrong DigestInfo, a
+      3072, 4096 and 8192 bits: malformed padding, the wrong DigestInfo, a
       missing NULL, trailing bytes, short padding, s at 0/1/n-1/n, e = 3's
       cube-root forgery, PSS trailers, top bits and salt lengths; moduli
-      under 2048 bits, even moduli and exponents refused by policy
+      under 2048 or over 8192 bits, even moduli and exponents refused by
+      policy
 
     First, the P-256 and P-384 field bodies in lib.c -- all eight on all
     three machines, the arithmetic ECDH's secret scalar runs through --
-    must hold no conditional branch; any other exit is a failure.
+    and x25519 on all three must hold no conditional branch but x25519's
+    counted loops (CRYPTO_X25519_COUNTED), and x25519 must retire the same
+    number of instructions for six different keys on every machine and
+    x86_64 body (crypto_x25519_instruction_counts, under qemu-user); any
+    other exit is a failure.
 
     Verdicts are OpenSSL's, except where this client is stricter on
-    purpose (RSA under 2048 bits, an even or unit exponent, a compressed
+    purpose (RSA under 2048 or over 8192 bits, an even or unit exponent, a compressed
     ECDH share, a signature not exactly the modulus' length); the
     generator raises if OpenSSL disagrees with a verdict a vector was built
     to have. Returns 2 when cryptography is missing.
@@ -44192,9 +45809,14 @@ def harness_crypto_vectors(argv):
         return 2
     bodies = crypto_branchless_bodies()
     branches = [row for row in bodies if row[2]]
-    if len(bodies) - len(branches) != 24 or branches:
-        print("crypto vectors: lib.c's P-256/P-384 bodies: %d of 24 found, branches %s"
+    if len(bodies) - len(branches) != 27 or branches:
+        print("crypto vectors: lib.c's P-256/P-384/X25519 bodies: %d of 27 found, branches %s"
               % (len(bodies) - len(branches), branches[:4]), file=sys.stderr)
+        return 1
+    counts, uneven = crypto_x25519_instruction_counts()
+    for line in counts:
+        print("crypto vectors: " + line, file=sys.stderr)
+    if uneven:
         return 1
     lines = crypto_vectors_lines(seed)
     kinds = collections.Counter(kind for kind, _, _ in lines)
@@ -44627,6 +46249,21 @@ static void fuzz_x25519(fuzz_take *f)
         take(f, scalar, 32);
         take(f, u, 32);
         valid = crypto_x25519(ours, scalar, u);
+#ifdef CRYPTO_FUZZ_X25519_LIFTED
+        {
+                //      lib.c's other x86_64 body, mulq for mulx, on the
+                //      same input: it must agree with the first.
+                p8 floor[32];
+                p8 mulx = cpu_has_mulx;
+                bool again;
+
+                cpu_has_mulx = 0;
+                again = crypto_x25519(floor, scalar, u);
+                cpu_has_mulx = mulx;
+                if (again != valid || memcmp(floor, ours, 32))
+                        disagree("X25519 mulq body");
+        }
+#endif
 #ifndef CRYPTO_FUZZ_NO_ORACLE
         {
                 EVP_PKEY *mine = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, scalar, 32);
@@ -44996,12 +46633,64 @@ int LLVMFuzzerTestOneInput(const p8 *data, size_t size)
 """
 
 
-def crypto_fuzz_source(net, checks, oracle):
+#       x25519 as the fuzz links it when lib.c's own x86_64 body is lifted:
+#       the prototype crypto_x25519 calls, the two feature bytes the body
+#       reads, answered from the host, and the probe it would call, which
+#       cpu_hash_probed set means it never does.
+CRYPTO_FUZZ_X25519_LIFTED_C = r"""
+#define CRYPTO_FUZZ_X25519_LIFTED 1
+void x25519(p8 *out, const p8 *scalar, const p8 *u);
+p8 cpu_hash_probed = 1;
+p8 cpu_has_mulx;
+void cpu_hash_detect(void) {}
+__attribute__((constructor)) static void crypto_fuzz_mulx(void)
+{
+        cpu_has_mulx = __builtin_cpu_supports("bmi2") && __builtin_cpu_supports("adx");
+}
+"""
+
+
+def library_routine_assembly(names):
+    """lib.c's x86_64 bodies of names as assembly text, for a hosted x86_64
+    program to link: lib.c compiled with -S and each routine's own section
+    cut out of the output, .pushsection to .popsection, so the bytes are
+    the ones every build assembles, macros expanded by the preprocessor
+    that expands them there. None when this is not an x86_64 host with a C
+    compiler, or a routine is missing."""
+    cc = shutil.which("gcc") or shutil.which("cc")
+    if os.uname().machine != "x86_64" or not cc:
+        return None
+    with tempfile.TemporaryDirectory(prefix="library-lift-") as temporary:
+        unit = Path(temporary) / "lift.c"
+        unit.write_text('#include "%s"\n' % (HARNESS_ROOT / "src/lib.c"))
+        if subprocess.run([cc, "-S", "-O2", "-march=x86-64", "-fno-builtin", "-w",
+                           "-o", str(unit.with_suffix(".s")), str(unit)],
+                          capture_output=True).returncode:
+            return None
+        lines = unit.with_suffix(".s").read_text().split("\n")
+    out = []
+    for name in names:
+        opener = '.pushsection .text.%s, "ax", %%progbits' % name
+        begins = [i for i, line in enumerate(lines) if line.strip() == opener]
+        if len(begins) != 1:
+            return None
+        end = next((i for i in range(begins[0], len(lines))
+                    if lines[i].strip() == ".size %s, .-%s" % (name, name)), None)
+        if end is None or lines[end + 1].strip() != ".popsection":
+            return None
+        out += lines[begins[0]:end + 2]
+    return "\n".join(out) + "\n"
+
+
+def crypto_fuzz_source(net, checks, oracle, lifted=False):
     """crypto_fuzz's program: net.c's crypto section whole, from crypto_wide
     to its #endif, with the p256_/p384_ fast paths cut so every field runs
     the C montgomery from checks.c's SHARED_montgomery_reference, over the
-    hosted digests, GHASH and AES above; then the driver. Raises ValueError
-    when a slice is gone and RuntimeError when a lib.c call survives."""
+    hosted digests, GHASH and AES above; then the driver. x25519 is lib.c's
+    own x86_64 body when lifted (library_routine_assembly, linked beside
+    the program) and otherwise the C crypto.c ran before it, from
+    SHARED_x25519_reference. Raises ValueError when a slice is gone and
+    RuntimeError when a lib.c call survives."""
     crypto = tls_fuzz_sec(net, "typedef unsigned __int128 crypto_wide;",
                           "#endif\n#include \"wait.c\"")
     for field_op in ("add", "subtract"):
@@ -45019,6 +46708,14 @@ def crypto_fuzz_source(net, checks, oracle):
     montgomery = montgomery.split("\n", 1)[1]
     montgomery = montgomery[:montgomery.rfind("#endif") + len("#endif")].replace(
         "montgomery_reference_multiply", "montgomery_multiply")
+    if lifted:
+        curve = CRYPTO_FUZZ_X25519_LIFTED_C
+    else:
+        curve = tls_fuzz_sec(checks, "#elif defined(SHARED_x25519_reference)",
+                             "#elif defined(SHARED_number_stream)")
+        curve = curve.split("\n", 1)[1]
+        curve = curve[:curve.rfind("#endif") + len("#endif")]
+        curve = re.sub(r"\bx25519_reference\(", "x25519(", curve)
     hosted = TLS_VERIFY_HOSTED_C
     sha = hosted[hosted.index("typedef struct {"):hosted.index("typedef fuzz_sha256 crypto_sha256;")]
     shim = tls_der_fuzz_lift_parts(net)[4]
@@ -45030,7 +46727,7 @@ def crypto_fuzz_source(net, checks, oracle):
     source = "\n".join((CRYPTO_FUZZ_ORACLE_INCLUDES if oracle else
                          "#define CRYPTO_FUZZ_NO_ORACLE",
                         shim, "#include <stdlib.h>", sha, CRYPTO_FUZZ_HOSTED_C,
-                        montgomery, crypto, CRYPTO_FUZZ_DRIVER_C))
+                        montgomery, curve, crypto, CRYPTO_FUZZ_DRIVER_C))
     left = re.search(r"\b(?:p(?:256|384)_(?:multiply|add|square|subtract)|"
                      r"sha256_blocks|sha512_blocks)\s*\(", source)
     if left:
@@ -45090,8 +46787,10 @@ def harness_crypto_fuzz(argv):
     The whole crypto section of src/net/net.c is lifted hosted -- lib.c's
     field, digest, GHASH and AES routines replaced by plain C (the stdin
     lane crypto_vectors is what holds the assembly to OpenSSL) -- and
-    linked against libcrypto. Each input picks a lane by its first byte:
-    X25519, ECDH and key shares on P-256/P-384 (OpenSSL's share of the
+    linked against libcrypto. x25519 is the exception on an x86_64 host:
+    lib.c's own body is linked (library_routine_assembly), and every X25519
+    input runs its mulx and its mulq body both. Each input picks a lane by
+    its first byte: X25519, ECDH and key shares on P-256/P-384 (OpenSSL's share of the
     input's scalar, then optionally a bit bent), ECDSA signed here with the
     input's key and nonce and then bent (high S, r or s flipped, digest or
     key bit flipped, leading zero dropped) or taken raw, RSA PKCS#1
@@ -45111,7 +46810,11 @@ def harness_crypto_fuzz(argv):
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     checks = (HARNESS_ROOT / "test/checks.c").read_text()
     oracle = not moonwater_msan_requested()
-    source = crypto_fuzz_source(net, checks, oracle)
+    #   MemorySanitizer sees nothing an assembly body stores, so under it
+    #   x25519 is the C reference; otherwise lib.c's own body is the one held
+    #   to OpenSSL, both of its x86_64 bodies on every input.
+    lifted = library_routine_assembly(["x25519"]) if oracle else None
+    source = crypto_fuzz_source(net, checks, oracle, lifted is not None)
     extra = ["-Wno-deprecated-declarations",
              os.environ.get("MOONWATER_CRYPTO_FUZZ_LIBRARY", "-lcrypto")] if oracle else []
     clang = shutil.which("clang")
@@ -45126,7 +46829,13 @@ def harness_crypto_fuzz(argv):
                               capture_output=True).returncode:
                 print("crypto fuzz: NOT RUN -- no OpenSSL headers or libcrypto to link")
                 return 2
-    return tls_fuzz_run("crypto", "crypto", source, 2048, extra)
+    if lifted is None:
+        return tls_fuzz_run("crypto", "crypto", source, 2048, extra)
+    with tempfile.TemporaryDirectory(prefix="crypto-fuzz-x25519-") as temporary:
+        assembly = Path(temporary) / "x25519.s"
+        assembly.write_text(lifted)
+        print("crypto fuzz: x25519 is lib.c's x86_64 body, mulx and mulq")
+        return tls_fuzz_run("crypto", "crypto", source, 2048, extra + [str(assembly)])
 
 
 def harness_tls_fuzz(argv):
@@ -45563,6 +47272,9 @@ int main(void)
 
     # --- 2. Thin hosted lifts: dns_copy_name + TLS record header. ---
     dns_copy = sec(
+        net,
+        "//      A wire name is at most 255 bytes",
+        "\n#define DNS_OK 0") + "\n" + sec(
         net,
         "static COLD bipolar dns_copy_name(",
         "//      Where a name ends, for a caller")
@@ -50274,6 +51986,41 @@ static void crypto_aesgcm_prepare(crypto_aesgcm_key *key, const p8 *raw)
         memset(key, 0, sizeof *key);
         memcpy(key->round, raw, 16);
 }
+/*      The cookie box's AEAD, standing in: a keyed stream and a tag over the
+        key, nonce, associated data and cipher text. */
+static void wl_aead_tag(crypto_aesgcm_key *key, const p8 *iv, const p8 *ad,
+                        positive ads, const p8 *text, positive size, p8 *tag)
+{
+        crypto_sha256 hash;
+        p8 full[32];
+
+        crypto_sha256_open(&hash);
+        crypto_sha256_write(&hash, key->round, 16);
+        crypto_sha256_write(&hash, iv, 12);
+        crypto_sha256_write(&hash, ad, ads);
+        crypto_sha256_write(&hash, text, size);
+        crypto_sha256_close(&hash, full);
+        memcpy(tag, full, 16);
+}
+static void crypto_aesgcm_seal(crypto_aesgcm_key *key, const p8 *iv, const p8 *ad,
+                               positive ads, p8 *text, positive size, p8 *tag)
+{
+        for (positive at = 0; at < size; at++)
+                text[at] ^= key->round[at % 16] ^ iv[at % 12] ^ (p8)at;
+        wl_aead_tag(key, iv, ad, ads, text, size, tag);
+}
+static bool crypto_aesgcm_open(crypto_aesgcm_key *key, const p8 *iv, const p8 *ad,
+                               positive ads, p8 *text, positive size, const p8 *tag)
+{
+        p8 want[16];
+
+        wl_aead_tag(key, iv, ad, ads, text, size, want);
+        if (memcmp(want, tag, 16))
+                return false;
+        for (positive at = 0; at < size; at++)
+                text[at] ^= key->round[at % 16] ^ iv[at % 12] ^ (p8)at;
+        return true;
+}
 '''
     ASM_MACROS = r'''
 #define ASM_ENDBR ""
@@ -50924,7 +52671,9 @@ static bool ref_gate(struct waterlink_identity *me, const p8 *datagram, positive
                 body = WATERLINK_RESPOND_BYTES;
         else
                 return false;
-        for (positive at = 16 + body; at < length; at++)
+        //      An initiation's mac2 follows its mac1, and the padding it.
+        for (positive at = 16 + body + (kind == WATERLINK_KIND_INITIATE ? 16 : 0);
+             at < length; at++)
                 if (datagram[at])
                         return false;
         waterlink_mac1(me->gate, (p8 *)datagram, 16 + body - 16, mac);
@@ -51010,14 +52759,44 @@ int main(int argc, char **argv)
         struct waterlink_admission table;
         memset(&table, 0, sizeof table);
         unsigned long admit_bad = 0;
+        p8 *initiation = malloc(WATERLINK_DATAGRAM);
+        memset(initiation, 0, WATERLINK_DATAGRAM);
         {
                 p8 fresh[16];
                 for (int i = 0; i < 16; i++) fresh[i] = (p8)draw(256);
                 int ok = 0;
                 for (int i = 0; i < WATERLINK_ADMIT_BURST; i++)
-                        ok += waterlink_admit(&table, fresh, 1000);
+                        ok += waterlink_admit(&table, initiation, fresh, 7, 1000) == 1;
                 if (ok != WATERLINK_ADMIT_BURST) admit_bad++;
-                if (waterlink_admit(&table, fresh, 1000)) admit_bad++; // dry now
+                if (waterlink_admit(&table, initiation, fresh, 7, 1000)) admit_bad++; // dry now
+        }
+        /*      Under load: with no secret nothing, with one a cookie for an
+                initiation without mac2, and the curve's buckets untouched;
+                with its mac2, the buckets decide again. */
+        {
+                p8 place[16] = {1};
+                p8 cookie[16];
+                struct waterlink_bucket all;
+
+                memset(&table, 0, sizeof table);
+                for (int i = 0; i < WATERLINK_ADMIT_LOADED; i++)
+                {
+                        place[15] = (p8)i;
+                        (void)waterlink_admit(&table, initiation, place, 9, 5000);
+                }
+                all = table.all;
+                if (waterlink_admit(&table, initiation, place, 9, 5000) != 0) admit_bad++;
+                for (int i = 0; i < 32; i++) table.secret[i] = (p8)draw(256);
+                table.secret_made = 4000;
+                if (waterlink_admit(&table, initiation, place, 9, 5000) != -1) admit_bad++;
+                if (memcmp(&all, &table.all, sizeof all)) admit_bad++;
+                waterlink_cookie_of(&table, place, 9, cookie);
+                waterlink_mac2(cookie, initiation);
+                if (waterlink_admit(&table, initiation, place, 9, 5000) != 1) admit_bad++;
+                if (waterlink_admit(&table, initiation, place, 10, 5000) != -1) admit_bad++;
+                table.secret_made = 5000 - (p64)WATERLINK_COOKIE_SECONDS * 1000000;
+                if (waterlink_admit(&table, initiation, place, 9, 5000) != 0) admit_bad++;
+                memset(initiation, 0, WATERLINK_DATAGRAM);
         }
         for (long n = 0; n < 200000; n++)
         {
@@ -51026,8 +52805,14 @@ int main(int argc, char **argv)
 
                 for (int i = 0; i < 16; i++)
                         address[i] = draw(3) ? (p8)draw(4) : (p8)draw(256);
-                (void)waterlink_admit(&table, address, now);
+                if (!draw(64))
+                {
+                        table.secret_made = now ? now - draw(2) * 130000000ull : 0;
+                        initiation[16 + WATERLINK_INITIATE_BYTES + draw(16)] = (p8)draw(256);
+                }
+                (void)waterlink_admit(&table, initiation, address, (p16)draw(65536), now);
         }
+        free(initiation);
 
         printf("gate: %ld cases, %lu passed, %lu model failures; admit %lu failures\n",
                count, passed, model_bad, admit_bad);
@@ -51402,6 +53187,7 @@ int main(int argc, char **argv)
 
     mdns_source = "\n".join([
         SHIM, wl,
+        sec(net, "//      A wire name is at most 255 bytes", "\n#define DNS_OK 0"),
         sec(net, "static COLD bipolar dns_copy_name(",
             "//      Where a name ends, for a caller"),
         sec(disc, "#define WATERLINK_MDNS_PORT 5353", "struct waterlink_group_keys {"),
@@ -51784,9 +53570,15 @@ static void crypto_sha256_write(crypto_sha256 *h, const void *data, positive siz
 }
 static void crypto_sha256_close(crypto_sha256 *h, p8 *out)
 {
+        //      Every word of the digest depends on every lane: a digest cut
+        //      to sixteen bytes, as the MACs and keys are, still sees every
+        //      byte written.
+        p64 all = wl_mix(h->lane[0] ^ wl_mix(h->lane[1] ^ wl_mix(h->lane[2] ^
+                                                                 wl_mix(h->lane[3]))));
+
         for (int i = 0; i < 4; i++)
         {
-                p64 word = wl_mix(h->lane[i] ^ h->lane[(i + 1) & 3] ^ h->length);
+                p64 word = wl_mix(h->lane[i] ^ all ^ h->length ^ (p64)i << 56);
 
                 memcpy(out + 8 * i, &word, 8);
         }
@@ -51845,10 +53637,12 @@ static void crypto_pbkdf2(positive algorithm, positive size, const p8 *secret,
         crypto_sha256_close(&h, block);
         memcpy(out, block, out_size < 32 ? out_size : 32);
 }
+static unsigned long wl_curves;
 static bool crypto_x25519(p8 *out, const p8 *scalar, const p8 *point)
 {
         p64 s, u, product;
 
+        wl_curves++;
         memcpy(&s, scalar, 8);
         memcpy(&u, point, 8);
         product = (s | 1) * u;
@@ -52038,6 +53832,7 @@ static fn link_peers_unlock(bipolar handle) { (void)handle; }
         sec(link, "struct waterlink_part\n{", "/*\n        Judge an authenticated body whole"),
         sec(link, "#define WATERLINK_REPLAY_BLOCKS", "#endif // WATERLINK_LINK_INCLUDED"),
         LINK_STUBS,
+        sec(net, "//      A wire name is at most 255 bytes", "\n#define DNS_OK 0"),
         sec(net, "static COLD bipolar dns_copy_name(",
             "//      Where a name ends, for a caller"),
         sec(hs, "#define WATERLINK_PROTOCOL", "#endif // WATERLINK_HANDSHAKE_INCLUDED"),
@@ -52101,7 +53896,10 @@ WATERLINK_PRE_DRIVER = r'''
           - greetings an mDNS packet provoked number at most LINK_GREETED in
             any LINK_GREET_AGAIN, and one-shot answers at most one in any
             LINK_ANSWER_AGAIN: nothing a spoofed packet says makes this an
-            amplifier.
+            amplifier;
+          - an initiation answered with a cookie reply spent no curve, and a
+            cookie reply is WATERLINK_COOKIE_DATAGRAM bytes, a sixteenth of
+            what provoked it.
 */
 static const p8 *wl_in;
 static positive wl_left;
@@ -52236,6 +54034,9 @@ static positive wl_answered_count;
 static p8 wl_last_respond[WATERLINK_DATAGRAM];
 static p8 wl_client_first[WATERLINK_DATAGRAM];
 static bool wl_have_respond;
+static p8 wl_last_cookie[WATERLINK_COOKIE_DATAGRAM];
+static bool wl_have_cookie;
+static void wl_check(bool good, const char *what);
 static bipolar socket_send(b32 socket, const void *bytes, positive size, b32 flags,
                            const void *to, positive to_size)
 {
@@ -52265,6 +54066,13 @@ static bipolar socket_send(b32 socket, const void *bytes, positive size, b32 fla
         {
                 memcpy(wl_last_respond, bytes, size);
                 wl_have_respond = true;
+        }
+        if (socket == 3 && kind == WATERLINK_KIND_COOKIE)
+        {
+                wl_check(size == WATERLINK_COOKIE_DATAGRAM,
+                         "a cookie reply of another size");
+                memcpy(wl_last_cookie, bytes, WATERLINK_COOKIE_DATAGRAM);
+                wl_have_cookie = true;
         }
         //      As the kernel: no datagram goes to port zero. What was made
         //      for it is counted above all the same.
@@ -52339,7 +54147,7 @@ static void wl_reset(bool server)
         wl_bad_names = 0;
         wl_greeted_count = wl_answered_count = 0;
         wl_run_count = wl_run_next = wl_mdns_count = wl_mdns_next = 0;
-        wl_have_respond = false;
+        wl_have_respond = wl_have_cookie = false;
         wl_clock = 1000000000ull;
         wl_random_state = 1;
         for (int i = 0; i < 3; i++)
@@ -52440,7 +54248,7 @@ static void wl_step(bool server)
         p16 port = take8() & 1 ? WATERLINK_MDNS_PORT : take16();
         p64 now = wl_clock / 1000;
 
-        switch (op % 9)
+        switch (op % 10)
         {
         case 0:
         {
@@ -52460,7 +54268,7 @@ static void wl_step(bool server)
                 //      group member, then perhaps spoiled; a good one is
                 //      answered, and the answer must key both ends alike.
                 int who = take8() % 3;
-                bool group = op % 9 == 2;
+                bool group = op % 10 == 2;
                 struct waterlink_noise noise;
                 p64 conversation = take8() & 3;
                 p32 index = take32();
@@ -52598,6 +54406,62 @@ static void wl_step(bool server)
                 wl_mdns_count = wl_mdns_next = 0;
                 break;
         }
+        case 9:
+        {
+                /*      A flood of good mac1s from made-up addresses, then one
+                        of the three from here, perhaps again under the cookie
+                        the listener handed back: no curve is spent on an
+                        initiation the listener answers with a cookie. */
+                positive count = take8() % 48;
+                int who = take8() % 3;
+                struct waterlink_noise noise;
+                p8 place[16];
+
+                if (!server)
+                        break;
+                for (positive at = 0; at <= count; at++)
+                {
+                        unsigned long curves;
+                        p64 cookies = link_self.admission.cookies;
+                        bool last = at == count;
+
+                        wl_initiation(datagram, last ? who : 2, false,
+                                      take16(), take8(), take32() | 1, &noise);
+                        curves = wl_curves;
+                        memcpy(place, wl_addresses[1], 16);
+                        place[13] = (p8)at;
+                        wl_have_cookie = false;
+                        link_datagram(datagram, WATERLINK_DATAGRAM,
+                                      last ? address : place,
+                                      last ? port : (p16)(2000 + at), now);
+                        wl_check(link_self.admission.cookies == cookies ||
+                                         wl_curves == curves,
+                                 "a curve spent on an initiation answered "
+                                 "with a cookie");
+                        crypto_forget(&noise, sizeof noise);
+                }
+                if (wl_have_cookie && take8() & 1)
+                {
+                        p8 cookie[16];
+
+                        if (waterlink_cookie_take(
+                                    link_self.me.public,
+                                    datagram + 16 + WATERLINK_INITIATE_BYTES - 16,
+                                    wl_last_cookie, WATERLINK_COOKIE_DATAGRAM,
+                                    cookie))
+                        {
+                                wl_initiation(datagram, who, false, take16(),
+                                              take8(), take32() | 1, &noise);
+                                waterlink_mac2(cookie, datagram);
+                                if (take8() & 1)
+                                        wl_spoil(datagram, &link_self.me, true);
+                                link_datagram(datagram, WATERLINK_DATAGRAM,
+                                              address, port, now);
+                                crypto_forget(&noise, sizeof noise);
+                        }
+                }
+                break;
+        }
         default:
         {
                 //      At the client: the answer to the initiation it has out,
@@ -52617,6 +54481,41 @@ static void wl_step(bool server)
                         break;
                 }
                 memcpy(datagram, wl_client_first, WATERLINK_DATAGRAM);
+                if (take8() & 1)
+                {
+                        /*      Under load the machine answers with a cookie;
+                                the next initiation must carry mac2 by it. */
+                        struct waterlink_admission table;
+                        p8 reply[WATERLINK_COOKIE_DATAGRAM];
+                        p8 nonce[24];
+                        p8 cookie[16];
+                        p8 copy[WATERLINK_DATAGRAM];
+
+                        memset(&table, 0, sizeof table);
+                        take_bytes(table.secret, 32);
+                        take_bytes(nonce, 24);
+                        table.secret_made = now ? now : 1;
+                        waterlink_cookie_reply(&wl_id[0], &table, datagram, address,
+                                               port, nonce, reply);
+                        if (take8() & 1)
+                                reply[take8() % sizeof reply] ^= take8() | 1;
+                        link_client.cookie_at = 0;
+                        link_datagram(reply, take8() & 1 ? sizeof reply
+                                                         : take8() % 128,
+                                      address, port, now);
+                        if (!link_client.cookie_at)
+                                break;
+                        waterlink_cookie_of(&table, address, port, cookie);
+                        wl_check(!memcmp(cookie, link_client.cookie, 16),
+                                 "the client kept a cookie it was not handed");
+                        (void)link_client_initiate(s, now);
+                        memcpy(copy, wl_client_first, WATERLINK_DATAGRAM);
+                        memset(copy + 16 + WATERLINK_INITIATE_BYTES, 0, 16);
+                        waterlink_mac2(cookie, copy);
+                        wl_check(!memcmp(copy, wl_client_first, WATERLINK_DATAGRAM),
+                                 "the initiation after a cookie lacks its mac2");
+                        break;
+                }
                 if (!waterlink_accept(&noise, &wl_id[0], null, datagram, who, hello))
                         break;
                 system_random_fill(ephemeral, 32, 0);
@@ -52721,6 +54620,12 @@ def waterlink_pre_seeds():
         "mdns_socket.bin": b"\x00" + socket_mdns,
         "client_answer.bin": b"\x01" + head(8) + head(8) + b"\x00\x00\x00\x07\x00",
         "raw.bin": b"\x00" + head(0) + (64).to_bytes(2, "big") + bytes(range(64)),
+        "flood_then_cookie.bin": b"\x00" + head(9) + bytes([40, 0]) + b"".join(
+            (i + 1).to_bytes(2, "big") + bytes([i & 3]) + (0x100 + i).to_bytes(4, "big")
+            for i in range(41)) + b"\x01" + (900).to_bytes(2, "big") + b"\x01" +
+        (0x5151).to_bytes(4, "big") + b"\x00",
+        "client_cookie.bin": b"\x01" + head(8) + head(8) + b"\x01" + bytes(range(56)) +
+        b"\x00\x01",
         "empty.bin": b"",
     }
 
@@ -53408,6 +55313,7 @@ HARNESS_CHECKS = {
     "crypto_vectors": harness_crypto_vectors,
     "crypto_fuzz": harness_crypto_fuzz,
     "x509_corpus": harness_x509_corpus,
+    "public_suffixes": harness_public_suffixes,
     "tls_fuzz": harness_tls_fuzz,
     "msan_net": harness_msan_net,
     "security_hygiene": harness_security_hygiene,
@@ -53973,40 +55879,40 @@ PINNED = r"""
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"4aae2e71030658fb500f5e05f56885e70e75eaec5a466092d62778566d553e65"},"case":{"argv":["-c","builtin ls -d .\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"builtin","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","utility":"shell"},"domain":"builtins","id":"bc848048805942ba","kind":"deliberate","list":"ledger","reason_id":"r55","utility":"builtin"},
 {"candidate":{"effects":"9cfb7f68f953f12a348334fa6ecc850bc23517e881bab78ebe1c8d5c8caf1d3c","status":0,"stdout":"e8ab253d17921f479da77a59bfdbabce6767b8ffa0e697102526bf6e1497a9bd"},"case":{"argv":["-c","/bin/mkdir -p target; unset PWD OLDPWD; set -a; cd target; /bin/sh -c 'echo \"${PWD##*/}:${OLDPWD:+set}\"'\n"],"domain":"builtins","family":"builtins-allexport","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","utility":"shell"},"domain":"builtins","id":"9ce54206a49f025e","kind":"deliberate","list":"ledger","reason_id":"r56","utility":"builtins-allexport"},
 {"candidate":{"effects":"9cfb7f68f953f12a348334fa6ecc850bc23517e881bab78ebe1c8d5c8caf1d3c","status":0,"stdout":"e8ab253d17921f479da77a59bfdbabce6767b8ffa0e697102526bf6e1497a9bd"},"case":{"argv":["-c","/bin/mkdir -p target; unset PWD OLDPWD; set -a; cd target; /bin/sh -c 'echo \"${PWD##*/}:${OLDPWD:+set}\"'\n"],"domain":"builtins","family":"builtins-allexport","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","utility":"shell"},"domain":"builtins","id":"cc7fdbfedd65f907","kind":"deliberate","list":"ledger","reason_id":"r56","utility":"builtins-allexport"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"8195e8cd543e967c97b3643019fed09daffe76b949d476cc25b4086e547c863d"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"09a5e20c1f95897b","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"41d70e9aa7af64576ed93d9172fea36e639f68dc9b87a79751848f590d6d2691"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"1f7a5ae882e72af0ba6527fc94e9b3a95d76309dc6cb4326f659cf9d8d77826b"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"0d0a626e6b2bacc1","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"880d07545ccfce3deff98989ba51b2400986caf0d383d297f1b6c87343a4f6f6"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"95b66abd4259d903cf2869b176934c1240d69552de3c6b39fab5eaedc36c9ceb"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"0ed7699907dc60c9","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"ea864d18c63d7191c84679f74e21fb143c43ca645f71ab89b1df1914ceb3561d"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"8195e8cd543e967c97b3643019fed09daffe76b949d476cc25b4086e547c863d"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"15d57cadd788ef56","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"41d70e9aa7af64576ed93d9172fea36e639f68dc9b87a79751848f590d6d2691"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"88b129524a4f09614c462a25214775cd4ae5be3d6159eb3643ae5d62464511c3"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"198d109b11e18633","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"d1cca6cfece5320b534e3c33d85c98e40a3f710d79f50b3bc9918da39a0cc126"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"1f7a5ae882e72af0ba6527fc94e9b3a95d76309dc6cb4326f659cf9d8d77826b"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"1b8ba84cdfae88d0","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"880d07545ccfce3deff98989ba51b2400986caf0d383d297f1b6c87343a4f6f6"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2e0a5cfd7a732016ba4740382ee335f5aa56290513459ff80aa07f3a8be6680e"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${a[k]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","utility":"shell"},"domain":"builtins","id":"1e19a106289f8d4a","kind":"deliberate","list":"ledger","reason_id":"r57","utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"8195e8cd543e967c97b3643019fed09daffe76b949d476cc25b4086e547c863d"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"1e80366503120cc4","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"41d70e9aa7af64576ed93d9172fea36e639f68dc9b87a79751848f590d6d2691"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"bf7f84c2c0d32fe1970feedc076ec339bc6cb36d4c55630e2d152c9c218b2604"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"28a9896552c05980","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"82c855d7c9c4e4a675158f2c06d8b0cc8c9414d8108874e10716156aef11a83e"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2e0a5cfd7a732016ba4740382ee335f5aa56290513459ff80aa07f3a8be6680e"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${a[k]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"333fa3c087391e9f","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"211b3f87fce106cd1c5c78cbe15d44fd3a6155d35ebcc1926778ad30d5919690"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2e0a5cfd7a732016ba4740382ee335f5aa56290513459ff80aa07f3a8be6680e"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"366105644e4c5f89","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"211b3f87fce106cd1c5c78cbe15d44fd3a6155d35ebcc1926778ad30d5919690"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"95b66abd4259d903cf2869b176934c1240d69552de3c6b39fab5eaedc36c9ceb"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"466fa693daa144f3","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"ea864d18c63d7191c84679f74e21fb143c43ca645f71ab89b1df1914ceb3561d"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"529db8a622b1bf8dcd83f4ebd24e8ae51808e53ce3e76c226a4faa9ed53ff504"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","utility":"shell"},"domain":"builtins","id":"4d2b9618bab2de15","kind":"deliberate","list":"ledger","reason_id":"r57","utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"19c50bcc9f232cb20fbc34b96257756c75c01e76f7496e5e6b0f719834622f71"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"4e54989b9bfde9b8","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"efa8e04f8770d61374dad46a56e04fe881c41be6abdfbbf99967842fd1455b47"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"7efafb797e30d59351ca5000e5e629878376d9657c70bccaf80728340838a3f8"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"57c9a19c3c37b37f","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"927a52fb8d6f15a1f67109f95f848108881f696dbdf067725bef576c95052118"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"bf7f84c2c0d32fe1970feedc076ec339bc6cb36d4c55630e2d152c9c218b2604"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"6a69af958578e2e1","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"82c855d7c9c4e4a675158f2c06d8b0cc8c9414d8108874e10716156aef11a83e"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"88b129524a4f09614c462a25214775cd4ae5be3d6159eb3643ae5d62464511c3"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"6b15665a233b2b35","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"d1cca6cfece5320b534e3c33d85c98e40a3f710d79f50b3bc9918da39a0cc126"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"b91e8c954081a0b3a0c82c9205fbf46bef0649aa6e348a6e32d4b87e0578a20f"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${!a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"777ac011cf2d06bc","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a225bafa29262ce4b23856a403925edebbc8af95c280feb8113116fcd07feef5"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2e0a5cfd7a732016ba4740382ee335f5aa56290513459ff80aa07f3a8be6680e"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"7efda84c0d26cd74","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"211b3f87fce106cd1c5c78cbe15d44fd3a6155d35ebcc1926778ad30d5919690"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"b91e8c954081a0b3a0c82c9205fbf46bef0649aa6e348a6e32d4b87e0578a20f"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${!a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"8085a20e871065ca","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a225bafa29262ce4b23856a403925edebbc8af95c280feb8113116fcd07feef5"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2e0a5cfd7a732016ba4740382ee335f5aa56290513459ff80aa07f3a8be6680e"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${a[k]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"87b44450b99acf4f","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"211b3f87fce106cd1c5c78cbe15d44fd3a6155d35ebcc1926778ad30d5919690"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"19c50bcc9f232cb20fbc34b96257756c75c01e76f7496e5e6b0f719834622f71"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"96ff1afe72e30a15","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"efa8e04f8770d61374dad46a56e04fe881c41be6abdfbbf99967842fd1455b47"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2e0a5cfd7a732016ba4740382ee335f5aa56290513459ff80aa07f3a8be6680e"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"a67fc606814fe6f0","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"211b3f87fce106cd1c5c78cbe15d44fd3a6155d35ebcc1926778ad30d5919690"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"529db8a622b1bf8dcd83f4ebd24e8ae51808e53ce3e76c226a4faa9ed53ff504"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${a[k]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"acd4bc6df51a1523","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"5c8e38b226c6b7543b8c6a2c9eafa646ea4e5790d8cd876260630f65c041c7ef"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a289cf35254e6a01f7b95417400c59c16971487b68976d5265c45ce950f283d2"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${!a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"add7c406a40c6bdc","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a2b4821abf17756c7a9d3f7d2128ecfc504e229b30e3cef37ac4fa5e1e428159"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"529db8a622b1bf8dcd83f4ebd24e8ae51808e53ce3e76c226a4faa9ed53ff504"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","utility":"shell"},"domain":"builtins","id":"ae2316e3c3318ddf","kind":"deliberate","list":"ledger","reason_id":"r57","utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"bf7f84c2c0d32fe1970feedc076ec339bc6cb36d4c55630e2d152c9c218b2604"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"b19e56f355bc8647","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"82c855d7c9c4e4a675158f2c06d8b0cc8c9414d8108874e10716156aef11a83e"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"7efafb797e30d59351ca5000e5e629878376d9657c70bccaf80728340838a3f8"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"c2b693ea27146e6d","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"927a52fb8d6f15a1f67109f95f848108881f696dbdf067725bef576c95052118"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"8195e8cd543e967c97b3643019fed09daffe76b949d476cc25b4086e547c863d"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"d51fb8f797abb1f3","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"41d70e9aa7af64576ed93d9172fea36e639f68dc9b87a79751848f590d6d2691"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"bf7f84c2c0d32fe1970feedc076ec339bc6cb36d4c55630e2d152c9c218b2604"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"de6f7825ee7492ba","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"82c855d7c9c4e4a675158f2c06d8b0cc8c9414d8108874e10716156aef11a83e"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2e0a5cfd7a732016ba4740382ee335f5aa56290513459ff80aa07f3a8be6680e"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${a[k]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","utility":"shell"},"domain":"builtins","id":"e046efdc68f59c09","kind":"deliberate","list":"ledger","reason_id":"r57","utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2e0a5cfd7a732016ba4740382ee335f5aa56290513459ff80aa07f3a8be6680e"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"eda9cb3facf4c47e","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"211b3f87fce106cd1c5c78cbe15d44fd3a6155d35ebcc1926778ad30d5919690"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"529db8a622b1bf8dcd83f4ebd24e8ae51808e53ce3e76c226a4faa9ed53ff504"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${a[k]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"f5bd3d25532b8576","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"5c8e38b226c6b7543b8c6a2c9eafa646ea4e5790d8cd876260630f65c041c7ef"},"utility":"builtins-array-machinery"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a289cf35254e6a01f7b95417400c59c16971487b68976d5265c45ce950f283d2"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${!a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"f88d869664e618dd","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a2b4821abf17756c7a9d3f7d2128ecfc504e229b30e3cef37ac4fa5e1e428159"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"e23686f4019cbcb90e52647e542ec7378a09813c2b45fc669f121706ba511dc1"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"09a5e20c1f95897b","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"41d70e9aa7af64576ed93d9172fea36e639f68dc9b87a79751848f590d6d2691"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"b967621677020aa2641e89e52ce8769e9dd3e47fb3fba3bdc90449cf89743c10"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"0d0a626e6b2bacc1","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"880d07545ccfce3deff98989ba51b2400986caf0d383d297f1b6c87343a4f6f6"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"5ec1a3f4f649d8155b85416b676559af9ff442c7aee6d679a8edaa748e9a0d4f"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"0ed7699907dc60c9","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"ea864d18c63d7191c84679f74e21fb143c43ca645f71ab89b1df1914ceb3561d"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"e23686f4019cbcb90e52647e542ec7378a09813c2b45fc669f121706ba511dc1"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"15d57cadd788ef56","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"41d70e9aa7af64576ed93d9172fea36e639f68dc9b87a79751848f590d6d2691"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"adf8e3640963e0229058d5590f4d196963441226d94152e83b4b62f2c234587e"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"198d109b11e18633","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"d1cca6cfece5320b534e3c33d85c98e40a3f710d79f50b3bc9918da39a0cc126"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"b967621677020aa2641e89e52ce8769e9dd3e47fb3fba3bdc90449cf89743c10"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"1b8ba84cdfae88d0","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"880d07545ccfce3deff98989ba51b2400986caf0d383d297f1b6c87343a4f6f6"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"0c24060de889e5e3b6eb7bcc3a51adeb02e1a98b1abd56e20304926d84ffa07b"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${a[k]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","utility":"shell"},"domain":"builtins","id":"1e19a106289f8d4a","kind":"deliberate","list":"ledger","reason_id":"r57","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"e23686f4019cbcb90e52647e542ec7378a09813c2b45fc669f121706ba511dc1"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"1e80366503120cc4","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"41d70e9aa7af64576ed93d9172fea36e639f68dc9b87a79751848f590d6d2691"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"ae46a52fa3783dfbf58dc78f270bc8dec28b8961b10aa7e88b9bb16757b04e3d"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"28a9896552c05980","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"82c855d7c9c4e4a675158f2c06d8b0cc8c9414d8108874e10716156aef11a83e"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"0c24060de889e5e3b6eb7bcc3a51adeb02e1a98b1abd56e20304926d84ffa07b"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${a[k]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"333fa3c087391e9f","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"211b3f87fce106cd1c5c78cbe15d44fd3a6155d35ebcc1926778ad30d5919690"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"0c24060de889e5e3b6eb7bcc3a51adeb02e1a98b1abd56e20304926d84ffa07b"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"366105644e4c5f89","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"211b3f87fce106cd1c5c78cbe15d44fd3a6155d35ebcc1926778ad30d5919690"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"5ec1a3f4f649d8155b85416b676559af9ff442c7aee6d679a8edaa748e9a0d4f"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"466fa693daa144f3","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"ea864d18c63d7191c84679f74e21fb143c43ca645f71ab89b1df1914ceb3561d"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"ae0b757ae8b3bcc57c2f867d60f57456a0b17a93b774e5ccc218937078b4c4bb"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","utility":"shell"},"domain":"builtins","id":"4d2b9618bab2de15","kind":"deliberate","list":"ledger","reason_id":"r57","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"ffffa3e38220401e6763371b2db6faba92f428b476e73e39d0bfe8754763c330"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"4e54989b9bfde9b8","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"efa8e04f8770d61374dad46a56e04fe881c41be6abdfbbf99967842fd1455b47"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"8d8d4f37131caf472433d80af9bd3ae474dd33544db4a98df5ac2a102c8ee111"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"57c9a19c3c37b37f","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"927a52fb8d6f15a1f67109f95f848108881f696dbdf067725bef576c95052118"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"ae46a52fa3783dfbf58dc78f270bc8dec28b8961b10aa7e88b9bb16757b04e3d"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"6a69af958578e2e1","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"82c855d7c9c4e4a675158f2c06d8b0cc8c9414d8108874e10716156aef11a83e"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"adf8e3640963e0229058d5590f4d196963441226d94152e83b4b62f2c234587e"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"6b15665a233b2b35","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"d1cca6cfece5320b534e3c33d85c98e40a3f710d79f50b3bc9918da39a0cc126"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"f32a529d6d5e0b9c2944a2462fdc3390f67a69f86cf30d75cef0a772a2e2f584"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${!a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"777ac011cf2d06bc","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a225bafa29262ce4b23856a403925edebbc8af95c280feb8113116fcd07feef5"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"0c24060de889e5e3b6eb7bcc3a51adeb02e1a98b1abd56e20304926d84ffa07b"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"7efda84c0d26cd74","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"211b3f87fce106cd1c5c78cbe15d44fd3a6155d35ebcc1926778ad30d5919690"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"f32a529d6d5e0b9c2944a2462fdc3390f67a69f86cf30d75cef0a772a2e2f584"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${!a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"8085a20e871065ca","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a225bafa29262ce4b23856a403925edebbc8af95c280feb8113116fcd07feef5"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"0c24060de889e5e3b6eb7bcc3a51adeb02e1a98b1abd56e20304926d84ffa07b"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${a[k]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"87b44450b99acf4f","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"211b3f87fce106cd1c5c78cbe15d44fd3a6155d35ebcc1926778ad30d5919690"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"ffffa3e38220401e6763371b2db6faba92f428b476e73e39d0bfe8754763c330"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"96ff1afe72e30a15","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"efa8e04f8770d61374dad46a56e04fe881c41be6abdfbbf99967842fd1455b47"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"0c24060de889e5e3b6eb7bcc3a51adeb02e1a98b1abd56e20304926d84ffa07b"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"a67fc606814fe6f0","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"211b3f87fce106cd1c5c78cbe15d44fd3a6155d35ebcc1926778ad30d5919690"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"ae0b757ae8b3bcc57c2f867d60f57456a0b17a93b774e5ccc218937078b4c4bb"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${a[k]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"acd4bc6df51a1523","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"5c8e38b226c6b7543b8c6a2c9eafa646ea4e5790d8cd876260630f65c041c7ef"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"e260fc6b7a06ed55fb812a768d13433cead8935648f3b02bfd90f0950be7f2ab"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${!a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"add7c406a40c6bdc","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a2b4821abf17756c7a9d3f7d2128ecfc504e229b30e3cef37ac4fa5e1e428159"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"ae0b757ae8b3bcc57c2f867d60f57456a0b17a93b774e5ccc218937078b4c4bb"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","utility":"shell"},"domain":"builtins","id":"ae2316e3c3318ddf","kind":"deliberate","list":"ledger","reason_id":"r57","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"ae46a52fa3783dfbf58dc78f270bc8dec28b8961b10aa7e88b9bb16757b04e3d"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"b19e56f355bc8647","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"82c855d7c9c4e4a675158f2c06d8b0cc8c9414d8108874e10716156aef11a83e"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"8d8d4f37131caf472433d80af9bd3ae474dd33544db4a98df5ac2a102c8ee111"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"c2b693ea27146e6d","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"927a52fb8d6f15a1f67109f95f848108881f696dbdf067725bef576c95052118"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"e23686f4019cbcb90e52647e542ec7378a09813c2b45fc669f121706ba511dc1"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"d51fb8f797abb1f3","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"41d70e9aa7af64576ed93d9172fea36e639f68dc9b87a79751848f590d6d2691"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"ae46a52fa3783dfbf58dc78f270bc8dec28b8961b10aa7e88b9bb16757b04e3d"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${#a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"de6f7825ee7492ba","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"82c855d7c9c4e4a675158f2c06d8b0cc8c9414d8108874e10716156aef11a83e"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"0c24060de889e5e3b6eb7bcc3a51adeb02e1a98b1abd56e20304926d84ffa07b"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\n:\nprintf '<%s>' \"${a[k]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","utility":"shell"},"domain":"builtins","id":"e046efdc68f59c09","kind":"deliberate","list":"ledger","reason_id":"r57","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"0c24060de889e5e3b6eb7bcc3a51adeb02e1a98b1abd56e20304926d84ffa07b"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\nunset 'a[k]'\nprintf '<%s>' \"${a[missing]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"eda9cb3facf4c47e","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"211b3f87fce106cd1c5c78cbe15d44fd3a6155d35ebcc1926778ad30d5919690"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"ae0b757ae8b3bcc57c2f867d60f57456a0b17a93b774e5ccc218937078b4c4bb"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[new]=added\nprintf '<%s>' \"${a[k]-none}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"f5bd3d25532b8576","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"5c8e38b226c6b7543b8c6a2c9eafa646ea4e5790d8cd876260630f65c041c7ef"},"utility":"builtins-array-machinery"},
+{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"e260fc6b7a06ed55fb812a768d13433cead8935648f3b02bfd90f0950be7f2ab"},"case":{"argv":["-c","declare -A a; a['a b']=spaced; a['x=y']=equals\na[k]+=more\nprintf '<%s>' \"${!a[@]}\" | /usr/bin/tr ' ' '\\n' | /usr/bin/sort | /usr/bin/tr '\\n' ' '\necho\ndeclare -p a 2>/dev/null | /usr/bin/tr ' ' '\\n' | /usr/bin/sort\n"],"domain":"builtins","family":"builtins-array-machinery","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"f88d869664e618dd","kind":"bug","list":"ledger","reason":"the value spaces the families walk, where no option grammar reaches: set -u killing a subshell leaves 127 here where bash keeps 127 for the shell the command string was handed to and answers 1 for a subshell or a substitution that dies of it; declare -g after a local of the same name writes through the local rather than past it; a negative subscript on an empty array and a key written with a space; an incomplete hex escape bash refuses and dash reads as a zero byte; and a multibyte IFS byte dash stops splitting on. The first of these lives in the expansion engine, which this pass does not own","reason_unverified":"the answer moved after a change elsewhere; this reason was not re-checked against it","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a2b4821abf17756c7a9d3f7d2128ecfc504e229b30e3cef37ac4fa5e1e428159"},"utility":"builtins-array-machinery"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"9186d1ed1735ee36d1045554dddf05eae092f8db03d7db54c99fa965430e596d"},"case":{"argv":["-c","set -- -abvalue -c tail\ngetopts abc o\nprintf '%s:%s:<%s>\\n' \"$o\" \"$OPTIND\" \"${OPTARG-unset}\"\nOPTIND=1\ngetopts abc o\nprintf '%s:%s:<%s>\\n' \"$o\" \"$OPTIND\" \"${OPTARG-unset}\"\n"],"domain":"builtins","family":"builtins-getopts-reset","fixture":"shell","input_kind":"command","mode":"sh","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"017c011de5129d77","kind":"deliberate","list":"ledger","reason":"under the sh name getopts walks a bundled word the POSIX-native way, moving OPTIND past the word from its first letter as dash does, where bash --posix holds OPTIND on the word until its last letter; POSIX leaves OPTIND inside a bundled word unspecified. Otherwise sh answers as bash --posix and POSIX do: OPTARG is unset beside an option that takes no argument, and set -- does not rewind the walk (dash sets OPTARG empty and rewinds, which is why the sh name is not compared with dash)","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"059eaef67e3a8d211852a012c7d2d44e887e3c720f2dd81685a4de2646d6e96c"},"utility":"builtins-getopts-reset"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"9186d1ed1735ee36d1045554dddf05eae092f8db03d7db54c99fa965430e596d"},"case":{"argv":["-c","set -- -abvalue -c tail\ngetopts :ab: o\nprintf '%s:%s:<%s>\\n' \"$o\" \"$OPTIND\" \"${OPTARG-unset}\"\nOPTIND=1\ngetopts :ab: o\nprintf '%s:%s:<%s>\\n' \"$o\" \"$OPTIND\" \"${OPTARG-unset}\"\n"],"domain":"builtins","family":"builtins-getopts-reset","fixture":"shell","input_kind":"command","mode":"sh","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"02718ef3ffa2bda2","kind":"deliberate","list":"ledger","reason":"under the sh name getopts walks a bundled word the POSIX-native way, moving OPTIND past the word from its first letter as dash does, where bash --posix holds OPTIND on the word until its last letter; POSIX leaves OPTIND inside a bundled word unspecified. Otherwise sh answers as bash --posix and POSIX do: OPTARG is unset beside an option that takes no argument, and set -- does not rewind the walk (dash sets OPTARG empty and rewinds, which is why the sh name is not compared with dash)","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"059eaef67e3a8d211852a012c7d2d44e887e3c720f2dd81685a4de2646d6e96c"},"utility":"builtins-getopts-reset"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"bde4423a47b82578a3153b944c54a53731141c06f7061f3e545a63eec3f42f46"},"case":{"argv":["-c","set -- -abc -c tail\ngetopts ab: o\nprintf '%s:%s:<%s>\\n' \"$o\" \"$OPTIND\" \"${OPTARG-unset}\"\nOPTIND=2\ngetopts ab: o\nprintf '%s:%s:<%s>\\n' \"$o\" \"$OPTIND\" \"${OPTARG-unset}\"\n"],"domain":"builtins","family":"builtins-getopts-reset","fixture":"shell","input_kind":"command","mode":"sh","stdin":"empty","tier":"family","utility":"shell"},"domain":"builtins","id":"062222b428555cad","kind":"deliberate","list":"ledger","reason":"under the sh name getopts walks a bundled word the POSIX-native way, moving OPTIND past the word from its first letter as dash does, where bash --posix holds OPTIND on the word until its last letter; POSIX leaves OPTIND inside a bundled word unspecified. Otherwise sh answers as bash --posix and POSIX do: OPTARG is unset beside an option that takes no argument, and set -- does not rewind the walk (dash sets OPTARG empty and rewinds, which is why the sh name is not compared with dash)","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"b696c69c43cf1aaf0dae97ac4fde79efa62b20d439723832a3c2917fc90c3078"},"utility":"builtins-getopts-reset"},
@@ -54741,14 +56647,12 @@ PINNED = r"""
 {"domain":"builtins","kind":"bug","list":"ledger","option":"-p","reason_id":"r71","utility":"history"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"acc07b62f23f458923737c4cd4a66bd05d1e71eb4f384003baaf2dcc760d6349"},"case":{"argv":["-c","jobs -\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"jobs_posix","fixture":"shell","input_kind":"command","mode":"dash","stdin":"empty","tier":"singles","utility":"shell"},"domain":"builtins","id":"7ab41f1981a38a56","kind":"bug","list":"ledger","reason":"answers bash 5.3.20 and dash 0.5.13.4 give that this shell does not yet: dash type, bg, fg, jobs and kill option and job errors; kill -n and kill -l ranges, which go through the kill utility parser; exec +Z; POSIX shift of a bad count as a fatal special-builtin error; and cd, read -e and -N, local -, unset and test -ef/-nt rows. Pinned 2026-09-24 so the lane fails on anything new; each row is a bug to fix, not a policy","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"844e4038ed5999677dba42a4e2ecdf77861755ad3e266836906963960bfe1b75"},"utility":"jobs_posix"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"acc07b62f23f458923737c4cd4a66bd05d1e71eb4f384003baaf2dcc760d6349"},"case":{"argv":["-c","jobs %nosuch\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"jobs_posix","fixture":"shell","input_kind":"command","mode":"dash","stdin":"empty","tier":"singles","utility":"shell"},"domain":"builtins","id":"8033bdacf5b58d44","kind":"bug","list":"ledger","reason":"answers bash 5.3.20 and dash 0.5.13.4 give that this shell does not yet: dash type, bg, fg, jobs and kill option and job errors; kill -n and kill -l ranges, which go through the kill utility parser; exec +Z; POSIX shift of a bad count as a fatal special-builtin error; and cd, read -e and -N, local -, unset and test -ef/-nt rows. Pinned 2026-09-24 so the lane fails on anything new; each row is a bug to fix, not a policy","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"844e4038ed5999677dba42a4e2ecdf77861755ad3e266836906963960bfe1b75"},"utility":"jobs_posix"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"65109e977b403a1aa5a9aa253d3dfd6d5fd70bd7930d52beb2b7351a97853384"},"case":{"argv":["-c","kill -L\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"kill_list","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","utility":"shell"},"domain":"builtins","id":"20fcc7098d539151","kind":"bug","list":"ledger","reason_id":"r72","utility":"kill_list"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"acc07b62f23f458923737c4cd4a66bd05d1e71eb4f384003baaf2dcc760d6349"},"case":{"argv":["-c","kill '-ø' -l\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"kill_list","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"singles","utility":"shell"},"domain":"builtins","id":"253aa2d3a5b30076","kind":"bug","list":"ledger","reason":"an option the program does not have: the reference names the word and says where to look next, and these answer in their own words or not at all. Walked for every program since the pass that found twenty-one of twenty-one were a line short here; what is left is the tail that needs the offending word threaded through a diagnostic that does not carry it yet","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"529a848fe913d3b5122b88b59d1981f8689cc6319b8ee6d07786cf8b3c3cb5e3"},"utility":"kill_list"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"acc07b62f23f458923737c4cd4a66bd05d1e71eb4f384003baaf2dcc760d6349"},"case":{"argv":["-c","kill - -l\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"kill_list","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"singles","utility":"shell"},"domain":"builtins","id":"288bf0568c2b5d80","kind":"bug","list":"ledger","reason":"an option the program does not have: the reference names the word and says where to look next, and these answer in their own words or not at all. Walked for every program since the pass that found twenty-one of twenty-one were a line short here; what is left is the tail that needs the offending word threaded through a diagnostic that does not carry it yet","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"529a848fe913d3b5122b88b59d1981f8689cc6319b8ee6d07786cf8b3c3cb5e3"},"utility":"kill_list"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"acc07b62f23f458923737c4cd4a66bd05d1e71eb4f384003baaf2dcc760d6349"},"case":{"argv":["-c","kill -- -l\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"kill_list","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"singles","utility":"shell"},"domain":"builtins","id":"6999fc66cb6ca2ea","kind":"bug","list":"ledger","reason":"an option the program does not have: the reference names the word and says where to look next, and these answer in their own words or not at all. Walked for every program since the pass that found twenty-one of twenty-one were a line short here; what is left is the tail that needs the offending word threaded through a diagnostic that does not carry it yet","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"c14196f132c1e9be0508ae80ab52fcb3e1d3fc05880415f3dc980971df207c9e"},"utility":"kill_list"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"acc07b62f23f458923737c4cd4a66bd05d1e71eb4f384003baaf2dcc760d6349"},"case":{"argv":["-c","kill --bogus-option -l\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"kill_list","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"singles","utility":"shell"},"domain":"builtins","id":"6ff94c6debc9ade6","kind":"bug","list":"ledger","reason":"an option the program does not have: the reference names the word and says where to look next, and these answer in their own words or not at all. Walked for every program since the pass that found twenty-one of twenty-one were a line short here; what is left is the tail that needs the offending word threaded through a diagnostic that does not carry it yet","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"529a848fe913d3b5122b88b59d1981f8689cc6319b8ee6d07786cf8b3c3cb5e3"},"utility":"kill_list"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"acc07b62f23f458923737c4cd4a66bd05d1e71eb4f384003baaf2dcc760d6349"},"case":{"argv":["-c","kill - -l\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"kill_list","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"singles","utility":"shell"},"domain":"builtins","id":"75cb72d759a7bce4","kind":"bug","list":"ledger","reason":"an option the program does not have: the reference names the word and says where to look next, and these answer in their own words or not at all. Walked for every program since the pass that found twenty-one of twenty-one were a line short here; what is left is the tail that needs the offending word threaded through a diagnostic that does not carry it yet","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2b048bbc68eca2572ea69bea2ef2ece1f9b75520c94da150f646cafb0467e3c4"},"utility":"kill_list"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"acc07b62f23f458923737c4cd4a66bd05d1e71eb4f384003baaf2dcc760d6349"},"case":{"argv":["-c","kill '-ø' -l\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"kill_list","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"singles","utility":"shell"},"domain":"builtins","id":"a155b7215bb89040","kind":"bug","list":"ledger","reason":"an option the program does not have: the reference names the word and says where to look next, and these answer in their own words or not at all. Walked for every program since the pass that found twenty-one of twenty-one were a line short here; what is left is the tail that needs the offending word threaded through a diagnostic that does not carry it yet","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2b048bbc68eca2572ea69bea2ef2ece1f9b75520c94da150f646cafb0467e3c4"},"utility":"kill_list"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"65109e977b403a1aa5a9aa253d3dfd6d5fd70bd7930d52beb2b7351a97853384"},"case":{"argv":["-c","kill -L\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"kill_list","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","utility":"shell"},"domain":"builtins","id":"c5ee6e9b8280d8b2","kind":"bug","list":"ledger","reason_id":"r72","utility":"kill_list"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"acc07b62f23f458923737c4cd4a66bd05d1e71eb4f384003baaf2dcc760d6349"},"case":{"argv":["-c","kill --bogus-option -l\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"kill_list","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"singles","utility":"shell"},"domain":"builtins","id":"e09d6bb5cf1ede0c","kind":"bug","list":"ledger","reason":"an option the program does not have: the reference names the word and says where to look next, and these answer in their own words or not at all. Walked for every program since the pass that found twenty-one of twenty-one were a line short here; what is left is the tail that needs the offending word threaded through a diagnostic that does not carry it yet","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"2b048bbc68eca2572ea69bea2ef2ece1f9b75520c94da150f646cafb0467e3c4"},"utility":"kill_list"},
 {"domain":"builtins","kind":"bug","list":"ledger","option":"-L","reason_id":"r73","utility":"kill_list"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"acc07b62f23f458923737c4cd4a66bd05d1e71eb4f384003baaf2dcc760d6349"},"case":{"argv":["-c","kill '-ø' -l 9\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"kill_list_posix","fixture":"shell","input_kind":"command","mode":"dash","stdin":"empty","tier":"singles","utility":"shell"},"domain":"builtins","id":"0054c412d3e66eb9","kind":"bug","list":"ledger","reason":"answers bash 5.3.20 and dash 0.5.13.4 give that this shell does not yet: dash type, bg, fg, jobs and kill option and job errors; kill -n and kill -l ranges, which go through the kill utility parser; exec +Z; POSIX shift of a bad count as a fatal special-builtin error; and cd, read -e and -N, local -, unset and test -ef/-nt rows. Pinned 2026-09-24 so the lane fails on anything new; each row is a bug to fix, not a policy","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"844e4038ed5999677dba42a4e2ecdf77861755ad3e266836906963960bfe1b75"},"utility":"kill_list_posix"},
@@ -54761,8 +56665,6 @@ PINNED = r"""
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"acc07b62f23f458923737c4cd4a66bd05d1e71eb4f384003baaf2dcc760d6349"},"case":{"argv":["-c","kill '-ø' -l 9\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"kill_list_posix","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"singles","utility":"shell"},"domain":"builtins","id":"c23dc76d58181564","kind":"bug","list":"ledger","reason":"answers bash 5.3.20 and dash 0.5.13.4 give that this shell does not yet: dash type, bg, fg, jobs and kill option and job errors; kill -n and kill -l ranges, which go through the kill utility parser; exec +Z; POSIX shift of a bad count as a fatal special-builtin error; and cd, read -e and -N, local -, unset and test -ef/-nt rows. Pinned 2026-09-24 so the lane fails on anything new; each row is a bug to fix, not a policy","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a7ca5e9ac81541003a2b7d0e129e4f93698f50d5b52d1ef61c607ea344542f3e"},"utility":"kill_list_posix"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"acc07b62f23f458923737c4cd4a66bd05d1e71eb4f384003baaf2dcc760d6349"},"case":{"argv":["-c","kill - -l 9\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"kill_list_posix","fixture":"shell","input_kind":"command","mode":"dash","stdin":"empty","tier":"singles","utility":"shell"},"domain":"builtins","id":"c7f638fd78291dcc","kind":"bug","list":"ledger","reason":"answers bash 5.3.20 and dash 0.5.13.4 give that this shell does not yet: dash type, bg, fg, jobs and kill option and job errors; kill -n and kill -l ranges, which go through the kill utility parser; exec +Z; POSIX shift of a bad count as a fatal special-builtin error; and cd, read -e and -N, local -, unset and test -ef/-nt rows. Pinned 2026-09-24 so the lane fails on anything new; each row is a bug to fix, not a policy","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"844e4038ed5999677dba42a4e2ecdf77861755ad3e266836906963960bfe1b75"},"utility":"kill_list_posix"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"acc07b62f23f458923737c4cd4a66bd05d1e71eb4f384003baaf2dcc760d6349"},"case":{"argv":["-c","kill - -l 9\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"kill_list_posix","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"singles","utility":"shell"},"domain":"builtins","id":"d9e29a4f66c31894","kind":"bug","list":"ledger","reason":"answers bash 5.3.20 and dash 0.5.13.4 give that this shell does not yet: dash type, bg, fg, jobs and kill option and job errors; kill -n and kill -l ranges, which go through the kill utility parser; exec +Z; POSIX shift of a bad count as a fatal special-builtin error; and cd, read -e and -N, local -, unset and test -ef/-nt rows. Pinned 2026-09-24 so the lane fails on anything new; each row is a bug to fix, not a policy","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"a7ca5e9ac81541003a2b7d0e129e4f93698f50d5b52d1ef61c607ea344542f3e"},"utility":"kill_list_posix"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"acc07b62f23f458923737c4cd4a66bd05d1e71eb4f384003baaf2dcc760d6349"},"case":{"argv":["-c","kill -n 0 $$ 2>/dev/null\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"kill_send","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","tier":"singles","utility":"shell"},"domain":"builtins","id":"0ec97bdd35d309ed","kind":"bug","list":"ledger","reason":"answers bash 5.3.20 and dash 0.5.13.4 give that this shell does not yet: dash type, bg, fg, jobs and kill option and job errors; kill -n and kill -l ranges, which go through the kill utility parser; exec +Z; POSIX shift of a bad count as a fatal special-builtin error; and cd, read -e and -N, local -, unset and test -ef/-nt rows. Pinned 2026-09-24 so the lane fails on anything new; each row is a bug to fix, not a policy","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"c14196f132c1e9be0508ae80ab52fcb3e1d3fc05880415f3dc980971df207c9e"},"utility":"kill_send"},
-{"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"acc07b62f23f458923737c4cd4a66bd05d1e71eb4f384003baaf2dcc760d6349"},"case":{"argv":["-c","kill -n 0 $$ 2>/dev/null\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"kill_send","fixture":"shell","input_kind":"command","mode":"bash","stdin":"empty","tier":"singles","utility":"shell"},"domain":"builtins","id":"3c9542e22cf25c8d","kind":"bug","list":"ledger","reason":"answers bash 5.3.20 and dash 0.5.13.4 give that this shell does not yet: dash type, bg, fg, jobs and kill option and job errors; kill -n and kill -l ranges, which go through the kill utility parser; exec +Z; POSIX shift of a bad count as a fatal special-builtin error; and cd, read -e and -N, local -, unset and test -ef/-nt rows. Pinned 2026-09-24 so the lane fails on anything new; each row is a bug to fix, not a policy","reference":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"c14196f132c1e9be0508ae80ab52fcb3e1d3fc05880415f3dc980971df207c9e"},"utility":"kill_send"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"acc07b62f23f458923737c4cd4a66bd05d1e71eb4f384003baaf2dcc760d6349"},"case":{"argv":["-c","kill %nosuch 2>/dev/null\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"kill_send","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","utility":"shell"},"domain":"builtins","id":"cd7597d7feb627de","kind":"bug","list":"ledger","reason_id":"r72","utility":"kill_send"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"acc07b62f23f458923737c4cd4a66bd05d1e71eb4f384003baaf2dcc760d6349"},"case":{"argv":["-c","kill %1 2>/dev/null\nprintf \"[%s]\\n\" \"$?\"\n"],"domain":"builtins","family":"kill_send","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","utility":"shell"},"domain":"builtins","id":"d357eca0decedf47","kind":"bug","list":"ledger","reason_id":"r72","utility":"kill_send"},
 {"candidate":{"effects":"a6e9edf8bc05e39aea3bba6dc66f806d4cd1874cbad73fae3290dd8c60db31fb","status":0,"stdout":"c12828ec2aa6dbf9783a510cf8194c30db1da5a9cb154dd99b6361ada403a720"},"case":{"argv":["-c","x=1; y=1\nlet x=1/0 2>/dev/null\nprintf \"[%s] x=%s y=%s\\n\" \"$?\" \"$x\" \"$y\"\n"],"domain":"builtins","family":"let","fixture":"shell","input_kind":"command","mode":"posix","stdin":"empty","utility":"shell"},"domain":"builtins","id":"32c68a813889ecc8","kind":"deliberate","list":"ledger","reason_id":"r55","utility":"let"},
@@ -57539,16 +59441,33 @@ PINNED = r"""
 {"domain":"text","kind":"deliberate","list":"ledger","option":"--perl-regexp","reason_id":"r256","utility":"grep"},
 {"domain":"text","kind":"deliberate","list":"ledger","option":"-P","reason_id":"r256","utility":"grep"},
 {"domain":"text","kind":"deliberate","list":"ledger","option":"-P","reason_id":"r257","utility":"grep"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-o0","-j2","-1","18446744073709551615","-z","--zero-terminated","--nocheck-order","zleft","zright"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"nonl","tier":"random","utility":"join"},"domain":"text","id":"0000896e93eea8bc","kind":"bug","list":"ledger","reason":"GNU holds a -j1 or -j2 back as the obsolete -jN FIELD until its operands are counted; this applies it where it stands, so which of two conflicting join fields is named first, and which error comes first, differ","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"join"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a1","-e","-i","-j2","-o","0 1.2","-t\t","-v","2","-1","18446744073709551615","-20","--check-order","--nocheck-order","--header","--zero-terminated","left"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text_sorted_a","tier":"pairs","utility":"join"},"domain":"text","id":"027e7a384a38fb71","kind":"bug","list":"ledger","reason":"GNU holds a -j1 or -j2 back as the obsolete -jN FIELD until its operands are counted; this applies it where it stands, so which of two conflicting join fields is named first, and which error comes first, differ","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"join"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-e","EMPTY","-i","--ignore-case","-j2","-o","1.2","-t","\n","-v2","-1","1","-2","0","--check-order","--header","--zero-terminated","left","right","a.txt"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"nonl","tier":"pairs","utility":"join"},"domain":"text","id":"04f92b872d2687e5","kind":"bug","list":"ledger","reason":"GNU holds a -j1 or -j2 back as the obsolete -jN FIELD until its operands are counted; this applies it where it stands, so which of two conflicting join fields is named first, and which error comes first, differ","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"join"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"117018074b9b9a78033af2f3e416a6a258c3141ddf69a369ef7f1864cedc2ab2"},"case":{"argv":["-1","2","-v1","--check-order","--ignore-case","--header","-22","-","right"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"nonl","utility":"join"},"domain":"text","id":"1c9b588ac147687b","kind":"bug","list":"ledger","reason_id":"r258","utility":"join"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-j1","-t"," ","--header","-z","-22","-1","0"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"nonl","tier":"random","utility":"join"},"domain":"text","id":"1d1c53a6a0a768cc","kind":"bug","list":"ledger","reason":"GNU holds a -j1 or -j2 back as the obsolete -jN FIELD until its operands are counted; this applies it where it stands, so which of two conflicting join fields is named first, and which error comes first, differ","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"join"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"248e219be379aa3f4bd5d9b83788f2baa22a8b8c74973a6c258b6af75f565577"},"case":{"argv":["-1","18446744073709551616","--ignore-case","-i","-e","--check-order","--header","unordered","unordered2"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","utility":"join"},"domain":"text","id":"1f346aba482dcca4","kind":"bug","list":"ledger","reason_id":"r258","utility":"join"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a","1","-e","EMPTY","-i","-j2","-o","1.9","-t\\0","-v2","-1","18446744073709551616","-21","--check-order","-z","--zero-terminated","left","left"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"edge_65535","tier":"pairs","utility":"join"},"domain":"text","id":"229d0366021a89f9","kind":"bug","list":"ledger","reason":"GNU holds a -j1 or -j2 back as the obsolete -jN FIELD until its operands are counted; this applies it where it stands, so which of two conflicting join fields is named first, and which error comes first, differ","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"join"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"b3577f507cb282f8a52a32cd3365a9d1ac51c06165406c435df79f007e3472ff"},"case":{"argv":["--ignore-case","-t",":","--zero-terminated","--header","-1","18446744073709551616","-eEMPTY","unordered","unordered2"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text","tier":"pinned","utility":"join"},"domain":"text","id":"2eb9b2bb7b19dc2a","kind":"bug","list":"ledger","reason":"join's empty field separator, its -o field list and the file and line it names for input out of order differ from GNU's.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"a9d0916854ef5194b2a19f410e044aa646069b342df199d67958dc6a1356ec39"},"utility":"join"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-118446744073709551615","--ignore-case","-i","--nocheck-order","-z","-o2.3,1.1","left","right","a.txt"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"nul","tier":"random","utility":"join"},"domain":"text","id":"38cf51b4e8a53cba","kind":"bug","list":"ledger","reason":"GNU holds a -j1 or -j2 back as the obsolete -jN FIELD until its operands are counted; this applies it where it stands, so which of two conflicting join fields is named first, and which error comes first, differ","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"join"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"9bf51c157d0c944608d6e5e336e2e69a38ecf447596df1090eb47b8e3ba8a252"},"case":{"argv":["-1","2","-v1","--check-order","--ignore-case","--header","-22","-","right"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"nul","tier":"pinned","utility":"join"},"domain":"text","id":"5422794e5309f7a5","kind":"bug","list":"ledger","reason":"join's empty field separator, its -o field list and the file and line it names for input out of order differ from GNU's.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"172e3e6372a1ba59c705ad185ebc9cd2d22d117f0b4a8986bf214baf0918b633"},"utility":"join"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a1","-e","EMPTY","-j2","-oauto","-v","1","-11","-21","--check-order","--zero-terminated","unordered","unordered2"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"edge_65537","tier":"pairs","utility":"join"},"domain":"text","id":"65af7026fec0c014","kind":"bug","list":"ledger","reason":"GNU holds a -j1 or -j2 back as the obsolete -jN FIELD until its operands are counted; this applies it where it stands, so which of two conflicting join fields is named first, and which error comes first, differ","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"join"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a1","-eEMPTY","-i","--ignore-case","-j1","-o2.3,1.1","-t\t","-v","1","-1","18446744073709551615","-2x","--nocheck-order","--header","-z","--zero-terminated","wide","wide"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"nonl","tier":"pairs","utility":"join"},"domain":"text","id":"6cfaa6a820de9338","kind":"bug","list":"ledger","reason":"GNU holds a -j1 or -j2 back as the obsolete -jN FIELD until its operands are counted; this applies it where it stands, so which of two conflicting join fields is named first, and which error comes first, differ","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"join"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a2","-eEMPTY","-j2","-o","0","-t",":","-v","1","-1","1","--nocheck-order","--header","-z","fleft","fright"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"nonl","tier":"pairs","utility":"join"},"domain":"text","id":"79fec3965786b84a","kind":"bug","list":"ledger","reason":"GNU holds a -j1 or -j2 back as the obsolete -jN FIELD until its operands are counted; this applies it where it stands, so which of two conflicting join fields is named first, and which error comes first, differ","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"join"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"9216bef24c3b4271702848ec56b2aaae9496c6d8f25e176cfafa99e96498e51f"},"case":{"argv":["--ignore-case","-i","-z","-e","EMPTY","-1","18446744073709551616","--header","fleft","fright"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"nul","utility":"join"},"domain":"text","id":"8c5153cfeb00db4a","kind":"bug","list":"ledger","reason_id":"r258","utility":"join"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"f0b1bcb4cfa61749129c7b673066a111c5f5c3a40061aebec92b55b880d86477"},"case":{"argv":["--header","-21","--nocheck-order","-z","-e","","-1","2","wide","wide"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","utility":"join"},"domain":"text","id":"9ce416c113cf40aa","kind":"bug","list":"ledger","reason_id":"r258","utility":"join"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--check-order","-21","-z","-i","--nocheck-order","-o0","left","right","a.txt"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"edge_65537","tier":"random","utility":"join"},"domain":"text","id":"a6ce19df9757e565","kind":"bug","list":"ledger","reason":"GNU holds a -j1 or -j2 back as the obsolete -jN FIELD until its operands are counted; this applies it where it stands, so which of two conflicting join fields is named first, and which error comes first, differ","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"join"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"651eb7f7ba22a3ff5bb8162420f869e9ac28732e1ee7777b63ced51f8b83790a"},"case":{"argv":["-1","2","-v2","--header","-a2","-t\\0","-z","left","left"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text_join_left","tier":"pinned","utility":"join"},"domain":"text","id":"ba235f9ca29fbcd1","kind":"bug","list":"ledger","reason":"join's empty field separator, its -o field list and the file and line it names for input out of order differ from GNU's.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"2d7665f016a244f89019bd685aed6ca958d612b6728ec48bf73f2fb329c1d0dd"},"utility":"join"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"b8dc3085455b38801687693f6358ab43618544e6fc944350d327afd4ec96679f"},"case":{"argv":["--nocheck-order","-v","2","--check-order","--header","-1","18446744073709551616","-v2","unordered","unordered2"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text_join_left","utility":"join"},"domain":"text","id":"c03af07007d90988","kind":"bug","list":"ledger","reason_id":"r258","utility":"join"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a","2","-e","EMPTY","--ignore-case","-j2","-o","1.2","-t ","-v1","-1","18446744073709551616","-2","1","--nocheck-order","-z","--zero-terminated","missing","right"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"edge_65537","tier":"pairs","utility":"join"},"domain":"text","id":"c05e17a14512e7c1","kind":"bug","list":"ledger","reason":"GNU holds a -j1 or -j2 back as the obsolete -jN FIELD until its operands are counted; this applies it where it stands, so which of two conflicting join fields is named first, and which error comes first, differ","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"join"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"cbc2072287bece122f3cd8c00a2bbf99bc8d7c6e5f5560c73b11d546b0eaf5b9"},"case":{"argv":["-a2","-e","EMPTY","-i","-o0 1.2","-t\t","-1","18446744073709551615","--check-order","--nocheck-order","--header","-z","unordered","unordered"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"nul","tier":"pinned","utility":"join"},"domain":"text","id":"cdf10adfd4941cc1","kind":"bug","list":"ledger","reason":"join's empty field separator, its -o field list and the file and line it names for input out of order differ from GNU's.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"4b36ee1cb9693444ad8209cb5c3726f5291ac33a4a9615b52ea7b1bcf84f320c"},"utility":"join"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-118446744073709551616","-a2","--check-order","-j2","-v","1","-e","left"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"nonl","tier":"random","utility":"join"},"domain":"text","id":"d6ee5ba7090b2cc6","kind":"bug","list":"ledger","reason":"GNU holds a -j1 or -j2 back as the obsolete -jN FIELD until its operands are counted; this applies it where it stands, so which of two conflicting join fields is named first, and which error comes first, differ","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"join"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"f0b1bcb4cfa61749129c7b673066a111c5f5c3a40061aebec92b55b880d86477"},"case":{"argv":["--header","-21","--nocheck-order","-z","-e","","-1","2","wide","wide"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text","tier":"pinned","utility":"join"},"domain":"text","id":"d93874f036f0e3a7","kind":"bug","list":"ledger","reason":"join's empty field separator, its -o field list and the file and line it names for input out of order differ from GNU's.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"58c00cca88e1418c41724ba51cf6fde37efb709b302208e0dd0cf6abe01ebd2c"},"utility":"join"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a1","-e","EMPTY","-j2","-o","1.2,2.2,0","-t:","-v","1","-11","-2","0","--nocheck-order","--header","-z","goodrun","badrun"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text_utf8","tier":"pairs","utility":"join"},"domain":"text","id":"dc4fd40c0babc0e7","kind":"bug","list":"ledger","reason":"GNU holds a -j1 or -j2 back as the obsolete -jN FIELD until its operands are counted; this applies it where it stands, so which of two conflicting join fields is named first, and which error comes first, differ","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"join"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a2","-i","--ignore-case","-j1","-o1.2","-t\\0","-v2","-1","18446744073709551615","-2","1","--header","--zero-terminated","hleft","hright"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text_join_left","tier":"pairs","utility":"join"},"domain":"text","id":"e77f07ae0945e8cb","kind":"bug","list":"ledger","reason":"GNU holds a -j1 or -j2 back as the obsolete -jN FIELD until its operands are counted; this applies it where it stands, so which of two conflicting join fields is named first, and which error comes first, differ","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"join"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a","2","-e","EMPTY","-j2","-o0,1.2,2.2","-t\t","-v","1","-118446744073709551616","-20","--nocheck-order","--header","-z","wide","wide"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text_utf8","tier":"pairs","utility":"join"},"domain":"text","id":"f02124a9bf8cfd3c","kind":"bug","list":"ledger","reason":"GNU holds a -j1 or -j2 back as the obsolete -jN FIELD until its operands are counted; this applies it where it stands, so which of two conflicting join fields is named first, and which error comes first, differ","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"join"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-e","","-j1","-o2.3,1.1","-t\n","-v1","-1","2","--check-order","--zero-terminated","fleft","fright"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","tier":"pairs","utility":"join"},"domain":"text","id":"f7e546bd66e2b2bc","kind":"bug","list":"ledger","reason":"GNU holds a -j1 or -j2 back as the obsolete -jN FIELD until its operands are counted; this applies it where it stands, so which of two conflicting join fields is named first, and which error comes first, differ","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"join"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-118446744073709551615","-a","2","--zero-terminated","-j2","-v3","--ignore-case","empty","right"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"edge_65537","tier":"random","utility":"join"},"domain":"text","id":"fc94bff3fd686dcd","kind":"bug","list":"ledger","reason":"GNU holds a -j1 or -j2 back as the obsolete -jN FIELD until its operands are counted; this applies it where it stands, so which of two conflicting join fields is named first, and which error comes first, differ","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"join"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a","-d","--ignore-case","ban","empty"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","utility":"look"},"domain":"text","id":"01ca4b068c40b1ff","kind":"deliberate","list":"ledger","reason_id":"r259","utility":"look"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-f","--alphanum","--terminate=:","ban","empty"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","utility":"look"},"domain":"text","id":"0250ad3a98b92239","kind":"deliberate","list":"ledger","reason_id":"r259","utility":"look"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--alternative","--alphanum","--ignore-case","ban","empty"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","utility":"look"},"domain":"text","id":"059eb1a9a42eeec7","kind":"deliberate","list":"ledger","reason_id":"r259","utility":"look"},
@@ -57651,6 +59570,7 @@ PINNED = r"""
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a","-f","ban","empty"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","utility":"look"},"domain":"text","id":"f2c13117d19fadb0","kind":"deliberate","list":"ledger","reason_id":"r259","utility":"look"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--alternative","--alphanum","-f","-t\t","ban","empty"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","utility":"look"},"domain":"text","id":"f55846703d462bb5","kind":"deliberate","list":"ledger","reason_id":"r259","utility":"look"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-f","ban","empty"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","utility":"look"},"domain":"text","id":"fb11da5e011cb778","kind":"deliberate","list":"ledger","reason_id":"r259","utility":"look"},
+{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-ø"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text","tier":"singles","utility":"nl"},"domain":"text","id":"980fec8d72ce014d","kind":"bug","list":"ledger","reason":"file_take_from names only the first byte of an invalid multibyte option letter (-ø); getopt names each byte","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"nl"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"f001e59dc956a4a6c794c722b8cbbf76fdcc6454b2eb57979014d6256804bcef"},"case":{"argv":["-0","binary"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"crlf","utility":"rev"},"domain":"text","id":"020fb274b5ddb999","kind":"deliberate","list":"ledger","reason_id":"r243","utility":"rev"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"f001e59dc956a4a6c794c722b8cbbf76fdcc6454b2eb57979014d6256804bcef"},"case":{"argv":["--zero","binary"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"edge_65537","tier":"pinned","utility":"rev"},"domain":"text","id":"03051de55e68d0f0","kind":"deliberate","list":"ledger","reason":"util-linux reads its input as wide characters in the locale's encoding and stops at the first byte that is not one; these readers are byte-oriented, have no locale, and pass every byte through.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"},"utility":"rev"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"f001e59dc956a4a6c794c722b8cbbf76fdcc6454b2eb57979014d6256804bcef"},"case":{"argv":["-0","binary"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","tier":"pinned","utility":"rev"},"domain":"text","id":"07d5f2d0a33830a7","kind":"deliberate","list":"ledger","reason":"util-linux reads its input as wide characters in the locale's encoding and stops at the first byte that is not one; these readers are byte-oriented, have no locale, and pass every byte through.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"},"utility":"rev"},

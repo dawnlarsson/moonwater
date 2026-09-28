@@ -42,7 +42,7 @@ extern positive memory_common_prefix(void*,void*,positive);
 extern void memory_copy_match(void*,positive,positive);
 extern const p32 hash_crc32_tab[2048];
 extern const p64 hash_crc64_tab[2048];
-static p8 cpu_has_pclmul;
+p8 cpu_has_pclmul;
 void *floor_copy(void *d,void *s,positive n) __asm__("_memory_copy_apart");
 void *floor_copy(void *d,void *s,positive n) { return memcpy(d,s,n); }
 void *floor_fill(void *d,p8 v,positive n) __asm__("_memory_fill");
@@ -93,6 +93,47 @@ static bool parallel_ordered(parallel_emit_job job, parallel_sink sink, void *co
         free(o.bytes);
         return ok;
 }
+/* lib.util.c and lib.c helpers xz.c and gzip.c reach, in plain C. */
+#define bipolar_max INT64_MAX
+#define memory_zero(d, n) memset((d), 0, (n))
+static void *memory_checked(positive n) { void *at = memory(n); return at == MAP_FAILED ? NULL : at; }
+static positive memory_vli_put(p8 *into, p64 value)
+{
+        positive used = 0;
+        for (; value >= 0x80; value >>= 7) into[used++] = (p8)(value | 0x80);
+        into[used++] = (p8)value;
+        return used;
+}
+static positive memory_vli_get(const p8 *bytes, positive length, positive most, p64 *value)
+{
+        p64 got = 0;
+        for (positive at = 0; at < length && at < most && at < 10; at++)
+        {
+                if (at == 9 && bytes[at] > 1) return 0;
+                got |= (p64)(bytes[at] & 0x7f) << (7 * at);
+                if (!(bytes[at] & 0x80))
+                {
+                        if (at && !bytes[at]) return 0;
+                        *value = got;
+                        return at + 1;
+                }
+        }
+        return 0;
+}
+static const bool string_set_high[256] = {[128 ... 255] = 1};
+static positive string_span_max(const p8 *bytes, positive n, const bool *set)
+{
+        positive at = 0;
+        while (at < n && set[bytes[at]]) at++;
+        return at;
+}
+extern bool huffman_lengths(const p32 *freq, positive n, p8 *length, positive limit);
+extern void huffman_codes(const p8 *length, positive n, p32 *table);
+extern void zstd_huffman_cells(void *cells, const p8 *weight, positive count, positive max_bits, p32 *first);
+extern void zstd_fse_cells(void *cells, const p8 *symbol, positive size, positive log, p16 *next, const p64 *template_cells);
+extern void zstd_huffman_codes(p32 *table, const p8 *weight, positive count, positive max_bits);
+extern void deflate_tokens_count(void *job);
+extern void deflate_tokens_encode(void *job);
 static bipolar system_read_retry(positive fd,void *p,positive n) { return read((int)fd,p,n); }
 static bipolar system_write_all(positive fd,void *p,positive n) { return write((int)fd,p,n); }
 
@@ -108,6 +149,7 @@ head+='#define FLOOR_NATIVE\n'+gz[gz.index('#define GZIP_MAGIC0'):gz.index('stat
 for name in ('gzip_len_extra','gzip_len_base','gzip_dist_extra','gzip_dist_base'):
  head+=re.search(r'static const p(?:8|16) '+name+r'\[.*?};',gz,re.S).group(0)+'\n'
 head+=re.search(r'static bipolar gzip_code_space\(.*?\n}\n',gz,re.S).group(0)
+head+=re.search(r'typedef struct\n{\n        p8 address_to src;\n        p32 address_to mpos;.*?} gzip_tokens;\n',gz,re.S).group(0)
 a=gz.index('#define GZIP_CELL_LITERAL');b=gz.index('/* End of the span kernel contract. */',a);head+=gz[a:b]+'\n'
 # xz.c verifies SHA-256 checks through lib.util.c's digest, whose cores
 # the floor does not lift; no floor check decodes a SHA-256 stream, so these
@@ -120,10 +162,10 @@ static inline void digest_close(digest_state *d, p8 *out) { (void)d; (void)out; 
 '''
 head+='#define XZ_CORE_ONLY\n'+xz+'\n'
 a=lib.index('#define ASM_CRC_BASIS(bit)');b=lib.index('__asm__(',a);head+=lib[a:b]
-for name in ('hash_crc32_tab','hash_crc64_tab'):
+for name in ('hash_crc32_tab','hash_crc64_tab','deflate_symbol_tab'):
  a=lib.index('ASM_RODATA_OBJECT_BEGIN('+name);a=lib.index('\n',a)+1;b=lib.index('    ASM_OBJECT_END('+name,a)
  head+='__asm__(".section __TEXT,__const\\n.globl _'+name+'\\n.p2align 4\\n_'+name+':\\n"\n'+lib[a:b]+'".text\\n");\n'
-head+=subprocess.check_output(['python3','test/differential.py','--harness','native_extract','src/lib.c','hash_crc32','hash_crc64','lzma_range_shift','lzma_range_encode','lzma_range_decode','huffman_encode_back','deflate_decode_span','lzma_decode_span','memory_common_prefix','memory_copy_match'],text=True)
+head+=subprocess.check_output(['python3','test/differential.py','--harness','native_extract','src/lib.c','hash_crc32','hash_crc64','lzma_range_shift','lzma_range_encode','lzma_range_decode','huffman_encode_back','huffman_lengths','huffman_codes','zstd_huffman_cells','zstd_fse_cells','zstd_huffman_codes','deflate_tokens_count','deflate_tokens_encode','deflate_decode_span','lzma_decode_span','memory_common_prefix','memory_copy_match'],text=True)
 a=checks.index('static p64 floor_crc(');b=checks.index('#endif\n#ifdef BENCH_compression_floor',a)
 body=checks[a:b].replace('#ifdef CHECK_compression_floor','')
 # Darwin pages are 16 KiB; the LZMA span check sizes its guards by FLOOR_PAGE.

@@ -5017,6 +5017,15 @@ static inline INLINE address_any fill_known(address_any destination,
 #define set_known_length(members)                                             \
         ((positive)__builtin_strlen((const char *)(members)))
 
+//      A byte the members do not hold, which a stopping table folded as it
+//      should be holds as 1, or 0 when the set holds both candidates. The
+//      terminator cannot be the witness there: a stopping table holds it as
+//      0 whether it folded or not.
+#define set_known_outside(members)                                            \
+        (!set_known_finds(members, 0xff)   ? 0xff                             \
+         : !set_known_finds(members, 0x01) ? 0x01                             \
+                                           : 0)
+
 //      Tied to the guarded element above and not to the length alone, so that
 //      the arm which builds a table is only taken when the bytes of that
 //      table fold. Two bytes are sampled and not one: the set's own first
@@ -6927,8 +6936,8 @@ static inline INLINE address_any copy_until_known(address_any destination,
 */
 /*
         Each table is checked before it is used, on one entry the set must
-        have: the terminator for a stopping set, the first member for a
-        holding one. Folded as it should be, the entry is a constant 1 and
+        have: a byte outside the set for a stopping set, the first member
+        for a holding one. Folded as it should be, the entry is a constant 1 and
         the check goes away. But set_known is folded by the optimiser and the
         static table by the front end, and when the optimiser can read a set
         the front end could not -- a parameter that whole-program analysis
@@ -6959,7 +6968,7 @@ static inline INLINE address_any copy_until_known(address_any destination,
                  : ({                                                         \
                            const b8 address_to _stops =                       \
                                set_known_table(reject, set_known_stops);      \
-                           _stops[0]                                          \
+                           _stops[set_known_outside(reject)]                  \
                                ? string_span((source), _stops)                \
                                : string_span_without_set((source), (reject)); \
                    }))
@@ -6974,7 +6983,7 @@ static inline INLINE address_any copy_until_known(address_any destination,
                  : ({                                                         \
                            const b8 address_to _stops =                       \
                                set_known_table(accept, set_known_stops);      \
-                           _stops[0]                                          \
+                           _stops[set_known_outside(accept)]                  \
                                ? first_of_set_known((source), _stops)         \
                                : string_first_of_set((source), (accept));     \
                    }))
@@ -16970,8 +16979,174 @@ static bool clock_break_down(bipolar seconds, tm address_to broken)
         answers it. Building time() on the trap that exists on one machine out
         of three is how a family passes its own test and fails on the others.
 */
+/*
+        And the clock without the trap.
+
+        Linux maps a small shared object into every ELF process it starts,
+        the vDSO, whose clock_gettime reads the time from a page the kernel
+        keeps current, with no syscall at all. Every network deadline reads
+        the clock: 687 of the traps went into one 200 MB HTTPS download.
+        The object is found the way the kernel's own parse_vdso.c finds it --
+        AT_SYSINFO_EHDR out of the auxiliary vector, the entry out of its
+        dynamic symbol table, under the version the architecture exports it
+        at -- on the first read rather than at startup, so a program that
+        never asks the time pays nothing for it.
+
+        Only where _start said there is an auxiliary vector (see
+        program_vdso_clock): a Spark stack ends after its environment's
+        null. Anything short of a well-formed object and a versioned
+        function reads as no vDSO, and the trap stays.
+*/
+#if X64
+#define CLOCK_VDSO_NAME "__vdso_clock_gettime"
+#define CLOCK_VDSO_VERSION "LINUX_2.6"
+#elif ARM64
+#define CLOCK_VDSO_NAME "__kernel_clock_gettime"
+#define CLOCK_VDSO_VERSION "LINUX_2.6.39"
+#else
+#define CLOCK_VDSO_NAME "__vdso_clock_gettime"
+#define CLOCK_VDSO_VERSION "LINUX_4.15"
+#endif
+
+#define CLOCK_VDSO_NONE 2
+
+typedef b32 (*clock_vdso_entry)(clockid_t which, timespec address_to into);
+
+static COLD positive clock_vdso_find(void)
+{
+        string_address address_to walk = program_environment_list();
+        const p8 address_to base = null;
+        //      Where the object's addresses land: zero when it was linked at
+        //      the address it is mapped at, as qemu-user's are.
+        positive bias = 0;
+        bool loaded = false;
+        const p64 address_to dynamic = null;
+        const p8 address_to symbols = null;
+        string_address names = null;
+        const p32 address_to hash = null;
+        const p32 address_to gnu = null;
+        const p16 address_to versions = null;
+        const p8 address_to definitions = null;
+        positive count = 0;
+
+        if (is_null(walk))
+                return CLOCK_VDSO_NONE;
+        while (!is_null(address_to walk))
+                walk++;
+        for (const p64 address_to aux = (const p64 address_to)(walk + 1); aux[0];
+             aux += 2)
+                if (aux[0] == 33) // AT_SYSINFO_EHDR
+                        base = (const p8 address_to)aux[1];
+
+        //      ELFCLASS64, little endian, program headers of the size ELF64's are.
+        if (is_null(base) || memory_compare(base, "\177ELF\2\1", 6) != 0 ||
+            address_to (const p16 address_to)(base + 54) != 56)
+                return CLOCK_VDSO_NONE;
+        for (positive i = 0; i < address_to (const p16 address_to)(base + 56); i++)
+        {
+                const p8 address_to header =
+                    base + address_to (const p64 address_to)(base + 32) + i * 56;
+                p32 type = address_to (const p32 address_to)header;
+                p64 offset = address_to (const p64 address_to)(header + 8);
+                p64 virtual = address_to (const p64 address_to)(header + 16);
+
+                if (type == 1 && !loaded) // PT_LOAD
+                {
+                        bias = (positive)base + offset - virtual;
+                        loaded = true;
+                }
+                else if (type == 2) // PT_DYNAMIC
+                        dynamic = (const p64 address_to)virtual;
+        }
+        if (!loaded || is_null(dynamic))
+                return CLOCK_VDSO_NONE;
+        dynamic = (const p64 address_to)(bias + (positive)dynamic);
+
+        for (; dynamic[0]; dynamic += 2)
+        {
+                const p8 address_to at = (const p8 address_to)(bias + dynamic[1]);
+
+                switch (dynamic[0])
+                {
+                case 4: hash = (const p32 address_to)at; break;
+                case 5: names = (string_address)at; break;
+                case 6: symbols = at; break;
+                case 0x6ffffef5: gnu = (const p32 address_to)at; break;
+                case 0x6ffffff0: versions = (const p16 address_to)at; break;
+                case 0x6ffffffc: definitions = at; break;
+                }
+        }
+        if (is_null(symbols) || is_null(names))
+                return CLOCK_VDSO_NONE;
+
+        //      DT_HASH says how many symbols there are. DT_GNU_HASH only says
+        //      where each bucket's chain starts, so the count is one past the
+        //      end of the chain the highest bucket starts.
+        if (!is_null(hash))
+                count = hash[1];
+        else if (!is_null(gnu))
+        {
+                const p32 address_to buckets = gnu + 4 + 2 * gnu[2];
+                const p32 address_to chains = buckets + gnu[0];
+
+                for (positive i = 0; i < gnu[0]; i++)
+                        count = max(count, (positive)buckets[i]);
+                if (count >= gnu[1])
+                        while (!(chains[count - gnu[1]] & 1))
+                                count++;
+                count += count != 0;
+        }
+
+        for (positive i = 0; i < min(count, 4096); i++)
+        {
+                const p8 address_to symbol = symbols + 24 * i;
+                p8 info = symbol[4];
+
+                if ((info & 15) != 2 || ((info >> 4) != 1 && (info >> 4) != 2) ||
+                    address_to (const p16 address_to)(symbol + 6) == 0 ||
+                    string_compare(names + address_to (const p32 address_to)symbol,
+                                   (string_address)CLOCK_VDSO_NAME) != 0)
+                        continue;
+                if (!is_null(versions) && !is_null(definitions))
+                {
+                        p16 wanted = versions[i] & 0x7fff;
+                        const p8 address_to definition = definitions;
+                        bool found = false;
+
+                        for (;;)
+                        {
+                                //      VER_FLG_BASE names the object, not a version.
+                                if (!(address_to (const p16 address_to)(definition + 2) & 1) &&
+                                    (address_to (const p16 address_to)(definition + 4) & 0x7fff) == wanted)
+                                {
+                                        const p8 address_to aux =
+                                            definition + address_to (const p32 address_to)(definition + 12);
+
+                                        found = string_compare(
+                                                    names + address_to (const p32 address_to)aux,
+                                                    (string_address)CLOCK_VDSO_VERSION) == 0;
+                                        break;
+                                }
+                                if (!address_to (const p32 address_to)(definition + 16))
+                                        break;
+                                definition += address_to (const p32 address_to)(definition + 16);
+                        }
+                        if (!found)
+                                continue;
+                }
+                return bias + address_to (const p64 address_to)(symbol + 8);
+        }
+        return CLOCK_VDSO_NONE;
+}
+
 b32 clock_gettime(clockid_t which, timespec address_to into)
 {
+        positive entry = program_vdso_clock;
+
+        if_rare (entry == 1)
+                program_vdso_clock = entry = clock_vdso_find();
+        if (entry > CLOCK_VDSO_NONE)
+                return error_result((bipolar)((clock_vdso_entry)entry)(which, into));
         return error_result((bipolar)system_call_2(
             syscall(clock_gettime), (positive)which, (positive)into));
 }
@@ -18061,7 +18236,7 @@ static fn clock_format_core(clock_format_state address_to state,
                         alone, the width less the six of "-MM-DD":
                         %12F is %06Y-%m-%d, %+F is %+1Y-%m-%d.
                 */
-                p8 dated[24];
+                p8 dated[32];
 
                 if (which == 'F' && state->extensions)
                 {
@@ -18077,12 +18252,7 @@ static fn clock_format_core(clock_format_state address_to state,
                         dated[at++] = state->pad || state->width >= 0 ? state->pad : '+';
                         if (!dated[at - 1])
                                 at--;
-                        if (year_width)
-                        {
-                                if (year_width >= 10)
-                                        dated[at++] = (p8)('0' + year_width / 10 % 10);
-                                dated[at++] = (p8)('0' + year_width % 10);
-                        }
+                        at += positive_into(dated + at, (positive)year_width);
                         memory_copy(dated + at, "Y-%m-%d", 8);
                         composite = (const char address_to)dated;
                         state->width = -1;

@@ -87,6 +87,7 @@
 #define IFLA_WIRELESS 11
 #define IFLA_LINKINFO 18
 #define IFLA_INFO_KIND 1
+#define IFLA_CARRIER_DOWN_COUNT 48
 #define NLA_TYPE_MASK 0x3fff
 
 #define NETLINK_PREFER_ANY 0
@@ -97,6 +98,11 @@
 #define IFA_ADDRESS 1
 #define IFA_LOCAL 2
 #define IFA_LABEL 3
+#define IFA_CACHEINFO 6
+#define IFA_PROTO 11
+//      What the DHCP client stamps on an address it leases: the routing
+//      protocol number iproute2 calls dhcp.
+#define IFA_PROTO_DHCP 16
 
 #define RTA_DST 1
 #define RTA_OIF 4
@@ -530,7 +536,9 @@ static COLD bipolar netlink_transact(b32 handle, netlink_buffer address_to reque
         with EBUSY -- which arrives long after the abandoned one, attached to
         an innocent request, and reads as though the second question were the
         problem. So the remaining messages are drawn and dropped, and the
-        socket is handed back clean.
+        socket is handed back clean. An interrupted dump is drained the same
+        way before it fails: it returned at its first marked message and left
+        the rest of the dump on the socket.
 */
 static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
                             p32 sequence, netlink_buffer address_to reply,
@@ -539,6 +547,7 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
         netlink_header address_to header;
         network_deadline deadline;
         bool enough = false;
+        bool interrupted = false;
         bipolar sent;
         positive at;
 
@@ -596,16 +605,21 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
                                 continue;
                         }
 
-                        if (header->flags & NLM_DUMP_INTERRUPTED)
-                                return -1;
+                        interrupted |= (header->flags &
+                                        NLM_DUMP_INTERRUPTED) != 0;
 
                         if (header->type == NLMSG_IS_DONE)
-                                return netlink_status(header, true);
+                        {
+                                bipolar status = netlink_status(header, true);
+
+                                return interrupted && !status ? -1 : status;
+                        }
 
                         if (header->type == NLMSG_IS_ERROR)
                                 return netlink_status(header, false);
 
-                        if (!enough && header->type != NLMSG_IS_NOOP && visit &&
+                        if (!enough && !interrupted &&
+                            header->type != NLMSG_IS_NOOP && visit &&
                             !visit(header, context))
                                 enough = true;
 
@@ -728,6 +742,9 @@ typedef struct
         bool wireless;
         p8 skip_count;
         p32 skip[8];
+        //      The kernel's count of carrier losses, where it says one.
+        bool carrier_counted;
+        p32 carrier_downs;
         p8 name[IFNAME_SIZE];
         p8 hardware[6];
 } netlink_search;
@@ -747,6 +764,23 @@ static inline INLINE string_address netlink_link_name(
         name = (string_address)netlink_find(
             header, sizeof(netlink_link), IFLA_IFNAME, address_of length);
         return name && length && memory_first_of(name, 0, length) ? name : null;
+}
+
+/* IFLA_CARRIER_DOWN_COUNT, which counts every loss of carrier: a cable
+   pulled and put back -- into another network, perhaps -- leaves it higher
+   even after both events have passed. */
+static bool netlink_link_carrier_downs(netlink_header address_to header,
+                                       p32 address_to downs)
+{
+        positive width = 0;
+        p8 address_to count = (p8 address_to)netlink_find(
+            header, sizeof(netlink_link), IFLA_CARRIER_DOWN_COUNT,
+            address_of width);
+
+        if (!count || width != 4)
+                return false;
+        address_to downs = memory_load_unaligned(p32, count);
+        return true;
 }
 
 static bool netlink_link_is_wireless(netlink_header address_to header,
@@ -866,6 +900,8 @@ static bool netlink_link_seen(netlink_header address_to header, address_any cont
                         search->has_hardware = true;
                 }
         }
+        search->carrier_counted = netlink_link_carrier_downs(
+            header, address_of search->carrier_downs);
 
         return search->skip_loopback;
 }
@@ -919,9 +955,15 @@ static bipolar netlink_link_up(b32 handle, p32 index)
         REPLACE rather than EXCLUSIVE, so running the same command twice is
         the same as running it once. A boot that is retried should not fail
         because the first attempt succeeded.
+
+        A leased address carries the lease: seconds, when not zero, are its
+        valid and preferred lifetimes -- so the kernel removes it at expiry
+        even with no client left to -- and IFA_PROTO_DHCP says whose it is,
+        which is how a restarted client knows the address it inherited.
 */
 static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
-                                      p32 index, p32 host, p8 prefix)
+                                      p32 index, p32 host, p8 prefix,
+                                      p32 seconds)
 {
         netlink_buffer request = {0};
         netlink_address address_to body;
@@ -940,6 +982,18 @@ static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
 
         netlink_attribute_add(address_of request, IFA_LOCAL, address_of wire, 4);
         netlink_attribute_add(address_of request, IFA_ADDRESS, address_of wire, 4);
+        if (seconds)
+        {
+                //      ifa_cacheinfo: preferred, valid, and two stamps the
+                //      kernel keeps for itself.
+                p32 lifetimes[4] = {seconds, seconds, 0, 0};
+                p8 leased = IFA_PROTO_DHCP;
+
+                netlink_attribute_add(address_of request, IFA_CACHEINFO,
+                                      lifetimes, sizeof lifetimes);
+                netlink_attribute_add(address_of request, IFA_PROTO,
+                                      address_of leased, 1);
+        }
 
         return netlink_transact(handle, address_of request, sequence,
                                 null, null);
@@ -947,7 +1001,16 @@ static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
 
 #define netlink_address_add(handle, index, host, prefix) netlink_address_change( \
         handle, RTM_NEWADDR, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_REPLACE,   \
-        index, host, prefix)
+        index, host, prefix, 0)
+
+/* A leased address, created exclusively or put in place of the one there,
+   its lifetimes the lease's. */
+#define netlink_address_lease(handle, index, host, prefix, seconds, exclusive) \
+        netlink_address_change(                                                \
+            handle, RTM_NEWADDR,                                                \
+            NLM_REQUEST | NLM_ACK | NLM_CREATE |                                \
+                ((exclusive) ? NLM_EXCLUSIVE : NLM_REPLACE),                    \
+            index, host, prefix, seconds)
 
 /* Automatic configuration must acquire a kernel object before it can later
    claim the right to remove it.  EXCLUSIVE distinguishes a newly installed
@@ -955,10 +1018,10 @@ static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
    another network manager; REPLACE cannot make that distinction. */
 #define netlink_address_acquire(handle, index, host, prefix) netlink_address_change( \
         handle, RTM_NEWADDR, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_EXCLUSIVE,     \
-        index, host, prefix)
+        index, host, prefix, 0)
 
 #define netlink_address_delete(handle, index, host, prefix) netlink_address_change( \
-        handle, RTM_DELADDR, NLM_REQUEST | NLM_ACK, index, host, prefix)
+        handle, RTM_DELADDR, NLM_REQUEST | NLM_ACK, index, host, prefix, 0)
 
 /*
         A route, with a destination of no bits at all being the default one.
@@ -1047,6 +1110,64 @@ static bipolar netlink_dump(b32 handle, p16 type, positive body, p8 family,
                                 visit, context);
 }
 
+#define NETLINK_LEASES_MAX 8
+
+/* The addresses on one link stamped as this client's leases: whether one
+   is the address asked about, and the others, up to a handful. */
+typedef struct
+{
+        p32 index;
+        p32 host;
+        p8 prefix;
+        bool leased;
+        positive others;
+        p32 other_host[NETLINK_LEASES_MAX];
+        p8 other_prefix[NETLINK_LEASES_MAX];
+} netlink_lease_search;
+
+static COLD bool netlink_lease_seen(netlink_header address_to header,
+                                    address_any context)
+{
+        netlink_lease_search address_to search =
+            (netlink_lease_search address_to)context;
+        netlink_address address_to body =
+            netlink_message_body(header, sizeof(netlink_address));
+        positive size = 0;
+        p8 address_to named;
+        p8 address_to protocol;
+        p32 host;
+
+        if (!body || body->family != AF_INET || body->index != search->index)
+                return true;
+        protocol = (p8 address_to)netlink_find(header, sizeof(netlink_address),
+                                               IFA_PROTO, address_of size);
+        if (!protocol || size != 1 || protocol[0] != IFA_PROTO_DHCP)
+                return true;
+        named = (p8 address_to)netlink_find(header, sizeof(netlink_address),
+                                            IFA_LOCAL, address_of size);
+        if (!named || size != 4)
+                return true;
+        host = network_order_32(memory_load_unaligned(p32, named));
+        if (host == search->host && body->prefix == search->prefix)
+                search->leased = true;
+        else if (search->others < NETLINK_LEASES_MAX)
+        {
+                search->other_host[search->others] = host;
+                search->other_prefix[search->others++] = body->prefix;
+        }
+        return true;
+}
+
+/* Which addresses on a link are leases this client put there -- what a
+   restarted watcher inherits from the one before it -- as against anybody
+   else's, an operator's static address included. */
+static COLD bipolar netlink_leases_on(b32 handle,
+                                      netlink_lease_search address_to search)
+{
+        return netlink_dump(handle, RTM_GETADDR, sizeof(netlink_address),
+                            AF_INET, netlink_lease_seen, search);
+}
+
 #endif // STANDARD_MODERN_C_NET_NETLINK
 /* ---- dns: A resolver: a name, and the address behind it ---- */
 
@@ -1105,6 +1226,10 @@ static bipolar netlink_dump(b32 handle, p16 type, positive body, p8 family,
 
 #define DNS_MAX_MESSAGE 4096
 #define DNS_CNAME_HOPS 16
+//      A wire name is at most 255 bytes, so at most 127 labels, and no
+//      encoder needs more jumps than a name has labels.
+#define DNS_NAME_MAX 255
+#define DNS_POINTER_HOPS 127
 //      Everything the caller may want to tell apart.
 #define DNS_OK 0
 #define DNS_NO_SERVER (-1)
@@ -1150,7 +1275,7 @@ static COLD bipolar dns_write_name(p8 address_to into, positive room, string_add
                 name = dot + string_is(dot, '.');
         }
 
-        if (used + 1 > room || used + 1 > 255)
+        if (used + 1 > room || used + 1 > DNS_NAME_MAX)
                 return DNS_MALFORMED;
 
         into[used++] = 0;
@@ -1166,8 +1291,12 @@ static COLD bipolar dns_write_name(p8 address_to into, positive room, string_add
         is two bytes on from where it began however far away the pointer led.
         Each jump lowers the ceiling to its own offset: merely moving
         backwards is insufficient because labels can step forwards to that
-        same pointer again. The spelling is kept as sent; DNS names compare
-        without regard to ASCII case.
+        same pointer again. The ceiling alone still let a chain of pointers,
+        each one two bytes before the last, cost two thousand jumps a name,
+        and a reply of names at the end of such a chain four milliseconds, so
+        the jumps are counted too. A name longer than 255 bytes is refused
+        whatever the room (RFC 1035 3.1). The spelling is kept as sent; DNS
+        names compare without regard to ASCII case.
 */
 static COLD bipolar dns_copy_name(p8 address_to message, positive size,
                              positive at, p8 address_to into, positive room,
@@ -1175,8 +1304,11 @@ static COLD bipolar dns_copy_name(p8 address_to message, positive size,
 {
         positive ceiling = size;
         positive used = 0;
+        positive jumps = 0;
 
         address_to ended = 0;
+        if (room > DNS_NAME_MAX)
+                room = DNS_NAME_MAX;
 
         for (;;)
         {
@@ -1199,7 +1331,7 @@ static COLD bipolar dns_copy_name(p8 address_to message, positive size,
 
                         target = network_load_16(message + at) & 0x3fff;
 
-                        if (target >= at)
+                        if (target >= at || ++jumps > DNS_POINTER_HOPS)
                                 return DNS_MALFORMED;
 
                         ceiling = at;
@@ -1621,6 +1753,7 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
         bipolar got;
         bipolar failure = DNS_NO_REPLY;
         positive question_length;
+        positive left[2];
         network_deadline deadline;
 
         /*
@@ -1673,8 +1806,14 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
                 goto failed;
         }
 
-        if (socket_send((b32)handle, request, DNS_HEADER + question_length,
-                        0, 0, 0) < 0)
+        /* A signal before the datagram left is not the server's silence:
+           send it again, within the same budget. */
+        do
+                written = socket_send((b32)handle, request,
+                                      DNS_HEADER + question_length, 0, 0, 0);
+        while (written == NETWORK_INTERRUPTED &&
+               network_deadline_left(address_of deadline, left, left + 1));
+        if (written < 0)
                 goto failed;
 
         /* A connected UDP socket authenticates the source address, not the
@@ -1794,18 +1933,29 @@ static COLD bipolar dns_resolve_any(string_address path, string_address name,
 #define STANDARD_MODERN_C_NET_HTTP
 
 /*
-        TLS 1.3 client for wget.
+        TLS 1.3 and 1.2 client for wget.
 
-        One cipher: TLS_AES_128_GCM_SHA256. Groups: X25519, P-256 and
-        P-384, each with a ClientHello key share so Chimera's secp384r1
-        servers do not HelloRetryRequest. Certificates walk to one of the
-        Mozilla TLS roots in anchors.inc: a served certificate carrying an
-        anchor's key ends the chain, or the last one served names an anchor
-        as its issuer and verifies under it. Chain signatures may be ECDSA
-        with SHA-256 or SHA-384 on P-256 or P-384, or RSA PKCS#1 v1.5 with
-        SHA-256 or SHA-384.
+        TLS 1.3 with TLS_AES_128_GCM_SHA256; TLS 1.2 with ECDHE-ECDSA and
+        ECDHE-RSA over AES-128-GCM, the extended master secret required,
+        renegotiation refused, and the TLS 1.3 downgrade sentinel checked.
+        Groups: X25519, P-256 and P-384; the ClientHello carries an X25519
+        share alone, and a HelloRetryRequest may ask once for either of the
+        others (Chimera's secp384r1 servers, Microsoft's P-256 ones).
+        Certificates walk to one of the
+        Mozilla TLS roots in anchors.inc along a path built from the served
+        certificates in any order, and at most one issuer fetched from a
+        caIssuers location: a served certificate carrying an anchor's key
+        ends the chain, or the path's last certificate names an anchor as
+        its issuer and verifies under it. Chain signatures may be ECDSA with
+        SHA-256, -384 or -512 on P-256 or P-384, or RSA PKCS#1 v1.5 with
+        SHA-256, -384 or -512 under keys of 2,048 to 8,192 bits. Name
+        constraints bind the path below them, and a wildcard standing on an
+        ICANN public suffix names nothing.
         Signature algorithms advertised are ecdsa_secp256r1_sha256,
-        ecdsa_secp384r1_sha384 and rsa_pss_rsae_sha256. close_notify is a
+        ecdsa_secp384r1_sha384, rsa_pss_rsae_sha256, and for TLS 1.2 and
+        certificates rsa_pkcs1_sha256 and rsa_pkcs1_sha384. A
+        CertificateRequest is answered with no certificate; a KeyUpdate is
+        taken and, asked, answered. close_notify is a
         clean end of the body, not a handshake failure.
         --no-check-certificate skips the chain and still encrypts.
 */
@@ -2057,15 +2207,23 @@ static fn crypto_hkdf_extract(p8 address_to salt, positive salt_length,
         crypto_hmac_sha256(salt, salt_length, ikm, ikm_length, prk);
 }
 
-static fn crypto_hkdf_expand(p8 address_to prk, p8 address_to info,
-                             positive info_length, p8 address_to out,
-                             positive out_length)
+/* RFC 5869 2.3: L is at most 255 HashLen, the blocks one counter byte
+   numbers. A longer ask is refused with its output wiped, where the counter
+   used to wrap to zero and go on as something that is not HKDF. */
+static bool crypto_hkdf_expand(p8 address_to prk, p8 address_to info,
+                               positive info_length, p8 address_to out,
+                               positive out_length)
 {
         p8 previous[32];
         p8 block[32];
         positive have = 0;
         p8 counter = 1;
 
+        if (out_length > 255 * 32)
+        {
+                crypto_forget(out, out_length);
+                return false;
+        }
         while (have < out_length)
         {
                 crypto_mac mac;
@@ -2091,6 +2249,7 @@ static fn crypto_hkdf_expand(p8 address_to prk, p8 address_to info,
 
         crypto_forget(previous, sizeof previous);
         crypto_forget(block, sizeof block);
+        return true;
 }
 
 /* The AES state and key are secret, so an ordinary S-box table exposes them
@@ -2328,393 +2487,32 @@ static bool crypto_aesgcm_open(crypto_aesgcm_key address_to key,
 }
 
 /*
-        RFC 7748 X25519 on 5 x 51-bit limbs. Field reduce, freeze and the
-        Montgomery step follow the public-domain 64-bit curve25519-donna.
+        RFC 7748 X25519. lib.c's x25519 is the whole of the arithmetic --
+        clamp, ladder, inversion, canonical encoding, its own scratch wiped
+        -- on four 64-bit limbs on x86_64 and arm64 and five 51-bit ones on
+        riscv64. What is left here is the verdict.
 */
-typedef p64 crypto_x25519_fe[5];
-
-static p64 crypto_x25519_load64(p8 address_to in)
-{
-        return (p64)in[0] | ((p64)in[1] << 8) | ((p64)in[2] << 16) |
-               ((p64)in[3] << 24) | ((p64)in[4] << 32) | ((p64)in[5] << 40) |
-               ((p64)in[6] << 48) | ((p64)in[7] << 56);
-}
-
-static fn crypto_x25519_store64(p8 address_to out, p64 in)
-{
-        out[0] = (p8)in;
-        out[1] = (p8)(in >> 8);
-        out[2] = (p8)(in >> 16);
-        out[3] = (p8)(in >> 24);
-        out[4] = (p8)(in >> 32);
-        out[5] = (p8)(in >> 40);
-        out[6] = (p8)(in >> 48);
-        out[7] = (p8)(in >> 56);
-}
-
-static fn crypto_x25519_copy(crypto_x25519_fe o, crypto_x25519_fe a)
-{
-        o[0] = a[0];
-        o[1] = a[1];
-        o[2] = a[2];
-        o[3] = a[3];
-        o[4] = a[4];
-}
-
-static fn crypto_x25519_load(crypto_x25519_fe out, p8 address_to in)
-{
-        out[0] = crypto_x25519_load64(in) & 0x7ffffffffffffull;
-        out[1] = (crypto_x25519_load64(in + 6) >> 3) & 0x7ffffffffffffull;
-        out[2] = (crypto_x25519_load64(in + 12) >> 6) & 0x7ffffffffffffull;
-        out[3] = (crypto_x25519_load64(in + 19) >> 1) & 0x7ffffffffffffull;
-        out[4] = (crypto_x25519_load64(in + 24) >> 12) & 0x7ffffffffffffull;
-}
-
-/*
-        One pass of the 51 bit carry chain.
-
-        Each limb hands what will not fit to the one above it. wrap folds the
-        carry leaving the top limb back into the bottom one at the weight the
-        prime gives it -- 2^255 is 19 -- and is how the chain stays inside
-        the field. The pass that finishes a store is the one exception: there
-        the carry out of the top is the answer to the conditional
-        subtraction, and dropping it is what performs the subtraction.
-*/
-static fn crypto_x25519_carry(crypto_wide address_to t, bool wrap)
-{
-        for (positive i = 0; i < 4; i++)
-        {
-                t[i + 1] += t[i] >> 51;
-                t[i] &= 0x7ffffffffffffull;
-        }
-
-        if (wrap)
-                t[0] += 19 * (t[4] >> 51);
-        t[4] &= 0x7ffffffffffffull;
-}
-
-static fn crypto_x25519_store(p8 address_to out, crypto_x25519_fe in)
-{
-        crypto_wide t[5];
-
-        for (positive i = 0; i < 5; i++)
-                t[i] = in[i];
-
-        crypto_x25519_carry(t, true);
-        crypto_x25519_carry(t, true);
-
-        //      Adding 19 and carrying turns a value in [p, 2p) into one in
-        //      [0, p) with the top limb's bit set, which the constants below
-        //      then clear; a value already below p is unchanged by the pair.
-        t[0] += 19;
-        crypto_x25519_carry(t, true);
-
-        t[0] += 0x8000000000000ull - 19;
-        for (positive i = 1; i < 5; i++)
-                t[i] += 0x8000000000000ull - 1;
-        crypto_x25519_carry(t, false);
-
-        crypto_x25519_store64(out, (p64)(t[0] | (t[1] << 51)));
-        crypto_x25519_store64(out + 8, (p64)((t[1] >> 13) | (t[2] << 38)));
-        crypto_x25519_store64(out + 16, (p64)((t[2] >> 26) | (t[3] << 25)));
-        crypto_x25519_store64(out + 24, (p64)((t[3] >> 39) | (t[4] << 12)));
-        crypto_forget(t, sizeof t);
-}
-
-static fn crypto_x25519_sum(crypto_x25519_fe o, crypto_x25519_fe in)
-{
-        o[0] += in[0];
-        o[1] += in[1];
-        o[2] += in[2];
-        o[3] += in[3];
-        o[4] += in[4];
-}
-
-static fn crypto_x25519_diff(crypto_x25519_fe o, crypto_x25519_fe in)
-{
-        o[0] = in[0] + 0x3fffffffffff68ull - o[0];
-        o[1] = in[1] + 0x3ffffffffffff8ull - o[1];
-        o[2] = in[2] + 0x3ffffffffffff8ull - o[2];
-        o[3] = in[3] + 0x3ffffffffffff8ull - o[3];
-        o[4] = in[4] + 0x3ffffffffffff8ull - o[4];
-}
-
-static fn crypto_x25519_mul(crypto_x25519_fe o, crypto_x25519_fe in2,
-                            crypto_x25519_fe in)
-{
-        crypto_wide t[5];
-        p64 r0, r1, r2, r3, r4, s0, s1, s2, s3, s4, c;
-
-        r0 = in[0];
-        r1 = in[1];
-        r2 = in[2];
-        r3 = in[3];
-        r4 = in[4];
-        s0 = in2[0];
-        s1 = in2[1];
-        s2 = in2[2];
-        s3 = in2[3];
-        s4 = in2[4];
-
-        t[0] = (crypto_wide)r0 * s0;
-        t[1] = (crypto_wide)r0 * s1 + (crypto_wide)r1 * s0;
-        t[2] = (crypto_wide)r0 * s2 + (crypto_wide)r2 * s0 + (crypto_wide)r1 * s1;
-        t[3] = (crypto_wide)r0 * s3 + (crypto_wide)r3 * s0 + (crypto_wide)r1 * s2 +
-               (crypto_wide)r2 * s1;
-        t[4] = (crypto_wide)r0 * s4 + (crypto_wide)r4 * s0 + (crypto_wide)r3 * s1 +
-               (crypto_wide)r1 * s3 + (crypto_wide)r2 * s2;
-
-        //      Limbs stay below 2^55 (a difference is at most 2^52 + 8p's
-        //      2^54 limb), so nineteen of one fits a word and each wrapped
-        //      product is one 64 by 64 multiply rather than a 128 by 64.
-        r1 *= 19;
-        r2 *= 19;
-        r3 *= 19;
-        r4 *= 19;
-        t[0] += (crypto_wide)r4 * s1 + (crypto_wide)r1 * s4 +
-                (crypto_wide)r2 * s3 + (crypto_wide)r3 * s2;
-        t[1] += (crypto_wide)r4 * s2 + (crypto_wide)r2 * s4 +
-                (crypto_wide)r3 * s3;
-        t[2] += (crypto_wide)r4 * s3 + (crypto_wide)r3 * s4;
-        t[3] += (crypto_wide)r4 * s4;
-
-        r0 = (p64)t[0] & 0x7ffffffffffffull;
-        c = (p64)(t[0] >> 51);
-        t[1] += c;
-        r1 = (p64)t[1] & 0x7ffffffffffffull;
-        c = (p64)(t[1] >> 51);
-        t[2] += c;
-        r2 = (p64)t[2] & 0x7ffffffffffffull;
-        c = (p64)(t[2] >> 51);
-        t[3] += c;
-        r3 = (p64)t[3] & 0x7ffffffffffffull;
-        c = (p64)(t[3] >> 51);
-        t[4] += c;
-        r4 = (p64)t[4] & 0x7ffffffffffffull;
-        c = (p64)(t[4] >> 51);
-        r0 += c * 19;
-        c = r0 >> 51;
-        r0 &= 0x7ffffffffffffull;
-        r1 += c;
-        c = r1 >> 51;
-        r1 &= 0x7ffffffffffffull;
-        r2 += c;
-
-        o[0] = r0;
-        o[1] = r1;
-        o[2] = r2;
-        o[3] = r3;
-        o[4] = r4;
-        crypto_forget(t, sizeof t);
-}
-
-/* o = a^(2^n), n at least one: each square makes each cross product once
-   and doubles it, fifteen multiplies where crypto_x25519_mul makes
-   twenty five, with the same carry chain. */
-static fn crypto_x25519_sqr_n(crypto_x25519_fe o, crypto_x25519_fe a, positive n)
-{
-        crypto_wide t[5];
-        p64 r0 = a[0], r1 = a[1], r2 = a[2], r3 = a[3], r4 = a[4];
-
-        while (n--)
-        {
-                p64 d0 = r0 * 2;
-                p64 d1 = r1 * 2;
-                p64 d2 = r2 * 2 * 19;
-                p64 d419 = r4 * 19;
-                p64 d4 = d419 * 2;
-                p64 c;
-
-                t[0] = (crypto_wide)r0 * r0 + (crypto_wide)d4 * r1 +
-                       (crypto_wide)d2 * r3;
-                t[1] = (crypto_wide)d0 * r1 + (crypto_wide)d4 * r2 +
-                       (crypto_wide)r3 * (r3 * 19);
-                t[2] = (crypto_wide)d0 * r2 + (crypto_wide)r1 * r1 +
-                       (crypto_wide)d4 * r3;
-                t[3] = (crypto_wide)d0 * r3 + (crypto_wide)d1 * r2 +
-                       (crypto_wide)r4 * d419;
-                t[4] = (crypto_wide)d0 * r4 + (crypto_wide)d1 * r3 +
-                       (crypto_wide)r2 * r2;
-
-                t[1] += (p64)(t[0] >> 51);
-                r0 = (p64)t[0] & 0x7ffffffffffffull;
-                t[2] += (p64)(t[1] >> 51);
-                r1 = (p64)t[1] & 0x7ffffffffffffull;
-                t[3] += (p64)(t[2] >> 51);
-                r2 = (p64)t[2] & 0x7ffffffffffffull;
-                t[4] += (p64)(t[3] >> 51);
-                r3 = (p64)t[3] & 0x7ffffffffffffull;
-                r4 = (p64)t[4] & 0x7ffffffffffffull;
-                r0 += 19 * (p64)(t[4] >> 51);
-                c = r0 >> 51;
-                r0 &= 0x7ffffffffffffull;
-                r1 += c;
-                c = r1 >> 51;
-                r1 &= 0x7ffffffffffffull;
-                r2 += c;
-        }
-
-        o[0] = r0;
-        o[1] = r1;
-        o[2] = r2;
-        o[3] = r3;
-        o[4] = r4;
-        crypto_forget(t, sizeof t);
-}
-
-static fn crypto_x25519_mul121665(crypto_x25519_fe o, crypto_x25519_fe a)
-{
-        crypto_wide w;
-
-        w = (crypto_wide)a[0] * 121665;
-        o[0] = (p64)w & 0x7ffffffffffffull;
-        w = (w >> 51) + (crypto_wide)a[1] * 121665;
-        o[1] = (p64)w & 0x7ffffffffffffull;
-        w = (w >> 51) + (crypto_wide)a[2] * 121665;
-        o[2] = (p64)w & 0x7ffffffffffffull;
-        w = (w >> 51) + (crypto_wide)a[3] * 121665;
-        o[3] = (p64)w & 0x7ffffffffffffull;
-        w = (w >> 51) + (crypto_wide)a[4] * 121665;
-        o[4] = (p64)w & 0x7ffffffffffffull;
-        o[0] += 19 * (p64)(w >> 51);
-        crypto_forget(address_of w, sizeof w);
-}
-
-static fn crypto_x25519_invert(crypto_x25519_fe o, crypto_x25519_fe z)
-{
-        crypto_x25519_fe a, t0, b, c;
-
-        crypto_x25519_sqr_n(a, z, 1);
-        crypto_x25519_sqr_n(t0, a, 2);
-        crypto_x25519_mul(b, t0, z);
-        crypto_x25519_mul(a, b, a);
-        crypto_x25519_sqr_n(t0, a, 1);
-        crypto_x25519_mul(b, t0, b);
-        crypto_x25519_sqr_n(t0, b, 5);
-        crypto_x25519_mul(b, t0, b);
-        crypto_x25519_sqr_n(t0, b, 10);
-        crypto_x25519_mul(c, t0, b);
-        crypto_x25519_sqr_n(t0, c, 20);
-        crypto_x25519_mul(t0, t0, c);
-        crypto_x25519_sqr_n(t0, t0, 10);
-        crypto_x25519_mul(b, t0, b);
-        crypto_x25519_sqr_n(t0, b, 50);
-        crypto_x25519_mul(c, t0, b);
-        crypto_x25519_sqr_n(t0, c, 100);
-        crypto_x25519_mul(t0, t0, c);
-        crypto_x25519_sqr_n(t0, t0, 50);
-        crypto_x25519_mul(t0, t0, b);
-        crypto_x25519_sqr_n(t0, t0, 5);
-        crypto_x25519_mul(o, t0, a);
-
-        crypto_forget(a, sizeof a);
-        crypto_forget(t0, sizeof t0);
-        crypto_forget(b, sizeof b);
-        crypto_forget(c, sizeof c);
-}
-
-static fn crypto_cswap(crypto_x25519_fe a, crypto_x25519_fe b, p64 swap)
-{
-        positive i;
-
-        swap = 0 - swap;
-        for (i = 0; i < 5; i++)
-        {
-                p64 t = swap & (a[i] ^ b[i]);
-                a[i] ^= t;
-                b[i] ^= t;
-        }
-}
-
 static bool crypto_x25519(p8 address_to out, p8 address_to scalar, p8 address_to u)
 {
-        //      Everything the ladder derives from the scalar, wiped as one.
-        struct
-        {
-                p8 e[32];
-                crypto_x25519_fe x1, x2, z2, x3, z3;
-                crypto_x25519_fe a, b, c, d, aa, bb, ee, da, cb, t;
-                p64 bit;
-                p64 swap;
-                p8 nonzero;
-        } w;
-        positive i;
-        bool valid;
+        p8 nonzero = 0;
 
-        memory_copy(w.e, scalar, 32);
-        w.swap = 0;
-        w.e[0] &= 248;
-        w.e[31] &= 127;
-        w.e[31] |= 64;
-
-        crypto_x25519_load(w.x1, u);
-        memory_fill(w.x2, 0, sizeof(w.x2));
-        w.x2[0] = 1;
-        memory_fill(w.z2, 0, sizeof(w.z2));
-        crypto_x25519_copy(w.x3, w.x1);
-        memory_fill(w.z3, 0, sizeof(w.z3));
-        w.z3[0] = 1;
-
-        for (i = 254; i < 256; i--)
-        {
-                w.bit = (w.e[i >> 3] >> (i & 7)) & 1;
-                w.swap ^= w.bit;
-                crypto_cswap(w.x2, w.x3, w.swap);
-                crypto_cswap(w.z2, w.z3, w.swap);
-                w.swap = w.bit;
-
-                crypto_x25519_copy(w.a, w.x2);
-                crypto_x25519_sum(w.a, w.z2);
-                crypto_x25519_copy(w.b, w.z2);
-                crypto_x25519_diff(w.b, w.x2);
-                crypto_x25519_copy(w.c, w.x3);
-                crypto_x25519_sum(w.c, w.z3);
-                crypto_x25519_copy(w.d, w.z3);
-                crypto_x25519_diff(w.d, w.x3);
-
-                crypto_x25519_mul(w.da, w.d, w.a);
-                crypto_x25519_mul(w.cb, w.c, w.b);
-                crypto_x25519_sqr_n(w.aa, w.a, 1);
-                crypto_x25519_sqr_n(w.bb, w.b, 1);
-
-                crypto_x25519_copy(w.t, w.da);
-                crypto_x25519_sum(w.t, w.cb);
-                crypto_x25519_sqr_n(w.x3, w.t, 1);
-
-                crypto_x25519_copy(w.t, w.cb);
-                crypto_x25519_diff(w.t, w.da);
-                crypto_x25519_sqr_n(w.t, w.t, 1);
-                crypto_x25519_mul(w.z3, w.x1, w.t);
-
-                crypto_x25519_mul(w.x2, w.aa, w.bb);
-
-                crypto_x25519_copy(w.ee, w.bb);
-                crypto_x25519_diff(w.ee, w.aa);
-                crypto_x25519_mul121665(w.t, w.ee);
-                crypto_x25519_sum(w.t, w.aa);
-                crypto_x25519_mul(w.z2, w.ee, w.t);
-        }
-
-        crypto_cswap(w.x2, w.x3, w.swap);
-        crypto_cswap(w.z2, w.z3, w.swap);
-        crypto_x25519_invert(w.z2, w.z2);
-        crypto_x25519_mul(w.x2, w.x2, w.z2);
-        crypto_x25519_store(out, w.x2);
+        x25519(out, scalar, u);
 
         /* RFC 7748's low-order inputs produce the all-zero shared secret.
            Returning its validity lets a protocol reject that public result
            without adding a second, easy-to-forget check at every caller. */
-        w.nonzero = 0;
-        for (i = 0; i < 32; i++)
-                w.nonzero |= out[i];
-        valid = w.nonzero != 0;
-
-        crypto_forget(address_of w, sizeof w);
-        return valid;
+        for (positive i = 0; i < 32; i++)
+                nonzero |= out[i];
+        return nonzero != 0;
 }
 
 #define CRYPTO_FE_MAX 6
-#define CRYPTO_RSA_LIMBS 64
+/* RSA moduli to 8,192 bits, as browsers take them (rsa8192.badssl.com).
+   lib.c's montgomery_multiply stops at 64 limbs; crypto_rsa_multiply
+   carries the rest. */
+#define CRYPTO_RSA_LIMBS 128
+#define CRYPTO_RSA_BYTES (CRYPTO_RSA_LIMBS * 8)
+#define CRYPTO_RSA_EXPONENT_BITS 33 /* BoringSSL's kMaxExponentBits */
 
 /* One, whose Montgomery product with an element in Montgomery form is the
    element as a plain integer. */
@@ -4135,6 +3933,54 @@ static fn crypto_rsa_double(p64 address_to x, const p64 address_to m, positive n
                 crypto_fe_subtract_raw(x, x, m, n);
 }
 
+/* montgomery_multiply for any n to CRYPTO_RSA_LIMBS: the assembly to its 64
+   limbs, and above that the same row-by-row product and reduction in C
+   (CIOS: row i adds a b_i and q m, q = t0 (-1/m0) mod 2^64, and shifts
+   one limb down), finished by one subtraction of m. Public moduli only:
+   the final subtraction branches. */
+static fn crypto_rsa_multiply(p64 address_to d, const p64 address_to a,
+                              const p64 address_to b, const p64 address_to m,
+                              p64 inverse, positive n)
+{
+        p64 t[CRYPTO_RSA_LIMBS + 2];
+
+        if (n <= 64)
+        {
+                montgomery_multiply(d, a, b, m, inverse, n);
+                return;
+        }
+        memory_fill(t, 0, (n + 2) * sizeof(p64));
+        for (positive i = 0; i < n; i++)
+        {
+                crypto_wide carry = 0;
+                p64 q;
+
+                for (positive j = 0; j < n; j++)
+                {
+                        carry += (crypto_wide)a[j] * b[i] + t[j];
+                        t[j] = (p64)carry;
+                        carry >>= 64;
+                }
+                carry += t[n];
+                t[n] = (p64)carry;
+                t[n + 1] = (p64)(carry >> 64);
+                q = t[0] * inverse;
+                carry = ((crypto_wide)q * m[0] + t[0]) >> 64;
+                for (positive j = 1; j < n; j++)
+                {
+                        carry += (crypto_wide)q * m[j] + t[j];
+                        t[j - 1] = (p64)carry;
+                        carry >>= 64;
+                }
+                carry += t[n];
+                t[n - 1] = (p64)carry;
+                t[n] = t[n + 1] + (p64)(carry >> 64);
+        }
+        if (t[n] || crypto_fe_cmp(t, m, n) >= 0)
+                crypto_fe_subtract_raw(t, t, m, n);
+        memory_copy(d, t, n * sizeof(p64));
+}
+
 /* out = base^exp mod m, for a public odd m of n limbs whose top limb is
    nonzero and base below m, in Montgomery form throughout.  -1/m mod 2^64
    comes by Newton's iteration: an odd m0 is its own inverse to three bits
@@ -4183,9 +4029,9 @@ static fn crypto_rsa_modexp(p64 address_to out, p64 address_to base, p64 exp,
         for (at = 0; at < k; at++)
                 crypto_rsa_double(square, mod, n);
         for (at = 0; at < s; at++)
-                montgomery_multiply(square, square, square, mod, inverse, n);
+                crypto_rsa_multiply(square, square, square, mod, inverse, n);
 
-        montgomery_multiply(b, base, square, mod, inverse, n);
+        crypto_rsa_multiply(b, base, square, mod, inverse, n);
         top = 63;
         while (!((exp >> top) & 1))
                 top--;
@@ -4193,15 +4039,19 @@ static fn crypto_rsa_modexp(p64 address_to out, p64 address_to base, p64 exp,
         while (top)
         {
                 top--;
-                montgomery_multiply(result, result, result, mod, inverse, n);
+                crypto_rsa_multiply(result, result, result, mod, inverse, n);
                 if ((exp >> top) & 1)
-                        montgomery_multiply(result, result, b, mod, inverse, n);
+                        crypto_rsa_multiply(result, result, b, mod, inverse, n);
         }
 
-        montgomery_multiply(out, result, crypto_unit, mod, inverse, n);
+        crypto_rsa_multiply(out, result, crypto_unit, mod, inverse, n);
 }
 
-/* Decode the public operation once for both RSA signature encodings.  The
+/* Decode the public operation once for both RSA signature encodings.  An
+   exponent is held to CRYPTO_RSA_EXPONENT_BITS, BoringSSL's ceiling: every
+   real key uses 3 or 65537, and an 8192-bit modulus with a 64-bit exponent
+   made one verify 15.2M cycles, ~29 of which a hostile server can ask a
+   handshake to do; 33 bits halves that and refuses nothing Chrome takes.  The
    signature representative is an integer in [0,n), never an arbitrary byte
    string reduced modulo n, and a usable RSA public exponent is odd and at
    least three. */
@@ -4211,13 +4061,13 @@ static bool crypto_rsa_prepare(p8 address_to n_bytes, positive n_length,
                                p64 address_to base,
                                positive address_to limbs)
 {
-        p8 padded[512];
+        p8 padded[CRYPTO_RSA_BYTES];
 
         if (n_length > sizeof(padded) || n_length < 256 ||
             sig_length != n_length || !n_bytes[0] ||
             (n_length == 256 && !(n_bytes[0] & 0x80)) ||
             !(n_bytes[n_length - 1] & 1) || exponent < 3 ||
-            !(exponent & 1))
+            !(exponent & 1) || exponent >> CRYPTO_RSA_EXPONENT_BITS)
                 return false;
 
         address_to limbs = (n_length + 7) / 8;
@@ -4264,7 +4114,7 @@ static bool crypto_rsa_pkcs1(p8 address_to n_bytes, positive n_length,
                              positive digestinfo_length, p8 address_to hash,
                              positive hash_length)
 {
-        p8 room[512];
+        p8 room[CRYPTO_RSA_BYTES];
         p8 address_to em = crypto_rsa_open(room, n_bytes, n_length, exponent,
                                            sig, sig_length);
         positive i;
@@ -4315,7 +4165,7 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
                                   positive sig_length, p8 address_to message,
                                   positive message_length)
 {
-        p8 room[512];
+        p8 room[CRYPTO_RSA_BYTES];
         p8 address_to em = crypto_rsa_open(room, n_bytes, n_length, exponent,
                                            sig, sig_length);
         p8 mhash[32];
@@ -4367,13 +4217,16 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #include "wait.c"
 
 /* RFC 8446 5.1 and 5.4: a record carries at most 2^14 bytes of content, and
-   under AES-128-GCM a protected one adds the inner type byte and the tag. */
+   under AES-128-GCM a protected one adds the inner type byte and the tag.
+   A TLS 1.2 one (RFC 5288 3) adds the eight-byte explicit nonce and the tag
+   instead, and that larger size is the room every buffer keeps. */
 #define TLS_PLAINTEXT_MAX 16384
 #define TLS_RECORD_MAX (TLS_PLAINTEXT_MAX + 1 + 16)
+#define TLS12_RECORD_MAX (TLS_PLAINTEXT_MAX + 8 + 16)
 /* One receive takes as many whole records as the socket has queued and this
-   room holds: about fifteen full records. At least two whole records must
-   fit, since the unopened tail moves to the front only when a record would
-   not. */
+   room holds: about fifteen full records. At least one whole record must
+   fit: the unopened tail, at most one partial record, moves to the front
+   before every read, and the read has to be able to finish it. */
 #ifndef TLS_RECEIVE_ROOM
 #define TLS_RECEIVE_ROOM ((positive)1 << 18)
 #endif
@@ -4383,6 +4236,10 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #define TLS_FAIL (-1)
 #define TLS_EOF 1
 #define TLS_AGAIN 2
+#define TLS_RETRY 3
+/* tls_connect's answer when certificate checking refused the server: wget
+   says so apart, as GNU wget's status 5 does. */
+#define TLS_UNTRUSTED (-2)
 
 #define TLS_CT_CCS 20
 #define TLS_CT_ALERT 21
@@ -4394,8 +4251,13 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #define TLS_HS_NEW_SESSION_TICKET 4
 #define TLS_HS_ENCRYPTED_EXTS 8
 #define TLS_HS_CERTIFICATE 11
+#define TLS_HS_SERVER_KEY_EXCHANGE 12
+#define TLS_HS_CERT_REQUEST 13
+#define TLS_HS_SERVER_HELLO_DONE 14
+#define TLS_HS_CLIENT_KEY_EXCHANGE 16
 #define TLS_HS_CERT_VERIFY 15
 #define TLS_HS_FINISHED 20
+#define TLS_HS_KEY_UPDATE 24
 
 /* One trust anchor from anchors.inc: hashes that find candidates, then the
    key itself (curve 1 P-256, 2 P-384, 3 RSA), key_length raw bytes at key_at
@@ -4411,6 +4273,7 @@ typedef struct
 } tls_anchor;
 
 #include "anchors.inc"
+#include "suffixes.inc"
 
 static const p8 tls_oid_ec[7] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01};
 static const p8 tls_oid_p256[8] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07};
@@ -4426,6 +4289,8 @@ static const p8 tls_oid_key_usage[3] = {0x55, 0x1d, 0x0f};
 static const p8 tls_oid_extended_key_usage[3] = {0x55, 0x1d, 0x25};
 static const p8 tls_oid_server_auth[8] = {0x2b, 0x06, 0x01, 0x05,
                                           0x05, 0x07, 0x03, 0x01};
+static const p8 tls_oid_authority_info[8] = {0x2b, 0x06, 0x01, 0x05,
+                                             0x05, 0x07, 0x01, 0x01};
 
 typedef struct
 {
@@ -4436,14 +4301,29 @@ typedef struct
         bool named;
         string_address host;
         crypto_sha256 transcript;
-        p8 x25519_scalar[32];
-        p8 p256_scalar[32];
-        p8 p384_scalar[48];
+        /* The one key share on offer: its group and secret scalar. */
+        p16 group;
+        p8 scalar[48];
+        p8 client_random[32];
         p8 hs_secret[32];
         p8 c_hs_traffic[32];
         p8 s_hs_traffic[32];
+        /* Kept past the handshake: KeyUpdate derives the next from each. */
         p8 c_ap_traffic[32];
         p8 s_ap_traffic[32];
+        bool update_asked;
+        bool cert_requested;
+        /* The server's Certificate was refused while checking it. */
+        bool untrusted;
+        /* TLS 1.2 (RFC 5246, 5288, 7627): the suite, the server's random,
+           the master secret -- the premaster until the client's flight --
+           and the client's key exchange point, made when the server's
+           arrives. */
+        bool tls12;
+        p16 suite;
+        p8 server_random[32];
+        p8 master[48];
+        p8 share[97];
         p8 c_iv[12];
         p8 s_iv[12];
         crypto_aesgcm_key c_gcm;
@@ -4452,7 +4332,7 @@ typedef struct
         p64 seq_write;
         p8 leaf_qx[48];
         p8 leaf_qy[48];
-        p8 leaf_n[512];
+        p8 leaf_n[CRYPTO_RSA_BYTES];
         positive leaf_n_length;
         p64 leaf_e;
         p8 leaf_curve;
@@ -4486,11 +4366,13 @@ typedef struct
    buffers. */
 #define TLS_CONN_HEAD __builtin_offsetof(tls_conn, post_handshake)
 
-/* RFC 8446 requires each AEAD key to stay within its usage bound.  This
-   client intentionally does not implement KeyUpdate, so end the connection
-   before AES-GCM reaches the 2^24.5-record analysis bound.  The conservative
-   integer limit also makes sequence wrap unreachable. */
+/* RFC 8446 5.5 holds each AES-GCM key under 2^24.5 full records. Half way
+   there a direction is rekeyed with KeyUpdate -- the write side by sending
+   one, the read side by asking the peer for one -- and a key that still
+   reaches 2^24 records ends the connection, which also keeps the sequence
+   number from wrapping. */
 #define TLS_AES_GCM_RECORD_LIMIT ((p64)1 << 24)
+#define TLS_KEY_UPDATE_AT ((p64)1 << 23)
 
 static fn tls_forget(tls_conn address_to tls)
 {
@@ -4515,7 +4397,10 @@ static COLD fn tls_expand_label(p8 address_to secret, string_address label,
         // use the full lengths, so a truncated length byte is not a bound.
         if (label_length > 249 || context_length > 255 ||
             used + 1 + 6 + label_length + 1 + context_length > sizeof info)
+        {
+                crypto_forget(out, out_length);
                 return;
+        }
 
         info[0] = (p8)(out_length >> 8);
         info[1] = (p8)out_length;
@@ -4590,53 +4475,107 @@ static fn tls_record_header(p8 address_to header, p8 type, positive length)
         network_store_16(header + 3, (p16)length);
 }
 
-/* A record leaves in one send: sent in pieces, everything after the first
-   piece waits under Nagle for the peer to acknowledge it. It is sealed where
-   it lies, so what leaves and what stays behind on the stack is ciphertext;
-   the plaintext is the caller's. */
-static bipolar tls_send_enc(tls_conn address_to tls, p8 inner_type,
-                            p8 address_to body, positive length)
+/* RFC 5246 6.2.3.3: a TLS 1.2 record's additional data is its sequence
+   number, then its header with the plaintext's length. */
+static fn tls12_aad(p8 address_to aad, p64 seq, p8 address_to header,
+                    positive length)
 {
-        p8 record[5 + TLS_RECORD_MAX];
+        crypto_put_be64(aad, seq);
+        tls_record_header(aad + 8, header[0], length);
+}
+
+/* Seal a record into record, which has room for 5 + TLS_RECORD_MAX bytes,
+   and answer its length, or 0 when the body is too long or the write key is
+   spent. It is sealed where it lies, so what leaves and what stays behind
+   is ciphertext; the plaintext is the caller's. */
+static positive tls_seal(tls_conn address_to tls, p8 inner_type,
+                         p8 address_to body, positive length,
+                         p8 address_to record)
+{
         p8 nonce[12];
+        p8 aad[13];
+        positive at = 5;
 
         if (length > TLS_PLAINTEXT_MAX ||
             tls->seq_write >= TLS_AES_GCM_RECORD_LIMIT)
-                return TLS_FAIL;
-        tls_record_header(record, TLS_CT_APP, length + 1 + 16);
-        memory_copy(record + 5, body, length);
-        record[5 + length] = inner_type;
-        tls_nonce(tls->c_iv, tls->seq_write++, nonce);
-        crypto_aesgcm_seal(address_of tls->c_gcm, nonce, record, 5, record + 5,
-                           length + 1, record + 5 + length + 1);
+                return 0;
+        tls_nonce(tls->c_iv, tls->seq_write, nonce);
+        if (tls->tls12)
+        {
+                /* The type is the record's own and the explicit nonce the
+                   sequence number, which c_iv's zero tail makes the
+                   nonce's; the AAD is sequence, header and length. */
+                tls_record_header(record, inner_type, 8 + length + 16);
+                memory_copy(record + 5, nonce + 4, 8);
+                at += 8;
+                tls12_aad(aad, tls->seq_write, record, length);
+        }
+        else
+        {
+                tls_record_header(record, TLS_CT_APP, length + 1 + 16);
+                record[5 + length] = inner_type;
+        }
+        memory_copy(record + at, body, length);
+        length += !tls->tls12;
+        tls->seq_write++;
+        crypto_aesgcm_seal(address_of tls->c_gcm, nonce,
+                           tls->tls12 ? aad : record, tls->tls12 ? 13 : 5,
+                           record + at, length, record + at + length);
         crypto_forget(nonce, sizeof nonce);
-        return network_stream_send_all(tls->handle, record, 5 + length + 17)
+        return at + length + 16;
+}
+
+/* A record leaves in one send: sent in pieces, everything after the first
+   piece waits under Nagle for the peer to acknowledge it. */
+static bipolar tls_send_enc(tls_conn address_to tls, p8 inner_type,
+                            p8 address_to body, positive length)
+{
+        p8 record[5 + TLS12_RECORD_MAX];
+        positive sealed = tls_seal(tls, inner_type, body, length, record);
+
+        return sealed && network_stream_send_all(tls->handle, record, sealed)
                    ? TLS_OK : TLS_FAIL;
 }
 
 /* Open a record where it lies. The inner type is its last nonzero byte;
    zeros after it are padding, and a record of nothing else is refused. A
-   failed open wipes what it decrypted. */
+   TLS 1.2 record's type is its header's, its plaintext follows the
+   explicit nonce, and its nonce is the four-byte salt and that. A failed
+   open wipes what it decrypted. */
 static bipolar tls_decrypt_record(tls_conn address_to tls, p8 address_to payload,
                                   positive payload_length, p8 address_to aad,
                                   positive address_to inner_length,
                                   p8 address_to type)
 {
         p8 nonce[12];
-        positive at = payload_length - 16;
+        p8 aad12[13];
+        positive skip = tls->tls12 ? 8 : 0;
+        positive at = payload_length - 16 - skip;
         bool opened;
 
-        if (payload_length < 16 ||
+        if (payload_length < 16 + skip ||
             tls->seq_read >= TLS_AES_GCM_RECORD_LIMIT)
                 return TLS_FAIL;
         tls_nonce(tls->s_iv, tls->seq_read, nonce);
-        opened = crypto_aesgcm_open(address_of tls->s_gcm, nonce, aad, 5,
-                                    payload, at, payload + at);
+        if (skip)
+        {
+                memory_copy(nonce + 4, payload, 8);
+                tls12_aad(aad12, tls->seq_read, aad, at);
+        }
+        opened = crypto_aesgcm_open(address_of tls->s_gcm, nonce,
+                                    skip ? aad12 : aad, skip ? 13 : 5,
+                                    payload + skip, at, payload + skip + at);
         crypto_forget(nonce, sizeof nonce);
         if (!opened)
                 return TLS_FAIL;
 
         tls->seq_read++;
+        if (skip)
+        {
+                address_to type = aad[0];
+                address_to inner_length = at;
+                return TLS_OK;
+        }
         while (at && payload[at - 1] == 0)
                 at--;
         if (!at)
@@ -4666,50 +4605,35 @@ static bool tls_record_version_valid(p8 address_to header)
         return header[1] == 0x03 && header[2] == 0x03;
 }
 
-/* Receive behind receive_end. Opened bytes before receive_start are dropped:
-   for free when nothing unopened remains, and otherwise the unopened tail
-   moves to the front only when the room behind it could not hold a whole
-   record, so a record arriving in pieces is not moved again per piece. The
-   read is tried before any wait, because mid-transfer the socket almost
-   always has bytes queued; only an empty socket polls, under the deadline,
-   and nothing blocks past it. */
+/* Receive behind receive_end. Opened bytes before receive_start are dropped
+   first, so every read has the whole room behind what is still unopened --
+   at most one partial record, moved to the front at most once -- and takes
+   as much as the socket has queued: a read into the few kilobytes left
+   behind a partial record was a second read, and a second writev, for what
+   one could carry. The read is tried before any wait, because mid-transfer
+   the socket almost always has bytes queued; only an empty socket polls,
+   under the deadline, and nothing blocks past it. */
 static bool tls_receive(tls_conn address_to tls,
                         const network_deadline address_to deadline)
 {
         positive have = tls->receive_end - tls->receive_start;
+        p8 address_to into;
         positive room;
         bipolar got;
 
-        if (!have)
-        {
-                tls->receive_start = 0;
-                tls->receive_end = 0;
-        }
-        else if (sizeof(tls->receive) - tls->receive_end < 5 + TLS_RECORD_MAX)
-        {
+        if (tls->receive_start)
                 memory_copy(tls->receive, tls->receive + tls->receive_start,
                             have);
-                tls->receive_start = 0;
-                tls->receive_end = have;
-        }
-        room = sizeof(tls->receive) - tls->receive_end;
-
-        do
-        {
-                p8 address_to into = tls->receive + tls->receive_end;
-
-                if (!deadline)
-                        got = system_read_retry((positive)tls->handle, into,
-                                                room);
-                else
-                {
-                        got = socket_receive((b32)tls->handle, into, room,
-                                             MSG_DONTWAIT, null, 0);
-                        if (got == NETWORK_TRY_AGAIN)
-                                got = network_stream_read_some_until(
-                                    tls->handle, into, room, deadline);
-                }
-        } while (got == NETWORK_INTERRUPTED);
+        tls->receive_start = 0;
+        tls->receive_end = have;
+        into = tls->receive + have;
+        room = sizeof(tls->receive) - have;
+        if (!deadline)
+                got = system_read_retry((positive)tls->handle, into, room);
+        else if ((got = network_stream_read_now(tls->handle, into, room)) ==
+                 NETWORK_TRY_AGAIN)
+                got = network_stream_read_some_until(tls->handle, into, room,
+                                                     deadline);
 
         if (got <= 0 || (positive)got > room)
                 return false;
@@ -4755,7 +4679,9 @@ static bipolar tls_next_record(tls_conn address_to tls, p8 address_to type,
                         if (!tls_record_version_valid(header))
                                 return TLS_FAIL;
                         payload_length = network_load_16(header + 3);
-                        if (!payload_length || payload_length > TLS_RECORD_MAX)
+                        if (!payload_length ||
+                            payload_length > (tls->tls12 ? TLS12_RECORD_MAX
+                                                         : TLS_RECORD_MAX))
                                 return TLS_FAIL;
                         if (have - 5 >= payload_length)
                                 break;
@@ -4789,12 +4715,18 @@ static bipolar tls_next_record(tls_conn address_to tls, p8 address_to type,
                 return TLS_OK;
         }
 
-        /* A change_cipher_spec that arrives protected is unexpected. */
-        if (header[0] != TLS_CT_APP ||
+        /* A change_cipher_spec that arrives protected is unexpected. A TLS
+           1.2 record names its own type, and only alerts, handshake and
+           application data are protected. */
+        if ((tls->tls12 ? header[0] != TLS_CT_ALERT &&
+                              header[0] != TLS_CT_HANDSHAKE &&
+                              header[0] != TLS_CT_APP
+                        : header[0] != TLS_CT_APP) ||
             tls_decrypt_record(tls, payload, payload_length, header,
                                address_of inner_length, address_of inner_type) ||
             inner_type == TLS_CT_CCS)
                 goto refused;
+        payload += tls->tls12 ? 8 : 0;
 
         if (inner_type == TLS_CT_ALERT)
         {
@@ -5071,12 +5003,156 @@ static COLD bool tls_signature_algorithm(p8 address_to der, positive size,
         return true;
 }
 
+/* The IA5String name forms -- rfc822Name, dNSName, URI -- carry printable
+   ASCII here and nothing else. */
+static COLD bool tls_printable(const p8 address_to bytes, positive length)
+{
+        for (positive at = 0; at < length; at++)
+                if (bytes[at] < 0x20 || bytes[at] >= 0x7f)
+                        return false;
+        return true;
+}
+
+/* Whether a dNSName of two or more labels is a public suffix under the
+   ICANN rules of the Public Suffix List: a rule names it, or a wildcard
+   rule names its parent and no exception names it. suffixes.inc keeps the
+   names with their labels reversed ("uk.co"): the wildcard parents and the
+   exceptions as short lists, and the other multi-label rules sorted and
+   front-coded -- an upper-case letter says how many leading bytes an
+   entry shares with the one before, 'A' none, and lower-case text follows
+   up to the next capital -- in one run a top-level label, each run found
+   by binary search over tls_public_suffix_runs. One-label names are
+   refused before this (every TLD is a suffix, known or not). */
+static COLD bool tls_suffix_in(const char address_to list, positive size,
+                               const p8 address_to key, positive length)
+{
+        for (positive at = 0; at < size && list[at];)
+        {
+                positive entry = memory_span_without_byte((address_any)(list + at), 0,
+                                                          size - at);
+
+                if (entry == length && !memory_compare(list + at, key, length))
+                        return true;
+                at += entry + 1;
+        }
+        return false;
+}
+
+static COLD bool tls_public_suffix(const p8 address_to name, positive length)
+{
+        p8 key[256];
+        p8 entry[256];
+        positive entry_length = 0;
+        positive key_length = 0;
+        positive label = length;
+        positive matched = 0;
+        positive low = 0;
+        positive high = array_count(tls_public_suffix_runs);
+        positive top;
+        positive cut;
+        bool behind = false;
+        const char address_to table;
+
+        if (length >= sizeof key)
+                return false;
+        while (label)
+        {
+                positive start = label;
+
+                while (start && name[start - 1] != '.')
+                        start--;
+                if (key_length)
+                        key[key_length++] = '.';
+                for (positive i = start; i < label; i++)
+                        key[key_length++] = name[i] >= 'A' && name[i] <= 'Z'
+                                                ? (p8)(name[i] + 32) : name[i];
+                label = start ? start - 1 : 0;
+        }
+        cut = key_length;
+        while (cut && key[cut - 1] != '.')
+                cut--;
+        top = memory_span_without_byte(key, '.', key_length);
+        if (tls_suffix_in(tls_public_suffix_exceptions,
+                          sizeof tls_public_suffix_exceptions, key, key_length))
+                return false;
+        if (cut && tls_suffix_in(tls_public_suffix_wildcards,
+                                 sizeof tls_public_suffix_wildcards, key, cut - 1))
+                return true;
+
+        /* The run whose top-level label is the key's: each run's first
+           entry is spelled whole after its 'A'. */
+        while (low < high)
+        {
+                positive middle = low + (high - low) / 2;
+                const char address_to run = tls_public_suffixes +
+                                            tls_public_suffix_runs[middle] + 1;
+                positive run_top = memory_span_without_byte(
+                    (address_any)run, '.',
+                    sizeof tls_public_suffixes - tls_public_suffix_runs[middle] - 1);
+                b32 order = memory_compare(run, key, run_top < top ? run_top : top);
+
+                if (!order && run_top == top)
+                {
+                        low = middle;
+                        break;
+                }
+                if (order < 0 || (!order && run_top < top))
+                        low = middle + 1;
+                else
+                        high = middle;
+        }
+        if (low == array_count(tls_public_suffix_runs))
+                return false;
+
+        /* matched counts the bytes of the entry that agree with the key.
+           Once an entry is below the key at matched, each entry sharing
+           more than matched bytes with it is too and is passed over, and
+           the first entry above the key, or the next run, ends the
+           search. */
+        table = tls_public_suffixes + tls_public_suffix_runs[low];
+        do
+        {
+                positive shared = (positive)(*table++ - 'A');
+
+                if (behind && shared > matched)
+                {
+                        while (*table && (*table < 'A' || *table > 'Z'))
+                                table++;
+                        continue;
+                }
+                entry_length = shared < entry_length ? shared : entry_length;
+                matched = shared < matched ? shared : matched;
+                while (*table && (*table < 'A' || *table > 'Z'))
+                {
+                        p8 byte = (p8)*table++;
+
+                        if (entry_length < sizeof entry)
+                                entry[entry_length++] = byte;
+                }
+                while (matched < key_length && matched < entry_length &&
+                       entry[matched] == key[matched])
+                        matched++;
+                if (matched == key_length && entry_length == key_length)
+                        return true;
+                behind = matched == entry_length ||
+                         (matched < key_length && entry[matched] < key[matched]);
+                if (!behind)
+                        return false;
+        } while (*table && *table != 'A');
+        return false;
+}
+
+/* A presented dNSName against a host already canonical (tls_general_name_
+   match). An absolute name's trailing dot is dropped, as Chrome drops it:
+   "example.com." and "example.com" are one name. */
 static COLD bool tls_host_match(string_address host, p8 address_to name,
                            positive name_length)
 {
         positive host_length = string_length(host);
         string_address star;
 
+        if (name_length && name[name_length - 1] == '.')
+                name_length--;
         if (name_length == host_length &&
             !memory_compare_ascii_case(name, host, host_length))
                 return true;
@@ -5084,10 +5160,12 @@ static COLD bool tls_host_match(string_address host, p8 address_to name,
         if (!name_length || name[0] != '*' || name_length < 3 || name[1] != '.')
                 return false;
 
-        /* A wildcard leaves at least two labels beneath it. "*.com" is one
-           label, and a certificate carrying it would stand for every host in
-           a whole public suffix; no issuer means to say that, and a client
-           that reads it as written hands one certificate the internet. */
+        /* A wildcard leaves at least two labels beneath it, and those are
+           not a public suffix. "*.com" and "*.co.uk" would each stand for
+           every host in a whole registry; no issuer means to say that, and
+           a client that reads it as written hands one certificate the
+           internet. Chrome refuses the same names (ICANN rules only, so
+           *.appspot.com stands). */
         {
                 positive rest = name_length - 2;
                 positive dot = memory_span_without_byte(name + 2, '.', rest);
@@ -5097,26 +5175,129 @@ static COLD bool tls_host_match(string_address host, p8 address_to name,
         }
 
         /* The star stands for one whole label, never an empty one: a host
-           ".example.com" is not a name "*.example.com" covers. */
+           ".example.com" is not a name "*.example.com" covers. The suffix
+           list is read last, for the one wildcard that would match. */
         star = string_first_of(host, '.');
         if (!star || star == host || !star[1])
                 return false;
 
         return string_length(star) == name_length - 1 &&
                !memory_compare_ascii_case(star, (string_address)(name + 1),
-                                          name_length - 1);
+                                          name_length - 1) &&
+               !tls_public_suffix(name + 2, name_length - 2);
 }
 
+/* An IPv6 literal, bare or bracketed, as 16 bytes (RFC 4291 2.2): up to
+   eight groups of one to four hex digits, one "::" standing for one or more
+   zero groups, and a dotted IPv4 tail for the last two. text is writable
+   and terminated at length; a zone ("%eth0") or anything else is refused. */
+static COLD bool tls_ipv6_literal(p8 address_to text, positive length,
+                                  p8 address_to out)
+{
+        p8 groups[16];
+        positive count = 0;
+        positive gap = positive_max;
+        positive at = 0;
+
+        if (length && text[0] == '[')
+        {
+                if (length < 2 || text[length - 1] != ']')
+                        return false;
+                text[--length] = end;
+                text++;
+                length--;
+        }
+        if (memory_span_without_byte(text, ':', length) == length)
+                return false;
+        if (length >= 2 && text[0] == ':' && text[1] == ':')
+        {
+                gap = 0;
+                at = 2;
+        }
+        while (at < length)
+        {
+                positive rest = length - at;
+                positive digits = 0;
+                p32 group = 0;
+
+                if (count > 14)
+                        return false;
+                if (count <= 12 &&
+                    memory_span_without_byte(text + at, ':', rest) == rest &&
+                    memory_span_without_byte(text + at, '.', rest) < rest)
+                {
+                        bipolar quad = string_to_host((string_address)(text + at));
+
+                        if (quad < 0)
+                                return false;
+                        for (positive k = 0; k < 4; k++)
+                                groups[count++] = (p8)((p32)quad >> (24 - 8 * k));
+                        break;
+                }
+                for (; at < length && digits < 5; at++, digits++)
+                {
+                        p8 c = text[at];
+
+                        if (c >= 'A' && c <= 'F')
+                                c = (p8)(c + 32);
+                        if (c >= '0' && c <= '9')
+                                group = group << 4 | (p32)(c - '0');
+                        else if (c >= 'a' && c <= 'f')
+                                group = group << 4 | (p32)(c - 'a' + 10);
+                        else
+                                break;
+                }
+                if (!digits || digits > 4)
+                        return false;
+                groups[count++] = (p8)(group >> 8);
+                groups[count++] = (p8)group;
+                if (at == length)
+                        break;
+                if (text[at++] != ':' || at == length)
+                        return false;
+                if (text[at] == ':')
+                {
+                        if (gap != positive_max)
+                                return false;
+                        gap = count;
+                        at++;
+                }
+        }
+        if (gap == positive_max ? count != 16 : count > 14)
+                return false;
+        gap = gap < count ? gap : count;
+        memory_fill(out, 0, 16);
+        memory_copy(out, groups, gap);
+        memory_copy(out + 16 - (count - gap), groups + gap, count - gap);
+        return true;
+}
+
+/* The host as RFC 6125 and Chrome compare it: one trailing dot dropped, an
+   IPv4 or IPv6 literal only against an iPAddress of its own length, and
+   anything else only against a dNSName. */
 static COLD bool tls_general_name_match(string_address host, p8 tag,
                                    p8 address_to name, positive name_length)
 {
-        bipolar address = string_to_host(host);
+        p8 canonical[256];
+        p8 address[16];
+        positive length = string_length(host);
+        bipolar quad;
 
-        if (address >= 0)
+        if (length && host[length - 1] == '.')
+                length--;
+        if (!length || length >= sizeof canonical)
+                return false;
+        memory_copy(canonical, host, length);
+        canonical[length] = end;
+        if (tls_ipv6_literal(canonical, length, address))
+                return tag == 0x87 && name_length == 16 &&
+                       !memory_compare(name, address, 16);
+        quad = string_to_host((string_address)canonical);
+        if (quad >= 0)
                 return tag == 0x87 && name_length == 4 &&
-                       network_load_32(name) == (p32)address;
-
-        return tag == 0x82 && tls_host_match(host, name, name_length);
+                       network_load_32(name) == (p32)quad;
+        return tag == 0x82 &&
+               tls_host_match((string_address)canonical, name, name_length);
 }
 
 /* Parse the signed GeneralNames value once, all the way to its declared end.
@@ -5146,10 +5327,9 @@ static COLD bool tls_parse_san(p8 address_to value, positive length,
                 if (tls_asn1_enter(value, stop, tag, address_of at,
                                    address_of name_stop))
                         return false;
-                if (tag == 0x81 || tag == 0x82 || tag == 0x86)
-                        for (positive byte = at; byte < name_stop; byte++)
-                                if (value[byte] < 0x20 || value[byte] >= 0x7f)
-                                        return false;
+                if ((tag == 0x81 || tag == 0x82 || tag == 0x86) &&
+                    !tls_printable(value + at, name_stop - at))
+                        return false;
                 if (tag == 0x87 && name_stop - at != 4 &&
                     name_stop - at != 16)
                         return false;
@@ -5165,6 +5345,336 @@ static COLD bool tls_parse_san(p8 address_to value, positive length,
         if (matched)
                 address_to matched = found;
         return at == stop;
+}
+
+/* Where a name falls against one subtree base of its own form. */
+enum { TLS_OUTSIDE, TLS_UNSURE, TLS_WITHIN };
+
+/* Chrome's DNSNameMatches: trailing dots dropped and case ignored, an empty
+   base holds every name, "b" holds b and every name under it and ".b" only
+   the names under it. In an excluded subtree a wildcard *.s also falls in
+   a base x.s, one label above s, since its star can stand for x. */
+static COLD bool tls_dns_within(p8 address_to name, positive length,
+                                p8 address_to base, positive base_length,
+                                bool excluded)
+{
+        positive dot = memory_span_without_byte(base, '.', base_length);
+
+        if (length && name[length - 1] == '.')
+                length--;
+        if (base_length && base[base_length - 1] == '.')
+                base_length--;
+        if (!base_length)
+                return true;
+        if (excluded && length > 2 && name[0] == '*' && name[1] == '.' &&
+            dot < base_length && base_length - dot - 1 == length - 2 &&
+            !memory_compare_ascii_case(base + dot + 1, name + 2, length - 2))
+                return true;
+        if (length < base_length ||
+            memory_compare_ascii_case(name + length - base_length, base,
+                                      base_length))
+                return false;
+        return length == base_length || base[0] == '.' ||
+               name[length - base_length - 1] == '.';
+}
+
+/* RFC 5280 4.2.1.10 for an rfc822Name: a base holding an '@' names one
+   mailbox, its local part exact; ".b" holds every mailbox on a host under
+   b, and "b" every mailbox on host b. A name without a mailbox is unsure. */
+static COLD p8 tls_email_within(p8 address_to name, positive length,
+                                p8 address_to base, positive base_length)
+{
+        positive host = length;
+        positive base_mailbox = memory_span_without_byte(base, '@', base_length);
+
+        while (host && name[host - 1] != '@')
+                host--;
+        if (!host)
+                return TLS_UNSURE;
+        if (base_mailbox < base_length)
+                return length == base_length &&
+                               !memory_compare(name, base, host) &&
+                               !memory_compare_ascii_case(name + host, base + host,
+                                                          length - host)
+                           ? TLS_WITHIN
+                           : TLS_OUTSIDE;
+        name += host;
+        length -= host;
+        if (base_length && base[0] == '.'
+                ? length > base_length &&
+                      !memory_compare_ascii_case(name + length - base_length, base,
+                                                 base_length)
+                : length == base_length &&
+                      !memory_compare_ascii_case(name, base, length))
+                return TLS_WITHIN;
+        return TLS_OUTSIDE;
+}
+
+/* The next byte of a DirectoryString as RFC 4518 and OpenSSL's canonical
+   form compare it: ASCII letters folded, leading and trailing white space
+   gone and each inner run of it one space; -1 past the end. */
+static COLD bipolar tls_folded_next(const p8 address_to text, positive length,
+                                    positive address_to at)
+{
+        positive i = address_to at;
+        bool space = false;
+
+        while (i < length && (text[i] == ' ' || (text[i] >= 9 && text[i] <= 13)))
+        {
+                i++;
+                space = true;
+        }
+        if (i == length)
+                return -1;
+        if (space && address_to at)
+        {
+                address_to at = i;
+                return ' ';
+        }
+        address_to at = i + 1;
+        return text[i] >= 'A' && text[i] <= 'Z' ? text[i] + 32 : text[i];
+}
+
+/* Two attribute values, each a whole TLV. PrintableString, UTF8String,
+   IA5String, VisibleString and an ASCII TeletexString compare folded, which
+   is how OpenSSL and Chrome read them; BMPString, UniversalString and a
+   TeletexString past ASCII would need converting first and are unsure
+   unless the bytes agree; any other type compares exactly. */
+static COLD p8 tls_directory_value(const p8 address_to one, positive one_length,
+                                   const p8 address_to two, positive two_length)
+{
+        const p8 address_to text[2] = {one, two};
+        positive size[2] = {one_length, two_length};
+        positive cursor[2] = {0, 0};
+        bipolar a;
+        bipolar b;
+
+        if (one_length == two_length && !memory_compare(one, two, one_length))
+                return TLS_WITHIN;
+        for (positive k = 0; k < 2; k++)
+        {
+                positive at = 0;
+                positive stop = 0;
+                p8 tag = text[k][0];
+
+                if (tls_asn1_enter((p8 address_to)text[k], size[k], tag,
+                                   address_of at, address_of stop) ||
+                    stop != size[k])
+                        return TLS_UNSURE;
+                text[k] += at;
+                size[k] = stop - at;
+                if (tag == 0x1c || tag == 0x1e ||
+                    (tag == 0x14 && !tls_printable(text[k], size[k])))
+                        return TLS_UNSURE;
+                if (tag != 0x0c && tag != 0x13 && tag != 0x14 && tag != 0x16 &&
+                    tag != 0x1a)
+                        return TLS_OUTSIDE;
+        }
+        do
+        {
+                a = tls_folded_next(text[0], size[0], address_of cursor[0]);
+                b = tls_folded_next(text[1], size[1], address_of cursor[1]);
+        } while (a == b && a >= 0);
+        return a == b ? TLS_WITHIN : TLS_OUTSIDE;
+}
+
+/* A Name against a directoryName base, both whole DER Names: within when
+   the base's RDNs begin the name's. Equal RDN bytes agree outright; else
+   one attribute each of the same type compares by value, and any other
+   difference -- a multi-valued RDN, a Name that does not parse -- is
+   unsure. */
+static COLD p8 tls_directory_within(p8 address_to name, positive length,
+                                    p8 address_to base, positive base_length)
+{
+        p8 address_to der[2] = {name, base};
+        positive at[2] = {0, 0};
+        positive stop[2] = {0, 0};
+        p8 verdict = TLS_WITHIN;
+
+        if (tls_asn1_enter(name, length, 0x30, address_of at[0],
+                           address_of stop[0]) ||
+            tls_asn1_enter(base, base_length, 0x30, address_of at[1],
+                           address_of stop[1]))
+                return TLS_UNSURE;
+        while (at[1] < stop[1])
+        {
+                positive rdn[2] = {at[0], at[1]};
+                positive rdn_stop[2] = {0, 0};
+                positive value[2];
+                p8 same = TLS_WITHIN;
+
+                if (at[0] == stop[0])
+                        return TLS_OUTSIDE;
+                for (positive k = 0; k < 2; k++)
+                        if (tls_asn1_enter(der[k], stop[k], 0x31,
+                                           address_of rdn[k],
+                                           address_of rdn_stop[k]))
+                                return TLS_UNSURE;
+                if (rdn_stop[0] - at[0] != rdn_stop[1] - at[1] ||
+                    memory_compare(name + at[0], base + at[1],
+                                   rdn_stop[0] - at[0]))
+                {
+                        for (positive k = 0; k < 2; k++)
+                        {
+                                positive ava_stop = 0;
+
+                                if (tls_asn1_enter(der[k], rdn_stop[k], 0x30,
+                                                   address_of rdn[k],
+                                                   address_of ava_stop) ||
+                                    ava_stop != rdn_stop[k])
+                                        return TLS_UNSURE;
+                                value[k] = rdn[k];
+                                if (tls_asn1_skip(der[k], ava_stop,
+                                                  address_of value[k]) ||
+                                    value[k] >= ava_stop)
+                                        return TLS_UNSURE;
+                        }
+                        /* rdn[k] is each attribute's type, value[k] its
+                           value, which runs to the end of the RDN. */
+                        if (value[0] - rdn[0] != value[1] - rdn[1] ||
+                            memory_compare(name + rdn[0], base + rdn[1],
+                                           value[0] - rdn[0]))
+                                return TLS_OUTSIDE;
+                        same = tls_directory_value(
+                            name + value[0], rdn_stop[0] - value[0],
+                            base + value[1], rdn_stop[1] - value[1]);
+                }
+                if (same == TLS_OUTSIDE)
+                        return TLS_OUTSIDE;
+                verdict = same < verdict ? same : verdict;
+                at[0] = rdn_stop[0];
+                at[1] = rdn_stop[1];
+        }
+        return verdict;
+}
+
+/* One name a certificate carries -- tag its GeneralName form, and name its
+   content, or a Name TLV for a directoryName -- against a NameConstraints
+   value (RFC 5280 4.2.1.10): refused if it may fall in an excluded subtree
+   of its form, or if permitted subtrees of its form exist and it surely
+   falls in none. A form this client cannot evaluate (otherName, x400,
+   ediParty, URI, registeredID), or a null name, is unsure, so a subtree of
+   that form refuses it either way: RFC 5280 lets a client reject what it
+   cannot process, and a name it cannot place is what an issuer's limits
+   exist to catch.
+
+   Tag 0 checks the value instead, once, where the extension is parsed:
+   permitted then excluded, at least one, neither empty, and each subtree a
+   base alone, since minimum and maximum are fixed at 0 and absent. A
+   dNSName, rfc822Name or URI base is printable, an iPAddress base an
+   address and a contiguous mask of 4 or 16 bytes each, and a
+   directoryName base one whole Name. */
+static COLD bool tls_name_allowed(p8 address_to constraints, positive length,
+                                  p8 tag, p8 address_to name,
+                                  positive name_length)
+{
+        positive at = 0;
+        positive stop = 0;
+        p8 last = 0;
+        bool form = false;
+        bool permitted = false;
+
+        if (tls_asn1_enter(constraints, length, 0x30, address_of at,
+                           address_of stop) ||
+            stop != length || at == stop)
+                return false;
+        while (at < stop)
+        {
+                p8 which = constraints[at];
+                positive trees_stop = 0;
+
+                if ((which != 0xa0 && which != 0xa1) || which <= last ||
+                    tls_asn1_enter(constraints, stop, which, address_of at,
+                                   address_of trees_stop) ||
+                    at == trees_stop)
+                        return false;
+                last = which;
+                while (at < trees_stop)
+                {
+                        positive tree_stop = 0;
+                        positive base_stop = 0;
+                        p8 address_to base;
+                        positive base_length;
+                        p8 base_tag;
+                        p8 verdict;
+
+                        if (tls_asn1_enter(constraints, trees_stop, 0x30,
+                                           address_of at, address_of tree_stop) ||
+                            at == tree_stop)
+                                return false;
+                        base_tag = constraints[at];
+                        if (tls_asn1_enter(constraints, tree_stop, base_tag,
+                                           address_of at, address_of base_stop) ||
+                            base_stop != tree_stop)
+                                return false;
+                        base = constraints + at;
+                        base_length = base_stop - at;
+                        at = tree_stop;
+                        if (!tag)
+                        {
+                                positive name_at = 0;
+                                positive name_stop = 0;
+                                p8 partial = 0;
+
+                                if ((base_tag == 0x81 || base_tag == 0x82 ||
+                                     base_tag == 0x86) &&
+                                    !tls_printable(base, base_length))
+                                        return false;
+                                if (base_tag == 0xa4 &&
+                                    (tls_asn1_enter(base, base_length, 0x30,
+                                                    address_of name_at,
+                                                    address_of name_stop) ||
+                                     name_stop != base_length))
+                                        return false;
+                                if (base_tag != 0x87)
+                                        continue;
+                                if (base_length != 8 && base_length != 32)
+                                        return false;
+                                for (positive i = base_length / 2; i < base_length; i++)
+                                {
+                                        p8 inverse = (p8)~base[i];
+
+                                        if (partial ? base[i]
+                                                    : inverse & (p8)(inverse + 1))
+                                                return false;
+                                        partial = base[i] != 0xff;
+                                }
+                                continue;
+                        }
+                        if (base_tag != tag)
+                                continue;
+                        if (!name)
+                                verdict = TLS_UNSURE;
+                        else if (tag == 0x82)
+                                verdict = tls_dns_within(name, name_length, base,
+                                                         base_length, which == 0xa1)
+                                              ? TLS_WITHIN : TLS_OUTSIDE;
+                        else if (tag == 0x87)
+                        {
+                                verdict = base_length == 2 * name_length
+                                              ? TLS_WITHIN : TLS_OUTSIDE;
+                                for (positive i = 0; verdict && i < name_length; i++)
+                                        if ((name[i] ^ base[i]) & base[name_length + i])
+                                                verdict = TLS_OUTSIDE;
+                        }
+                        else if (tag == 0x81)
+                                verdict = tls_email_within(name, name_length, base,
+                                                           base_length);
+                        else if (tag == 0xa4)
+                                verdict = tls_directory_within(name, name_length,
+                                                               base, base_length);
+                        else
+                                verdict = TLS_UNSURE;
+                        if (which == 0xa1 && verdict != TLS_OUTSIDE)
+                                return false;
+                        if (which == 0xa0)
+                        {
+                                form = true;
+                                permitted |= verdict == TLS_WITHIN;
+                        }
+                }
+        }
+        return !form || permitted;
 }
 
 static COLD bipolar tls_parse_ecdsa_sig(p8 address_to sig, positive length,
@@ -5210,10 +5720,19 @@ typedef struct
         positive sig_oid_length;
         p8 address_to sig;
         positive sig_length;
+        /* The subjectAltName GeneralNames and the NameConstraints, each a
+           whole DER value checked by the parser, or null when absent. */
+        p8 address_to san;
+        positive san_length;
+        p8 address_to name_constraints;
+        positive name_constraints_length;
+        /* The first http: caIssuers location, or null (tls_parse_ca_issuers). */
+        p8 address_to ca_issuers;
+        positive ca_issuers_length;
         p8 curve;
         p8 qx[48];
         p8 qy[48];
-        p8 modulus[512];
+        p8 modulus[CRYPTO_RSA_BYTES];
         positive modulus_length;
         p64 exponent;
         p64 not_before;
@@ -5227,7 +5746,6 @@ typedef struct
         bool key_cert_sign;
         bool extended_key_usage;
         bool server_auth;
-        bool san;
         bool san_match;
         bool unsupported_critical;
 } tls_cert;
@@ -5431,6 +5949,46 @@ static COLD bipolar tls_parse_extended_key_usage(p8 address_to value, positive l
         return TLS_OK;
 }
 
+/* The first caIssuers location of an AuthorityInfoAccess value (RFC 5280
+   4.2.2.1) that is an http: URI, for tls_verify_chain to fetch when a
+   server leaves an intermediate out. It is only a hint -- whatever it
+   names is parsed and verified like a served certificate -- so a value
+   that does not parse is read as naming nothing. */
+static COLD fn tls_parse_ca_issuers(p8 address_to value, positive length,
+                                    tls_cert address_to cert)
+{
+        static const p8 ca_issuers[8] = {0x2b, 0x06, 0x01, 0x05,
+                                         0x05, 0x07, 0x30, 0x02};
+        positive at = 0;
+        positive stop = 0;
+
+        if (tls_asn1_enter(value, length, 0x30, address_of at, address_of stop))
+                return;
+        while (at < stop && !cert->ca_issuers)
+        {
+                positive access_stop = 0;
+                positive location = 0;
+                positive location_stop = 0;
+
+                if (tls_asn1_enter(value, stop, 0x30, address_of at,
+                                   address_of access_stop) ||
+                    tls_asn1_enter_oid(value, access_stop, address_of at,
+                                       address_of location))
+                        return;
+                if (tls_oid_is(value + at, location - at, ca_issuers, 8) &&
+                    !tls_asn1_enter(value, access_stop, 0x86, address_of location,
+                                    address_of location_stop) &&
+                    location_stop == access_stop && location_stop - location > 7 &&
+                    tls_printable(value + location, location_stop - location) &&
+                    !memory_compare_ascii_case(value + location, "http://", 7))
+                {
+                        cert->ca_issuers = value + location;
+                        cert->ca_issuers_length = location_stop - location;
+                }
+                at = access_stop;
+        }
+}
+
 static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                                     positive at, p8 version,
                                     tls_cert address_to cert,
@@ -5546,18 +6104,28 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                             !tls_parse_san(der + at, value_stop - at, host,
                                            address_of matched))
                                 return TLS_FAIL;
-                        cert->san = true;
+                        cert->san = der + at;
+                        cert->san_length = value_stop - at;
                         cert->san_match = matched;
                 }
                 else if (tls_oid_is(der + oid_at, oid_stop - oid_at,
                                     tls_oid_name_constraints, 3))
                 {
-                        /* Namespace limits apply even when an issuer marks
-                           them non-critical.  Until they are implemented,
-                           accepting the chain would authorize names outside
-                           the issuer's permitted subtrees. */
-                        return TLS_FAIL;
+                        /* Namespace limits bind whether or not the issuer
+                           marks them critical, and a form this client
+                           cannot evaluate fails closed where it is used
+                           (tls_name_allowed), so a value that does not
+                           parse is refused here, before any path uses it. */
+                        if (!tls_name_allowed(der + at, value_stop - at, 0,
+                                              null, 0))
+                                return TLS_FAIL;
+                        cert->name_constraints = der + at;
+                        cert->name_constraints_length = value_stop - at;
                 }
+                else if (!critical &&
+                         tls_oid_is(der + oid_at, oid_stop - oid_at,
+                                    tls_oid_authority_info, 8))
+                        tls_parse_ca_issuers(der + at, value_stop - at, cert);
                 else if (critical)
                         cert->unsupported_critical = true;
 
@@ -5730,7 +6298,8 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
                                          der[value_at++];
                 at = e_stop;
                 if (at != rsa_stop || cert->exponent < 3 ||
-                    !(cert->exponent & 1))
+                    !(cert->exponent & 1) ||
+                    cert->exponent >> CRYPTO_RSA_EXPONENT_BITS)
                         return TLS_FAIL;
         }
         else
@@ -5988,6 +6557,91 @@ static COLD bool tls_issuer_authorized(tls_cert address_to cert, positive ca_bel
                (!cert->path_length_present || ca_below <= cert->path_length);
 }
 
+/* Whether every name cert carries lies within constraints: a non-empty
+   subject as a directoryName, an emailAddress attribute in it as an
+   rfc822Name no subtree can vouch for (tls_name_allowed with no name), and
+   each subjectAltName entry as its own form. A subject whose RDNs do not
+   parse is refused, the way an unplaceable name is. */
+static COLD bool tls_cert_names_permitted(p8 address_to constraints,
+                                          positive length,
+                                          tls_cert address_to cert)
+{
+        static const p8 email[] = {0x06, 0x09, 0x2a, 0x86, 0x48, 0x86,
+                                   0xf7, 0x0d, 0x01, 0x09, 0x01};
+        p8 address_to subject = cert->subject;
+        positive at = 0;
+        positive stop = 0;
+        bool mailbox = false;
+
+        if (tls_asn1_enter(subject, cert->subject_length, 0x30, address_of at,
+                           address_of stop) ||
+            (at < stop && !tls_name_allowed(constraints, length, 0xa4, subject,
+                                            cert->subject_length)))
+                return false;
+        while (at < stop)
+        {
+                positive rdn_stop = 0;
+
+                if (tls_asn1_enter(subject, stop, 0x31, address_of at,
+                                   address_of rdn_stop))
+                        return false;
+                while (at < rdn_stop)
+                {
+                        positive ava_stop = 0;
+
+                        if (tls_asn1_enter(subject, rdn_stop, 0x30, address_of at,
+                                           address_of ava_stop))
+                                return false;
+                        mailbox |= ava_stop - at >= sizeof email &&
+                                   !memory_compare(subject + at, email, sizeof email);
+                        at = ava_stop;
+                }
+        }
+        if (mailbox && !tls_name_allowed(constraints, length, 0x81, null, 0))
+                return false;
+
+        at = 0;
+        if (!cert->san || tls_asn1_enter(cert->san, cert->san_length, 0x30,
+                                         address_of at, address_of stop))
+                return true;
+        while (at < stop)
+        {
+                p8 tag = cert->san[at];
+                positive name_stop = 0;
+
+                if (tls_asn1_enter(cert->san, stop, tag, address_of at,
+                                   address_of name_stop) ||
+                    !tls_name_allowed(constraints, length, tag, cert->san + at,
+                                      name_stop - at))
+                        return false;
+                at = name_stop;
+        }
+        return true;
+}
+
+/* An issuer's name constraints bind every certificate below it on the
+   path, path[0] the leaf, but an intermediate that issued itself (RFC 5280
+   6.1.3 (b) and 6.1.4 (b) leave self-issued certificates out). */
+static COLD bool tls_path_permitted(tls_cert address_to certs,
+                                    const positive address_to path,
+                                    positive below, tls_cert address_to issuer)
+{
+        for (positive k = 0; issuer->name_constraints && k < below; k++)
+        {
+                tls_cert address_to cert = certs + path[k];
+
+                if (k && cert->issuer_length == cert->subject_length &&
+                    !memory_compare(cert->issuer, cert->subject,
+                                    cert->subject_length))
+                        continue;
+                if (!tls_cert_names_permitted(issuer->name_constraints,
+                                              issuer->name_constraints_length,
+                                              cert))
+                        return false;
+        }
+        return true;
+}
+
 // A TLS handshake length: three bytes, most significant first.
 static PURE positive tls_load_24(p8 address_to at)
 {
@@ -6018,6 +6672,13 @@ static COLD bool tls_certificate_body_open(p8 address_to body,
         return true;
 }
 
+/* The issuer certificate a caIssuers URL names, fetched into room over the
+   HTTP client (defined there, beside it): its length, or 0. */
+#define TLS_AIA_MAX 16384
+
+static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
+                                   p8 address_to into, positive room);
+
 /* The leaf comes first; the rest is a pool, as RFC 8446 section 4.4.2 asks
    clients to treat it. Of 640 public HTTPS hosts openssl verified on
    2026-09-28, 25 served intermediates out of order or an extra certificate
@@ -6025,23 +6686,36 @@ static COLD bool tls_certificate_body_open(p8 address_to body,
    refused. The path grows from the leaf: each step takes the first unused
    served certificate whose subject names the step's issuer, that may issue
    at this depth or carries an anchor key (which ends the path), and whose
-   key verifies the step; when none does, the anchors must sign for the
-   step. Asking the anchors first would accept nothing more -- a served
+   key verifies the step and whose name constraints, if any, hold every
+   certificate on the path below it; when none does, the anchors must sign
+   for the step. Asking the anchors first would accept nothing more -- a served
    certificate the step verifies under has the signing key, so it carries
    the anchor's key if an anchor signed -- and would cost the https_bench
    anchor a failed P-384 verify per chain. A certificate that fails to
    parse is never a candidate. A chain served in order costs what it did;
-   each entry is used once, at most 28 served signature checks. */
+   each entry is used once, at most 28 served signature checks.
+
+   A server that leaves an intermediate out (3 of 642 hosts on 2026-09-28:
+   gob.mx, monster.com, ssa.gov) gets what browsers give it: when neither
+   the pool nor the anchors sign for a step, the issuer that step's
+   certificate names in its caIssuers location is fetched once
+   (tls_aia_fetch) and joins the pool as one more candidate, held to every
+   test a served one is. A fetched certificate's own missing issuer is not
+   fetched in turn. */
 static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                              string_address host, tls_conn address_to tls)
 {
-        tls_cert certs[8];
+        tls_cert certs[9];
+        positive path[9] = {0};
+        p8 fetched[TLS_AIA_MAX];
         positive count = 0;
         positive at;
         positive list_end;
         positive unusable = 0;
         positive child = 0;
+        positive depth = 0;
         p64 now = 0;
+        bool asked = false;
 
         if (!tls_certificate_body_open(body, body_length,
                                        address_of at, address_of list_end))
@@ -6076,7 +6750,7 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
 
         tls_keep_leaf(tls, certs);
 
-        if (tls->check_cert && (!certs[0].san || !certs[0].san_match))
+        if (tls->check_cert && !certs[0].san_match)
                 return false;
         if (!tls->check_cert)
                 return true;
@@ -6084,7 +6758,7 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         if (!tls_date_now(address_of now) || !tls_leaf_authorized(certs, now) ||
             tls_spki_is_anchor(certs))
                 return false;
-        for (positive depth = 0;; depth++)
+        for (;;)
         {
                 positive next;
                 bool anchor = false;
@@ -6095,14 +6769,33 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                                                         certs + next) &&
                             ((anchor = tls_spki_is_anchor(certs + next)) ||
                              tls_issuer_authorized(certs + next, depth, now)) &&
-                            tls_verify_one(certs + child, certs + next))
+                            tls_verify_one(certs + child, certs + next) &&
+                            tls_path_permitted(certs, path, depth + 1,
+                                               certs + next))
                                 break;
                 if (next == count)
-                        return tls_anchor_verifies(certs + child);
+                {
+                        positive length;
+
+                        if (tls_anchor_verifies(certs + child))
+                                return true;
+                        if (asked || !certs[child].ca_issuers)
+                                return false;
+                        asked = true;
+                        length = tls_aia_fetch(certs[child].ca_issuers,
+                                               certs[child].ca_issuers_length,
+                                               fetched, sizeof fetched);
+                        if (!length || tls_parse_cert(fetched, length,
+                                                      certs + count, null))
+                                return false;
+                        count++;
+                        continue;
+                }
                 if (anchor)
                         return true;
                 unusable |= (positive)1 << next;
                 child = next;
+                path[++depth] = next;
         }
 }
 
@@ -6118,80 +6811,137 @@ static COLD bool tls_hello_append(p8 address_to out, positive room,
         return true;
 }
 
+/* A key share on one of the groups supported_groups names, as its group
+   id: the scalar in tls->scalar, the public value's length, and the shared
+   secret's. X25519 is the one share a first ClientHello carries, as curl's
+   and OpenSSL's do; a HelloRetryRequest may ask for P-256 or P-384 instead,
+   which costs one round trip on the servers that want it and spares every
+   other connection the two NIST key generations. */
+static COLD positive tls_share_length(positive group)
+{
+        return group == 0x001d ? 32 : group == 0x0017 ? 65 : group == 0x0018 ? 97 : 0;
+}
+
+static COLD bool tls_share_scalar(tls_conn address_to tls, positive group)
+{
+        p8 raw[48];
+        positive width = group == 0x0018 ? 48 : 32;
+        bool made = false;
+
+        tls->group = (p16)group;
+        if (group == 0x001d)
+                made = system_random_fill(tls->scalar, 32, 0) >= 0;
+        for (positive tries = 0; group != 0x001d && !made && tries < 9; tries++)
+        {
+                if (system_random_fill(raw, width, 0) < 0)
+                        break;
+                made = crypto_scalar_reduce_be(tls->scalar, raw, width,
+                                               width == 48 ? crypto_p384_n
+                                                           : crypto_p256_n,
+                                               width / 8);
+        }
+        crypto_forget(raw, sizeof raw);
+        return made;
+}
+
+/* The public value for the share, or the secret agreed with the peer's: out
+   takes tls_share_length bytes, or 48 for a shared secret. The length
+   written, 0 on failure. */
+static COLD positive tls_share_use(tls_conn address_to tls, p8 address_to peer,
+                                   p8 address_to out)
+{
+        static const p8 base[32] = {9};
+        bool made;
+
+        if (tls->group == 0x001d)
+                made = crypto_x25519(out, tls->scalar,
+                                     peer ? peer : (p8 address_to)base);
+        else if (tls->group == 0x0017)
+                made = peer ? crypto_ecdh_p256_shared(out, tls->scalar, peer)
+                            : crypto_ecdh_p256_public(out, tls->scalar);
+        else
+                made = peer ? crypto_ecdh_p384_shared(out, tls->scalar, peer)
+                            : crypto_ecdh_p384_public(out, tls->scalar);
+        if (!made)
+                return 0;
+        return peer ? (tls->group == 0x0018 ? 48 : 32)
+                    : tls_share_length(tls->group);
+}
+
+/* The first ClientHello draws the random and an X25519 share; after a
+   HelloRetryRequest the same hello goes again with the share the server
+   asked for (already drawn into tls) and its cookie echoed, the whole
+   cookie extension body, length included (RFC 8446 4.1.2). */
 static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
-                                positive room, positive address_to used)
+                                positive room, positive address_to used,
+                                const p8 address_to cookie,
+                                positive cookie_length)
 {
         static const p8 prefix[] = {
             TLS_HS_CLIENT_HELLO, 0, 0, 0, 0x03, 0x03};
         static const p8 parameters[] = {
             0,                    // empty legacy session id
-            0, 2, 0x13, 0x01,    // TLS_AES_128_GCM_SHA256
+            0, 6, 0x13, 0x01,    // TLS_AES_128_GCM_SHA256
+            0xc0, 0x2b,           // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+            0xc0, 0x2f,           // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
             1, 0,                 // null legacy compression
             0, 0};                // extensions length, filled below
+        /* ec_point_formats (uncompressed), supported_groups,
+           extended_master_secret and an empty renegotiation_info: TLS 1.2
+           needs them, TLS 1.3 servers pass them over. */
         static const p8 groups[] = {
-            0, 0x0a, 0, 8, 0, 6, 0, 0x1d, 0, 0x17, 0, 0x18};
-        static const p8 share_intro[] = {
-            0, 0x33, 0, 208, 0, 206};
-        static const p8 x25519_item[] = {0, 0x1d, 0, 32};
-        static const p8 p256_item[] = {0, 0x17, 0, 65};
-        static const p8 p384_item[] = {0, 0x18, 0, 97};
+            0, 0x0b, 0, 2, 1, 0,
+            0, 0x0a, 0, 8, 0, 6, 0, 0x1d, 0, 0x17, 0, 0x18,
+            0, 0x17, 0, 0,
+            0xff, 0x01, 0, 1, 0};
         static const p8 tail[] = {
-            0, 0x2b, 0, 3, 2, 0x03, 0x04,
-            0, 0x0d, 0, 8, 0, 6, 0x04, 0x03, 0x05, 0x03, 0x08, 0x04};
-        p8 random[32];
-        p8 x25519_public[32];
-        p8 p256_public[65];
-        p8 p384_public[97];
-        p8 base[32];
-        p8 raw[48];
+            0, 0x2b, 0, 5, 4, 0x03, 0x04, 0x03, 0x03,
+            0, 0x0d, 0, 12, 0, 10, 0x04, 0x03, 0x05, 0x03, 0x08, 0x04,
+            0x04, 0x01, 0x05, 0x01};
+        p8 share[10 + 97];
+        positive share_length;
         positive host_length = string_length(tls->host);
-        bool named = string_to_host(tls->host) < 0;
+        bool letter = false;
+        bool colon = false;
         positive at = 0;
         positive ext_len_at;
-        positive tries;
         bipolar status = TLS_FAIL;
 
-        if (system_random_fill(random, 32, 0) < 0)
+        if (!tls->group &&
+            (system_random_fill(tls->client_random, 32, 0) < 0 ||
+             !tls_share_scalar(tls, 0x001d)))
                 goto done;
-        if (system_random_fill(tls->x25519_scalar, 32, 0) < 0)
+        share_length = tls_share_use(tls, null, share + 10);
+        if (!share_length)
                 goto done;
-
-        memory_fill(base, 0, 32);
-        base[0] = 9;
-        if (!crypto_x25519(x25519_public, tls->x25519_scalar, base))
-                goto done;
-
-        for (tries = 0;; tries++)
-        {
-                if (tries > 8 || system_random_fill(raw, 32, 0) < 0)
-                        goto done;
-                if (crypto_scalar_reduce_be(tls->p256_scalar, raw, 32,
-                                            crypto_p256_n, 4))
-                        break;
-        }
-        if (!crypto_ecdh_p256_public(p256_public, tls->p256_scalar))
-                goto done;
-
-        for (tries = 0;; tries++)
-        {
-                if (tries > 8 || system_random_fill(raw, 48, 0) < 0)
-                        goto done;
-                if (crypto_scalar_reduce_be(tls->p384_scalar, raw, 48,
-                                            crypto_p384_n, 6))
-                        break;
-        }
-        if (!crypto_ecdh_p384_public(p384_public, tls->p384_scalar))
-                goto done;
+        share[0] = 0;
+        share[1] = 0x33;
+        network_store_16(share + 2, (p16)(share_length + 6));
+        network_store_16(share + 4, (p16)(share_length + 4));
+        network_store_16(share + 6, tls->group);
+        network_store_16(share + 8, (p16)share_length);
 
         if (!tls_hello_append(out, room, address_of at, prefix, sizeof prefix) ||
-            !tls_hello_append(out, room, address_of at, random, sizeof random) ||
+            !tls_hello_append(out, room, address_of at, tls->client_random, 32) ||
             !tls_hello_append(out, room, address_of at, parameters,
                               sizeof parameters))
                 goto done;
 
         ext_len_at = at - 2;
 
-        tls->named = named && host_length && host_length < 256;
+        /* server_name names a DNS host (RFC 6066 3): an absolute name
+           without its trailing dot, and never an address -- nothing with a
+           colon (IPv6, bracketed or bare) and nothing of digits and dots
+           alone (IPv4, which no top-level domain can spell). */
+        if (host_length && tls->host[host_length - 1] == '.')
+                host_length--;
+        for (positive i = 0; i < host_length; i++)
+        {
+                colon |= tls->host[i] == ':';
+                letter |= tls->host[i] != '.' &&
+                          (tls->host[i] < '0' || tls->host[i] > '9');
+        }
+        tls->named = letter && !colon && host_length < 256;
         if (tls->named)
         {
                 positive n = 5 + host_length;
@@ -6208,21 +6958,22 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
                         goto done;
         }
 
+        if (cookie_length)
+        {
+                p8 head[4] = {0, 0x2c, (p8)(cookie_length >> 8),
+                              (p8)cookie_length};
+
+                if (cookie_length > 0xffff ||
+                    !tls_hello_append(out, room, address_of at, head,
+                                      sizeof head) ||
+                    !tls_hello_append(out, room, address_of at, cookie,
+                                      cookie_length))
+                        goto done;
+        }
+
         if (!tls_hello_append(out, room, address_of at, groups, sizeof groups) ||
-            !tls_hello_append(out, room, address_of at, share_intro,
-                              sizeof share_intro) ||
-            !tls_hello_append(out, room, address_of at, x25519_item,
-                              sizeof x25519_item) ||
-            !tls_hello_append(out, room, address_of at, x25519_public,
-                              sizeof x25519_public) ||
-            !tls_hello_append(out, room, address_of at, p256_item,
-                              sizeof p256_item) ||
-            !tls_hello_append(out, room, address_of at, p256_public,
-                              sizeof p256_public) ||
-            !tls_hello_append(out, room, address_of at, p384_item,
-                              sizeof p384_item) ||
-            !tls_hello_append(out, room, address_of at, p384_public,
-                              sizeof p384_public) ||
+            !tls_hello_append(out, room, address_of at, share,
+                              10 + share_length) ||
             !tls_hello_append(out, room, address_of at, tail, sizeof tail))
                 goto done;
 
@@ -6242,131 +6993,220 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
         status = TLS_OK;
 
 done:
-        crypto_forget(random, sizeof random);
-        crypto_forget(x25519_public, sizeof x25519_public);
-        crypto_forget(p256_public, sizeof p256_public);
-        crypto_forget(p384_public, sizeof p384_public);
-        crypto_forget(base, sizeof base);
-        crypto_forget(raw, sizeof raw);
         if (status)
-        {
-                crypto_forget(tls->x25519_scalar, sizeof tls->x25519_scalar);
-                crypto_forget(tls->p256_scalar, sizeof tls->p256_scalar);
-                crypto_forget(tls->p384_scalar, sizeof tls->p384_scalar);
-        }
+                crypto_forget(tls->scalar, sizeof tls->scalar);
         return status;
 }
 
+/* HelloRetryRequest is a ServerHello whose random is SHA-256 of
+   "HelloRetryRequest" (RFC 8446 4.1.3). */
+static const p8 tls_retry_random[32] = {
+    0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02,
+    0x1e, 0x65, 0xb8, 0x91, 0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e,
+    0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c};
+
+/* A ServerHello answers TLS_OK with the peer's share in peer, on the one
+   group tls->group the client sent a share for; a HelloRetryRequest
+   answers TLS_RETRY with the group it asks for in group (0 when it asks
+   for none) and its cookie extension body in cookie and cookie_length
+   (null and 0 when it has none). A retry has to ask for something -- a
+   group offered but not already shared, or a cookie -- and may carry
+   nothing else (RFC 8446 4.1.4).
+
+   Without supported_versions the answer is TLS 1.2, which sets tls->tls12
+   and tls->suite: one of the two ECDHE suites offered, the extended master
+   secret (RFC 7627) and an empty renegotiation_info (RFC 5746) required,
+   point formats that include uncompressed, a session id the server may
+   choose; and never the random's downgrade sentinel, since TLS 1.3 was on
+   offer (RFC 8446 4.1.3). Each version refuses the other's extensions.
+   Both record the server's random. */
 static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
+                                     tls_conn address_to tls,
                                      p8 address_to peer, positive room,
                                      positive address_to share_length,
-                                     positive address_to group)
+                                     positive address_to group,
+                                     p8 address_to address_to cookie,
+                                     positive address_to cookie_length)
 {
+        static const p8 kinds[] = {0x2b, 0x33, 0x2c, 0x17, 0x0b, 0x00};
         positive at;
-        bool seen_share = false;
-        bool seen_version = false;
+        positive session;
+        positive suite;
+        positive seen = 0;
+        bool retry;
 
         if (length < 44 || hello[0] != TLS_HS_SERVER_HELLO ||
             tls_load_24(hello + 1) != length - 4 || hello[4] != 0x03 ||
             hello[5] != 0x03)
                 return TLS_FAIL;
 
+        retry = !memory_compare(hello + 6, tls_retry_random, 32);
+        memory_copy(tls->server_random, hello + 6, 32);
+        address_to group = 0;
+        address_to cookie = null;
+        address_to cookie_length = 0;
         at = 4 + 2 + 32;
-        /* The client sent an empty legacy_session_id, so the echo is empty. */
-        if (hello[at++])
+        session = hello[at++];
+        if (session > 32 || length - at < session + 3)
                 return TLS_FAIL;
-        if (hello[at] != 0x13 || hello[at + 1] != 0x01)
-                return TLS_FAIL;
+        at += session;
+        suite = network_load_16(hello + at);
         at += 2;
-        if (hello[at++] != 0)
+        if (hello[at++] != 0 ||
+            (at < length && (length - at < 2 ||
+                             network_load_16(hello + at) != length - at - 2)))
                 return TLS_FAIL;
-        if (length - at < 2 || network_load_16(hello + at) != length - at - 2)
-                return TLS_FAIL;
-        at += 2;
+        at += at < length ? 2 : 0;
 
         while (at < length)
         {
+                positive id;
+                positive elen;
+                positive bit = 7;
+
                 if (length - at < 4)
                         return TLS_FAIL;
-
-                positive id = network_load_16(hello + at);
-                positive elen = network_load_16(hello + at + 2);
+                id = network_load_16(hello + at);
+                elen = network_load_16(hello + at + 2);
                 at += 4;
                 if (elen > length - at)
                         return TLS_FAIL;
+                /* One bit a kind this client offered, in kinds' order and
+                   renegotiation_info last; any other kind, or one twice,
+                   fails. */
+                for (positive kind = 0; kind < sizeof kinds; kind++)
+                        if (id == kinds[kind])
+                                bit = kind;
+                if (id == 0xff01)
+                        bit = 6;
+                if (bit == 7 || seen >> bit & 1)
+                        return TLS_FAIL;
+                seen |= (positive)1 << bit;
 
                 if (id == 0x002b)
                 {
-                        if (seen_version || elen != 2 || hello[at] != 0x03 ||
+                        if (elen != 2 || hello[at] != 0x03 ||
                             hello[at + 1] != 0x04)
                                 return TLS_FAIL;
-                        seen_version = true;
                 }
                 else if (id == 0x0033)
                 {
                         positive named;
                         positive klen;
 
-                        if (seen_share || elen < 4)
+                        if (elen < 2)
                                 return TLS_FAIL;
                         named = network_load_16(hello + at);
-                        klen = network_load_16(hello + at + 2);
-                        if (klen != elen - 4)
+                        klen = tls_share_length(named);
+                        /* A retry names an offered group not yet shared; a
+                           hello answers the share, at its one length. */
+                        if (!klen || (named == tls->group) == retry ||
+                            (retry ? elen != 2
+                                   : elen != 4 + klen || klen > room ||
+                                         network_load_16(hello + at + 2) !=
+                                             klen))
                                 return TLS_FAIL;
-                        if (!((named == 0x001d && klen == 32) ||
-                              (named == 0x0017 && klen == 65) ||
-                              (named == 0x0018 && klen == 97)))
-                                return TLS_FAIL;
-                        if (klen > room)
-                                return TLS_FAIL;
+                        if (retry)
+                                klen = 0;
                         memory_copy(peer, hello + at + 4, klen);
                         address_to share_length = klen;
                         address_to group = named;
-                        seen_share = true;
                 }
-                else
+                else if (id == 0x002c)
+                {
+                        if (!retry || elen < 3 ||
+                            network_load_16(hello + at) != elen - 2)
+                                return TLS_FAIL;
+                        address_to cookie = hello + at;
+                        address_to cookie_length = elen;
+                }
+                else if (id == 0x000b)
+                {
+                        /* The formats list has to hold uncompressed. */
+                        bool uncompressed = false;
+
+                        for (positive i = 1; i < elen; i++)
+                                uncompressed |= !hello[at + i];
+                        if (!uncompressed || hello[at] != elen - 1)
+                                return TLS_FAIL;
+                }
+                else if ((id == 0x0000 && (elen || !tls->named)) ||
+                         (id == 0x0017 && elen) ||
+                         (id == 0xff01 && (elen != 1 || hello[at])))
                         return TLS_FAIL;
 
                 at += elen;
         }
 
-        return seen_version && seen_share ? TLS_OK : TLS_FAIL;
+        if (seen & 1)
+        {
+                /* TLS 1.3: supported_versions, a key share or a retry's
+                   request, and nothing of TLS 1.2's. */
+                if (session || suite != 0x1301 || seen >> 3)
+                        return TLS_FAIL;
+                if (retry)
+                        return seen & 6 ? TLS_RETRY : TLS_FAIL;
+                return seen & 2 ? TLS_OK : TLS_FAIL;
+        }
+        if (retry || (suite != 0xc02b && suite != 0xc02f) || seen & 6 ||
+            (seen & 0x48) != 0x48 ||
+            (!memory_compare(hello + 6 + 24, "DOWNGRD", 7) &&
+             hello[6 + 31] <= 1))
+                return TLS_FAIL;
+        tls->tls12 = true;
+        tls->suite = (p16)suite;
+        return TLS_OK;
 }
 
-#define TLS_HANDSHAKE_MORE 0
-#define TLS_HANDSHAKE_COMPLETE 1
-
-/* The handshake protocol is a byte stream layered over records.  ServerHello
-   may therefore cross record boundaries, but it is the last plaintext
-   handshake message: bytes after its declared end cannot legally share that
-   plaintext stream. */
-static COLD bipolar tls_handshake_one_append(p8 address_to held, positive room,
-                                        positive address_to held_length,
-                                        p8 address_to fragment,
-                                        positive length)
+/* The handshake protocol is a byte stream layered over records: the next
+   whole message at the front of hs, receiving records until one is there.
+   *length is its size, and the call after drops it first; bytes behind it
+   stay for the next call, and the caller, which knows where the keys
+   change, refuses any left at a change (RFC 8446 5.1). An empty record is
+   refused, as RFC 8446 5.1 forbids sending one, and so is the one
+   compatibility change_cipher_spec past its first. */
+static COLD bipolar tls_handshake_next(tls_conn address_to tls, p8 address_to hs,
+                                       positive address_to used,
+                                       positive address_to length,
+                                       bool address_to seen_ccs,
+                                       const network_deadline address_to deadline)
 {
-        positive body_length;
-        positive complete;
+        p8 type = 0;
+        p8 address_to record = null;
+        positive record_length = 0;
 
-        if (address_to held_length > room || !length ||
-            length > room - address_to held_length)
-                return TLS_FAIL;
+        memory_copy(hs, hs + *length, *used - *length);
+        *used -= *length;
+        *length = 0;
+        for (;;)
+        {
+                if (*used >= 4)
+                {
+                        positive body = tls_load_24(hs + 1);
 
-        memory_copy(held + address_to held_length, fragment, length);
-        address_to held_length += length;
-
-        if (address_to held_length < 4)
-                return TLS_HANDSHAKE_MORE;
-
-        body_length = tls_load_24(held + 1);
-        if (body_length > room - 4)
-                return TLS_FAIL;
-        complete = 4 + body_length;
-        if (address_to held_length < complete)
-                return TLS_HANDSHAKE_MORE;
-
-        return address_to held_length == complete ? TLS_HANDSHAKE_COMPLETE
-                                                   : TLS_FAIL;
+                        if (body > TLS_HS_MAX - 4)
+                                return TLS_FAIL;
+                        if (*used - 4 >= body)
+                        {
+                                *length = 4 + body;
+                                return TLS_OK;
+                        }
+                }
+                if (tls_next_record(tls, address_of type, address_of record,
+                                    address_of record_length, deadline))
+                        return TLS_FAIL;
+                if (type == TLS_CT_CCS)
+                {
+                        if (!tls_compatibility_ccs_take(seen_ccs))
+                                return TLS_FAIL;
+                        continue;
+                }
+                if (type != TLS_CT_HANDSHAKE || !record_length ||
+                    record_length > TLS_HS_MAX - *used)
+                        return TLS_FAIL;
+                memory_copy(hs + *used, record, record_length);
+                *used += record_length;
+        }
 }
 
 /* The handshake secret, its two traffic secrets and their keys: the flight
@@ -6417,8 +7257,6 @@ static COLD fn tls_use_app_keys(tls_conn address_to tls)
         crypto_forget(tls->hs_secret, sizeof tls->hs_secret);
         crypto_forget(tls->c_hs_traffic, sizeof tls->c_hs_traffic);
         crypto_forget(tls->s_hs_traffic, sizeof tls->s_hs_traffic);
-        crypto_forget(tls->c_ap_traffic, sizeof tls->c_ap_traffic);
-        crypto_forget(tls->s_ap_traffic, sizeof tls->s_ap_traffic);
         crypto_forget(address_of tls->transcript, sizeof tls->transcript);
 }
 
@@ -6439,133 +7277,216 @@ static COLD fn tls_finished_mac(tls_conn address_to tls, p8 address_to traffic,
         crypto_forget(address_of copy, sizeof copy);
 }
 
+/* The TLS 1.2 PRF (RFC 5246 5): P_SHA256(secret, label + seed_a +
+   seed_b), one-shot HMACs over a block that holds A(i) with the label and
+   seeds behind it. The longest label is "extended master secret" and the
+   longest seed the two randoms. */
+static COLD fn tls12_prf(p8 address_to secret, positive secret_length,
+                         string_address label, const p8 address_to seed_a,
+                         positive a_length, const p8 address_to seed_b,
+                         positive b_length, p8 address_to out,
+                         positive out_length)
+{
+        p8 block[32 + 22 + 64];
+        p8 mac[32];
+        positive label_length = string_length(label);
+        positive seed_length = label_length + a_length + b_length;
+
+        memory_copy(block + 32, label, label_length);
+        memory_copy(block + 32 + label_length, seed_a, a_length);
+        memory_copy(block + 32 + label_length + a_length, seed_b, b_length);
+        crypto_hmac_sha256(secret, secret_length, block + 32, seed_length,
+                           block);
+        for (positive at = 0; at < out_length; at += 32)
+        {
+                crypto_hmac_sha256(secret, secret_length, block,
+                                   32 + seed_length, mac);
+                memory_copy(out + at, mac, min((positive)32, out_length - at));
+                crypto_hmac_sha256(secret, secret_length, block, 32, block);
+        }
+        crypto_forget(block, sizeof block);
+        crypto_forget(mac, sizeof mac);
+}
+
+/* A TLS 1.2 Finished's verify_data: the PRF over the transcript's hash. */
+static COLD fn tls12_verify_data(tls_conn address_to tls, string_address label,
+                                 p8 address_to out)
+{
+        p8 hash[32];
+        crypto_sha256 copy = tls->transcript;
+
+        crypto_sha256_close(address_of copy, hash);
+        tls12_prf(tls->master, 48, label, hash, 32, hash, 0, out, 12);
+        crypto_forget(address_of copy, sizeof copy);
+}
+
 static COLD bipolar tls_check_finished(tls_conn address_to tls, p8 address_to verify,
                                   positive length)
 {
         p8 expect[32];
+        positive size = tls->tls12 ? 12 : 32;
         bool same;
 
-        if (length != 32)
+        if (length != size)
                 return TLS_FAIL;
-        tls_finished_mac(tls, tls->s_hs_traffic, expect);
-        same = crypto_same(expect, verify, 32);
+        if (tls->tls12)
+                tls12_verify_data(tls, "server finished", expect);
+        else
+                tls_finished_mac(tls, tls->s_hs_traffic, expect);
+        same = crypto_same(expect, verify, size);
         crypto_forget(expect, sizeof expect);
         return same ? TLS_OK : TLS_FAIL;
 }
 
 /* Nothing reads the transcript after the client's Finished, so it is sent
-   without being added. */
-static COLD bipolar tls_send_finished(tls_conn address_to tls)
+   without being added. A requested certificate goes first, empty, as
+   OpenSSL's and curl's clients answer when they hold none. The flight is
+   sealed into out and leaves in one send. */
+static COLD bipolar tls_send_finished(tls_conn address_to tls,
+                                      p8 address_to out)
 {
         p8 msg[36] = {TLS_HS_FINISHED, 0, 0, 32};
-        bipolar status;
+        p8 none[8] = {TLS_HS_CERTIFICATE, 0, 0, 4};
+        positive at = 0;
 
+        if (tls->cert_requested)
+        {
+                at = tls_seal(tls, TLS_CT_HANDSHAKE, none, sizeof none, out);
+                tls_transcript_add(tls, none, sizeof none);
+        }
         tls_finished_mac(tls, tls->c_hs_traffic, msg + 4);
-        status = tls_send_enc(tls, TLS_CT_HANDSHAKE, msg, sizeof msg);
+        at += tls_seal(tls, TLS_CT_HANDSHAKE, msg, sizeof msg, out + at);
         crypto_forget(msg, sizeof msg);
-        return status;
+        return network_stream_send_all(tls->handle, out, at) ? TLS_OK
+                                                             : TLS_FAIL;
 }
 
-static COLD bipolar tls_check_cert_verify(tls_conn address_to tls, p8 address_to msg,
-                                     positive length)
+/* A signature by the leaf's key over message under a scheme the
+   ClientHello offered: ECDSA with SHA-256 or SHA-384, RSA-PSS with
+   SHA-256, and in TLS 1.2 RSA PKCS#1 v1.5 with SHA-256 or SHA-384. TLS 1.3
+   binds an ECDSA scheme to its curve and keeps PKCS#1 v1.5 to certificates
+   (RFC 8446 4.2.3); TLS 1.2's schemes name only the hash. */
+static COLD bool tls_signature_valid(tls_conn address_to tls, positive scheme,
+                                     p8 address_to message,
+                                     positive message_length,
+                                     p8 address_to sig, positive sig_length)
 {
-        p8 signed_bytes[130];
-        p8 hash[32];
+        p8 hash[48];
         p8 r[48];
         p8 s[48];
         positive r_length = 0;
         positive s_length = 0;
-        positive at;
-        positive sig_length;
-        p16 scheme;
-        crypto_sha256 copy = tls->transcript;
-        static const p8 context[] = "TLS 1.3, server CertificateVerify";
-
-        if (length < 8)
-                return TLS_FAIL;
-        at = 4;
-        scheme = network_load_16(msg + at);
-        at += 2;
-        sig_length = network_load_16(msg + at);
-        at += 2;
-        if (sig_length != length - at)
-                return TLS_FAIL;
-
-        memory_fill(signed_bytes, 0x20, 64);
-        memory_copy(signed_bytes + 64, context, 33);
-        signed_bytes[97] = 0;
-        crypto_sha256_close(address_of copy, hash);
-        memory_copy(signed_bytes + 98, hash, 32);
-
-        if (scheme == 0x0403)
-        {
-                crypto_sha256_of(signed_bytes, sizeof(signed_bytes), hash);
-                if (tls_parse_ecdsa_sig(msg + at, sig_length, r, address_of r_length,
-                                        s, address_of s_length))
-                        return TLS_FAIL;
-                if (tls->leaf_curve != 1)
-                        return TLS_FAIL;
-                return crypto_ecdsa_p256(hash, 32, r, r_length, s, s_length,
-                                         tls->leaf_qx + 16, tls->leaf_qy + 16)
-                           ? TLS_OK
-                           : TLS_FAIL;
-        }
-
-        if (scheme == 0x0503)
-        {
-                p8 hash384[48];
-
-                crypto_sha384(signed_bytes, sizeof(signed_bytes), hash384);
-                if (tls_parse_ecdsa_sig(msg + at, sig_length, r, address_of r_length,
-                                        s, address_of s_length))
-                        return TLS_FAIL;
-                if (tls->leaf_curve != 2)
-                        return TLS_FAIL;
-                return crypto_ecdsa_p384(hash384, 48, r, r_length, s, s_length,
-                                         tls->leaf_qx, tls->leaf_qy)
-                           ? TLS_OK
-                           : TLS_FAIL;
-        }
+        positive hash_length = scheme >> 8 == 5 ? 48 : 32;
+        p8 curve = tls->leaf_curve;
 
         if (scheme == 0x0804)
+                return curve == 3 && tls->leaf_n_length &&
+                       crypto_rsa_pss_sha256(tls->leaf_n, tls->leaf_n_length,
+                                             tls->leaf_e, sig, sig_length,
+                                             message, message_length);
+        if (scheme != 0x0403 && scheme != 0x0503 &&
+            (!tls->tls12 || (scheme != 0x0401 && scheme != 0x0501)))
+                return false;
+        if (hash_length == 48)
+                crypto_sha384(message, message_length, hash);
+        else
+                crypto_sha256_of(message, message_length, hash);
+        if ((scheme & 0xff) == 1)
         {
-                if (tls->leaf_curve != 3 || !tls->leaf_n_length)
-                        return TLS_FAIL;
-                return crypto_rsa_pss_sha256(tls->leaf_n, tls->leaf_n_length,
-                                             tls->leaf_e, msg + at, sig_length,
-                                             signed_bytes, sizeof(signed_bytes))
-                           ? TLS_OK
-                           : TLS_FAIL;
-        }
+                /* DigestInfo: AlgorithmIdentifier {id-sha256 or -384, NULL}
+                   and the OCTET STRING hash. */
+                const p8 info[19] = {
+                    0x30, (p8)(17 + hash_length), 0x30, 0x0d, 0x06, 0x09,
+                    0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+                    (p8)(hash_length / 16 - 1), 0x05, 0x00, 0x04,
+                    (p8)hash_length};
 
-        return TLS_FAIL;
+                return curve == 3 && tls->leaf_n_length &&
+                       crypto_rsa_pkcs1(tls->leaf_n, tls->leaf_n_length,
+                                        tls->leaf_e, sig, sig_length, info,
+                                        sizeof info, hash, hash_length);
+        }
+        if ((curve != 1 && curve != 2) ||
+            (!tls->tls12 && curve != hash_length / 16 - 1) ||
+            tls_parse_ecdsa_sig(sig, sig_length, r, address_of r_length, s,
+                                address_of s_length))
+                return false;
+        return curve == 1 ? crypto_ecdsa_p256(hash, hash_length, r, r_length,
+                                              s, s_length, tls->leaf_qx + 16,
+                                              tls->leaf_qy + 16)
+                          : crypto_ecdsa_p384(hash, hash_length, r, r_length,
+                                              s, s_length, tls->leaf_qx,
+                                              tls->leaf_qy);
+}
+
+/* TLS 1.3's CertificateVerify signs 64 spaces, its context string with the
+   NUL, and the transcript's hash (RFC 8446 4.4.3). */
+static COLD bipolar tls_check_cert_verify(tls_conn address_to tls, p8 address_to msg,
+                                     positive length)
+{
+        static const p8 context[] = "TLS 1.3, server CertificateVerify";
+        p8 signed_bytes[64 + sizeof context + 32];
+        crypto_sha256 copy = tls->transcript;
+
+        if (length < 8 || network_load_16(msg + 6) != length - 8)
+                return TLS_FAIL;
+        memory_fill(signed_bytes, 0x20, 64);
+        memory_copy(signed_bytes + 64, context, sizeof context);
+        crypto_sha256_close(address_of copy, signed_bytes + 64 + sizeof context);
+        return tls_signature_valid(tls, network_load_16(msg + 4), signed_bytes,
+                                   sizeof signed_bytes, msg + 8, length - 8)
+                   ? TLS_OK
+                   : TLS_FAIL;
 }
 
 #define TLS_SERVER_FLIGHT_EE 0
-#define TLS_SERVER_FLIGHT_CERTIFICATE 1
-#define TLS_SERVER_FLIGHT_CERT_VERIFY 2
-#define TLS_SERVER_FLIGHT_FINISHED 3
-#define TLS_SERVER_FLIGHT_COMPLETE 4
+#define TLS_SERVER_FLIGHT_REQUEST 1
+#define TLS_SERVER_FLIGHT_CERTIFICATE 2
+#define TLS_SERVER_FLIGHT_CERT_VERIFY 3
+#define TLS_SERVER_FLIGHT_FINISHED 4
+#define TLS_SERVER_FLIGHT_COMPLETE 5
+#define TLS12_FLIGHT_CERTIFICATE 6
+#define TLS12_FLIGHT_FINISHED 10
+#define TLS12_FLIGHT_COMPLETE 11
 
-/* This client offers neither PSK nor client authentication, so the server
-   flight has exactly one legal shape.  Keeping that shape in one transition
-   function prevents a duplicate message from overwriting parsed certificate
-   state or an early Finished from authenticating an incomplete transcript. */
+/* This client offers no PSK and resumes nothing, so each version's server
+   flight has one legal shape, in which only a CertificateRequest is
+   optional: TLS 1.3's from EncryptedExtensions, TLS 1.2's from Certificate
+   to ServerHelloDone and, after the client's flight, Finished. A zero ends
+   each, so neither version's walk reaches the other's messages. Keeping
+   the shapes in one transition function prevents a duplicate message from
+   overwriting parsed certificate state or an early Finished from
+   authenticating an incomplete transcript. An optional step (the high bit)
+   is passed over when the message is the next one instead; a refused
+   message leaves the state. */
 static COLD bool tls_server_flight_step(p8 address_to state, p8 type)
 {
         static const p8 expected[] = {
             TLS_HS_ENCRYPTED_EXTS,
+            TLS_HS_CERT_REQUEST | 0x80,
             TLS_HS_CERTIFICATE,
             TLS_HS_CERT_VERIFY,
             TLS_HS_FINISHED,
+            0,
+            TLS_HS_CERTIFICATE,
+            TLS_HS_SERVER_KEY_EXCHANGE,
+            TLS_HS_CERT_REQUEST | 0x80,
+            TLS_HS_SERVER_HELLO_DONE,
+            TLS_HS_FINISHED,
+            0,
         };
 
-        if (*state >= TLS_SERVER_FLIGHT_COMPLETE ||
-            type != expected[*state])
-                return false;
-
-        (*state)++;
-        return true;
+        for (p8 at = *state; at < sizeof expected && expected[at]; at++)
+        {
+                if (type == (expected[at] & 0x7f))
+                {
+                        *state = at + 1;
+                        return true;
+                }
+                if (!(expected[at] & 0x80))
+                        break;
+        }
+        return false;
 }
 
 /* RFC 8446 forbids duplicate extensions.  Rescanning every earlier extension
@@ -6645,15 +7566,47 @@ static COLD bool tls_new_session_ticket_valid(p8 address_to body,
                                               positive_max);
 }
 
-/* This client does not resume sessions, but servers commonly send tickets.
-   Ignore only complete, well-framed NewSessionTicket messages.  KeyUpdate and
-   every other unsupported post-handshake transition fail instead of leaving
-   traffic keys or authentication state silently stale. */
-static COLD bipolar tls_post_handshake_append(p8 address_to held,
-                                         positive address_to held_length,
-                                         p8 address_to fragment,
-                                         positive length)
+/* KeyUpdate (RFC 8446 4.6.3, 7.2): the next traffic secret replaces the
+   one it came from, and the direction's key, IV and sequence start over. */
+static COLD fn tls_update_traffic(p8 address_to secret,
+                                  crypto_aesgcm_key address_to gcm,
+                                  p8 address_to iv, p64 address_to seq)
 {
+        p8 next[32];
+
+        tls_expand_label(secret, "traffic upd", null, 0, next, 32);
+        memory_copy(secret, next, 32);
+        crypto_forget(next, sizeof next);
+        tls_traffic_keys(secret, gcm, iv);
+        address_to seq = 0;
+}
+
+/* Send a KeyUpdate under the current write key, then write under the
+   next. Asking the peer to update too is how the read side is rekeyed. */
+static COLD bipolar tls_key_update(tls_conn address_to tls, bool ask)
+{
+        p8 message[5] = {TLS_HS_KEY_UPDATE, 0, 0, 1, (p8)ask};
+
+        if (tls_send_enc(tls, TLS_CT_HANDSHAKE, message, sizeof message))
+                return TLS_FAIL;
+        tls_update_traffic(tls->c_ap_traffic, address_of tls->c_gcm, tls->c_iv,
+                           address_of tls->seq_write);
+        tls->update_asked |= ask;
+        return TLS_OK;
+}
+
+/* This client does not resume sessions, but servers commonly send tickets:
+   complete, well-framed NewSessionTickets are ignored. A KeyUpdate rekeys
+   the read side and, when the peer asks, answers with one of its own; it
+   has to end its record, since the key changes after it (RFC 8446 5.1),
+   and its one byte is 0 or 1. Every other post-handshake message fails
+   rather than leaving keys or authentication silently stale. */
+static COLD bipolar tls_post_handshake_append(tls_conn address_to tls,
+                                              p8 address_to fragment,
+                                              positive length)
+{
+        p8 address_to held = tls->post_handshake;
+        positive address_to held_length = address_of tls->post_handshake_used;
         positive at = 0;
 
         if (*held_length > TLS_HS_MAX || !length ||
@@ -6669,17 +7622,27 @@ static COLD bipolar tls_post_handshake_append(p8 address_to held,
 
                 if (*held_length - at < 4)
                         break;
-                if (held[at] != TLS_HS_NEW_SESSION_TICKET)
-                        return TLS_FAIL;
-
                 body_length = tls_load_24(held + at + 1);
-                if (body_length > TLS_HS_MAX - 4)
+                if (held[at] == TLS_HS_KEY_UPDATE ? body_length != 1
+                    : held[at] != TLS_HS_NEW_SESSION_TICKET ||
+                          body_length > TLS_HS_MAX - 4)
                         return TLS_FAIL;
 
                 if (body_length > *held_length - at - 4)
                         break;
-                if (!tls_new_session_ticket_valid(held + at + 4,
-                                                  body_length))
+                if (held[at] == TLS_HS_KEY_UPDATE)
+                {
+                        if (held[at + 4] > 1 || at + 5 != *held_length)
+                                return TLS_FAIL;
+                        tls_update_traffic(tls->s_ap_traffic,
+                                           address_of tls->s_gcm, tls->s_iv,
+                                           address_of tls->seq_read);
+                        tls->update_asked = false;
+                        if (held[at + 4] && tls_key_update(tls, false))
+                                return TLS_FAIL;
+                }
+                else if (!tls_new_session_ticket_valid(held + at + 4,
+                                                       body_length))
                         return TLS_FAIL;
                 at += 4 + body_length;
         }
@@ -6697,198 +7660,359 @@ static COLD bipolar tls_post_handshake_append(p8 address_to held,
         return TLS_OK;
 }
 
-/* Encrypted server flight: handshake bytes are a stream across records, so
-   each plaintext fragment is appended to hs[] and every complete message is
-   peeled from the front.  Several messages may share one record; an empty
-   fragment is refused, as RFC 8446 5.1 forbids sending one and as the other
-   appends refuse it.  Leftover bytes after the flight reaches COMPLETE are
-   refused.
-
-   tls may be null: then only framing and tls_server_flight_step run, which is
-   how the unit checks exercise the same walk without keys or a peer. */
-static COLD bipolar tls_encrypted_flight_append(
-    tls_conn address_to tls, p8 address_to hs, positive room,
-    positive address_to hs_used, p8 address_to flight,
-    p8 address_to fragment, positive length,
-    positive address_to messages)
+/* A TLS 1.2 Certificate is the list alone, each entry without
+   extensions. Laid out again as TLS 1.3's -- an empty context, two empty
+   extension bytes after each certificate -- in into, which has room for
+   5 + TLS_PLAINTEXT_MAX bytes, it goes through the one chain check; then
+   the leaf's key has to be the kind the suite signs with. */
+static COLD bool tls12_certificate(tls_conn address_to tls, p8 address_to body,
+                                   positive length, p8 address_to into)
 {
-        positive msg_at = 0;
+        positive at = 3;
+        positive out = 4;
 
-        if (!length || *hs_used > room || length > room - *hs_used)
-                return TLS_FAIL;
-        memory_copy(hs + *hs_used, fragment, length);
-        *hs_used += length;
-
-        while (*hs_used - msg_at >= 4)
+        if (length < 3 || tls_load_24(body) != length - 3)
+                return false;
+        into[0] = 0;
+        while (at < length)
         {
-                p8 hs_type = hs[msg_at];
-                positive hs_len = tls_load_24(hs + msg_at + 1);
+                positive size;
 
-                if (hs_len > *hs_used - msg_at - 4)
-                        break;
+                if (length - at < 3)
+                        return false;
+                size = tls_load_24(body + at);
+                if (size > length - at - 3 ||
+                    size + 5 > 5 + TLS_PLAINTEXT_MAX - out)
+                        return false;
+                memory_copy(into + out, body + at, 3 + size);
+                into[out + 3 + size] = 0;
+                into[out + 4 + size] = 0;
+                out += 5 + size;
+                at += 3 + size;
+        }
+        into[1] = (p8)((out - 4) >> 16);
+        network_store_16(into + 2, (p16)(out - 4));
+        return tls_verify_chain(into, out, tls->host, tls) &&
+               (tls->leaf_curve == 3) == (tls->suite == 0xc02f);
+}
 
-                if (!tls_server_flight_step(flight, hs_type))
+/* ServerKeyExchange (RFC 8422 5.4): a named curve this client offered and a
+   point at that curve's length, signed by the leaf with both randoms in
+   front under a scheme offered. The client's share on that curve is drawn
+   now: the premaster goes to master and the point to share, for the
+   client's flight, and the scalar is spent. */
+static COLD bool tls12_key_exchange(tls_conn address_to tls, p8 address_to body,
+                                    positive length)
+{
+        p8 signed_bytes[64 + 4 + 97];
+        positive point;
+        positive params;
+        bool agreed;
+
+        if (length < 4 || body[0] != 3)
+                return false;
+        point = tls_share_length(network_load_16(body + 1));
+        params = 4 + point;
+        if (!point || body[3] != point || length - 4 < params ||
+            network_load_16(body + params + 2) != length - params - 4)
+                return false;
+        memory_copy(signed_bytes, tls->client_random, 32);
+        memory_copy(signed_bytes + 32, tls->server_random, 32);
+        memory_copy(signed_bytes + 64, body, params);
+        if (!tls_signature_valid(tls, network_load_16(body + params),
+                                 signed_bytes, 64 + params, body + params + 4,
+                                 length - params - 4))
+                return false;
+        agreed = tls_share_scalar(tls, network_load_16(body + 1)) &&
+                 tls_share_use(tls, body + 4, tls->master) &&
+                 tls_share_use(tls, null, tls->share);
+        crypto_forget(tls->scalar, sizeof tls->scalar);
+        return agreed;
+}
+
+/* A TLS 1.2 CertificateRequest (RFC 5246 7.4.4): certificate types, then
+   signature algorithms, then authorities, each vector whole. */
+static COLD bool tls12_certificate_request(p8 address_to body, positive length)
+{
+        positive at;
+
+        if (!length || !body[0] || body[0] > length - 1)
+                return false;
+        at = 1 + body[0];
+        for (positive vector = 0; vector < 2; vector++)
+        {
+                if (length - at < 2 ||
+                    network_load_16(body + at) > length - at - 2)
+                        return false;
+                at += 2 + network_load_16(body + at);
+        }
+        return at == length;
+}
+
+/* One message of the server's flight, framed by tls_handshake_next and
+   placed by tls_server_flight_step: checked, then added to the transcript,
+   so a CertificateVerify and a Finished are checked against what came
+   before them. As answers, in EncryptedExtensions, only what the
+   ClientHello asked for may come back (RFC 8446 4.2): supported_groups,
+   and server_name when the host was a name. A TLS 1.3 CertificateRequest
+   has an empty context during the handshake (RFC 8446 4.3.2) and
+   well-framed extensions; with no certificate to offer, the answer to
+   either version's is an empty Certificate and the server decides.
+   scratch has room for 5 + TLS_PLAINTEXT_MAX bytes. */
+static COLD bipolar tls_flight_message(tls_conn address_to tls,
+                                       p8 address_to msg, positive length,
+                                       p8 address_to scratch)
+{
+        p8 address_to body = msg + 4;
+        positive body_length = length - 4;
+        bool valid;
+
+        if (msg[0] == TLS_HS_ENCRYPTED_EXTS)
+                valid = tls_encrypted_extensions_valid(
+                    body, body_length, (positive)1 << 0x000a | tls->named);
+        else if (msg[0] == TLS_HS_CERT_REQUEST)
+                valid = tls->cert_requested =
+                    tls->tls12 ? tls12_certificate_request(body, body_length)
+                               : body_length >= 3 && !body[0] &&
+                                     tls_encrypted_extensions_valid(
+                                         body + 1, body_length - 1,
+                                         positive_max);
+        else if (msg[0] == TLS_HS_CERTIFICATE)
+        {
+                valid = tls->tls12 ? tls12_certificate(tls, body, body_length,
+                                                       scratch)
+                                   : tls_verify_chain(body, body_length,
+                                                      tls->host, tls);
+                tls->untrusted = tls->check_cert && !valid;
+        }
+        else if (msg[0] == TLS_HS_SERVER_KEY_EXCHANGE)
+                valid = tls12_key_exchange(tls, body, body_length);
+        else if (msg[0] == TLS_HS_SERVER_HELLO_DONE)
+                valid = !body_length;
+        else if (msg[0] == TLS_HS_CERT_VERIFY)
+                valid = !tls_check_cert_verify(tls, msg, length);
+        else
+                valid = !tls_check_finished(tls, body, body_length);
+        if (!valid)
+                return TLS_FAIL;
+        tls_transcript_add(tls, msg, length);
+        return TLS_OK;
+}
+
+/* The client's TLS 1.2 flight, sealed into out and sent at once: an empty
+   Certificate when one was requested and ClientKeyExchange in one
+   plaintext record, the change_cipher_spec, and Finished under the new
+   keys. The master secret is the extended one (RFC 7627), taken over the
+   transcript through ClientKeyExchange, so it is bound to this handshake;
+   the key block (RFC 5288 3) is the two keys and the two four-byte salts,
+   and each IV is its salt before eight zero bytes that tls_nonce fills with
+   the sequence. */
+static COLD bipolar tls12_client_flight(tls_conn address_to tls,
+                                        p8 address_to out)
+{
+        static const p8 no_certificate[7] = {TLS_HS_CERTIFICATE, 0, 0, 3};
+        static const p8 change[6] = {TLS_CT_CCS, 3, 3, 0, 1, 1};
+        p8 hash[32];
+        p8 keys[48];
+        p8 finished[16] = {TLS_HS_FINISHED, 0, 0, 12};
+        positive point = tls_share_length(tls->group);
+        positive at = 5;
+        crypto_sha256 copy;
+        positive sealed;
+
+        if (tls->cert_requested)
+        {
+                memory_copy(out + at, no_certificate, sizeof no_certificate);
+                at += sizeof no_certificate;
+        }
+        out[at] = TLS_HS_CLIENT_KEY_EXCHANGE;
+        out[at + 1] = 0;
+        network_store_16(out + at + 2, (p16)(1 + point));
+        out[at + 4] = (p8)point;
+        memory_copy(out + at + 5, tls->share, point);
+        at += 5 + point;
+        tls_record_header(out, TLS_CT_HANDSHAKE, at - 5);
+        tls_transcript_add(tls, out + 5, at - 5);
+        memory_copy(out + at, change, sizeof change);
+        at += sizeof change;
+
+        copy = tls->transcript;
+        crypto_sha256_close(address_of copy, hash);
+        tls12_prf(tls->master, tls->group == 0x0018 ? 48 : 32,
+                  "extended master secret", hash, 32, hash, 0, keys, 48);
+        memory_copy(tls->master, keys, 48);
+        tls12_prf(tls->master, 48, "key expansion", tls->server_random, 32,
+                  tls->client_random, 32, keys, 40);
+        crypto_aesgcm_prepare(address_of tls->c_gcm, keys);
+        crypto_aesgcm_prepare(address_of tls->s_gcm, keys + 16);
+        memory_fill(tls->c_iv, 0, 12);
+        memory_fill(tls->s_iv, 0, 12);
+        memory_copy(tls->c_iv, keys + 32, 4);
+        memory_copy(tls->s_iv, keys + 36, 4);
+        crypto_forget(keys, sizeof keys);
+        crypto_forget(address_of copy, sizeof copy);
+
+        tls12_verify_data(tls, "client finished", finished + 4);
+        tls_transcript_add(tls, finished, sizeof finished);
+        sealed = tls_seal(tls, TLS_CT_HANDSHAKE, finished, sizeof finished,
+                          out + at);
+        crypto_forget(finished, sizeof finished);
+        return sealed && network_stream_send_all(tls->handle, out, at + sealed)
+                   ? TLS_OK
+                   : TLS_FAIL;
+}
+
+/* TLS 1.2 after its ServerHello, whose records the flight may share. The
+   server's one change_cipher_spec comes after the client's Finished, with
+   no handshake bytes pending, and turns on the read keys; a compatibility
+   CCS has no place in TLS 1.2, so any other fails. */
+static COLD bipolar tls12_handshake(tls_conn address_to tls, p8 address_to hs,
+                                    positive used, positive length,
+                                    bool seen_ccs, p8 address_to out,
+                                    const network_deadline address_to deadline)
+{
+        p8 flight = TLS12_FLIGHT_CERTIFICATE;
+        p8 type = 0;
+        p8 address_to record = null;
+        positive record_length = 0;
+
+        if (seen_ccs)
+                return TLS_FAIL;
+        seen_ccs = true;
+        crypto_forget(tls->scalar, sizeof tls->scalar);
+        while (flight != TLS12_FLIGHT_FINISHED)
+                if (tls_handshake_next(tls, hs, address_of used,
+                                       address_of length, address_of seen_ccs,
+                                       deadline) ||
+                    !tls_server_flight_step(address_of flight, hs[0]) ||
+                    tls_flight_message(tls, hs, length, out))
                         return TLS_FAIL;
-
-                if (tls)
-                {
-                        if (hs_type == TLS_HS_ENCRYPTED_EXTS)
-                        {
-                                if (!tls_encrypted_extensions_valid(
-                                        hs + msg_at + 4, hs_len,
-                                        (positive)1 << 0x000a | tls->named))
-                                        return TLS_FAIL;
-                                tls_transcript_add(tls, hs + msg_at,
-                                                   4 + hs_len);
-                        }
-                        else if (hs_type == TLS_HS_CERTIFICATE)
-                        {
-                                tls_transcript_add(tls, hs + msg_at,
-                                                   4 + hs_len);
-                                if (!tls_verify_chain(hs + msg_at + 4, hs_len,
-                                                      tls->host, tls))
-                                        return TLS_FAIL;
-                        }
-                        else if (hs_type == TLS_HS_CERT_VERIFY)
-                        {
-                                if (tls_check_cert_verify(tls, hs + msg_at,
-                                                          4 + hs_len))
-                                        return TLS_FAIL;
-                                tls_transcript_add(tls, hs + msg_at,
-                                                   4 + hs_len);
-                        }
-                        else if (hs_type == TLS_HS_FINISHED)
-                        {
-                                if (tls_check_finished(tls, hs + msg_at + 4,
-                                                       hs_len))
-                                        return TLS_FAIL;
-                                tls_transcript_add(tls, hs + msg_at,
-                                                   4 + hs_len);
-                        }
-                }
-
-                if (messages)
-                        (*messages)++;
-                msg_at += 4 + hs_len;
-        }
-
-        if (msg_at)
-        {
-                memory_copy(hs, hs + msg_at, *hs_used - msg_at);
-                *hs_used -= msg_at;
-        }
-
-        if (*flight == TLS_SERVER_FLIGHT_COMPLETE && *hs_used)
+        if (used != length || tls12_client_flight(tls, out) ||
+            tls_next_record(tls, address_of type, address_of record,
+                            address_of record_length, deadline) ||
+            type != TLS_CT_CCS)
                 return TLS_FAIL;
+        tls->encrypted = true;
+        if (tls_handshake_next(tls, hs, address_of used, address_of length,
+                               address_of seen_ccs, deadline) ||
+            !tls_server_flight_step(address_of flight, hs[0]) ||
+            tls_flight_message(tls, hs, length, out) || used != length)
+                return TLS_FAIL;
+        tls->application = true;
+        crypto_forget(tls->master, sizeof tls->master);
+        crypto_forget(address_of tls->transcript, sizeof tls->transcript);
         return TLS_OK;
 }
 
 static COLD bipolar tls_handshake(
     tls_conn address_to tls, const network_deadline address_to deadline)
 {
-        p8 hello[5 + 1024];
-        p8 address_to record = null;
+        /* A retry's cookie comes back in the second hello, which has to
+           fit one record; the client's last flight is sealed here too. */
+        p8 out[5 + TLS_PLAINTEXT_MAX];
         p8 peer[97];
         p8 shared[48];
-        positive hello_length = 0;
-        p8 type = 0;
-        positive length = 0;
         p8 hs[TLS_HS_MAX];
-        positive hs_used = 0;
+        positive out_length = 0;
+        positive used = 0;
+        positive length = 0;
+        positive secret_length;
         p8 flight = TLS_SERVER_FLIGHT_EE;
         bool seen_ccs = false;
+        bool retried = false;
         bipolar status = TLS_FAIL;
+        bipolar hello_kind;
         positive share_length = 0;
         positive group = 0;
+        p8 address_to cookie = null;
+        positive cookie_length = 0;
 
         crypto_sha256_open(address_of tls->transcript);
 
-        if (tls_client_hello(tls, hello + 5, sizeof hello - 5,
-                             address_of hello_length))
-                goto done;
-        tls_transcript_add(tls, hello + 5, hello_length);
-        tls_record_header(hello, TLS_CT_HANDSHAKE, hello_length);
-        if (!network_stream_send_all(tls->handle, hello, 5 + hello_length))
-                goto done;
-
         for (;;)
         {
-                bipolar assembled;
-
-                if (tls_next_record(tls, address_of type, address_of record,
-                                    address_of length, deadline))
+                if (tls_client_hello(tls, out + 5, sizeof out - 5,
+                                     address_of out_length, cookie,
+                                     cookie_length))
                         goto done;
-                if (type == TLS_CT_CCS)
-                {
-                        if (!tls_compatibility_ccs_take(address_of seen_ccs))
-                                goto done;
-                        continue;
-                }
-                if (type != TLS_CT_HANDSHAKE)
+                tls_transcript_add(tls, out + 5, out_length);
+                tls_record_header(out, TLS_CT_HANDSHAKE, out_length);
+                if (!network_stream_send_all(tls->handle, out, 5 + out_length) ||
+                    tls_handshake_next(tls, hs, address_of used,
+                                       address_of length, address_of seen_ccs,
+                                       deadline))
                         goto done;
 
-                assembled = tls_handshake_one_append(
-                    hs, sizeof(hs), address_of hs_used, record, length);
-                if (assembled == TLS_FAIL)
-                        goto done;
-                if (assembled == TLS_HANDSHAKE_COMPLETE)
+                hello_kind = tls_server_hello_keys(
+                    hs, length, tls, peer, sizeof peer,
+                    address_of share_length, address_of group,
+                    address_of cookie, address_of cookie_length);
+                if (hello_kind != TLS_RETRY)
                         break;
+
+                /* One retry, answered by the next hello, so nothing may
+                   follow it. The transcript restarts as message_hash over
+                   the first ClientHello, then the retry and the second
+                   hello (RFC 8446 4.4.1). */
+                if (retried || used != length ||
+                    (group && !tls_share_scalar(tls, group)))
+                        goto done;
+                retried = true;
+                {
+                        p8 message_hash[4 + 32] = {254, 0, 0, 32};
+
+                        crypto_sha256_close(address_of tls->transcript,
+                                            message_hash + 4);
+                        crypto_sha256_open(address_of tls->transcript);
+                        tls_transcript_add(tls, message_hash,
+                                           sizeof message_hash);
+                }
+                tls_transcript_add(tls, hs, length);
         }
 
-        tls_transcript_add(tls, hs, hs_used);
-        if (tls_server_hello_keys(hs, hs_used, peer, sizeof peer,
-                                  address_of share_length, address_of group))
+        /* TLS 1.2 is never the answer to a retry. In TLS 1.3 the keys
+           change after ServerHello, so nothing may share its records. */
+        if (hello_kind || (retried && tls->tls12) ||
+            (!tls->tls12 && used != length))
                 goto done;
-        hs_used = 0;
+        tls_transcript_add(tls, hs, length);
+        if (tls->tls12)
+        {
+                status = tls12_handshake(tls, hs, used, length, seen_ccs, out,
+                                         deadline);
+                goto done;
+        }
 
-        /* tls_server_hello_keys admits only the three groups offered, each
-           at its own share length. */
-        if (!(group == 0x001d
-                  ? crypto_x25519(shared, tls->x25519_scalar, peer)
-              : group == 0x0017
-                  ? crypto_ecdh_p256_shared(shared, tls->p256_scalar, peer)
-                  : crypto_ecdh_p384_shared(shared, tls->p384_scalar, peer)))
+        secret_length = tls_share_use(tls, peer, shared);
+        crypto_forget(tls->scalar, sizeof tls->scalar);
+        if (!secret_length)
                 goto done;
-        tls_install_handshake_keys(tls, shared, group == 0x0018 ? 48 : 32);
-        crypto_forget(tls->x25519_scalar, sizeof tls->x25519_scalar);
-        crypto_forget(tls->p256_scalar, sizeof tls->p256_scalar);
-        crypto_forget(tls->p384_scalar, sizeof tls->p384_scalar);
+        tls_install_handshake_keys(tls, shared, secret_length);
         crypto_forget(shared, sizeof shared);
 
         while (flight != TLS_SERVER_FLIGHT_COMPLETE)
-        {
-                if (tls_next_record(tls, address_of type, address_of record,
-                                    address_of length, deadline))
+                if (tls_handshake_next(tls, hs, address_of used,
+                                       address_of length, address_of seen_ccs,
+                                       deadline) ||
+                    !tls_server_flight_step(address_of flight, hs[0]) ||
+                    tls_flight_message(tls, hs, length, out))
                         goto done;
-                if (type == TLS_CT_CCS)
-                {
-                        if (!tls_compatibility_ccs_take(address_of seen_ccs))
-                                goto done;
-                        continue;
-                }
-                if (type != TLS_CT_HANDSHAKE)
-                        goto done;
-                if (tls_encrypted_flight_append(tls, hs, sizeof(hs),
-                                                address_of hs_used,
-                                                address_of flight, record,
-                                                length, null))
-                        goto done;
-        }
+        /* Nothing follows Finished under the handshake keys. */
+        if (used != length)
+                goto done;
 
         tls_derive_app_keys(tls);
-        if (tls_send_finished(tls))
+        if (tls_send_finished(tls, out))
                 goto done;
         tls_use_app_keys(tls);
         status = TLS_OK;
 
 done:
-        crypto_forget(hello, sizeof hello);
+        crypto_forget(out, sizeof out);
         crypto_forget(peer, sizeof peer);
         crypto_forget(shared, sizeof shared);
         crypto_forget(hs, sizeof hs);
-        crypto_forget(tls->x25519_scalar, sizeof tls->x25519_scalar);
-        crypto_forget(tls->p256_scalar, sizeof tls->p256_scalar);
-        crypto_forget(tls->p384_scalar, sizeof tls->p384_scalar);
+        crypto_forget(tls->scalar, sizeof tls->scalar);
         return status;
 }
 
@@ -6906,7 +8030,10 @@ static COLD bipolar tls_connect(tls_conn address_to tls, bipolar handle,
                                         TLS_HANDSHAKE_SECONDS, 0)
                      ? tls_handshake(tls, address_of deadline) : TLS_FAIL;
         if (status)
+        {
+                status = tls->untrusted ? TLS_UNTRUSTED : TLS_FAIL;
                 tls_forget(tls);
+        }
         return status;
 }
 
@@ -6917,7 +8044,9 @@ static bipolar tls_write(tls_conn address_to tls, p8 address_to data,
         {
                 positive take = min(length, (positive)TLS_PLAINTEXT_MAX);
 
-                if (tls_send_enc(tls, TLS_CT_APP, data, take))
+                if ((tls->seq_write >= TLS_KEY_UPDATE_AT && !tls->tls12 &&
+                     tls_key_update(tls, false)) ||
+                    tls_send_enc(tls, TLS_CT_APP, data, take))
                         return TLS_FAIL;
                 data += take;
                 length -= take;
@@ -6995,19 +8124,25 @@ static bipolar tls_take(tls_conn address_to tls, positive room,
                 }
                 if (status)
                         return TLS_FAIL;
+                /* TLS 1.2 after its handshake has only renegotiation to
+                   say in handshake messages, and that is refused. */
                 if (type == TLS_CT_HANDSHAKE)
                 {
-                        if (tls_post_handshake_append(
-                                tls->post_handshake,
-                                address_of tls->post_handshake_used,
-                                inner, length))
+                        if (tls->tls12 ||
+                            tls_post_handshake_append(tls, inner, length))
                                 return TLS_FAIL;
                         crypto_forget(inner, length);
-                        continue;
                 }
-                if (type != TLS_CT_APP || tls->post_handshake_used)
+                else if (type != TLS_CT_APP || tls->post_handshake_used)
                         return TLS_FAIL;
-                if (!length)
+                /* Half way to the read key's limit, a TLS 1.3 peer is asked
+                   for a KeyUpdate, once; its answer starts the count over.
+                   TLS 1.2 has no rekeying without renegotiation, so its keys
+                   run to the limit. */
+                if (tls->seq_read >= TLS_KEY_UPDATE_AT && !tls->update_asked &&
+                    !tls->tls12 && tls_key_update(tls, true))
+                        return TLS_FAIL;
+                if (type == TLS_CT_HANDSHAKE || !length)
                         continue;
                 if (room > length)
                         room = length;
@@ -7068,7 +8203,8 @@ static bipolar tls_read_until(
 #define HTTP_URL_MAX 2048
 #define HTTP_HEAD_MAX 16384
 #define HTTP_FETCH_MAX (16 * 1024 * 1024)
-#define HTTP_HOPS 10
+//      GNU wget's twenty redirects, and the request after the last.
+#define HTTP_HOPS 21
 #define HTTP_IDLE_SECONDS 30
 #define HTTP_HEAD_SECONDS 30
 
@@ -7083,6 +8219,7 @@ static bipolar tls_read_until(
 #define HTTP_DOWNGRADE (-9)
 #define HTTP_STATUS (-10)
 #define HTTP_WRITE (-11)
+#define HTTP_SCHEME (-12)
 
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
@@ -7155,7 +8292,7 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
         if (scheme && url[scheme] == '/' && url[scheme + 1] == '/')
         {
                 if (!http_web_scheme(url, scheme))
-                        return HTTP_BAD_URL;
+                        return HTTP_SCHEME;
                 selected_tls = scheme == 6;
                 at = url + scheme + 2;
         }
@@ -7664,7 +8801,7 @@ static bipolar http_get_request(p8 address_to request, positive room,
                                 p8 version_minor, string_address agent,
                                 positive address_to used);
 
-static bipolar http_stream_open(p32 host, p16 port)
+static bipolar http_stream_open(p32 host, p16 port, positive seconds)
 {
         socket_address_internet where = {
             .family = AF_INET, .port = network_order_16(port),
@@ -7673,7 +8810,7 @@ static bipolar http_stream_open(p32 host, p16 port)
 
         if (handle < 0)
                 return HTTP_NO_ROUTE;
-        if (!network_stream_timeout(handle, HTTP_IDLE_SECONDS, 0) ||
+        if (!network_stream_timeout(handle, seconds, 0) ||
             socket_connect((b32)handle, address_of where, sizeof where) < 0)
         {
                 socket_close((b32)handle);
@@ -7704,7 +8841,7 @@ static bipolar http_link_open(http_link address_to link, p32 ip, p16 port,
 {
         //      The session's buffers are tls_connect's to leave alone.
         memory_fill(link, 0, __builtin_offsetof(http_link, session));
-        link->handle = http_stream_open(ip, port);
+        link->handle = http_stream_open(ip, port, HTTP_IDLE_SECONDS);
         if (link->handle < 0)
                 return link->handle;
         if (tls)
@@ -7860,7 +8997,7 @@ static bipolar http_body_borrow(http_body address_to body, positive room,
 
 /* Payload copied into the caller's bytes: the stash's and TLS's through
    http_body_borrow, a plaintext socket's by a read that asks the clock and
-   polls only when nothing is queued yet. */
+   polls only when nothing is queued yet (network_stream_read_some_for). */
 static bipolar http_body_read(http_body address_to body, p8 address_to into,
                               positive room, positive address_to got)
 {
@@ -7881,19 +9018,9 @@ static bipolar http_body_read(http_body address_to body, p8 address_to into,
                 return HTTP_OK;
         }
 
-        n = socket_receive((b32)body->link->handle, into, room, MSG_DONTWAIT,
-                           null, 0);
-        if (n == NETWORK_TRY_AGAIN || n == NETWORK_INTERRUPTED)
-        {
-                network_deadline deadline;
-
-                if (!network_deadline_begin(address_of deadline,
-                                            http_body_seconds(body),
-                                            body->read_nanoseconds))
-                        return HTTP_NO_REPLY;
-                n = network_stream_read_some_until(body->link->handle, into,
-                                                   room, address_of deadline);
-        }
+        n = network_stream_read_some_for(body->link->handle, into, room,
+                                         http_body_seconds(body),
+                                         body->read_nanoseconds);
         if (n < 0 || (positive)n > room)
                 return HTTP_NO_REPLY;
         address_to got = (positive)n;
@@ -8352,14 +9479,16 @@ static bipolar http_absolutize(bool tls, string_address host, p16 port,
 
         /* An absolute reference is http or https followed by "//", in any
            case; http_split_into reads the rest.  Any other scheme -- ftp:,
-           javascript:, a bare "http:path" -- is refused rather than taken
-           for a relative path on the current host.  A network-path "//host"
-           keeps the current scheme. */
+           javascript:, a bare "http:path" -- is an unsupported scheme, as
+           GNU wget names it, never a relative path on the current host.  A
+           network-path "//host" keeps the current scheme. */
         scheme = http_scheme_length(kept);
         if (scheme)
         {
                 if (!http_web_scheme(kept, scheme) || kept[scheme] != '/' ||
-                    kept[scheme + 1] != '/' || length >= room)
+                    kept[scheme + 1] != '/')
+                        return HTTP_SCHEME;
+                if (length >= room)
                         return HTTP_BAD_URL;
                 memory_copy_apart_end(into, kept, length);
                 return HTTP_OK;
@@ -8396,6 +9525,72 @@ static bipolar http_absolutize(bool tls, string_address host, p16 port,
         memory_copy_apart(merged, base, used);
         memory_copy_apart_end(merged + used, kept, length);
         return http_put_url(into, room, tls, host, port, merged);
+}
+
+/* 1 for a "." segment, 2 for "..", either spelled with %2e as well, as
+   GNU wget and a browser read them; 0 for any other. */
+static positive http_dot_segment(string_address segment, positive length)
+{
+        positive dots = 0;
+
+        for (positive at = 0; at < length; dots++)
+        {
+                if (segment[at] == '.')
+                        at++;
+                else if (length - at >= 3 && segment[at] == '%' &&
+                         segment[at + 1] == '2' && (segment[at + 2] | 0x20) == 'e')
+                        at += 3;
+                else
+                        return 0;
+        }
+        return dots <= 2 ? dots : 0;
+}
+
+/* RFC 3986 5.2.4's remove_dot_segments over the path in front of a query,
+   in place, where the path starts with '/': GNU wget and curl resolve the
+   dot segments of every URL and Location rather than asking the server to,
+   and a path climbing above the root stays at it. Output never outruns
+   input, so each segment moves down over what was dropped. */
+static fn http_path_simplify(p8 address_to path)
+{
+        positive length = string_span_without_set(path, "?#");
+        positive read = 0;
+        positive wrote = 0;
+
+        if (path[0] != '/')
+                return;
+        while (read < length)
+        {
+                positive start = read + 1;
+                positive stop = start + memory_span_without_byte(
+                                            path + start, '/', length - start);
+                positive dots = http_dot_segment((string_address)path + start,
+                                                 stop - start);
+
+                if (!dots)
+                {
+                        //      Nothing moves until something was dropped,
+                        //      so a path with no dot segment -- the root
+                        //      http_split_into names as a literal, too --
+                        //      is never written.
+                        if (wrote != read)
+                                memory_copy(path + wrote, path + read,
+                                            stop - read);
+                        wrote += stop - read;
+                }
+                else
+                {
+                        //      ".." drops the last segment written.
+                        while (dots == 2 && wrote && path[--wrote] != '/')
+                                ;
+                        if (stop == length)
+                                path[wrote++] = '/';
+                }
+                read = stop;
+        }
+        if (wrote != length)
+                memory_copy(path + wrote, path + length,
+                            string_length(path + length) + 1);
 }
 
 /* Once a redirect chain has reached HTTPS, no later Location may discard
@@ -8439,6 +9634,113 @@ static p32 http_lookup(string_address host)
         return ip;
 }
 
+/* Whether a fetch whose destination the peer chose may go to ip: not this
+   network, loopback, private, shared (100.64/10), link-local, IETF
+   protocol (192.0.0/24), benchmarking (198.18/15), multicast or reserved
+   space. Checked on the address the name resolved to, so a name that
+   rebinds to an inside address is refused too. The harness builds that
+   define TLS_BENCH_ANCHOR serve from loopback and may reach it. */
+static bool http_address_public(p32 ip)
+{
+        p8 a = (p8)(ip >> 24);
+        p8 b = (p8)(ip >> 16);
+
+#ifdef TLS_BENCH_ANCHOR
+        if (a == 127)
+                return true;
+#endif
+        return a && a != 10 && a != 127 && a < 224 &&
+               (a != 100 || (b & 0xc0) != 64) && (a != 169 || b != 254) &&
+               (a != 172 || (b & 0xf0) != 16) && (a != 192 || b != 168) &&
+               (a != 192 || b || (p8)(ip >> 8)) && (a != 198 || (b & 0xfe) != 18);
+}
+
+#define TLS_AIA_SECONDS 5
+
+/*
+        tls_verify_chain's missing issuer: the certificate a caIssuers
+        location names (RFC 5280 4.2.2.1), which browsers fetch when a server
+        leaves an intermediate out. The URL comes from a certificate nothing
+        has verified yet, so the peer chooses the destination, and the fetch
+        is held to what a certificate needs: http: only (https would be a
+        handshake inside a handshake), port 80 unless a harness serves it,
+        no userinfo, a public address, one HTTP/1.0 GET with no redirect
+        followed, five seconds for the connection and the reply together,
+        a 200, and a body of at most room bytes less the head, which the
+        caller parses and verifies like any served certificate -- DER only,
+        so a PKCS#7 bundle or PEM text is refused there. Returns the body's
+        length at the front of into, or 0.
+*/
+static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
+                                   p8 address_to into, positive room)
+{
+        p8 text[HTTP_URL_MAX];
+        p8 host[256];
+        p8 request[HTTP_URL_MAX + 256];
+        string_address path;
+        p16 port;
+        bool tls;
+        p32 ip;
+        positive sent = 0;
+        positive used = 0;
+        positive header = 0;
+        http_response response;
+        network_deadline deadline;
+        bipolar handle;
+        bool closed = false;
+
+        if (length >= sizeof text)
+                return 0;
+        memory_copy(text, url, length);
+        text[length] = end;
+        if (http_split_into((string_address)text, host, sizeof host,
+                            address_of port, address_of path, address_of tls) ||
+            tls ||
+#ifndef TLS_BENCH_ANCHOR
+            port != HTTP_PORT ||
+#endif
+            http_get_request(request, sizeof request, (string_address)host, port,
+                             path, false, '0', (string_address)"Wget",
+                             address_of sent) ||
+            !(ip = http_lookup((string_address)host)) || !http_address_public(ip) ||
+            !network_deadline_begin(address_of deadline, TLS_AIA_SECONDS, 0))
+                return 0;
+        handle = http_stream_open(ip, port, TLS_AIA_SECONDS);
+        if (handle < 0)
+                return 0;
+        if (network_stream_send_all(handle, request, sent))
+                for (;;)
+                {
+                        bipolar got;
+
+                        if (!http_response_framing(into, used, address_of header,
+                                                   address_of response) &&
+                            response.body_kind == HTTP_BODY_LENGTH &&
+                            used - header >= response.body_length)
+                                break;
+                        if (used == room)
+                                break;
+                        got = network_stream_read_some_until(
+                            handle, into + used, room - used, address_of deadline);
+                        if (got <= 0)
+                        {
+                                closed = !got;
+                                break;
+                        }
+                        used += (positive)got;
+                }
+        socket_close((b32)handle);
+        if (http_response_framing(into, used, address_of header,
+                                  address_of response) ||
+            response.code != 200 ||
+            (response.body_kind == HTTP_BODY_LENGTH
+                 ? used - header != response.body_length
+                 : response.body_kind != HTTP_BODY_CLOSE || !closed))
+                return 0;
+        memory_copy(into, into + header, used - header);
+        return used - header;
+}
+
 static fn http_url_leaf(string_address path, p8 address_to into, positive room)
 {
         p8 target[HTTP_URL_MAX];
@@ -8454,12 +9756,12 @@ static fn http_url_leaf(string_address path, p8 address_to into, positive room)
         if (query)
                 query[0] = end;
 
-        /* No last segment, ".", or "..": each names a directory, which a
-           file cannot replace, and GNU wget saves all three as index.html. */
+        /* No last segment, ".", or "..", %2e spellings too: each names a
+           directory, which a file cannot replace, and GNU wget saves all
+           three as index.html. */
         slash = string_last_of(target, '/');
         path = slash ? slash + 1 : target;
-        if (!string_get(path) || string_equals(path, (string_address) ".") ||
-            string_equals(path, (string_address) ".."))
+        if (!string_get(path) || http_dot_segment(path, string_length(path)))
                 path = (string_address) "index.html";
         string_copy_max_end(into, path, room - 1);
 }
@@ -8497,7 +9799,8 @@ static const http_manners http_manners_wget = {
    actually arrives. */
 static bipolar http_run(string_address start, const http_manners address_to how,
                         bool check_cert, bipolar dest,
-                        http_buffer address_to into, b32 address_to code)
+                        http_buffer address_to into, b32 address_to code,
+                        p8 address_to where)
 {
         p8 url[HTTP_URL_MAX];
         http_buffer whole = {0};
@@ -8529,6 +9832,8 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                    It is the head buffer's first bytes until it is sent. */
                 status = http_split_into(url, host, sizeof host, address_of port,
                                          address_of path, address_of tls);
+                if (!status)
+                        http_path_simplify((p8 address_to)path);
                 if (!status && tls && !how->allow_tls)
                         status = HTTP_TLS;
                 if (!status && !http_transport_allowed(address_of secure, tls))
@@ -8561,25 +9866,26 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                 if (!status && how->follow &&
                     http_response_is_redirect(response.code))
                 {
+                        p8 placed[HTTP_URL_MAX];
+
                         status = !response.location_length ? HTTP_MALFORMED
-                                 : response.location_length >= sizeof next
+                                 : response.location_length >= sizeof placed
                                      ? HTTP_BAD_URL : HTTP_OK;
                         if (!status)
                         {
-                                p8 placed[HTTP_URL_MAX];
-
                                 memory_copy(placed, response.location,
                                             response.location_length);
                                 placed[response.location_length] = end;
                                 status = http_absolutize(tls, host, port, path, placed,
                                                          next, sizeof next);
+                                //      The next hop, or the Location a failure
+                                //      names; both terminate inside a buffer
+                                //      exactly as large as url.
+                                string_copy(url, status ? placed : next);
                         }
                         http_link_close(address_of link);
                         if (status)
                                 goto done;
-                        //      http_absolutize terminates inside next, which is
-                        //      exactly as large as url.
-                        string_copy(url, next);
                         continue;
                 }
 
@@ -8612,6 +9918,9 @@ static bipolar http_run(string_address start, const http_manners address_to how,
         status = HTTP_REDIRECTS;
 
 done:
+        //      Where it ended: the URL a failure names.
+        if (where)
+                string_copy(where, url);
         //      The store path of http_copy terminates what it appends.
         if (into && !status)
         {
@@ -8629,15 +9938,16 @@ static bipolar http_get(string_address url, http_buffer address_to body,
                         b32 address_to code)
 {
         return http_run(url, address_of http_manners_fetch, false, -1, body,
-                        code);
+                        code, null);
 }
 
-//      wget: TLS, redirects, and the body written as it arrives.
+//      wget: TLS, redirects, and the body written as it arrives; where, if
+//      given, is HTTP_URL_MAX bytes and gets the URL the fetch ended on.
 static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert,
-                             b32 address_to code)
+                             b32 address_to code, p8 address_to where)
 {
         return http_run(start, address_of http_manners_wget, check_cert, dest,
-                        null, code);
+                        null, code, where);
 }
 
 #endif // STANDARD_MODERN_C_NET_HTTP

@@ -713,12 +713,131 @@ static COLD bipolar net_staged_name_publish(file_staged_name address_to stage)
         return 0;
 }
 
+/* wget's exit statuses are GNU wget's: 1 anything else, 2 a command line
+   it cannot parse, 3 a file it cannot write, 4 the network, 6 a server
+   refusing credentials, 8 a server answering with an error. */
+#define WGET_GENERIC 1
+#define WGET_USAGE 2
+#define WGET_FILE 3
+#define WGET_NETWORK 4
+#define WGET_AUTH 6
+#define WGET_SERVER 8
+
+/* -O through a link: GNU wget writes wherever the link points, so -O
+   /dev/stdout reaches the terminal, pipe or file behind it. Here the link
+   is followed only where it and what it names belong to root or to the
+   caller, and only to a character device, a FIFO, or the file already open
+   as standard output -- which is then written through that descriptor, at
+   its offset. Any other link to a regular file stays replaced rather than
+   written through: planted in a shared directory it would aim a download
+   at somebody's file. */
+static COLD bipolar net_wget_stream_link(string_address output)
+{
+        file_facts link;
+        file_facts target;
+        file_facts standard;
+        p32 me;
+        positive kind;
+
+        if (file_look_code(AT_FDCWD, output, AT_SYMLINK_NOFOLLOW,
+                           address_of link) < 0 ||
+            (link.mode & MODE_FORMAT) != MODE_LINK)
+                return -1;
+        me = (p32)system_call(syscall(geteuid));
+        if ((link.owner && link.owner != me) ||
+            file_look_code(AT_FDCWD, output, 0, address_of target) < 0)
+                return -1;
+        kind = target.mode & MODE_FORMAT;
+        if (kind == MODE_FILE &&
+            file_look_code(1, (string_address) "", AT_EMPTY_PATH,
+                           address_of standard) >= 0 &&
+            file_same_identity(address_of target, address_of standard))
+                return 1;
+        if ((kind != MODE_CHARACTER && kind != MODE_PIPE) ||
+            (target.owner && target.owner != me))
+                return -1;
+        return file_open_same(AT_FDCWD, output, address_of target,
+                              O_WRONLY | O_NOCTTY);
+}
+
+//      Why a download failed, in GNU wget's words where it has them.
+static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
+                                string_address output)
+{
+        p8 host[256];
+        string_address path;
+        p16 port;
+        bool tls;
+
+        if (http_split_into(where, host, sizeof host, address_of port,
+                            address_of path, address_of tls))
+                host[0] = end;
+        switch (status)
+        {
+        case HTTP_SCHEME:
+                return string_report(log_error, WGET_GENERIC,
+                                     "%w: Unsupported scheme.\n",
+                                     writer_terminal_quoted_name, where);
+        case HTTP_BAD_URL:
+                return string_report(log_error, WGET_GENERIC,
+                                     "wget: %w is not a url this understands\n",
+                                     writer_terminal_quoted_name, where);
+        case HTTP_NO_HOST:
+                return string_report(log_error, WGET_NETWORK,
+                                     "wget: unable to resolve host address '%w'\n",
+                                     writer_terminal_quoted_name, host);
+        case HTTP_NO_ROUTE:
+                return string_report(log_error, WGET_NETWORK,
+                                     "wget: cannot reach %w\n",
+                                     writer_terminal_quoted_name, host);
+        case HTTP_NO_REPLY:
+                return string_report(log_error, WGET_NETWORK,
+                                     "wget: no reply from %w\n",
+                                     writer_terminal_quoted_name, host);
+        case HTTP_MALFORMED:
+                return string_report(log_error, WGET_NETWORK,
+                                     "wget: %w sent a reply this cannot read\n",
+                                     writer_terminal_quoted_name, host);
+        case HTTP_TLS:
+                return string_report(log_error, WGET_NETWORK,
+                                     "wget: TLS handshake with %w failed\n",
+                                     writer_terminal_quoted_name, host);
+        case HTTP_DOWNGRADE:
+                return string_report(log_error, WGET_GENERIC,
+                                     "wget: refused an HTTPS to HTTP redirect "
+                                     "to %w\n",
+                                     writer_terminal_quoted_name, where);
+        case HTTP_REDIRECTS:
+                return string_report(log_error, WGET_SERVER,
+                                     "%p redirections exceeded.\n",
+                                     (positive)(HTTP_HOPS - 1));
+        //      GNU wget's own line, and its file I/O status.
+        case HTTP_WRITE:
+                return string_report(log_error, WGET_FILE,
+                                     "Cannot write to '%w' (%s).\n",
+                                     writer_terminal_quoted_name, output,
+                                     file_reason(http_write_failure));
+        case HTTP_STATUS:
+                if (code == 401)
+                        return string_report(
+                            log_error, WGET_AUTH,
+                            "Username/Password Authentication Failed.\n");
+                return string_report(log_error, WGET_SERVER,
+                                     "wget: %w returned %p\n",
+                                     writer_terminal_quoted_name, host,
+                                     (positive)code);
+        }
+        return string_report(log_error, WGET_GENERIC, "wget: download failed\n");
+}
+
 /*
         wget [ -q ] [ -O FILE ] [ --no-check-certificate ] URL
 
-        BusyBox's subset: save the body under the URL's last component, or
-        under -O, and follow redirects. HTTPS is the reason this exists;
-        fetch remains the small plaintext tool.
+        BusyBox's subset of GNU wget, with GNU's defaults: save the body under
+        the URL's last component -- as NAME.1, NAME.2 and on when that name is
+        taken -- or under -O, which replaces; follow redirects; exit with
+        GNU's statuses. HTTPS is the reason this exists; fetch remains the
+        small plaintext tool.
 */
 static b32 net_wget(void)
 {
@@ -730,6 +849,8 @@ static b32 net_wget(void)
         string_address output;
         p8 name[256];
         p8 leaf[256];
+        p8 numbered[256 + 24];
+        p8 where[HTTP_URL_MAX];
         string_address path;
         p16 port;
         bool tls;
@@ -739,10 +860,11 @@ static b32 net_wget(void)
         bipolar status;
         b32 code = 0;
         bool own_file = false;
+        bool own_stream = false;
         file_staged_name staged;
 
         if (!file_take(address_of taking))
-                return 1;
+                return WGET_USAGE;
 
         if (file_meta(address_of taking,
                       (string_address) "[-q] [-O FILE] [--no-check-certificate] URL",
@@ -755,14 +877,17 @@ static b32 net_wget(void)
         if (taking.first >= (positive)program_argument_count())
         {
                 string_format(log_error, "wget: missing URL\n");
-                return string_report(log_error, 1, "Usage: wget [-q] [-O FILE] "
-                                         "[--no-check-certificate] URL\n");
+                return string_report(log_error, WGET_GENERIC,
+                                     "Usage: wget [-q] [-O FILE] "
+                                     "[--no-check-certificate] URL\n");
         }
 
         if (taking.first + 1 < (positive)program_argument_count())
         {
-                return string_report(log_error, 1, "wget: extra operand '%w'\n", writer_terminal_quoted_name,
-                              program_argument((b32)(taking.first + 1)));
+                return string_report(log_error, WGET_GENERIC,
+                                     "wget: extra operand '%w'\n",
+                                     writer_terminal_quoted_name,
+                                     program_argument((b32)(taking.first + 1)));
         }
 
         url = program_argument((b32)taking.first);
@@ -773,31 +898,58 @@ static b32 net_wget(void)
         status = http_split_into(url, name, sizeof name, address_of port,
                                  address_of path, address_of tls);
         if (status)
-        {
-                return string_report(log_error, 1, "wget: %w is not a url this understands\n",
-                              writer_terminal_quoted_name, url);
-        }
+                return net_wget_failed(status, 0, url, null);
 
         if (output && string_equals(output, (string_address) "-"))
                 dest = 1;
+        else if (output && (dest = net_wget_stream_link(output)) >= 0)
+                own_stream = dest != 1;
         else
         {
-                if (!output)
-                {
-                        http_url_leaf(path, leaf, sizeof leaf);
-                        output = leaf;
-                }
                 /* A device or FIFO is written into, as GNU wget does, never
                    replaced: as root, -O /dev/null would otherwise put a
-                   regular file where the device was. */
-                dest = file_staged_name_open(
-                    address_of staged, output, 0644 & ~file_umask(),
-                    FILE_STAGED_STREAM_SPECIAL);
-                if (dest < 0)
+                   regular file where the device was. Without -O a name that
+                   is taken is left alone for the next number, and a
+                   directory there is GNU's "Is a directory"; publication
+                   refuses to replace a name that appears meanwhile. */
+                bool named = output != null;
+
+                if (!named)
+                        http_url_leaf(path, leaf, sizeof leaf);
+                output = named ? output : leaf;
+                for (positive copy = 1;; copy++)
                 {
-                        return string_report(log_error, 1, "wget: cannot write %w\n",
-                                      writer_terminal_quoted_name, output);
+                        file_facts taken;
+
+                        dest = file_staged_name_open(
+                            address_of staged, output, 0666 & ~file_umask(),
+                            FILE_STAGED_STREAM_SPECIAL |
+                                (named ? 0 : FILE_STAGED_NO_REPLACE));
+                        if (named || dest != -ERROR_EXISTS || copy > 999999)
+                                break;
+                        if (file_look_code(AT_FDCWD, output, 0,
+                                           address_of taken) >= 0 &&
+                            (taken.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                        {
+                                dest = -ERROR_IS_DIRECTORY;
+                                break;
+                        }
+                        positive used = string_length(leaf);
+
+                        memory_copy(numbered, leaf, used);
+                        numbered[used++] = '.';
+                        numbered[used + positive_into(numbered + used, copy)] = end;
+                        output = numbered;
                 }
+                if (dest < 0)
+                        return named ? string_report(log_error, WGET_GENERIC,
+                                                     "%w: %s\n",
+                                                     writer_terminal_quoted_name,
+                                                     output, file_reason(dest))
+                                     : string_report(log_error, WGET_FILE,
+                                                     "Cannot write to '%w' (%s).\n",
+                                                     writer_terminal_quoted_name,
+                                                     output, file_reason(dest));
                 own_file = true;
         }
 
@@ -807,47 +959,27 @@ static b32 net_wget(void)
                               writer_terminal_quoted_name, output);
         }
 
-        status = http_fetch_to(url, dest, check_cert, address_of code);
+        string_copy(where, url);
+        status = http_fetch_to(url, dest, check_cert, address_of code, where);
+        if (own_stream)
+                system_close((positive)dest);
 
         if (status)
         {
                 if (own_file)
-                {
                         file_staged_name_abort(address_of staged);
-                }
-                if (status == HTTP_NO_HOST)
-                        string_format(log_error, "wget: cannot resolve %w\n",
-                                      writer_terminal_quoted_name, name);
-                else if (status == HTTP_NO_ROUTE)
-                        string_format(log_error, "wget: cannot reach %w\n",
-                                      writer_terminal_quoted_name, name);
-                else if (status == HTTP_TLS)
-                        string_format(log_error, "wget: TLS handshake failed\n");
-                else if (status == HTTP_DOWNGRADE)
-                        string_format(log_error,
-                                      "wget: refused an HTTPS to HTTP redirect\n");
-                else if (status == HTTP_REDIRECTS)
-                        string_format(log_error, "wget: too many redirects\n");
-                //      GNU wget's own line, and its file I/O status below.
-                else if (status == HTTP_WRITE)
-                        string_format(log_error, "Cannot write to '%w' (%s).\n",
-                                      writer_terminal_quoted_name, output,
-                                      file_reason(http_write_failure));
-                else if (status == HTTP_NO_REPLY)
-                        string_format(log_error, "wget: no reply from %w\n",
-                                      writer_terminal_quoted_name, name);
-                else if (status == HTTP_STATUS)
-                        string_format(log_error, "wget: server returned %p\n",
-                                      (positive)code);
-                else
-                        string_format(log_error, "wget: download failed\n");
-                return status == HTTP_WRITE ? 3 : 1;
+                return net_wget_failed(status, code, where, output);
         }
 
-        if (own_file && net_staged_name_publish(address_of staged) < 0)
+        if (own_file)
         {
-                return string_report(log_error, 1, "wget: cannot publish %w\n",
-                              writer_terminal_quoted_name, output);
+                bipolar published = net_staged_name_publish(address_of staged);
+
+                if (published < 0)
+                        return string_report(log_error, WGET_FILE,
+                                             "Cannot write to '%w' (%s).\n",
+                                             writer_terminal_quoted_name,
+                                             output, file_reason(published));
         }
 
         return 0;
@@ -942,6 +1074,10 @@ typedef struct
         bool address_owned;
         bool route_owned;
         bool lost;
+        //      The link's count of carrier losses when the lease was asked
+        //      for, where the kernel keeps one.
+        bool carrier_counted;
+        p32 carrier_downs;
 } net_holding;
 
 static positive net_seconds(void)
@@ -1152,9 +1288,10 @@ static COLD bipolar net_lease_rollback(
 
         if (address_changed && net_owns_address(previous))
         {
-                bipolar status = netlink_address_add(
+                bipolar status = netlink_address_lease(
                     handle, previous->index, previous->lease.address,
-                    dhcp_prefix_of(previous->lease.mask));
+                    dhcp_prefix_of(previous->lease.mask),
+                    previous->lease.seconds, false);
                 if (status < 0 && !failed)
                         failed = status;
         }
@@ -1217,19 +1354,42 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
         address_changed = !net_holds_address(previous, index, lease);
         route_changed = !net_holds_route(previous, index, lease);
 
-        if (address_changed)
+        /* A watcher's address carries the lease's lifetimes, so the kernel
+           drops it at expiry even with no watcher left, and a renewal of
+           the same address puts the new lease's on it; a one-shot ip auto,
+           which nothing renews, installs it as it always did. EEXIST from
+           the exclusive create is the address already there: an operator's
+           stays theirs, present and not owned, but one this client leased
+           -- a watcher's before init restarted this one -- is taken back,
+           so that a NAK or expiry removes it as it would have. A watcher's
+           first lease also removes any other lease left on the link: the
+           server that handed out a new address may hand the old one to
+           somebody else. */
+        if (address_changed || net_owns_address(previous))
         {
-                status = net_owns_address(previous)
-                             ? netlink_address_add(
-                                   handle, index, lease->address,
-                                   dhcp_prefix_of(lease->mask))
-                             : netlink_address_acquire(
-                                   handle, index, lease->address,
-                                   dhcp_prefix_of(lease->mask));
-                /* EEXIST from the exclusive create is the address already
-                   there -- an operator's, or this watcher's before init
-                   restarted it -- which stays theirs: present, not owned. */
-                address_applied = status >= 0;
+                p8 prefix = dhcp_prefix_of(lease->mask);
+                p32 seconds = held ? lease->seconds : 0;
+                netlink_lease_search found = {.index = index,
+                                              .host = lease->address,
+                                              .prefix = prefix};
+
+                status = netlink_address_lease(
+                    handle, index, lease->address, prefix, seconds,
+                    !net_owns_address(previous));
+                if (held && !previous &&
+                    (status >= 0 || status == -EEXIST) &&
+                    netlink_leases_on(handle, address_of found) >= 0)
+                {
+                        for (positive at = 0; at < found.others; at++)
+                                (void)netlink_address_delete(
+                                    handle, index, found.other_host[at],
+                                    found.other_prefix[at]);
+                        if (status == -EEXIST && found.leased)
+                                status = netlink_address_lease(
+                                    handle, index, lease->address, prefix,
+                                    seconds, false);
+                }
+                address_applied = address_changed && status >= 0;
                 if (status < 0 && status != -EEXIST)
                 {
                         doing = (string_address) "addr add";
@@ -1321,6 +1481,8 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
                     .route_owned = net_ownership_next(
                         net_owns_route(previous), route_changed,
                         route_applied, lease->router != 0),
+                    .carrier_counted = previous && previous->carrier_counted,
+                    .carrier_downs = previous ? previous->carrier_downs : 0,
                 };
                 string_copy_max_end(next.name, name, IFNAME_SIZE - 1);
                 memory_copy(next.hardware, hardware, 6);
@@ -1506,8 +1668,25 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
                 return 1;
         }
 
-        return net_apply_lease(handle, search.index, search.name,
-                               search.hardware, address_of lease, held, true);
+        if (net_apply_lease(handle, search.index, search.name,
+                            search.hardware, address_of lease, held, true))
+                return 1;
+        /* Counted once the lease is taken, not before the exchange:
+           bringing a link up can itself cost a carrier loss -- a PHY that
+           starts by dropping the carrier it was registered with -- which
+           is no reason to doubt a lease taken after it. */
+        if (held)
+        {
+                netlink_search now = {.wanted = (string_address)search.name};
+
+                if (netlink_link_find(handle, address_of now) >= 0 &&
+                    now.index == search.index)
+                {
+                        held->carrier_counted = now.carrier_counted;
+                        held->carrier_downs = now.carrier_downs;
+                }
+        }
+        return 0;
 }
 
 static COLD b32 net_reconfigure(b32 handle, net_holding address_to held)
@@ -1580,19 +1759,33 @@ static COLD net_state address_to net_state_of(p32 index)
         return null;
 }
 
+/* Whether the held link lost its carrier since the lease was asked for, by
+   the kernel's count: a cable pulled and put back while the watcher was
+   busy -- into another network, perhaps -- leaves the link looking as it
+   did, and only the count says otherwise. Only a count that went up does;
+   news queued from before the lease carries an older one. */
+static COLD bool net_link_bounced(const net_holding address_to held,
+                                  bool counted, p32 downs)
+{
+        return held->carrier_counted && counted &&
+               (b32)(downs - held->carrier_downs) > 0;
+}
+
 /* News without IFF_RUNNING is also what the kernel sends the moment a link
    is brought up; linkwatch says RUNNING up to a second later, and the lease
    is taken between the two, so every boot released a lease a millisecond
-   old and asked again. The held link is asked as it is now, and carrier
-   (IFF_LOWER_UP) counts. */
-static COLD bool net_link_carrier_now(const net_holding address_to held)
+   old and asked again. The held link is asked as it is now: carrier
+   (IFF_LOWER_UP) counts, and so does a carrier lost and found since. */
+static COLD bool net_link_carrier_kept(const net_holding address_to held)
 {
         netlink_search now = {.wanted = (string_address)held->name};
         bipolar handle = netlink_open_groups(0);
         bool carrier = handle >= 0 &&
                        netlink_link_find((b32)handle, address_of now) >= 0 &&
                        now.index == held->index &&
-                       (now.flags & (IFF_RUNNING | IFF_LOWER_UP));
+                       (now.flags & (IFF_RUNNING | IFF_LOWER_UP)) &&
+                       !net_link_bounced(held, now.carrier_counted,
+                                         now.carrier_downs);
 
         if (handle >= 0)
                 socket_close((b32)handle);
@@ -1625,7 +1818,7 @@ static COLD bool net_link_news(p32 index, p32 flags, net_holding address_to held
         entry->flags = flags;
 
         if (held && held->index == index && !(flags & IFF_RUNNING) &&
-            !net_link_carrier_now(held))
+            !net_link_carrier_kept(held))
                 held->lost = true;
         if (!held || held->index == 0 || held->lost)
                 return true;
@@ -1667,6 +1860,19 @@ static COLD bool net_link_event(netlink_header address_to header,
                 return net_link_removed(link->index, held);
         if (header->type != RTM_NEWLINK || (link->flags & IFF_LOOPBACK))
                 return false;
+        {
+                p32 downs = 0;
+                bool counted = netlink_link_carrier_downs(header,
+                                                          address_of downs);
+
+                if (held && held->index == link->index && !held->lost &&
+                    net_link_bounced(held, counted, downs))
+                {
+                        (void)net_link_news(link->index, link->flags, held);
+                        held->lost = true;
+                        return true;
+                }
+        }
         return net_link_news(link->index, link->flags, held);
 }
 
@@ -1715,6 +1921,54 @@ static COLD fn net_wake_drain(b32 handle)
         }
 }
 
+/* One datagram of link news, acted on: 1 when it reconfigured, 0 when
+   nothing in it mattered, negative when the socket failed for good. News
+   that came faster than it was read is dropped by the kernel with ENOBUFS,
+   which is not the end of the socket: what it would have said is asked
+   instead. Every carrier snapshot is forgotten, so each link's next news
+   counts, the held link is asked whether it kept its carrier since the
+   lease, and the best link is picked again. */
+static COLD bipolar net_watch_events(b32 events, netlink_buffer address_to message,
+                                     net_holding address_to held)
+{
+        bipolar got = netlink_receive(events, message, null);
+        positive at = 0;
+        bipolar acted = 0;
+
+        /* recvfrom can still be interrupted in the narrow interval after the
+           readiness poll.  Nothing was consumed, and the lease deadline is
+           recomputed by the caller. */
+        if (got == NETWORK_INTERRUPTED)
+                return 0;
+        if (got == -ENOBUFS)
+        {
+                netlink_forget(address_of net_states);
+                if (held->index && !held->lost && !net_link_carrier_kept(held))
+                        held->lost = true;
+                net_reconfigure_fresh(held);
+                return 1;
+        }
+        if (got < 0)
+                return got;
+
+        while (at + NETLINK_HEADER <= message->used)
+        {
+                netlink_header address_to header =
+                    (netlink_header address_to)(message->bytes + at);
+
+                if (header->length < NETLINK_HEADER ||
+                    at + header->length > message->used)
+                        break;
+                at += netlink_align(header->length);
+                if (net_link_event(header, held))
+                {
+                        acted = 1;
+                        net_reconfigure_fresh(held);
+                }
+        }
+        return acted;
+}
+
 static COLD b32 net_watch(void)
 {
         netlink_buffer message = {0};
@@ -1761,8 +2015,6 @@ static COLD b32 net_watch(void)
 
         for (;;)
         {
-                netlink_header address_to header;
-                positive at = 0;
                 bipolar got;
                 bool link_ready = false;
                 bool woken = false;
@@ -1923,40 +2175,15 @@ static COLD b32 net_watch(void)
 
                 if (link_ready)
                 {
-                        got = netlink_receive((b32)events, address_of message,
-                                              null);
-
-                        /* recvfrom can still be interrupted in the narrow
-                           interval after the readiness poll.  Nothing was
-                           consumed, and the lease deadline is recomputed at
-                           the top of the loop. */
-                        if (got == NETWORK_INTERRUPTED)
-                                continue;
+                        got = net_watch_events((b32)events,
+                                               address_of message,
+                                               address_of held);
                         if (got < 0)
                                 break;
-
-                        while (at + NETLINK_HEADER <= message.used)
+                        if (got > 0)
                         {
-                                bool interesting = false;
-
-                                header = (netlink_header address_to)(
-                                    message.bytes + at);
-
-                                if (header->length < NETLINK_HEADER ||
-                                    at + header->length > message.used)
-                                        break;
-
-                                interesting = net_link_event(header,
-                                                             address_of held);
-
-                                at += netlink_align(header->length);
-
-                                if (interesting)
-                                {
-                                        retry_seconds = 4;
-                                        net_reconfigure_fresh(address_of held);
-                                        woken = false;
-                                }
+                                retry_seconds = 4;
+                                woken = false;
                         }
                 }
 
