@@ -1209,63 +1209,60 @@ static bool text_unsigned_option(string_address source, bool saturate,
 }
 
 /*
-        gnulib's xnumtoumax in base 10 with no suffixes, words and all:
-        blanks may lead and a plus may sign, a minus or a word with no digits
-        or anything after them is "WHAT: 'WORD'", and a number past CEILING
-        (or one too long to hold) adds the reason, ERANGE where the caller
-        asked for it and EOVERFLOW where it did not. FLOOR works the same
-        way from below.
+        gnulib's xnumtoimax and xnumtoumax in base 10 with no suffixes, words
+        and all: blanks may lead and a sign may lead them, a word that is no
+        number or has anything after it is "WHAT: 'WORD'", and a number
+        outside FLOOR..CEILING -- one too long to hold is outside too, on
+        its side -- adds the reason: ERANGE where the caller's flag for that
+        side asks for it, EOVERFLOW where it does not, and nothing at all
+        past the ceiling under TEXT_XNUM_MAX_QUIET, which takes the ceiling.
+        A minus is no number without TEXT_XNUM_SIGNED, as strtoumax has it.
 */
 enum
 {
         TEXT_XNUM_MIN_RANGE = 1,
         TEXT_XNUM_MAX_RANGE = 2,
+        TEXT_XNUM_MAX_QUIET = 4,
+        TEXT_XNUM_SIGNED = 8,
 };
 
-static bool text_xnum(string_address said, positive floor, positive ceiling,
-                      p8 flags, string_address what,
-                      positive address_to value)
+static bool text_xnum(string_address said, bipolar floor, bipolar ceiling,
+                      p8 flags, string_address what, bipolar address_to value)
 {
         string_address at = said + string_span(said, string_set_space);
-        bool invalid = at[0] == '-';
+        bool negative = at[0] == '-';
+        bool invalid = negative && !(flags & TEXT_XNUM_SIGNED);
         bool overflow = false;
-        bool range = false;
         positive made = 0;
 
-        if (at[0] == '+')
-                at++;
-        if (!invalid && !byte_is_digit(at[0]))
-                invalid = true;
+        at += at[0] == '+' || negative;
+        invalid = invalid || !byte_is_digit(at[0]);
 
-        if (!invalid)
+        for (; !invalid && byte_is_digit(at[0]); at++)
         {
-                for (; byte_is_digit(at[0]); at++)
-                {
-                        positive digit = (positive)(at[0] - '0');
+                positive digit = (positive)(at[0] - '0');
 
-                        if (made > (positive_max - digit) / 10)
-                        {
-                                overflow = true;
-                                made = positive_max;
-                        }
-                        else if (!overflow)
-                                made = made * 10 + digit;
-                }
-
-                if (at[0])
-                        invalid = true;
+                if (made > ((positive)bipolar_max + negative - digit) / 10)
+                        overflow = true;
+                else if (!overflow)
+                        made = made * 10 + digit;
         }
+        invalid = invalid || at[0];
 
-        if (!invalid && (overflow || made > ceiling))
-                range = (flags & TEXT_XNUM_MAX_RANGE) != 0;
-        else if (!invalid && made < floor)
+        //      The side a number falls out on; -0 is zero.
+        bipolar number = negative ? (bipolar)(0 - made) : (bipolar)made;
+        bool below = !invalid && (negative && made ? overflow || number < floor
+                                                   : !overflow && number < floor);
+        bool above = !invalid && !below && (overflow || number > ceiling);
+
+        if (above && (flags & TEXT_XNUM_MAX_QUIET))
         {
-                overflow = true;
-                range = (flags & TEXT_XNUM_MIN_RANGE) != 0;
+                address_to value = ceiling;
+                return true;
         }
-        else if (!invalid)
+        if (!invalid && !below && !above)
         {
-                address_to value = made;
+                address_to value = number;
                 return true;
         }
 
@@ -1273,8 +1270,9 @@ static bool text_xnum(string_address said, positive floor, positive ceiling,
         string_format(writer_stderr, "%s: %s: '%w'%s\n", text_name, what,
                       writer_terminal_quoted_name, said,
                       invalid ? ""
-                      : range ? ": Numerical result out of range"
-                              : ": Value too large for defined data type");
+                      : (flags & (below ? TEXT_XNUM_MIN_RANGE : TEXT_XNUM_MAX_RANGE))
+                          ? ": Numerical result out of range"
+                          : ": Value too large for defined data type");
         return false;
 }
 
@@ -10170,25 +10168,6 @@ static regex_program nl_patterns[3];
 
 // A line number or an increment: an optional minus and digits, within what a
 // signed 64-bit count can hold. GNU refuses the rest as too large.
-static bool nl_signed(string_address said, bipolar address_to into)
-{
-        bool negative = said[0] == '-';
-        positive magnitude;
-
-        if (negative)
-                said++;
-
-        if (!byte_is_digit(said[0]) ||
-            !file_decimal_read(address_of said, true, address_of magnitude) || said[0])
-                return false;
-
-        if (magnitude > (positive)NL_NUMBER_MAX + negative)
-                return false;
-
-        address_to into = negative ? (bipolar)(0 - magnitude) : (bipolar)magnitude;
-        return true;
-}
-
 // The number in its field: right aligned, left aligned, or zero filled
 // behind its sign, none of which cut a number that is wider than the field.
 static fn nl_put_number(bipolar number, positive width, p8 justify, bool zeros)
@@ -10278,40 +10257,64 @@ static bipolar nl_start;
 static bipolar nl_step;
 static positive nl_join;
 
+/*
+        A style or format nl has no use for is said, "WHAT: 'WORD'", and the
+        options go on being read, as GNU's getopt loop does: every such word
+        is named, and the pointer at --help comes once they are all read. A
+        number that will not do ends the reading where it is met.
+*/
+static bool nl_refused_any;
+
+static bool nl_refused(string_address what, string_address value)
+{
+        text_flush();
+        string_format(writer_stderr, "%s: %s: '%w'\n", text_name, what,
+                      writer_terminal_quoted_name, value);
+        nl_refused_any = true;
+        return true;
+}
+
 static bool nl_option_seen(p8 letter, string_address value)
 {
         if (letter == 'b' || letter == 'f' || letter == 'h')
         {
                 if (!nl_style_valid(value))
-                        return string_diagnostic(&text_diagnostic, 0, value,
-                                                 letter == 'h' ? "invalid header numbering style"
-                                                 : letter == 'b' ? "invalid body numbering style"
-                                                                 : "invalid footer numbering style");
+                        return nl_refused((string_address)(letter == 'h' ? "invalid header numbering style"
+                                                           : letter == 'b' ? "invalid body numbering style"
+                                                                           : "invalid footer numbering style"),
+                                          value);
         }
         else if (letter == 'n')
         {
                 if (!string_equals(value, "ln") && !string_equals(value, "rn") &&
                     !string_equals(value, "rz"))
-                        return string_diagnostic(&text_diagnostic, 0, value, "invalid line numbering format");
+                        return nl_refused((string_address) "invalid line numbering format", value);
         }
         else if (letter == 'w')
         {
-                if (!text_unsigned_option(value, false, address_of nl_width) ||
-                    !nl_width || nl_width > 0x7fffffff)
-                        return string_diagnostic(&text_diagnostic, 0, value, "invalid line number field width");
+                bipolar width;
+
+                if (!text_xnum(value, 1, 0x7fffffff, TEXT_XNUM_SIGNED | TEXT_XNUM_MIN_RANGE,
+                               (string_address) "invalid line number field width", address_of width))
+                        return false;
+                nl_width = (positive)width;
         }
         else if (letter == 'l')
         {
-                if (!text_unsigned_option(value, false, address_of nl_join))
-                        return string_diagnostic(&text_diagnostic, 0, value, "invalid line number of blank lines");
+                bipolar join;
+
+                if (!text_xnum(value, 0, bipolar_max,
+                               TEXT_XNUM_SIGNED | TEXT_XNUM_MIN_RANGE | TEXT_XNUM_MAX_QUIET,
+                               (string_address) "invalid line number of blank lines", address_of join))
+                        return false;
+                nl_join = (positive)join;
         }
         else if (letter == 'v' || letter == 'i')
         {
-                if (!nl_signed(value, letter == 'v' ? address_of nl_start
-                                                    : address_of nl_step))
-                        return string_diagnostic(&text_diagnostic, 0, value,
-                                                 letter == 'v' ? "invalid starting line number"
-                                                               : "invalid line number increment");
+                return text_xnum(value, -bipolar_max - 1, bipolar_max, TEXT_XNUM_SIGNED,
+                                 (string_address)(letter == 'v' ? "invalid starting line number"
+                                                                : "invalid line number increment"),
+                                 letter == 'v' ? address_of nl_start : address_of nl_step);
         }
 
         return true;
@@ -10331,9 +10334,14 @@ static b32 text_nl()
         nl_start = 1;
         nl_step = 1;
         nl_join = 1;
+        nl_refused_any = false;
 
         if (!text_took(address_of taking))
                 return text_done(1);
+        if (nl_refused_any)
+                return text_done(string_report(writer_stderr, 1,
+                                               "Try '%s --help' for more information.\n",
+                                               text_name));
 
         positive width = nl_width;
         bipolar number = nl_start;
@@ -10367,10 +10375,12 @@ static b32 text_nl()
                 if (said[0] != 'p')
                         continue;
 
-                if (pattern_count >= 3 ||
-                    !regex_compile(said + 1, false, false, false,
-                                   REGEX_POLICY_DEFAULT))
-                        return text_done(string_diagnostic(&text_diagnostic, 1, said + 1, "invalid regular expression"));
+                // GNU compiles it with regcomp's basic syntax, and says
+                // regcomp's reason alone.
+                if (!regex_compile(said + 1, false, false, false,
+                                   REGEX_POLICY_EXPR))
+                        return text_done(string_diagnostic(&text_diagnostic, 1, null,
+                                                           regex_failure_reason()));
 
                 regex_keep(nl_patterns + pattern_count);
                 patterns[k] = pattern_count++;
@@ -12101,7 +12111,7 @@ static b32 text_fmt()
         if (!text_took(address_of taking))
                 return text_done(1);
 
-        positive width = FMT_WIDTH_DEFAULT;
+        bipolar width = FMT_WIDTH_DEFAULT;
         string_address width_value = (taking.flags & FILE_FLAG('w'))
                                          ? file_option_value(address_of taking, 'w')
                                          : (taking.flags & FILE_FLAG('W'))
@@ -12113,7 +12123,7 @@ static b32 text_fmt()
                        "invalid width", address_of width))
                 return text_done(1);
 
-        positive goal;
+        bipolar goal;
 
         if (taking.flags & FILE_FLAG('g'))
         {
