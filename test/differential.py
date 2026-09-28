@@ -39607,8 +39607,9 @@ def harness_http_urls(argv):
     host, port and origin-form target, and every URL urlsplit reads that way
     must be accepted. A resolved Location must name what urljoin names, less
     the fragment. DELIBERATE lists where this client refuses what urllib
-    takes; references with dot segments are not generated, since this client
-    sends them to the server as written and urljoin removes them.
+    takes. Paths and references carry dot segments too: the client resolves
+    them before it asks, as GNU wget does (http_path_simplify, %2e spellings
+    included), and the oracle by RFC 3986 5.2.4 over urllib's answer.
 
         python3 test/differential.py --harness http_urls
     """
@@ -39655,7 +39656,7 @@ static void answer(const p8 *url)
         p16 port = 0;
         bool tls = false;
         if (http_split_into((string_address)url, host, sizeof host, &port, &path, &tls) ||
-            http_origin_form(path, target, sizeof target)) {
+            (http_path_simplify((p8 *)path), http_origin_form(path, target, sizeof target))) {
                 printf("BAD\n");
                 return;
         }
@@ -39707,7 +39708,8 @@ int main(void)
     ports = ["", "", "", ":80", ":443", ":8080", ":65535", ":08", ":1"] * 2 + [
         ":0", ":65536", ":", ":+1", ":1x", ":99999999999999999999"]
     paths = ["", "/", "/a/b", "/a%20b", "/a;b,c", "/\u00e9", "/a:b@c", "/%0d%0a"] * 2 + [
-        "/a b", "/a\\b", "/a\tb", "/" + "p" * 2100]
+        "/a b", "/a\\b", "/a\tb", "/" + "p" * 2100, "/a/./b", "/a/../b", "/a/b/..",
+        "/..", "/./", "/a/%2e%2E/b", "/a/.%2e", "/a/...", "/a//../b", "/%2e/x"]
     queries = ["", "", "?", "?x=1", "?a/b?c", "?#"]
     fragments = ["", "", "#", "#f", "#a?b/c"]
 
@@ -39721,7 +39723,11 @@ int main(void)
     urls = sorted(urls)
     bases = ["http://example.com/dir/old", "https://example.com:8443/a/b?q=1",
              "http://h:80/", "https://h/x?y#z", "http://127.0.0.1:8080/d/e/f"]
-    segments = ["", "p", "p/q", "a%20b", "x;y", "\u00e9"]
+    segments = ["", "p", "p/q", "a%20b", "x;y", "\u00e9", "../x", "./y", "..", ".",
+                "a/../../b", "%2e%2e/z", "..%2f", "../../../up",
+                #   RFC 3986 5.4.2's abnormal examples.
+                "./../g", "./g/.", "g/./h", "g/../h", "g;x=1/./y", "g;x=1/../y",
+                "g.", ".g", "g..", "..g"]
     references = set()
     for _ in range(1500):
         shape = random_urls.randrange(7)
@@ -39737,6 +39743,25 @@ int main(void)
         return text.encode("utf-8").hex() or "-"
 
     scheme_shape = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):")
+
+    def dot_free(target):
+        """RFC 3986 5.2.4 over the path in front of the query, a segment
+        of dots spelled with %2e too."""
+        path, mark, query = target.partition("?")
+        if not path.startswith("/"):
+            return target
+        kept = []
+        segments = path.split("/")[1:]
+        for at, segment in enumerate(segments):
+            plain = re.sub("%2e", ".", segment, flags=re.I)
+            if plain in (".", ".."):
+                if plain == ".." and kept:
+                    kept.pop()
+                if at == len(segments) - 1:
+                    kept.append("")
+                continue
+            kept.append(segment)
+        return "/" + "/".join(kept) + mark + query
 
     def subset(url):
         """What this client must answer for url: a (tls, host, port, target)
@@ -39758,7 +39783,7 @@ int main(void)
             return "refuse"
         tls = scheme.group(1).lower() == "https"
         target = (parts.path or "/") + ("?" + parts.query if "?" in url.split("#", 1)[0] else "")
-        return (tls, host, int(port) if colon else 443 if tls else 80, target)
+        return (tls, host, int(port) if colon else 443 if tls else 80, dot_free(target))
 
     def same(got, want):
         """urljoin drops an empty query that RFC 3986 keeps; nothing else

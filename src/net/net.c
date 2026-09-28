@@ -8399,6 +8399,72 @@ static bipolar http_absolutize(bool tls, string_address host, p16 port,
         return http_put_url(into, room, tls, host, port, merged);
 }
 
+/* 1 for a "." segment, 2 for "..", either spelled with %2e as well, as
+   GNU wget and a browser read them; 0 for any other. */
+static positive http_dot_segment(string_address segment, positive length)
+{
+        positive dots = 0;
+
+        for (positive at = 0; at < length; dots++)
+        {
+                if (segment[at] == '.')
+                        at++;
+                else if (length - at >= 3 && segment[at] == '%' &&
+                         segment[at + 1] == '2' && (segment[at + 2] | 0x20) == 'e')
+                        at += 3;
+                else
+                        return 0;
+        }
+        return dots <= 2 ? dots : 0;
+}
+
+/* RFC 3986 5.2.4's remove_dot_segments over the path in front of a query,
+   in place, where the path starts with '/': GNU wget and curl resolve the
+   dot segments of every URL and Location rather than asking the server to,
+   and a path climbing above the root stays at it. Output never outruns
+   input, so each segment moves down over what was dropped. */
+static fn http_path_simplify(p8 address_to path)
+{
+        positive length = string_span_without_set(path, "?#");
+        positive read = 0;
+        positive wrote = 0;
+
+        if (path[0] != '/')
+                return;
+        while (read < length)
+        {
+                positive start = read + 1;
+                positive stop = start + memory_span_without_byte(
+                                            path + start, '/', length - start);
+                positive dots = http_dot_segment((string_address)path + start,
+                                                 stop - start);
+
+                if (!dots)
+                {
+                        //      Nothing moves until something was dropped,
+                        //      so a path with no dot segment -- the root
+                        //      http_split_into names as a literal, too --
+                        //      is never written.
+                        if (wrote != read)
+                                memory_copy(path + wrote, path + read,
+                                            stop - read);
+                        wrote += stop - read;
+                }
+                else
+                {
+                        //      ".." drops the last segment written.
+                        while (dots == 2 && wrote && path[--wrote] != '/')
+                                ;
+                        if (stop == length)
+                                path[wrote++] = '/';
+                }
+                read = stop;
+        }
+        if (wrote != length)
+                memory_copy(path + wrote, path + length,
+                            string_length(path + length) + 1);
+}
+
 /* Once a redirect chain has reached HTTPS, no later Location may discard
    transport authentication.  The caller applies this before name lookup or
    opening the next connection. */
@@ -8455,12 +8521,12 @@ static fn http_url_leaf(string_address path, p8 address_to into, positive room)
         if (query)
                 query[0] = end;
 
-        /* No last segment, ".", or "..": each names a directory, which a
-           file cannot replace, and GNU wget saves all three as index.html. */
+        /* No last segment, ".", or "..", %2e spellings too: each names a
+           directory, which a file cannot replace, and GNU wget saves all
+           three as index.html. */
         slash = string_last_of(target, '/');
         path = slash ? slash + 1 : target;
-        if (!string_get(path) || string_equals(path, (string_address) ".") ||
-            string_equals(path, (string_address) ".."))
+        if (!string_get(path) || http_dot_segment(path, string_length(path)))
                 path = (string_address) "index.html";
         string_copy_max_end(into, path, room - 1);
 }
@@ -8530,6 +8596,8 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                    It is the head buffer's first bytes until it is sent. */
                 status = http_split_into(url, host, sizeof host, address_of port,
                                          address_of path, address_of tls);
+                if (!status)
+                        http_path_simplify((p8 address_to)path);
                 if (!status && tls && !how->allow_tls)
                         status = HTTP_TLS;
                 if (!status && !http_transport_allowed(address_of secure, tls))

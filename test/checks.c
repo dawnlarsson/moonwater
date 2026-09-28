@@ -58202,7 +58202,11 @@ static fn redirect_urls(void)
                     {"/..?x", "index.html"},
                     {"/a/..x", "..x"},
                     {"/a/...", "..."},
-                    {"/a/%2e%2e", "%2e%2e"},
+                    {"/a/%2e%2e", "index.html"},
+                    {"/a/.%2E", "index.html"},
+                    {"/a/%2e", "index.html"},
+                    {"/a/%2e%2e%2e", "%2e%2e%2e"},
+                    {"/a/%2", "%2"},
                 };
                 p8 overlong[HTTP_URL_MAX + 8];
 
