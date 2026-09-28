@@ -7445,19 +7445,9 @@ static bipolar http_origin_form(string_address path, p8 address_to into,
 
         hash = string_first_of(path, '#');
         length = hash ? (positive)(hash - path) : string_length(path);
-        if (!length)
-        {
-                if (room < 2)
-                        return HTTP_BAD_URL;
-                into[0] = '/';
-                into[1] = end;
-                return HTTP_OK;
-        }
-
-        root = path[0] == '?';
-        if (path[0] != '/' && !root)
-                return HTTP_BAD_URL;
-        if (length > room || root >= room - length)
+        root = !length || path[0] == '?';
+        if ((path[0] != '/' && !root) || length > room ||
+            root >= room - length)
                 return HTTP_BAD_URL;
 
         if (root)
@@ -7640,29 +7630,14 @@ static bool http_chunk_extensions_valid(string_address at,
                                 return false;
                         if (*at == '"')
                         {
-                                bool closed = false;
-
-                                at++;
-                                while (at < stop)
-                                {
-                                        p8 byte = *at++;
-
-                                        if (byte == '"')
-                                        {
-                                                closed = true;
-                                                break;
-                                        }
-                                        if (byte == '\\')
-                                        {
-                                                if (at == stop)
-                                                        return false;
-                                                byte = *at++;
-                                        }
-                                        if (byte_is_control(byte) &&
-                                            byte != '\t')
+                                /* A quoted-string: an escape takes the next
+                                   byte whatever it is, and no byte in it is
+                                   a control but tab. */
+                                for (at++; at < stop && *at != '"'; at++)
+                                        if ((*at == '\\' && ++at == stop) ||
+                                            (byte_is_control(*at) && *at != '\t'))
                                                 return false;
-                                }
-                                if (!closed)
+                                if (at++ == stop)
                                         return false;
                         }
                         else
@@ -7701,11 +7676,8 @@ static bipolar http_chunk_line(p8 address_to line, positive line_length,
         if (number < stop && byte_is_blank(number[0]))
                 number += string_span_max(number, stop - number,
                                           string_set_blanks);
-        if (number < stop)
-        {
-                if (!http_chunk_extensions_valid(number, stop))
-                        return HTTP_MALFORMED;
-        }
+        if (number < stop && !http_chunk_extensions_valid(number, stop))
+                return HTTP_MALFORMED;
 
         address_to chunk_length = parsed;
         return HTTP_OK;
@@ -8851,10 +8823,9 @@ static bipolar http_run(string_address start, const http_manners address_to how,
         status = HTTP_REDIRECTS;
 
 done:
+        //      The store path of http_copy terminates what it appends.
         if (into && !status)
         {
-                if (whole.bytes)
-                        whole.bytes[whole.used] = end;
                 byte_store_release(into);
                 address_to into = whole;
                 memory_fill(address_of whole, 0, sizeof whole);
