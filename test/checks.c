@@ -66482,6 +66482,105 @@ static fn places(void)
 }
 
 /*
+        The client's standard output, full: a pipe nobody reads, a socket
+        nobody reads. A write that waited there stopped the client's whole
+        loop -- keepalives, acknowledgements, the rekey -- until the machine
+        gave the link up. Each is filled and handed a frame in a child, which
+        must come back with the frame refused for now, not hang; a file is
+        written where it stands, its offset kept.
+*/
+static b32 wls_output_full(positive kind)
+{
+        struct link_session address_to s = link_self.session;
+        b32 ends[2];
+        p8 junk[4096];
+        p8 frame[] = "Dabc";
+        p8 file[8];
+
+        memory_zero(junk, sizeof junk);
+        if (kind == 2)
+        {
+                bipolar out = system_open_at_mode(AT_FDCWD, "/root/wls-out",
+                                                  FILE_WRITE | O_CLOEXEC, 0600);
+
+                if (out < 0 || system_write_all((positive)out, "xy", 2) != 2 ||
+                    system_descriptor_install((b32)out, 1) < 0)
+                        return 64;
+        }
+        else if ((kind ? system_call_4(syscall(socketpair), 1, 1, 0,
+                                       (positive)ends)
+                       : system_pipe(ends, 0)) < 0 ||
+                 system_descriptor_install(ends[1], 1) < 0)
+                return 64;
+        //      Filled through a description of its own: 1 stays blocking.
+        if (kind == 1)
+                while (socket_send(1, junk, sizeof junk, MSG_DONTWAIT, 0, 0) > 0)
+                        ;
+        else if (!kind)
+        {
+                bipolar filler = system_open_at(AT_FDCWD, "/proc/self/fd/1",
+                                                O_WRONLY | O_NONBLOCK);
+
+                while (filler >= 0 &&
+                       system_write_once(filler, junk, sizeof junk) > 0)
+                        ;
+        }
+        if (!link_session_open(s))
+                return 65;
+        link_stream_own(s->writes, 1, LINK_KEY_OUTPUT, 0, O_WRONLY);
+        if (kind == 2)
+                return link_stream_take(s, s->writes, frame, 4) &&
+                                       s->writes[0].fd == 1 &&
+                                       host_read_text("/root/wls-out", file,
+                                                      sizeof file) == 5 &&
+                                       !memory_compare(file, "xyabc", 5)
+                               ? 0
+                               : 1;
+        return !link_stream_take(s, s->writes, frame, 4) && s->writes[0].quiet
+                       ? 0
+                       : 1;
+}
+
+static fn client_never_waits(void)
+{
+        b32 code[3] = {255, 255, 255};
+
+        for (positive kind = 0; kind < 3; kind++)
+        {
+                bipolar child = system_fork();
+                positive status = 0;
+
+                if (!child)
+                        exit(wls_output_full(kind));
+                for (positive tick = 0; child > 0 && tick < 100; tick++)
+                {
+                        timespec pause = {0, 20000000};
+
+                        if (system_wait4_retry(child, address_of status, 1,
+                                               null) == child)
+                        {
+                                code[kind] = wait_status_code(status);
+                                break;
+                        }
+                        (void)system_call_2(syscall(nanosleep),
+                                            (positive)address_of pause, 0);
+                }
+                if (code[kind] == 255 && child > 0)
+                {
+                        (void)system_call_2(syscall(kill), (positive)child, 9);
+                        (void)system_wait4_retry(child, address_of status, 0,
+                                                 null);
+                }
+        }
+        check("sec: a full pipe as the client's standard output never holds "
+              "its loop",
+              code[0] == 0);
+        check("sec: nor does a full socket", code[1] == 0);
+        check("and a file is written where it stands, its offset kept",
+              code[2] == 0);
+}
+
+/*
         A machine with no IPv6 (the modern profile builds without it): the
         link's socket falls back to IPv4 and binds there, a datagram to an
         IPv4 peer goes out and comes back as that peer, and one to an IPv6
@@ -66704,6 +66803,7 @@ b32 main(void)
         key_text();
         places();
         ipv4_only();
+        client_never_waits();
         indexes_and_commands();
         return test_report(null);
 }

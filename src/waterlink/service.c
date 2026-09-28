@@ -740,7 +740,8 @@ struct link_stream {
         p8 key;
         p8 flags;
         bool done;
-        bool quiet; // it said "not now", and no wait has heard it since
+        bool quiet;  // it said "not now", and no wait has heard it since
+        bool socket; // asked with MSG_DONTWAIT, since it is not opened again
 };
 
 struct link_session {
@@ -1246,7 +1247,45 @@ static fn link_stream_set(struct link_stream address_to stream, bipolar fd,
         stream->flags = flags;
         stream->done = fd < 0;
         stream->quiet = false;
+        stream->socket = false;
         stream->skip = 0;
+}
+
+/*
+        One of the client's standard descriptors, as a stream no read or
+        write ever waits on: a write that waited on a full pipe or a paused
+        terminal stopped the whole loop with it -- keepalives, acknowledgements
+        and the rekey -- until the far side gave the link up. A pipe or a
+        terminal is opened again through /proc, a description of this
+        process's own that can be nonblocking without changing it for whoever
+        shares it. A socket cannot be opened again and is asked with
+        MSG_DONTWAIT on each call instead. A file never waits, and is kept as
+        it is: opened again it would lose its offset and O_APPEND.
+*/
+static fn link_stream_own(struct link_stream address_to stream, bipolar fd,
+                          p8 key, p8 flags, positive access)
+{
+        p8 path[] = "/proc/self/fd/0";
+        file_facts facts;
+        p32 format;
+
+        link_stream_set(stream, fd, key, flags);
+        if (fd < 0 || fd > 2 ||
+            !file_look(fd, (string_address)"", AT_EMPTY_PATH, address_of facts))
+                return;
+        format = facts.mode & MODE_FORMAT;
+        path[14] = (p8)('0' + fd);
+        if (format == MODE_SOCKET)
+                stream->socket = true;
+        else if (format == MODE_PIPE || format == MODE_CHARACTER)
+        {
+                bipolar own = system_open_at(AT_FDCWD, path,
+                                             access | O_NONBLOCK | O_NOCTTY |
+                                                     O_CLOEXEC);
+
+                if (own >= 0)
+                        stream->fd = own;
+        }
 }
 
 static fn link_stream_close(struct link_session address_to s,
@@ -1702,8 +1741,13 @@ static fn link_stream_read(struct link_session address_to s,
         while (!stream->done && !stream->quiet && link_room(s))
         {
                 positive want = link_room(s) * LINK_CHUNK;
-                bipolar got = system_read_once(stream->fd, link_read_buffer,
-                                               want);
+                bipolar got = stream->socket
+                                      ? socket_receive((b32)stream->fd,
+                                                       link_read_buffer, want,
+                                                       MSG_DONTWAIT, 0, 0)
+                                      : system_read_once(stream->fd,
+                                                         link_read_buffer,
+                                                         want);
 
                 if (got == -EAGAIN || got == -4)
                 {
@@ -1760,9 +1804,17 @@ static bool link_stream_take(struct link_session address_to s,
         {
                 while (stream->fd >= 0 && stream->skip < length - 1)
                 {
-                        bipolar wrote = system_write_once(
-                                stream->fd, payload + 1 + stream->skip,
-                                length - 1 - stream->skip);
+                        p8 address_to from = payload + 1 + stream->skip;
+                        positive left = length - 1 - stream->skip;
+                        bipolar wrote =
+                                stream->socket
+                                        ? socket_send((b32)stream->fd, from,
+                                                      left,
+                                                      MSG_DONTWAIT |
+                                                              MSG_NOSIGNAL,
+                                                      0, 0)
+                                        : system_write_once(stream->fd, from,
+                                                            left);
 
                         if (wrote == -EAGAIN || wrote == -4)
                         {
@@ -2914,24 +2966,16 @@ static b32 link_client_run(string_address name, p8 kind,
                 return host_fail("randomness", -EIO);
         }
 
-        //      Input is read once the machine has said yes to the request,
-        //      and never waited on: standard input is opened again as a
-        //      description of this process's own, which can be nonblocking
-        //      without changing it for whoever shares the terminal or pipe.
-        if (!input)
-        {
-                bipolar own = system_open_at(AT_FDCWD, "/proc/self/fd/0",
-                                             FILE_READ | O_NONBLOCK | O_CLOEXEC);
-
-                input = own >= 0 ? own : 0;
-        }
-        link_stream_set(s->reads, input, LINK_KEY_INPUT,
+        //      Input is read once the machine has said yes to the request.
+        //      Neither it nor what comes back is ever waited on.
+        link_stream_own(s->reads, input, LINK_KEY_INPUT,
                         WATERLINK_FRAME_DURABLE |
                                 (kind == LINK_KIND_SHELL ? WATERLINK_FRAME_URGENT
-                                                         : 0));
+                                                         : 0),
+                        FILE_READ);
         s->reads[0].done = true;
-        link_stream_set(s->writes, 1, LINK_KEY_OUTPUT, 0);
-        link_stream_set(s->writes + 1, 2, LINK_KEY_ERROR, 0);
+        link_stream_own(s->writes, 1, LINK_KEY_OUTPUT, 0, O_WRONLY);
+        link_stream_own(s->writes + 1, 2, LINK_KEY_ERROR, 0, O_WRONLY);
         signals = link_signals_open();
 
         for (;;)
@@ -2990,6 +3034,7 @@ static b32 link_client_run(string_address name, p8 kind,
                                         break;
                                 }
                                 string_copy((string_address)s->whole, words[1]);
+                                link_stream_close(s, s->writes);
                                 link_stream_set(s->writes, part,
                                                 LINK_KEY_OUTPUT, 0);
                         }
