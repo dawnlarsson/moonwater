@@ -48959,11 +48959,15 @@ static bool net_as_emulated(void)
             hop exhaust:     "a DNS CNAME cycle exhausts the answer-section hop budget"
 
         TLS
-          record payload     TLS_RECORD_MAX (16640)
-            exact+one-over:  "a TLS record of exactly TLS_RECORD_MAX is accepted"
-                             / "a TLS record one past TLS_RECORD_MAX is refused"
-          enc plaintext      TLS_RECORD_MAX - 17
-            one-over:        "TLS encrypted plaintext one over TLS_RECORD_MAX-17 is refused"
+          record content     TLS_PLAINTEXT_MAX (16384), plaintext and protected
+            exact+one-over:  "a plaintext TLS record of exactly 2^14 bytes is accepted"
+                             / "a plaintext TLS record one past 2^14 bytes is refused"
+                             "a protected TLS record of exactly 2^14 content bytes is accepted"
+                             / "a protected TLS record over 2^14 content bytes is refused"
+          record payload     TLS_RECORD_MAX (16401: content, type byte, tag)
+            one-over:        "a TLS record one past TLS_RECORD_MAX is refused"
+          enc plaintext      TLS_PLAINTEXT_MAX
+            one-over:        "TLS encrypted plaintext one over 2^14 bytes is refused"
                              (wraparound also: "TLS record sizing rejects arithmetic wraparound")
           handshake hold     TLS_HS_MAX (16384)
             exact+one-over:  "encrypted-flight hs may fill exactly to TLS_HS_MAX"
@@ -53749,9 +53753,30 @@ static fn tls_closure_boundaries(void)
         #undef TLS_BATCH_RECORDS
 }
 
-/* TLS_RECORD_MAX is the inclusive ciphertext payload ceiling on the wire.
-   An unencrypted handshake record is enough to hit the length gate before
-   any AEAD work: exact fill is accepted, one past and empty are refused. */
+/* A record sealed where tls_next_record opens it, under the zero keys of a
+   fresh connection: content bytes of 0xa5 and the application type. */
+static fn tls_seal_in_receive(tls_conn address_to tls, positive content)
+{
+        p8 nonce[12] = {0};
+        p8 address_to header = tls->receive;
+
+        header[0] = TLS_CT_APP;
+        header[1] = 0x03;
+        header[2] = 0x03;
+        network_store_16(header + 3, content + 1 + 16);
+        memory_fill(header + 5, 0xa5, content);
+        header[5 + content] = TLS_CT_APP;
+        crypto_aesgcm_seal(address_of tls->s_gcm, nonce, header, 5, header + 5,
+                           content + 1, header + 5 + content + 1);
+        tls->receive_start = 0;
+        tls->receive_end = 5 + content + 1 + 16;
+        tls->encrypted = true;
+}
+
+/* RFC 8446 5.1 and 5.4: 2^14 bytes of content is the ceiling for a
+   plaintext record and for a protected record's inner plaintext, so
+   TLS_RECORD_MAX, the header's gate, is that plus the type byte and the
+   AES-GCM tag. Exact fills are accepted, one past and empty are refused. */
 static fn tls_record_payload_ceiling(void)
 {
         tls_conn tls = {0};
@@ -53762,20 +53787,49 @@ static fn tls_record_payload_ceiling(void)
         tls.receive[0] = TLS_CT_HANDSHAKE;
         tls.receive[1] = 0x03;
         tls.receive[2] = 0x03;
-        network_store_16(tls.receive + 3, TLS_RECORD_MAX);
-        memory_fill(tls.receive + 5, 0xa5, TLS_RECORD_MAX);
-        tls.receive_end = 5 + TLS_RECORD_MAX;
-        check("a TLS record of exactly TLS_RECORD_MAX is accepted",
+        network_store_16(tls.receive + 3, TLS_PLAINTEXT_MAX);
+        memory_fill(tls.receive + 5, 0xa5, TLS_PLAINTEXT_MAX);
+        tls.receive_end = 5 + TLS_PLAINTEXT_MAX;
+        check("a plaintext TLS record of exactly 2^14 bytes is accepted",
               tls_next_record(address_of tls, address_of type,
                               address_of inner, address_of length, null) ==
                       TLS_OK &&
-                  type == TLS_CT_HANDSHAKE && length == TLS_RECORD_MAX &&
+                  type == TLS_CT_HANDSHAKE && length == TLS_PLAINTEXT_MAX &&
                   inner == tls.receive + 5);
 
         memory_fill(address_of tls, 0, sizeof tls);
         tls.receive[0] = TLS_CT_HANDSHAKE;
         tls.receive[1] = 0x03;
         tls.receive[2] = 0x03;
+        network_store_16(tls.receive + 3, TLS_PLAINTEXT_MAX + 1);
+        memory_fill(tls.receive + 5, 0xa5, TLS_PLAINTEXT_MAX + 1);
+        tls.receive_end = 5 + TLS_PLAINTEXT_MAX + 1;
+        check("a plaintext TLS record one past 2^14 bytes is refused",
+              tls_next_record(address_of tls, address_of type,
+                              address_of inner, address_of length, null) ==
+                  TLS_FAIL);
+
+        memory_fill(address_of tls, 0, sizeof tls);
+        tls_seal_in_receive(address_of tls, TLS_PLAINTEXT_MAX);
+        check("a protected TLS record of exactly 2^14 content bytes is accepted",
+              tls_next_record(address_of tls, address_of type,
+                              address_of inner, address_of length, null) ==
+                      TLS_OK &&
+                  type == TLS_CT_APP && length == TLS_PLAINTEXT_MAX &&
+                  tls.receive_start == 5 + TLS_PLAINTEXT_MAX + 1 + 16);
+
+        memory_fill(address_of tls, 0, sizeof tls);
+        tls_seal_in_receive(address_of tls, TLS_PLAINTEXT_MAX + 1);
+        check("a protected TLS record over 2^14 content bytes is refused",
+              tls_next_record(address_of tls, address_of type,
+                              address_of inner, address_of length, null) ==
+                  TLS_FAIL);
+
+        memory_fill(address_of tls, 0, sizeof tls);
+        tls.receive[0] = TLS_CT_APP;
+        tls.receive[1] = 0x03;
+        tls.receive[2] = 0x03;
+        tls.encrypted = true;
         network_store_16(tls.receive + 3, TLS_RECORD_MAX + 1);
         tls.receive_end = 5;
         type = 0;
@@ -53808,10 +53862,10 @@ static fn tls_sensitive_state_erasure(void)
                       tls_send_enc(address_of connection, TLS_CT_APP,
                                    address_of byte, (positive)-1) == TLS_FAIL);
 
-                check("TLS encrypted plaintext one over TLS_RECORD_MAX-17 is refused",
+                check("TLS encrypted plaintext one over 2^14 bytes is refused",
                       tls_send_enc(address_of connection, TLS_CT_APP,
                                    address_of byte,
-                                   TLS_RECORD_MAX - 16) == TLS_FAIL);
+                                   TLS_PLAINTEXT_MAX + 1) == TLS_FAIL);
 
                 connection.seq_write = TLS_AES_GCM_RECORD_LIMIT;
                 check("TLS write keys stop at their AES-GCM usage limit",

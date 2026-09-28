@@ -38268,7 +38268,11 @@ def tls_seed_connections():
         "conn_inner_over_2_14.bin": (control,) + base + (
             tls_seed_sealed(23, b"o" * 16385), close),
         "conn_record_max.bin": (control,) + base + (
-            tls_seed_sealed(23, b"m" * 16384, 239), close),
+            tls_seed_sealed(23, b"m" * 16384), close),
+        "conn_record_max_padded.bin": (control,) + base + (
+            tls_seed_sealed(23, b"m" * 16384, 1), close),
+        "conn_plaintext_over_2_14.bin": (control, tls_seed_record(
+            22, tls_seed_server_hello() + b"\0" * 16300), flight, close),
         "conn_many_records.bin": (b"\0\x10\0\7",) + base + tuple(
             tls_seed_sealed(23, bytes([n]) * (n * 997 % 16000 + 1)) for n in range(6)) + (close,),
         "conn_read_limit.bin": (b"\4\0\0\5",) + base + (data,) * 5 + (close,),
@@ -39271,7 +39275,7 @@ def harness_tls_hs_fuzz(argv):
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     sec = tls_fuzz_sec
 
-    defines = sec(net, "#define TLS_RECORD_MAX 16640",
+    defines = sec(net, "/* RFC 8446 5.1 and 5.4: a record carries at most 2^14",
                   "/* One trust anchor from anchors.inc")
     connection = sec(net, "typedef struct\n{\n        bipolar handle;\n"
                      "        bool check_cert;", "static fn tls_forget(")

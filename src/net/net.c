@@ -4440,7 +4440,10 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #endif
 #include "wait.c"
 
-#define TLS_RECORD_MAX 16640
+/* RFC 8446 5.1 and 5.4: a record carries at most 2^14 bytes of content, and
+   under AES-128-GCM a protected one adds the inner type byte and the tag. */
+#define TLS_PLAINTEXT_MAX 16384
+#define TLS_RECORD_MAX (TLS_PLAINTEXT_MAX + 1 + 16)
 /* One receive takes as many whole records as the socket has queued and this
    room holds: about fifteen full records. At least two whole records must
    fit, since the unopened tail moves to the front only when a record would
@@ -4686,7 +4689,7 @@ static bipolar tls_send_enc(tls_conn address_to tls, p8 inner_type,
         positive record_length = 0;
         bipolar status = TLS_FAIL;
 
-        if (length > TLS_RECORD_MAX - 17 ||
+        if (length > TLS_PLAINTEXT_MAX ||
             tls->seq_write >= TLS_AES_GCM_RECORD_LIMIT)
                 goto done;
         inner_length = length + 1;
@@ -4903,7 +4906,8 @@ static bipolar tls_next_record(tls_conn address_to tls, p8 address_to type,
 
         if (!tls->encrypted)
         {
-                if (header[0] != TLS_CT_HANDSHAKE)
+                if (header[0] != TLS_CT_HANDSHAKE ||
+                    payload_length > TLS_PLAINTEXT_MAX)
                         return TLS_FAIL;
                 address_to type = TLS_CT_HANDSHAKE;
                 address_to inner = payload;
@@ -7134,10 +7138,8 @@ static bipolar tls_write(tls_conn address_to tls, p8 address_to data,
 {
         while (length)
         {
-                positive take = length;
+                positive take = min(length, (positive)TLS_PLAINTEXT_MAX);
 
-                if (take > 16384)
-                        take = 16384;
                 if (tls_send_enc(tls, TLS_CT_APP, data, take))
                         return TLS_FAIL;
                 data += take;
