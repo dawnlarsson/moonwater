@@ -7606,6 +7606,7 @@ static bipolar file_make_directories_open(
 
         positive at = 0;
         positive held_stop = 0;
+        bool held_made = false;
         at += memory_span_byte(work + at, '/', length - at);
 
         /* A path made only of slashes already names the held root. */
@@ -7680,7 +7681,11 @@ static bipolar file_make_directories_open(
                         }
                         else if (!last && !parents)
                                 next = -ERROR_NO_ENTRY;
-                        else if (parent_owned &&
+                        /* A parent this walk made is held open and
+                           is the caller's own, whatever mode the umask
+                           left it: umask 000 with mkdir -p a/b makes a
+                           writable a and b inside it, as GNU's does. */
+                        else if (parent_owned && !held_made &&
                                  !system_path_parent_cleanup_safe(held))
                                 next = -ERROR_ACCESS;
                         else
@@ -7791,6 +7796,7 @@ static bipolar file_make_directories_open(
                 system_close(held);
                 held = next;
                 held_stop = stop;
+                held_made = made_here;
         }
 
         system_close(held);
