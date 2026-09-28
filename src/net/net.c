@@ -5066,12 +5066,17 @@ static COLD bool tls_printable(const p8 address_to bytes, positive length)
         return true;
 }
 
+/* A presented dNSName against a host already canonical (tls_general_name_
+   match). An absolute name's trailing dot is dropped, as Chrome drops it:
+   "example.com." and "example.com" are one name. */
 static COLD bool tls_host_match(string_address host, p8 address_to name,
                            positive name_length)
 {
         positive host_length = string_length(host);
         string_address star;
 
+        if (name_length && name[name_length - 1] == '.')
+                name_length--;
         if (name_length == host_length &&
             !memory_compare_ascii_case(name, host, host_length))
                 return true;
@@ -5102,16 +5107,117 @@ static COLD bool tls_host_match(string_address host, p8 address_to name,
                                           name_length - 1);
 }
 
+/* An IPv6 literal, bare or bracketed, as 16 bytes (RFC 4291 2.2): up to
+   eight groups of one to four hex digits, one "::" standing for one or more
+   zero groups, and a dotted IPv4 tail for the last two. text is writable
+   and terminated at length; a zone ("%eth0") or anything else is refused. */
+static COLD bool tls_ipv6_literal(p8 address_to text, positive length,
+                                  p8 address_to out)
+{
+        p8 groups[16];
+        positive count = 0;
+        positive gap = positive_max;
+        positive at = 0;
+
+        if (length && text[0] == '[')
+        {
+                if (length < 2 || text[length - 1] != ']')
+                        return false;
+                text[--length] = end;
+                text++;
+                length--;
+        }
+        if (memory_span_without_byte(text, ':', length) == length)
+                return false;
+        if (length >= 2 && text[0] == ':' && text[1] == ':')
+        {
+                gap = 0;
+                at = 2;
+        }
+        while (at < length)
+        {
+                positive rest = length - at;
+                positive digits = 0;
+                p32 group = 0;
+
+                if (count > 14)
+                        return false;
+                if (count <= 12 &&
+                    memory_span_without_byte(text + at, ':', rest) == rest &&
+                    memory_span_without_byte(text + at, '.', rest) < rest)
+                {
+                        bipolar quad = string_to_host((string_address)(text + at));
+
+                        if (quad < 0)
+                                return false;
+                        for (positive k = 0; k < 4; k++)
+                                groups[count++] = (p8)((p32)quad >> (24 - 8 * k));
+                        break;
+                }
+                for (; at < length && digits < 5; at++, digits++)
+                {
+                        p8 c = text[at];
+
+                        if (c >= 'A' && c <= 'F')
+                                c = (p8)(c + 32);
+                        if (c >= '0' && c <= '9')
+                                group = group << 4 | (p32)(c - '0');
+                        else if (c >= 'a' && c <= 'f')
+                                group = group << 4 | (p32)(c - 'a' + 10);
+                        else
+                                break;
+                }
+                if (!digits || digits > 4)
+                        return false;
+                groups[count++] = (p8)(group >> 8);
+                groups[count++] = (p8)group;
+                if (at == length)
+                        break;
+                if (text[at++] != ':' || at == length)
+                        return false;
+                if (text[at] == ':')
+                {
+                        if (gap != positive_max)
+                                return false;
+                        gap = count;
+                        at++;
+                }
+        }
+        if (gap == positive_max ? count != 16 : count > 14)
+                return false;
+        gap = gap < count ? gap : count;
+        memory_fill(out, 0, 16);
+        memory_copy(out, groups, gap);
+        memory_copy(out + 16 - (count - gap), groups + gap, count - gap);
+        return true;
+}
+
+/* The host as RFC 6125 and Chrome compare it: one trailing dot dropped, an
+   IPv4 or IPv6 literal only against an iPAddress of its own length, and
+   anything else only against a dNSName. */
 static COLD bool tls_general_name_match(string_address host, p8 tag,
                                    p8 address_to name, positive name_length)
 {
-        bipolar address = string_to_host(host);
+        p8 canonical[256];
+        p8 address[16];
+        positive length = string_length(host);
+        bipolar quad;
 
-        if (address >= 0)
+        if (length && host[length - 1] == '.')
+                length--;
+        if (!length || length >= sizeof canonical)
+                return false;
+        memory_copy(canonical, host, length);
+        canonical[length] = end;
+        if (tls_ipv6_literal(canonical, length, address))
+                return tag == 0x87 && name_length == 16 &&
+                       !memory_compare(name, address, 16);
+        quad = string_to_host((string_address)canonical);
+        if (quad >= 0)
                 return tag == 0x87 && name_length == 4 &&
-                       network_load_32(name) == (p32)address;
-
-        return tag == 0x82 && tls_host_match(host, name, name_length);
+                       network_load_32(name) == (p32)quad;
+        return tag == 0x82 &&
+               tls_host_match((string_address)canonical, name, name_length);
 }
 
 /* Parse the signed GeneralNames value once, all the way to its declared end.

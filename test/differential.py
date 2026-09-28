@@ -40311,6 +40311,9 @@ def tls_fuzz_seeds(corpus):
         "magic_eku_many.bin": b"\xc2" + eku_many,
         "magic_san_dns.bin": b"\xc3" + san_dns,
         "magic_san_multi.bin": b"\xc3" + san_multi,
+        "magic_san_ipv6.bin": b"\xc3" + tls_seed_tlv(
+            0x30, b"\x82\x10www.example.com.", b"\x87\x10\x20\x01\x0d\xb8" +
+            b"\0" * 8 + b"\xc0\0\x02\x01"),
         "magic_bc_ca.bin": b"\xc4" + tls_seed_tlv(0x30, b"\x01\x01\xff\x02\x01\x00"),
         "magic_ku_ds.bin": b"\xc5\x03\x02\x07\x80",
         "magic_cert_host.bin": b"\xc6" + minimal,
@@ -41279,6 +41282,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         matched = false;
                         (void)tls_parse_san(rest, rest_len,
                                             (string_address)"192.0.2.1",
+                                            address_of matched);
+                        /* An IPv6 literal and an absolute name reach the
+                           canonicalising half of tls_general_name_match. */
+                        matched = false;
+                        (void)tls_parse_san(rest, rest_len,
+                                            (string_address)"[2001:db8::c000:201]",
+                                            address_of matched);
+                        matched = false;
+                        (void)tls_parse_san(rest, rest_len,
+                                            (string_address)"www.example.com.",
                                             address_of matched);
                         break;
                 case 0xc4:

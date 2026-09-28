@@ -54633,7 +54633,16 @@ static fn tls_certificate_identity_rules(void)
                     {"www.example.com.evil", "*.example.com", false},
                     {"example.com", "*.com", false},
                     {"www.example.com", "w*.example.com", false},
-                    {"www.example.com", "*.example.com.", false},
+                    {"www.example.com", "*.example.com.", true},
+                    {"example.com", "example.com.", true},
+                    {"example.com", "example.com..", false},
+                    {"example.com", ".", false},
+                    {"XN--BCHER-KVA.example.com", "xn--bcher-kva.EXAMPLE.com", true},
+                    {"xn--bcher-kva.example.com", "*.xn--EXAMPLE-abc.com", false},
+                    {"a.xn--example-abc.com", "*.xn--EXAMPLE-abc.com", true},
+                    {"www.example.com", "www.*.com", false},
+                    {"www.example.com", "*.*.com", false},
+                    {"www.example.com", "*example.com", false},
                     {"a", "*", false},
                     {"a.", "*.", false},
                     {"example.co", "example.com", false},
@@ -54648,6 +54657,90 @@ static fn tls_certificate_identity_rules(void)
                 check("dNSName matching: case, one-label wildcards, no empty "
                       "label, no public-suffix star",
                       wrong == 0);
+        }
+        {
+                /* An IPv6 literal and the 16 bytes it stands for, or a
+                   refusal. */
+                static const struct
+                {
+                        string_address text;
+                        bool parsed;
+                        p8 address[16];
+                } literals[] = {
+                    {"::1", true, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}},
+                    {"[::1]", true, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}},
+                    {"2001:DB8::1", true, {0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}},
+                    {"2001:db8:0:0:0:0:0:1", true, {0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}},
+                    {"::", true, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+                    {"1::", true, {0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+                    {"::ffff:192.0.2.1", true, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xc0, 0x00, 0x02, 0x01}},
+                    {"1:2:3:4:5:6:7:8", true, {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07, 0x00, 0x08}},
+                    {"1:2:3:4:5:6:192.0.2.1", true, {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0xc0, 0x00, 0x02, 0x01}},
+                    {"1:2:3:4:5:6:7::", true, {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07, 0x00, 0x00}},
+                    {"1:2:3:4:5:6:7:8:9", false, {0}},
+                    {"1::2::3", false, {0}},
+                    {":1", false, {0}},
+                    {"1:", false, {0}},
+                    {"12345::", false, {0}},
+                    {"1:2:3:4:5:6:7:8::", false, {0}},
+                    {"::1%eth0", false, {0}},
+                    {"[::1", false, {0}},
+                    {"::1]", false, {0}},
+                    {"1:::2", false, {0}},
+                    {"::g", false, {0}},
+                    {"1:2:3:4:5:6:7:192.0.2.1", false, {0}},
+                    {"::1.2.3", false, {0}},
+                    {"example.com", false, {0}},
+                    {"192.0.2.1", false, {0}},
+                    {"\x10::1", false, {0}},
+                    {"::\x19", false, {0}},
+                };
+                positive wrong = 0;
+
+                for (positive i = 0; i < array_count(literals); i++)
+                {
+                        p8 text[64];
+                        p8 address[16];
+                        positive length = string_length(literals[i].text);
+                        bool parsed;
+
+                        memory_copy(text, literals[i].text, length + 1);
+                        parsed = tls_ipv6_literal(text, length, address);
+                        wrong += parsed != literals[i].parsed ||
+                                 (parsed && memory_compare(address,
+                                                           literals[i].address,
+                                                           16));
+                }
+                check("IPv6 literals: groups, one ::, IPv4 tails, brackets; "
+                      "zones and malformed spellings refused",
+                      wrong == 0);
+        }
+        {
+                static p8 v6_one[16] = {[15] = 1};
+                static p8 v4_mapped[16] = {[10] = 0xff, [11] = 0xff, [12] = 192,
+                                           [14] = 2, [15] = 1};
+
+                check("an IPv6 host is identified by its 16-byte iPAddress",
+                      tls_general_name_match("::1", 0x87, v6_one, 16) &&
+                          tls_general_name_match("[::1]", 0x87, v6_one, 16) &&
+                          tls_general_name_match("0:0::0:1", 0x87, v6_one, 16));
+                check("an IPv6 host is never a dNSName or an IPv4 iPAddress",
+                      !tls_general_name_match("::1", 0x82, (p8 address_to)"::1", 3) &&
+                          !tls_general_name_match("::ffff:192.0.2.1", 0x87,
+                                                  ip, sizeof ip) &&
+                          tls_general_name_match("::ffff:192.0.2.1", 0x87,
+                                                 v4_mapped, 16));
+                check("an IPv4 host is never a 16-byte iPAddress",
+                      !tls_general_name_match("192.0.2.1", 0x87, v4_mapped, 16));
+                check("a host's trailing dot is dropped before matching",
+                      tls_general_name_match("example.com.", 0x82, dns,
+                                             sizeof dns - 1) &&
+                          tls_general_name_match("192.0.2.1.", 0x87, ip,
+                                                 sizeof ip) &&
+                          !tls_general_name_match("example.com..", 0x82, dns,
+                                                  sizeof dns - 1) &&
+                          !tls_general_name_match(".", 0x82, (p8 address_to)"", 0) &&
+                          !tls_general_name_match("", 0x82, (p8 address_to)"", 0));
         }
         check("an exact dNSName identifies a named host",
               tls_general_name_match("example.com", 0x82, dns,
