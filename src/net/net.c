@@ -4755,21 +4755,13 @@ static bool tls_record_version_valid(p8 address_to header)
    record, so a record arriving in pieces is not moved again per piece. The
    read is tried before any wait, because mid-transfer the socket almost
    always has bytes queued; only an empty socket polls, under the deadline,
-   and nothing blocks past it. A peer keeping the socket full of records
-   that deliver nothing never lets a read wait, so the deadline is asked
-   before every read as well. */
+   and nothing blocks past it. */
 static bool tls_receive(tls_conn address_to tls,
                         const network_deadline address_to deadline)
 {
         positive have = tls->receive_end - tls->receive_start;
         positive room;
-        positive seconds;
-        positive nanoseconds;
         bipolar got;
-
-        if (deadline && !network_deadline_left(deadline, address_of seconds,
-                                               address_of nanoseconds))
-                return false;
 
         if (!have)
         {
@@ -7019,7 +7011,9 @@ static bipolar tls_write(tls_conn address_to tls, p8 address_to data,
    renews: tickets, empty records and partial records all spend one budget.
    hold never receives: when the next record is not yet whole it answers
    TLS_AGAIN, so a writer can gather every record already here while the
-   spans it holds stay put. */
+   spans it holds stay put. A peer keeping the socket full of records that
+   deliver nothing never lets a read wait, so after each such record the
+   budget is asked here as well. */
 static bipolar tls_take(tls_conn address_to tls, positive room,
                         p8 address_to address_to span, positive address_to got,
                         const network_deadline address_to deadline,
@@ -7027,6 +7021,7 @@ static bipolar tls_take(tls_conn address_to tls, positive room,
 {
         network_deadline patience;
         bool waiting = !seconds && !nanoseconds;
+        positive left[2];
         p8 type = 0;
         p8 address_to inner = null;
         positive length = 0;
@@ -7043,13 +7038,16 @@ static bipolar tls_take(tls_conn address_to tls, positive room,
                 return TLS_OK;
         }
 
-        for (;;)
+        for (bool spent = false;; spent = true)
         {
                 if (tls->closed)
                 {
                         address_to got = 0;
                         return tls->post_handshake_used ? TLS_FAIL : TLS_OK;
                 }
+                if (spent && deadline &&
+                    !network_deadline_left(deadline, left, left + 1))
+                        return TLS_FAIL;
                 if (!tls_record_whole(tls))
                 {
                         if (hold)
