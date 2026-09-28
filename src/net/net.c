@@ -1784,11 +1784,15 @@ static COLD bipolar dns_resolve_any(string_address path, string_address name,
         One cipher: TLS_AES_128_GCM_SHA256. Groups: X25519, P-256 and
         P-384, each with a ClientHello key share so Chimera's secp384r1
         servers do not HelloRetryRequest. Certificates walk to one of the
-        Mozilla TLS roots in anchors.inc: a served certificate carrying an
-        anchor's key ends the chain, or the last one served names an anchor
-        as its issuer and verifies under it. Chain signatures may be ECDSA
-        with SHA-256 or SHA-384 on P-256 or P-384, or RSA PKCS#1 v1.5 with
-        SHA-256 or SHA-384.
+        Mozilla TLS roots in anchors.inc along a path built from the served
+        certificates in any order, and at most one issuer fetched from a
+        caIssuers location: a served certificate carrying an anchor's key
+        ends the chain, or the path's last certificate names an anchor as
+        its issuer and verifies under it. Chain signatures may be ECDSA with
+        SHA-256, -384 or -512 on P-256 or P-384, or RSA PKCS#1 v1.5 with
+        SHA-256, -384 or -512 under keys of 2,048 to 8,192 bits. Name
+        constraints bind the path below them, and a wildcard standing on an
+        ICANN public suffix names nothing.
         Signature algorithms advertised are ecdsa_secp256r1_sha256,
         ecdsa_secp384r1_sha384 and rsa_pss_rsae_sha256. close_notify is a
         clean end of the body, not a handshake failure.
@@ -5136,7 +5140,8 @@ static COLD bool tls_suffix_in(const char address_to list, positive size,
 {
         for (positive at = 0; at < size && list[at];)
         {
-                positive entry = memory_span_without_byte(list + at, 0, size - at);
+                positive entry = memory_span_without_byte((address_any)(list + at), 0,
+                                                          size - at);
 
                 if (entry == length && !memory_compare(list + at, key, length))
                         return true;
@@ -5194,7 +5199,8 @@ static COLD bool tls_public_suffix(const p8 address_to name, positive length)
                 const char address_to run = tls_public_suffixes +
                                             tls_public_suffix_runs[middle] + 1;
                 positive run_top = memory_span_without_byte(
-                    run, '.', sizeof tls_public_suffixes - tls_public_suffix_runs[middle] - 1);
+                    (address_any)run, '.',
+                    sizeof tls_public_suffixes - tls_public_suffix_runs[middle] - 1);
                 b32 order = memory_compare(run, key, run_top < top ? run_top : top);
 
                 if (!order && run_top == top)
@@ -5460,8 +5466,8 @@ enum { TLS_OUTSIDE, TLS_UNSURE, TLS_WITHIN };
    base holds every name, "b" holds b and every name under it and ".b" only
    the names under it. In an excluded subtree a wildcard *.s also falls in
    a base x.s, one label above s, since its star can stand for x. */
-static COLD bool tls_dns_within(const p8 address_to name, positive length,
-                                const p8 address_to base, positive base_length,
+static COLD bool tls_dns_within(p8 address_to name, positive length,
+                                p8 address_to base, positive base_length,
                                 bool excluded)
 {
         positive dot = memory_span_without_byte(base, '.', base_length);
@@ -5487,8 +5493,8 @@ static COLD bool tls_dns_within(const p8 address_to name, positive length,
 /* RFC 5280 4.2.1.10 for an rfc822Name: a base holding an '@' names one
    mailbox, its local part exact; ".b" holds every mailbox on a host under
    b, and "b" every mailbox on host b. A name without a mailbox is unsure. */
-static COLD p8 tls_email_within(const p8 address_to name, positive length,
-                                const p8 address_to base, positive base_length)
+static COLD p8 tls_email_within(p8 address_to name, positive length,
+                                p8 address_to base, positive base_length)
 {
         positive host = length;
         positive base_mailbox = memory_span_without_byte(base, '@', base_length);

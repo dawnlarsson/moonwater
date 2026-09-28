@@ -42406,6 +42406,12 @@ def harness_public_suffixes(argv):
 
         python3 test/differential.py --harness public_suffixes
         python3 test/differential.py --harness public_suffixes --list FILE --write
+
+    The list changes most days, and --list takes only the pinned copy: to
+    move to a newer one, fetch https://publicsuffix.org/list/public_suffix_list.dat,
+    set PUBLIC_SUFFIX_LIST_SHA256 and the date in its comment and in the
+    written header to the new copy's, rerun with --write (about 40 s, most
+    of it the reference algorithm), and commit suffixes.inc with the pin.
     """
     parser = argparse.ArgumentParser(prog="differential.py --harness public_suffixes")
     parser.add_argument("--list")
@@ -44608,11 +44614,16 @@ def crypto_vectors_lines(seed):
              message if scheme == "pss" else digest)
 
     for bits, e in ((2048, 65537), (2049, 65537), (2055, 3), (3072, 65537),
-                    (4096, 65537), (8192, 65537), (8200, 65537), (2047, 65537),
-                    (2048, 3)):
+                    (4096, 65537), (8192, 65537), (2047, 65537), (2048, 3)):
         n, (one, two, d) = rsa_key(bits, e)
         k = (bits + 7) // 8
-        policy = 2048 <= bits <= 8192
+        policy = bits >= 2048
+        if bits == 8192:
+            #   Past 8,192 bits policy refuses before any arithmetic, so the
+            #   modulus need not factor: this key's, shifted a byte up.
+            wide = n << 8 | 0xff
+            rsa_add("pkcs256", wide, e, be(12345, k + 1), draw(32), policy=False)
+            rsa_add("pss", wide, e, be(12345, k + 1), message=draw(3), policy=False)
 
         def raw(em):
             m = int.from_bytes(em, "big")

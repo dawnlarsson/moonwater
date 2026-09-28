@@ -58156,7 +58156,8 @@ static fn tls_ca_issuers_rules(void)
         tls_cert cert;
 
         for (positive i = 0; i < array_count(addresses); i++)
-                wrong += http_address_public(network_load_32(addresses[i].address)) !=
+                wrong += http_address_public(network_load_32(
+                             (p8 address_to)addresses[i].address)) !=
                          addresses[i].reachable;
         check("caIssuers reaches public addresses only: not this network, "
               "private, loopback, shared, link-local, IETF, benchmarking, "

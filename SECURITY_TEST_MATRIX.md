@@ -6,6 +6,8 @@
 | Netlink source, sequence, attributes; DNS; HTTP; TLS; DHCP | freestanding network checks | `sh test/run net` |
 | UDP replay and DHCP reacquisition authorization | identity mutation, queued prior transaction, exhaustive state cross-product | `sh test/run net machine` |
 | Certificate path semantics | generated chains against OpenSSL | `python3 test/differential.py --harness tls_chains` |
+| Wildcard public suffixes | the lifted lookup against `src/net/suffixes.inc` over every rule-derived name; regeneration proves the compact test equals the Public Suffix List algorithm | `python3 test/differential.py --harness public_suffixes` (via `sh test/run net`) |
+| Real-server chains | `tls_verify_chain` against `openssl verify` over 643 public hosts, caIssuers fetched for both; needs the network | `python3 test/differential.py --harness x509_corpus --work DIR` (by hand) |
 | TLS 1.3 record layer and state machine with real crypto | a scripted TLS 1.3 server (tickets, KeyUpdate, CCS placements, padding and 2^14 edges, bad tags, alerts, truncation, unasked EncryptedExtensions, CertificateRequest, each key-share group) served to wget and to OpenSSL's client; RFC 8446 column with named deliberate and lenient disagreements | `python3 test/differential.py --harness tls_peer` (via `sh test/run net`) |
 | HTTPS→HTTP redirect downgrade | TLS loopback 302 Location shapes under wget manners (9 checks: plain/`http://` sticky+nested, authority-only; uppercase/`//` stay HTTPS; credentialed/`http:///` refuse without silent fetch; no Refresh/meta path) | `python3 test/differential.py --harness https_downgrade` |
 | HTTP response framing (chunked, TE/CL, headers, trailers) | written MUST_ACCEPT/MUST_REFUSE matrix (54 cases / 136 checks); http.client as second oracle with named deliberate disagreements | `python3 test/differential.py --harness http_response_framing` |
@@ -33,7 +35,7 @@ corpus directory; no seed file lives in the tree.
 
 | Corpus | Seeds | Harness | What it exercises |
 | --- | --- | --- | --- |
-| DER / Certificate list | `tls_der` | `tls_der_fuzz` | `tls_parse_extensions` / `tls_parse_cert` / certificate-list framing; EKU/SAN/BC/KU value lanes; names_chain + leaf/issuer policy; magic prefixes C1–C9 |
+| DER / Certificate list | `tls_der` | `tls_der_fuzz` | `tls_parse_extensions` / `tls_parse_cert` / certificate-list framing; EKU/SAN/BC/KU value lanes; names_chain + leaf/issuer policy; NameConstraints (CC); magic prefixes C1–C9, CC |
 | DER verify + sig | `tls_der` (same) | `tls_verify_fuzz` | `tls_verify_chain` parse/policy/names walker plus production `tls_verify_one` (hosted C montgomery + SHA); WR2→GTS prove in `LLVMFuzzerInitialize`; **not** lane_net smoke (hand / `sh test/run fuzz`) |
 | TLS 1.3 client protocol | `tls_hs` | `tls_hs_fuzz` | the whole record layer and handshake/application state machine (`tls_connect` through `tls_read_until`, crypto and certificate verdict stubbed, AEAD identity) over a fuzzed server stream in PRNG-sized reads (magic F3), with offset, lent-span and stays-closed asserts; framing walks over `tls_handshake_one_append` / `tls_encrypted_flight_append` (F1/F2) |
 | DHCP replies and lease clock | `dhcp` | `dhcp_fuzz` | `dhcp_read` / `dhcp_walk` against an RFC 2131/2132/3396 reference, `dhcp_lease_timers` / `dhcp_lease_acknowledge`, and the watcher's `net_lease_*` clock at fuzzed start and now |
@@ -153,8 +155,10 @@ accept/refuse matrix for every mutation and key type as well as comparing the
 two implementations. Invalid SAN, validity, CA, path-length, key-usage, EKU,
 critical-extension, issuer, and trust-anchor cases must be rejected; valid
 depths, absent optional leaf/issuer constraints, non-critical basic constraints,
-a served root, unknown non-critical extensions, and an inclusive sixty-four
-extension ceiling must be accepted. Duplicate extension OIDs (including
+a served root, unknown non-critical extensions, an inclusive sixty-four
+extension ceiling, names inside an intermediate's name constraints, an
+RSA-8192 leaf and intermediate, and an intermediate fetched from the leaf's
+caIssuers location must be accepted. Duplicate extension OIDs (including
 unknown and non-adjacent duplicates) and a sixty-five extension work ceiling
 are refused even when OpenSSL accepts them; those rows are named deliberate.
 Extension policy is exercised at both leaves and intermediates. Deliberately
