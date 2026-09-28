@@ -3594,7 +3594,7 @@ lane_socket() { freestanding_checks_lane socket socket; }
 #       http_response_framing holds the response parser to a written
 #       accept/refuse matrix (and names deliberate disagreements with
 #       Python's http.client).
-#       tls_der_fuzz / tls_hs_fuzz are bounded libFuzzer ASan/UBSan runs
+#       tls_der_fuzz / tls_hs_fuzz / sntp_fuzz are bounded libFuzzer ASan/UBSan runs
 #       over seeds differential.py writes into each run's temporary
 #       directory. NOT RUN (2) when clang/libFuzzer is absent.
 #       Longer fuzzing is lane_fuzz and MSan is lane_msan, both run only when
@@ -3640,10 +3640,16 @@ lane_net()
         2) note "tls_hs_fuzz: skipped (soft) -- does not downgrade net" ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness sntp_fuzz
+        case $? in
+        0) ;;
+        2) note "sntp_fuzz: skipped (soft) -- does not downgrade net" ;;
+        *) net_outcome=1 ;;
+        esac
         return "$net_outcome"
 }
-#       The TLS fuzz targets for longer than lane_net's smoke: tls_der_fuzz,
-#       tls_hs_fuzz and tls_verify_fuzz, an hour each with no run cap unless
+#       The TLS and SNTP fuzz targets for longer than lane_net's smoke:
+#       tls_der_fuzz, tls_hs_fuzz, tls_verify_fuzz and sntp_fuzz, an hour each with no run cap unless
 #       MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise.
 #       MOONWATER_FUZZ_REPORT=artifacts/fuzz-report.txt makes it the release
 #       attach instead: lane_net's budget unless the knobs are set, and a JSON

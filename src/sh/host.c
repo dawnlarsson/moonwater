@@ -7597,6 +7597,53 @@ static COLD bipolar sntp_reply_ok(p8 address_to reply, p8 address_to request)
         return SNTP_OK;
 }
 
+/*
+        One reply made into a sample, or the reason it is not one: the
+        checks above on the header, then the four stamps. t1 and t4 are the
+        local departure and arrival, t4 as the kernel stamped it.
+*/
+static COLD bipolar sntp_reply_sample(p8 address_to reply,
+                                      p8 address_to request, bipolar t1,
+                                      bipolar t4, bool tight,
+                                      sntp_sample address_to into)
+{
+        bipolar verdict = sntp_reply_ok(reply, request);
+        bipolar t2;
+        bipolar t3;
+        bipolar reference;
+        bipolar offset = 0;
+        bipolar delay = 0;
+
+        if_rare (verdict < 0)
+                return verdict;
+        if_rare (!sntp_local_ok(t4))
+                return SNTP_MALFORMED;
+        t2 = sntp_load_stamp(reply + 32);
+        t3 = sntp_load_stamp(reply + 40);
+        /*
+                The reference stamp is when the server last set its own
+                clock, so it sits at or before the stamp it transmits. A
+                second of slack, because the two are read at different
+                moments and a server whose reference is one tick the wrong
+                side of transmit would otherwise be refused for ever: the
+                sample loop stops on BAD_SERVER, so that server is not asked
+                again.
+        */
+        reference = sntp_load_stamp(reply + 16);
+        if_rare (!sntp_wall_ok(reference) ||
+                 reference > t3 + (bipolar)SNTP_NANOSECONDS)
+                return SNTP_BAD_SERVER;
+        sntp_offset_delay(t1, t2, t3, t4, address_of offset, address_of delay);
+        if_rare (!sntp_sample_sane(t1, t2, t3, t4, offset, delay, tight))
+                return SNTP_MALFORMED;
+        into->offset_ns = offset;
+        into->delay_ns = delay;
+        into->distance_ns = sntp_distance_ns(delay, network_load_32(reply + 4),
+                                             network_load_32(reply + 8));
+        into->ok = true;
+        return SNTP_OK;
+}
+
 static COLD bool sntp_math_ok(void)
 {
         bipolar offset = 0;
@@ -8039,16 +8086,10 @@ static HOT bipolar sntp_exchange(b32 handle,
         p64 spare[2];
         p32 mine;
         bipolar t1;
-        bipolar t2;
-        bipolar t3;
-        bipolar t4;
         bipolar wait;
         bipolar received;
         bipolar verdict;
-        bipolar reference;
         bool stamped;
-        bipolar offset = 0;
-        bipolar delay = 0;
 
         into->ok = false;
         memory_fill(request, 0, sizeof(request));
@@ -8099,42 +8140,12 @@ static HOT bipolar sntp_exchange(b32 handle,
                 }
                 if_rare (received < SNTP_PACKET)
                         continue;
-                verdict = sntp_reply_ok(reply, request);
+                verdict = sntp_reply_sample(reply, request, t1,
+                                            sntp_timespec_ns(got[0], got[1]),
+                                            tight, into);
                 if_rare (verdict == SNTP_NO_REPLY)
                         continue;
-                if_rare (verdict < 0)
-                        return verdict;
-                t4 = sntp_timespec_ns(got[0], got[1]);
-                if_rare (!sntp_local_ok(t4))
-                        return SNTP_MALFORMED;
-                t2 = sntp_load_stamp(reply + 32);
-                t3 = sntp_load_stamp(reply + 40);
-                /*
-                        The reference stamp is when the server last set
-                        its own clock, so it sits at or before the stamp
-                        it transmits. A second of slack, because the two
-                        are read at different moments and a server whose
-                        reference is one tick the wrong side of transmit
-                        would otherwise be refused for ever: the sample
-                        loop stops on BAD_SERVER, so that server is not
-                        asked again.
-                */
-                reference = sntp_load_stamp(reply + 16);
-                if_rare (!sntp_wall_ok(reference) ||
-                         reference > t3 + (bipolar)SNTP_NANOSECONDS)
-                        return SNTP_BAD_SERVER;
-                sntp_offset_delay(t1, t2, t3, t4, address_of offset,
-                                  address_of delay);
-                if_rare (!sntp_sample_sane(t1, t2, t3, t4, offset, delay,
-                                           tight))
-                        return SNTP_MALFORMED;
-                into->offset_ns = offset;
-                into->delay_ns = delay;
-                into->distance_ns = sntp_distance_ns(delay,
-                                                     network_load_32(reply + 4),
-                                                     network_load_32(reply + 8));
-                into->ok = true;
-                return SNTP_OK;
+                return verdict;
         }
 }
 
