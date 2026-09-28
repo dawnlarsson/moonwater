@@ -14538,6 +14538,18 @@ def shell_lang_brace_continuation(rng):
             ("command", "stdin", "file"))
 
 
+#       A lone + among set's options is an option word with no letters: both
+#       references pass over it, so `set -x + -v x y` turns on -v and leaves
+#       x y, and `set +` changes nothing. It was taken as the first operand.
+def shell_lang_set_lone_plus(rng):
+    forms = ("set +", "set + -", "set - +", "set -- +", "set + a b", "set -f + a", "set + + c", "set -u + -f d e",
+             "set +f + g")
+    line = rng.choice(forms)
+    return ("set-lone-plus", shell_ALL + ("sh",), shell_program(
+        "set -- p q", line, 'echo "[$#] $*"; case $- in *f*) echo f-on;; esac; case $- in *u*) echo u-on;; esac',
+        'echo "end=$?"'), ("command", "stdin", "file"))
+
+
 #       What bash does with a builtin handed words it has no place for, and
 #       with a subscript it cannot evaluate: the whole command the reader was
 #       running is dropped -- through eval, a sourced file and a function --
@@ -17375,6 +17387,7 @@ SHELL_FAMILIES = (
     shell_lang_regex_operand,
     shell_lang_loop_control_arguments,
     shell_lang_builtin_discard,
+    shell_lang_set_lone_plus,
     shell_lang_count_operators,
     shell_lang_brace_continuation,
     shell_lang_trap_return,

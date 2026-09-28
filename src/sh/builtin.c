@@ -8278,6 +8278,8 @@ COLD fn shell_set(writer write, string_address input)
         {
                 string_address word = shell_argv[look];
 
+                if (word_is(word, "+"))
+                        continue;
                 if (word_is(word, "--") || word_is(word, "-") ||
                     !(string_is(word, '-') || string_is(word, '+')) ||
                     !string_not(word + 1, end))
@@ -8326,6 +8328,16 @@ COLD fn shell_set(writer write, string_address input)
                         if (index < shell_argc)
                                 operands = true;
                         break;
+                }
+
+                //      A lone + is an option word with no letters in it:
+                //      both references pass over it and read on, so
+                //      `set -x + -v x y` sets -v and leaves x y, and
+                //      `set +` changes nothing.
+                if (word_is(word, "+"))
+                {
+                        index++;
+                        continue;
                 }
 
                 if ((string_is(word, '-') || string_is(word, '+')) &&
