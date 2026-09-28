@@ -2997,7 +2997,11 @@ positive env_names_prefix(string_address prefix, positive length,
         {
                 env_variable address_to variable = shell_vars + at;
 
-                if (!env_variable_has_value(variable) ||
+                //      An array assigned nothing, a=(), is set to bash and
+                //      named; declare -a a alone is not.
+                if (!(env_variable_has_value(variable) ||
+                      ((variable->attributes & SHELL_ARRAY_EITHER) &&
+                       (variable->attributes & SHELL_ARRAY_ASSIGNED))) ||
                     variable->name_length < length ||
                     memory_compare(variable->text, prefix, length))
                         continue;

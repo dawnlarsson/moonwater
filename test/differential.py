@@ -14919,6 +14919,20 @@ def shell_lang_conditional_tight(rng):
         "v=a", line + "; echo \"st=$?\"", 'echo "end=$?"'), ("command", "stdin", "file"))
 
 
+#       Two readings of "set" bash has for arrays: ${!prefix@} names an array
+#       assigned nothing, a=(), where declare -a a alone is not named; and
+#       under set -u ${x@a} of a name with no value is unbound whatever its
+#       attributes. These left the empty array out and wrote the letters.
+def shell_lang_array_set_names(rng):
+    setup = rng.choice(("hello1=1 hello2=2", "hello1=1; hello=()", "hello=(); declare hx", "declare -a hello",
+                        "declare -A hello; hello=()", "hello=(); unset hello", "f() { local -a hello=(); echo ${!hel*}; }; f"))
+    line = rng.choice(('echo "${!hello@}|${!hel*}"', "set -u; declare -i x; echo ${x@a}", "set -u; a=(); echo ${a@a}",
+                       "set -u; a=(1); echo ${a[5]@a}", "set -u; echo ${u@a}", "set -u; x=1; echo ${x@a}",
+                       "set -u; declare -A A; echo ${A[k]@a}", "set -u; echo ${hello@a}"))
+    return ("array-set-names", shell_BASH, shell_program(
+        setup, line, 'echo "st=$?"'), ("command", "stdin", "file"))
+
+
 #       A readonly assignment outside posix mode drops the rest of the line
 #       the reader was on: eval answers 1 and a sourced file goes on at its
 #       next line, where a function's caller still loses its whole line.
@@ -17891,6 +17905,7 @@ SHELL_FAMILIES = (
     shell_lang_local_listing,
     shell_lang_regex_refusals,
     shell_lang_conditional_tight,
+    shell_lang_array_set_names,
     shell_lang_readonly_discard_scope,
     shell_lang_readonly_subshell_status,
     shell_lang_prompt_expansion,

@@ -6937,7 +6937,21 @@ static COLD fn expand_transform(expand_reference reference, string_address word,
                         expand_positional_transform(which, string_get(name),
                                                     quoted);
                 else
+                {
+                        //      Under set -u a name with no value is unbound
+                        //      to bash whatever attributes it carries.
+                        if (shell_options & ((positive)1 << ('u' - 'a')))
+                        {
+                                expand_value_of(reference, scratch,
+                                                address_of present, null);
+                                if (!present)
+                                {
+                                        expand_unbound(reference, false);
+                                        return;
+                                }
+                        }
                         transform_attributes(reference, mark);
+                }
                 return;
         }
 
@@ -7034,8 +7048,9 @@ static fn expand_push_names(string_address prefix, positive prefix_length,
 
         for (positive at = 0; at < count; at++)
         {
-                positive length = (positive)(string_first_of(names[at], '=') -
-                                               names[at]);
+                string_address equals = string_first_of(names[at], '=');
+                positive length = equals ? (positive)(equals - names[at])
+                                         : string_length(names[at]);
                 p8 address_to kept = shell_store_copy(address_of expand_store,
                                                        names[at], length);
 
