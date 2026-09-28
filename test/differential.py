@@ -7999,7 +7999,10 @@ FILES_UTILITIES = (
                    ("-T", "dir/sub", "elsewhere"), ("-T", "a.txt", "b.txt", "dir"), ("-t", "dir/sub", "a.txt"), ("-v", "a.txt", "renamed"),
                    ("-b", "a.txt", "b.txt"), ("--backup=numbered", "a.txt", "b.txt"), ("-u", "a.txt", "b.txt"), ("-u", "b.txt", "a.txt"),
                    ("--exchange", "a.txt", "b.txt"), ("--exchange", "dir", "a.txt"), ("--exchange", "a.txt", "missing"),
-                   ("--strip-trailing-slashes", "dir/", "moved"), ("-W", "a.txt", "renamed"))
+                   ("--strip-trailing-slashes", "dir/", "moved"), ("-W", "a.txt", "renamed"),
+                   ("a.txt", "renamed", "-v"), ("a.txt", "b.txt", "-t", "dir"),
+                   {"argv": ("a.txt", "renamed", "-v"), "env": (("POSIXLY_CORRECT", "1"),)},
+                   ("-i", "a.txt", "unreadable"))
             #   A dangling link is left out: the reference reads the stat
             #   of a name it never looked up and answers either way.
             + tuple(case for case in files_slash_destinations(

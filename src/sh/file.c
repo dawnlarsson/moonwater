@@ -32506,6 +32506,39 @@ static bool file_overwrite_allowed(string_address program, string_address shown,
                 return false;
         }
 
+        /* A destination the caller may not write is asked about by its
+           mode, as GNU's overwrite_ok asks: mv and a cp that will remove
+           it to replace it, one that will try anyway. */
+        if (ask && (there->mode & MODE_FORMAT) != MODE_LINK &&
+            system_call(syscall(geteuid)) != 0 &&
+            system_call_4(syscall(faccessat2), (positive)AT_FDCWD,
+                          (positive)shown, 2, AT_EACCESS) < 0)
+        {
+                p8 letters[12];
+                bool replacing = string_equals(program, (string_address) "mv") ||
+                                 cp_replace || cp_force;
+
+                file_mode_letters(letters, there->mode);
+                letters[10] = end;
+                string_format(log_error,
+                              replacing ? "%s: replace %w, overriding mode "
+                                        : "%s: unwritable %w (mode ",
+                              program, writer_shell_quoted_name, shown);
+                positive_to_base_field(log_error, there->mode & 07777, 8, 4,
+                                       -1, (positive)1 << 28);
+                string_format(log_error,
+                              replacing ? " (%s)? " : ", %s); try anyway? ",
+                              letters + 1);
+                if (!file_answer_is_yes(0))
+                {
+                        if (file_debug)
+                                string_format(log, "skipped %w\n",
+                                              writer_shell_quoted_name, shown);
+                        address_to status = 1;
+                        return false;
+                }
+                return true;
+        }
         if (ask && !file_ask(program, (string_address)"overwrite", shown))
         {
                 if (file_debug)
