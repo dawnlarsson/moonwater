@@ -92,9 +92,10 @@ oracle lanes must be reported as not run rather than silently counted as pass.
 ## Per-parser length/item/recursion ceilings (net)
 
 Length, item-count, and recursion ceilings already enforced in `src/net/net.c`,
-with exact-limit and/or one-over proving checks under `CHECK_net`. There is no
-CPU-work budget for these parsers; DNS decompression bounds jumps structurally
-(ceiling lowers), and DHCP junk discard is an absolute deadline. The full
+with exact-limit and/or one-over proving checks under `CHECK_net`. The one
+CPU-work budget is DNS's CNAME limit (`DNS_CNAME_HOPS`), which caps the
+record-walk passes a hostile reply can buy; DNS decompression bounds jumps
+structurally (ceiling lowers), and DHCP junk discard is an absolute deadline. The full
 mapping (parser → ceiling kind → constant → check name) is the comment ledger
 at the top of the `CHECK_net` section in `test/checks.c`.
 

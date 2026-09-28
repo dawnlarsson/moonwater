@@ -31,7 +31,7 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
   and many qemu images: NOT RUN. CI remains parked — no push auto-job).
 - [x] Record per-parser length, item-count, and recursion ceilings.
   Ledger of those ceilings lives in `test/checks.c` (CHECK_net) and
-  `SECURITY_TEST_MATRIX.md` (no CPU-work budgets); exact-limit and one-over
+  `SECURITY_TEST_MATRIX.md` (one CPU-work budget: DNS_CNAME_HOPS); exact-limit and one-over
   hit tests cover DNS, TLS, HTTP, and DHCP main parsers.
 
 ## Identity and state
