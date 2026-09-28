@@ -39593,6 +39593,616 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     return tls_fuzz_run("tls verify", "tls_der", source, 4096)
 
 
+#       The NIST curves as integers, for the vectors crypto_vectors has to
+#       build by hand: a signature whose point R has x above the order, a
+#       public key solved so a chosen signature verifies, a point off the
+#       curve. cryptography is still the verdict on every one of them.
+CRYPTO_CURVES = {
+    256: dict(
+        size=32,
+        p=0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff,
+        n=0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551,
+        b=0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b,
+        gx=0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296,
+        gy=0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5),
+    384: dict(
+        size=48,
+        p=int("fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe"
+              "ffffffff0000000000000000ffffffff", 16),
+        n=int("ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf"
+              "581a0db248b0a77aecec196accc52973", 16),
+        b=int("b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875a"
+              "c656398d8a2ed19d2a85c8edd3ec2aef", 16),
+        gx=int("aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a38"
+               "5502f25dbf55296c3a545e3872760ab7", 16),
+        gy=int("3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c0"
+               "0a60b1ce1d7e819d7a431d7c90ea0e5f", 16)),
+}
+
+
+def crypto_ec_add(c, one, two):
+    """one + two in affine coordinates, None for infinity, a = -3."""
+    p = c["p"]
+    if one is None:
+        return two
+    if two is None:
+        return one
+    if one[0] == two[0]:
+        if (one[1] + two[1]) % p == 0:
+            return None
+        slope = (3 * one[0] * one[0] - 3) * pow(2 * one[1], -1, p) % p
+    else:
+        slope = (two[1] - one[1]) * pow(two[0] - one[0], -1, p) % p
+    x = (slope * slope - one[0] - two[0]) % p
+    return x, (slope * (one[0] - x) - one[1]) % p
+
+
+def crypto_ec_multiply(c, k, point):
+    result = None
+    for bit in bin(k % c["n"])[2:] if k % c["n"] else "":
+        result = crypto_ec_add(c, result, result)
+        if bit == "1":
+            result = crypto_ec_add(c, result, point)
+    return result
+
+
+def crypto_ec_lift(c, x):
+    """A point with this x, or None when x^3 - 3x + b is not a square
+    (both primes are 3 mod 4, so the root is one power)."""
+    p = c["p"]
+    right = (x * x * x - 3 * x + c["b"]) % p
+    y = pow(right, (p + 1) // 4, p)
+    return (x, y) if y * y % p == right else None
+
+
+def crypto_vectors_lines(seed):
+    """Every vector crypto_vectors prints, as (kind, expect, fields) with
+    expect 1 for accept and 0 for refuse and fields bytes; the kinds are
+    CHECK_crypto_vectors' switch."""
+    from cryptography.exceptions import InvalidSignature, InvalidTag
+    import hmac as hmac_module
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa, utils
+    from cryptography.hazmat.primitives.asymmetric.x25519 import (
+        X25519PrivateKey, X25519PublicKey)
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    rng = random.Random(seed)
+    out = []
+
+    def draw(size):
+        return bytes(rng.getrandbits(8) for _ in range(size))
+
+    def emit(kind, expect, *fields):
+        out.append((kind, int(bool(expect)), fields))
+
+    def be(value, size):
+        return value.to_bytes(size, "big")
+
+    def minimal(value):
+        return value.to_bytes(max(1, (value.bit_length() + 7) // 8), "big")
+
+    # ---- hashes, HMAC, HKDF, PBKDF2 ----------------------------------
+    #   Lengths either side of every padding boundary: 55/56 bytes is where
+    #   SHA-256's length field stops fitting, 111/112 SHA-384's.
+    for length in (0, 1, 3, 55, 56, 57, 63, 64, 65, 111, 112, 113, 127, 128,
+                   129, 191, 192, 1000, 4096 + 7):
+        data = draw(length)
+        emit("sha256", 1, data, hashlib.sha256(data).digest())
+        emit("sha384", 1, data, hashlib.sha384(data).digest())
+    #   A key up to the 64-byte block is padded, a longer one is hashed first.
+    for key_length in (0, 1, 31, 32, 63, 64, 65, 100, 131, 200):
+        key = draw(key_length)
+        message = draw(rng.choice((0, 1, 55, 64, 200)))
+        emit("hmac256", 1, key, message,
+             hmac_module.new(key, message, hashlib.sha256).digest())
+    #   RFC 5869's length ceiling is 255 blocks; every length to the second
+    #   block boundary and a few past it, then the ceiling itself.
+    for length in list(range(1, 66)) + [96, 97, 1000, 255 * 32]:
+        ikm = draw(rng.choice((0, 22, 32, 80)))
+        salt = draw(rng.choice((0, 13, 32, 64, 80)))
+        info = draw(rng.choice((0, 10, 50, 255)))
+        okm = HKDF(algorithm=hashes.SHA256(), length=length,
+                   salt=salt or None, info=info).derive(ikm)
+        emit("hkdf", 1, salt, ikm, info, be(length, 2), okm)
+    for algorithm, name, size in (("sha1", 1, 20), ("sha256", 3, 32)):
+        for rounds, length in ((1, size), (2, size), (3, size + 1),
+                               (7, 2 * size + 5), (4096, 32), (1, 1)):
+            password = draw(rng.choice((0, 8, 63, 64, 65)))
+            salt = draw(rng.choice((0, 4, 36)))
+            emit("pbkdf2", 1, bytes((name,)), password, salt, be(rounds, 4),
+                 hashlib.pbkdf2_hmac(algorithm, password, salt, rounds, length))
+
+    # ---- AES-128-GCM --------------------------------------------------
+    #   Text and AAD either side of every turn the bodies take -- the
+    #   integer floor's single blocks, the xmm body's 8, the zmm body's 48,
+    #   and a TLS record's 16 KiB -- then the tag's every byte flipped.
+    lengths = sorted({0, 1, 15, 16, 17, 31, 33} |
+                     {16 * k + d for k in (4, 8, 48, 96) for d in (-15, -1, 0, 1, 15)} |
+                     {16384, 16384 + 17})
+    for length in lengths:
+        key = draw(16)
+        iv = draw(12)
+        aad = draw(rng.choice((0, 1, 5, 13, 16, 17, 64, 200)))
+        plain = draw(length)
+        sealed = AESGCM(key).encrypt(iv, plain, aad)
+        emit("gcm", 1, key, iv, aad, plain, sealed[:-16], sealed[-16:])
+    key, iv, aad, plain = draw(16), draw(12), draw(13), draw(40)
+    sealed = AESGCM(key).encrypt(iv, plain, aad)
+    for at in range(16):
+        tag = bytearray(sealed[-16:])
+        tag[at] ^= 1 << rng.randrange(8)
+        emit("gcm", 0, key, iv, aad, plain, sealed[:-16], bytes(tag))
+    for at in (0, 39):
+        text = bytearray(sealed[:-16])
+        text[at] ^= 0x80
+        emit("gcm", 0, key, iv, aad, plain, bytes(text), sealed[-16:])
+    emit("gcm", 0, key, iv, aad[:-1], plain, sealed[:-16], sealed[-16:])
+    #   The tag the empty text makes, over an AAD alone (GMAC).
+    sealed = AESGCM(key).encrypt(iv, b"", aad)
+    emit("gcm", 1, key, iv, aad, b"", b"", sealed)
+
+    # ---- X25519 -------------------------------------------------------
+    p25519 = 2 ** 255 - 19
+    #   RFC 7748 and Wycheproof's low-order and edge u: each of them makes
+    #   the all-zero secret, which the exchange must refuse.
+    low_order = [0, 1, p25519 - 1, p25519, p25519 + 1,
+                 325606250916557431795983626356110631294008115727848805560023387167927233504,
+                 39382357235489614581723060781553021112529911719440698176882885853963445705823,
+                 2 ** 255 - 1, 2 ** 255 - 20]
+    #   Non-canonical and high-bit u: reduced mod p, bit 255 ignored.
+    odd_u = [p25519 + 9, 2 ** 255 - 2, 2 ** 255 + 9, 2 ** 256 - 1, 9 + 2 ** 255]
+    for index in range(60):
+        scalar = draw(32)
+        if index < len(low_order):
+            u = (low_order[index] % 2 ** 256).to_bytes(32, "little")
+        elif index < len(low_order) + len(odd_u):
+            u = odd_u[index - len(low_order)].to_bytes(32, "little")
+        else:
+            u = X25519PrivateKey.from_private_bytes(draw(32)).public_key().public_bytes_raw()
+        try:
+            shared = X25519PrivateKey.from_private_bytes(scalar).exchange(
+                X25519PublicKey.from_public_bytes(u))
+            emit("x25519", 1, scalar, u, shared)
+        except ValueError:
+            emit("x25519", 0, scalar, u, bytes(32))
+    for index in range(8):
+        scalar = draw(32) if index > 1 else bytes(32) if index else b"\xff" * 32
+        emit("x25519", 1, scalar, (9).to_bytes(32, "little"),
+             X25519PrivateKey.from_private_bytes(scalar).public_key().public_bytes_raw())
+
+    # ---- ECDH on P-256 and P-384 ------------------------------------
+    for bits, curve in ((256, ec.SECP256R1()), (384, ec.SECP384R1())):
+        c = CRYPTO_CURVES[bits]
+        size, n, p = c["size"], c["n"], c["p"]
+        g = (c["gx"], c["gy"])
+        share, secret = "share%d" % bits, "ecdh%d" % bits
+
+        def encode(point):
+            return b"\x04" + be(point[0], size) + be(point[1], size)
+
+        #   Key shares over the whole scalar range, the ends included.
+        for k in [1, 2, 3, 15, 16, 17, n - 1, n - 2, n // 2, 2 ** (bits - 1)] + \
+                 [rng.randrange(1, n) for _ in range(8)]:
+            public = ec.derive_private_key(k, curve).public_key().public_bytes(
+                Encoding.X962, PublicFormat.UncompressedPoint)
+            emit(share, 1, be(k, size), public)
+        #   Scalars our shares refuse: zero and the order and above.
+        for k in (0, n, n + 1, 2 ** bits - 1):
+            emit(share, 0, be(k, size), bytes(2 * size + 1))
+
+        def exchange(k, peer):
+            try:
+                other = ec.EllipticCurvePublicKey.from_encoded_point(curve, peer)
+                return ec.derive_private_key(k, curve).exchange(ec.ECDH(), other)
+            except ValueError:
+                return None
+
+        peers = []
+        for _ in range(6):
+            peers.append(encode(crypto_ec_multiply(c, rng.randrange(1, n), g)))
+        peers.append(encode(g))
+        peers.append(encode((g[0], p - g[1])))
+        for peer in peers:
+            k = rng.randrange(1, n)
+            emit(secret, 1, be(k, size), peer, exchange(k, peer))
+            #   The ends of the private range against a real peer.
+        for k in (1, n - 1):
+            emit(secret, 1, be(k, size), peers[0], exchange(k, peers[0]))
+        for k in (0, n):
+            emit(secret, 0, be(k, size), peers[0], bytes(size))
+        #   Off the curve, a coordinate at or above p, the wrong prefix, the
+        #   compressed form (TLS 1.3 sends only the uncompressed one, so
+        #   refusing it is policy), and the encoding of nothing.
+        good = crypto_ec_multiply(c, rng.randrange(1, n), g)
+        bad = [b"\x04" + be(good[0], size) + be((good[1] + 1) % p, size),
+               b"\x04" + be(good[0] + p if good[0] + p < 2 ** bits else p, size) +
+               be(good[1], size),
+               b"\x04" + be(good[0], size) + be(good[1] + p if good[1] + p < 2 ** bits else p,
+                                              size),
+               b"\x04" + bytes(2 * size),
+               b"\x05" + encode(good)[1:],
+               b"\x00" + bytes(2 * size),
+               b"\x04" + be(p, size) + be(0, size)]
+        for x in range(0, 40):
+            lifted = crypto_ec_lift(c, x)
+            if lifted is None:
+                bad.append(b"\x04" + be(x, size) + be(rng.randrange(p), size))
+                break
+        for peer in bad:
+            k = rng.randrange(1, n)
+            if exchange(k, peer) is not None:
+                raise RuntimeError("crypto_vectors: OpenSSL took the bad peer %s" % peer.hex())
+            emit(secret, 0, be(k, size), peer, bytes(size))
+        compressed = bytes((2 + (good[1] & 1),)) + be(good[0], size)
+        k = rng.randrange(1, n)
+        if exchange(k, compressed) is None:
+            raise RuntimeError("crypto_vectors: OpenSSL refused a compressed peer")
+        emit(secret, 0, be(k, size), compressed + bytes(size), bytes(size))
+
+    # ---- ECDSA on P-256 and P-384 ------------------------------------
+    for bits, curve in ((256, ec.SECP256R1()), (384, ec.SECP384R1())):
+        c = CRYPTO_CURVES[bits]
+        size, n, p = c["size"], c["n"], c["p"]
+        g = (c["gx"], c["gy"])
+        kind = "ecdsa%d" % bits
+
+        def as_integer(digest):
+            return int.from_bytes(digest[:size], "big")
+
+        def verdict(digest, r, s, q):
+            try:
+                key = ec.EllipticCurvePublicNumbers(q[0], q[1], curve).public_key()
+            except ValueError:
+                return False
+            algorithm = hashes.SHA256() if len(digest) == 32 else hashes.SHA384()
+            try:
+                key.verify(utils.encode_dss_signature(r, s), digest,
+                           ec.ECDSA(utils.Prehashed(algorithm)))
+                return True
+            except InvalidSignature:
+                return False
+
+        def add(digest, r, s, q, r_bytes=None, s_bytes=None, expect=None,
+                policy=True):
+            want = policy and 0 <= r < 2 ** bits and 0 <= s < 2 ** bits and \
+                verdict(digest, r, s, q)
+            if expect is not None and want != expect:
+                raise RuntimeError("crypto_vectors: %s vector is %s to OpenSSL" %
+                                   (kind, want))
+            emit(kind, want, digest, r_bytes if r_bytes is not None else minimal(r),
+                 s_bytes if s_bytes is not None else minimal(s),
+                 be(q[0], size), be(q[1], size))
+
+        def sign(d, digest, k=None):
+            while True:
+                k = k or rng.randrange(1, n)
+                point = crypto_ec_multiply(c, k, g)
+                r = point[0] % n
+                s = pow(k, -1, n) * (as_integer(digest) + r * d) % n
+                if r and s:
+                    return r, s
+                k = None
+
+        #   Honest signatures over both hashes on both curves, each with its
+        #   high-S twin (ECDSA itself accepts both), a flipped hash bit and a
+        #   flipped key.
+        for index in range(12):
+            d = rng.randrange(1, n)
+            q = crypto_ec_multiply(c, d, g)
+            digest = draw(32 if index % 2 else 48)
+            r, s = sign(d, digest)
+            add(digest, r, s, q, expect=True)
+            add(digest, r, n - s, q, expect=True)
+            add(bytes([digest[0] ^ 1]) + digest[1:], r, s, q, expect=False)
+            add(digest, r, s, crypto_ec_multiply(c, d + 1, g), expect=False)
+            if index == 0:
+                #   r and s at and past the order, zero, and one; padded and
+                #   overlong encodings.
+                for bad_r, bad_s in ((0, s), (r, 0), (n, s), (r, n), (r + n, s),
+                                     (r, s + n), (1, s), (r, 1), (n - 1, s)):
+                    add(digest, bad_r, bad_s, q)
+                #   The API takes r and s as the DER reader leaves them, a
+                #   leading zero already gone: a longer field is refused.
+                add(digest, r, s, q, r_bytes=b"\x00" + be(r, size), policy=False)
+                add(digest, r, s, q, r_bytes=be(r, size), s_bytes=be(s, size),
+                    expect=True)
+                #   The key off the curve, at a coordinate of p, at (0, 0).
+                add(digest, r, s, (q[0], (q[1] + 1) % p))
+                add(digest, r, s, (q[0], q[1] + p) if q[1] + p < 2 ** bits else (q[0], p))
+                add(digest, r, s, (0, 0))
+        #   A digest that is all ones, and one of zeros: e reduced by n.
+        for fill in (b"\xff", b"\x00"):
+            d = rng.randrange(1, n)
+            q = crypto_ec_multiply(c, d, g)
+            for length in (32, 48):
+                digest = fill * length
+                r, s = sign(d, digest)
+                add(digest, r, s, q, expect=True)
+        #   Constructed keys: pick R, r, s and e, and solve for the Q that
+        #   makes the signature verify, Q = (s R - e G) / r. First an R whose
+        #   x is at or above n, so r = x - n; the verifier must reduce R.x.
+        found = 0
+        for offset in range(1, 4000):
+            x = n + offset
+            if x >= p:
+                break
+            point = crypto_ec_lift(c, x)
+            if point is None:
+                continue
+            r = x - n
+            for s in (rng.randrange(1, n), 1):
+                digest = draw(size)
+                e = as_integer(digest)
+                q = crypto_ec_add(c, crypto_ec_multiply(c, s, point),
+                                  crypto_ec_multiply(c, n - e % n, g))
+                q = crypto_ec_multiply(c, pow(r, -1, n), q)
+                add(digest, r, s, q, expect=True)
+                #   The same R.x without its reduction must not pass.
+                add(digest, x, s, q, expect=False) if x < 2 ** bits else None
+            found += 1
+            if found == 3:
+                break
+        #   Small r and s, so their encodings are short: R with a tiny x.
+        for x in range(1, 200):
+            point = crypto_ec_lift(c, x)
+            if point is None:
+                continue
+            for s in (1, 2, rng.randrange(1, 256), rng.randrange(1, n)):
+                digest = draw(size)
+                e = as_integer(digest)
+                q = crypto_ec_add(c, crypto_ec_multiply(c, s, point),
+                                  crypto_ec_multiply(c, n - e % n, g))
+                q = crypto_ec_multiply(c, pow(x, -1, n), q)
+                add(digest, x, s, q, expect=True)
+            break
+        #   u1 G = -u2 Q: the sum is infinity and must be refused. u1 G = u2 Q:
+        #   the sum is a doubling.
+        for _ in range(3):
+            digest = draw(size)
+            e = as_integer(digest) % n or 1
+            r = rng.randrange(1, n)
+            s = rng.randrange(1, n)
+            q = crypto_ec_multiply(c, (n - e) * pow(r, -1, n) % n, g)
+            add(digest, r, s, q, expect=False)
+            u1 = e * pow(s, -1, n) % n
+            point = crypto_ec_multiply(c, 2 * u1, g)
+            r = point[0] % n
+            q = crypto_ec_multiply(c, e * pow(r, -1, n) % n, g)
+            add(digest, r, s, q, expect=True)
+
+    # ---- RSA ----------------------------------------------------------
+    #   RSA keys are OpenSSL's, fresh each run: Python's own arithmetic took
+    #   seconds a 4096-bit key. Everything signed with them is seeded.
+    #   OpenSSL makes even sizes only, so an odd one -- 2049 bits is the
+    #   modulus whose PSS encoding is a byte shorter than it -- takes one
+    #   prime from a key a bit longer and one from a key a bit shorter. Its
+    #   primes are above sqrt(2) times their power of two, so the product
+    #   has exactly the bits asked for.
+    def rsa_key(bits, e):
+        def primes(size):
+            numbers = rsa.generate_private_key(public_exponent=e,
+                                               key_size=size).private_numbers()
+            return numbers.p, numbers.q
+
+        one, two = primes(bits) if bits % 2 == 0 else (primes(bits + 1)[0],
+                                                        primes(bits - 1)[0])
+        n = one * two
+        if n.bit_length() != bits:
+            raise RuntimeError("crypto_vectors: a %d-bit key came out %d" %
+                               (bits, n.bit_length()))
+        return n, (one, two, pow(e, -1, (one - 1) * (two - 1)))
+
+    def emsa_pkcs1(prefix, digest, k, ps=None):
+        info = prefix + digest
+        ps = ps if ps is not None else b"\xff" * (k - 3 - len(info))
+        return b"\x00\x01" + ps + b"\x00" + info
+
+    def mgf1(seed, length):
+        mask = b""
+        for counter in range((length + 31) // 32):
+            mask += hashlib.sha256(seed + counter.to_bytes(4, "big")).digest()
+        return mask[:length]
+
+    def emsa_pss(message, em_bits, salt, trailer=0xbc, top=True):
+        em_length = (em_bits + 7) // 8
+        mhash = hashlib.sha256(message).digest()
+        h = hashlib.sha256(b"\x00" * 8 + mhash + salt).digest()
+        db = b"\x00" * (em_length - len(salt) - 32 - 2) + b"\x01" + salt
+        masked = bytearray(x ^ y for x, y in zip(db, mgf1(h, len(db))))
+        if top:
+            masked[0] &= 0xff >> (8 * em_length - em_bits)
+        return bytes(masked) + h + bytes((trailer,))
+
+    sha256_info = bytes.fromhex("3031300d060960864801650304020105000420")
+    sha384_info = bytes.fromhex("3041300d060960864801650304020205000430")
+    sha256_bare = bytes.fromhex("302f300b0609608648016503040201" "0420")
+
+    def rsa_verdict(n, e, signature, digest, scheme, message=None):
+        try:
+            key = rsa.RSAPublicNumbers(e, n).public_key()
+        except ValueError:
+            return False
+        try:
+            if scheme == "pss":
+                key.verify(signature, message,
+                           padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32),
+                           hashes.SHA256())
+            else:
+                algorithm = hashes.SHA256() if scheme == "pkcs256" else hashes.SHA384()
+                key.verify(signature, digest, padding.PKCS1v15(), utils.Prehashed(algorithm))
+            return True
+        except (InvalidSignature, ValueError):
+            return False
+
+    def rsa_add(scheme, n, e, signature, digest=b"", message=b"", expect=None,
+                policy=True):
+        k = (n.bit_length() + 7) // 8
+        want = policy and rsa_verdict(n, e, signature, digest, scheme, message)
+        if expect is not None and want != expect:
+            raise RuntimeError("crypto_vectors: %s vector is %s to OpenSSL" % (scheme, want))
+        emit(scheme, want, be(n, k), be(e, 8), signature,
+             message if scheme == "pss" else digest)
+
+    for bits, e in ((2048, 65537), (2049, 65537), (2055, 3), (3072, 65537),
+                    (4096, 65537), (2047, 65537), (2048, 3)):
+        n, (one, two, d) = rsa_key(bits, e)
+        k = (bits + 7) // 8
+        policy = bits >= 2048
+
+        def raw(em):
+            m = int.from_bytes(em, "big")
+            first = pow(m, d % (one - 1), one)
+            second = pow(m, d % (two - 1), two)
+            return be(second + two * ((first - second) * pow(two, -1, one) % one), k)
+
+        for scheme, info, length in (("pkcs256", sha256_info, 32), ("pkcs384", sha384_info, 48)):
+            digest = draw(length)
+            good = raw(emsa_pkcs1(info, digest, k))
+            rsa_add(scheme, n, e, good, digest, expect=policy, policy=policy)
+            if not policy:
+                continue
+            rsa_add(scheme, n, e, good, bytes([digest[0] ^ 1]) + digest[1:], expect=False)
+            flipped = bytearray(good)
+            flipped[-1] ^= 1
+            rsa_add(scheme, n, e, bytes(flipped), digest, expect=False)
+            #   The other hash's DigestInfo, a padding byte that is not FF, a
+            #   block type of 2, trailing bytes after the digest, and
+            #   SHA-256's DigestInfo without its NULL parameters.
+            other, other_length = (sha384_info, 48) if scheme == "pkcs256" else (sha256_info, 32)
+            rsa_add(scheme, n, e, raw(emsa_pkcs1(other, draw(other_length), k)),
+                    digest, expect=False)
+            em = bytearray(emsa_pkcs1(info, digest, k))
+            em[5] = 0xfe
+            rsa_add(scheme, n, e, raw(bytes(em)), digest, expect=False)
+            em = bytearray(emsa_pkcs1(info, digest, k))
+            em[1] = 2
+            rsa_add(scheme, n, e, raw(bytes(em)), digest, expect=False)
+            em = emsa_pkcs1(info, digest + b"\x00", k)
+            rsa_add(scheme, n, e, raw(em), digest, expect=False)
+            if scheme == "pkcs256":
+                rsa_add(scheme, n, e, raw(emsa_pkcs1(sha256_bare, digest, k)), digest)
+                #   Seven FF bytes of padding, and the rest a longer
+                #   DigestInfo, and no padding at all.
+                em = b"\x00\x01" + b"\xff" * 7 + b"\x00" + b"\x00" * (k - 10 - len(info) - 32) + \
+                    info + digest
+                rsa_add(scheme, n, e, raw(em), digest, expect=False)
+            #   s = 0, 1, n - 1, n, and a signature a byte short.
+            for value in (0, 1, n - 1):
+                rsa_add(scheme, n, e, be(value, k), digest, expect=False)
+            rsa_add(scheme, n, e, be(n, k), digest, expect=False)
+            rsa_add(scheme, n, e, good[1:] if good[0] == 0 else good[:-1], digest,
+                    expect=False)
+            if e == 3:
+                #   Bleichenbacher's e = 3 forgery: 00 01 FF 00, the
+                #   DigestInfo and digest, then garbage chosen so the whole
+                #   is a cube. Only a verifier that stops reading at the
+                #   digest takes it.
+                prefix = b"\x00\x01\xff\x00" + info + digest
+                target = int.from_bytes(prefix + b"\xff" * (k - len(prefix)), "big")
+                lo, hi = 0, 1 << (bits // 3 + 2)
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    if mid ** 3 < target:
+                        lo = mid + 1
+                    else:
+                        hi = mid
+                root = lo - 1
+                del lo, hi
+                rsa_add(scheme, n, e, be(root, k), digest, expect=False)
+
+        em_bits = bits - 1
+        message = draw(rng.choice((0, 3, 64, 300)))
+        salt = draw(32)
+        good = raw(emsa_pss(message, em_bits, salt))
+        rsa_add("pss", n, e, good, message=message, expect=policy, policy=policy)
+        if not policy:
+            continue
+        rsa_add("pss", n, e, good, message=message + b"x", expect=False)
+        rsa_add("pss", n, e, raw(emsa_pss(message, em_bits, salt, trailer=0xbd)),
+                message=message, expect=False)
+        if em_bits % 8:
+            rsa_add("pss", n, e, raw(emsa_pss(message, em_bits, salt, top=False)),
+                    message=message)
+        for salt_length in (0, 20, 31, 33, 64):
+            rsa_add("pss", n, e, raw(emsa_pss(message, em_bits, draw(salt_length))),
+                    message=message, expect=False)
+        for value in (0, 1, n - 1):
+            rsa_add("pss", n, e, be(value, k), message=message, expect=False)
+        rsa_add("pss", n, e, be(n, k), message=message, expect=False)
+        flipped = bytearray(good)
+        flipped[k // 2] ^= 4
+        rsa_add("pss", n, e, bytes(flipped), message=message, expect=False)
+    #   A modulus that is even, and an exponent that is even or one: refused
+    #   before any arithmetic, by policy where OpenSSL has none.
+    n, _ = rsa_key(2048, 65537)
+    digest = draw(32)
+    for bad_n, bad_e in ((n + 1, 65537), (n, 65536), (n, 1), (n, 2)):
+        rsa_add("pkcs256", bad_n, bad_e, be(12345, 256), digest, policy=False)
+    return out
+
+
+def harness_crypto_vectors(argv):
+    """Wycheproof-style vectors for the crypto in src/net/net.c, answered by
+    Python's cryptography (OpenSSL) and printed for CHECK_crypto_vectors.
+
+    lane_net feeds this program's output to test/checks.c's
+    CHECK_crypto_vectors on x86_64, arm64 and riscv64, which runs every
+    vector through the production crypto_* routines over lib.c's assembly
+    -- each hardware body in turn where the machine has more than one --
+    and counts every verdict or output that differs. Nothing is read from
+    a vector file: the categories are generated here from a fixed seed.
+
+    - SHA-256/384, HMAC-SHA256, HKDF-SHA256 (every length to 66 and the
+      255-block ceiling), PBKDF2 over SHA-1 and SHA-256
+    - AES-128-GCM across every turn size and tail, the tag's every byte
+      flipped, the text and AAD tampered, GMAC over an empty text
+    - X25519 on RFC 7748's low-order and non-canonical u, which must
+      refuse the all-zero secret, and random pairs
+    - P-256/P-384 key shares over the scalar range's ends and refusals,
+      ECDH against peers off the curve, at p, compressed or malformed
+    - ECDSA P-256/P-384: honest and high-S signatures over SHA-256 and
+      SHA-384 digests, r and s at 0, n and past, padded encodings, keys off
+      the curve, and constructed keys whose R has x above n, whose r and s
+      are short, whose u1 G + u2 Q is infinity or a doubling
+    - RSA PKCS#1 v1.5 (SHA-256/384) and PSS-SHA256 at 2048, 2049, 2055,
+      3072 and 4096 bits: malformed padding, the wrong DigestInfo, a
+      missing NULL, trailing bytes, short padding, s at 0/1/n-1/n, e = 3's
+      cube-root forgery, PSS trailers, top bits and salt lengths; moduli
+      under 2048 bits, even moduli and exponents refused by policy
+
+    Verdicts are OpenSSL's, except where this client is stricter on
+    purpose (RSA under 2048 bits, an even or unit exponent, a compressed
+    ECDH share, a signature not exactly the modulus' length); the
+    generator raises if OpenSSL disagrees with a verdict a vector was built
+    to have. Returns 2 when cryptography is missing.
+
+        python3 test/differential.py --harness crypto_vectors [--seed N]
+    """
+    seed = 20260928
+    if argv[:1] == ["--seed"] and len(argv) > 1:
+        seed = int(argv[1])
+    try:
+        import cryptography  # noqa: F401
+    except ImportError:
+        print("crypto vectors: NOT RUN -- python3 cryptography is missing", file=sys.stderr)
+        return 2
+    lines = crypto_vectors_lines(seed)
+    kinds = collections.Counter(kind for kind, _, _ in lines)
+    accepts = collections.Counter(kind for kind, expect, _ in lines if expect)
+    for kind in kinds:
+        if not accepts[kind]:
+            raise RuntimeError("crypto_vectors: no accepting %s vector" % kind)
+    for index, (kind, expect, fields) in enumerate(lines):
+        sys.stdout.write("%s %d %d %s\n" % (kind, index, expect, " ".join(
+            field.hex() or "-" for field in fields)))
+    print("crypto vectors: %d (%s)" % (len(lines), ", ".join(
+        "%s %d" % item for item in sorted(kinds.items()))), file=sys.stderr)
+    return 0
+
+
 def harness_tls_fuzz(argv):
     """tls_der_fuzz, tls_hs_fuzz and tls_verify_fuzz in turn: `sh test/run fuzz`.
 
@@ -45362,6 +45972,7 @@ HARNESS_CHECKS = {
     "tls_der_fuzz": harness_tls_der_fuzz,
     "tls_hs_fuzz": harness_tls_hs_fuzz,
     "tls_verify_fuzz": harness_tls_verify_fuzz,
+    "crypto_vectors": harness_crypto_vectors,
     "tls_fuzz": harness_tls_fuzz,
     "msan_net": harness_msan_net,
     "security_hygiene": harness_security_hygiene,
