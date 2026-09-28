@@ -7597,6 +7597,53 @@ static COLD bipolar sntp_reply_ok(p8 address_to reply, p8 address_to request)
         return SNTP_OK;
 }
 
+/*
+        One reply made into a sample, or the reason it is not one: the
+        checks above on the header, then the four stamps. t1 and t4 are the
+        local departure and arrival, t4 as the kernel stamped it.
+*/
+static COLD bipolar sntp_reply_sample(p8 address_to reply,
+                                      p8 address_to request, bipolar t1,
+                                      bipolar t4, bool tight,
+                                      sntp_sample address_to into)
+{
+        bipolar verdict = sntp_reply_ok(reply, request);
+        bipolar t2;
+        bipolar t3;
+        bipolar reference;
+        bipolar offset = 0;
+        bipolar delay = 0;
+
+        if_rare (verdict < 0)
+                return verdict;
+        if_rare (!sntp_local_ok(t4))
+                return SNTP_MALFORMED;
+        t2 = sntp_load_stamp(reply + 32);
+        t3 = sntp_load_stamp(reply + 40);
+        /*
+                The reference stamp is when the server last set its own
+                clock, so it sits at or before the stamp it transmits. A
+                second of slack, because the two are read at different
+                moments and a server whose reference is one tick the wrong
+                side of transmit would otherwise be refused for ever: the
+                sample loop stops on BAD_SERVER, so that server is not asked
+                again.
+        */
+        reference = sntp_load_stamp(reply + 16);
+        if_rare (!sntp_wall_ok(reference) ||
+                 reference > t3 + (bipolar)SNTP_NANOSECONDS)
+                return SNTP_BAD_SERVER;
+        sntp_offset_delay(t1, t2, t3, t4, address_of offset, address_of delay);
+        if_rare (!sntp_sample_sane(t1, t2, t3, t4, offset, delay, tight))
+                return SNTP_MALFORMED;
+        into->offset_ns = offset;
+        into->delay_ns = delay;
+        into->distance_ns = sntp_distance_ns(delay, network_load_32(reply + 4),
+                                             network_load_32(reply + 8));
+        into->ok = true;
+        return SNTP_OK;
+}
+
 static COLD bool sntp_math_ok(void)
 {
         bipolar offset = 0;
@@ -8039,16 +8086,10 @@ static HOT bipolar sntp_exchange(b32 handle,
         p64 spare[2];
         p32 mine;
         bipolar t1;
-        bipolar t2;
-        bipolar t3;
-        bipolar t4;
         bipolar wait;
         bipolar received;
         bipolar verdict;
-        bipolar reference;
         bool stamped;
-        bipolar offset = 0;
-        bipolar delay = 0;
 
         into->ok = false;
         memory_fill(request, 0, sizeof(request));
@@ -8099,42 +8140,12 @@ static HOT bipolar sntp_exchange(b32 handle,
                 }
                 if_rare (received < SNTP_PACKET)
                         continue;
-                verdict = sntp_reply_ok(reply, request);
+                verdict = sntp_reply_sample(reply, request, t1,
+                                            sntp_timespec_ns(got[0], got[1]),
+                                            tight, into);
                 if_rare (verdict == SNTP_NO_REPLY)
                         continue;
-                if_rare (verdict < 0)
-                        return verdict;
-                t4 = sntp_timespec_ns(got[0], got[1]);
-                if_rare (!sntp_local_ok(t4))
-                        return SNTP_MALFORMED;
-                t2 = sntp_load_stamp(reply + 32);
-                t3 = sntp_load_stamp(reply + 40);
-                /*
-                        The reference stamp is when the server last set
-                        its own clock, so it sits at or before the stamp
-                        it transmits. A second of slack, because the two
-                        are read at different moments and a server whose
-                        reference is one tick the wrong side of transmit
-                        would otherwise be refused for ever: the sample
-                        loop stops on BAD_SERVER, so that server is not
-                        asked again.
-                */
-                reference = sntp_load_stamp(reply + 16);
-                if_rare (!sntp_wall_ok(reference) ||
-                         reference > t3 + (bipolar)SNTP_NANOSECONDS)
-                        return SNTP_BAD_SERVER;
-                sntp_offset_delay(t1, t2, t3, t4, address_of offset,
-                                  address_of delay);
-                if_rare (!sntp_sample_sane(t1, t2, t3, t4, offset, delay,
-                                           tight))
-                        return SNTP_MALFORMED;
-                into->offset_ns = offset;
-                into->delay_ns = delay;
-                into->distance_ns = sntp_distance_ns(delay,
-                                                     network_load_32(reply + 4),
-                                                     network_load_32(reply + 8));
-                into->ok = true;
-                return SNTP_OK;
+                return verdict;
         }
 }
 
@@ -9479,15 +9490,27 @@ static bool locale_ntp_wants_step(bipolar offset_ns)
 static CONST bipolar locale_ntp_learned(bipolar offset_ns, bipolar elapsed_ns,
                                         bipolar frequency)
 {
+        bipolar milliseconds = elapsed_ns / 1000000;
+        bipolar magnitude;
         bipolar learned;
 
         if (elapsed_ns < LOCALE_NTP_LEARN_LEAST_NS ||
             offset_ns > elapsed_ns / 1000 || offset_ns < -(elapsed_ns / 1000))
                 return frequency;
-        learned = offset_ns * 65536 / (elapsed_ns / 1000000);
-        learned = learned * (offset_ns < 0 ? -offset_ns : offset_ns) /
-                  ((offset_ns < 0 ? -offset_ns : offset_ns) +
-                   LOCALE_NTP_NOISE_NS);
+        magnitude = offset_ns < 0 ? -offset_ns : offset_ns;
+        /*
+                Offset over elapsed, in the kernel's 2^-16 ppm, taken whole
+                and remainder so neither product can pass 2^63; and the
+                gain, whose product with the rate did pass it for an offset
+                past 140 s -- 39 hours since the last poll that set the
+                clock is enough -- and came out with the wrong sign. Past
+                four seconds the gain is within 1e-4 of one and is left out.
+        */
+        learned = offset_ns / milliseconds * 65536 +
+                  offset_ns % milliseconds * 65536 / milliseconds;
+        if (magnitude < (bipolar)1 << 32)
+                learned = learned * magnitude /
+                          (magnitude + LOCALE_NTP_NOISE_NS);
         learned += frequency;
         if (learned > LOCALE_NTP_FREQ_MOST)
                 return LOCALE_NTP_FREQ_MOST;
@@ -9623,7 +9646,10 @@ static COLD bool locale_discipline_ok(void)
             locale_ntp_learned(-144000000, (bipolar)1800 * 1000000000,
                                -((bipolar)490 << 16)) != -LOCALE_NTP_FREQ_MOST ||
             locale_ntp_learned(-144000000, (bipolar)30 * 1000000000, 5) != 5 ||
-            locale_ntp_learned(-5000000000, (bipolar)1800 * 1000000000, 5) != 5)
+            locale_ntp_learned(-5000000000, (bipolar)1800 * 1000000000, 5) != 5 ||
+            locale_ntp_learned((bipolar)199 * 1000000000,
+                               (bipolar)200000 * 1000000000, 0) !=
+                LOCALE_NTP_FREQ_MOST)
                 return false;
         /* a 10 ms distance is 10 ms, rounded up a microsecond; a negative
            or absurd one still gives a bound the kernel accepts */
@@ -9960,6 +9986,53 @@ static fn locale_restore(void)
                 locale_ntp_keep();
 }
 
+/*
+        What the schedule makes of a query that ended, or of a look between
+        queries. A success is only a success if the kernel still says the
+        clock is synchronised when it is looked at: any change of
+        clocksource clears that (timekeeping_notify ends in ntp_clear), and
+        x86 changes it by itself about 1.5 s into a boot, when the TSC's
+        refined calibration replaces tsc-early, and again whenever the
+        watchdog gives up on the TSC. A first answer that landed before the
+        switch left a correct clock marked unsynchronised and the next query
+        256 s away: on a guest whose entropy was ready at once, 6 boots in 6
+        synced at 1.4 s, were unsynchronised at 1.5 s, and were still
+        waiting at 42 s. So an answer the kernel has forgotten is asked for
+        again at the retry pace, whether that is seen as the child ends or
+        on a later look -- but not over a RATE answer's wait, which leaves
+        the retry pace at its slowest.
+*/
+static fn locale_ntp_schedule(bipolar ended, bool synced, p64 now)
+{
+        if (!ended && synced)
+        {
+                //      Soon at first, while the loop has not learned how
+                //      fast this clock runs, and half-hourly once it has
+                //      had the time to.
+                locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
+                locale_ntp_synced = locale_ntp_asked;
+                locale_ntp_next = now + (p64)locale_ntp_every * 1000000000ull;
+                locale_ntp_every = locale_ntp_every * 2 < LOCALE_NTP_AGAIN
+                                       ? locale_ntp_every * 2
+                                       : LOCALE_NTP_AGAIN;
+        }
+        else if (ended == LOCALE_NTP_EXIT_RATE)
+        {
+                locale_ntp_retry = LOCALE_NTP_RETRY_MOST;
+                locale_ntp_next = now + (p64)LOCALE_NTP_RATE_AGAIN * 1000000000ull;
+        }
+        else if (ended != LOCALE_CHILD_IDLE)
+        {
+                locale_ntp_next = now + (p64)locale_ntp_retry * 1000000000ull;
+                if (locale_ntp_retry < LOCALE_NTP_RETRY_MOST)
+                        locale_ntp_retry *= 2;
+        }
+        else if (locale_ntp_synced && !synced &&
+                 locale_ntp_retry == LOCALE_NTP_RETRY_LEAST &&
+                 locale_ntp_next > now + LOCALE_NTP_RETRY_LEAST * 1000000000ull)
+                locale_ntp_next = now + LOCALE_NTP_RETRY_LEAST * 1000000000ull;
+}
+
 static fn locale_ntp_keep(void)
 {
         p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME);
@@ -9967,38 +10040,8 @@ static fn locale_ntp_keep(void)
 
         if (ended == LOCALE_CHILD_RUNNING)
                 return;
-        if (ended != LOCALE_CHILD_IDLE)
-        {
-                if (!ended)
-                {
-                        //      Soon at first, while the loop has not
-                        //      learned how fast this clock runs, and
-                        //      half-hourly once it has had the time to.
-                        locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
-                        locale_ntp_synced = locale_ntp_asked;
-                        locale_ntp_next =
-                            now + (p64)locale_ntp_every * 1000000000ull;
-                        locale_ntp_every = locale_ntp_every * 2 < LOCALE_NTP_AGAIN
-                                                   ? locale_ntp_every * 2
-                                                   : LOCALE_NTP_AGAIN;
-                }
-                else if (ended == LOCALE_NTP_EXIT_RATE)
-                {
-                        locale_ntp_retry = LOCALE_NTP_RETRY_MOST;
-                        locale_ntp_next =
-                            now + (p64)LOCALE_NTP_RATE_AGAIN * 1000000000ull;
-                }
-                else
-                {
-                        locale_ntp_next =
-                            now + (p64)locale_ntp_retry * 1000000000ull;
-                        if (locale_ntp_retry < LOCALE_NTP_RETRY_MOST)
-                                locale_ntp_retry *= 2;
-                }
-                return;
-        }
-
-        if (locale_ntp_next && now < locale_ntp_next)
+        locale_ntp_schedule(ended, locale_clock_synced(), now);
+        if (ended != LOCALE_CHILD_IDLE || (locale_ntp_next && now < locale_ntp_next))
                 return;
 
         locale_ntp_asked = now;

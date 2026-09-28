@@ -38448,6 +38448,8 @@ def tls_fuzz_seeds(corpus):
         return waterlink_fuzz_seeds()
     if corpus == "dhcp":
         return dhcp_fuzz_seeds()
+    if corpus == "sntp":
+        return sntp_fuzz_seeds()
     seeds = {name + ".bin": bytes.fromhex(hx)
              for name, hx in TLS_FUZZ_SEED_HEX[corpus].items()}
     if corpus == "tls_hs":
@@ -39874,9 +39876,263 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     return tls_fuzz_run("tls verify", "tls_der", source, 4096)
 
 
+SNTP_FUZZ_SHIM = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+typedef uint8_t p8;
+typedef uint32_t p32;
+typedef uint64_t p64;
+typedef int32_t b32;
+typedef long bipolar;
+typedef unsigned long positive;
+#define INLINE
+#define CONST
+#define PURE
+#define COLD
+#define HOT
+#define fn void
+#define address_to *
+#define address_of &
+#define if_rare(c) if (c)
+#define if_common(c) if (c)
+#define bipolar_max INT64_MAX
+#define bipolar_min INT64_MIN
+#define SOL_SOCKET 1
+#define LOGGER_TIMEX_WORDS 26
+#define LOGGER_TIMEX_MAXERROR 3
+#define LOGGER_TIMEX_STATUS 5
+#define LOGGER_TIMEX_TIME_SEC 9
+#define LOGGER_TIMEX_TIME_NSEC 10
+#define array_count(a) (sizeof(a) / sizeof((a)[0]))
+#define memory_compare memcmp
+#define memory_copy memcpy
+#define memory_zero(at, n) memset((at), 0, (n))
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+static p32 network_load_32(const p8 *b)
+{
+        return ((p32)b[0] << 24) | ((p32)b[1] << 16) | ((p32)b[2] << 8) | b[3];
+}
+static void network_store_32(p8 *b, p32 v)
+{
+        b[0] = (p8)(v >> 24); b[1] = (p8)(v >> 16); b[2] = (p8)(v >> 8); b[3] = (p8)v;
+}
+"""
+
+SNTP_FUZZ_DRIVER = r"""
+static p64 fuzz_load_64(const p8 *b)
+{
+        p64 v = 0;
+        for (int i = 0; i < 8; i++)
+                v = v << 8 | b[i];
+        return v;
+}
+
+int LLVMFuzzerInitialize(int *argc, char ***argv)
+{
+        (void)argc;
+        (void)argv;
+        if (!sntp_math_ok() || !locale_discipline_ok())
+        {
+                fprintf(stderr, "sntp_fuzz: the lifted self-tests fail\n");
+                exit(1);
+        }
+        return 0;
+}
+
+/*
+        One exchange's worth of input, three servers' worth of replies: a
+        flag byte, the nonce the request carried, the two local timespecs
+        (t1 held to what sntp_exchange lets through, t4 as the kernel's
+        stamp arrives), the discipline's kernel state, three 48-byte
+        replies, and whatever is left as a control-message buffer.
+*/
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        p8 in[1 + 8 + 32 + 24 + 3 * SNTP_PACKET];
+        positive control[SNTP_CONTROL_WORDS];
+        p8 request[SNTP_PACKET];
+        p8 reply[SNTP_PACKET];
+        sntp_sample heard[SNTP_SERVERS];
+        positive heard_count = 0;
+        positive words[LOGGER_TIMEX_WORDS];
+        p64 arrived[2];
+        p32 sequence = 0;
+        p8 flags;
+        bipolar t1;
+        bipolar t4;
+        positive rest;
+
+        memset(in, 0, sizeof in);
+        memcpy(in, data, size < sizeof in ? size : sizeof in);
+        rest = size > sizeof in ? size - sizeof in : 0;
+        memset(control, 0, sizeof control);
+        memcpy(control, data + (size - rest),
+               rest < sizeof control ? rest : sizeof control);
+        (void)sntp_control_stamp((p8 *)control, rest < sizeof control ? rest
+                                                                      : sizeof control,
+                                 SNTP_TIMESTAMPNS, arrived);
+        (void)sntp_control_stamp((p8 *)control, rest < sizeof control ? rest
+                                                                      : sizeof control,
+                                 SNTP_TIMESTAMPING, arrived);
+        (void)sntp_control_sequence((p8 *)control, rest < sizeof control ? rest
+                                                                         : sizeof control,
+                                    &sequence);
+
+        flags = in[0];
+        memset(request, 0, sizeof request);
+        request[0] = SNTP_LI_VN_MODE;
+        memcpy(request + 40, in + 1, 8);
+        t1 = flags & 4 ? 0 : sntp_timespec_ns(fuzz_load_64(in + 9), fuzz_load_64(in + 17));
+        t4 = sntp_timespec_ns(fuzz_load_64(in + 25), fuzz_load_64(in + 33));
+        if (!sntp_local_ok(t1))
+                return 0;
+
+        for (positive at = 0; at < SNTP_SERVERS; at++)
+        {
+                memcpy(reply, in + 65 + at * SNTP_PACKET, SNTP_PACKET);
+                if (flags & 1)
+                        memcpy(reply + 24, request + 40, 8);
+                memset(heard + heard_count, 0, sizeof heard[0]);
+                if (sntp_reply_sample(reply, request, t1, t4, flags & 2,
+                                      heard + heard_count) == SNTP_OK)
+                        heard_count++;
+        }
+        (void)sntp_pick(heard, heard_count);
+        if (heard_count)
+        {
+                bipolar chosen = sntp_choose(heard, heard_count);
+                bipolar offset = heard[chosen].offset_ns;
+                bipolar now = t4 < 0 ? 0 : t4;
+                bipolar target = 0;
+                bipolar sec = 0;
+                bipolar nsec = 0;
+                /* the kernel's state as locale_ntp_apply_offset reads it:
+                   a pending slew within half a second, a frequency the
+                   kernel holds to 500 ppm, and an elapsed boot time */
+                bipolar pending = (bipolar)(fuzz_load_64(in + 41) % 1000000001ull) - 500000000;
+                bipolar frequency = (bipolar)(fuzz_load_64(in + 49) % (2 * (p64)LOCALE_NTP_FREQ_MOST + 1)) -
+                                    LOCALE_NTP_FREQ_MOST;
+                bipolar elapsed = (bipolar)(fuzz_load_64(in + 57) >> 2);
+
+                if (sntp_target_ok(now, offset, &target))
+                {
+                        sntp_split_offset(offset, &sec, &nsec);
+                        locale_ntp_first = flags & 8;
+                        locale_ntp_discipline_words(offset, sec, nsec,
+                                locale_ntp_error_us(heard[chosen].distance_ns), words);
+                        (void)locale_ntp_learned(offset - pending, elapsed, frequency);
+                }
+        }
+        return 0;
+}
+"""
+
+
+def sntp_fuzz_seeds():
+    """Name to bytes for the sntp corpus: the flag byte, nonce, t1/t4 and
+    kernel state, then replies shaped like a real stratum-2 answer, the
+    kiss codes, both eras, the window's edges and a lying control buffer."""
+    import struct
+
+    def stamp(unix_seconds, fraction=0):
+        ntp = (unix_seconds + 2208988800) & 0xffffffff
+        return struct.pack(">II", ntp, fraction)
+
+    def reply(first=0x24, stratum=2, delay=0x100, dispersion=0x100, ref_id=0,
+              reference=1800000000, receive=1800000001, transmit=1800000001):
+        return (bytes([first, stratum, 6, 0xec]) + struct.pack(">II", delay, dispersion) +
+                struct.pack(">I", ref_id) + stamp(reference) + b"\0" * 8 +
+                stamp(receive, 0x40000000) + stamp(transmit, 0x40010000))
+
+    def head(flags, t1, t4, pending=500000000, frequency=0, elapsed=0):
+        return (bytes([flags]) + b"\xc0\xff\xee\x00\x0b\xad\xf0\x0d" +
+                struct.pack(">QQQQ", t1, 0, t4, 1000) +
+                struct.pack(">QQQ", pending, frequency, elapsed << 2))
+
+    now = 1800000000
+    good = reply()
+    seeds = {
+        "empty.bin": b"",
+        "one_flag.bin": b"\x01",
+        "stratum2_three.bin": head(1, now, now + 1) + good * 3,
+        "stratum2_tight.bin": head(3, now, now + 1) + good * 3,
+        "epoch_clock.bin": head(5, 0, 1) + good * 3,
+        "first_step.bin": head(9, now - 3600, now - 3599) + good * 3,
+        "falseticker.bin": head(1, now, now + 1) + good * 2 +
+            reply(receive=now + 50, transmit=now + 50),
+        "two_disagree.bin": head(1, now, now + 1) + good +
+            reply(delay=0, dispersion=0, receive=now + 7200, transmit=now + 7200) +
+            reply(first=0x23),
+        "kiss_rate.bin": head(1, now, now + 1) + reply(stratum=0, ref_id=0x52415445) * 3,
+        "kiss_deny.bin": head(1, now, now + 1) + reply(stratum=0, ref_id=0x44454e59) * 3,
+        "alarm.bin": head(1, now, now + 1) + reply(first=0xe4) * 3,
+        "root_second.bin": head(1, now, now + 1) + reply(delay=0x10000, dispersion=0x10000) * 3,
+        "root_sign.bin": head(1, now, now + 1) + reply(delay=0x80000000) * 3,
+        "era1.bin": head(1, now, now + 1) + reply(reference=2085978496,
+                                                  receive=2085978497,
+                                                  transmit=2085978497) * 3,
+        "window_edge.bin": head(1, 2082758400 - 1, 2082758400) +
+            reply(reference=2082758399, receive=2082758400, transmit=2082758400) * 3,
+        "not_echoed.bin": head(0, now, now + 1) + good * 3,
+        "reference_future.bin": head(1, now, now + 1) + reply(reference=now + 5) * 3,
+        "learn_long.bin": head(1, now, now + 1, 0, 0, 200000 * 10**9) +
+            reply(receive=now + 199, transmit=now + 199) * 3,
+    }
+    control = struct.pack("<QiiQQ", 32, 1, 35, now, 250000000)
+    seeds["control_stamp.bin"] = head(1, now, now + 1) + good * 3 + control
+    seeds["control_lies.bin"] = head(1, now, now + 1) + good * 3 + \
+        struct.pack("<Qii", 0xffffffffffffffff, 1, 35) + b"\0" * 16
+    seeds["control_errqueue.bin"] = head(1, now, now + 1) + good * 3 + \
+        struct.pack("<Qii", 16, 1, 7) + struct.pack("<QiiQQ", 32, 1, 37, now, 1) + \
+        struct.pack("<Qii", 32, 0, 11) + bytes([0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0])
+    return seeds
+
+
+def sntp_fuzz_source(host):
+    """host.c's SNTP parse, selection and discipline arithmetic, lifted whole
+    by the literal anchors below, behind SNTP_FUZZ_SHIM."""
+    sec = tls_fuzz_sec
+    parts = (
+        sec(host, "#define SNTP_PORT 123", "static inline INLINE bipolar sntp_now_ns(void)"),
+        sec(host, "static inline INLINE PURE bipolar sntp_load_stamp",
+            "/*\n        t4 is meant to be"),
+        sec(host, "static bool sntp_control_stamp(", "static HOT bipolar sntp_receive_stamped("),
+        sec(host, "static bool sntp_control_sequence(", "static HOT bool sntp_transmit_stamp("),
+        sec(host, "static COLD bipolar sntp_reply_ok(", "static HOT bipolar sntp_exchange("),
+        sec(host, "#define LOCALE_NTP_RETRY_LEAST", "/*\n        A query that runs in a child"),
+        sec(host, "#define LOCALE_TIMEX_ESTERROR", "static fn locale_clock_mark_synced("),
+        sec(host, "static bool locale_ntp_first;", "static const char locale_ntp_fallback"),
+    )
+    return SNTP_FUZZ_SHIM + "\n".join(parts) + SNTP_FUZZ_DRIVER
+
+
+def harness_sntp_fuzz(argv):
+    """libFuzzer over host.c's SNTP reply path: sntp_reply_sample (header,
+    kiss codes, the four stamps and their window), sntp_choose over three
+    servers, the control-message walks, and the discipline arithmetic the
+    chosen offset reaches (sntp_target_ok, the timex words,
+    locale_ntp_learned). The production functions are lifted by literal
+    anchors; LLVMFuzzerInitialize runs sntp_math_ok and locale_discipline_ok
+    on the lift first. Bounded fixed-seed; 2 when clang/libFuzzer is absent.
+
+        python3 test/differential.py --harness sntp_fuzz
+    """
+    del argv
+    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    try:
+        source = sntp_fuzz_source(host)
+    except ValueError as exc:
+        print("  FAIL sntp fuzz: an anchor moved: " + str(exc))
+        return 1
+    return tls_fuzz_run("sntp", "sntp", source, 1024)
+
+
 def harness_tls_fuzz(argv):
     """tls_der_fuzz, tls_hs_fuzz, tls_verify_fuzz, waterlink_pre_fuzz,
-    waterlink_fuzz and dhcp_fuzz in turn: `sh test/run fuzz`.
+    waterlink_fuzz, dhcp_fuzz and sntp_fuzz in turn: `sh test/run fuzz`.
 
     Continuous by default, an hour a target with no run cap, unless
     MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise. With
@@ -39894,10 +40150,10 @@ def harness_tls_fuzz(argv):
     os.environ.setdefault("MOONWATER_FUZZ_RUNS", "20000" if report else "-1")
     os.environ.setdefault("MOONWATER_FUZZ_SECONDS", "5" if report else "3600")
     runs, seconds, _ = tls_fuzz_budget()
-    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp "
+    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp then sntp "
           "(runs=%d seconds=%d)" % (runs, seconds))
     seeds = {corpus: len(tls_fuzz_seeds(corpus))
-             for corpus in ("tls_der", "tls_hs", "waterlink", "dhcp")}
+             for corpus in ("tls_der", "tls_hs", "waterlink", "dhcp", "sntp")}
     seeds["waterlink_pre"] = len(waterlink_pre_seeds())
     targets = []
     for name, corpus, harness in (
@@ -39906,7 +40162,8 @@ def harness_tls_fuzz(argv):
             ("tls_verify_fuzz", "tls_der", harness_tls_verify_fuzz),
             ("waterlink_pre_fuzz", "waterlink_pre", harness_waterlink_pre_fuzz),
             ("waterlink_fuzz", "waterlink", harness_waterlink_fuzz),
-            ("dhcp_fuzz", "dhcp", harness_dhcp_fuzz)):
+            ("dhcp_fuzz", "dhcp", harness_dhcp_fuzz),
+            ("sntp_fuzz", "sntp", harness_sntp_fuzz)):
         began = time.time()
         try:
             code = harness([])
@@ -39978,7 +40235,7 @@ def harness_msan_net(argv):
          (same lift pieces as tls_der_fuzz)
       4. thin CHECK_net-equivalent probes (align/sizeof + parser shape checks);
          not a full freestanding CHECK_net under MSan
-      5. short tls_der_fuzz / tls_hs_fuzz seed smokes with MOONWATER_MSAN=1
+      5. short tls_der_fuzz / tls_hs_fuzz / sntp_fuzz seed smokes with MOONWATER_MSAN=1
     Returns 2 (NOT RUN) when MSan is unavailable (Apple clang, many qemu
     images).
 
@@ -41059,19 +41316,21 @@ int main(void)
         der = harness_tls_der_fuzz([])
         hs = harness_tls_hs_fuzz([])
         dhcp = harness_dhcp_fuzz([])
+        sntp = harness_sntp_fuzz([])
     finally:
         if prior is None:
             os.environ.pop("MOONWATER_MSAN", None)
         else:
             os.environ["MOONWATER_MSAN"] = prior
 
-    if der == 2 or hs == 2:
-        print("msan net: NOT RUN -- tls fuzz under MSan unavailable "
-              "(der=%s hs=%s)" % (der, hs))
+    if 2 in (der, hs, sntp):
+        print("msan net: NOT RUN -- fuzz under MSan unavailable "
+              "(der=%s hs=%s sntp=%s)" % (der, hs, sntp))
         return 2
     checks(der == 0, "tls_der_fuzz clean under MSan")
     checks(hs == 0, "tls_hs_fuzz clean under MSan")
     checks(dhcp == 0, "dhcp_fuzz clean under MSan")
+    checks(sntp == 0, "sntp_fuzz clean under MSan")
     return checks.verdict("msan net", "msan-net")
 
 
@@ -41098,7 +41357,7 @@ def harness_security_hygiene(argv):
     source = Path(__file__).resolve().read_text()
 
     security = ("tls_chains", "https_downgrade", "http_response_framing", "tls_der_fuzz",
-                "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race", "dhcp_fuzz")
+                "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race", "dhcp_fuzz", "sntp_fuzz")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -41108,11 +41367,11 @@ def harness_security_hygiene(argv):
     checks(not twice, "differential.py: registered twice: " + ", ".join(twice))
     for name in security:
         checks("--harness " + name in run, "test/run: no lane asks for --harness " + name)
-    for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race", "dhcp_fuzz"):
+    for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race", "dhcp_fuzz", "sntp_fuzz"):
         checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
 
     names = set()
-    for corpus in ("tls_der", "tls_hs", "dhcp"):
+    for corpus in ("tls_der", "tls_hs", "dhcp", "sntp"):
         seeds = tls_fuzz_seeds(corpus)
         names.update(seeds)
         checks(bool(seeds), "tls_fuzz_seeds(%r) is empty" % corpus)
@@ -47417,6 +47676,7 @@ HARNESS_CHECKS = {
     "tls_der_fuzz": harness_tls_der_fuzz,
     "tls_hs_fuzz": harness_tls_hs_fuzz,
     "tls_verify_fuzz": harness_tls_verify_fuzz,
+    "sntp_fuzz": harness_sntp_fuzz,
     "tls_fuzz": harness_tls_fuzz,
     "msan_net": harness_msan_net,
     "security_hygiene": harness_security_hygiene,
