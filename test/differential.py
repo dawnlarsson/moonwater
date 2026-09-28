@@ -18145,6 +18145,14 @@ _TEXT_SORT_SAID_CASES = (
     ("none", "-o", "out", "--debug"), ("none", "--debug", "+0", "+1.2", "-3"), ("none", "-fdb", "-u", "--debug"),
     ("none", "-k1.2,1.3n", "--debug"), ("none", "-k1,1.2", "--debug"), ("none", "-s", "-k2", "-n", "--debug"),
     ("keys", "-k2n", "-k1", "--debug"), ("keys", "-R", "--random-source=big", "--debug"),
+    #   A long option cut short enough to be two of them is refused by
+    #   name, with every one it could be, --help and --version among them,
+    #   where getopt reaches it; a unique or exact one is that option.
+    ("keys", "--vers"), ("keys", "--versi"), ("keys", "--version-s"), ("keys", "--rand"),
+    ("keys", "--random-s"), ("keys", "--ran=x"), ("keys", "--h"), ("keys", "--s"), ("keys", "--r"),
+    ("keys", "--c"), ("keys", "--i"), ("keys", "--st"), ("keys", "--re"), ("keys", "-k0", "--rand"),
+    ("keys", "--rand", "-k0"), ("keys", "--nosuch", "--rand"), ("keys", "--", "--rand"),
+    ("keys", "-t", "--rand", "-k1"),
 )
 
 

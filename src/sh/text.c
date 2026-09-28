@@ -31021,6 +31021,8 @@ static const argument_option sort_options[] = {
     {"unique", 'u'},
     {"zero-terminated", 'z'},
     {"Cc", 0},
+    // The stand-in for an ambiguous abbreviation; no word can spell it.
+    {"\001", 'A', ARGUMENT_LONG_ONLY},
     {null},
 };
 
@@ -31177,8 +31179,76 @@ static bool sort_word_takes_next(string_address word)
 }
 
 /*
-        Find the obsolete keys among the words, and when there are any, hand
-        the scan a copy of the vector to read instead. False only when there
+        A long option abbreviated so far that it could be more than one of
+        GNU's: getopt refuses it by name and lists what it could have been,
+        in the order its table holds them, --help and --version included, so
+        --vers is both --version-sort and --version and neither.
+*/
+static const string_address sort_long_names[] = {
+    "ignore-leading-blanks", "check", "compress-program", "debug", "dictionary-order",
+    "ignore-case", "files0-from", "general-numeric-sort", "ignore-nonprinting", "key",
+    "merge", "month-sort", "numeric-sort", "human-numeric-sort", "version-sort",
+    "random-sort", "random-source", "sort", "output", "reverse", "stable", "batch-size",
+    "buffer-size", "field-separator", "temporary-directory", "unique", "zero-terminated",
+    "parallel", "help", "version", null};
+
+// The word a scan found ambiguous first, which the stand-in names.
+static string_address sort_ambiguous_word;
+
+static positive sort_long_matches(string_address word, bool address_to exact)
+{
+        positive length = 0;
+        positive matches = 0;
+
+        while (word[2 + length] && word[2 + length] != '=')
+                length++;
+
+        address_to exact = false;
+
+        for (positive at = 0; length && sort_long_names[at]; at++)
+        {
+                if (string_compare_max(sort_long_names[at], word + 2, length))
+                        continue;
+
+                matches++;
+                address_to exact |= !sort_long_names[at][length];
+        }
+
+        return matches;
+}
+
+static bool sort_long_ambiguous(string_address word)
+{
+        bool exact;
+
+        return word[0] == '-' && word[1] == '-' && word[2] &&
+               sort_long_matches(word, address_of exact) > 1 && !exact;
+}
+
+static fn sort_ambiguous_say(string_address word)
+{
+        positive length = 0;
+
+        while (word[2 + length] && word[2 + length] != '=')
+                length++;
+
+        text_flush();
+        string_format(writer_stderr, "%s: option '%s' is ambiguous; possibilities:", text_name,
+                      word);
+
+        for (positive at = 0; sort_long_names[at]; at++)
+                if (!string_compare_max(sort_long_names[at], word + 2, length))
+                        string_format(writer_stderr, " '--%s'", sort_long_names[at]);
+
+        string_format(writer_stderr, "\nTry '%s --help' for more information.\n", text_name);
+}
+
+/*
+        Find the obsolete keys among the words, and the long options too
+        short to name one, and when there are any, hand the scan a copy of
+        the vector to read instead: an ambiguous word becomes a stand-in
+        option of sort's own, so it is refused where getopt would reach it
+        and not before an earlier word's complaint. False only when there
         was no room for the copy.
 */
 static bool sort_obsolete_words(file_taking address_to taking)
@@ -31187,8 +31257,10 @@ static bool sort_obsolete_words(file_taking address_to taking)
         string_address address_to argv = (string_address address_to)program_argument_list();
         bool any = false;
 
+        sort_ambiguous_word = null;
+
         for (positive at = 1; at < count && !any; at++)
-                any = argv[at][0] == '+';
+                any = argv[at][0] == '+' || sort_long_ambiguous(argv[at]);
 
         if (!any)
                 return true;
@@ -31228,6 +31300,14 @@ static bool sort_obsolete_words(file_taking address_to taking)
 
                 if (word[0] == '-' && word[1] == '-' && !word[2])
                         break;
+
+                if (sort_long_ambiguous(word))
+                {
+                        if (!sort_ambiguous_word)
+                                sort_ambiguous_word = word;
+                        sort_words[at] = (string_address) "--\001";
+                        continue;
+                }
 
                 if (word[0] == '-' && word[1])
                 {
@@ -31514,6 +31594,12 @@ static bool sort_key_seen(p8 letter, string_address value)
         {
                 sort_option_status = 1;
                 text_argmatch((string_address) "--sort", value, sort_sort_list, null);
+                return false;
+        }
+
+        if (letter == 'A')
+        {
+                sort_ambiguous_say(sort_ambiguous_word);
                 return false;
         }
 
