@@ -24989,6 +24989,28 @@ static positive lengths[] = {
 
 #define LENGTHS (sizeof(lengths) / sizeof(lengths[0]))
 
+/*
+        A stopping table is asked, before it is used, for one entry a table
+        folded from the literal holds as 1: a byte outside the set. It asked
+        for the terminator, which a stopping table holds as 0 however it was
+        built, so every set of two or more members went to the routine and
+        the table was never read -- about eighty instructions a call where
+        the table's scan is a handful, on every arithmetic body the shell
+        expanded. The table the macro reads has to answer 1 at the byte it
+        is asked about, whenever the set leaves one out.
+*/
+static void witness(string_address set, bool asked, b8 answer)
+{
+        checks++;
+
+        if (asked && answer != 1)
+        {
+                failures++;
+                string_format(log, "  FAIL witness: [%s] folds to a table that "
+                                   "stops at the byte it is asked about\n", set);
+        }
+}
+
 //      The literal has to be written into every call, because a set held in a
 //      variable is a set the compiler has not been told.
 #define CHECK_SET(literal)                                                    \
@@ -25007,6 +25029,10 @@ static positive lengths[] = {
                                               string_span_without_set(at, literal), \
                                               string_first_of_set(at, literal)); \
                                 }                                             \
+                witness(set, set_known_length(literal) > 1 &&                 \
+                                     set_known_outside(literal),              \
+                        set_known_table(literal, set_known_stops)             \
+                                [set_known_outside(literal)]);                \
         } while (0)
 
 //      A set the compiler cannot see, so that the other arm of every macro is

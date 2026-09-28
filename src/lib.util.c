@@ -5017,6 +5017,15 @@ static inline INLINE address_any fill_known(address_any destination,
 #define set_known_length(members)                                             \
         ((positive)__builtin_strlen((const char *)(members)))
 
+//      A byte the members do not hold, which a stopping table folded as it
+//      should be holds as 1, or 0 when the set holds both candidates. The
+//      terminator cannot be the witness there: a stopping table holds it as
+//      0 whether it folded or not.
+#define set_known_outside(members)                                            \
+        (!set_known_finds(members, 0xff)   ? 0xff                             \
+         : !set_known_finds(members, 0x01) ? 0x01                             \
+                                           : 0)
+
 //      Tied to the guarded element above and not to the length alone, so that
 //      the arm which builds a table is only taken when the bytes of that
 //      table fold. Two bytes are sampled and not one: the set's own first
@@ -6927,8 +6936,8 @@ static inline INLINE address_any copy_until_known(address_any destination,
 */
 /*
         Each table is checked before it is used, on one entry the set must
-        have: the terminator for a stopping set, the first member for a
-        holding one. Folded as it should be, the entry is a constant 1 and
+        have: a byte outside the set for a stopping set, the first member
+        for a holding one. Folded as it should be, the entry is a constant 1 and
         the check goes away. But set_known is folded by the optimiser and the
         static table by the front end, and when the optimiser can read a set
         the front end could not -- a parameter that whole-program analysis
@@ -6959,7 +6968,7 @@ static inline INLINE address_any copy_until_known(address_any destination,
                  : ({                                                         \
                            const b8 address_to _stops =                       \
                                set_known_table(reject, set_known_stops);      \
-                           _stops[0]                                          \
+                           _stops[set_known_outside(reject)]                  \
                                ? string_span((source), _stops)                \
                                : string_span_without_set((source), (reject)); \
                    }))
@@ -6974,7 +6983,7 @@ static inline INLINE address_any copy_until_known(address_any destination,
                  : ({                                                         \
                            const b8 address_to _stops =                       \
                                set_known_table(accept, set_known_stops);      \
-                           _stops[0]                                          \
+                           _stops[set_known_outside(accept)]                  \
                                ? first_of_set_known((source), _stops)         \
                                : string_first_of_set((source), (accept));     \
                    }))
