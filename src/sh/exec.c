@@ -9058,6 +9058,9 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
 
         exec_compound_held address_to first = null;
         exec_compound_held address_to address_to tail = address_of first;
+        bool pairs_decided = false;
+        bool pairs = false;
+        string_address pending = null;
 
         if (append && shell_array_length(name, name_length))
                 next = shell_array_highest(name, name_length) + 1;
@@ -9106,6 +9109,49 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
 
                 if (string_is(piece, '['))
                         shut = expand_bracket_end(piece + 1, '[', ']');
+
+                /*
+                        bash 5.1's other spelling of an associative list:
+                        when its first word is no [key]=value, the words are
+                        keys and values in turn, each expanded as an
+                        assignment's value is, and a key left without a value
+                        gets an empty one.
+                */
+                if (keyed && !pairs_decided)
+                {
+                        pairs_decided = true;
+                        pairs = !(shut && string_is(shut + 1, '='));
+                }
+                if (pairs)
+                {
+                        value = shell_expand_assignment(piece, 0);
+                        if (!value)
+                        {
+                                answer = false;
+                                break;
+                        }
+                        if (!pending)
+                        {
+                                pending = shell_store_copy(
+                                    address_of exec_store, value,
+                                    string_length(value));
+                                if (!pending)
+                                        answer = false;
+                                continue;
+                        }
+                        if (!string_get(pending))
+                                log_error(str("'': bad array subscript\n"));
+                        else
+                        {
+                                answer = exec_compound_put(
+                                    name, name_length, pending,
+                                    string_length(pending), value, tail);
+                                if (tail && *tail)
+                                        tail = address_of (*tail)->next;
+                        }
+                        pending = null;
+                        continue;
+                }
 
                 if (shut && string_is(shut + 1, '='))
                 {
@@ -9172,6 +9218,20 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                                 if (tail && *tail)
                                         tail = address_of (*tail)->next;
                         }
+                }
+        }
+
+        if (answer && pending)
+        {
+                if (!string_get(pending))
+                        log_error(str("'': bad array subscript\n"));
+                else
+                {
+                        answer = exec_compound_put(name, name_length, pending,
+                                                   string_length(pending), "",
+                                                   tail);
+                        if (tail && *tail)
+                                tail = address_of (*tail)->next;
                 }
         }
 
