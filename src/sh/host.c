@@ -10067,7 +10067,12 @@ static fn locale_ntp_keep(void)
         that failed ask cost two three-second wakes before the retry went out.
         Never 0, which the machine wait reads as not waiting at all; a retry
         already past due (its fork failed) is looked at again in a quarter
-        second rather than in a spin.
+        second rather than in a spin. For ten seconds after a query that set
+        the clock it is a quarter second as well, so that the kernel dropping
+        that synchronisation at the boot's clocksource switch (see
+        locale_ntp_schedule) is seen at once and not at the next three-second
+        wake: three instrumented boots lost it at 1.5 s and asked again only
+        at 5.6 s.
 */
 static unsigned int locale_wake_ms(unsigned int most)
 {
@@ -10079,6 +10084,8 @@ static unsigned int locale_wake_ms(unsigned int most)
         if (!locale_ntp_next || !locale_ntp_wanted())
                 return most;
         now = system_clock_ns(HOST_CLOCK_BOOTTIME);
+        if (locale_ntp_synced && now - locale_ntp_synced < 10000000000ull)
+                return most < 250 ? most : 250;
         due = locale_ntp_next <= now ? 250
                                      : (locale_ntp_next - now) / 1000000 + 1;
         return due < most ? (unsigned int)due : most;
