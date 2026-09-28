@@ -57600,10 +57600,34 @@ static fn redirect_urls(void)
         {
                 p8 leaf[32];
 
-                http_url_leaf((string_address)"/dir/archive#private", leaf,
-                              sizeof leaf);
-                check("a URL fragment is not part of wget's output name",
-                      string_equals(leaf, (string_address)"archive"));
+                /* wget's output name: the last path segment, never a
+                   directory name, never empty, never holding a slash. */
+                static const char address_to leaves[][2] = {
+                    {"/dir/archive#private", "archive"},
+                    {"/dir/b?c/d", "b"},
+                    {"/", "index.html"},
+                    {"?only", "index.html"},
+                    {"/a/..", "index.html"},
+                    {"/a/.", "index.html"},
+                    {"/..?x", "index.html"},
+                    {"/a/..x", "..x"},
+                    {"/a/...", "..."},
+                    {"/a/%2e%2e", "%2e%2e"},
+                };
+                p8 overlong[HTTP_URL_MAX + 8];
+
+                for (positive row = 0; row < sizeof leaves / sizeof leaves[0]; row++)
+                {
+                        http_url_leaf((string_address)leaves[row][0], leaf, sizeof leaf);
+                        check("wget's output name is the last segment, and a directory's is index.html",
+                              string_equals(leaf, (string_address)leaves[row][1]));
+                }
+                overlong[0] = '/';
+                memory_fill(overlong + 1, 'a', sizeof overlong - 2);
+                overlong[sizeof overlong - 1] = end;
+                http_url_leaf(overlong, leaf, sizeof leaf);
+                check("a path too long for a request still names index.html, not nothing",
+                      string_equals(leaf, (string_address)"index.html"));
         }
 
         check("a redirect chain may begin on HTTP",
@@ -57679,6 +57703,10 @@ static fn redirect_urls(void)
 
                 memory_fill(url + prefix, 'a', HTTP_URL_MAX - prefix);
                 url[HTTP_URL_MAX] = end;
+                check("a start URL at HTTP_URL_MAX is refused by the splitter",
+                      http_split_into(url, long_host, sizeof long_host,
+                                      address_of long_port, address_of long_path,
+                                      address_of long_tls) == HTTP_BAD_URL);
                 check("a start URL at HTTP_URL_MAX is refused before any hop",
                       string_length(url) == HTTP_URL_MAX &&
                           http_get(url, address_of body, address_of code) ==

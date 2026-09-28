@@ -7328,7 +7328,9 @@ static bool http_web_scheme(string_address url, positive scheme)
         Everything before the first slash after the authority is the host,
         everything from it is the path, and a missing path is "/". A colon in
         the authority is a port, which is how a test talks to a server on a
-        port the kernel picked.
+        port the kernel picked. A URL the client could not carry through
+        http_run -- HTTP_URL_MAX bytes or more -- is refused here too, so no
+        caller derives an output name or a message from one.
 */
 static bipolar http_split_into(string_address url, p8 address_to host, positive room,
                                p16 address_to port, string_address address_to path,
@@ -7338,10 +7340,13 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
         positive length;
         positive scheme = http_scheme_length(url);
         bool selected_tls = false;
+        string_address scan = url;
 
-        for (string_address scan = url; *scan; scan++)
+        for (; *scan; scan++)
                 if (byte_is_control(*scan) || *scan == ' ' || *scan == '\\')
                         return HTTP_BAD_URL;
+        if ((positive)(scan - url) >= HTTP_URL_MAX)
+                return HTTP_BAD_URL;
 
         /* A spelling with an explicit scheme is not a schemeless HTTP URL.
            Treating "gopher://host" as host "gopher" is a parser
@@ -8688,18 +8693,18 @@ static fn http_url_leaf(string_address path, p8 address_to into, positive room)
         if (!room)
                 return;
         if (http_origin_form(path, target, sizeof target))
-        {
-                into[0] = end;
-                return;
-        }
+                target[0] = end;
 
         query = string_first_of(target, '?');
         if (query)
                 query[0] = end;
 
+        /* No last segment, ".", or "..": each names a directory, which a
+           file cannot replace, and GNU wget saves all three as index.html. */
         slash = string_last_of(target, '/');
         path = slash ? slash + 1 : target;
-        if (!string_get(path))
+        if (!string_get(path) || string_equals(path, (string_address) ".") ||
+            string_equals(path, (string_address) ".."))
                 path = (string_address) "index.html";
         string_copy_max_end(into, path, room - 1);
 }
