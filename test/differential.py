@@ -14999,9 +14999,12 @@ def shell_lang_read_trailing_delimiter(rng):
 
 #       bash 5.3's source -p PATH looks along the given PATH and nowhere
 #       else, the current directory only when PATH names it; -p was refused.
+#       A restricted shell refuses -p as it does a name with a slash: both
+#       reach past the PATH it was left, and -p read the file.
 def shell_lang_source_path(rng):
     line = rng.choice((". -p sd f.sh", "source -p sd:. c.sh", ". -p sd c.sh", ". -p '' c.sh", "source -p sd f.sh a b",
-                       "shopt -u sourcepath; . -p sd f.sh", ". -p nowhere f.sh", ". f.sh"))
+                       "shopt -u sourcepath; . -p sd f.sh", ". -p nowhere f.sh", ". f.sh",
+                       "set -r; source -p sd f.sh", "set -r; . -p . c.sh", "set -r; source sd/f.sh", "set -r; . c.sh"))
     return ("source-path", shell_BASH, shell_program(
         "mkdir -p sd; printf 'echo in-sd\\n' > sd/f.sh; printf 'echo in-cwd\\n' > c.sh",
         line + " 2>&1 | sed 's/^.*: //'", 'echo "s=$?"'))

@@ -19232,10 +19232,13 @@ COLD fn shell_dot(writer write, string_address input)
         path = shell_argv[first];
 
         //      rbash: a name with a slash in it reaches outside whatever PATH
-        //      was left, which is the whole of what the restriction holds.
-        if (shell_restricted && string_first_of(path, '/'))
+        //      was left, and so does -p, which names a search path of its own.
+        if (shell_restricted &&
+            (shell_source_search || string_first_of(path, '/')))
         {
-                return shell_refuse(1, ".: %s: restricted\n", path);
+                shell_source_search = null;
+                return shell_refuse(1, "%s: %s: restricted\n", shell_argv[0],
+                                    path);
         }
 
         handle = shell_source_open(path, address_of found, address_of found_room,
