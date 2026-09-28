@@ -2458,12 +2458,19 @@ static fn crypto_x25519_mul(crypto_x25519_fe o, crypto_x25519_fe in2,
         t[4] = (crypto_wide)r0 * s4 + (crypto_wide)r4 * s0 + (crypto_wide)r3 * s1 +
                (crypto_wide)r1 * s3 + (crypto_wide)r2 * s2;
 
-        t[0] += ((crypto_wide)r4 * 19) * s1 + ((crypto_wide)r1 * 19) * s4 +
-                ((crypto_wide)r2 * 19) * s3 + ((crypto_wide)r3 * 19) * s2;
-        t[1] += ((crypto_wide)r4 * 19) * s2 + ((crypto_wide)r2 * 19) * s4 +
-                ((crypto_wide)r3 * 19) * s3;
-        t[2] += ((crypto_wide)r4 * 19) * s3 + ((crypto_wide)r3 * 19) * s4;
-        t[3] += ((crypto_wide)r4 * 19) * s4;
+        //      Limbs stay below 2^55 (a difference is at most 2^52 + 8p's
+        //      2^54 limb), so nineteen of one fits a word and each wrapped
+        //      product is one 64 by 64 multiply rather than a 128 by 64.
+        r1 *= 19;
+        r2 *= 19;
+        r3 *= 19;
+        r4 *= 19;
+        t[0] += (crypto_wide)r4 * s1 + (crypto_wide)r1 * s4 +
+                (crypto_wide)r2 * s3 + (crypto_wide)r3 * s2;
+        t[1] += (crypto_wide)r4 * s2 + (crypto_wide)r2 * s4 +
+                (crypto_wide)r3 * s3;
+        t[2] += (crypto_wide)r4 * s3 + (crypto_wide)r3 * s4;
+        t[3] += (crypto_wide)r4 * s4;
 
         r0 = (p64)t[0] & 0x7ffffffffffffull;
         c = (p64)(t[0] >> 51);
@@ -2495,18 +2502,57 @@ static fn crypto_x25519_mul(crypto_x25519_fe o, crypto_x25519_fe in2,
         crypto_forget(t, sizeof t);
 }
 
+/* o = a^(2^n), n at least one: each square makes each cross product once
+   and doubles it, fifteen multiplies where crypto_x25519_mul makes
+   twenty five, with the same carry chain. */
 static fn crypto_x25519_sqr_n(crypto_x25519_fe o, crypto_x25519_fe a, positive n)
 {
-        crypto_x25519_fe t;
+        crypto_wide t[5];
+        p64 r0 = a[0], r1 = a[1], r2 = a[2], r3 = a[3], r4 = a[4];
 
-        crypto_x25519_mul(t, a, a);
-        n--;
-        while (n)
+        while (n--)
         {
-                crypto_x25519_mul(t, t, t);
-                n--;
+                p64 d0 = r0 * 2;
+                p64 d1 = r1 * 2;
+                p64 d2 = r2 * 2 * 19;
+                p64 d419 = r4 * 19;
+                p64 d4 = d419 * 2;
+                p64 c;
+
+                t[0] = (crypto_wide)r0 * r0 + (crypto_wide)d4 * r1 +
+                       (crypto_wide)d2 * r3;
+                t[1] = (crypto_wide)d0 * r1 + (crypto_wide)d4 * r2 +
+                       (crypto_wide)r3 * (r3 * 19);
+                t[2] = (crypto_wide)d0 * r2 + (crypto_wide)r1 * r1 +
+                       (crypto_wide)d4 * r3;
+                t[3] = (crypto_wide)d0 * r3 + (crypto_wide)d1 * r2 +
+                       (crypto_wide)r4 * d419;
+                t[4] = (crypto_wide)d0 * r4 + (crypto_wide)d1 * r3 +
+                       (crypto_wide)r2 * r2;
+
+                t[1] += (p64)(t[0] >> 51);
+                r0 = (p64)t[0] & 0x7ffffffffffffull;
+                t[2] += (p64)(t[1] >> 51);
+                r1 = (p64)t[1] & 0x7ffffffffffffull;
+                t[3] += (p64)(t[2] >> 51);
+                r2 = (p64)t[2] & 0x7ffffffffffffull;
+                t[4] += (p64)(t[3] >> 51);
+                r3 = (p64)t[3] & 0x7ffffffffffffull;
+                r4 = (p64)t[4] & 0x7ffffffffffffull;
+                r0 += 19 * (p64)(t[4] >> 51);
+                c = r0 >> 51;
+                r0 &= 0x7ffffffffffffull;
+                r1 += c;
+                c = r1 >> 51;
+                r1 &= 0x7ffffffffffffull;
+                r2 += c;
         }
-        crypto_x25519_copy(o, t);
+
+        o[0] = r0;
+        o[1] = r1;
+        o[2] = r2;
+        o[3] = r3;
+        o[4] = r4;
         crypto_forget(t, sizeof t);
 }
 
@@ -2616,16 +2662,16 @@ static bool crypto_x25519(p8 address_to out, p8 address_to scalar, p8 address_to
 
                 crypto_x25519_mul(da, d, a);
                 crypto_x25519_mul(cb, c, b);
-                crypto_x25519_mul(aa, a, a);
-                crypto_x25519_mul(bb, b, b);
+                crypto_x25519_sqr_n(aa, a, 1);
+                crypto_x25519_sqr_n(bb, b, 1);
 
                 crypto_x25519_copy(t, da);
                 crypto_x25519_sum(t, cb);
-                crypto_x25519_mul(x3, t, t);
+                crypto_x25519_sqr_n(x3, t, 1);
 
                 crypto_x25519_copy(t, cb);
                 crypto_x25519_diff(t, da);
-                crypto_x25519_mul(t, t, t);
+                crypto_x25519_sqr_n(t, t, 1);
                 crypto_x25519_mul(z3, x1, t);
 
                 crypto_x25519_mul(x2, aa, bb);
