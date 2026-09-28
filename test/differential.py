@@ -38169,6 +38169,8 @@ def tls_fuzz_seeds(corpus):
     tls_der magic first bytes pick a lane: C1 list body, C2 EKU value, C3 SAN,
     C4 basicConstraints, C5 keyUsage, C6 cert+host, C7 extensions+host, C8
     ECDSA signature DER, C9 AlgorithmIdentifier."""
+    if corpus == "waterlink":
+        return waterlink_fuzz_seeds()
     seeds = {name + ".bin": bytes.fromhex(hx)
              for name, hx in TLS_FUZZ_SEED_HEX[corpus].items()}
     if corpus == "tls_hs":
@@ -39594,7 +39596,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
 
 def harness_tls_fuzz(argv):
-    """tls_der_fuzz, tls_hs_fuzz and tls_verify_fuzz in turn: `sh test/run fuzz`.
+    """tls_der_fuzz, tls_hs_fuzz, tls_verify_fuzz and waterlink_fuzz in turn:
+    `sh test/run fuzz`.
 
     Continuous by default, an hour a target with no run cap, unless
     MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise. With
@@ -39612,12 +39615,15 @@ def harness_tls_fuzz(argv):
     os.environ.setdefault("MOONWATER_FUZZ_RUNS", "20000" if report else "-1")
     os.environ.setdefault("MOONWATER_FUZZ_SECONDS", "5" if report else "3600")
     runs, seconds, _ = tls_fuzz_budget()
-    print("tls fuzz: der then hs then verify (runs=%d seconds=%d)" % (runs, seconds))
-    seeds = {corpus: len(tls_fuzz_seeds(corpus)) for corpus in ("tls_der", "tls_hs")}
+    print("tls fuzz: der then hs then verify then waterlink (runs=%d seconds=%d)"
+          % (runs, seconds))
+    seeds = {corpus: len(tls_fuzz_seeds(corpus))
+             for corpus in ("tls_der", "tls_hs", "waterlink")}
     targets = []
     for name, corpus, harness in (("tls_der_fuzz", "tls_der", harness_tls_der_fuzz),
                                   ("tls_hs_fuzz", "tls_hs", harness_tls_hs_fuzz),
-                                  ("tls_verify_fuzz", "tls_der", harness_tls_verify_fuzz)):
+                                  ("tls_verify_fuzz", "tls_der", harness_tls_verify_fuzz),
+                                  ("waterlink_fuzz", "waterlink", harness_waterlink_fuzz)):
         began = time.time()
         try:
             code = harness([])
@@ -43567,7 +43573,7 @@ def harness_waterlink_mdns(argv):
     return checks.verdict("waterlink mdns:", "waterlink-mdns")
 
 
-def harness_waterlink_sanitized(argv):
+def harness_waterlink_sanitized(argv, lift=False):
     """waterlink's parsers and link core, hosted under ASan and UBSan.
 
     The in-tree checks compile freestanding with -fno-stack-protector, so a
@@ -44838,7 +44844,10 @@ static bool sink_hear(address_any context, struct waterlink_frame *head, p8 *pay
         free chain plus what the keys hold is every held entry; the flight is
         a doubly linked list with no cycle. A corruption of any list shows
         here before it is a wild read. */
-static bool invariants(struct waterlink_link *link, const char *where)
+#ifndef WL_QUIET
+#define WL_QUIET
+#endif
+static WL_QUIET bool invariants(struct waterlink_link *link, const char *where)
 {
         p32 seen = 0;
         p32 at = link->free;
@@ -44900,7 +44909,9 @@ static bool invariants(struct waterlink_link *link, const char *where)
         return true;
 }
 
-#ifdef WL_FUZZER
+#if defined(WL_STATE)
+/*      waterlink_fuzz's driver follows and brings its own entry. */
+#elif defined(WL_FUZZER)
 /*      libFuzzer's entry: coverage-guided over the same two readings, with a
         guard page behind the body, and the input delivered into a link.
         Deterministic under a fixed -seed; statics are reset each call. */
@@ -45185,7 +45196,7 @@ static void *memory_copy_apart(void *into, const void *from, positive size)
 }
 '''
 
-    def core_source(with_asm, fuzzer):
+    def core_source(with_asm, fuzzer, extra=""):
         parts = [SHIM, wl, vli, ASM_CALLEES,
                  "#define X64 %d\n#define ARM64 0\n#define RISCV64 0\n"
                  % (1 if with_asm else 0) + ASM_MACROS, core_text]
@@ -45199,8 +45210,11 @@ static void *memory_copy_apart(void *into, const void *from, positive size)
             parts.append(FILL_MODEL)
         if not with_asm and not apply_c:
             parts.append(APPLY_MODEL)
-        parts.append(driver)
+        parts += [driver, extra]
         return "\n".join(parts)
+
+    if lift:
+        return core_source, SHIM
 
     is_elf_x86 = (platform.system() != "Darwin" and
                   platform.machine() in ("x86_64", "amd64"))
@@ -45319,6 +45333,499 @@ static void *memory_copy_apart(void *into, const void *from, positive size)
     return checks_run.verdict("waterlink sanitized:", "waterlink-sanitized")
 
 
+def waterlink_fuzz_seeds():
+    """Scripts for waterlink_fuzz's state driver, made here: a stream in
+    bulk over a lossy, reordering network, a register storm, keystrokes with
+    a reader that pauses, the replay window's edges, hostile bodies and
+    acknowledgements, and seeded mixes of everything."""
+    import random
+
+    def post(key, shape, size):
+        return bytes([0, key, shape, size])
+    send_a, send_b, clock, toggle = b"\x03", b"\x07", b"\x09", b"\x0a"
+
+    def arrive(way, pick, mode=0):  # mode 0 deliver, 1 drop, 3 duplicate
+        return bytes([(5 if way == 0 else 8) | mode << 4, pick])
+    stream = b"".join(post(1, 0, 200) + send_a + arrive(0, 0) + send_b + arrive(1, 0)
+                      for _ in range(24))
+    lossy = b"".join(post(3, 0, 180 + i % 60) + send_a + send_a +
+                     arrive(0, i, 1 if i % 4 == 0 else 3 if i % 5 == 0 else 0) +
+                     send_b + arrive(1, 0) + clock + bytes([i])
+                     for i in range(40))
+    register = b"".join(post(2, 1, i % 48) + (send_a + arrive(0, 0) if i % 3 else b"")
+                        for i in range(60)) + send_b + arrive(1, 0)
+    keys = b"".join(post(k, 2 | (k & 1), 1) + send_a + arrive(0, 0)
+                    for k in range(32)) + toggle + b"".join(
+        post(k, 2, 1) + send_a + arrive(0, 0) for k in range(8)) + toggle + b"\x0b\x05"
+    ended = post(4, 0x7c, 10) + post(4, 0, 10) + send_a + arrive(0, 0) + send_b + arrive(1, 0)
+    replay = b"".join(bytes([13, how, arg, arg ^ 0x5a]) for how in range(8)
+                      for arg in (0, 1, 63, 64, 200, 255))
+    #   The top walked forward a block at a time past the ring's length,
+    #   probing inside the window after every step.
+    replay += b"".join(bytes([13, 1, 63, 13, 7, step % 40, step]) for step in range(80))
+    hostile = b"".join(bytes([12, how]) + bytes([37]) + bytes(range(185))
+                       for how in (0, 0x10, 3)) + b"".join(
+        bytes([12, how, 7, 9]) for how in (1, 9, 0x11, 0x19)) + \
+        post(1, 0, 20) + send_a + bytes([12, 2, 0, 3, 77])
+    seeds = {"waterlink_empty.bin": b"", "waterlink_stream.bin": stream,
+             "waterlink_lossy.bin": lossy, "waterlink_register.bin": register,
+             "waterlink_keys_paused.bin": keys, "waterlink_ended.bin": ended,
+             "waterlink_replay.bin": replay, "waterlink_hostile.bin": hostile}
+    generator = random.Random(0x3a7e)
+    for index in range(6):
+        seeds["waterlink_mix_%d.bin" % index] = bytes(
+            generator.randrange(256) for _ in range(300 + 300 * index))
+    return seeds
+
+
+WATERLINK_FUZZ_DRIVER = r'''/*      The link core with its state carried across a whole script, the
+        input read as operations: posts on the sender A, datagrams filled
+        into a network that loses, repeats and reorders them, acknowledgements
+        back, a reader on B that refuses and resumes, clock jumps, hostile
+        bodies judged and delivered to either side, and the replay window
+        against a model of what it has accepted.
+
+        What must hold after every operation: the lists of both links
+        (invariants), a stream key handed on exactly once and in order from
+        sequence one, a register key only ever newer, nothing after a key's
+        last frame, every payload the bytes posted under that key and
+        sequence, and fill writing nothing past what it returns. At the end,
+        unless a hostile acknowledgement reached a key A is sending on, a
+        lossless drain must bring every posted stream frame and every
+        register's newest value across: a stall is a failure too.
+*/
+
+#define WL_TRACKED 32   // keys the model follows; hostile frames stay above
+#define WL_SEQUENCES 1024
+#define WL_QUEUE 16
+
+static struct waterlink_link state_a, state_b, state_c;
+static p16 posted_length[WL_TRACKED][WL_SEQUENCES];
+static p8 posted_class[WL_TRACKED];
+static p32 posted_last[WL_TRACKED];
+static p32 taken[WL_TRACKED];
+static p8 taken_over[WL_TRACKED];
+static bool reader_refuses, tainted;
+static p8 network[2][WL_QUEUE][WATERLINK_PAYLOAD];
+static positive network_length[2][WL_QUEUE];
+static positive network_count[2];
+static p8 *state_body, *state_fill;
+static p64 replay_accepted[4096];
+static positive replay_count;
+static p64 replay_top;
+static struct waterlink_replay state_window;
+static int state_a_tag, state_b_tag, state_c_tag;
+
+static const p8 *script;
+static positive script_left;
+
+static p8 take(void)
+{
+        if (!script_left)
+                return 0;
+        script_left--;
+        return *script++;
+}
+
+static p8 stamp(p8 key, p32 sequence, positive at)
+{
+        return (p8)(key * 131u + sequence * 7u + (sequence >> 8) + at * 13u);
+}
+
+static bool state_sink(address_any context, struct waterlink_frame *head,
+                       p8 *payload)
+{
+        p8 key = head->key;
+        p32 sequence = head->sequence;
+
+        if (key >= WATERLINK_KEYS || head->length > WATERLINK_FRAME_MAX)
+                abort();
+        if (context != &state_b_tag || key >= WL_TRACKED)
+                return true;
+        if (reader_refuses)
+                return false;
+        if (taken_over[key] || !posted_class[key] ||
+            (head->flags & (WATERLINK_FRAME_REPLACEABLE | WATERLINK_FRAME_DURABLE)) !=
+                    posted_class[key])
+                abort();
+        if (posted_class[key] == WATERLINK_FRAME_DURABLE ? sequence != taken[key] + 1
+                                                        : sequence <= taken[key])
+                abort();
+        if (sequence > posted_last[key] || sequence >= WL_SEQUENCES ||
+            posted_length[key][sequence] != head->length + 1u)
+                abort();
+        for (positive at = 0; at < head->length; at++)
+                if (payload[at] != stamp(key, sequence, at))
+                        abort();
+        taken[key] = sequence;
+        if (head->flags & WATERLINK_FRAME_LAST)
+                taken_over[key] = 1;
+        return true;
+}
+
+//      The lists of the links an operation touched: 1 A, 2 B, 4 C.
+static void state_check(int touched)
+{
+        if (((touched & 1) && !invariants(&state_a, "A")) ||
+            ((touched & 2) && !invariants(&state_b, "B")) ||
+            ((touched & 4) && !invariants(&state_c, "C")))
+                abort();
+}
+
+static void state_post(p64 now)
+{
+        p8 key = take() % WL_TRACKED;
+        p8 shape = take();
+        p8 flags = (shape & 1 ? WATERLINK_FRAME_REPLACEABLE : WATERLINK_FRAME_DURABLE) |
+                   (shape & 2 ? WATERLINK_FRAME_URGENT : 0) |
+                   ((shape & 0x7c) == 0x7c ? WATERLINK_FRAME_LAST : 0);
+        p8 size = take();
+        p16 length = size < 160 ? size % 48
+                   : size < 240 ? (p16)(WATERLINK_FRAME_MAX - size % 16)
+                                : (p16)(size * 4);
+        p32 sequence = state_a.sending[key].sequence;
+        p8 payload[WATERLINK_FRAME_MAX];
+
+        if (sequence >= WL_SEQUENCES)
+                return;
+        for (positive at = 0; at < length; at++)
+                payload[at] = stamp(key, sequence, at);
+        if (!waterlink_post(&state_a, key, flags, payload, length, now))
+                return;
+        if (state_a.sending[key].sequence != sequence + 1)
+                abort();
+        posted_class[key] = flags & (WATERLINK_FRAME_REPLACEABLE | WATERLINK_FRAME_DURABLE);
+        posted_length[key][sequence] = length + 1;
+        posted_last[key] = sequence;
+}
+
+//      Fill into a body flush against its guard page, with the bytes past
+//      where fill says it stopped marked, and check they are untouched.
+static positive state_fill_one(struct waterlink_link *link, p64 now, p8 *into)
+{
+        bool alone = false;
+        positive used;
+
+        static p8 marks[WATERLINK_PAYLOAD];
+
+        memset(marks, 0xa5, WATERLINK_PAYLOAD);
+        memset(state_fill, 0xa5, WATERLINK_PAYLOAD);
+        used = waterlink_fill(link, state_fill, now, &alone);
+        if (used > WATERLINK_PAYLOAD ||
+            memcmp(state_fill + used, marks, WATERLINK_PAYLOAD - used))
+                abort();
+        if (used && into)
+                memcpy(into, state_fill, used);
+        return used;
+}
+
+static bool state_deliver(struct waterlink_link *link, const p8 *body,
+                          positive length, p64 now, address_any tag)
+{
+        p8 *at = state_body + (WATERLINK_PAYLOAD + 1 - length);
+
+        if (length)
+                memcpy(at, body, length);
+        return waterlink_deliver(link, at, length, now, state_sink, tag);
+}
+
+static void state_send(int way, p64 now)
+{
+        positive used;
+
+        if (network_count[way] == WL_QUEUE)
+                return;
+        used = state_fill_one(way ? &state_b : &state_a, now,
+                              network[way][network_count[way]]);
+        if (used)
+                network_length[way][network_count[way]++] = used;
+}
+
+static void state_arrive(int way, p64 now, bool keep, bool drop)
+{
+        positive at;
+
+        if (!network_count[way])
+                return;
+        at = take() % network_count[way];
+        if (!drop && !state_deliver(way ? &state_a : &state_b, network[way][at],
+                                    network_length[way][at], now,
+                                    way ? (address_any)&state_a_tag
+                                        : (address_any)&state_b_tag))
+                abort(); // a body fill made must be well formed
+        if (keep)
+                return;
+        network_count[way]--;
+        memmove(network[way][at], network[way][at + 1],
+                (network_count[way] - at) * sizeof network[way][0]);
+        memmove(network_length[way] + at, network_length[way] + at + 1,
+                (network_count[way] - at) * sizeof network_length[way][0]);
+}
+
+/*      A hostile body: the script's own bytes, or a plausible one the tree's
+        generator makes from a seed the script gives, or a queued body with
+        a byte changed. Frames on a key the model follows would be the model
+        lying to itself, so a body carrying one goes to C; one carrying an
+        acknowledgement for a key A sends on makes A free what B never took,
+        which is allowed to stall the stream and so turns the drain off. */
+static void state_hostile(p64 now)
+{
+        p8 body[WATERLINK_PAYLOAD + 2];
+        struct waterlink_part parts[WATERLINK_PARTS];
+        p8 how = take();
+        positive length;
+        bipolar count;
+        bool tracked_frame = false, tracked_ack = false;
+
+        if (how % 3 == 0)
+        {
+                length = take();
+                length = length * 5 % (WATERLINK_PAYLOAD + 2);
+                for (positive at = 0; at < length; at++)
+                        body[at] = take();
+        }
+        else if (how % 3 == 1 || !network_count[0])
+        {
+                judge_state = ((p64)take() << 8 | take()) * 0x9e3779b97f4a7c15ull | 1;
+                length = judge_body(body, how & 8);
+        }
+        else
+        {
+                positive at = take() % network_count[0];
+
+                length = network_length[0][at];
+                memcpy(body, network[0][at], length);
+                body[take() % length] ^= (p8)(1 + take() % 255);
+        }
+        if (length > WATERLINK_PAYLOAD + 1)
+                length = WATERLINK_PAYLOAD + 1;
+        memcpy(state_body + (WATERLINK_PAYLOAD + 1 - length), body, length);
+        count = waterlink_judge(state_body + (WATERLINK_PAYLOAD + 1 - length),
+                                length, parts);
+        if (count < -1 || count > (bipolar)WATERLINK_PARTS)
+                abort();
+        for (bipolar at = 0; at < count; at++)
+                if (parts[at].key < WL_TRACKED)
+                {
+                        if (parts[at].flags & WATERLINK_FRAME_ACK)
+                                tracked_ack = true;
+                        else
+                                tracked_frame = true;
+                }
+        if (tracked_frame)
+                (void)state_deliver(&state_c, body, length, now, &state_c_tag);
+        else if (how & 0x10)
+                (void)state_deliver(&state_b, body, length, now, &state_b_tag);
+        else
+        {
+                tainted |= tracked_ack;
+                (void)state_deliver(&state_a, body, length, now, &state_a_tag);
+        }
+}
+
+static void state_replay(void)
+{
+        p8 how = take();
+        p64 counter;
+        bool want, got;
+
+        if (replay_count == array_count(replay_accepted))
+                return;
+        switch (how % 8)
+        {
+        case 0: counter = replay_top + 1; break;
+        case 1: counter = replay_top + 1 + take(); break;
+        case 2: counter = replay_top - (WATERLINK_REPLAY_WINDOW - 1); break;
+        case 3: counter = replay_top - WATERLINK_REPLAY_WINDOW; break;
+        case 4: counter = replay_top - take() * 9u; break;
+        case 5: counter = replay_top + ((p64)take() << (take() % 24)); break;
+        case 6: counter = replay_count ? replay_accepted[take() % replay_count] : 0; break;
+        default: counter = replay_top - 64 * (take() % 40) + take() % 64; break;
+        }
+        if (counter > replay_top)
+                want = true;
+        else if (replay_top - counter >= WATERLINK_REPLAY_WINDOW)
+                want = false;
+        else
+        {
+                want = true;
+                for (positive at = 0; at < replay_count; at++)
+                        if (replay_accepted[at] == counter)
+                                want = false;
+        }
+        got = waterlink_replay_new(&state_window, counter);
+        if (got != want)
+                abort();
+        if (got && replay_count < array_count(replay_accepted))
+        {
+                replay_accepted[replay_count++] = counter;
+                if (counter > replay_top)
+                        replay_top = counter;
+        }
+}
+
+/*      Everything posted, brought across a network that loses nothing: the
+        clock past any timer each round, the reader taking everything. It
+        can take many rounds and still be right: a hold-back pool the script
+        filled with frames ahead of a gap -- a stream's own, or a peer's on
+        keys nobody reads -- spills what arrives beyond it, the sender times
+        that out and starts again from the least window, and only the next
+        frame in order is always taken (one script took 73 rounds). A stall
+        is a round count no such script reaches. */
+static void state_drain(p64 now)
+{
+        reader_refuses = false;
+        for (positive round = 0; round < 1024; round++)
+        {
+                now += WATERLINK_RTO_MOST + 1000;
+                for (p8 key = 0; key < WATERLINK_KEYS; key++)
+                        if (waterlink_paused(&state_b, key))
+                                waterlink_resume(&state_b, key, state_sink, &state_b_tag);
+                for (positive turn = 0; turn < 4 * WATERLINK_SLOTS; turn++)
+                {
+                        positive used = state_fill_one(&state_a, now, network[0][0]);
+
+                        if (!used)
+                                break;
+                        if (!state_deliver(&state_b, network[0][0], used, now, &state_b_tag))
+                                abort();
+                }
+                for (positive turn = 0; turn < 64; turn++)
+                {
+                        positive used = state_fill_one(&state_b, now, network[1][0]);
+
+                        if (!used)
+                                break;
+                        if (!state_deliver(&state_a, network[1][0], used, now, &state_a_tag))
+                                abort();
+                }
+                if (waterlink_idle(&state_a) && waterlink_idle(&state_b))
+                        break;
+        }
+        state_check(3);
+        for (p8 key = 0; key < WL_TRACKED; key++)
+                if (posted_class[key] && taken[key] != posted_last[key])
+                {
+                        fprintf(stderr, "drain: key %u (%s) took %u of %u\n", key,
+                                posted_class[key] == WATERLINK_FRAME_DURABLE
+                                        ? "stream" : "register",
+                                taken[key], posted_last[key]);
+                        abort();
+                }
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        p64 now = 1000;
+
+        if (!wl_page)
+        {
+                wl_page = sysconf(_SC_PAGESIZE);
+                state_body = guard_region(WATERLINK_PAYLOAD + 1);
+                state_fill = guard_region(WATERLINK_PAYLOAD);
+        }
+        script = data;
+        script_left = size;
+        waterlink_link_reset(&state_a);
+        waterlink_link_reset(&state_b);
+        waterlink_link_reset(&state_c);
+        memset(posted_length, 0, sizeof posted_length);
+        memset(posted_class, 0, sizeof posted_class);
+        memset(posted_last, 0, sizeof posted_last);
+        memset(taken, 0, sizeof taken);
+        memset(taken_over, 0, sizeof taken_over);
+        memset(&state_window, 0, sizeof state_window);
+        memset(network_count, 0, sizeof network_count);
+        replay_count = 0;
+        replay_top = 0;
+        reader_refuses = tainted = false;
+
+        while (script_left)
+        {
+                p8 op = take();
+                int touched = 0;
+
+                switch (op % 16)
+                {
+                case 0: case 1: case 2: state_post(now); touched = 1; break;
+                case 3: case 4: state_send(0, now); touched = 1; break;
+                case 5: case 6: state_arrive(0, now, (op & 0x30) == 0x30, (op & 0x30) == 0x10);
+                        touched = 2;
+                        break;
+                case 7: state_send(1, now); touched = 2; break;
+                case 8: state_arrive(1, now, (op & 0x30) == 0x30, (op & 0x30) == 0x10);
+                        touched = 1;
+                        break;
+                case 9: now += op & 0x10 ? WATERLINK_RTO_MOST / 2 * (1 + take() % 4)
+                                         : 1 + take() * 37u;
+                        break;
+                case 10: reader_refuses = !reader_refuses; break;
+                case 11:
+                {
+                        p8 key = take();
+
+                        waterlink_resume(&state_b, op & 0x10 ? key : key % WL_TRACKED,
+                                         state_sink, &state_b_tag);
+                        touched = 2;
+                        break;
+                }
+                case 12: state_hostile(now); touched = 7; break;
+                case 13: case 14: state_replay(); break;
+                default:
+                        (void)waterlink_wake(&state_a, now);
+                        (void)waterlink_wake(&state_b, now);
+                        if (waterlink_post(&state_a, take() | WATERLINK_KEYS,
+                                           WATERLINK_FRAME_DURABLE, 0, 0, now) ||
+                            waterlink_post(&state_a, 1, take() | WATERLINK_FRAME_ACK, 0,
+                                           0, now))
+                                abort();
+                        touched = 1;
+                        break;
+                }
+                state_check(touched);
+        }
+        if (!tainted)
+                state_drain(now);
+        return 0;
+}
+'''
+
+
+def harness_waterlink_fuzz(argv):
+    """The waterlink core as a state machine under libFuzzer: a script of
+    posts, fills, losses, repeats, reorders, acknowledgements, clock jumps,
+    reader pauses, hostile bodies and replay-window counters over two links,
+    the lists of both checked after every step, streams exactly once and in
+    order, registers only newer, every payload what was posted, fill writing
+    nothing past what it returns, the replay window against a model, and a
+    lossless drain at the end that must bring everything across.
+
+    The core is waterlink_sanitized's lift: on an x86_64 ELF host the judge,
+    fill and apply are the tree's assembly (with the body flush against a
+    guard page); under MOONWATER_MSAN=1, whose shadow the assembly's stores
+    would not reach, test/checks.c's C references stand in. Seeds come from
+    waterlink_fuzz_seeds. lane_waterlink runs the bounded smoke; `sh test/run
+    fuzz` runs it for as long as the TLS targets.
+
+        waterlink_fuzz
+    """
+    del argv
+    import platform
+    lifted = harness_waterlink_sanitized([], lift=True)
+    if not isinstance(lifted, tuple):
+        print("waterlink fuzz: NOT RUN -- no C compiler")
+        return 2
+    core_source, shim = lifted
+    with_asm = (platform.system() != "Darwin" and
+                platform.machine() in ("x86_64", "amd64") and
+                not moonwater_msan_requested())
+    #   The lists are walked after every step; tracing their compares for
+    #   coverage cost four fifths of the run and found nothing new.
+    source = ("#define WL_STATE 1\n#define WL_QUIET __attribute__((no_sanitize("
+              "\"coverage\")))\n" + core_source(with_asm, False, WATERLINK_FUZZ_DRIVER))
+    return tls_fuzz_run("waterlink", "waterlink", source, 4096)
+
+
 HARNESS_CHECKS = {
     "https_bench": harness_https_bench,
     "compression": harness_compression,
@@ -45370,6 +45877,7 @@ HARNESS_CHECKS = {
     "waterlink_noise": harness_waterlink_noise,
     "waterlink_mdns": harness_waterlink_mdns,
     "waterlink_sanitized": harness_waterlink_sanitized,
+    "waterlink_fuzz": harness_waterlink_fuzz,
     "waterlink_link": harness_waterlink_link,
 }
 

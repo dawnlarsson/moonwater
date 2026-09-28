@@ -165,7 +165,7 @@ describe()
         install)  echo "Moonwater installed to a disk, started from it, asked about and updated from a stick" ;;
         canvas)   echo "what is actually on the screen, read back a pixel at a time" ;;
         wifi)     echo "networks in the air of a machine with simulated radios, joined and listed" ;;
-        fuzz)     echo "the TLS DER, handshake and verify fuzz targets for an hour each, or a release report" ;;
+        fuzz)     echo "the TLS DER, handshake and verify fuzz targets and the waterlink core's for an hour each, or a release report" ;;
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
         esac
 }
@@ -2543,6 +2543,11 @@ lane_waterlink()
         #       see a memory-safety bug in. It builds itself, so it stands
         #       outside the native-binary gate above.
         python3 test/differential.py --harness waterlink_sanitized
+        case $? in 0|2) ;; *) waterlink_outcome=1 ;; esac
+        #       The core as a state machine under libFuzzer, and command.c's
+        #       machine-script scan under ASan: a short smoke here, as long as
+        #       the TLS targets under lane_fuzz.
+        python3 test/differential.py --harness waterlink_fuzz
         case $? in 0|2) ;; *) waterlink_outcome=1 ;; esac
         return "$waterlink_outcome"
 }
