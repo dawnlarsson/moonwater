@@ -5135,6 +5135,34 @@ static COLD string_address expand_arithmetic_complex(string_address step,
         return expand_arithmetic_finish(arith_expand_body(text), stop, quoted);
 }
 
+/*
+        $[ expr ], the spelling bash kept from before $(( )): the same
+        arithmetic, closed by the ] that matches its [. With no match it is
+        the two bytes it looks like.
+*/
+static string_address expand_simple(string_address step, bool quoted);
+
+static COLD string_address expand_arithmetic_legacy(string_address step,
+                                                    bool quoted)
+{
+        string_address inner = step + 2;
+        string_address stop = expand_bracket_end_quoted(inner, '[', ']', false,
+                                                       false);
+        p8 text_local[EXPAND_LOCAL_TEXT];
+        string_address text;
+
+        if (!stop)
+                return expand_simple(step, quoted);
+
+        text = expand_hold(inner, (positive)(stop - inner), text_local,
+                           sizeof(text_local));
+        if (!text)
+                return stop + 1;
+
+        return expand_arithmetic_finish(arith_expand_body(text), stop - 1,
+                                        quoted);
+}
+
 static HOT __attribute__((noinline)) string_address expand_arithmetic(
         string_address step, bool quoted)
 {
@@ -8733,6 +8761,8 @@ static string_address expand_dollar(string_address step, bool quoted)
                 result = expand_command(step, quoted);
         else if (next == '{')
                 result = expand_braced(step, quoted);
+        else if (next == '[' && shell_bash_compat)
+                result = expand_arithmetic_legacy(step, quoted);
         else
                 result = expand_simple(step, quoted);
 

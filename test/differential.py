@@ -14630,6 +14630,16 @@ def shell_lang_readonly_arrays(rng):
         'echo "${#a[@]}:${a[*]}"', 'echo "end=$?"'))
 
 
+#       $[ expr ], the spelling bash kept from before $(( )): this printed
+#       it as it stands, and a list of files for $[*].
+def shell_lang_legacy_arithmetic(rng):
+    expr = rng.choice(("1+2", " 1 + 2 ", "x*3", "$x+1", "(1+2)*3", "a[1]", "x > 2 ? 7 : 8", "1/0", "", "$[1+1]*2"))
+    line = rng.choice(('echo $[%s]', 'echo "$[%s]"', 'y=$[%s]; echo "$y"', 'echo x$[%s]y')) % expr
+    return ("legacy-arithmetic", shell_BASH, shell_program(
+        "x=5; a=(4 9)", line + " 2>&1 | sed 's/^[^:]*: line [0-9]*: //'", 'echo "end=$?"'),
+        ("command", "stdin", "file"))
+
+
 #       Digits in front of > are a descriptor only while they fit one: bash
 #       reads a number past INT_MAX there as an ordinary word, so `echo a
 #       2147483648>f` writes "a 2147483648" to f. This called it a syntax
@@ -17495,6 +17505,7 @@ SHELL_FAMILIES = (
     shell_lang_fd_prefix_range,
     shell_lang_case_substitution_lines,
     shell_lang_readonly_arrays,
+    shell_lang_legacy_arithmetic,
     shell_lang_set_lone_plus,
     shell_lang_directory_state,
     shell_lang_builtin_refusals,

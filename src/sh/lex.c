@@ -538,6 +538,11 @@ static string_address lex_nested_at(string_address at)
             (string_get(at + 1) == '(' || string_get(at + 1) == '{'))
                 return at + 1;
 
+        //      bash's old spelling of $(( )): $[ expr ].
+        if (shell_bash_compat && string_get(at) == '$' &&
+            string_get(at + 1) == '[')
+                return at + 1;
+
         return null;
 }
 
@@ -820,7 +825,8 @@ static string_address lex_nesting_at(string_address at, positive nesting,
                                      bool posix_double)
 {
         p8 open = string_get(at);
-        p8 close = open == '(' ? ')' : open == '{' ? '}' : open;
+        p8 close = open == '(' ? ')' : open == '{' ? '}'
+                 : open == '[' ? ']' : open;
         positive depth = 0;
         string_address step = at;
         string_address line = at + 1;
@@ -940,7 +946,8 @@ static string_address lex_nesting_at(string_address at, positive nesting,
                    Walk it independently so its comment state and closing
                    delimiter cannot leak into the containing word. */
                 if ((c == '$' &&
-                     (string_is(step + 1, '(') || string_is(step + 1, '{'))) ||
+                     (string_is(step + 1, '(') || string_is(step + 1, '{') ||
+                      (shell_bash_compat && string_is(step + 1, '[')))) ||
                     ((c == '<' || c == '>') && string_is(step + 1, '(')) ||
                     (c == '`' && open != '`'))
                 {
@@ -1586,7 +1593,9 @@ static KEEP b32 lex_word(string_address address_to at)
                         if (c == '`')
                                 stop = lex_nesting(step - 1);
                         else if (c == '$' && (string_get(step) == '(' ||
-                                              string_get(step) == '{'))
+                                              string_get(step) == '{' ||
+                                              (shell_bash_compat &&
+                                               string_get(step) == '[')))
                                 stop = lex_nesting(step);
 
                         if (stop && stop > step)
