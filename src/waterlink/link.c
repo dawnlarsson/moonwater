@@ -1416,12 +1416,15 @@ p64 waterlink_wake(struct waterlink_link address_to link, p64 now)
         return wake;
 }
 
-// Nothing queued, nothing in flight and nothing owed: the link can close.
+/*
+        Every frame taken by the far side's application and nothing owed: the
+        link can close. Not only nothing queued or in flight -- a frame the
+        far side holds for a reader that is behind is not delivered yet, and
+        closing then would drop it there.
+*/
 bool waterlink_idle(struct waterlink_link address_to link)
 {
-        return link->head[WATERLINK_BAND_URGENT] == WATERLINK_NONE &&
-               link->head[WATERLINK_BAND_NORMAL] == WATERLINK_NONE &&
-               link->flight_head == WATERLINK_NONE && !link->acking;
+        return link->free_count == WATERLINK_SLOTS && !link->acking;
 }
 
 /*
