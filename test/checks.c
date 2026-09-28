@@ -57803,9 +57803,63 @@ static positive x25519_check_whole(void)
 }
 #endif
 
+#ifndef KERNEL_MODE
+/*
+        What x25519 leaves under the stack once it returns: its frame holds
+        the clamped scalar a word at a time through the whole ladder, so a
+        wipe that is missing leaves the secret key below the stack pointer.
+        One call a frame down, then a sibling reads the two kilobytes under
+        it -- every body's frame fits -- for any word of the clamped scalar.
+*/
+static __attribute__((noinline, noclone)) fn x25519_residue_call(
+    p8 address_to out, const p8 address_to scalar, const p8 address_to u)
+{
+        x25519(out, scalar, u);
+}
+
+static __attribute__((noinline, noclone)) positive x25519_residue_scan(
+    const p64 address_to words)
+{
+        volatile p64 window[256];
+        positive found = 0;
+
+        for (positive i = 0; i < array_count(window); i++)
+                for (positive j = 0; j < 4; j++)
+                        found += window[i] == words[j];
+        return found;
+}
+
+static positive x25519_residue(void)
+{
+        static const p8 nine[32] = {9};
+        p8 scalar[32], out[32];
+        p64 words[4];
+        positive found = 0;
+        p8 mulx;
+
+        x25519(out, nine, nine);
+        mulx = cpu_has_mulx;
+        for (positive i = 0; i < 32; i++)
+                scalar[i] = (p8)(0xa5 ^ (i * 29));
+        memory_copy(words, scalar, 32);
+        words[0] &= ~7ull;
+        words[3] = (words[3] & 0x7fffffffffffffffull) | 0x4000000000000000ull;
+        for (positive body = 0; body < 2; body++)
+        {
+                cpu_has_mulx = body ? 0 : mulx;
+                x25519_residue_call(out, scalar, nine);
+                found += x25519_residue_scan(words);
+        }
+        cpu_has_mulx = mulx;
+        return found;
+}
+#endif
+
 static fn crypto_floor_x25519(void)
 {
 #ifndef KERNEL_MODE
+        check("x25519 leaves no word of the clamped scalar on the stack",
+              x25519_residue() == 0);
 #if X64
         static const p8 nine[32] = {9};
         p8 probe[32];
