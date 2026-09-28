@@ -33510,8 +33510,14 @@ static b32 text_cmp()
         What is left is the six levels of precedence below, weakest first,
         and a value that is either a number or a string and knows which.
 
+        Integers are of any size, as GNU's are with GMP: a sum, difference,
+        product, quotient or remainder that fits sixty-four bits is worked
+        there, and one that does not -- or an operand that does not -- is
+        worked on the decimal digits and kept as its decimal string.
+
         Status is not the usual one. Zero means the value is neither empty nor
-        zero, one means it is, and two means the expression was not one.
+        zero, one means it is, two means the expression was not one, and
+        three that the regular expression matcher failed.
 */
 typedef struct
 {
@@ -33538,6 +33544,20 @@ static fn expr_stop(string_address reason)
         expr_fault = 1;
 }
 
+// A syntax error that names a word, in locale quotes as GNU's does.
+static fn expr_stop_at(string_address reason, string_address word)
+{
+        if (!expr_fault)
+        {
+                text_flush();
+                string_format(writer_stderr, "%s: syntax error: %s '%w'\n",
+                              text_name, reason, writer_terminal_quoted_name,
+                              word);
+        }
+
+        expr_fault = 1;
+}
+
 static string_address expr_keep(string_address from, positive length)
 {
         p8 address_to made = length == (positive)-1
@@ -33546,7 +33566,7 @@ static string_address expr_keep(string_address from, positive length)
 
         if (!made)
         {
-                expr_stop("expression too long");
+                expr_stop("memory exhausted");
                 return expr_empty;
         }
 
@@ -33570,8 +33590,24 @@ static string_address expr_shown(expr_value address_to value)
         return value->text;
 }
 
-// A string is a number only when the whole of it is one; " 1" and "1x" are
-// strings, which is why the walk has to reach the terminator.
+// An optional minus and digits, nothing else: +1 and " 1" are strings to
+// GNU expr, and so they are here.
+static bool expr_looks_integer(expr_value address_to value)
+{
+        if (!value->text)
+                return true;
+
+        positive at = value->text[0] == '-';
+
+        if (!byte_is_digit(value->text[at]))
+                return false;
+
+        at += string_span(value->text + at, string_set_digits);
+
+        return !value->text[at];
+}
+
+// An integer that fits sixty-four bits signed, and its value.
 static bool expr_integer(expr_value address_to value, bipolar address_to out)
 {
         if (!value->text)
@@ -33580,38 +33616,328 @@ static bool expr_integer(expr_value address_to value, bipolar address_to out)
                 return true;
         }
 
-        // An optional minus and digits, nothing else: +1 and " 1" are
-        // strings to GNU expr, and so they are here.
-        positive at = value->text[0] == '-';
-
-        if (!byte_is_digit(value->text[at]))
+        if (!expr_looks_integer(value))
                 return false;
 
-        at += string_span(value->text + at, string_set_digits);
+        string_address at = value->text;
+        bool negative = at[0] == '-';
+        positive made = 0;
 
-        if (value->text[at])
-                return false;
+        at += negative;
+        for (; *at; at++)
+        {
+                positive digit = (positive)(*at - '0');
 
-        positive taken;
-        address_to out = string_bipolar(value->text, address_of taken);
+                if (made > ((positive)1 << 63) / 10 ||
+                    made * 10 + digit < made * 10 ||
+                    made * 10 + digit > ((positive)1 << 63) - !negative)
+                        return false;
+                made = made * 10 + digit;
+        }
 
+        address_to out = negative ? (bipolar)(0 - made) : (bipolar)made;
         return true;
+}
+
+// The magnitude of an integer-looking value: its digits with the leading
+// zeros gone (zero keeps one), and its sign.
+typedef struct
+{
+        string_address digits;
+        positive length;
+        bool negative;
+} expr_magnitude;
+
+static expr_magnitude expr_magnitude_of(expr_value address_to value)
+{
+        string_address text = expr_shown(value);
+        expr_magnitude made;
+
+        made.negative = text[0] == '-';
+        text += made.negative;
+        while (text[0] == '0' && text[1])
+                text++;
+        made.digits = text;
+        made.length = string_length(text);
+        if (made.length == 1 && text[0] == '0')
+                made.negative = false;
+        return made;
+}
+
+static bipolar expr_magnitude_compare(expr_magnitude address_to a,
+                                      expr_magnitude address_to b)
+{
+        if (a->length != b->length)
+                return a->length < b->length ? -1 : 1;
+
+        for (positive at = 0; at < a->length; at++)
+                if (a->digits[at] != b->digits[at])
+                        return a->digits[at] < b->digits[at] ? -1 : 1;
+
+        return 0;
+}
+
+// strintcmp's order of two integer strings of any length.
+static bipolar expr_integers_compare(expr_value address_to left,
+                                     expr_value address_to right)
+{
+        expr_magnitude a = expr_magnitude_of(left);
+        expr_magnitude b = expr_magnitude_of(right);
+
+        if (a.negative != b.negative)
+                return a.negative ? -1 : 1;
+
+        bipolar order = expr_magnitude_compare(address_of a, address_of b);
+        return a.negative ? -order : order;
+}
+
+/*
+        Digits are worked least significant first in a scratch run of the
+        arena, one byte a digit, and written out as a string once the length
+        is known.
+*/
+static expr_value expr_digits_value(p8 address_to digits, positive length,
+                                    bool negative)
+{
+        expr_value made = {null, 0};
+
+        while (length > 1 && !digits[length - 1])
+                length--;
+        if (length == 1 && !digits[0])
+                negative = false;
+
+        p8 address_to text = (p8 address_to)utility_arena_take(length + 2);
+
+        if (!text)
+        {
+                expr_stop("memory exhausted");
+                made.text = expr_empty;
+                return made;
+        }
+
+        positive at = 0;
+
+        if (negative)
+                text[at++] = '-';
+        for (positive digit = length; digit; digit--)
+                text[at++] = (p8)('0' + digits[digit - 1]);
+        text[at] = 0;
+        made.text = text;
+        return made;
+}
+
+static p8 address_to expr_scratch(positive length)
+{
+        p8 address_to made = (p8 address_to)utility_arena_take(length ? length : 1);
+
+        if (!made)
+                expr_stop("memory exhausted");
+        else
+                memory_fill(made, 0, length ? length : 1);
+        return made;
+}
+
+// |a| + |b| or |a| - |b| (with |a| >= |b|), least significant first.
+static expr_value expr_magnitudes_add(expr_magnitude address_to a,
+                                      expr_magnitude address_to b,
+                                      bool subtract, bool negative)
+{
+        positive length = max(a->length, b->length) + 1;
+        p8 address_to sum = expr_scratch(length);
+        expr_value failed = {expr_empty, 0};
+
+        if (!sum)
+                return failed;
+
+        bipolar carry = 0;
+
+        for (positive at = 0; at < length; at++)
+        {
+                bipolar digit = carry;
+
+                if (at < a->length)
+                        digit += a->digits[a->length - 1 - at] - '0';
+                if (at < b->length)
+                        digit += subtract ? -(bipolar)(b->digits[b->length - 1 - at] - '0')
+                                          : (bipolar)(b->digits[b->length - 1 - at] - '0');
+                carry = digit < 0 ? -1 : digit / 10;
+                digit -= carry * 10;
+                sum[at] = (p8)digit;
+        }
+
+        return expr_digits_value(sum, length, negative);
+}
+
+static expr_value expr_big_sum(expr_value address_to left,
+                               expr_value address_to right, bool subtract)
+{
+        expr_magnitude a = expr_magnitude_of(left);
+        expr_magnitude b = expr_magnitude_of(right);
+        bool b_negative = b.negative != subtract;
+
+        if (a.negative == b_negative)
+                return expr_magnitudes_add(address_of a, address_of b, false,
+                                           a.negative);
+
+        if (expr_magnitude_compare(address_of a, address_of b) >= 0)
+                return expr_magnitudes_add(address_of a, address_of b, true,
+                                           a.negative);
+
+        return expr_magnitudes_add(address_of b, address_of a, true,
+                                   b_negative);
+}
+
+static expr_value expr_big_product(expr_value address_to left,
+                                   expr_value address_to right)
+{
+        expr_magnitude a = expr_magnitude_of(left);
+        expr_magnitude b = expr_magnitude_of(right);
+        positive length = a.length + b.length;
+        positive address_to wide = (positive address_to)utility_arena_take(
+            length * sizeof(positive));
+        p8 address_to digits = expr_scratch(length);
+        expr_value failed = {expr_empty, 0};
+
+        if (!wide || !digits)
+        {
+                expr_stop("memory exhausted");
+                return failed;
+        }
+
+        memory_fill(wide, 0, length * sizeof(positive));
+        for (positive i = 0; i < a.length; i++)
+        {
+                positive x = (positive)(a.digits[a.length - 1 - i] - '0');
+
+                if (!x)
+                        continue;
+                for (positive j = 0; j < b.length; j++)
+                        wide[i + j] += x * (positive)(b.digits[b.length - 1 - j] - '0');
+                // Keep each column small enough that the sums never wrap.
+                if ((i & 0xffff) == 0xffff)
+                        for (positive k = 0; k + 1 < length; k++)
+                        {
+                                wide[k + 1] += wide[k] / 10;
+                                wide[k] %= 10;
+                        }
+        }
+
+        positive carry = 0;
+
+        for (positive at = 0; at < length; at++)
+        {
+                positive column = wide[at] + carry;
+
+                digits[at] = (p8)(column % 10);
+                carry = column / 10;
+        }
+
+        return expr_digits_value(digits, length, a.negative != b.negative);
+}
+
+/*
+        Long division on the digits, truncating toward zero as mpz_tdiv_q
+        and mpz_tdiv_r do: the quotient takes the sign of the two, the
+        remainder the sign of the dividend.
+*/
+static expr_value expr_big_divide(expr_value address_to left,
+                                  expr_value address_to right, bool remainder)
+{
+        expr_magnitude a = expr_magnitude_of(left);
+        expr_magnitude b = expr_magnitude_of(right);
+        p8 address_to quotient = expr_scratch(a.length);
+        // The running remainder, most significant first, never longer than
+        // the divisor and one digit.
+        p8 address_to rest = expr_scratch(b.length + 1);
+        expr_value failed = {expr_empty, 0};
+
+        if (!quotient || !rest)
+                return failed;
+
+        positive used = 0;
+
+        for (positive at = 0; at < a.length; at++)
+        {
+                // rest = rest * 10 + next digit, dropping a leading zero.
+                if (used == 1 && !rest[0])
+                        used = 0;
+                rest[used++] = (p8)(a.digits[at] - '0');
+
+                p8 count = 0;
+
+                for (;;)
+                {
+                        bipolar order = used != b.length
+                                            ? (used < b.length ? -1 : 1)
+                                            : 0;
+
+                        for (positive k = 0; !order && k < used; k++)
+                                if (rest[k] != (p8)(b.digits[k] - '0'))
+                                        order = rest[k] < (p8)(b.digits[k] - '0') ? -1 : 1;
+                        if (order < 0)
+                                break;
+
+                        bipolar borrow = 0;
+
+                        for (positive k = used; k; k--)
+                        {
+                                positive from_end = used - k;
+                                bipolar digit = (bipolar)rest[k - 1] - borrow -
+                                                (from_end < b.length
+                                                     ? (bipolar)(b.digits[b.length - 1 - from_end] - '0')
+                                                     : 0);
+
+                                borrow = digit < 0;
+                                rest[k - 1] = (p8)(digit + 10 * borrow);
+                        }
+
+                        positive lead = 0;
+
+                        while (lead + 1 < used && !rest[lead])
+                                lead++;
+                        if (lead)
+                        {
+                                memory_copy(rest, rest + lead, used - lead);
+                                used -= lead;
+                        }
+                        count++;
+                }
+
+                quotient[a.length - 1 - at] = count;
+        }
+
+        if (!remainder)
+                return expr_digits_value(quotient, a.length,
+                                         a.negative != b.negative);
+
+        p8 address_to low_first = expr_scratch(used);
+
+        if (!low_first)
+                return failed;
+        for (positive k = 0; k < used; k++)
+                low_first[k] = rest[used - 1 - k];
+        return expr_digits_value(low_first, used, a.negative);
 }
 
 static bool expr_true(expr_value address_to value)
 {
-        bipolar number;
-
         if (!value->text)
                 return value->number != 0;
 
-        if (!string_get(value->text))
+        // GNU's null(): empty, or an optional minus and zeros only.
+        string_address at = value->text;
+
+        if (!*at)
                 return false;
+        at += *at == '-';
+        do
+        {
+                if (*at != '0')
+                        return true;
+        }
+        while (*++at);
 
-        if (expr_integer(value, address_of number))
-                return number != 0;
-
-        return true;
+        return false;
 }
 
 static expr_value expr_zero()
@@ -33631,6 +33957,16 @@ static bool expr_is(string_address text)
         string_address word = expr_word();
 
         return word && string_equals(word, text);
+}
+
+// require_more_args: the word before is named when the words run out.
+static bool expr_more()
+{
+        if (expr_at < expr_count)
+                return true;
+
+        expr_stop_at("missing argument after", program_argument(expr_at - 1));
+        return false;
 }
 
 /*
@@ -33687,40 +34023,41 @@ static expr_value expr_matched(expr_value address_to subject,
         return made;
 }
 
+/*
+        getsize: a position or length as a count, where a negative one is
+        the largest count and one too large to hold is the one below it.
+*/
+static positive expr_size(expr_value address_to value)
+{
+        bipolar small;
+
+        if (expr_integer(value, address_of small))
+                return small < 0 ? positive_max : (positive)small;
+
+        return expr_shown(value)[0] == '-' ? positive_max : positive_max - 1;
+}
+
 static expr_value expr_any();
 
 static expr_value expr_primary()
 {
         expr_value made = expr_zero();
-        string_address word = expr_word();
 
-        if (!word)
-        {
-                expr_stop("syntax error");
+        if (!expr_more())
                 return made;
-        }
+
+        string_address word = expr_word();
 
         /* A leading plus quotes one otherwise-special operand. This is how
            GNU expr makes `expr + length` mean the literal word "length". */
         if (!string_compare(word, "+"))
         {
                 expr_at++;
-                word = expr_word();
-
-                if (!word)
-                {
-                        expr_stop("syntax error");
+                if (!expr_more())
                         return made;
-                }
 
+                made.text = expr_word();
                 expr_at++;
-                made.text = word;
-                return made;
-        }
-
-        if (!string_compare(word, ")"))
-        {
-                expr_stop("syntax error: unexpected ')'");
                 return made;
         }
 
@@ -33732,14 +34069,26 @@ static expr_value expr_primary()
                 if (expr_fault)
                         return made;
 
+                if (expr_at >= expr_count)
+                {
+                        expr_stop_at("expecting ')' after",
+                                     program_argument(expr_at - 1));
+                        return made;
+                }
                 if (!expr_is(")"))
                 {
-                        expr_stop("syntax error");
+                        expr_stop_at("expecting ')' instead of", expr_word());
                         return made;
                 }
 
                 expr_at++;
 
+                return made;
+        }
+
+        if (!string_compare(word, ")"))
+        {
+                expr_stop("syntax error: unexpected ')'");
                 return made;
         }
 
@@ -33749,6 +34098,8 @@ static expr_value expr_primary()
 
                 expr_at++;
                 of = expr_primary();
+                if (expr_fault)
+                        return made;
                 made.number = (bipolar)string_length(expr_shown(address_of of));
 
                 return made;
@@ -33761,10 +34112,15 @@ static expr_value expr_primary()
 
                 expr_at++;
                 subject = expr_primary();
+                if (expr_fault)
+                        return made;
                 pattern = expr_primary();
 
                 if (expr_fault)
                         return made;
+
+                if (expr_dead)
+                        return subject;
 
                 return expr_matched(address_of subject, address_of pattern);
         }
@@ -33778,6 +34134,8 @@ static expr_value expr_primary()
 
                 expr_at++;
                 of = expr_primary();
+                if (expr_fault)
+                        return made;
                 set = expr_primary();
 
                 if (expr_fault)
@@ -33799,32 +34157,36 @@ static expr_value expr_primary()
                 expr_value of;
                 expr_value from;
                 expr_value span;
-                string_address text;
-                positive whole;
-                bipolar start;
-                bipolar length;
 
                 expr_at++;
                 of = expr_primary();
+                if (expr_fault)
+                        return made;
                 from = expr_primary();
+                if (expr_fault)
+                        return made;
                 span = expr_primary();
 
                 if (expr_fault)
                         return made;
 
-                text = expr_shown(address_of of);
-                whole = string_length(text);
+                string_address text = expr_shown(address_of of);
+                positive whole = string_length(text);
+
                 made.text = expr_empty;
 
-                if (!expr_integer(address_of from, address_of start) ||
-                    !expr_integer(address_of span, address_of length) ||
-                    start < 1 || length < 1 || (positive)start > whole)
+                if (!expr_looks_integer(address_of from) ||
+                    !expr_looks_integer(address_of span))
                         return made;
 
-                if ((positive)start - 1 + (positive)length > whole)
-                        length = (bipolar)(whole - ((positive)start - 1));
+                positive start = expr_size(address_of from);
+                positive length = expr_size(address_of span);
 
-                made.text = expr_keep(text + start - 1, (positive)length);
+                if (!start || length == positive_max || start > whole)
+                        return made;
+
+                length = min(length, whole - start + 1);
+                made.text = expr_keep(text + start - 1, length);
 
                 return made;
         }
@@ -33849,29 +34211,54 @@ static expr_value expr_match_level()
                 if (expr_fault)
                         break;
 
-                left = expr_matched(address_of left, address_of right);
+                if (!expr_dead)
+                        left = expr_matched(address_of left, address_of right);
         }
 
         return left;
 }
 
-static bool expr_pair(expr_value address_to left, expr_value address_to right,
-                      bipolar address_to a, bipolar address_to b)
+/*
+        A sum, difference, product, quotient or remainder: in sixty-four
+        bits when both fit and the answer does, on the digits otherwise.
+*/
+static expr_value expr_arithmetic(positive operation, expr_value address_to left,
+                                  expr_value address_to right)
 {
-        if (expr_integer(left, a) && expr_integer(right, b))
-                return true;
+        expr_value made = expr_zero();
+        bipolar a, b;
 
-        if (expr_dead)
+        if (expr_integer(left, address_of a) && expr_integer(right, address_of b))
         {
-                address_to a = 0;
-                address_to b = 0;
+                bool over = false;
 
-                return true;
+                switch (operation)
+                {
+                case 8: over = __builtin_add_overflow(a, b, address_of made.number); break;
+                case 9: over = __builtin_sub_overflow(a, b, address_of made.number); break;
+                case 10: over = __builtin_mul_overflow(a, b, address_of made.number); break;
+                case 11:
+                        over = b == -1 && a == (bipolar)((positive)1 << 63);
+                        if (!over)
+                                made.number = a / b;
+                        break;
+                default:
+                        made.number = b == -1 ? 0 : a % b;
+                        break;
+                }
+
+                if (!over)
+                        return made;
         }
 
-        expr_stop("non-integer argument");
-
-        return false;
+        switch (operation)
+        {
+        case 8: return expr_big_sum(left, right, false);
+        case 9: return expr_big_sum(left, right, true);
+        case 10: return expr_big_product(left, right);
+        case 11: return expr_big_divide(left, right, false);
+        default: return expr_big_divide(left, right, true);
+        }
 }
 
 /* One precedence walk owns operand sequencing and short-circuit suppression.
@@ -33893,8 +34280,11 @@ static expr_value expr_binary(positive minimum)
                 if ((operation == 4 || operation == 6) && word[1] == '=')
                         operation++;
                 bool paired = operation == 3 || operation == 5 || operation == 7;
-                if (word[1] != (paired ? '=' : 0) ||
-                    (paired && word[2]) || precedence[operation] < minimum)
+                bool equal_twice = operation == 2 && word[1] == '=' && !word[2];
+                if (!equal_twice &&
+                    (word[1] != (paired ? '=' : 0) || (paired && word[2])))
+                        break;
+                if (precedence[operation] < minimum)
                         break;
 
                 bool logical = operation < 2;
@@ -33924,13 +34314,16 @@ static expr_value expr_binary(positive minimum)
                         continue;
                 }
 
-                bipolar a, b;
+                if (expr_dead)
+                        continue;
+
                 if (operation < 8)
                 {
                         bipolar order;
-                        if (expr_integer(address_of left, address_of a) &&
-                            expr_integer(address_of right, address_of b))
-                                order = a < b ? -1 : a > b;
+                        if (expr_looks_integer(address_of left) &&
+                            expr_looks_integer(address_of right))
+                                order = expr_integers_compare(address_of left,
+                                                              address_of right);
                         else
                                 order = string_compare(expr_shown(address_of left),
                                                        expr_shown(address_of right));
@@ -33947,30 +34340,19 @@ static expr_value expr_binary(positive minimum)
                         continue;
                 }
 
-                if (!expr_pair(address_of left, address_of right,
-                                address_of a, address_of b))
-                        break;
-                if (operation >= 11 && !b)
+                if (!expr_looks_integer(address_of left) ||
+                    !expr_looks_integer(address_of right))
                 {
-                        if (!expr_dead)
-                        {
-                                expr_stop("division by zero");
-                                break;
-                        }
-                        b = 1;
+                        expr_stop("non-integer argument");
+                        break;
+                }
+                if (operation >= 11 && !expr_true(address_of right))
+                {
+                        expr_stop("division by zero");
+                        break;
                 }
 
-                left.text = null;
-                switch (operation)
-                {
-                case 8: left.number = a + b; break;
-                case 9: left.number = a - b; break;
-                case 10: left.number = a * b; break;
-                // Sixty four bits wrap, and the one quotient that does not
-                // fit them is written as the wrap rather than left to trap.
-                case 11: left.number = b == -1 ? (bipolar)(0 - (positive)a) : a / b; break;
-                default: left.number = b == -1 ? 0 : a % b; break;
-                }
+                left = expr_arithmetic(operation, address_of left, address_of right);
         }
         return left;
 }
@@ -34005,7 +34387,7 @@ static b32 text_expr()
         result = expr_any();
 
         if (!expr_fault && expr_at < expr_count)
-                expr_stop("syntax error");
+                expr_stop_at("unexpected argument", expr_word());
 
         if (expr_fault)
                 return text_done(2);
