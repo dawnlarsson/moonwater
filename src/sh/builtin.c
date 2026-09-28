@@ -18333,6 +18333,13 @@ static bipolar shell_source_direct(string_address name)
         return handle;
 }
 
+/*
+        bash 5.3's `source -p PATH name` looks along PATH, the operand, and
+        nowhere else: not the current directory unless PATH names it, as an
+        empty one does, and whatever sourcepath says.
+*/
+static string_address shell_source_search;
+
 static bipolar shell_source_open(string_address name,
                                   p8 address_to address_to found,
                                   positive address_to found_room,
@@ -18340,6 +18347,7 @@ static bipolar shell_source_open(string_address name,
 {
         string_address value;
         path_walk walk;
+        string_address search = shell_source_search;
 
         if (!name || !string_get(name))
                 return -1;
@@ -18349,10 +18357,11 @@ static bipolar shell_source_open(string_address name,
 
         //      sourcepath off is cwd under bash, and nothing under posix:
         //      `. p` is not found even when p is in this directory.
-        if (shell_bash_compat && !shell_shopt_on(SOURCEPATH))
+        if (!search && shell_bash_compat && !shell_shopt_on(SOURCEPATH))
                 return shell_posix_on() ? -1 : shell_source_direct(name);
 
-        value = env_get("PATH");
+        value = search ? (string_get(search) ? search : (string_address) ".")
+                       : env_get("PATH");
 
         if (!value)
                 value = "/bin:/usr/bin:/";
@@ -18400,7 +18409,7 @@ static bipolar shell_source_open(string_address name,
         /* Bash's ordinary source policy falls back to the current directory.
            POSIX mode removes that fallback; dash only visits it when PATH
            explicitly contains a current-directory field. */
-        return shell_bash_compat && !shell_posix_on()
+        return shell_bash_compat && !shell_posix_on() && !search
                    ? shell_source_direct(name)
                    : -1;
 }
@@ -18514,6 +18523,13 @@ COLD fn shell_dot(writer write, string_address input)
         bipolar handle;
         positive first = 1;
 
+        shell_source_search = null;
+        if (shell_bash_compat && first + 1 < shell_argc &&
+            word_is(shell_argv[first], "-p"))
+        {
+                shell_source_search = shell_argv[first + 1];
+                first += 2;
+        }
         if (first < shell_argc && word_is(shell_argv[first], "--"))
                 first++;
         //      A word that looks like an option is one, and neither shell
@@ -18560,6 +18576,9 @@ COLD fn shell_dot(writer write, string_address input)
 
         handle = shell_source_open(path, address_of found, address_of found_room,
                                    address_of no_room);
+        bool searched_given = shell_source_search != null;
+
+        shell_source_search = null;
 
         if (handle >= 0)
                 got = shell_source_read(handle, address_of source_text,
@@ -18614,7 +18633,8 @@ COLD fn shell_dot(writer write, string_address input)
                                     code == ERROR_NO_ENTRY
                                         ? (string_address) "No such file"
                                         : why);
-                        else if (shell_posix_on() && searched)
+                        else if ((shell_posix_on() || searched_given) &&
+                                 searched)
                                 string_format(log_error,
                                     "%s: %s: file not found\n",
                                     shell_argv[0], path);

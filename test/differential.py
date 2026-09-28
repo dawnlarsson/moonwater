@@ -14763,6 +14763,16 @@ def shell_lang_read_trailing_delimiter(rng):
         "; for v in " + names + "; do eval \"printf '[%s]' \\\"\\$$v\\\"\"; done; echo; }"))
 
 
+#       bash 5.3's source -p PATH looks along the given PATH and nowhere
+#       else, the current directory only when PATH names it; -p was refused.
+def shell_lang_source_path(rng):
+    line = rng.choice((". -p sd f.sh", "source -p sd:. c.sh", ". -p sd c.sh", ". -p '' c.sh", "source -p sd f.sh a b",
+                       "shopt -u sourcepath; . -p sd f.sh", ". -p nowhere f.sh", ". f.sh"))
+    return ("source-path", shell_BASH, shell_program(
+        "mkdir -p sd; printf 'echo in-sd\\n' > sd/f.sh; printf 'echo in-cwd\\n' > c.sh",
+        line + " 2>&1 | sed 's/^.*: //'", 'echo "s=$?"'))
+
+
 #       Digits in front of > are a descriptor only while they fit one: bash
 #       reads a number past INT_MAX there as an ordinary word, so `echo a
 #       2147483648>f` writes "a 2147483648" to f. This called it a syntax
@@ -17627,6 +17637,7 @@ SHELL_FAMILIES = (
     shell_lang_builtin_discard,
     shell_lang_fd_prefix_range,
     shell_lang_case_substitution_lines,
+    shell_lang_source_path,
     shell_lang_read_trailing_delimiter,
     shell_lang_debug_trap_places,
     shell_lang_globignore,
