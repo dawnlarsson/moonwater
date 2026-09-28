@@ -2497,6 +2497,7 @@ static bool crypto_x25519(p8 address_to out, p8 address_to scalar, p8 address_to
    carries the rest. */
 #define CRYPTO_RSA_LIMBS 128
 #define CRYPTO_RSA_BYTES (CRYPTO_RSA_LIMBS * 8)
+#define CRYPTO_RSA_EXPONENT_BITS 33 /* BoringSSL's kMaxExponentBits */
 
 /* One, whose Montgomery product with an element in Montgomery form is the
    element as a plain integer. */
@@ -4031,7 +4032,11 @@ static fn crypto_rsa_modexp(p64 address_to out, p64 address_to base, p64 exp,
         crypto_rsa_multiply(out, result, crypto_unit, mod, inverse, n);
 }
 
-/* Decode the public operation once for both RSA signature encodings.  The
+/* Decode the public operation once for both RSA signature encodings.  An
+   exponent is held to CRYPTO_RSA_EXPONENT_BITS, BoringSSL's ceiling: every
+   real key uses 3 or 65537, and an 8192-bit modulus with a 64-bit exponent
+   made one verify 15.2M cycles, ~29 of which a hostile server can ask a
+   handshake to do; 33 bits halves that and refuses nothing Chrome takes.  The
    signature representative is an integer in [0,n), never an arbitrary byte
    string reduced modulo n, and a usable RSA public exponent is odd and at
    least three. */
@@ -4047,7 +4052,7 @@ static bool crypto_rsa_prepare(p8 address_to n_bytes, positive n_length,
             sig_length != n_length || !n_bytes[0] ||
             (n_length == 256 && !(n_bytes[0] & 0x80)) ||
             !(n_bytes[n_length - 1] & 1) || exponent < 3 ||
-            !(exponent & 1))
+            !(exponent & 1) || exponent >> CRYPTO_RSA_EXPONENT_BITS)
                 return false;
 
         address_to limbs = (n_length + 7) / 8;
@@ -6288,7 +6293,8 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
                                          der[value_at++];
                 at = e_stop;
                 if (at != rsa_stop || cert->exponent < 3 ||
-                    !(cert->exponent & 1))
+                    !(cert->exponent & 1) ||
+                    cert->exponent >> CRYPTO_RSA_EXPONENT_BITS)
                         return TLS_FAIL;
         }
         else

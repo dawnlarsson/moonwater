@@ -41034,7 +41034,7 @@ def tls_der_fuzz_lift_parts(net):
     #   include path, so the table comes in as text, and so do the RSA
     #   limits tls_cert is sized by (the verify lift's crypto slice repeats
     #   them word for word, which C allows).
-    limits = re.search(r"#define CRYPTO_RSA_LIMBS .*\n#define CRYPTO_RSA_BYTES .*\n", net)
+    limits = re.search(r"#define CRYPTO_RSA_LIMBS .*\n#define CRYPTO_RSA_BYTES .*\n#define CRYPTO_RSA_EXPONENT_BITS .*\n", net)
     if not limits:
         raise ValueError("CRYPTO_RSA_LIMBS / CRYPTO_RSA_BYTES")
     oids = limits.group(0) + (HARNESS_ROOT / "src/net/suffixes.inc").read_text() + \
@@ -42032,7 +42032,7 @@ def harness_tls_hs_fuzz(argv):
     connection = sec(net, "typedef struct\n{\n        bipolar handle;\n"
                      "        bool check_cert;", "static fn tls_forget(")
     #   The leaf modulus room is sized in the crypto section.
-    connection = re.search(r"#define CRYPTO_RSA_LIMBS .*\n#define CRYPTO_RSA_BYTES .*\n",
+    connection = re.search(r"#define CRYPTO_RSA_LIMBS .*\n#define CRYPTO_RSA_BYTES .*\n#define CRYPTO_RSA_EXPONENT_BITS .*\n",
                            net).group(0) + connection
     record = sec(net, "static fn tls_forget(",
                  "static COLD bipolar tls_asn1_length(")

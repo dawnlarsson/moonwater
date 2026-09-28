@@ -59049,6 +59049,15 @@ static fn crypto_floor_aes(void)
                               modulus, sizeof modulus - 1, 65537, signature,
                               sizeof modulus - 1, mod, base,
                               address_of limbs));
+                check("RSA takes public exponents up to BoringSSL's 33 bits",
+                      crypto_rsa_prepare(
+                          modulus, sizeof modulus, ((p64)1 << 33) - 1,
+                          signature, sizeof signature, mod, base,
+                          address_of limbs) &&
+                          !crypto_rsa_prepare(
+                              modulus, sizeof modulus, ((p64)1 << 33) + 1,
+                              signature, sizeof signature, mod, base,
+                              address_of limbs));
                 modulus[0] = 0x7f;
                 check("RSA enforces a full 2048-bit minimum modulus",
                       !crypto_rsa_prepare(
