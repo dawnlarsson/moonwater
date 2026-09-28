@@ -2760,6 +2760,13 @@ static const argument_option paste_options[] = {
 /* 256 is the empty delimiter.  A NUL delimiter is still the byte zero. */
 #define PASTE_EMPTY 256
 
+/*
+        GNU's escapes, and only these: \0 is an empty delimiter whatever
+        follows it, \b \f \n \r \t \v and \\ are the bytes they name, and a
+        backslash before anything else is that character itself, so \101 is
+        an empty delimiter, then 1, then 0. A backslash that ends the list is
+        refused.
+*/
 static bool paste_delimiters(string_address said, p16 address_to made,
                              positive room, positive address_to count)
 {
@@ -2777,25 +2784,14 @@ static bool paste_delimiters(string_address said, p16 address_to made,
                         if (!escaped)
                                 return false;
 
-                        p8 simple = byte_simple_escape(escaped);
-
-                        if (escaped == '0' &&
-                                 !byte_is_digit(said[at]))
-                                value = PASTE_EMPTY;
-                        else if (simple)
-                                value = simple;
-                        else if (escaped >= '0' && escaped <= '7')
-                        {
-                                value = escaped - '0';
-
-                                for (positive digit = 1; digit < 3 &&
-                                     said[at] >= '0' && said[at] <= '7'; digit++)
-                                        value = value * 8 + said[at++] - '0';
-
-                                value &= 255;
-                        }
-                        else
-                                value = escaped;
+                        value = escaped == '0' ? PASTE_EMPTY
+                                : escaped == 'b' ? '\b'
+                                : escaped == 'f' ? '\f'
+                                : escaped == 'n' ? '\n'
+                                : escaped == 'r' ? '\r'
+                                : escaped == 't' ? '\t'
+                                : escaped == 'v' ? '\v'
+                                                 : escaped;
                 }
 
                 if (have >= room)
@@ -2809,6 +2805,28 @@ static bool paste_delimiters(string_address said, p16 address_to made,
 
         address_to count = have;
         return true;
+}
+
+/*
+        GNU names the list as c-maybe quoting with colons spells it: bare
+        unless a byte needs escaping or is a double quote or a colon, and
+        then in double quotes with C escapes, backslashes doubled.
+*/
+static fn text_c_maybe_colon(writer output, string_address value)
+{
+        positive length = string_length(value);
+        bool quote = false;
+
+        for (positive at = 0; at < length && !quote; at++)
+        {
+                p8 byte = (p8)value[at];
+                quote = ls_byte_unprintable(byte) || byte == '"' || byte == ':';
+        }
+
+        if (quote)
+                ls_quote_c(output, value, length, 'c');
+        else
+                output(value, length);
 }
 
 static fn paste_delimiter(p16 address_to delimiters, positive count,
@@ -2850,11 +2868,18 @@ static b32 text_paste()
         p16 address_to delimiters = (p16 address_to)utility_arena_take(
             delimiter_room * sizeof(p16));
 
-        if (!delimiters ||
-            !paste_delimiters(said ? said : (string_address)"\t",
+        if (!delimiters)
+                return text_done(1);
+        if (!paste_delimiters(said ? said : (string_address)"\t",
                               delimiters, delimiter_room,
                               address_of delimiter_count))
-                return text_done(string_diagnostic(&text_diagnostic, 1, said, "invalid delimiter list"));
+        {
+                text_flush();
+                string_format(writer_stderr,
+                              "%s: delimiter list ends with an unescaped backslash: %w\n",
+                              text_name, text_c_maybe_colon, said);
+                return text_done(1);
+        }
 
         positive inputs = text_files_count ? text_files_count : 1;
 

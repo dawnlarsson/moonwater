@@ -19385,7 +19385,14 @@ TEXT_UTILITIES = (
                       ("missing", "a.txt"), ("empty", "a.txt"), ("zleft", "zright"), ("wide", "b.txt"), ("dir",),
                       ("nonl", "a.txt"), ("a.txt", "nonl"), ("-",), ("big", "a.txt"), ("a.txt", "missing", "b.txt")),
             stdin=("text", "text_fifteen", "empty", "nonl", "nul", "text_sorted_a", "blanks", "edge_65535", "edge_65536", "edge_65537", "text_utf8"), fixture="text",
-            extra=(("--nosuchflag", "a.txt"), ("-Q", "a.txt"))),
+            #       GNU's escapes are \0 b f n r t v and \\; any other
+            #       escaped byte is itself (\101 is empty, 1, 0), and a list
+            #       that ends in a backslash is named c-maybe quoted.
+            stderr="exact",
+            extra=(("--nosuchflag", "a.txt"), ("-Q", "a.txt"), ("-d", "\\01", "a.txt", "b.txt"),
+                   ("-d", "\\101", "a.txt", "b.txt", "c.txt"), ("-d", "\\a\\e", "a.txt", "b.txt"),
+                   ("-d", "a:\\", "a.txt"), ("-d", "a\"\\", "a.txt"), ("-d", "\\\\\\", "a.txt"),
+                   ("-d", "\t\\", "a.txt"))),
     Utility("pr",
             options=(Option("+2"), Option("+3:4"), Option("+0"), Option("+x"), Option("+1:1"),
                      Option("--pages", ("3:4", "2"), True),
