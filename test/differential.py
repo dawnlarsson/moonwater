@@ -37291,7 +37291,7 @@ def harness_tls_peer(argv):
         "EncryptedExtensions answering supported_groups",
         "CertificateRequest in the flight",
     }
-    # Where OpenSSL's client accepts what the RFC says to refuse.
+    # Where OpenSSL 3.6's client accepts what the RFC says to refuse.
     OPENSSL_LENIENT = {
         "close_notify inside a split ticket":
             "5.1 forbids interleaving another record type within a split "
@@ -37548,7 +37548,9 @@ def harness_tls_peer(argv):
                 listener.close()
             expected = script in MUST_ACCEPT
             ours, theirs = verdicts["wget"], verdicts["openssl"]
-            checks(theirs == (expected or script in OPENSSL_LENIENT),
+            # A lenient row takes either verdict, so a stricter OpenSSL
+            # does not turn the lane red.
+            checks(theirs == expected or script in OPENSSL_LENIENT,
                    "%s: OpenSSL %s what RFC 8446 says to %s" % (
                        script, "accepts" if theirs else "refuses",
                        "accept" if expected else "refuse"))
