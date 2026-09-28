@@ -1784,11 +1784,15 @@ static COLD bipolar dns_resolve_any(string_address path, string_address name,
         One cipher: TLS_AES_128_GCM_SHA256. Groups: X25519, P-256 and
         P-384, each with a ClientHello key share so Chimera's secp384r1
         servers do not HelloRetryRequest. Certificates walk to one of the
-        Mozilla TLS roots in anchors.inc: a served certificate carrying an
-        anchor's key ends the chain, or the last one served names an anchor
-        as its issuer and verifies under it. Chain signatures may be ECDSA
-        with SHA-256 or SHA-384 on P-256 or P-384, or RSA PKCS#1 v1.5 with
-        SHA-256 or SHA-384.
+        Mozilla TLS roots in anchors.inc along a path built from the served
+        certificates in any order, and at most one issuer fetched from a
+        caIssuers location: a served certificate carrying an anchor's key
+        ends the chain, or the path's last certificate names an anchor as
+        its issuer and verifies under it. Chain signatures may be ECDSA with
+        SHA-256, -384 or -512 on P-256 or P-384, or RSA PKCS#1 v1.5 with
+        SHA-256, -384 or -512 under keys of 2,048 to 8,192 bits. Name
+        constraints bind the path below them, and a wildcard standing on an
+        ICANN public suffix names nothing.
         Signature algorithms advertised are ecdsa_secp256r1_sha256,
         ecdsa_secp384r1_sha384 and rsa_pss_rsae_sha256. close_notify is a
         clean end of the body, not a handshake failure.
@@ -2699,7 +2703,11 @@ static bool crypto_x25519(p8 address_to out, p8 address_to scalar, p8 address_to
 }
 
 #define CRYPTO_FE_MAX 6
-#define CRYPTO_RSA_LIMBS 64
+/* RSA moduli to 8,192 bits, as browsers take them (rsa8192.badssl.com).
+   lib.c's montgomery_multiply stops at 64 limbs; crypto_rsa_multiply
+   carries the rest. */
+#define CRYPTO_RSA_LIMBS 128
+#define CRYPTO_RSA_BYTES (CRYPTO_RSA_LIMBS * 8)
 
 /* One, whose Montgomery product with an element in Montgomery form is the
    element as a plain integer. */
@@ -4120,6 +4128,54 @@ static fn crypto_rsa_double(p64 address_to x, const p64 address_to m, positive n
                 crypto_fe_subtract_raw(x, x, m, n);
 }
 
+/* montgomery_multiply for any n to CRYPTO_RSA_LIMBS: the assembly to its 64
+   limbs, and above that the same row-by-row product and reduction in C
+   (CIOS: row i adds a b_i and q m, q = t0 (-1/m0) mod 2^64, and shifts
+   one limb down), finished by one subtraction of m. Public moduli only:
+   the final subtraction branches. */
+static fn crypto_rsa_multiply(p64 address_to d, const p64 address_to a,
+                              const p64 address_to b, const p64 address_to m,
+                              p64 inverse, positive n)
+{
+        p64 t[CRYPTO_RSA_LIMBS + 2];
+
+        if (n <= 64)
+        {
+                montgomery_multiply(d, a, b, m, inverse, n);
+                return;
+        }
+        memory_fill(t, 0, (n + 2) * sizeof(p64));
+        for (positive i = 0; i < n; i++)
+        {
+                crypto_wide carry = 0;
+                p64 q;
+
+                for (positive j = 0; j < n; j++)
+                {
+                        carry += (crypto_wide)a[j] * b[i] + t[j];
+                        t[j] = (p64)carry;
+                        carry >>= 64;
+                }
+                carry += t[n];
+                t[n] = (p64)carry;
+                t[n + 1] = (p64)(carry >> 64);
+                q = t[0] * inverse;
+                carry = ((crypto_wide)q * m[0] + t[0]) >> 64;
+                for (positive j = 1; j < n; j++)
+                {
+                        carry += (crypto_wide)q * m[j] + t[j];
+                        t[j - 1] = (p64)carry;
+                        carry >>= 64;
+                }
+                carry += t[n];
+                t[n - 1] = (p64)carry;
+                t[n] = t[n + 1] + (p64)(carry >> 64);
+        }
+        if (t[n] || crypto_fe_cmp(t, m, n) >= 0)
+                crypto_fe_subtract_raw(t, t, m, n);
+        memory_copy(d, t, n * sizeof(p64));
+}
+
 /* out = base^exp mod m, for a public odd m of n limbs whose top limb is
    nonzero and base below m, in Montgomery form throughout.  -1/m mod 2^64
    comes by Newton's iteration: an odd m0 is its own inverse to three bits
@@ -4168,9 +4224,9 @@ static fn crypto_rsa_modexp(p64 address_to out, p64 address_to base, p64 exp,
         for (at = 0; at < k; at++)
                 crypto_rsa_double(square, mod, n);
         for (at = 0; at < s; at++)
-                montgomery_multiply(square, square, square, mod, inverse, n);
+                crypto_rsa_multiply(square, square, square, mod, inverse, n);
 
-        montgomery_multiply(b, base, square, mod, inverse, n);
+        crypto_rsa_multiply(b, base, square, mod, inverse, n);
         top = 63;
         while (!((exp >> top) & 1))
                 top--;
@@ -4178,12 +4234,12 @@ static fn crypto_rsa_modexp(p64 address_to out, p64 address_to base, p64 exp,
         while (top)
         {
                 top--;
-                montgomery_multiply(result, result, result, mod, inverse, n);
+                crypto_rsa_multiply(result, result, result, mod, inverse, n);
                 if ((exp >> top) & 1)
-                        montgomery_multiply(result, result, b, mod, inverse, n);
+                        crypto_rsa_multiply(result, result, b, mod, inverse, n);
         }
 
-        montgomery_multiply(out, result, crypto_unit, mod, inverse, n);
+        crypto_rsa_multiply(out, result, crypto_unit, mod, inverse, n);
 }
 
 /* Decode the public operation once for both RSA signature encodings.  The
@@ -4196,7 +4252,7 @@ static bool crypto_rsa_prepare(p8 address_to n_bytes, positive n_length,
                                p64 address_to base,
                                positive address_to limbs)
 {
-        p8 padded[512];
+        p8 padded[CRYPTO_RSA_BYTES];
 
         if (n_length > sizeof(padded) || n_length < 256 ||
             sig_length != n_length || !n_bytes[0] ||
@@ -4249,7 +4305,7 @@ static bool crypto_rsa_pkcs1(p8 address_to n_bytes, positive n_length,
                              positive digestinfo_length, p8 address_to hash,
                              positive hash_length)
 {
-        p8 room[512];
+        p8 room[CRYPTO_RSA_BYTES];
         p8 address_to em = crypto_rsa_open(room, n_bytes, n_length, exponent,
                                            sig, sig_length);
         positive i;
@@ -4300,7 +4356,7 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
                                   positive sig_length, p8 address_to message,
                                   positive message_length)
 {
-        p8 room[512];
+        p8 room[CRYPTO_RSA_BYTES];
         p8 address_to em = crypto_rsa_open(room, n_bytes, n_length, exponent,
                                            sig, sig_length);
         p8 mhash[32];
@@ -4396,6 +4452,7 @@ typedef struct
 } tls_anchor;
 
 #include "anchors.inc"
+#include "suffixes.inc"
 
 static const p8 tls_oid_ec[7] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01};
 static const p8 tls_oid_p256[8] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07};
@@ -4411,6 +4468,8 @@ static const p8 tls_oid_key_usage[3] = {0x55, 0x1d, 0x0f};
 static const p8 tls_oid_extended_key_usage[3] = {0x55, 0x1d, 0x25};
 static const p8 tls_oid_server_auth[8] = {0x2b, 0x06, 0x01, 0x05,
                                           0x05, 0x07, 0x03, 0x01};
+static const p8 tls_oid_authority_info[8] = {0x2b, 0x06, 0x01, 0x05,
+                                             0x05, 0x07, 0x01, 0x01};
 
 typedef struct
 {
@@ -4437,7 +4496,7 @@ typedef struct
         p64 seq_write;
         p8 leaf_qx[48];
         p8 leaf_qy[48];
-        p8 leaf_n[512];
+        p8 leaf_n[CRYPTO_RSA_BYTES];
         positive leaf_n_length;
         p64 leaf_e;
         p8 leaf_curve;
@@ -5056,12 +5115,156 @@ static COLD bool tls_signature_algorithm(p8 address_to der, positive size,
         return true;
 }
 
+/* The IA5String name forms -- rfc822Name, dNSName, URI -- carry printable
+   ASCII here and nothing else. */
+static COLD bool tls_printable(const p8 address_to bytes, positive length)
+{
+        for (positive at = 0; at < length; at++)
+                if (bytes[at] < 0x20 || bytes[at] >= 0x7f)
+                        return false;
+        return true;
+}
+
+/* Whether a dNSName of two or more labels is a public suffix under the
+   ICANN rules of the Public Suffix List: a rule names it, or a wildcard
+   rule names its parent and no exception names it. suffixes.inc keeps the
+   names with their labels reversed ("uk.co"): the wildcard parents and the
+   exceptions as short lists, and the other multi-label rules sorted and
+   front-coded -- an upper-case letter says how many leading bytes an
+   entry shares with the one before, 'A' none, and lower-case text follows
+   up to the next capital -- in one run a top-level label, each run found
+   by binary search over tls_public_suffix_runs. One-label names are
+   refused before this (every TLD is a suffix, known or not). */
+static COLD bool tls_suffix_in(const char address_to list, positive size,
+                               const p8 address_to key, positive length)
+{
+        for (positive at = 0; at < size && list[at];)
+        {
+                positive entry = memory_span_without_byte((address_any)(list + at), 0,
+                                                          size - at);
+
+                if (entry == length && !memory_compare(list + at, key, length))
+                        return true;
+                at += entry + 1;
+        }
+        return false;
+}
+
+static COLD bool tls_public_suffix(const p8 address_to name, positive length)
+{
+        p8 key[256];
+        p8 entry[256];
+        positive entry_length = 0;
+        positive key_length = 0;
+        positive label = length;
+        positive matched = 0;
+        positive low = 0;
+        positive high = array_count(tls_public_suffix_runs);
+        positive top;
+        positive cut;
+        bool behind = false;
+        const char address_to table;
+
+        if (length >= sizeof key)
+                return false;
+        while (label)
+        {
+                positive start = label;
+
+                while (start && name[start - 1] != '.')
+                        start--;
+                if (key_length)
+                        key[key_length++] = '.';
+                for (positive i = start; i < label; i++)
+                        key[key_length++] = name[i] >= 'A' && name[i] <= 'Z'
+                                                ? (p8)(name[i] + 32) : name[i];
+                label = start ? start - 1 : 0;
+        }
+        cut = key_length;
+        while (cut && key[cut - 1] != '.')
+                cut--;
+        top = memory_span_without_byte(key, '.', key_length);
+        if (tls_suffix_in(tls_public_suffix_exceptions,
+                          sizeof tls_public_suffix_exceptions, key, key_length))
+                return false;
+        if (cut && tls_suffix_in(tls_public_suffix_wildcards,
+                                 sizeof tls_public_suffix_wildcards, key, cut - 1))
+                return true;
+
+        /* The run whose top-level label is the key's: each run's first
+           entry is spelled whole after its 'A'. */
+        while (low < high)
+        {
+                positive middle = low + (high - low) / 2;
+                const char address_to run = tls_public_suffixes +
+                                            tls_public_suffix_runs[middle] + 1;
+                positive run_top = memory_span_without_byte(
+                    (address_any)run, '.',
+                    sizeof tls_public_suffixes - tls_public_suffix_runs[middle] - 1);
+                b32 order = memory_compare(run, key, run_top < top ? run_top : top);
+
+                if (!order && run_top == top)
+                {
+                        low = middle;
+                        break;
+                }
+                if (order < 0 || (!order && run_top < top))
+                        low = middle + 1;
+                else
+                        high = middle;
+        }
+        if (low == array_count(tls_public_suffix_runs))
+                return false;
+
+        /* matched counts the bytes of the entry that agree with the key.
+           Once an entry is below the key at matched, each entry sharing
+           more than matched bytes with it is too and is passed over, and
+           the first entry above the key, or the next run, ends the
+           search. */
+        table = tls_public_suffixes + tls_public_suffix_runs[low];
+        do
+        {
+                positive shared = (positive)(*table++ - 'A');
+
+                if (behind && shared > matched)
+                {
+                        while (*table && (*table < 'A' || *table > 'Z'))
+                                table++;
+                        continue;
+                }
+                entry_length = shared < entry_length ? shared : entry_length;
+                matched = shared < matched ? shared : matched;
+                while (*table && (*table < 'A' || *table > 'Z'))
+                {
+                        p8 byte = (p8)*table++;
+
+                        if (entry_length < sizeof entry)
+                                entry[entry_length++] = byte;
+                }
+                while (matched < key_length && matched < entry_length &&
+                       entry[matched] == key[matched])
+                        matched++;
+                if (matched == key_length && entry_length == key_length)
+                        return true;
+                behind = matched == entry_length ||
+                         (matched < key_length && entry[matched] < key[matched]);
+                if (!behind)
+                        return false;
+        } while (*table && *table != 'A');
+        return false;
+}
+
+/* A presented dNSName against a host already canonical (tls_general_name_
+   match). An absolute name's trailing dot is dropped, as Chrome drops it:
+   "example.com." and "example.com" are one name. */
 static COLD bool tls_host_match(string_address host, p8 address_to name,
                            positive name_length)
 {
         positive host_length = string_length(host);
         string_address star;
 
+        if (name_length && name[name_length - 1] == '.')
+                name_length--;
         if (name_length == host_length &&
             !memory_compare_ascii_case(name, host, host_length))
                 return true;
@@ -5069,10 +5272,12 @@ static COLD bool tls_host_match(string_address host, p8 address_to name,
         if (!name_length || name[0] != '*' || name_length < 3 || name[1] != '.')
                 return false;
 
-        /* A wildcard leaves at least two labels beneath it. "*.com" is one
-           label, and a certificate carrying it would stand for every host in
-           a whole public suffix; no issuer means to say that, and a client
-           that reads it as written hands one certificate the internet. */
+        /* A wildcard leaves at least two labels beneath it, and those are
+           not a public suffix. "*.com" and "*.co.uk" would each stand for
+           every host in a whole registry; no issuer means to say that, and
+           a client that reads it as written hands one certificate the
+           internet. Chrome refuses the same names (ICANN rules only, so
+           *.appspot.com stands). */
         {
                 positive rest = name_length - 2;
                 positive dot = memory_span_without_byte(name + 2, '.', rest);
@@ -5082,26 +5287,129 @@ static COLD bool tls_host_match(string_address host, p8 address_to name,
         }
 
         /* The star stands for one whole label, never an empty one: a host
-           ".example.com" is not a name "*.example.com" covers. */
+           ".example.com" is not a name "*.example.com" covers. The suffix
+           list is read last, for the one wildcard that would match. */
         star = string_first_of(host, '.');
         if (!star || star == host || !star[1])
                 return false;
 
         return string_length(star) == name_length - 1 &&
                !memory_compare_ascii_case(star, (string_address)(name + 1),
-                                          name_length - 1);
+                                          name_length - 1) &&
+               !tls_public_suffix(name + 2, name_length - 2);
 }
 
+/* An IPv6 literal, bare or bracketed, as 16 bytes (RFC 4291 2.2): up to
+   eight groups of one to four hex digits, one "::" standing for one or more
+   zero groups, and a dotted IPv4 tail for the last two. text is writable
+   and terminated at length; a zone ("%eth0") or anything else is refused. */
+static COLD bool tls_ipv6_literal(p8 address_to text, positive length,
+                                  p8 address_to out)
+{
+        p8 groups[16];
+        positive count = 0;
+        positive gap = positive_max;
+        positive at = 0;
+
+        if (length && text[0] == '[')
+        {
+                if (length < 2 || text[length - 1] != ']')
+                        return false;
+                text[--length] = end;
+                text++;
+                length--;
+        }
+        if (memory_span_without_byte(text, ':', length) == length)
+                return false;
+        if (length >= 2 && text[0] == ':' && text[1] == ':')
+        {
+                gap = 0;
+                at = 2;
+        }
+        while (at < length)
+        {
+                positive rest = length - at;
+                positive digits = 0;
+                p32 group = 0;
+
+                if (count > 14)
+                        return false;
+                if (count <= 12 &&
+                    memory_span_without_byte(text + at, ':', rest) == rest &&
+                    memory_span_without_byte(text + at, '.', rest) < rest)
+                {
+                        bipolar quad = string_to_host((string_address)(text + at));
+
+                        if (quad < 0)
+                                return false;
+                        for (positive k = 0; k < 4; k++)
+                                groups[count++] = (p8)((p32)quad >> (24 - 8 * k));
+                        break;
+                }
+                for (; at < length && digits < 5; at++, digits++)
+                {
+                        p8 c = text[at];
+
+                        if (c >= 'A' && c <= 'F')
+                                c = (p8)(c + 32);
+                        if (c >= '0' && c <= '9')
+                                group = group << 4 | (p32)(c - '0');
+                        else if (c >= 'a' && c <= 'f')
+                                group = group << 4 | (p32)(c - 'a' + 10);
+                        else
+                                break;
+                }
+                if (!digits || digits > 4)
+                        return false;
+                groups[count++] = (p8)(group >> 8);
+                groups[count++] = (p8)group;
+                if (at == length)
+                        break;
+                if (text[at++] != ':' || at == length)
+                        return false;
+                if (text[at] == ':')
+                {
+                        if (gap != positive_max)
+                                return false;
+                        gap = count;
+                        at++;
+                }
+        }
+        if (gap == positive_max ? count != 16 : count > 14)
+                return false;
+        gap = gap < count ? gap : count;
+        memory_fill(out, 0, 16);
+        memory_copy(out, groups, gap);
+        memory_copy(out + 16 - (count - gap), groups + gap, count - gap);
+        return true;
+}
+
+/* The host as RFC 6125 and Chrome compare it: one trailing dot dropped, an
+   IPv4 or IPv6 literal only against an iPAddress of its own length, and
+   anything else only against a dNSName. */
 static COLD bool tls_general_name_match(string_address host, p8 tag,
                                    p8 address_to name, positive name_length)
 {
-        bipolar address = string_to_host(host);
+        p8 canonical[256];
+        p8 address[16];
+        positive length = string_length(host);
+        bipolar quad;
 
-        if (address >= 0)
+        if (length && host[length - 1] == '.')
+                length--;
+        if (!length || length >= sizeof canonical)
+                return false;
+        memory_copy(canonical, host, length);
+        canonical[length] = end;
+        if (tls_ipv6_literal(canonical, length, address))
+                return tag == 0x87 && name_length == 16 &&
+                       !memory_compare(name, address, 16);
+        quad = string_to_host((string_address)canonical);
+        if (quad >= 0)
                 return tag == 0x87 && name_length == 4 &&
-                       network_load_32(name) == (p32)address;
-
-        return tag == 0x82 && tls_host_match(host, name, name_length);
+                       network_load_32(name) == (p32)quad;
+        return tag == 0x82 &&
+               tls_host_match((string_address)canonical, name, name_length);
 }
 
 /* Parse the signed GeneralNames value once, all the way to its declared end.
@@ -5131,10 +5439,9 @@ static COLD bool tls_parse_san(p8 address_to value, positive length,
                 if (tls_asn1_enter(value, stop, tag, address_of at,
                                    address_of name_stop))
                         return false;
-                if (tag == 0x81 || tag == 0x82 || tag == 0x86)
-                        for (positive byte = at; byte < name_stop; byte++)
-                                if (value[byte] < 0x20 || value[byte] >= 0x7f)
-                                        return false;
+                if ((tag == 0x81 || tag == 0x82 || tag == 0x86) &&
+                    !tls_printable(value + at, name_stop - at))
+                        return false;
                 if (tag == 0x87 && name_stop - at != 4 &&
                     name_stop - at != 16)
                         return false;
@@ -5150,6 +5457,336 @@ static COLD bool tls_parse_san(p8 address_to value, positive length,
         if (matched)
                 address_to matched = found;
         return at == stop;
+}
+
+/* Where a name falls against one subtree base of its own form. */
+enum { TLS_OUTSIDE, TLS_UNSURE, TLS_WITHIN };
+
+/* Chrome's DNSNameMatches: trailing dots dropped and case ignored, an empty
+   base holds every name, "b" holds b and every name under it and ".b" only
+   the names under it. In an excluded subtree a wildcard *.s also falls in
+   a base x.s, one label above s, since its star can stand for x. */
+static COLD bool tls_dns_within(p8 address_to name, positive length,
+                                p8 address_to base, positive base_length,
+                                bool excluded)
+{
+        positive dot = memory_span_without_byte(base, '.', base_length);
+
+        if (length && name[length - 1] == '.')
+                length--;
+        if (base_length && base[base_length - 1] == '.')
+                base_length--;
+        if (!base_length)
+                return true;
+        if (excluded && length > 2 && name[0] == '*' && name[1] == '.' &&
+            dot < base_length && base_length - dot - 1 == length - 2 &&
+            !memory_compare_ascii_case(base + dot + 1, name + 2, length - 2))
+                return true;
+        if (length < base_length ||
+            memory_compare_ascii_case(name + length - base_length, base,
+                                      base_length))
+                return false;
+        return length == base_length || base[0] == '.' ||
+               name[length - base_length - 1] == '.';
+}
+
+/* RFC 5280 4.2.1.10 for an rfc822Name: a base holding an '@' names one
+   mailbox, its local part exact; ".b" holds every mailbox on a host under
+   b, and "b" every mailbox on host b. A name without a mailbox is unsure. */
+static COLD p8 tls_email_within(p8 address_to name, positive length,
+                                p8 address_to base, positive base_length)
+{
+        positive host = length;
+        positive base_mailbox = memory_span_without_byte(base, '@', base_length);
+
+        while (host && name[host - 1] != '@')
+                host--;
+        if (!host)
+                return TLS_UNSURE;
+        if (base_mailbox < base_length)
+                return length == base_length &&
+                               !memory_compare(name, base, host) &&
+                               !memory_compare_ascii_case(name + host, base + host,
+                                                          length - host)
+                           ? TLS_WITHIN
+                           : TLS_OUTSIDE;
+        name += host;
+        length -= host;
+        if (base_length && base[0] == '.'
+                ? length > base_length &&
+                      !memory_compare_ascii_case(name + length - base_length, base,
+                                                 base_length)
+                : length == base_length &&
+                      !memory_compare_ascii_case(name, base, length))
+                return TLS_WITHIN;
+        return TLS_OUTSIDE;
+}
+
+/* The next byte of a DirectoryString as RFC 4518 and OpenSSL's canonical
+   form compare it: ASCII letters folded, leading and trailing white space
+   gone and each inner run of it one space; -1 past the end. */
+static COLD bipolar tls_folded_next(const p8 address_to text, positive length,
+                                    positive address_to at)
+{
+        positive i = address_to at;
+        bool space = false;
+
+        while (i < length && (text[i] == ' ' || (text[i] >= 9 && text[i] <= 13)))
+        {
+                i++;
+                space = true;
+        }
+        if (i == length)
+                return -1;
+        if (space && address_to at)
+        {
+                address_to at = i;
+                return ' ';
+        }
+        address_to at = i + 1;
+        return text[i] >= 'A' && text[i] <= 'Z' ? text[i] + 32 : text[i];
+}
+
+/* Two attribute values, each a whole TLV. PrintableString, UTF8String,
+   IA5String, VisibleString and an ASCII TeletexString compare folded, which
+   is how OpenSSL and Chrome read them; BMPString, UniversalString and a
+   TeletexString past ASCII would need converting first and are unsure
+   unless the bytes agree; any other type compares exactly. */
+static COLD p8 tls_directory_value(const p8 address_to one, positive one_length,
+                                   const p8 address_to two, positive two_length)
+{
+        const p8 address_to text[2] = {one, two};
+        positive size[2] = {one_length, two_length};
+        positive cursor[2] = {0, 0};
+        bipolar a;
+        bipolar b;
+
+        if (one_length == two_length && !memory_compare(one, two, one_length))
+                return TLS_WITHIN;
+        for (positive k = 0; k < 2; k++)
+        {
+                positive at = 0;
+                positive stop = 0;
+                p8 tag = text[k][0];
+
+                if (tls_asn1_enter((p8 address_to)text[k], size[k], tag,
+                                   address_of at, address_of stop) ||
+                    stop != size[k])
+                        return TLS_UNSURE;
+                text[k] += at;
+                size[k] = stop - at;
+                if (tag == 0x1c || tag == 0x1e ||
+                    (tag == 0x14 && !tls_printable(text[k], size[k])))
+                        return TLS_UNSURE;
+                if (tag != 0x0c && tag != 0x13 && tag != 0x14 && tag != 0x16 &&
+                    tag != 0x1a)
+                        return TLS_OUTSIDE;
+        }
+        do
+        {
+                a = tls_folded_next(text[0], size[0], address_of cursor[0]);
+                b = tls_folded_next(text[1], size[1], address_of cursor[1]);
+        } while (a == b && a >= 0);
+        return a == b ? TLS_WITHIN : TLS_OUTSIDE;
+}
+
+/* A Name against a directoryName base, both whole DER Names: within when
+   the base's RDNs begin the name's. Equal RDN bytes agree outright; else
+   one attribute each of the same type compares by value, and any other
+   difference -- a multi-valued RDN, a Name that does not parse -- is
+   unsure. */
+static COLD p8 tls_directory_within(p8 address_to name, positive length,
+                                    p8 address_to base, positive base_length)
+{
+        p8 address_to der[2] = {name, base};
+        positive at[2] = {0, 0};
+        positive stop[2] = {0, 0};
+        p8 verdict = TLS_WITHIN;
+
+        if (tls_asn1_enter(name, length, 0x30, address_of at[0],
+                           address_of stop[0]) ||
+            tls_asn1_enter(base, base_length, 0x30, address_of at[1],
+                           address_of stop[1]))
+                return TLS_UNSURE;
+        while (at[1] < stop[1])
+        {
+                positive rdn[2] = {at[0], at[1]};
+                positive rdn_stop[2] = {0, 0};
+                positive value[2];
+                p8 same = TLS_WITHIN;
+
+                if (at[0] == stop[0])
+                        return TLS_OUTSIDE;
+                for (positive k = 0; k < 2; k++)
+                        if (tls_asn1_enter(der[k], stop[k], 0x31,
+                                           address_of rdn[k],
+                                           address_of rdn_stop[k]))
+                                return TLS_UNSURE;
+                if (rdn_stop[0] - at[0] != rdn_stop[1] - at[1] ||
+                    memory_compare(name + at[0], base + at[1],
+                                   rdn_stop[0] - at[0]))
+                {
+                        for (positive k = 0; k < 2; k++)
+                        {
+                                positive ava_stop = 0;
+
+                                if (tls_asn1_enter(der[k], rdn_stop[k], 0x30,
+                                                   address_of rdn[k],
+                                                   address_of ava_stop) ||
+                                    ava_stop != rdn_stop[k])
+                                        return TLS_UNSURE;
+                                value[k] = rdn[k];
+                                if (tls_asn1_skip(der[k], ava_stop,
+                                                  address_of value[k]) ||
+                                    value[k] >= ava_stop)
+                                        return TLS_UNSURE;
+                        }
+                        /* rdn[k] is each attribute's type, value[k] its
+                           value, which runs to the end of the RDN. */
+                        if (value[0] - rdn[0] != value[1] - rdn[1] ||
+                            memory_compare(name + rdn[0], base + rdn[1],
+                                           value[0] - rdn[0]))
+                                return TLS_OUTSIDE;
+                        same = tls_directory_value(
+                            name + value[0], rdn_stop[0] - value[0],
+                            base + value[1], rdn_stop[1] - value[1]);
+                }
+                if (same == TLS_OUTSIDE)
+                        return TLS_OUTSIDE;
+                verdict = same < verdict ? same : verdict;
+                at[0] = rdn_stop[0];
+                at[1] = rdn_stop[1];
+        }
+        return verdict;
+}
+
+/* One name a certificate carries -- tag its GeneralName form, and name its
+   content, or a Name TLV for a directoryName -- against a NameConstraints
+   value (RFC 5280 4.2.1.10): refused if it may fall in an excluded subtree
+   of its form, or if permitted subtrees of its form exist and it surely
+   falls in none. A form this client cannot evaluate (otherName, x400,
+   ediParty, URI, registeredID), or a null name, is unsure, so a subtree of
+   that form refuses it either way: RFC 5280 lets a client reject what it
+   cannot process, and a name it cannot place is what an issuer's limits
+   exist to catch.
+
+   Tag 0 checks the value instead, once, where the extension is parsed:
+   permitted then excluded, at least one, neither empty, and each subtree a
+   base alone, since minimum and maximum are fixed at 0 and absent. A
+   dNSName, rfc822Name or URI base is printable, an iPAddress base an
+   address and a contiguous mask of 4 or 16 bytes each, and a
+   directoryName base one whole Name. */
+static COLD bool tls_name_allowed(p8 address_to constraints, positive length,
+                                  p8 tag, p8 address_to name,
+                                  positive name_length)
+{
+        positive at = 0;
+        positive stop = 0;
+        p8 last = 0;
+        bool form = false;
+        bool permitted = false;
+
+        if (tls_asn1_enter(constraints, length, 0x30, address_of at,
+                           address_of stop) ||
+            stop != length || at == stop)
+                return false;
+        while (at < stop)
+        {
+                p8 which = constraints[at];
+                positive trees_stop = 0;
+
+                if ((which != 0xa0 && which != 0xa1) || which <= last ||
+                    tls_asn1_enter(constraints, stop, which, address_of at,
+                                   address_of trees_stop) ||
+                    at == trees_stop)
+                        return false;
+                last = which;
+                while (at < trees_stop)
+                {
+                        positive tree_stop = 0;
+                        positive base_stop = 0;
+                        p8 address_to base;
+                        positive base_length;
+                        p8 base_tag;
+                        p8 verdict;
+
+                        if (tls_asn1_enter(constraints, trees_stop, 0x30,
+                                           address_of at, address_of tree_stop) ||
+                            at == tree_stop)
+                                return false;
+                        base_tag = constraints[at];
+                        if (tls_asn1_enter(constraints, tree_stop, base_tag,
+                                           address_of at, address_of base_stop) ||
+                            base_stop != tree_stop)
+                                return false;
+                        base = constraints + at;
+                        base_length = base_stop - at;
+                        at = tree_stop;
+                        if (!tag)
+                        {
+                                positive name_at = 0;
+                                positive name_stop = 0;
+                                p8 partial = 0;
+
+                                if ((base_tag == 0x81 || base_tag == 0x82 ||
+                                     base_tag == 0x86) &&
+                                    !tls_printable(base, base_length))
+                                        return false;
+                                if (base_tag == 0xa4 &&
+                                    (tls_asn1_enter(base, base_length, 0x30,
+                                                    address_of name_at,
+                                                    address_of name_stop) ||
+                                     name_stop != base_length))
+                                        return false;
+                                if (base_tag != 0x87)
+                                        continue;
+                                if (base_length != 8 && base_length != 32)
+                                        return false;
+                                for (positive i = base_length / 2; i < base_length; i++)
+                                {
+                                        p8 inverse = (p8)~base[i];
+
+                                        if (partial ? base[i]
+                                                    : inverse & (p8)(inverse + 1))
+                                                return false;
+                                        partial = base[i] != 0xff;
+                                }
+                                continue;
+                        }
+                        if (base_tag != tag)
+                                continue;
+                        if (!name)
+                                verdict = TLS_UNSURE;
+                        else if (tag == 0x82)
+                                verdict = tls_dns_within(name, name_length, base,
+                                                         base_length, which == 0xa1)
+                                              ? TLS_WITHIN : TLS_OUTSIDE;
+                        else if (tag == 0x87)
+                        {
+                                verdict = base_length == 2 * name_length
+                                              ? TLS_WITHIN : TLS_OUTSIDE;
+                                for (positive i = 0; verdict && i < name_length; i++)
+                                        if ((name[i] ^ base[i]) & base[name_length + i])
+                                                verdict = TLS_OUTSIDE;
+                        }
+                        else if (tag == 0x81)
+                                verdict = tls_email_within(name, name_length, base,
+                                                           base_length);
+                        else if (tag == 0xa4)
+                                verdict = tls_directory_within(name, name_length,
+                                                               base, base_length);
+                        else
+                                verdict = TLS_UNSURE;
+                        if (which == 0xa1 && verdict != TLS_OUTSIDE)
+                                return false;
+                        if (which == 0xa0)
+                        {
+                                form = true;
+                                permitted |= verdict == TLS_WITHIN;
+                        }
+                }
+        }
+        return !form || permitted;
 }
 
 static COLD bipolar tls_parse_ecdsa_sig(p8 address_to sig, positive length,
@@ -5195,10 +5832,19 @@ typedef struct
         positive sig_oid_length;
         p8 address_to sig;
         positive sig_length;
+        /* The subjectAltName GeneralNames and the NameConstraints, each a
+           whole DER value checked by the parser, or null when absent. */
+        p8 address_to san;
+        positive san_length;
+        p8 address_to name_constraints;
+        positive name_constraints_length;
+        /* The first http: caIssuers location, or null (tls_parse_ca_issuers). */
+        p8 address_to ca_issuers;
+        positive ca_issuers_length;
         p8 curve;
         p8 qx[48];
         p8 qy[48];
-        p8 modulus[512];
+        p8 modulus[CRYPTO_RSA_BYTES];
         positive modulus_length;
         p64 exponent;
         p64 not_before;
@@ -5212,7 +5858,6 @@ typedef struct
         bool key_cert_sign;
         bool extended_key_usage;
         bool server_auth;
-        bool san;
         bool san_match;
         bool unsupported_critical;
 } tls_cert;
@@ -5416,6 +6061,46 @@ static COLD bipolar tls_parse_extended_key_usage(p8 address_to value, positive l
         return TLS_OK;
 }
 
+/* The first caIssuers location of an AuthorityInfoAccess value (RFC 5280
+   4.2.2.1) that is an http: URI, for tls_verify_chain to fetch when a
+   server leaves an intermediate out. It is only a hint -- whatever it
+   names is parsed and verified like a served certificate -- so a value
+   that does not parse is read as naming nothing. */
+static COLD fn tls_parse_ca_issuers(p8 address_to value, positive length,
+                                    tls_cert address_to cert)
+{
+        static const p8 ca_issuers[8] = {0x2b, 0x06, 0x01, 0x05,
+                                         0x05, 0x07, 0x30, 0x02};
+        positive at = 0;
+        positive stop = 0;
+
+        if (tls_asn1_enter(value, length, 0x30, address_of at, address_of stop))
+                return;
+        while (at < stop && !cert->ca_issuers)
+        {
+                positive access_stop = 0;
+                positive location = 0;
+                positive location_stop = 0;
+
+                if (tls_asn1_enter(value, stop, 0x30, address_of at,
+                                   address_of access_stop) ||
+                    tls_asn1_enter_oid(value, access_stop, address_of at,
+                                       address_of location))
+                        return;
+                if (tls_oid_is(value + at, location - at, ca_issuers, 8) &&
+                    !tls_asn1_enter(value, access_stop, 0x86, address_of location,
+                                    address_of location_stop) &&
+                    location_stop == access_stop && location_stop - location > 7 &&
+                    tls_printable(value + location, location_stop - location) &&
+                    !memory_compare_ascii_case(value + location, "http://", 7))
+                {
+                        cert->ca_issuers = value + location;
+                        cert->ca_issuers_length = location_stop - location;
+                }
+                at = access_stop;
+        }
+}
+
 static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                                     positive at, p8 version,
                                     tls_cert address_to cert,
@@ -5531,18 +6216,28 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                             !tls_parse_san(der + at, value_stop - at, host,
                                            address_of matched))
                                 return TLS_FAIL;
-                        cert->san = true;
+                        cert->san = der + at;
+                        cert->san_length = value_stop - at;
                         cert->san_match = matched;
                 }
                 else if (tls_oid_is(der + oid_at, oid_stop - oid_at,
                                     tls_oid_name_constraints, 3))
                 {
-                        /* Namespace limits apply even when an issuer marks
-                           them non-critical.  Until they are implemented,
-                           accepting the chain would authorize names outside
-                           the issuer's permitted subtrees. */
-                        return TLS_FAIL;
+                        /* Namespace limits bind whether or not the issuer
+                           marks them critical, and a form this client
+                           cannot evaluate fails closed where it is used
+                           (tls_name_allowed), so a value that does not
+                           parse is refused here, before any path uses it. */
+                        if (!tls_name_allowed(der + at, value_stop - at, 0,
+                                              null, 0))
+                                return TLS_FAIL;
+                        cert->name_constraints = der + at;
+                        cert->name_constraints_length = value_stop - at;
                 }
+                else if (!critical &&
+                         tls_oid_is(der + oid_at, oid_stop - oid_at,
+                                    tls_oid_authority_info, 8))
+                        tls_parse_ca_issuers(der + at, value_stop - at, cert);
                 else if (critical)
                         cert->unsupported_critical = true;
 
@@ -5973,6 +6668,91 @@ static COLD bool tls_issuer_authorized(tls_cert address_to cert, positive ca_bel
                (!cert->path_length_present || ca_below <= cert->path_length);
 }
 
+/* Whether every name cert carries lies within constraints: a non-empty
+   subject as a directoryName, an emailAddress attribute in it as an
+   rfc822Name no subtree can vouch for (tls_name_allowed with no name), and
+   each subjectAltName entry as its own form. A subject whose RDNs do not
+   parse is refused, the way an unplaceable name is. */
+static COLD bool tls_cert_names_permitted(p8 address_to constraints,
+                                          positive length,
+                                          tls_cert address_to cert)
+{
+        static const p8 email[] = {0x06, 0x09, 0x2a, 0x86, 0x48, 0x86,
+                                   0xf7, 0x0d, 0x01, 0x09, 0x01};
+        p8 address_to subject = cert->subject;
+        positive at = 0;
+        positive stop = 0;
+        bool mailbox = false;
+
+        if (tls_asn1_enter(subject, cert->subject_length, 0x30, address_of at,
+                           address_of stop) ||
+            (at < stop && !tls_name_allowed(constraints, length, 0xa4, subject,
+                                            cert->subject_length)))
+                return false;
+        while (at < stop)
+        {
+                positive rdn_stop = 0;
+
+                if (tls_asn1_enter(subject, stop, 0x31, address_of at,
+                                   address_of rdn_stop))
+                        return false;
+                while (at < rdn_stop)
+                {
+                        positive ava_stop = 0;
+
+                        if (tls_asn1_enter(subject, rdn_stop, 0x30, address_of at,
+                                           address_of ava_stop))
+                                return false;
+                        mailbox |= ava_stop - at >= sizeof email &&
+                                   !memory_compare(subject + at, email, sizeof email);
+                        at = ava_stop;
+                }
+        }
+        if (mailbox && !tls_name_allowed(constraints, length, 0x81, null, 0))
+                return false;
+
+        at = 0;
+        if (!cert->san || tls_asn1_enter(cert->san, cert->san_length, 0x30,
+                                         address_of at, address_of stop))
+                return true;
+        while (at < stop)
+        {
+                p8 tag = cert->san[at];
+                positive name_stop = 0;
+
+                if (tls_asn1_enter(cert->san, stop, tag, address_of at,
+                                   address_of name_stop) ||
+                    !tls_name_allowed(constraints, length, tag, cert->san + at,
+                                      name_stop - at))
+                        return false;
+                at = name_stop;
+        }
+        return true;
+}
+
+/* An issuer's name constraints bind every certificate below it on the
+   path, path[0] the leaf, but an intermediate that issued itself (RFC 5280
+   6.1.3 (b) and 6.1.4 (b) leave self-issued certificates out). */
+static COLD bool tls_path_permitted(tls_cert address_to certs,
+                                    const positive address_to path,
+                                    positive below, tls_cert address_to issuer)
+{
+        for (positive k = 0; issuer->name_constraints && k < below; k++)
+        {
+                tls_cert address_to cert = certs + path[k];
+
+                if (k && cert->issuer_length == cert->subject_length &&
+                    !memory_compare(cert->issuer, cert->subject,
+                                    cert->subject_length))
+                        continue;
+                if (!tls_cert_names_permitted(issuer->name_constraints,
+                                              issuer->name_constraints_length,
+                                              cert))
+                        return false;
+        }
+        return true;
+}
+
 // A TLS handshake length: three bytes, most significant first.
 static PURE positive tls_load_24(p8 address_to at)
 {
@@ -6003,6 +6783,13 @@ static COLD bool tls_certificate_body_open(p8 address_to body,
         return true;
 }
 
+/* The issuer certificate a caIssuers URL names, fetched into room over the
+   HTTP client (defined there, beside it): its length, or 0. */
+#define TLS_AIA_MAX 16384
+
+static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
+                                   p8 address_to into, positive room);
+
 /* The leaf comes first; the rest is a pool, as RFC 8446 section 4.4.2 asks
    clients to treat it. Of 640 public HTTPS hosts openssl verified on
    2026-09-28, 25 served intermediates out of order or an extra certificate
@@ -6010,23 +6797,36 @@ static COLD bool tls_certificate_body_open(p8 address_to body,
    refused. The path grows from the leaf: each step takes the first unused
    served certificate whose subject names the step's issuer, that may issue
    at this depth or carries an anchor key (which ends the path), and whose
-   key verifies the step; when none does, the anchors must sign for the
-   step. Asking the anchors first would accept nothing more -- a served
+   key verifies the step and whose name constraints, if any, hold every
+   certificate on the path below it; when none does, the anchors must sign
+   for the step. Asking the anchors first would accept nothing more -- a served
    certificate the step verifies under has the signing key, so it carries
    the anchor's key if an anchor signed -- and would cost the https_bench
    anchor a failed P-384 verify per chain. A certificate that fails to
    parse is never a candidate. A chain served in order costs what it did;
-   each entry is used once, at most 28 served signature checks. */
+   each entry is used once, at most 28 served signature checks.
+
+   A server that leaves an intermediate out (3 of 642 hosts on 2026-09-28:
+   gob.mx, monster.com, ssa.gov) gets what browsers give it: when neither
+   the pool nor the anchors sign for a step, the issuer that step's
+   certificate names in its caIssuers location is fetched once
+   (tls_aia_fetch) and joins the pool as one more candidate, held to every
+   test a served one is. A fetched certificate's own missing issuer is not
+   fetched in turn. */
 static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                              string_address host, tls_conn address_to tls)
 {
-        tls_cert certs[8];
+        tls_cert certs[9];
+        positive path[9] = {0};
+        p8 fetched[TLS_AIA_MAX];
         positive count = 0;
         positive at;
         positive list_end;
         positive unusable = 0;
         positive child = 0;
+        positive depth = 0;
         p64 now = 0;
+        bool asked = false;
 
         if (!tls_certificate_body_open(body, body_length,
                                        address_of at, address_of list_end))
@@ -6061,7 +6861,7 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
 
         tls_keep_leaf(tls, certs);
 
-        if (tls->check_cert && (!certs[0].san || !certs[0].san_match))
+        if (tls->check_cert && !certs[0].san_match)
                 return false;
         if (!tls->check_cert)
                 return true;
@@ -6069,7 +6869,7 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         if (!tls_date_now(address_of now) || !tls_leaf_authorized(certs, now) ||
             tls_spki_is_anchor(certs))
                 return false;
-        for (positive depth = 0;; depth++)
+        for (;;)
         {
                 positive next;
                 bool anchor = false;
@@ -6080,14 +6880,33 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                                                         certs + next) &&
                             ((anchor = tls_spki_is_anchor(certs + next)) ||
                              tls_issuer_authorized(certs + next, depth, now)) &&
-                            tls_verify_one(certs + child, certs + next))
+                            tls_verify_one(certs + child, certs + next) &&
+                            tls_path_permitted(certs, path, depth + 1,
+                                               certs + next))
                                 break;
                 if (next == count)
-                        return tls_anchor_verifies(certs + child);
+                {
+                        positive length;
+
+                        if (tls_anchor_verifies(certs + child))
+                                return true;
+                        if (asked || !certs[child].ca_issuers)
+                                return false;
+                        asked = true;
+                        length = tls_aia_fetch(certs[child].ca_issuers,
+                                               certs[child].ca_issuers_length,
+                                               fetched, sizeof fetched);
+                        if (!length || tls_parse_cert(fetched, length,
+                                                      certs + count, null))
+                                return false;
+                        count++;
+                        continue;
+                }
                 if (anchor)
                         return true;
                 unusable |= (positive)1 << next;
                 child = next;
+                path[++depth] = next;
         }
 }
 
@@ -7649,7 +8468,7 @@ static bipolar http_get_request(p8 address_to request, positive room,
                                 p8 version_minor, string_address agent,
                                 positive address_to used);
 
-static bipolar http_stream_open(p32 host, p16 port)
+static bipolar http_stream_open(p32 host, p16 port, positive seconds)
 {
         socket_address_internet where = {
             .family = AF_INET, .port = network_order_16(port),
@@ -7658,7 +8477,7 @@ static bipolar http_stream_open(p32 host, p16 port)
 
         if (handle < 0)
                 return HTTP_NO_ROUTE;
-        if (!network_stream_timeout(handle, HTTP_IDLE_SECONDS, 0) ||
+        if (!network_stream_timeout(handle, seconds, 0) ||
             socket_connect((b32)handle, address_of where, sizeof where) < 0)
         {
                 socket_close((b32)handle);
@@ -7689,7 +8508,7 @@ static bipolar http_link_open(http_link address_to link, p32 ip, p16 port,
 {
         //      The session's buffers are tls_connect's to leave alone.
         memory_fill(link, 0, __builtin_offsetof(http_link, session));
-        link->handle = http_stream_open(ip, port);
+        link->handle = http_stream_open(ip, port, HTTP_IDLE_SECONDS);
         if (link->handle < 0)
                 return link->handle;
         if (tls)
@@ -8422,6 +9241,113 @@ static p32 http_lookup(string_address host)
                             3) != DNS_OK)
                 return 0;
         return ip;
+}
+
+/* Whether a fetch whose destination the peer chose may go to ip: not this
+   network, loopback, private, shared (100.64/10), link-local, IETF
+   protocol (192.0.0/24), benchmarking (198.18/15), multicast or reserved
+   space. Checked on the address the name resolved to, so a name that
+   rebinds to an inside address is refused too. The harness builds that
+   define TLS_BENCH_ANCHOR serve from loopback and may reach it. */
+static bool http_address_public(p32 ip)
+{
+        p8 a = (p8)(ip >> 24);
+        p8 b = (p8)(ip >> 16);
+
+#ifdef TLS_BENCH_ANCHOR
+        if (a == 127)
+                return true;
+#endif
+        return a && a != 10 && a != 127 && a < 224 &&
+               (a != 100 || (b & 0xc0) != 64) && (a != 169 || b != 254) &&
+               (a != 172 || (b & 0xf0) != 16) && (a != 192 || b != 168) &&
+               (a != 192 || b || (p8)(ip >> 8)) && (a != 198 || (b & 0xfe) != 18);
+}
+
+#define TLS_AIA_SECONDS 5
+
+/*
+        tls_verify_chain's missing issuer: the certificate a caIssuers
+        location names (RFC 5280 4.2.2.1), which browsers fetch when a server
+        leaves an intermediate out. The URL comes from a certificate nothing
+        has verified yet, so the peer chooses the destination, and the fetch
+        is held to what a certificate needs: http: only (https would be a
+        handshake inside a handshake), port 80 unless a harness serves it,
+        no userinfo, a public address, one HTTP/1.0 GET with no redirect
+        followed, five seconds for the connection and the reply together,
+        a 200, and a body of at most room bytes less the head, which the
+        caller parses and verifies like any served certificate -- DER only,
+        so a PKCS#7 bundle or PEM text is refused there. Returns the body's
+        length at the front of into, or 0.
+*/
+static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
+                                   p8 address_to into, positive room)
+{
+        p8 text[HTTP_URL_MAX];
+        p8 host[256];
+        p8 request[HTTP_URL_MAX + 256];
+        string_address path;
+        p16 port;
+        bool tls;
+        p32 ip;
+        positive sent = 0;
+        positive used = 0;
+        positive header = 0;
+        http_response response;
+        network_deadline deadline;
+        bipolar handle;
+        bool closed = false;
+
+        if (length >= sizeof text)
+                return 0;
+        memory_copy(text, url, length);
+        text[length] = end;
+        if (http_split_into((string_address)text, host, sizeof host,
+                            address_of port, address_of path, address_of tls) ||
+            tls ||
+#ifndef TLS_BENCH_ANCHOR
+            port != HTTP_PORT ||
+#endif
+            http_get_request(request, sizeof request, (string_address)host, port,
+                             path, false, '0', (string_address)"Wget",
+                             address_of sent) ||
+            !(ip = http_lookup((string_address)host)) || !http_address_public(ip) ||
+            !network_deadline_begin(address_of deadline, TLS_AIA_SECONDS, 0))
+                return 0;
+        handle = http_stream_open(ip, port, TLS_AIA_SECONDS);
+        if (handle < 0)
+                return 0;
+        if (network_stream_send_all(handle, request, sent))
+                for (;;)
+                {
+                        bipolar got;
+
+                        if (!http_response_framing(into, used, address_of header,
+                                                   address_of response) &&
+                            response.body_kind == HTTP_BODY_LENGTH &&
+                            used - header >= response.body_length)
+                                break;
+                        if (used == room)
+                                break;
+                        got = network_stream_read_some_until(
+                            handle, into + used, room - used, address_of deadline);
+                        if (got <= 0)
+                        {
+                                closed = !got;
+                                break;
+                        }
+                        used += (positive)got;
+                }
+        socket_close((b32)handle);
+        if (http_response_framing(into, used, address_of header,
+                                  address_of response) ||
+            response.code != 200 ||
+            (response.body_kind == HTTP_BODY_LENGTH
+                 ? used - header != response.body_length
+                 : response.body_kind != HTTP_BODY_CLOSE || !closed))
+                return 0;
+        memory_copy(into, into + header, used - header);
+        return used - header;
 }
 
 static fn http_url_leaf(string_address path, p8 address_to into, positive room)

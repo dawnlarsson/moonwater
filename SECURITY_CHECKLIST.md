@@ -76,9 +76,17 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
 
 - [x] Transcript, Finished, record sequence, AEAD tag, and close handling have
   pure or loopback checks.
-- [x] SAN matching distinguishes DNS and IPv4 names and constrains wildcards.
+- [x] SAN matching distinguishes DNS, IPv4 and IPv6 names, drops one trailing
+  dot, and constrains wildcards: one whole left-most label, never on an ICANN
+  public suffix (`src/net/suffixes.inc`, `--harness public_suffixes`).
 - [x] SAN registeredID alternatives require complete canonical DER OID arcs.
-- [x] Unknown critical and name-constraints extensions fail closed.
+- [x] Unknown critical extensions fail closed.
+- [x] Name constraints (dNSName, iPAddress, rfc822Name, directoryName) bind
+  every certificate below them on the path; a form that cannot be evaluated
+  fails closed wherever a certificate carries it.
+- [x] A missing intermediate is fetched once from an http: caIssuers location
+  on port 80, from a public address only, with a five-second budget, and
+  verified like a served certificate.
 - [x] The default v1 certificate version is omitted; explicit v2/v3 remain valid.
 - [x] Certificate validity uses canonical UTC/GeneralizedTime at the 2050 pivot.
 - [x] KeyUsage has exact DER named-bit encoding, no undefined bits, and enforces
@@ -96,7 +104,8 @@ procedural coverage; `[ ]` is work still required, not an assertion of a bug.
       `python3 test/differential.py --harness tls_der_fuzz`; ASan/UBSan via
       clang libFuzzer when available, else NOT RUN). Lifts also hit EKU/SAN/BC/KU
       value parsers (magic C2–C5), host-aware SAN (C6–C7), ECDSA sig / alg-id
-      junk (C8–C9), and pure path policy (`names_chain`, leaf/issuer auth).
+      junk (C8–C9), NameConstraints against names of every form (CC), and
+      pure path policy (`names_chain`, leaf/issuer auth).
       Local continuous: see `sh test/run fuzz` / `MOONWATER_FUZZ_*`.
 - [x] Bounded lane-smoke coverage-guided fuzzing for certificate-list framing
       (same `tls_der_fuzz` 5s/20k smoke: seeds plus `tls_certificate_body_open` /

@@ -37005,6 +37005,96 @@ def harness_tls_chains(argv):
          {"first_extra": "nameConstraints=critical,permitted;IP:127.0.0.0/255.0.0.0\n"}),
         ("intermediate carries name constraints", 2, good_leaf,
          {"second_extra": "nameConstraints=critical,permitted;IP:127.0.0.0/255.0.0.0\n"}),
+        # RFC 5280 4.2.1.10 name constraints, one key type each (the
+        # evaluation is key-blind): every form the leaf or a lower CA
+        # carries against permitted and excluded subtrees of that form.
+        ("intermediate permits another range", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;IP:10.0.0.0/255.0.0.0\n",
+          "keys": ("P-256",)}),
+        ("intermediate excludes the leaf's address", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,excluded;IP:127.0.0.1/255.255.255.255\n",
+          "keys": ("P-256",)}),
+        ("noncritical name constraints still bind", 2, good_leaf,
+         {"second_extra": "nameConstraints=permitted;IP:10.0.0.0/255.0.0.0\n",
+          "keys": ("P-256",)}),
+        ("an IPv6-only range leaves the IPv4 leaf outside", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;IP:2001:db8::/ffff:ffff::\n",
+          "keys": ("P-256",)}),
+        ("intermediate permits the leaf's DNS name", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.example.com"),
+         {"second_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "keys": ("P-256",)}),
+        ("leaf DNS name outside the permitted names", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:www.evil.test"),
+         {"second_extra": "nameConstraints=critical,permitted;DNS:example.com\n",
+          "keys": ("P-256",)}),
+        ("leaf DNS name under an excluded name", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:a.evil.test"),
+         {"second_extra": "nameConstraints=critical,excluded;DNS:evil.test\n",
+          "keys": ("P-256",)}),
+        ("leaf wildcard whose star can be an excluded label", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,DNS:*.example.com"),
+         {"second_extra": "nameConstraints=critical,excluded;DNS:bad.example.com\n",
+          "keys": ("P-256",)}),
+        ("intermediate permits the leaf's subject", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;dirName:subtree\n"
+                          "[subtree]\nCN=127.0.0.1\n", "keys": ("P-256",)}),
+        ("intermediate permits another subject", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;dirName:subtree\n"
+                          "[subtree]\nCN=127.0.0.2\n", "keys": ("P-256",)}),
+        ("intermediate excludes the leaf's subject", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,excluded;dirName:subtree\n"
+                          "[subtree]\nCN=127.0.0.1\n", "keys": ("P-256",)}),
+        ("a permitted subject compared case-folded", 2, good_leaf,
+         {"second_extra": "nameConstraints=critical,permitted;dirName:subtree\n"
+                          "[subtree]\nO=EXAMPLE  ORG\n",
+          "leaf_subject": "/O=Example Org/CN=127.0.0.1", "keys": ("P-256",)}),
+        ("leaf mailbox on a permitted host", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,email:a@example.com"),
+         {"second_extra": "nameConstraints=critical,permitted;email:example.com\n",
+          "keys": ("P-256",)}),
+        ("leaf mailbox outside the permitted hosts", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,email:a@evil.test"),
+         {"second_extra": "nameConstraints=critical,permitted;email:example.com\n",
+          "keys": ("P-256",)}),
+        ("leaf URI under URI constraints", 2,
+         good_leaf.replace("IP:127.0.0.1", "IP:127.0.0.1,URI:https://a.example.com/"),
+         {"second_extra": "nameConstraints=critical,permitted;URI:.example.com\n",
+          "keys": ("P-256",)}),
+        ("first intermediate's range leaves the leaf outside", 2, good_leaf,
+         {"first_extra": "nameConstraints=critical,permitted;IP:10.0.0.0/255.0.0.0\n",
+          "keys": ("P-256",)}),
+        ("first intermediate excludes the second's subject", 2, good_leaf,
+         {"first_extra": "nameConstraints=critical,excluded;dirName:subtree\n"
+                         "[subtree]\nCN=tls chains second\n", "keys": ("P-256",)}),
+        # rsa8192.badssl.com's shape, the largest key browsers take: the
+        # leaf and the intermediate that signs it both RSA-8192.
+        ("RSA-8192 leaf under an RSA-8192 intermediate", 2, good_leaf,
+         {"keys": ("RSA-8192",), "second_key": "RSA-8192"}),
+        # A left-out intermediate named by the leaf's caIssuers location and
+        # served over plain HTTP from loopback, which the harness build may
+        # reach (TLS_BENCH_ANCHOR). openssl verify fetches nothing, so it is
+        # handed what a browser would have fetched.
+        ("a left-out intermediate fetched from the leaf's caIssuers", 2, good_leaf,
+         {"skip_second": True, "aia": "http://127.0.0.1:%d/second.der",
+          "openssl_untrusted": ["second"], "keys": ("P-256",)}),
+        ("caIssuers answers 404", 2, good_leaf,
+         {"skip_second": True, "aia": "http://127.0.0.1:%d/absent.der",
+          "keys": ("P-256",)}),
+        ("caIssuers serves PEM, not DER", 2, good_leaf,
+         {"skip_second": True, "aia": "http://127.0.0.1:%d/second.pem",
+          "keys": ("P-256",)}),
+        ("caIssuers is https", 2, good_leaf,
+         {"skip_second": True, "aia": "https://127.0.0.1:%d/second.der",
+          "keys": ("P-256",)}),
+        ("caIssuers serves another CA's certificate", 2, good_leaf,
+         {"skip_second": True, "aia": "http://127.0.0.1:%d/first.der",
+          "keys": ("P-256",)}),
+        ("two intermediates left out, each named by caIssuers", 2, good_leaf,
+         {"skip_second": True, "skip_first": True,
+          "aia": "http://127.0.0.1:%d/second.der",
+          "second_extra": "authorityInfoAccess=caIssuers;URI:http://127.0.0.1:%d/first.der\n",
+          "openssl_untrusted": ["second", "first"], "keys": ("P-256",)}),
         ("path length exceeded", 2, good_leaf, {"first_pathlen": 0}),
         ("leaf for clients only", 2, good_leaf.replace("serverAuth", "clientAuth"), {}),
         ("leaf may only sign certificates", 2, good_leaf.replace("digitalSignature", "keyCertSign"), {}),
@@ -37059,13 +37149,20 @@ def harness_tls_chains(argv):
     )
     keys = (("P-256", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"]),
             ("P-384", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]),
-            ("RSA-2048", ["-newkey", "rsa:2048"]))
+            ("RSA-2048", ["-newkey", "rsa:2048"]),
+            ("RSA-8192", ["-newkey", "rsa:8192"]))
+    #   Every row runs under these unless it names its own; an 8,192-bit key
+    #   takes seconds to make, so only the row about it pays for one.
+    every_key = ("P-256", "P-384", "RSA-2048")
     #       This tree's policy where it is stricter than openssl, on purpose.
     DELIBERATE = {
         "no subject alternative name": "a name is taken from subjectAltName only, never the CN",
         "leaf is a CA": "a certificate that says CA:TRUE is not an end entity (tls_leaf_authorized)",
-        "intermediate carries name constraints": "name constraints fail closed until implemented",
-        "first intermediate carries name constraints": "name constraints fail closed until implemented",
+        "leaf wildcard whose star can be an excluded label":
+            "a wildcard falls in an excluded subtree its star can name, as Chrome reads it",
+        "leaf URI under URI constraints": "a name form under constraints it cannot evaluate fails closed",
+        "two intermediates left out, each named by caIssuers":
+            "a caIssuers fetch is one level: a fetched certificate's own issuer is not fetched",
         "duplicate subjectAltName leaf extension": "RFC 5280 one-instance rule; OpenSSL may still accept",
         "leaf duplicate unknown extension": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
         "leaf nonadjacent duplicate unknown": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
@@ -37089,6 +37186,11 @@ def harness_tls_chains(argv):
         "intermediates served out of order", "root served before the intermediates",
         "an unrelated root served too", "a SHA-1 legacy root served too",
         "an impostor intermediate served first",
+        "first intermediate carries name constraints", "intermediate carries name constraints",
+        "intermediate permits the leaf's DNS name", "intermediate permits the leaf's subject",
+        "a permitted subject compared case-folded", "leaf mailbox on a permitted host",
+        "RSA-8192 leaf under an RSA-8192 intermediate",
+        "a left-out intermediate fetched from the leaf's caIssuers",
     }
 
     checks = Checks()
@@ -37253,8 +37355,23 @@ def harness_tls_chains(argv):
             return 1
         (work / "wget").symlink_to(work / "shell")
 
+        #   caIssuers locations are served from the work directory.
+        import functools
+        import http.server
+
+        class Quiet(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *arguments):
+                pass
+
+        files = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), functools.partial(Quiet, directory=str(work)))
+        threading.Thread(target=files.serve_forever, daemon=True).start()
+        files_port = files.server_address[1]
+
         for mutation, depth, leaf_ext, change in mutations:
             for key_name, key in keys:
+                if key_name not in change.get("keys", every_key):
+                    continue
                 top = "stranger" if change.get("stranger") else "root"
                 chain = []
                 issuer = top
@@ -37281,8 +37398,10 @@ def harness_tls_chains(argv):
                         "basicConstraints=critical,%s\nkeyUsage=critical,%s\n" %
                         (change.get("second_ca", "CA:TRUE,pathlen:0"),
                          change.get("second_key_usage", "keyCertSign,cRLSign")))
-                    second_extensions += change.get("second_extra", "")
-                    issue("second", p384, "/CN=tls chains second", "first",
+                    second_extensions += change.get("second_extra", "").replace(
+                        "%d", str(files_port))
+                    issue("second", dict(keys).get(change.get("second_key"), p384),
+                          "/CN=tls chains second", "first",
                           second_extensions,
                           change.get("second_dates", (-1, 90)))
                     if change.get("der_rewrite_oids_second") or change.get("der_dup_unknown_second"):
@@ -37293,13 +37412,20 @@ def harness_tls_chains(argv):
                     if change.get("impostor"):
                         issue("impostor", p384, "/CN=tls chains second", "first",
                               second_extensions)
-                issue("leaf", key, "/CN=127.0.0.1", issuer, leaf_ext,
+                if change.get("aia"):
+                    leaf_ext += "authorityInfoAccess=caIssuers;URI:%s\n" % (
+                        change["aia"] % files_port)
+                    for name in chain:
+                        openssl("x509", "-in", name + ".pem", "-outform", "DER",
+                                "-out", name + ".der")
+                issue("leaf", key, change.get("leaf_subject", "/CN=127.0.0.1"), issuer, leaf_ext,
                       change.get("leaf_dates", (-1, 90)),
                       change.get("leaf_digest", "sha384"))
                 if change.get("der_rewrite_oids") or change.get("der_dup_unknown"):
                     mutate_cert_der("leaf", issuer, change,
                                     "der_rewrite_oids", "der_dup_unknown")
-                served = [c for c in chain if not (change.get("skip_second") and c == "second")]
+                served = [c for c in chain if not (change.get("skip_second") and c == "second")
+                          and not (change.get("skip_first") and c == "first")]
                 if change.get("serve_root"):
                     served.append(top)
                 if change.get("reverse"):
@@ -37313,10 +37439,11 @@ def harness_tls_chains(argv):
                 (work / "chain.pem").write_text("".join(
                     (work / (n + ".pem")).read_text() for n in ["leaf"] + served))
                 (work / "untrusted.pem").write_text("".join(
-                    (work / (n + ".pem")).read_text() for n in served) or "")
+                    (work / (n + ".pem")).read_text()
+                    for n in served + change.get("openssl_untrusted", [])) or "")
                 verify = ["openssl", "verify", "-CAfile", "root.pem", "-purpose", "sslserver",
                           "-verify_ip", "127.0.0.1"]
-                if served:
+                if served or change.get("openssl_untrusted"):
                     verify += ["-untrusted", "untrusted.pem"]
                 openssl_ok = subprocess.run(verify + ["leaf.pem"], cwd=work,
                                             capture_output=True).returncode == 0
@@ -37397,6 +37524,7 @@ def harness_tls_chains(argv):
                            name, "accepts" if openssl_ok else "refuses",
                            "accepts" if ours_ok else "refuses",
                            fetched.stderr.decode(errors="replace").strip()[:200]))
+        files.shutdown()
     return checks.verdict("tls chains", "tls-chains")
 
 
@@ -40131,7 +40259,8 @@ def tls_fuzz_seeds(corpus):
     hostile NC/EKU/SAN/ceiling/alg-id/BMPString/chain shapes built here. The
     tls_der magic first bytes pick a lane: C1 list body, C2 EKU value, C3 SAN,
     C4 basicConstraints, C5 keyUsage, C6 cert+host, C7 extensions+host, C8
-    ECDSA signature DER, C9 AlgorithmIdentifier."""
+    ECDSA signature DER, C9 AlgorithmIdentifier, CC NameConstraints and a
+    name."""
     if corpus == "waterlink":
         return waterlink_fuzz_seeds()
     if corpus == "dhcp":
@@ -40168,6 +40297,33 @@ def tls_fuzz_seeds(corpus):
     nc_excl = tls_seed_tlv(0x30, tls_seed_tlv(0xa1, tls_seed_tlv(0x30, b"\x82\x07bad.com")))
     nc_both = tls_seed_tlv(0x30, tls_seed_tlv(0xa0, tls_seed_tlv(0x30, b"\x82\x03a.b")),
                            tls_seed_tlv(0xa1, tls_seed_tlv(0x30, b"\x82\x03x.y")))
+    #   Magic CC: form, constraint length, NameConstraints, then a name.
+    def nc_seed(form, constraints, name):
+        return b"\xcc" + bytes([form, len(constraints)]) + constraints + name
+    us = tls_seed_tlv(0x31, tls_seed_tlv(0x30, b"\x06\x03\x55\x04\x06",
+                                         tls_seed_tlv(0x13, b"US")))
+    org = tls_seed_tlv(0x31, tls_seed_tlv(0x30, b"\x06\x03\x55\x04\x0a",
+                                          tls_seed_tlv(0x0c, b" Ex  ample ")))
+    nc_dir = tls_seed_tlv(0x30, tls_seed_tlv(0xa1, tls_seed_tlv(0x30, tls_seed_tlv(
+        0xa4, tls_seed_tlv(0x30, us, org)))))
+    nc_ip = tls_seed_tlv(0x30, tls_seed_tlv(0xa0, tls_seed_tlv(
+        0x30, tls_seed_tlv(0x87, b"\x0a\0\0\0\xff\0\0\0")), tls_seed_tlv(
+        0x30, tls_seed_tlv(0x87, b"\x20\x01\x0d\xb8" + b"\0" * 12 +
+                           b"\xff" * 4 + b"\0" * 12))))
+    nc_mail = tls_seed_tlv(0x30, tls_seed_tlv(0xa0, tls_seed_tlv(
+        0x30, tls_seed_tlv(0x81, b".example.com")), tls_seed_tlv(
+        0x30, tls_seed_tlv(0x86, b"x"))))
+    nc_seeds = {
+        "magic_nc_dns_wildcard.bin": nc_seed(0x82, nc_excl, b"*.com"),
+        "magic_nc_dns_under.bin": nc_seed(0x82, nc_both, b"q.a.b."),
+        "magic_nc_ip_v6.bin": nc_seed(0x87, nc_ip, b"\x20\x01\x0d\xb8" + b"\0" * 11 + b"\x01"),
+        "magic_nc_ip_v4.bin": nc_seed(0x87, nc_ip, b"\x0a\x01\x02\x03"),
+        "magic_nc_dir_folded.bin": nc_seed(0xa4, nc_dir, tls_seed_tlv(0x30, us, tls_seed_tlv(
+            0x31, tls_seed_tlv(0x30, b"\x06\x03\x55\x04\x0a", tls_seed_tlv(0x13, b"EX AMPLE"))))),
+        "magic_nc_mail.bin": nc_seed(0x81, nc_mail, b"a@b.example.com"),
+        "magic_nc_san_list.bin": nc_seed(0x82, nc_mail, tls_seed_tlv(
+            0x30, b"\x81\x03a@b", b"\x86\x01x", b"\x82\x03a.b")),
+    }
     #   The wildcard and URI names claim fewer bytes than follow them (11 of
     #   13, 15 of 17); they are kept as they were seeded.
     san_dns = tls_seed_tlv(0x30, b"\x82\x0bexample.com")
@@ -40195,6 +40351,17 @@ def tls_fuzz_seeds(corpus):
         "ext_nc_excluded_dns.bin": one(nc, nc_excl),
         "ext_nc_both.bin": one(nc, nc_both),
         "ext_nc_critical.bin": one(nc, nc_perm, True),
+        "ext_nc_ip.bin": one(nc, nc_ip),
+        "ext_aia_ca_issuers.bin": one(b"\x2b\x06\x01\x05\x05\x07\x01\x01", tls_seed_tlv(
+            0x30, tls_seed_tlv(0x30, b"\x06\x08\x2b\x06\x01\x05\x05\x07\x30\x01",
+                               b"\x86\x0ehttp://ocsp.x/"),
+            tls_seed_tlv(0x30, b"\x06\x08\x2b\x06\x01\x05\x05\x07\x30\x02",
+                         b"\x86\x10http://ca.x/i.der"))),
+        "ext_aia_critical.bin": one(b"\x2b\x06\x01\x05\x05\x07\x01\x01", tls_seed_tlv(
+            0x30, tls_seed_tlv(0x30, b"\x06\x08\x2b\x06\x01\x05\x05\x07\x30\x02",
+                               b"\x86\x0bhttp://x/i")), True),
+        "ext_nc_directory.bin": one(nc, nc_dir, True),
+        **nc_seeds,
         "ext_san_dns.bin": one(san, san_dns),
         "ext_san_wildcard.bin": one(san, tls_seed_tlv(0x30, b"\x82\x0b*.example.com")),
         "ext_san_ipv4.bin": one(san, tls_seed_tlv(0x30, b"\x87\x04\xc0\x00\x02\x01")),
@@ -40212,6 +40379,9 @@ def tls_fuzz_seeds(corpus):
         "magic_eku_many.bin": b"\xc2" + eku_many,
         "magic_san_dns.bin": b"\xc3" + san_dns,
         "magic_san_multi.bin": b"\xc3" + san_multi,
+        "magic_san_ipv6.bin": b"\xc3" + tls_seed_tlv(
+            0x30, b"\x82\x10www.example.com.", b"\x87\x10\x20\x01\x0d\xb8" +
+            b"\0" * 8 + b"\xc0\0\x02\x01"),
         "magic_bc_ca.bin": b"\xc4" + tls_seed_tlv(0x30, b"\x01\x01\xff\x02\x01\x00"),
         "magic_ku_ds.bin": b"\xc5\x03\x02\x07\x80",
         "magic_cert_host.bin": b"\xc6" + minimal,
@@ -40232,6 +40402,7 @@ def tls_fuzz_seeds(corpus):
         "verify_chain_shuffled.bin": b"\xcb\x00\x04\x02\x01\x03",
         "verify_chain_repeats.bin": b"\xcb\x00\x01\x01\x02\x01\x02\x03\x03\x04",
         "verify_chain_overwrite.bin": b"\xca\x01\x00\xff\x00",
+        "verify_chain_short_of_one.bin": b"\xcb\x00\x02",
     })
     return seeds
 
@@ -40327,7 +40498,15 @@ def tls_der_fuzz_lift_parts(net):
     """
     oids = tls_fuzz_sec(net, "static const p8 tls_oid_ec[7] = {",
                         "typedef struct\n{\n        bipolar handle;")
-    oids = oids[:oids.rfind("};\n") + 3]
+    #   net.c includes suffixes.inc beside anchors.inc; the lift has no
+    #   include path, so the table comes in as text, and so do the RSA
+    #   limits tls_cert is sized by (the verify lift's crypto slice repeats
+    #   them word for word, which C allows).
+    limits = re.search(r"#define CRYPTO_RSA_LIMBS .*\n#define CRYPTO_RSA_BYTES .*\n", net)
+    if not limits:
+        raise ValueError("CRYPTO_RSA_LIMBS / CRYPTO_RSA_BYTES")
+    oids = limits.group(0) + (HARNESS_ROOT / "src/net/suffixes.inc").read_text() + \
+        oids[:oids.rfind("};\n") + 3]
     parsers = tls_fuzz_sec(
         net,
         "static COLD bipolar tls_asn1_length(p8 address_to bytes, positive size,",
@@ -40380,6 +40559,7 @@ typedef const char *const_string;
 #define end ((p8)0)
 #define positive_max (~(positive)0)
 #define min(a, b) ((a) < (b) ? (a) : (b))
+#define array_count(a) (sizeof(a) / sizeof((a)[0]))
 #define memory_compare memcmp
 #define memory_copy memcpy
 #define memory_fill(at, v, n) memset((at), (int)(v), (n))
@@ -40883,7 +41063,11 @@ def tls_verify_ecdsa_chain():
     """C arrays of a fresh chain, leaf first, whose links are ECDSA P-256
     under SHA-256, P-384 under SHA-384, P-384 under SHA-512 and RSA-2048
     under SHA-512: the kinds WR2 under GTS Root R1 (RSA SHA-256) leaves.
-    The leaf names example.com and 192.0.2.1; the rest say CA:TRUE."""
+    The leaf names example.com and 192.0.2.1, and link 1 as its caIssuers
+    at http://example.com/link1.der; the rest say CA:TRUE. Link 2
+    permits example.com and 192.0.2.0/24, and a sixth certificate is link 2
+    again -- its name and key, under link 3 -- excluding example.com, the
+    constrained impostor a path must pass over."""
     import datetime
     import ipaddress
     from cryptography import x509
@@ -40903,6 +41087,11 @@ def tls_verify_ecdsa_chain():
             x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "link %d" % signer)])).public_key(
             key.public_key()).serial_number(at + 1).not_valid_before(
             datetime.datetime(2020, 1, 1)).not_valid_after(datetime.datetime(2040, 1, 1))
+        if at == 2:
+            signed = signed.add_extension(x509.NameConstraints(
+                permitted_subtrees=[x509.DNSName("example.com"), x509.IPAddress(
+                    ipaddress.ip_network("192.0.2.0/24"))], excluded_subtrees=None),
+                critical=True)
         if at:
             signed = signed.add_extension(x509.BasicConstraints(ca=True, path_length=None),
                                           critical=True)
@@ -40910,12 +41099,27 @@ def tls_verify_ecdsa_chain():
             signed = signed.add_extension(x509.SubjectAlternativeName([
                 x509.DNSName("example.com"),
                 x509.IPAddress(ipaddress.ip_address("192.0.2.1"))]), critical=False)
+            signed = signed.add_extension(x509.AuthorityInformationAccess([
+                x509.AccessDescription(x509.oid.AuthorityInformationAccessOID.CA_ISSUERS,
+                                       x509.UniformResourceIdentifier(
+                                           "http://example.com/link1.der"))]),
+                critical=False)
         ders.append(signed.sign(keys[signer], digests[at]).public_bytes(
             serialization.Encoding.DER))
-    return ("enum { FUZZ_ECDSA_CHAIN = %d };\n"
+    ders.append(x509.CertificateBuilder().subject_name(
+        x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "link 2")])).issuer_name(
+        x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "link 3")])).public_key(
+        keys[2].public_key()).serial_number(len(keys) + 1).not_valid_before(
+        datetime.datetime(2020, 1, 1)).not_valid_after(datetime.datetime(2040, 1, 1)).add_extension(
+        x509.NameConstraints(permitted_subtrees=None,
+                             excluded_subtrees=[x509.DNSName("example.com")]),
+        critical=True).add_extension(x509.BasicConstraints(ca=True, path_length=None),
+                                     critical=True).sign(keys[3], hashes.SHA512()).public_bytes(
+        serialization.Encoding.DER))
+    return ("enum { FUZZ_ECDSA_CHAIN = %d, FUZZ_ECDSA_LINKS = %d };\n"
             "static const positive fuzz_ecdsa_length[] = { %s };\n"
             "static const p8 fuzz_ecdsa_der[][1024] = { %s };\n" %
-            (len(ders), ", ".join(str(len(d)) for d in ders),
+            (len(ders), len(keys), ", ".join(str(len(d)) for d in ders),
              ", ".join("{ %s }" % ", ".join("0x%02x" % b for b in d) for d in ders)))
 
 
@@ -40992,7 +41196,7 @@ static bool fuzz_prove_wr2_gts(void)
         /* Each generated link accepts, and refuses one flipped signature
            bit: a verify that is never seen to pass proves nothing when it
            refuses. */
-        for (positive link = 0; link + 1 < FUZZ_ECDSA_CHAIN; link++)
+        for (positive link = 0; link + 1 < FUZZ_ECDSA_LINKS; link++)
         {
                 p8 child_buf[1024];
                 p8 issuer_buf[1024];
@@ -41101,9 +41305,9 @@ static void fuzz_certificate_list(p8 *body, positive body_length,
 
 /* Magic-prefix lanes deepen pure parsers the list walk alone under-hits:
    EKU OID walks, SAN GeneralNames, BC/KU values, host-aware SAN, ECDSA
-   signature DER, AlgorithmIdentifier junk. Prefixes: C1 list, C2 EKU,
-   C3 SAN+host, C4 BC, C5 KU, C6 cert+host, C7 exts+host, C8 ECDSA sig,
-   C9 AlgorithmIdentifier. */
+   signature DER, AlgorithmIdentifier junk, name constraints. Prefixes: C1
+   list, C2 EKU, C3 SAN+host, C4 BC, C5 KU, C6 cert+host, C7 exts+host, C8
+   ECDSA sig, C9 AlgorithmIdentifier, CC NameConstraints and a name. */
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
         tls_cert cert;
@@ -41163,6 +41367,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         (void)tls_parse_san(rest, rest_len,
                                             (string_address)"192.0.2.1",
                                             address_of matched);
+                        /* An IPv6 literal and an absolute name reach the
+                           canonicalising half of tls_general_name_match. */
+                        matched = false;
+                        (void)tls_parse_san(rest, rest_len,
+                                            (string_address)"[2001:db8::c000:201]",
+                                            address_of matched);
+                        matched = false;
+                        (void)tls_parse_san(rest, rest_len,
+                                            (string_address)"www.example.com.",
+                                            address_of matched);
                         break;
                 case 0xc4:
                         memory_fill(address_of cert, 0, sizeof cert);
@@ -41191,6 +41405,41 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         (void)tls_parse_ecdsa_sig(rest, rest_len, r,
                                                   address_of r_length, s,
                                                   address_of s_length);
+                        break;
+                case 0xcc:
+                        /* A form, a NameConstraints length, the value, and
+                           a name: the value checked as the parser does,
+                           then walked for the name in every form, and as a
+                           certificate's subject and SAN list. */
+                        if (rest_len >= 2 && rest[1] <= rest_len - 2)
+                        {
+                                static const p8 forms[] = {
+                                    0x81, 0x82, 0x86, 0x87, 0xa0, 0xa4};
+                                p8 *constraints = rest + 2;
+                                positive constraints_length = rest[1];
+                                p8 *name = constraints + constraints_length;
+                                positive name_length =
+                                    rest_len - 2 - constraints_length;
+
+                                (void)tls_name_allowed(constraints,
+                                                       constraints_length, 0,
+                                                       null, 0);
+                                (void)tls_name_allowed(constraints,
+                                                       constraints_length, rest[0],
+                                                       name, name_length);
+                                for (positive k = 0; k < sizeof forms; k++)
+                                        (void)tls_name_allowed(
+                                            constraints, constraints_length,
+                                            forms[k], name, name_length);
+                                memory_fill(address_of cert, 0, sizeof cert);
+                                cert.subject = name;
+                                cert.subject_length = name_length;
+                                cert.san = name;
+                                cert.san_length = name_length;
+                                (void)tls_cert_names_permitted(
+                                    constraints, constraints_length,
+                                    address_of cert);
+                        }
                         break;
                 case 0xc9:
                         alg_at = 0;
@@ -41249,6 +41498,9 @@ def harness_tls_hs_fuzz(argv):
                   "/* One trust anchor from anchors.inc")
     connection = sec(net, "typedef struct\n{\n        bipolar handle;\n"
                      "        bool check_cert;", "static fn tls_forget(")
+    #   The leaf modulus room is sized in the crypto section.
+    connection = re.search(r"#define CRYPTO_RSA_LIMBS .*\n#define CRYPTO_RSA_BYTES .*\n",
+                           net).group(0) + connection
     record = sec(net, "static fn tls_forget(",
                  "static COLD bipolar tls_asn1_length(")
     load24 = sec(
@@ -41985,13 +42237,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         81920)
 
 
-def tls_verify_chain_lift(net, now=None):
+def tls_verify_chain_lift(net, now=None, aia=None):
     """Production tls_verify_chain and what it calls past tls_verify_one:
     anchors.inc, tls_anchor_key, tls_spki_is_anchor, tls_anchor_verifies,
     tls_keep_leaf over a tls_conn holding only what they touch, and
-    tls_date_now -- libc's clock, or the constant named by now. Appended to
-    tls_verify_hosted_source's program; a TLS_BENCH_ANCHOR defined before it
-    is used as net.c uses it. Raises ValueError when a slice is gone."""
+    tls_date_now -- libc's clock, or the constant named by now -- and
+    tls_aia_fetch, whose network half lives in the HTTP client: aia is the C
+    body that stands in for it, by default a fetch that finds nothing.
+    Appended to tls_verify_hosted_source's program; a TLS_BENCH_ANCHOR
+    defined before it is used as net.c uses it. Raises ValueError when a
+    slice is gone."""
     anchor_types = tls_fuzz_sec(net, "typedef struct\n{\n        p8 name[8];",
                                 '#include "anchors.inc"')
     anchor_code = tls_fuzz_sec(
@@ -42014,15 +42269,260 @@ typedef struct
         bool check_cert;
         p8 leaf_qx[48];
         p8 leaf_qy[48];
-        p8 leaf_n[512];
+        p8 leaf_n[CRYPTO_RSA_BYTES];
         positive leaf_n_length;
         p64 leaf_e;
         p8 leaf_curve;
 } tls_conn;
 """ + anchor_types + (HARNESS_ROOT / "src/net/anchors.inc").read_text() + anchor_code + date +
+            "static COLD positive tls_aia_fetch(const p8 address_to url, positive length,\n"
+            "                                   p8 address_to into, positive room)\n{\n" +
+            (aia or "        (void)url;\n        (void)length;\n        (void)into;\n"
+                    "        (void)room;\n        return 0;\n") + "}\n" +
             tls_fuzz_sec(net, "static COLD bool tls_verify_chain(p8 address_to body",
                          "static COLD bool tls_hello_append("))
 
+
+#       The Public Suffix List file suffixes.inc was generated from, fetched
+#       from https://publicsuffix.org/list/public_suffix_list.dat on the box
+#       2026-09-28. Only its ICANN section is used, the section Chrome's
+#       wildcard check reads.
+PUBLIC_SUFFIX_LIST_SHA256 = "257b298daca42f6d8ec964e238c2a55518e14f09d3117917ec8acee6f188503e"
+
+
+def public_suffix_rules(text):
+    """The ICANN section's rules, lower case, each U-label as its A-label."""
+    rules = []
+    icann = False
+    for line in text.splitlines():
+        line = line.strip()
+        if "===BEGIN ICANN DOMAINS===" in line:
+            icann = True
+        elif "===END ICANN DOMAINS===" in line:
+            icann = False
+        elif icann and line and not line.startswith("//"):
+            labels = []
+            for label in line.split()[0].split("."):
+                mark = "!" if label.startswith("!") else ""
+                label = label[len(mark):].lower()
+                if not label.isascii():
+                    label = "xn--" + label.encode("punycode").decode()
+                labels.append(mark + label)
+            rules.append(".".join(labels))
+    return rules
+
+
+def public_suffix_entries(rules):
+    """The multi-label rules as suffixes.inc keeps them, labels reversed
+    ("uk.co"): the plain rules sorted, the wildcards' parents ("ck" for
+    "*.ck") and the exceptions ("ck.www" for "!www.ck")."""
+    reverse = lambda name: ".".join(reversed(name.split(".")))
+    plain = sorted(reverse(r) for r in rules if "." in r and r[0] not in "*!")
+    wildcards = sorted(reverse(r[2:]) for r in rules if r.startswith("*."))
+    exceptions = sorted(reverse(r[1:]) for r in rules if r.startswith("!"))
+    return plain, wildcards, exceptions
+
+
+def public_suffix_compact(tables, name):
+    """What tls_public_suffix answers from the three tables."""
+    plain, wildcards, exceptions = tables
+    key = ".".join(reversed(name.lower().split(".")))
+    return key not in exceptions and (key.rpartition(".")[0] in wildcards or key in plain)
+
+
+def public_suffix_encode(entries):
+    """Front coding: a capital, 'A' plus the bytes shared with the entry
+    before (at most 25), then the rest of the entry. Each top-level label's
+    run starts from nothing, at the offsets returned beside the text."""
+    out = []
+    runs = []
+    before = ""
+    at = 0
+    for entry in entries:
+        shared = 0
+        if before.split(".")[0] != entry.split(".")[0]:
+            runs.append(at)
+        else:
+            while shared < min(len(before), len(entry), 25) and before[shared] == entry[shared]:
+                shared += 1
+        piece = chr(ord("A") + shared) + entry[shared:]
+        out.append(piece)
+        at += len(piece)
+        before = entry
+    return "".join(out), runs
+
+
+def public_suffix_decode(text):
+    entries = []
+    for found in re.finditer(r"([A-Z])([^A-Z]*)", text):
+        before = entries[-1] if entries else ""
+        entries.append(before[:ord(found.group(1)) - ord("A")] + found.group(2))
+    return entries
+
+
+def public_suffix_is_suffix(rules, name):
+    """The Public Suffix List algorithm itself: whether name is its own
+    public suffix under the prevailing rule (exception first, else the rule
+    of most labels, else the implicit "*")."""
+    labels = name.lower().split(".")
+    best = 1
+    for rule in rules:
+        parts = rule.lstrip("!").split(".")
+        if len(parts) <= len(labels) and all(
+                p == "*" or p == l for p, l in zip(reversed(parts), reversed(labels))):
+            if rule.startswith("!"):
+                return len(parts) - 1 == len(labels)
+            best = max(best, len(parts))
+    return best == len(labels)
+
+
+def public_suffix_probes(tables):
+    """Names derived from every entry: the rule, a name under it and its
+    parent, a wildcard's expansions and base, an exception and a name under
+    it, mixed case."""
+    plain, wildcards, exceptions = tables
+    names = set()
+    for entry in plain + wildcards + exceptions:
+        name = ".".join(reversed(entry.split(".")))
+        names.update((name, "zz." + name, "zz.zz." + name, name.upper(),
+                      name.partition(".")[2]))
+    names.update(("example.com", "example.foo", "co.uk.example", "github.io", "appspot.com"))
+    return sorted(n for n in names if n.count(".") >= 1)
+
+
+def harness_public_suffixes(argv):
+    """The wildcard public-suffix tables in src/net/suffixes.inc and the C
+    lookup that reads them.
+
+    With --list FILE (a copy of the Public Suffix List whose sha256 is
+    PUBLIC_SUFFIX_LIST_SHA256) and --write, regenerates suffixes.inc, after
+    proving that the compact test tls_public_suffix makes -- not an
+    exception, and a wildcard parent or a plain rule -- equals the Public
+    Suffix List algorithm over every rule-derived name. Without --list it
+    decodes suffixes.inc and holds the lifted tls_public_suffix and
+    tls_host_match to it over the same names: each is a suffix exactly when
+    the tables say so, and "*.<name>" identifies "a.<name>" exactly when it
+    is not.
+
+        python3 test/differential.py --harness public_suffixes
+        python3 test/differential.py --harness public_suffixes --list FILE --write
+
+    The list changes most days, and --list takes only the pinned copy: to
+    move to a newer one, fetch https://publicsuffix.org/list/public_suffix_list.dat,
+    set PUBLIC_SUFFIX_LIST_SHA256 and the date in its comment and in the
+    written header to the new copy's, rerun with --write (about 40 s, most
+    of it the reference algorithm), and commit suffixes.inc with the pin.
+    """
+    parser = argparse.ArgumentParser(prog="differential.py --harness public_suffixes")
+    parser.add_argument("--list")
+    parser.add_argument("--write", action="store_true")
+    args = parser.parse_args(argv)
+    path = HARNESS_ROOT / "src/net/suffixes.inc"
+    checks = Checks()
+
+    def c_list(name, items):
+        return "static const char %s[] =\n%s;\n" % (
+            name, "\n".join('    "%s\\0"' % item for item in items))
+
+    if args.list:
+        raw = Path(args.list).read_bytes()
+        if hashlib.sha256(raw).hexdigest() != PUBLIC_SUFFIX_LIST_SHA256:
+            print("public suffixes: FAIL -- %s is not the pinned list" % args.list)
+            return 1
+        rules = public_suffix_rules(raw.decode("utf-8"))
+        tables = public_suffix_entries(rules)
+        wrong = [name for name in public_suffix_probes(tables)
+                 if public_suffix_compact(tables, name) != public_suffix_is_suffix(rules, name)]
+        checks(not wrong, "the compact test differs from the list's algorithm for %s" %
+               " ".join(wrong[:10]))
+        encoded, runs = public_suffix_encode(tables[0])
+        checks(public_suffix_decode(encoded) == tables[0], "the front coding does not decode")
+        if args.write and not wrong:
+            lines = [encoded[at:at + 72] for at in range(0, len(encoded), 72)]
+            path.write_text(
+                "/*\n        Public suffixes a certificate wildcard may not stand on "
+                "(tls_public_suffix).\n\n"
+                "        Generated by test/differential.py --harness public_suffixes "
+                "--list FILE --write\n"
+                "        from the Public Suffix List, sha256 %s...,\n"
+                "        fetched from publicsuffix.org 2026-09-28: the %d multi-label "
+                "rules of its\n        ICANN section (U-labels as A-labels), labels "
+                "reversed. The plain rules are\n        sorted and front-coded -- a "
+                "capital letter, 'A' plus the bytes shared with\n        the entry "
+                "before, then the rest -- and each top-level label's run starts\n"
+                "        from 'A' at an offset in tls_public_suffix_runs. %d bytes "
+                "of text.\n*/\n\n"
+                "static const char tls_public_suffixes[] =\n%s;\n\n"
+                "static const p16 tls_public_suffix_runs[] = {\n%s};\n\n%s\n%s" % (
+                    PUBLIC_SUFFIX_LIST_SHA256[:16], sum(map(len, tables)), len(encoded),
+                    "\n".join('    "%s"' % line for line in lines),
+                    "".join("    %s,\n" % ", ".join(str(r) for r in runs[at:at + 10])
+                            for at in range(0, len(runs), 10)),
+                    c_list("tls_public_suffix_wildcards", tables[1]),
+                    c_list("tls_public_suffix_exceptions", tables[2])))
+            print("public suffixes: wrote %s (%d rules, %d bytes, %d runs)" % (
+                path, sum(map(len, tables)), len(encoded), len(runs)))
+        return checks.verdict("public suffixes", "public-suffixes")
+
+    text = path.read_text()
+
+    def c_strings(name):
+        found = re.search(r"%s\[\] =\n((?:\s*\"[^\"]*\"\n?)+);" % name, text)
+        return "".join(re.findall(r'"([^"]*)"', found.group(1))) if found else None
+
+    encoded = c_strings("tls_public_suffixes")
+    wildcards = c_strings("tls_public_suffix_wildcards")
+    exceptions = c_strings("tls_public_suffix_exceptions")
+    if None in (encoded, wildcards, exceptions):
+        print("public suffixes: FAIL -- a table is missing from suffixes.inc")
+        return 1
+    tables = (public_suffix_decode(encoded), wildcards.split("\\0")[:-1],
+              exceptions.split("\\0")[:-1])
+    names = public_suffix_probes(tables)
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
+    driver = r"""
+int main(void)
+{
+        char line[512];
+
+        while (fgets(line, sizeof line, stdin))
+        {
+                char star[520];
+                char host[520];
+                positive length = strcspn(line, "\n");
+
+                line[length] = 0;
+                snprintf(star, sizeof star, "*.%s", line);
+                snprintf(host, sizeof host, "a.%s", line);
+                printf("%d %d\n", tls_public_suffix((p8 *)line, length),
+                       tls_host_match(host, (p8 *)star, strlen(star)));
+        }
+        return 0;
+}
+"""
+    with tempfile.TemporaryDirectory(prefix="public-suffixes-") as temporary:
+        work = Path(temporary)
+        (work / "suffix.c").write_text(shim + oids + "\n" + parsers + driver)
+        built = subprocess.run([os.environ.get("CC", "cc"), "-O1", "-w", "-o",
+                                str(work / "suffix"), str(work / "suffix.c")],
+                               capture_output=True, text=True)
+        if built.returncode:
+            print("public suffixes: FAIL -- the lift does not build:\n" + built.stderr[-2000:])
+            return 1
+        ran = subprocess.run([str(work / "suffix")], input="\n".join(names) + "\n",
+                             capture_output=True, text=True)
+    answers = ran.stdout.split("\n")
+    wrong = []
+    for name, answer in zip(names, answers):
+        suffix = public_suffix_compact(tables, name)
+        if answer != "%d %d" % (suffix, not suffix):
+            wrong.append("%s(%s)" % (name, answer))
+    checks(len(answers) > len(names) and not wrong,
+           "tls_public_suffix disagrees with suffixes.inc for %d of %d names: %s" % (
+               len(wrong), len(names), " ".join(wrong[:10])))
+    print("public suffixes: %d rules, %d names probed" % (sum(map(len, tables)), len(names)))
+    return checks.verdict("public suffixes", "public-suffixes")
 
 #       Public HTTPS hosts for x509_corpus: the popular sites, CDNs, clouds and
 #       registries, and a deliberate spread of governments, banks and national
@@ -42150,6 +42650,16 @@ def harness_x509_corpus(argv):
     2026-09-28, live: 644 chains, 635 of the 635 openssl accepts verify,
     and none of the 9 it refuses.
 
+    A certificate's http: caIssuers location is fetched too, once, into
+    --work/aia (the lift's tls_aia_fetch reads it from there), and handed
+    to openssl as untrusted, so openssl's verdict is the browser's that
+    completes a short chain the same way. 2026-09-28, live again after
+    name constraints, the suffix check, RSA-8192 and caIssuers: 642 chains,
+    openssl (with the fetched issuers) accepts 636 and this tree all 636,
+    none it refuses; the pinned base over the same chains accepted 633 of
+    the 633 openssl took without fetching (gob.mx, monster.com, ssa.gov are
+    the three a fetch completes).
+
         python3 test/differential.py --harness x509_corpus --work DIR
     """
     import base64
@@ -42182,8 +42692,61 @@ def harness_x509_corpus(argv):
     with concurrent.futures.ThreadPoolExecutor(24) as pool:
         chains = [(h, p) for h, p in zip(X509_CORPUS_HOSTS, pool.map(fetch, X509_CORPUS_HOSTS))
                   if p]
+    pem = re.compile(rb"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", re.S)
+    (work / "aia").mkdir(exist_ok=True)
+
+    def aia_name(url):
+        return re.sub(r"[^A-Za-z0-9._-]", "_", url)
+
+    def aia_urls(text):
+        from cryptography import x509
+        urls = []
+        for found in pem.finditer(text):
+            try:
+                cert = x509.load_der_x509_certificate(
+                    base64.b64decode(b"".join(found.group(1).split())))
+                access = cert.extensions.get_extension_for_class(
+                    x509.AuthorityInformationAccess).value
+            except Exception:
+                continue
+            urls += [d.access_location.value for d in access
+                     if d.access_method == x509.oid.AuthorityInformationAccessOID.CA_ISSUERS
+                     and isinstance(d.access_location, x509.UniformResourceIdentifier)
+                     and d.access_location.value.lower().startswith("http://")][:1]
+        return urls
+
+    def aia_fetch(url):
+        import urllib.request
+        path = work / "aia" / aia_name(url)
+        if not args.offline and not path.exists():
+            try:
+                with urllib.request.urlopen(url, timeout=10) as reply:
+                    path.write_bytes(reply.read(16384))
+            except Exception:
+                pass
+        return path
+
+    urls = sorted({u for _, path in chains for u in aia_urls(path.read_bytes())})
+    with concurrent.futures.ThreadPoolExecutor(16) as pool:
+        list(pool.map(aia_fetch, urls))
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
-    driver = tls_verify_chain_lift(net) + r"""
+    aia = r"""
+        char path[4096];
+        int at = snprintf(path, sizeof path, "%s/", getenv("X509_AIA"));
+        FILE *f;
+        positive got;
+
+        for (positive i = 0; i < length && at < (int)sizeof path - 1; i++)
+                path[at++] = isalnum(url[i]) || url[i] == '.' || url[i] == '-' ||
+                                     url[i] == '_' ? url[i] : '_';
+        path[at] = 0;
+        f = fopen(path, "rb");
+        got = f ? fread(into, 1, room, f) : 0;
+        if (f)
+                fclose(f);
+        return got;
+"""
+    driver = tls_verify_chain_lift(net, aia=aia) + r"""
 static p8 body[1 << 20];
 
 /* argv: host, then the served DER files in order; prints 1 or 0. */
@@ -42223,7 +42786,6 @@ int main(int argc, char **argv)
     if built.returncode:
         print("x509 corpus: FAIL -- the lift does not build:\n" + built.stderr[-2000:])
         return 1
-    pem = re.compile(rb"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", re.S)
 
     def judge(item):
         host, path = item
@@ -42237,6 +42799,15 @@ int main(int argc, char **argv)
         rest = work / "chains" / (host + ".rest.pem")
         blocks = [m.group(0) + b"\n" for m in pem.finditer(text)]
         leaf.write_bytes(blocks[0])
+        for url in aia_urls(text):
+            fetched = work / "aia" / aia_name(url)
+            try:
+                from cryptography import x509
+                from cryptography.hazmat.primitives import serialization
+                blocks.append(x509.load_der_x509_certificate(fetched.read_bytes()).public_bytes(
+                    serialization.Encoding.PEM))
+            except Exception:
+                pass
         rest.write_bytes(b"".join(blocks[1:]))
         verify = ["openssl", "verify", "-CAfile", args.bundle, "-purpose", "sslserver",
                   "-verify_ip" if re.fullmatch(r"[0-9.]+", host) else "-verify_hostname", host]
@@ -42244,7 +42815,8 @@ int main(int argc, char **argv)
             verify += ["-untrusted", str(rest)]
         theirs = subprocess.run(verify + [str(leaf)], capture_output=True).returncode == 0
         ours = subprocess.run([str(work / "verify"), host] + ders, capture_output=True,
-                              text=True).stdout.strip() == "1"
+                              text=True, env=dict(os.environ, X509_AIA=str(work / "aia"))
+                              ).stdout.strip() == "1"
         return host, ours, theirs
 
     with concurrent.futures.ThreadPoolExecutor(8) as pool:
@@ -42285,8 +42857,18 @@ def harness_tls_verify_fuzz(argv):
     del argv
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     checks = (HARNESS_ROOT / "test/checks.c").read_text()
+    #   The leaf's caIssuers location serves link 1 while fuzz_aia is set.
+    aia = r"""
+        static const char named[] = "http://example.com/link1.der";
+
+        if (!fuzz_aia || length != sizeof named - 1 ||
+            memory_compare(url, named, length) || fuzz_ecdsa_length[1] > room)
+                return 0;
+        memory_copy(into, fuzz_ecdsa_der[1], fuzz_ecdsa_length[1]);
+        return fuzz_ecdsa_length[1];
+"""
     try:
-        chain = tls_verify_chain_lift(net, "FUZZ_TLS_NOW")
+        chain = tls_verify_chain_lift(net, "FUZZ_TLS_NOW", aia)
     except ValueError as exc:
         print("tls verify fuzz: FAIL -- net.c slice anchor moved: %s" % exc)
         return 1
@@ -42296,6 +42878,7 @@ def harness_tls_verify_fuzz(argv):
 enum { FUZZ_TLS_NOW = 20200101000000ull };
 static p8 tls_bench_anchor_x[48];
 static p8 tls_bench_anchor_y[48];
+static bool fuzz_aia;
 """ + chain + r"""
 static p8 fuzz_body[9 * (1024 + 5) + 4];
 
@@ -42337,6 +42920,8 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 {
         static const p8 good[3] = {0, 1, 2};
         static const p8 shuffled[4] = {0, 4, 2, 1};
+        static const p8 impostor[4] = {0, 1, 5, 2};
+        static const p8 short_of_one[2] = {0, 2};
         tls_cert anchor;
         positive length;
         bool proved;
@@ -42362,6 +42947,25 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
         length = fuzz_chain_body(shuffled, 4);
         proved = proved &&
                  fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        /* Link 2's twin excludes example.com, a name the leaf carries
+           whichever host is asked for: alone it refuses, and served first
+           it is passed over for link 2, whose subtrees hold the leaf. */
+        length = fuzz_chain_body(impostor, 3);
+        proved = proved &&
+                 !fuzz_verify(fuzz_body, length, (string_address)"example.com") &&
+                 !fuzz_verify(fuzz_body, length, (string_address)"192.0.2.1");
+        length = fuzz_chain_body(impostor, 4);
+        proved = proved &&
+                 fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        /* Link 1 left out: refused until the leaf's caIssuers serves it,
+           then a path through the fetched link 1. */
+        length = fuzz_chain_body(short_of_one, 2);
+        proved = proved &&
+                 !fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        fuzz_aia = true;
+        proved = proved &&
+                 fuzz_verify(fuzz_body, length, (string_address)"example.com");
+        fuzz_aia = false;
         if (!proved)
         {
                 fprintf(stderr, "tls_verify_fuzz: WR2/GTS or generated-chain prove failed\n");
@@ -42402,25 +43006,38 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         }
         if (length > 1 && buf[0] == 0xcb)
         {
-                /* The verdict is known exactly: every generated subject is
-                   distinct and key 3 is the anchor, so a path needs the
-                   leaf first, the first and second intermediates anywhere
-                   after it, and no more than eight entries. */
+                /* The verdict is known exactly: key 3 is the anchor and
+                   every generated subject but link 2's twin is distinct,
+                   so a path needs the leaf first, the first and second
+                   intermediates anywhere after it, and no more than eight
+                   entries; the twin, whose subtrees exclude the leaf's
+                   name, never stands in for link 2. */
                 positive n = min(length - 1, (positive)9);
                 positive body = fuzz_chain_body(buf + 1, n);
                 bool served[FUZZ_ECDSA_CHAIN] = {false};
                 bool framed = n <= 8;
+                bool first = buf[1] % FUZZ_ECDSA_CHAIN == 0;
 
                 for (positive i = 1; i < n; i++)
                         served[buf[1 + i] % FUZZ_ECDSA_CHAIN] = true;
+                /* With the leaf's caIssuers answering, link 1 need not be
+                   served: it is fetched, and still needs link 2 above it. */
+                fuzz_aia = false;
                 if (fuzz_verify(fuzz_body, body, (string_address)"example.com") !=
-                        (framed && buf[1] % FUZZ_ECDSA_CHAIN == 0 && served[1] &&
-                         served[2]) ||
+                        (framed && first && served[1] && served[2]) ||
                     fuzz_verify(fuzz_body, body, null) != framed)
                 {
                         fprintf(stderr, "tls_verify_fuzz: wrong verdict for a served order\n");
                         abort();
                 }
+                fuzz_aia = true;
+                if (fuzz_verify(fuzz_body, body, (string_address)"example.com") !=
+                    (framed && first && served[2]))
+                {
+                        fprintf(stderr, "tls_verify_fuzz: wrong verdict with caIssuers\n");
+                        abort();
+                }
+                fuzz_aia = false;
         }
 
         free(buf);
@@ -44002,10 +44619,16 @@ def crypto_vectors_lines(seed):
              message if scheme == "pss" else digest)
 
     for bits, e in ((2048, 65537), (2049, 65537), (2055, 3), (3072, 65537),
-                    (4096, 65537), (2047, 65537), (2048, 3)):
+                    (4096, 65537), (8192, 65537), (2047, 65537), (2048, 3)):
         n, (one, two, d) = rsa_key(bits, e)
         k = (bits + 7) // 8
         policy = bits >= 2048
+        if bits == 8192:
+            #   Past 8,192 bits policy refuses before any arithmetic, so the
+            #   modulus need not factor: this key's, shifted a byte up.
+            wide = n << 8 | 0xff
+            rsa_add("pkcs256", wide, e, be(12345, k + 1), draw(32), policy=False)
+            rsa_add("pss", wide, e, be(12345, k + 1), message=draw(3), policy=False)
 
         def raw(em):
             m = int.from_bytes(em, "big")
@@ -44161,17 +44784,18 @@ def harness_crypto_vectors(argv):
       the curve, and constructed keys whose R has x above n, whose r and s
       are short, whose u1 G + u2 Q is infinity or a doubling
     - RSA PKCS#1 v1.5 (SHA-256/384) and PSS-SHA256 at 2048, 2049, 2055,
-      3072 and 4096 bits: malformed padding, the wrong DigestInfo, a
+      3072, 4096 and 8192 bits: malformed padding, the wrong DigestInfo, a
       missing NULL, trailing bytes, short padding, s at 0/1/n-1/n, e = 3's
       cube-root forgery, PSS trailers, top bits and salt lengths; moduli
-      under 2048 bits, even moduli and exponents refused by policy
+      under 2048 or over 8192 bits, even moduli and exponents refused by
+      policy
 
     First, the P-256 and P-384 field bodies in lib.c -- all eight on all
     three machines, the arithmetic ECDH's secret scalar runs through --
     must hold no conditional branch; any other exit is a failure.
 
     Verdicts are OpenSSL's, except where this client is stricter on
-    purpose (RSA under 2048 bits, an even or unit exponent, a compressed
+    purpose (RSA under 2048 or over 8192 bits, an even or unit exponent, a compressed
     ECDH share, a signature not exactly the modulus' length); the
     generator raises if OpenSSL disagrees with a verdict a vector was built
     to have. Returns 2 when cryptography is missing.
@@ -52717,6 +53341,7 @@ HARNESS_CHECKS = {
     "crypto_vectors": harness_crypto_vectors,
     "crypto_fuzz": harness_crypto_fuzz,
     "x509_corpus": harness_x509_corpus,
+    "public_suffixes": harness_public_suffixes,
     "tls_fuzz": harness_tls_fuzz,
     "msan_net": harness_msan_net,
     "security_hygiene": harness_security_hygiene,

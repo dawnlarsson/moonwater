@@ -54632,8 +54632,28 @@ static fn tls_certificate_identity_rules(void)
                     {"a.b.example.com", "*.example.com", false},
                     {"www.example.com.evil", "*.example.com", false},
                     {"example.com", "*.com", false},
+                    {"a.co.uk", "*.co.uk", false},
+                    {"a.CO.UK", "*.Co.Uk.", false},
+                    {"www.example.co.uk", "*.example.co.uk", true},
+                    {"a.b.ck", "*.b.ck", false},
+                    {"a.www.ck", "*.www.ck", true},
+                    {"a.x.kawasaki.jp", "*.x.kawasaki.jp", false},
+                    {"a.city.kawasaki.jp", "*.city.kawasaki.jp", true},
+                    {"a.aisai.aichi.jp", "*.aisai.aichi.jp", false},
+                    {"a.xn--55qx5d.cn", "*.xn--55qx5d.cn", false},
+                    {"a.appspot.com", "*.appspot.com", true},
+                    {"a.example.foo", "*.example.foo", true},
                     {"www.example.com", "w*.example.com", false},
-                    {"www.example.com", "*.example.com.", false},
+                    {"www.example.com", "*.example.com.", true},
+                    {"example.com", "example.com.", true},
+                    {"example.com", "example.com..", false},
+                    {"example.com", ".", false},
+                    {"XN--BCHER-KVA.example.com", "xn--bcher-kva.EXAMPLE.com", true},
+                    {"xn--bcher-kva.example.com", "*.xn--EXAMPLE-abc.com", false},
+                    {"a.xn--example-abc.com", "*.xn--EXAMPLE-abc.com", true},
+                    {"www.example.com", "www.*.com", false},
+                    {"www.example.com", "*.*.com", false},
+                    {"www.example.com", "*example.com", false},
                     {"a", "*", false},
                     {"a.", "*.", false},
                     {"example.co", "example.com", false},
@@ -54646,8 +54666,92 @@ static fn tls_certificate_identity_rules(void)
                                                 string_length(names[i].name)) !=
                                  names[i].match;
                 check("dNSName matching: case, one-label wildcards, no empty "
-                      "label, no public-suffix star",
+                      "label, no star on an ICANN public suffix",
                       wrong == 0);
+        }
+        {
+                /* An IPv6 literal and the 16 bytes it stands for, or a
+                   refusal. */
+                static const struct
+                {
+                        string_address text;
+                        bool parsed;
+                        p8 address[16];
+                } literals[] = {
+                    {"::1", true, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}},
+                    {"[::1]", true, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}},
+                    {"2001:DB8::1", true, {0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}},
+                    {"2001:db8:0:0:0:0:0:1", true, {0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}},
+                    {"::", true, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+                    {"1::", true, {0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+                    {"::ffff:192.0.2.1", true, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xc0, 0x00, 0x02, 0x01}},
+                    {"1:2:3:4:5:6:7:8", true, {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07, 0x00, 0x08}},
+                    {"1:2:3:4:5:6:192.0.2.1", true, {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0xc0, 0x00, 0x02, 0x01}},
+                    {"1:2:3:4:5:6:7::", true, {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07, 0x00, 0x00}},
+                    {"1:2:3:4:5:6:7:8:9", false, {0}},
+                    {"1::2::3", false, {0}},
+                    {":1", false, {0}},
+                    {"1:", false, {0}},
+                    {"12345::", false, {0}},
+                    {"1:2:3:4:5:6:7:8::", false, {0}},
+                    {"::1%eth0", false, {0}},
+                    {"[::1", false, {0}},
+                    {"::1]", false, {0}},
+                    {"1:::2", false, {0}},
+                    {"::g", false, {0}},
+                    {"1:2:3:4:5:6:7:192.0.2.1", false, {0}},
+                    {"::1.2.3", false, {0}},
+                    {"example.com", false, {0}},
+                    {"192.0.2.1", false, {0}},
+                    {"\x10::1", false, {0}},
+                    {"::\x19", false, {0}},
+                };
+                positive wrong = 0;
+
+                for (positive i = 0; i < array_count(literals); i++)
+                {
+                        p8 text[64];
+                        p8 address[16];
+                        positive length = string_length(literals[i].text);
+                        bool parsed;
+
+                        memory_copy(text, literals[i].text, length + 1);
+                        parsed = tls_ipv6_literal(text, length, address);
+                        wrong += parsed != literals[i].parsed ||
+                                 (parsed && memory_compare(address,
+                                                           literals[i].address,
+                                                           16));
+                }
+                check("IPv6 literals: groups, one ::, IPv4 tails, brackets; "
+                      "zones and malformed spellings refused",
+                      wrong == 0);
+        }
+        {
+                static p8 v6_one[16] = {[15] = 1};
+                static p8 v4_mapped[16] = {[10] = 0xff, [11] = 0xff, [12] = 192,
+                                           [14] = 2, [15] = 1};
+
+                check("an IPv6 host is identified by its 16-byte iPAddress",
+                      tls_general_name_match("::1", 0x87, v6_one, 16) &&
+                          tls_general_name_match("[::1]", 0x87, v6_one, 16) &&
+                          tls_general_name_match("0:0::0:1", 0x87, v6_one, 16));
+                check("an IPv6 host is never a dNSName or an IPv4 iPAddress",
+                      !tls_general_name_match("::1", 0x82, (p8 address_to)"::1", 3) &&
+                          !tls_general_name_match("::ffff:192.0.2.1", 0x87,
+                                                  ip, sizeof ip) &&
+                          tls_general_name_match("::ffff:192.0.2.1", 0x87,
+                                                 v4_mapped, 16));
+                check("an IPv4 host is never a 16-byte iPAddress",
+                      !tls_general_name_match("192.0.2.1", 0x87, v4_mapped, 16));
+                check("a host's trailing dot is dropped before matching",
+                      tls_general_name_match("example.com.", 0x82, dns,
+                                             sizeof dns - 1) &&
+                          tls_general_name_match("192.0.2.1.", 0x87, ip,
+                                                 sizeof ip) &&
+                          !tls_general_name_match("example.com..", 0x82, dns,
+                                                  sizeof dns - 1) &&
+                          !tls_general_name_match(".", 0x82, (p8 address_to)"", 0) &&
+                          !tls_general_name_match("", 0x82, (p8 address_to)"", 0));
         }
         check("an exact dNSName identifies a named host",
               tls_general_name_match("example.com", 0x82, dns,
@@ -54693,7 +54797,7 @@ static fn tls_certificate_identity_rules(void)
               !tls_parse_san(san_registered_empty,
                              sizeof san_registered_empty, null,
                              address_of matched));
-        check("name constraints are refused even when non-critical",
+        check("an empty NameConstraints value is refused",
               tls_parse_extensions(constrained, sizeof constrained, 0, 2,
                                    address_of cert, null) == TLS_FAIL);
         memory_fill(address_of cert, 0, sizeof cert);
@@ -57732,6 +57836,352 @@ static fn crypto_rsa_served_sizes(void)
 }
 
 /*
+        RFC 5280 4.2.1.10 name constraints, one row a name against a
+        NameConstraints value (tag 0 checks the value itself, as the parser
+        does): dNSName subtrees the way Chrome reads them, a wildcard
+        against an excluded label, IPv4 and IPv6 ranges, directoryName
+        prefixes folded like OpenSSL's canonical form, rfc822Name hosts and
+        mailboxes, and the forms this client cannot evaluate, which fail
+        closed. Generated with ncrows in the sec2-x509 pass; the DER is
+        spelled out so a row reads without a decoder.
+*/
+static fn tls_name_constraint_rules(void)
+{
+        static const struct
+        {
+                string_address label;
+                string_address constraints;
+                p8 tag;
+                string_address name;
+                bool allowed;
+        } rows[] = {
+            {"dNSName equal to a permitted base",
+             "3011a00f300d820b6578616d706c652e636f6d",
+             0x82, "6578616d706c652e636f6d", true},
+            {"dNSName under a permitted base",
+             "3011a00f300d820b6578616d706c652e636f6d",
+             0x82, "7777772e6578616d706c652e636f6d", true},
+            {"dNSName case and trailing dot fold",
+             "3011a00f300d820b6578616d706c652e636f6d",
+             0x82, "5757572e4558414d504c452e434f4d2e", true},
+            {"dNSName sharing only a suffix string",
+             "3011a00f300d820b6578616d706c652e636f6d",
+             0x82, "6261646578616d706c652e636f6d", false},
+            {"dNSName past a permitted base",
+             "3011a00f300d820b6578616d706c652e636f6d",
+             0x82, "6578616d706c652e636f6d2e6576696c", false},
+            {"wildcard under a permitted base",
+             "3011a00f300d820b6578616d706c652e636f6d",
+             0x82, "2a2e6578616d706c652e636f6d", true},
+            {"iPAddress beside dNSName-only subtrees",
+             "3011a00f300d820b6578616d706c652e636f6d",
+             0x87, "c0000201", true},
+            {"a leading-dot base leaves out its own name",
+             "3012a010300e820c2e6578616d706c652e636f6d",
+             0x82, "6578616d706c652e636f6d", false},
+            {"a leading-dot base holds names under it",
+             "3012a010300e820c2e6578616d706c652e636f6d",
+             0x82, "612e6578616d706c652e636f6d", true},
+            {"dNSName under an excluded base",
+             "300fa10d300b82096576696c2e74657374",
+             0x82, "612e6576696c2e74657374", false},
+            {"dNSName equal to an excluded base",
+             "300fa10d300b82096576696c2e74657374",
+             0x82, "4556494c2e74657374", false},
+            {"dNSName beside an excluded base",
+             "300fa10d300b82096576696c2e74657374",
+             0x82, "6e6f746576696c2e74657374", true},
+            {"a wildcard whose star can be the excluded label",
+             "300fa10d300b82096576696c2e74657374",
+             0x82, "2a2e74657374", false},
+            {"a wildcard under an excluded base",
+             "300fa10d300b82096576696c2e74657374",
+             0x82, "2a2e6576696c2e74657374", false},
+            {"a wildcard two labels above an excluded base",
+             "300fa10d300b82096576696c2e74657374",
+             0x82, "2a2e782e6576696c2e74657374", false},
+            {"a wildcard beside an excluded base",
+             "300fa10d300b82096576696c2e74657374",
+             0x82, "2a2e676f6f642e74657374", true},
+            {"empty permitted dNSName base holds all",
+             "3006a00430028200",
+             0x82, "616e797468696e672e74657374", true},
+            {"IPv4 inside a permitted range",
+             "300ea00c300a87080a000000ff000000",
+             0x87, "0a010203", true},
+            {"IPv4 outside a permitted range",
+             "300ea00c300a87080a000000ff000000",
+             0x87, "0b000001", false},
+            {"IPv6 against an IPv4-only permitted range",
+             "300ea00c300a87080a000000ff000000",
+             0x87, "00000000000000000000000000000001", false},
+            {"dNSName beside iPAddress-only subtrees",
+             "300ea00c300a87080a000000ff000000",
+             0x82, "6578616d706c652e636f6d", true},
+            {"IPv4 inside an excluded range",
+             "300ea10c300a8708c0000200ffffff00",
+             0x87, "c0000207", false},
+            {"IPv4 outside an excluded range",
+             "300ea10c300a8708c0000200ffffff00",
+             0x87, "c0000301", true},
+            {"IPv6 inside a permitted range",
+             "3026a0243022872020010db8000000000000000000000000ffffffff000000000000000000000000",
+             0x87, "20010db8000000000000000000000001", true},
+            {"IPv6 outside a permitted range",
+             "3026a0243022872020010db8000000000000000000000000ffffffff000000000000000000000000",
+             0x87, "20010db9000000000000000000000001", false},
+            {"subject under a permitted directoryName",
+             "3027a0253023a421301f310b30090603550406130255533110300e060355040a13074578616d706c65",
+             0xa4, "302b310b30090603550406130255533110300e060355040a13074578616d706c65310a300806035504030c0178", true},
+            {"directoryName compares case-folded across string types",
+             "3027a0253023a421301f310b30090603550406130255533110300e060355040a13074578616d706c65",
+             0xa4, "301f310b30090603550406130255533110300e060355040a0c074558414d504c45", true},
+            {"directoryName folds outer and inner white space",
+             "3028a0263024a4223020310b30090603550406130255533111300f060355040a1308457820616d706c65",
+             0xa4, "3025310b300906035504061302555331163014060355040a0c0d20206578200920616d706c6520", true},
+            {"subject beside a permitted directoryName",
+             "3027a0253023a421301f310b30090603550406130255533110300e060355040a13074578616d706c65",
+             0xa4, "301d310b3009060355040613025553310e300c060355040a13054f74686572", false},
+            {"subject shorter than a permitted directoryName",
+             "3027a0253023a421301f310b30090603550406130255533110300e060355040a13074578616d706c65",
+             0xa4, "300d310b3009060355040613025553", false},
+            {"subject with another first attribute type",
+             "3027a0253023a421301f310b30090603550406130255533110300e060355040a13074578616d706c65",
+             0xa4, "301f310b3009060355040a130255533110300e060355040a13074578616d706c65", false},
+            {"subject under an excluded directoryName",
+             "3024a1223020a41e301c310b3009060355040613025553310d300b060355040a0c044576696c",
+             0xa4, "3028310b3009060355040613025553310d300b060355040a13046576696c310a300806035504030c0179", false},
+            {"subject beside an excluded directoryName",
+             "3024a1223020a41e301c310b3009060355040613025553310d300b060355040a0c044576696c",
+             0xa4, "301c310b3009060355040613025553310d300b060355040a1304476f6f64", true},
+            {"a BMPString the fold cannot read is unsure, so excluded",
+             "3024a1223020a41e301c310b3009060355040613025553310d300b060355040a0c044576696c",
+             0xa4, "3020310b30090603550406130255533111300f060355040a1e08004500760069006c", false},
+            {"a BMPString is unsure, so not permitted",
+             "3027a0253023a421301f310b30090603550406130255533110300e060355040a13074578616d706c65",
+             0xa4, "3026310b300906035504061302555331173015060355040a1e0e004500780061006d0070006c0065", false},
+            {"a multi-valued RDN that differs is unsure",
+             "3024a1223020a41e301c310b3009060355040613025553310d300b060355040a0c044576696c",
+             0xa4, "3026310b30090603550406130255533117300b060355040a13044576696c3008060355040313017a", false},
+            {"mailbox on a permitted host",
+             "3011a00f300d810b6578616d706c652e636f6d",
+             0x81, "61404578616d706c652e434f4d", true},
+            {"mailbox on a host under a permitted host",
+             "3011a00f300d810b6578616d706c652e636f6d",
+             0x81, "61407375622e6578616d706c652e636f6d", false},
+            {"rfc822Name without a mailbox is unsure",
+             "3011a00f300d810b6578616d706c652e636f6d",
+             0x81, "6578616d706c652e636f6d", false},
+            {"mailbox under a leading-dot host",
+             "3012a010300e810c2e6578616d706c652e636f6d",
+             0x81, "61407375622e6578616d706c652e636f6d", true},
+            {"mailbox on the leading-dot host itself",
+             "3012a010300e810c2e6578616d706c652e636f6d",
+             0x81, "61406578616d706c652e636f6d", false},
+            {"a whole-mailbox base, host case folded",
+             "3013a011300f810d61406578616d706c652e636f6d",
+             0x81, "61404558414d504c452e636f6d", true},
+            {"a whole-mailbox base, local part exact",
+             "3013a011300f810d61406578616d706c652e636f6d",
+             0x81, "41406578616d706c652e636f6d", false},
+            {"an emailAddress no subtree can vouch for",
+             "3013a011300f810d61406578616d706c652e636f6d",
+             0x81, null, false},
+            {"an emailAddress under excluded rfc822 subtrees",
+             "300fa10d300b81096576696c2e74657374",
+             0x81, null, false},
+            {"a URI under URI subtrees fails closed",
+             "3012a010300e860c2e6578616d706c652e636f6d",
+             0x86, "68747470733a2f2f612e6578616d706c652e636f6d2f", false},
+            {"a dNSName beside URI subtrees",
+             "3012a010300e860c2e6578616d706c652e636f6d",
+             0x82, "612e6578616d706c652e636f6d", true},
+            {"an otherName under otherName subtrees fails closed",
+             "3010a10e300ca00a060355040aa0030c0178",
+             0xa0, "060355040aa0030c0179", false},
+            {"permitted and excluded subtrees parse",
+             "3076a04e300d820b6578616d706c652e636f6d300a87080a000000ff0000003023a421301f310b30090603550406130255533110300e060355040a13074578616d706c65300781056140622e633003860178a1243022872020010db8000000000000000000000000ffffffff000000000000000000000000",
+             0, null, true},
+            {"an empty NameConstraints is refused",
+             "3000",
+             0, null, false},
+            {"an empty permitted list is refused",
+             "3002a000",
+             0, null, false},
+            {"excluded before permitted is refused",
+             "300ea1053003820161a0053003820162",
+             0, null, false},
+            {"two permitted lists are refused",
+             "300ea0053003820161a0053003820162",
+             0, null, false},
+            {"a subtree minimum is refused",
+             "300aa0083006820161800100",
+             0, null, false},
+            {"a subtree maximum is refused",
+             "300aa0083006820161810101",
+             0, null, false},
+            {"a non-contiguous IPv4 mask is refused",
+             "300ea00c300a87080a000000ff00ff00",
+             0, null, false},
+            {"an IPv6 mask with a hole is refused",
+             "3026a0243022872000000000000000000000000000000000ffffffff7f0000000000000000000000",
+             0, null, false},
+            {"a five-byte iPAddress base is refused",
+             "300ba009300787050a000000ff",
+             0, null, false},
+            {"a dNSName base with a control byte is refused",
+             "3009a00730058203610162",
+             0, null, false},
+            {"a directoryName base that is not a Name is refused",
+             "3008a0063004a4023100",
+             0, null, false},
+            {"trailing bytes after the subtrees are refused",
+             "3007a005300382016100",
+             0, null, false},
+            {"an unknown list tag is refused",
+             "3007a2053003820161",
+             0, null, false},
+        };
+
+        static p8 constraints[256];
+        static p8 name[256];
+
+        for (positive i = 0; i < array_count(rows); i++)
+        {
+                positive length;
+                positive name_length = 0;
+                bool allowed;
+
+                memory_fill(constraints, 0, sizeof constraints);
+                memory_fill(name, 0, sizeof name);
+                length = crypto_hex_into(constraints, sizeof constraints,
+                                         rows[i].constraints);
+                if (rows[i].name)
+                        name_length = crypto_hex_into(name, sizeof name,
+                                                      rows[i].name);
+                allowed = length &&
+                          tls_name_allowed(constraints, length, rows[i].tag,
+                                           rows[i].name ? name : null,
+                                           name_length);
+                checks++;
+                if (allowed != rows[i].allowed)
+                {
+                        failures++;
+                        string_format(log, "  FAIL name constraints: %s\n",
+                                      rows[i].label);
+                }
+        }
+
+        {
+                /* A subject carrying an emailAddress under rfc822Name
+                   subtrees, then the same certificate's SAN names. */
+                static p8 permitted[] = {
+                    0x30, 0x0c, 0xa0, 0x0a, 0x30, 0x08, 0x81, 0x06,
+                    'b', '.', 't', 'e', 's', 't'};
+                static p8 subject_mail[] = {
+                    0x30, 0x19, 0x31, 0x17, 0x30, 0x15, 0x06, 0x09, 0x2a,
+                    0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x01, 0x16,
+                    0x08, 'a', '@', 'b', '.', 't', 'e', 's', 't'};
+                static p8 subject_plain[] = {
+                    0x30, 0x0e, 0x31, 0x0c, 0x30, 0x0a, 0x06, 0x03, 0x55,
+                    0x04, 0x03, 0x0c, 0x03, 'a', 'b', 'c'};
+                static p8 san_inside[] = {
+                    0x30, 0x0a, 0x81, 0x08, 'a', '@', 'b', '.', 't', 'e',
+                    's', 't'};
+                static p8 san_outside[] = {
+                    0x30, 0x0a, 0x81, 0x08, 'a', '@', 'c', '.', 't', 'e',
+                    's', 't'};
+                tls_cert cert;
+
+                memory_fill(address_of cert, 0, sizeof cert);
+                cert.subject = subject_mail;
+                cert.subject_length = sizeof subject_mail;
+                check("an emailAddress in the subject fails rfc822Name constraints closed",
+                      !tls_cert_names_permitted(permitted, sizeof permitted,
+                                                address_of cert));
+                cert.subject = subject_plain;
+                cert.subject_length = sizeof subject_plain;
+                cert.san = san_inside;
+                cert.san_length = sizeof san_inside;
+                check("an rfc822Name SAN inside the permitted host passes",
+                      tls_cert_names_permitted(permitted, sizeof permitted,
+                                               address_of cert));
+                cert.san = san_outside;
+                check("an rfc822Name SAN on another host is refused",
+                      !tls_cert_names_permitted(permitted, sizeof permitted,
+                                                address_of cert));
+        }
+}
+
+/*
+        The caIssuers fetch's two gates that need no network: which
+        addresses a URL chosen by the peer may reach, and which location
+        tls_parse_ca_issuers takes from an AuthorityInfoAccess value.
+        CHECK_net builds without TLS_BENCH_ANCHOR, so loopback is refused
+        here as it is in wget.
+*/
+static fn tls_ca_issuers_rules(void)
+{
+        static const struct
+        {
+                p8 address[4];
+                bool reachable;
+        } addresses[] = {
+            {{8, 8, 8, 8}, true},          {{1, 1, 1, 1}, true},
+            {{0, 0, 0, 0}, false},         {{0, 1, 2, 3}, false},
+            {{10, 0, 0, 1}, false},        {{127, 0, 0, 1}, false},
+            {{100, 63, 255, 255}, true},   {{100, 64, 0, 1}, false},
+            {{100, 127, 255, 255}, false}, {{100, 128, 0, 0}, true},
+            {{169, 254, 169, 254}, false}, {{169, 253, 0, 1}, true},
+            {{172, 15, 0, 1}, true},       {{172, 16, 0, 1}, false},
+            {{172, 31, 255, 255}, false},  {{172, 32, 0, 1}, true},
+            {{192, 0, 0, 1}, false},       {{192, 0, 1, 1}, true},
+            {{192, 168, 1, 1}, false},     {{192, 169, 0, 1}, true},
+            {{198, 17, 255, 255}, true},   {{198, 18, 0, 1}, false},
+            {{198, 19, 255, 255}, false},  {{198, 20, 0, 0}, true},
+            {{223, 255, 255, 255}, true},  {{224, 0, 0, 1}, false},
+            {{239, 255, 255, 250}, false}, {{240, 0, 0, 1}, false},
+            {{255, 255, 255, 255}, false},
+        };
+        /* ocsp first, then an https caIssuers, then the http one taken. */
+        static p8 access[] = {
+            0x30, 0x43,
+            0x30, 0x15, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30,
+            0x01, 0x86, 0x09, 'h', 't', 't', 'p', ':', '/', '/', 'o', '/',
+            0x30, 0x14, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30,
+            0x02, 0x86, 0x08, 'h', 't', 't', 'p', 's', ':', '/', '/',
+            0x30, 0x14, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30,
+            0x02, 0x86, 0x08, 'H', 'T', 'T', 'P', ':', '/', '/', 'c'};
+        positive wrong = 0;
+        tls_cert cert;
+
+        for (positive i = 0; i < array_count(addresses); i++)
+                wrong += http_address_public(network_load_32(
+                             (p8 address_to)addresses[i].address)) !=
+                         addresses[i].reachable;
+        check("caIssuers reaches public addresses only: not this network, "
+              "private, loopback, shared, link-local, IETF, benchmarking, "
+              "multicast or reserved",
+              wrong == 0);
+
+        memory_fill(address_of cert, 0, sizeof cert);
+        tls_parse_ca_issuers(access, sizeof access, address_of cert);
+        check("the first http: caIssuers location is taken, past OCSP and https",
+              cert.ca_issuers == access + sizeof access - 8 &&
+                  cert.ca_issuers_length == 8);
+        memory_fill(address_of cert, 0, sizeof cert);
+        access[sizeof access - 1] = 0x01;
+        tls_parse_ca_issuers(access, sizeof access, address_of cert);
+        check("a caIssuers location with a control byte is not taken",
+              !cert.ca_issuers);
+        access[sizeof access - 1] = 'c';
+        memory_fill(address_of cert, 0, sizeof cert);
+        tls_parse_ca_issuers(access, sizeof access - 1, address_of cert);
+        check("a truncated AuthorityInfoAccess names nothing",
+              !cert.ca_issuers);
+}
+
+/*
         The anchor table against chains that failed before it existed.
 
         www.kernel.org serves its leaf and GlobalSign Atlas R3 DV TLS CA 2025
@@ -59936,6 +60386,8 @@ b32 main(void)
         crypto_floor_montgomery();
         crypto_floor_aes();
         crypto_rsa_served_sizes();
+        tls_name_constraint_rules();
+        tls_ca_issuers_rules();
         tls_trust_anchor_chains();
         redirect_urls();
         fetching_for_real();
