@@ -5214,8 +5214,10 @@ static COLD bool tls_host_match(string_address host, p8 address_to name,
                         return false;
         }
 
+        /* The star stands for one whole label, never an empty one: a host
+           ".example.com" is not a name "*.example.com" covers. */
         star = string_first_of(host, '.');
-        if (!star || !star[1])
+        if (!star || star == host || !star[1])
                 return false;
 
         return string_length(star) == name_length - 1 &&

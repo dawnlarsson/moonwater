@@ -54228,6 +54228,41 @@ static fn tls_certificate_identity_rules(void)
         memory_fill(address_of cert, 0, sizeof cert);
 
 
+        {
+                /* host, dNSName, whether it identifies the host */
+                static const struct
+                {
+                        string_address host;
+                        string_address name;
+                        bool match;
+                } names[] = {
+                    {"example.com", "example.com", true},
+                    {"Example.COM", "example.com", true},
+                    {"www.example.com", "*.example.com", true},
+                    {"WWW.Example.Com", "*.EXAMPLE.com", true},
+                    {"xn--bcher-kva.example.com", "*.example.com", true},
+                    {"example.com", "*.example.com", false},
+                    {".example.com", "*.example.com", false},
+                    {"a.b.example.com", "*.example.com", false},
+                    {"www.example.com.evil", "*.example.com", false},
+                    {"example.com", "*.com", false},
+                    {"www.example.com", "w*.example.com", false},
+                    {"www.example.com", "*.example.com.", false},
+                    {"a", "*", false},
+                    {"a.", "*.", false},
+                    {"example.co", "example.com", false},
+                };
+                positive wrong = 0;
+
+                for (positive i = 0; i < array_count(names); i++)
+                        wrong += tls_host_match(names[i].host,
+                                                (p8 address_to)names[i].name,
+                                                string_length(names[i].name)) !=
+                                 names[i].match;
+                check("dNSName matching: case, one-label wildcards, no empty "
+                      "label, no public-suffix star",
+                      wrong == 0);
+        }
         check("an exact dNSName identifies a named host",
               tls_general_name_match("example.com", 0x82, dns,
                                      sizeof dns - 1));
