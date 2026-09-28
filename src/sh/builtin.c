@@ -16621,9 +16621,8 @@ static bool floodlight_take(string_address text, positive length,
         is a refusal. So a handoff that defines the string must define every
         CONFIG_MOONWATER_FLOODLIGHT_* bool that is y, exactly as autoconf.h
         does for the kernel; one that carries none of them must carry the
-        string neither. Until the build's configuration header carries them,
-        this text is empty in the image and a live register's report is what
-        brings the configured rows to the shell.
+        string neither. The build's configuration header, which src/lib.util.c
+        includes ahead of everything, does exactly that.
 */
 static const p8 floodlight_configured_text[] =
 #ifdef CONFIG_MOONWATER_FLOODLIGHT_POLICY

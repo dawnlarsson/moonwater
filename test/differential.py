@@ -28355,6 +28355,17 @@ def harness_floodlight(argv):
         check(bool(entry),
               '%s is a Kconfig bool that allows by default and says what it '
               'closes' % symbol)
+    build_source = (ROOT / 'src/build/build.c').read_text()
+    carried = re.search(r'build_floodlight_switches\[\] = \{(.*?)null\}',
+                        build_source, re.S)
+    check(bool(carried) and
+          re.findall(r'"(\w+)"', carried.group(1)) ==
+              [name[len('CONFIG_MOONWATER_FLOODLIGHT_'):]
+               for name, _ in kernel_composition[1]],
+          'the configuration header carries every dangerous-flag switch to '
+          'the shell, in the order floodlight.c composes them')
+    check('"#define CONFIG_MOONWATER_FLOODLIGHT_POLICY "' in build_source,
+          'and the policy string beside them')
     check(bool(re.search(r'config MOONWATER_FLOODLIGHT_POLICY\n\s+string .*?\n'
                          r'\s+depends on MOONWATER_FLOODLIGHT\n\s+default ""',
                          kconfig)) and

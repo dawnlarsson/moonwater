@@ -3797,6 +3797,21 @@ static positive build_switch_count;
 static bool build_moon_tools_all;
 static bool build_moon_builtins_all;
 
+/*
+        Floodlight's configuration, for the shell's copy of it: whether the
+        register is built, its policy string as the .config spells it (a C
+        string literal already), and the dangerous-flag switches, which are
+        kept with the tool and builtin switches and default to y. The list
+        is src/moonwater/Kconfig's "Floodlight: dangerous flags" menu, and
+        the floodlight harness fails the build if the two differ.
+*/
+static bool build_moon_floodlight;
+static string_address build_floodlight_policy;
+static string_address const build_floodlight_switches[] = {
+    "AWK_SPAWN", "SHELL_ESCAPES", "FIND_EXEC", "FIND_DELETE", "FIND_WRITE",
+    "XARGS", "SPLIT_FILTER", "SORT_COMPRESS", "ENV_SPLIT", "LAUNCHERS",
+    "NAMESPACES", "NETWORK_FETCH", null};
+
 static string_address build_upper(string_address name)
 {
         positive length = string_length(name);
@@ -3850,6 +3865,8 @@ static fn build_components(string_address config)
         build_moon_strict = STRICT_SAFE;
         build_moon_tools_all = true;
         build_moon_builtins_all = true;
+        build_moon_floodlight = true;
+        build_floodlight_policy = null;
         build_switch_count = 0;
 
         if (file_slurp(config, build_file_two, BUILD_FILE_ROOM) < 0)
@@ -3892,6 +3909,18 @@ static fn build_components(string_address config)
                         continue;
                 }
 
+                //      The policy string is a value, not a switch, and is kept
+                //      as written: Kconfig quotes it the way C does.
+                if (memory_is_word(name, length, "FLOODLIGHT_POLICY"))
+                {
+                        build_floodlight_policy =
+                            pair.value && pair.value_length >= 2 &&
+                                    pair.value[0] == '"'
+                                ? build_text_keep(pair.value, pair.value_length)
+                                : null;
+                        continue;
+                }
+
                 //      =y is on, and "is not set" and =n are off: a composed
                 //      .config says the first, a profile may say the second.
                 //      Any other value, =m included, leaves the default
@@ -3916,8 +3945,11 @@ static fn build_components(string_address config)
                         build_moon_tools_all = on;
                 else if (memory_is_word(name, length, "BUILTINS_ALL"))
                         build_moon_builtins_all = on;
+                else if (memory_is_word(name, length, "FLOODLIGHT"))
+                        build_moon_floodlight = on;
                 else if ((string_has_prefix(name, "TOOL_") ||
-                          string_has_prefix(name, "BUILTIN_")) &&
+                          string_has_prefix(name, "BUILTIN_") ||
+                          string_has_prefix(name, "FLOODLIGHT_")) &&
                          build_switch_count < BUILD_SWITCH_ROOM)
                 {
                         build_switch_name[build_switch_count] =
@@ -4035,6 +4067,36 @@ static string_address build_config_header(string_address from,
 
                 text = build_join(text, "#define MOONWATER_CONFIG_BUILTINS ",
                                   build_number(builtins), "\n", null);
+        }
+
+        //      Floodlight's rows for the shell's copy, spelled as autoconf.h
+        //      spells them for floodlight.c: the string whenever the
+        //      register is built, and every switch that is y. The shell reads
+        //      the switches only when the string is defined and takes an
+        //      absent one as off, so the two always travel together.
+        if (build_moon_floodlight)
+        {
+                text = build_join(text, "#define CONFIG_MOONWATER_FLOODLIGHT_POLICY ",
+                                  build_floodlight_policy ? build_floodlight_policy
+                                                          : (string_address)"\"\"",
+                                  "\n", null);
+                for (positive at = 0; build_floodlight_switches[at]; at++)
+                {
+                        string_address want = build_join(
+                            "FLOODLIGHT_", build_floodlight_switches[at], null);
+                        bool on = true;
+
+                        for (positive seen = build_switch_count; seen > 0; seen--)
+                                if (word_is(build_switch_name[seen - 1], want))
+                                {
+                                        on = build_switch_value[seen - 1];
+                                        break;
+                                }
+
+                        if (on)
+                                text = build_join(text, "#define CONFIG_MOONWATER_",
+                                                  want, " 1\n", null);
+                }
         }
 
         text = build_join(text, "#define MOONWATER_CONFIG_TOOLS ",

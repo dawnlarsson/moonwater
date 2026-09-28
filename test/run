@@ -4439,27 +4439,21 @@ differential_domain()
                 --jobs "${MW_JOBS:-$differential_jobs}"
 }
 
-#       The shell as kernel/profile/sec_hardened configures it: its Floodlight
-#       policy string and dangerous-flag switches, handed to the compiler the
-#       way the kernel configuration hands them over, so the rows the shell
-#       carries for a missing register are the ones that profile ships. A
-#       switch the profile does not turn off keeps its Kconfig default, y.
-#       Another whole-shell build, so run -j makes it beside the others.
+#       The shell as kernel/profile/sec_hardened configures it, built through
+#       the configuration header an image build writes (switch_header, below
+#       in kit), so its Floodlight policy string and dangerous-flag switches
+#       reach the compile the way they reach the image's shell; a switch the
+#       profile does not turn off keeps its Kconfig default, y. Another
+#       whole-shell build, so run -j makes it beside the others.
 need_hardened_shell()
 {
         [ -x "$work/hardened-shell" ] && return 0
-        (
-                hardened_profile=kernel/profile/sec_hardened
-                set -- "-DCONFIG_MOONWATER_FLOODLIGHT_POLICY=$(sed -n \
-                        's/^CONFIG_MOONWATER_FLOODLIGHT_POLICY=//p' "$hardened_profile")"
-                for hardened_switch in $(sed -n '/^    menu "Floodlight: dangerous flags"/,/^    endmenu/s/^    config \(MOONWATER_FLOODLIGHT_[A-Z_]*\)$/\1/p' \
-                        src/moonwater/Kconfig); do
-                        grep -qx "CONFIG_$hardened_switch=n" "$hardened_profile" ||
-                                set -- "$@" "-DCONFIG_$hardened_switch=1"
-                done
-                freestanding programs/shell.c "$work/hardened-shell.building" \
-                        "$host_arch" "$@"
-        ) || return 1
+        build_tool config-header kernel/profile/sec_hardened \
+                "$work/hardened.h" > "$work/hardened.h.log" 2>&1 ||
+                { sed 's/^/    /' "$work/hardened.h.log"; return 1; }
+        freestanding programs/shell.c "$work/hardened-shell.building" \
+                "$host_arch" "-DMOONWATER_CONFIG=\"$work/hardened.h\"" ||
+                return 1
         mkdir -p "$work/hardened-bin" || return 1
         for hardened_name in $utilities bash sh; do
                 ln -sf "$work/hardened-shell" "$work/hardened-bin/$hardened_name" ||
