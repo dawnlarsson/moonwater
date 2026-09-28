@@ -53875,7 +53875,6 @@ static fn tls_sensitive_state_erasure(void)
                 {
                         p8 payload[16] = {0};
                         p8 aad[5] = {TLS_CT_APP, 0x03, 0x03, 0, 16};
-                        p8 inner[16] = {0};
                         positive inner_length = 0;
                         p8 type = 0;
 
@@ -53883,7 +53882,7 @@ static fn tls_sensitive_state_erasure(void)
                         check("TLS read keys stop at their AES-GCM usage limit",
                               tls_decrypt_record(
                                   address_of connection, payload,
-                                  sizeof payload, aad, inner,
+                                  sizeof payload, aad,
                                   address_of inner_length,
                                   address_of type) == TLS_FAIL);
                 }

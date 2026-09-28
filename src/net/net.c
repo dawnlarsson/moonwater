@@ -4685,45 +4685,36 @@ static bipolar tls_send_enc(tls_conn address_to tls, p8 inner_type,
                    ? TLS_OK : TLS_FAIL;
 }
 
+/* Open a record where it lies. The inner type is its last nonzero byte;
+   zeros after it are padding, and a record of nothing else is refused. A
+   failed open wipes what it decrypted. */
 static bipolar tls_decrypt_record(tls_conn address_to tls, p8 address_to payload,
                                   positive payload_length, p8 address_to aad,
-                                  p8 address_to inner, positive address_to inner_length,
+                                  positive address_to inner_length,
                                   p8 address_to type)
 {
         p8 nonce[12];
-        p8 tag[16];
-        positive at = 0;
-        bipolar status = TLS_FAIL;
+        positive at = payload_length - 16;
+        bool opened;
 
         if (payload_length < 16 ||
             tls->seq_read >= TLS_AES_GCM_RECORD_LIMIT)
-                goto done;
-
-        // The record layer opens records where they lie: inner is payload.
-        if (inner != payload)
-                memory_copy(inner, payload, payload_length - 16);
-        memory_copy(tag, payload + payload_length - 16, 16);
+                return TLS_FAIL;
         tls_nonce(tls->s_iv, tls->seq_read, nonce);
-        if (!crypto_aesgcm_open(address_of tls->s_gcm, nonce, aad, 5, inner,
-                                   payload_length - 16, tag))
-                goto done;
+        opened = crypto_aesgcm_open(address_of tls->s_gcm, nonce, aad, 5,
+                                    payload, at, payload + at);
+        crypto_forget(nonce, sizeof nonce);
+        if (!opened)
+                return TLS_FAIL;
 
         tls->seq_read++;
-        at = payload_length - 16;
-        while (at && inner[at - 1] == 0)
+        while (at && payload[at - 1] == 0)
                 at--;
         if (!at)
-                goto done;
-        address_to type = inner[at - 1];
+                return TLS_FAIL;
+        address_to type = payload[at - 1];
         address_to inner_length = at - 1;
-        status = TLS_OK;
-
-done:
-        if (status && payload_length >= 16)
-                crypto_forget(inner, payload_length - 16);
-        crypto_forget(nonce, sizeof nonce);
-        crypto_forget(tag, sizeof tag);
-        return status;
+        return TLS_OK;
 }
 
 static bool tls_compatibility_ccs_valid(p8 address_to payload,
@@ -4879,7 +4870,7 @@ static bipolar tls_next_record(tls_conn address_to tls, p8 address_to type,
 
         /* A change_cipher_spec that arrives protected is unexpected. */
         if (header[0] != TLS_CT_APP ||
-            tls_decrypt_record(tls, payload, payload_length, header, payload,
+            tls_decrypt_record(tls, payload, payload_length, header,
                                address_of inner_length, address_of inner_type) ||
             inner_type == TLS_CT_CCS)
                 return TLS_FAIL;
