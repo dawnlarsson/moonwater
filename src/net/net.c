@@ -2043,15 +2043,23 @@ static fn crypto_hkdf_extract(p8 address_to salt, positive salt_length,
         crypto_hmac_sha256(salt, salt_length, ikm, ikm_length, prk);
 }
 
-static fn crypto_hkdf_expand(p8 address_to prk, p8 address_to info,
-                             positive info_length, p8 address_to out,
-                             positive out_length)
+/* RFC 5869 2.3: L is at most 255 HashLen, the blocks one counter byte
+   numbers. A longer ask is refused with its output wiped, where the counter
+   used to wrap to zero and go on as something that is not HKDF. */
+static bool crypto_hkdf_expand(p8 address_to prk, p8 address_to info,
+                               positive info_length, p8 address_to out,
+                               positive out_length)
 {
         p8 previous[32];
         p8 block[32];
         positive have = 0;
         p8 counter = 1;
 
+        if (out_length > 255 * 32)
+        {
+                crypto_forget(out, out_length);
+                return false;
+        }
         while (have < out_length)
         {
                 crypto_mac mac;
@@ -2077,6 +2085,7 @@ static fn crypto_hkdf_expand(p8 address_to prk, p8 address_to info,
 
         crypto_forget(previous, sizeof previous);
         crypto_forget(block, sizeof block);
+        return true;
 }
 
 /* The AES state and key are secret, so an ordinary S-box table exposes them
@@ -4510,7 +4519,10 @@ static COLD fn tls_expand_label(p8 address_to secret, string_address label,
         // use the full lengths, so a truncated length byte is not a bound.
         if (label_length > 249 || context_length > 255 ||
             used + 1 + 6 + label_length + 1 + context_length > sizeof info)
+        {
+                crypto_forget(out, out_length);
                 return;
+        }
 
         info[0] = (p8)(out_length >> 8);
         info[1] = (p8)out_length;

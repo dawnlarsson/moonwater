@@ -56441,6 +56441,46 @@ static fn tls_key_update_rounds(void)
         tls_forget(far);
 }
 
+/*
+        HKDF-Expand at its ceiling (RFC 5869 2.3): 255 blocks come out, the
+        last one chained from the 254th under counter 255; one byte more is
+        refused and the output wiped, where the one-byte counter used to
+        wrap to zero and restart the chain.
+*/
+static p8 tls_hkdf_long[255 * 32 + 1];
+
+static fn tls_hkdf_expand_ceiling(void)
+{
+        p8 prk[32];
+        p8 info[3] = {'i', 'n', 'f'};
+        p8 last[32];
+        p8 counter = 255;
+        crypto_mac mac;
+        bool zeros = true;
+
+        memory_fill(prk, 0x0b, sizeof prk);
+        check("HKDF-Expand gives 255 blocks",
+              crypto_hkdf_expand(prk, info, sizeof info, tls_hkdf_long,
+                                 255 * 32));
+        crypto_hmac_open(address_of mac, DIGEST_SHA256, 32, prk, 32);
+        crypto_hmac_write(address_of mac, tls_hkdf_long + 253 * 32, 32);
+        crypto_hmac_write(address_of mac, info, sizeof info);
+        crypto_hmac_write(address_of mac, address_of counter, 1);
+        crypto_hmac_close(address_of mac, last);
+        check("HKDF-Expand's 255th block chains from the 254th",
+              !memory_compare(last, tls_hkdf_long + 254 * 32, 32));
+
+        memory_fill(tls_hkdf_long, 0xa5, sizeof tls_hkdf_long);
+        (void)crypto_hkdf_expand(prk, info, sizeof info, tls_hkdf_long,
+                                 sizeof tls_hkdf_long);
+        for (positive at = 0; at < sizeof tls_hkdf_long; at++)
+                zeros &= !tls_hkdf_long[at];
+        check("HKDF-Expand past 255 blocks writes no key stream", zeros);
+        check("HKDF-Expand past 255 blocks is refused",
+              !crypto_hkdf_expand(prk, info, sizeof info, tls_hkdf_long,
+                                  sizeof tls_hkdf_long));
+}
+
 static fn tls_certificate_framing(void)
 {
         {
@@ -60217,6 +60257,7 @@ b32 main(void)
         tls_encrypted_flight_hs_reassembly();
         tls_post_handshake_framing();
         tls_key_update_rounds();
+        tls_hkdf_expand_ceiling();
         tls_certificate_framing();
         crypto_floor();
         crypto_floor_ghash();
