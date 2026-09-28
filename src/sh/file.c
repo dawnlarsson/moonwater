@@ -10269,6 +10269,10 @@ static bool ls_option_seen(p8 letter, string_address value)
                 question is answered where the option is read, so a format
                 written after them wins and one written before does not.
         */
+        //      --zero turns colour off where it is read.
+        if (letter == '6')
+                ls_color_when = 0;
+
         if (letter == '1' || letter == '6')
         {
                 p8 chosen = ls_selected.format;
@@ -10816,15 +10820,15 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                 Colour: asked for and wanted here, and then LS_COLORS read --
                 or with no LS_COLORS the built-in table, but only when
                 COLORTERM says anything or TERM is one the dircolors database
-                names. A run of names with nothing between them but a zero
-                byte is no place for colour, whichever order the two were
-                asked in. Some terminals mishandle tabs among colour
+                names. --zero turns colour off as it is read, so a --color
+                after it turns it on again, as GNU's option loop has it. Some
+                terminals mishandle tabs among colour
                 sequences, so a coloured listing indents with spaces whatever
                 -T said. Links are followed for their targets where a colour
                 or the grouping of directories first depends on them.
         */
         ls_coloring = (flags & FILE_FLAG('K')) && ls_when_active(ls_color_when) &&
-                      !(flags & FILE_FLAG('6')) && ls_color_parse();
+                      ls_color_parse();
         ls_color_used = false;
         if (ls_coloring)
                 ls_tabsize = 0;
