@@ -10634,6 +10634,11 @@ static fn ls_print_commas(string_address directory)
 {
         positive position = 0;
 
+        //      An empty directory is its heading and its total and no line
+        //      of names, as GNU prints nothing for a directory with none.
+        if (!ls_count)
+                return;
+
         for (positive index = 0; index < ls_count; index++)
         {
                 ls_entry address_to entry = address_of ls_entries[ls_sorted[index]];

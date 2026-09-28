@@ -7355,7 +7355,9 @@ FILES_UTILITIES = (
                    ("--zero", "--color=always", "-d", "dir", "exe"), ("--color=always", "--zero", "-d", "dir"),
                    # Unsorted is not reversed, and not grouped.
                    ("-U", "-r", "-d", "dir", "a.txt", "exe"), ("-f", "-r", "dir"),
-                   ("-U", "--group-directories-first", "-r", "-d", "a.txt", "dir"))),
+                   ("-U", "--group-directories-first", "-r", "-d", "a.txt", "dir"),
+                   # An empty directory has no line of names under -m.
+                   ("-m", "hollow"), ("-sm", "a.txt", "hollow"), ("-w0", "-C", "hollow"))),
     #       dir and vdir are ls with a different default format, so they
     #       answer for the same surface and are walked over it. A shorter
     #       list of their own left sixty-nine of ls's options untouched in
