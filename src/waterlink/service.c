@@ -1032,6 +1032,32 @@ typedef struct
         b32 padding2;
 } link_message;
 
+/*
+        The int a control message carries, by its level and type, or -1:
+        each cmsghdr is a length, a level and a type, padded to eight bytes,
+        and nothing is read past what the kernel said it wrote.
+*/
+static b32 link_control_int(p8 address_to control, positive length,
+                            positive room, b32 level, b32 type)
+{
+        b32 value = -1;
+
+        for (positive at = 0; at + 16 <= length && at + 16 <= room;)
+        {
+                p64 size;
+                b32 has[2];
+
+                memory_copy(address_of size, control + at, 8);
+                memory_copy(has, control + at + 8, 8);
+                if (size < 16 || size > room - at)
+                        break;
+                if (has[0] == level && has[1] == type && size >= 20)
+                        memory_copy(address_of value, control + at + 16, 4);
+                at += (size + 7) & ~7ull;
+        }
+        return value;
+}
+
 static fn link_batch_flush(void)
 {
         positive count = link_self.batched;
@@ -2317,30 +2343,15 @@ static bipolar link_receive(link_run address_to run)
 
         for (bipolar at = 0; at < count; at++)
         {
-                link_message address_to message = address_of got[at].message;
-                p8 address_to cmsg = (p8 address_to)control[at];
+                b32 segment = link_control_int((p8 address_to)control[at],
+                                               got[at].message.control_length,
+                                               sizeof control[at], 17,
+                                               104); // SOL_UDP, UDP_GRO
 
                 run[at].length = got[at].length;
-                run[at].size = got[at].length;
-                //      cmsghdr: length, level, type, then the size as an int.
-                for (positive place = 0;
-                     place + 20 <= message->control_length &&
-                     place + 20 <= sizeof control[at];)
-                {
-                        p64 length;
-                        b32 level, type, segment;
-
-                        memory_copy(address_of length, cmsg + place, 8);
-                        memory_copy(address_of level, cmsg + place + 8, 4);
-                        memory_copy(address_of type, cmsg + place + 12, 4);
-                        if (length < 20 || place + length > sizeof control[at])
-                                break;
-                        memory_copy(address_of segment, cmsg + place + 16, 4);
-                        if (level == 17 && type == 104 && segment > 0 &&
-                            (positive)segment < run[at].length) // SOL_UDP, UDP_GRO
-                                run[at].size = (positive)segment;
-                        place += (length + 7) & ~7ull;
-                }
+                run[at].size = segment > 0 && (positive)segment < run[at].length
+                                       ? (positive)segment
+                                       : run[at].length;
 
                 if (from[at].family == AF_INET6)
                 {

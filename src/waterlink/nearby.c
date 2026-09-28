@@ -738,7 +738,6 @@ static fn link_nearby_receive(p64 now)
                 p64 control[8];
                 link_message message;
                 bipolar got;
-                b32 ttl = -1;
                 p8 address[16];
 
                 memory_zero(address_of message, sizeof message);
@@ -755,23 +754,9 @@ static fn link_nearby_receive(p64 now)
                 if ((positive)got > WATERLINK_MDNS_MAX)
                         continue;
 
-                //      cmsghdr: length, level, type, then the TTL as an int.
-                for (positive at = 0;
-                     at + 16 <= message.control_length && at + 16 <= sizeof control;)
-                {
-                        p64 cmsg_length;
-                        b32 level, type;
-
-                        memory_copy(address_of cmsg_length, (p8 address_to)control + at, 8);
-                        memory_copy(address_of level, (p8 address_to)control + at + 8, 4);
-                        memory_copy(address_of type, (p8 address_to)control + at + 12, 4);
-                        if (cmsg_length < 16 || at + cmsg_length > sizeof control)
-                                break;
-                        if (level == 0 && type == 2 && cmsg_length >= 20)
-                                memory_copy(address_of ttl, (p8 address_to)control + at + 16, 4);
-                        at += (cmsg_length + 7) & ~7ull;
-                }
-                if (ttl != 255)
+                if (link_control_int((p8 address_to)control,
+                                     message.control_length, sizeof control, 0,
+                                     2) != 255) // IPPROTO_IP, IP_TTL
                         continue;
 
                 link_address_v4(address, network_order_32(from.host));

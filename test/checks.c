@@ -65066,6 +65066,60 @@ static fn mdns_amplification(void)
         link_nearby.socket = -1;
 }
 
+/*
+        mDNS is believed only as sent on this link: a question that arrived
+        with a TTL a router would have lowered is not answered, the same
+        question at 255 is. Real sockets, so the TTL is the kernel's
+        control message and not a value the test makes up.
+*/
+static fn mdns_hop_limit(void)
+{
+        socket_address_internet where, to;
+        p32 size = sizeof where;
+        b32 one = 1;
+        p8 packet[64], back[WATERLINK_DATAGRAM + 16];
+        positive length = waterlink_mdns_query(packet, sizeof packet);
+        positive answered[2] = {0, 0};
+        bipolar asker = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC |
+                                                    SOCK_NONBLOCK, 0);
+
+        wls_group();
+        link_nearby.socket = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC |
+                                                         SOCK_NONBLOCK, 0);
+        memory_zero(address_of where, sizeof where);
+        where.family = AF_INET;
+        where.host = network_order_32(HOST_LOOPBACK);
+        if (asker < 0 || link_nearby.socket < 0 ||
+            socket_option_set((b32)link_nearby.socket, 0, 12, // IP_RECVTTL
+                              address_of one, sizeof one) < 0 ||
+            socket_bind((b32)link_nearby.socket, address_of where,
+                        sizeof where) < 0 ||
+            socket_name((b32)link_nearby.socket, address_of to,
+                        address_of size) < 0)
+        {
+                check("IPv4 loopback sockets for the hop limit", false);
+                return;
+        }
+        for (positive at = 0; at < 2; at++)
+        {
+                b32 ttl = at ? 255 : 64;
+
+                (void)socket_option_set((b32)asker, 0, 2, address_of ttl,
+                                        sizeof ttl); // IP_TTL
+                (void)socket_send((b32)asker, packet, length, MSG_NOSIGNAL,
+                                  address_of to, sizeof to);
+                link_nearby_receive(4000000 + at * LINK_ANSWER_AGAIN);
+                while (wls_heard(asker, back) > 0)
+                        answered[at]++;
+        }
+        check("sec: mDNS that crossed a router is not answered; from this "
+              "link, it is",
+              answered[0] == 0 && answered[1] == 1);
+        system_close(asker);
+        socket_close((b32)link_nearby.socket);
+        link_nearby.socket = -1;
+}
+
 //      Discovery labels are published only when every one was drawn.
 static fn labels(void)
 {
@@ -65442,6 +65496,7 @@ b32 main(void)
         control_records_are_canonical();
         greetings(listener, port);
         mdns_amplification();
+        mdns_hop_limit();
         labels();
         wpa_key();
         key_text();
