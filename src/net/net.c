@@ -4513,6 +4513,7 @@ typedef struct
         bool check_cert;
         bool encrypted;
         bool application;
+        bool named;
         string_address host;
         crypto_sha256 transcript;
         p8 x25519_scalar[32];
@@ -6278,7 +6279,8 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
 
         ext_len_at = at - 2;
 
-        if (named && host_length && host_length < 256)
+        tls->named = named && host_length && host_length < 256;
+        if (tls->named)
         {
                 positive n = 5 + host_length;
                 p8 sni[] = {
@@ -6664,9 +6666,11 @@ static COLD bool tls_server_flight_step(p8 address_to state, p8 type)
    offsets this walk had already validated and placed -- so the predicate is
    the same one. As answers, in EncryptedExtensions, only what the
    ClientHello asked for may come back (RFC 8446 4.2): of what this client
-   sends, server_name and supported_groups. A ticket's may be anything. */
+   sends, supported_groups, and server_name when the host was a name. allowed
+   has a bit for each kind below 64 that may appear; a ticket's extensions
+   pass positive_max, which allows every kind. */
 static COLD bool tls_encrypted_extensions_valid(p8 address_to body,
-                                           positive length, bool answers)
+                                           positive length, positive allowed)
 {
         p8 seen[8192];
         positive at = 2;
@@ -6690,7 +6694,8 @@ static COLD bool tls_encrypted_extensions_valid(p8 address_to body,
                 if ((positive)size > length - at - 4)
                         return false;
 
-                if ((answers && kind != 0x0000 && kind != 0x000a) ||
+                if ((allowed != positive_max &&
+                     (kind > 63 || !(allowed >> kind & 1))) ||
                     seen[kind >> 3] & (p8)(1u << (kind & 7)))
                         return false;
                 seen[kind >> 3] |= (p8)(1u << (kind & 7));
@@ -6724,7 +6729,8 @@ static COLD bool tls_new_session_ticket_valid(p8 address_to body,
                 return false;
         at += ticket_length;
 
-        return tls_encrypted_extensions_valid(body + at, length - at, false);
+        return tls_encrypted_extensions_valid(body + at, length - at,
+                                              positive_max);
 }
 
 /* This client does not resume sessions, but servers commonly send tickets.
@@ -6817,7 +6823,8 @@ static COLD bipolar tls_encrypted_flight_append(
                         if (hs_type == TLS_HS_ENCRYPTED_EXTS)
                         {
                                 if (!tls_encrypted_extensions_valid(
-                                        hs + msg_at + 4, hs_len, true))
+                                        hs + msg_at + 4, hs_len,
+                                        (positive)1 << 0x000a | tls->named))
                                         return TLS_FAIL;
                                 tls_transcript_add(tls, hs + msg_at,
                                                    4 + hs_len);
