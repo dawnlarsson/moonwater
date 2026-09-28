@@ -26957,15 +26957,105 @@ static const argument_option shred_options[] = {
     {null},
 };
 
-static bool shred_size(string_address text, positive address_to size)
+/*
+        -s and -n are read as GNU's xstrtoumax reads them: blanks and a plus
+        sign may lead, a minus may not, and -s takes C's base prefixes (010
+        is eight, 0x10 sixteen) and the suffixes c, b, B, k, K and M to Q,
+        each of the last with an optional B (powers of 1000) or iB. A suffix
+        with no digits before it counts one of itself. 0 is a good answer,
+        1 a word that is not a number, 2 one that is too large.
+*/
+static b32 shred_number(string_address text, bool size, p64 ceiling,
+                        p64 address_to out)
 {
-        if (string_is(text, '0') && !string_get(text + 1))
+        string_address at = text;
+        p64 value = 0;
+        positive base = 10;
+        bool over = false;
+
+        while (string_get(at) == ' ' || (string_get(at) >= '\t' && string_get(at) <= '\r'))
+                at++;
+        if (string_is(at, '-'))
+                return 1;
+        if (string_is(at, '+'))
+                at++;
+
+        if (size && string_is(at, '0'))
         {
-                address_to size = 0;
-                return true;
+                base = 8;
+                if ((at[1] == 'x' || at[1] == 'X') && digit_known(at[2], 16) < 16)
+                {
+                        base = 16;
+                        at += 2;
+                }
         }
 
-        return split_size(text, size);
+        string_address digits = at;
+
+        for (positive digit; (digit = digit_known(string_get(at), base)) < base; at++)
+        {
+                if (value > (~(p64)0 - digit) / base)
+                        over = true;
+                value = value * base + digit;
+        }
+
+        if (at == digits)
+        {
+                if (!size || !string_get(at) || !string_first_of("cbBkKMGTPEZYRQ", string_get(at)))
+                        return 1;
+                value = 1;
+        }
+
+        p8 suffix = string_get(at);
+
+        if (suffix)
+        {
+                if (!size || !string_first_of("cbBkKMGTPEZYRQ", suffix))
+                        return 1;
+
+                positive power = 0;
+                p64 scale = 1024;
+
+                switch (suffix)
+                {
+                case 'c':
+                        scale = 1;
+                        power = 1;
+                        break;
+                case 'b':
+                        scale = 512;
+                        power = 1;
+                        break;
+                case 'B':
+                        power = 1;
+                        break;
+                default:
+                        power = size_suffix_power(suffix, true);
+                        if (at[1] == 'i' && at[2] == 'B')
+                                at += 2;
+                        else if (at[1] == 'B' || at[1] == 'D')
+                        {
+                                scale = 1000;
+                                at++;
+                        }
+                        break;
+                }
+                at++;
+                while (power--)
+                {
+                        if (value > ~(p64)0 / scale)
+                                over = true;
+                        value *= scale;
+                }
+                if (string_get(at))
+                        return 1;
+        }
+
+        if (over || value > ceiling)
+                return 2;
+
+        address_to out = value;
+        return 0;
 }
 
 typedef struct
@@ -27044,255 +27134,796 @@ static fn shred_random_fill(file_random_state address_to restrict state,
         }
 }
 
-static bool shred_sync(bipolar handle, string_address path, bool data)
+/*
+        Where the random bytes come from: the kernel-seeded stream, or with
+        --random-source the bytes of a file, read in order, as GNU's
+        randread reads them. The same bytes pick the order of the pattern
+        passes (GNU's randint, below) and fill the random ones, so a given
+        source makes the same passes and the same file contents as GNU's.
+        A source that runs dry stops shred, as it does GNU's.
+*/
+typedef struct
+{
+        bipolar handle;
+        string_address name;
+        positive have;
+        positive at;
+        p64 number;
+        p64 ceiling;
+        file_random_state state;
+        p8 buffer[4096];
+} shred_source;
+
+static shred_source shred_random;
+static bool shred_fatal;
+
+static bool shred_source_read(p8 address_to into, positive length)
+{
+        shred_source address_to source = address_of shred_random;
+
+        if (source->handle < 0)
+        {
+                shred_random_fill(address_of source->state, into, length);
+                return true;
+        }
+
+        while (length)
+        {
+                if (source->at == source->have)
+                {
+                        bipolar got = system_read_retry((positive)source->handle,
+                                                        source->buffer,
+                                                        sizeof(source->buffer));
+
+                        if (got <= 0)
+                        {
+                                shred_fatal = true;
+                                if (got == 0)
+                                        return string_report(log_error, false,
+                                                             "shred: '%w': end of file\n",
+                                                             writer_terminal_quoted_name,
+                                                             source->name);
+                                return string_report(log_error, false,
+                                                     "shred: '%w': read error: %s\n",
+                                                     writer_terminal_quoted_name,
+                                                     source->name, file_reason(got));
+                        }
+                        source->have = (positive)got;
+                        source->at = 0;
+                }
+
+                positive take = source->have - source->at;
+
+                if (take > length)
+                        take = length;
+                memory_copy(into, source->buffer + source->at, take);
+                source->at += take;
+                into += take;
+                length -= take;
+        }
+
+        return true;
+}
+
+/*
+        A fair choice among CHOICES from the source's bytes, which is
+        gnulib's randint: bytes are appended to a number until its range
+        covers the choices, a draw that would favour the low answers is
+        thrown back keeping what it still says, and what a fair draw leaves
+        over is carried to the next one.
+*/
+static bool shred_choose(p64 choices, p64 address_to out)
+{
+        shred_source address_to source = address_of shred_random;
+        p64 top = choices - 1;
+        p64 number = source->number;
+        p64 ceiling = source->ceiling;
+
+        for (;;)
+        {
+                if (ceiling < top)
+                {
+                        p8 bytes[8];
+                        positive count = 0;
+                        p64 grown = ceiling;
+
+                        do
+                        {
+                                grown = (grown << 8) + 255;
+                                count++;
+                        } while (grown < top);
+
+                        if (!shred_source_read(bytes, count))
+                                return false;
+
+                        count = 0;
+                        do
+                        {
+                                number = (number << 8) + bytes[count++];
+                                ceiling = (ceiling << 8) + 255;
+                        } while (ceiling < top);
+                }
+
+                if (ceiling == top)
+                {
+                        source->number = source->ceiling = 0;
+                        address_to out = number;
+                        return true;
+                }
+
+                p64 excess = ceiling - top;
+                p64 unusable = excess % choices;
+                p64 reduced = number % choices;
+
+                if (number <= ceiling - unusable)
+                {
+                        source->number = number / choices;
+                        source->ceiling = excess / choices;
+                        address_to out = reduced;
+                        return true;
+                }
+
+                number = reduced;
+                ceiling = unusable - 1;
+        }
+}
+
+/*
+        The overwrite patterns, in GNU's groups: a count of random passes
+        (negative), or a count and that many 12-bit patterns, the bit 0x1000
+        flipping the first bit of every 512-byte sector. Zero wraps around.
+*/
+static const b32 shred_patterns[] = {
+    -2,
+    2, 0x000, 0xFFF,
+    2, 0x555, 0xAAA,
+    -1,
+    6, 0x249, 0x492, 0x6DB, 0x924, 0xB6D, 0xDB6,
+    12, 0x111, 0x222, 0x333, 0x444, 0x666, 0x777,
+    0x888, 0x999, 0xBBB, 0xCCC, 0xDDD, 0xEEE,
+    -1,
+    8, 0x1000, 0x1249, 0x1492, 0x16DB, 0x1924, 0x1B6D, 0x1DB6, 0x1FFF,
+    14, 0x1111, 0x1222, 0x1333, 0x1444, 0x1555, 0x1666, 0x1777,
+    0x1888, 0x1999, 0x1AAA, 0x1BBB, 0x1CCC, 0x1DDD, 0x1EEE,
+    -1,
+    0,
+};
+
+static b32 address_to shred_order;
+static positive shred_order_room;
+
+/*
+        GNU's schedule of NUM passes: whole groups while they fit, a random
+        few of the group that does not (or random passes when too few of it
+        would fit), then the random passes spread evenly from first to last
+        by a line-drawing count and the patterns shuffled between them.
+*/
+static bool shred_schedule(b32 address_to order, positive num)
+{
+        if (!num)
+                return true;
+
+        const b32 address_to pattern = shred_patterns;
+        positive random = 0;
+        positive filled = 0;
+        positive left = num;
+
+        for (;;)
+        {
+                b32 k = *pattern++;
+
+                if (!k)
+                        pattern = shred_patterns;
+                else if (k < 0)
+                {
+                        if ((positive)-k >= left)
+                        {
+                                random += left;
+                                break;
+                        }
+                        random += (positive)-k;
+                        left -= (positive)-k;
+                }
+                else if ((positive)k <= left)
+                {
+                        memory_copy(order + filled, pattern, (positive)k * sizeof(b32));
+                        pattern += k;
+                        filled += (positive)k;
+                        left -= (positive)k;
+                }
+                else if (left < 2 || 3 * left < (positive)k)
+                {
+                        random += left;
+                        break;
+                }
+                else
+                {
+                        do
+                        {
+                                p64 draw = 0;
+
+                                if (left != (positive)k &&
+                                    !shred_choose((p64)k, address_of draw))
+                                        return false;
+                                if (left == (positive)k || draw < left)
+                                {
+                                        order[filled++] = *pattern;
+                                        left--;
+                                }
+                                pattern++;
+                                k--;
+                        } while (left);
+                        break;
+                }
+        }
+
+        positive top = num - random;
+        positive spread = random - 1;
+        positive count = spread;
+
+        for (positive n = 0; n < num; n++)
+        {
+                if (count <= spread)
+                {
+                        count += num - 1;
+                        order[top++] = order[n];
+                        order[n] = -1;
+                }
+                else
+                {
+                        p64 draw;
+
+                        if (!shred_choose((p64)(top - n), address_of draw))
+                                return false;
+
+                        positive swap = n + (positive)draw;
+                        b32 held = order[n];
+
+                        order[n] = order[swap];
+                        order[swap] = held;
+                }
+                count -= spread;
+        }
+
+        return true;
+}
+
+static bool shred_periodic(b32 type)
+{
+        if (type <= 0)
+                return false;
+
+        p32 bits = (p32)type & 0xfff;
+
+        bits |= bits << 12;
+        return ((bits >> 4) & 255) != ((bits >> 8) & 255) ||
+               ((bits >> 4) & 255) != (bits & 255);
+}
+
+static fn shred_fill_pattern(b32 type, p8 address_to bytes, positive size)
+{
+        p32 bits = (p32)type & 0xfff;
+        positive i;
+
+        bits |= bits << 12;
+        bytes[0] = (p8)(bits >> 4);
+        bytes[1] = (p8)(bits >> 8);
+        bytes[2] = (p8)bits;
+        for (i = 3; i <= size / 2; i *= 2)
+                memory_copy(bytes + i, bytes, i);
+        if (i < size)
+                memory_copy(bytes + i, bytes, size - i);
+        if (type & 0x1000)
+                for (i = 0; i < size; i += 512)
+                        bytes[i] ^= 0x80;
+}
+
+//      GNU syncs with fdatasync, then fsync, then sync(), passing over the
+//      errors that only say the descriptor cannot be synced that way.
+static bool shred_sync_ignorable(bipolar code)
+{
+        return code == -ERROR_INVALID || code == -9 || code == -21;
+}
+
+static bipolar shred_sync(bipolar handle, string_address name)
 {
         bipolar done;
 
         do
-                done = system_call_1(data ? syscall(fdatasync) : syscall(fsync),
-                                     (positive)handle);
+                done = system_call_1(syscall(fdatasync), (positive)handle);
         while (done == -4);
-
         if (done >= 0)
-                return true;
+                return 0;
+        if (!shred_sync_ignorable(done))
+        {
+                file_shell_name_reason(log_error, (string_address)"shred: ", name,
+                                       (string_address)": fdatasync failed: ", done);
+                return done;
+        }
 
-        return string_report(log_error, false, "shred: %w: sync failed: %s\n", writer_shell_quoted_name,
-                      path, file_reason(done));
+        do
+                done = system_call_1(syscall(fsync), (positive)handle);
+        while (done == -4);
+        if (done >= 0)
+                return 0;
+        if (!shred_sync_ignorable(done))
+        {
+                file_shell_name_reason(log_error, (string_address)"shred: ", name,
+                                       (string_address)": fsync failed: ", done);
+                return done;
+        }
+
+        system_call(syscall(sync));
+        return 0;
 }
 
-static bool shred_pass(bipolar handle, string_address path, positive length,
-                       bool zero, file_random_state address_to random)
+/*
+        One pass over the first SIZE bytes, GNU's dopass: a size below zero
+        is not known yet and the pass writes until the device is full, which
+        then is its size. Returns 0, 1 for a write that failed but was passed
+        over (an unreadable sector, or a sync that said EIO), or -1 when the
+        file cannot be gone on with.
+*/
+static b32 shred_pass(bipolar handle, string_address name, b64 address_to sizep,
+                      b32 type, positive pass, positive passes)
 {
+        b64 size = address_to sizep;
+        positive output = shred_periodic(type) ? 60 * 1024 : 64 * 1024;
+        positive fill = (output + 2) / 3 * 3;
+        p8 address_to bytes = file_transfer;
+        bool write_error = false;
+        p8 shown[8];
+
         if (system_seek(handle, 0, FILE_SEEK_SET) < 0)
         {
-                return string_report(log_error, false, "shred: %w: seek failed\n", writer_shell_quoted_name,
-                              path);
+                bipolar code = system_seek(handle, 0, FILE_SEEK_SET);
+
+                file_shell_name_reason(log_error, (string_address)"shred: ", name,
+                                       (string_address)": cannot rewind: ", code);
+                return -1;
         }
 
-        if (zero)
-                memory_fill(file_transfer, 0, sizeof(file_transfer));
-
-        positive left = length;
-
-        while (left)
+        if (type >= 0)
         {
-                positive chunk = left < sizeof(file_transfer)
-                                     ? left : sizeof(file_transfer);
+                positive lim = size >= 0 && (p64)size < fill ? (positive)size : fill;
 
-                if (!zero)
-                        shred_random_fill(random, file_transfer, chunk);
-
-                if (system_write_all((positive)handle, file_transfer, chunk) !=
-                    chunk)
+                shred_fill_pattern(type, bytes, lim < 3 ? 3 : lim);
+                for (positive i = 0; i < 3; i++)
                 {
-                        return string_report(log_error, false, "shred: %w: write failed\n",
-                                      writer_shell_quoted_name, path);
+                        shown[i * 2] = "0123456789abcdef"[bytes[i] >> 4];
+                        shown[i * 2 + 1] = "0123456789abcdef"[bytes[i] & 15];
                 }
-
-                left -= chunk;
-        }
-
-        return !length || shred_sync(handle, path, true);
-}
-
-static bipolar shred_open(string_address path, bool force)
-{
-        positive flags = (FILE_WRITE & ~(O_TRUNC | FILE_CREATE)) | O_NONBLOCK;
-        bipolar handle = system_open_at(AT_FDCWD, path, flags);
-
-        if (handle >= 0 || !force ||
-            (handle != -ERROR_ACCESS && handle != -ERROR_NOT_PERMITTED))
-                return handle;
-
-        file_facts facts;
-
-        if (!file_look_at(path, address_of facts) ||
-            (facts.mode & MODE_FORMAT) != MODE_FILE ||
-            system_change_mode_at(AT_FDCWD, path, 0200) < 0)
-                return handle;
-
-        return system_open_at(AT_FDCWD, path, flags);
-}
-
-static bool shred_one(string_address path, positive iterations,
-                      bool size_given, positive requested, bool exact,
-                      bool zero, bool remove, bool force, bool verbose)
-{
-        /* shred follows a symlink while writing, but -u removes the directory
-           entry the caller named. Keep both identities distinct. */
-        file_facts named;
-        bool named_known = file_look_code(
-            AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of named) >= 0;
-        bipolar handle = shred_open(path, force);
-
-        if (handle < 0)
-        {
-                file_shell_name_reason(
-                    log_error, (string_address)"shred: ", path,
-                    (string_address)": failed to open for writing: ", handle);
-                return false;
-        }
-
-        file_facts facts;
-        bool good = file_look(handle, (string_address) "", AT_EMPTY_PATH,
-                              address_of facts);
-
-        if (!good || (facts.mode & MODE_FORMAT) != MODE_FILE)
-        {
-                string_format(log_error, "shred: %w: refusing non-regular file\n",
-                              writer_shell_quoted_name, path);
-                system_close(handle);
-                return false;
-        }
-
-        positive length;
-
-        if (size_given)
-                length = requested;
-        else if (facts.size > positive_max)
-        {
-                string_format(log_error, "shred: %w: file is too large\n",
-                              writer_shell_quoted_name, path);
-                system_close(handle);
-                return false;
+                shown[6] = end;
         }
         else
-                length = (positive)facts.size;
+                memory_copy(shown, "random", 7);
 
-        if (!size_given && !exact && length)
+        if (passes)
         {
-                positive block = facts.blocksize ? facts.blocksize : FILE_BLOCK;
-                positive spare = length % block;
+                file_shell_name_message(log_error, (string_address)"shred: ", name,
+                                        (string_address)": pass ");
+                string_format(log_error, "%p/%p (%s)...\n", pass, passes,
+                              (string_address)shown);
+        }
 
-                if (spare)
+        p64 offset = 0;
+
+        for (;;)
+        {
+                positive lim = output;
+
+                if (size >= 0 && (p64)size - offset < output)
                 {
-                        positive add = block - spare;
+                        if ((p64)size < offset)
+                                break;
+                        lim = (positive)((p64)size - offset);
+                        if (!lim)
+                                break;
+                }
+                if (type < 0 && !shred_source_read(bytes, lim))
+                        return -1;
 
-                        if (length > positive_max - add)
+                positive done = 0;
+
+                while (done < lim)
+                {
+                        bipolar wrote = system_write_once(handle, bytes + done, lim - done);
+
+                        if (wrote == -4)
+                                continue;
+                        if (wrote > 0)
                         {
-                                string_format(log_error, "shred: %w: size overflow\n",
-                                              writer_shell_quoted_name, path);
-                                system_close(handle);
-                                return false;
+                                done += (positive)wrote;
+                                continue;
+                        }
+                        if (size < 0 && (wrote == 0 || wrote == -28))
+                        {
+                                size = (b64)(offset + done);
+                                address_to sizep = size;
+                                break;
                         }
 
-                        length += add;
-                }
-        }
+                        bipolar code = wrote ? wrote : -5;
 
-        file_random_state random;
+                        file_shell_name_message(log_error, (string_address)"shred: ", name,
+                                                (string_address)": error writing at offset ");
+                        string_format(log_error, "%b: %s\n", (p64)(offset + done),
+                                      file_reason(code));
 
-        if (iterations && good && !file_random_seed(address_of random))
-        {
-                string_format(log_error, "shred: %w: kernel randomness unavailable\n",
-                              writer_shell_quoted_name, path);
-                good = false;
-        }
+                        //      An unwritable sector is stepped over, not
+                        //      given up on: shred is run on failing media.
+                        if (code == -5 && size >= 0 && (done | 511) < lim)
+                        {
+                                positive next = (done | 511) + 1;
 
-        //      The zero pass is one of the passes and is counted with
-        //      them, which is how the reference numbers them: -n1 -z is
-        //      pass 1/2 random and pass 2/2 of zeroes.
-        positive passes = iterations + (zero ? 1 : 0);
-
-        //      Nothing to write over is no pass at all: -s0 leaves the file
-        //      alone and the reference says nothing about passes it never
-        //      made.
-        if (!length)
-                passes = 0;
-
-        for (positive pass = 0; pass < iterations && good && length; pass++)
-        {
-                if (verbose)
-                {
-                        file_shell_name_message(
-                            log_error, (string_address)"shred: ", path,
-                            (string_address)": pass ");
-                        string_format(log_error, "%p/%p (random)...\n",
-                                      pass + 1, passes);
+                                if (system_seek(handle, offset + next, FILE_SEEK_SET) >= 0)
+                                {
+                                        done = next;
+                                        write_error = true;
+                                        continue;
+                                }
+                                file_shell_name_reason(log_error, (string_address)"shred: ", name,
+                                                       (string_address)": lseek failed: ",
+                                                       system_seek(handle, offset + next, FILE_SEEK_SET));
+                        }
+                        return -1;
                 }
 
-                good = shred_pass(handle, path, length, false,
-                                  address_of random);
+                offset += done;
+                if (size >= 0 && offset == (p64)size)
+                        break;
         }
 
-        if (zero && good && length)
-        {
-                if (verbose)
-                {
-                        file_shell_name_message(
-                            log_error, (string_address)"shred: ", path,
-                            (string_address)": pass ");
-                        string_format(log_error, "%p/%p (000000)...\n",
-                                      passes, passes);
-                }
+        bipolar synced = shred_sync(handle, name);
 
-                good = shred_pass(handle, path, length, true, null);
+        if (synced < 0)
+        {
+                if (synced != -5)
+                        return -1;
+                write_error = true;
         }
 
-        if (remove && good)
-        {
-                bipolar shortened = system_truncate_handle(handle, 0);
+        return write_error ? 1 : 0;
+}
 
-                if (shortened < 0)
+typedef struct
+{
+        positive iterations;
+        b64 size;
+        bool exact;
+        bool zero;
+        bool verbose;
+        bool force;
+        p8 removal;
+} shred_how;
+
+//      GNU's do_wipefd: every pass over the descriptor, and the truncation a
+//      removal wants.
+static bool shred_handle(bipolar handle, string_address name, shred_how address_to how)
+{
+        file_facts facts;
+        positive passes = how->verbose ? how->iterations + (how->zero ? 1 : 0) : 0;
+
+        if (!file_look(handle, (string_address) "", AT_EMPTY_PATH, address_of facts))
+        {
+                file_shell_name_message(log_error, (string_address)"shred: ", name,
+                                        (string_address)": fstat failed\n");
+                return false;
+        }
+
+        positive format = facts.mode & MODE_FORMAT;
+
+        if ((format == MODE_CHARACTER && isatty((b32)handle)) ||
+            format == MODE_PIPE || format == MODE_SOCKET)
+        {
+                file_shell_name_message(log_error, (string_address)"shred: ", name,
+                                        (string_address)": invalid file type\n");
+                return false;
+        }
+
+        positive block = facts.blocksize && facts.blocksize <= ((positive)1 << 60)
+                             ? facts.blocksize : 512;
+        b64 size = how->size;
+        b64 first = 0;
+
+        if (size < 0)
+        {
+                if (format == MODE_FILE)
                 {
-                        string_format(log_error, "shred: %w: cannot truncate before removal: %s\n",
-                                      writer_shell_quoted_name, path, file_reason(shortened));
-                        good = false;
+                        size = (b64)facts.size;
+                        if (!how->exact)
+                        {
+                                positive spare = (p64)size % block;
+
+                                if (size && (p64)size < block)
+                                        first = size;
+                                if (spare)
+                                        size += (b64)(block - spare);
+                        }
                 }
                 else
-                        good = shred_sync(handle, path, false);
-        }
-
-        bipolar closed = system_close(handle);
-
-        if (closed < 0)
-        {
-                string_format(log_error, "shred: %w: close failed: %s\n",
-                              writer_shell_quoted_name, path, file_reason(closed));
-                good = false;
-        }
-
-        if (remove && good)
-        {
-                //      The reference says it is removing the name before it
-                //      does. file_remove_same atomically detaches that name
-                //      and proves that the detached inode is the one wiped
-                //      above, so a concurrent replacement is preserved.
-                if (verbose)
-                        file_shell_name_message(
-                            log_error, (string_address)"shred: ", path,
-                            (string_address)": removing\n");
-
-                bipolar gone = named_known
-                    ? file_remove_path_same(path, 0, address_of named)
-                    : -ERROR_AGAIN;
-
-                if (gone < 0)
                 {
-                        file_shell_name_reason(
-                            log_error, (string_address)"shred: ", path,
-                            (string_address)": cannot remove: ", gone);
-                        good = false;
+                        size = system_seek(handle, 0, 2);
+                        if (size <= 0)
+                                size = -1;
                 }
-                else if (verbose)
-                        file_shell_name_message(
-                            log_error, (string_address)"shred: ", path,
-                            (string_address)": removed\n");
+        }
+        else if (format == MODE_FILE && facts.size < min(block, (p64)size))
+                first = (b64)facts.size;
+
+        if (!shell_array_room(shred_order, shred_order_room, how->iterations + 1))
+                return string_report(log_error, false, "shred: memory exhausted\n");
+        if (!shred_schedule(shred_order, how->iterations))
+                return false;
+
+        bool good = true;
+
+        for (;;)
+        {
+                b64 pass_size;
+                positive shown = passes;
+
+                //      A file smaller than a block is gone over at its own
+                //      length first, quietly, so the bytes it had are
+                //      overwritten even where the rounded-up passes would
+                //      reach them through a new allocation.
+                if (first)
+                {
+                        pass_size = first;
+                        first = 0;
+                        shown = 0;
+                }
+                else if (size)
+                {
+                        pass_size = size;
+                        size = 0;
+                }
+                else
+                        break;
+
+                for (positive i = 0; i < how->iterations + (how->zero ? 1 : 0); i++)
+                {
+                        b32 type = i < how->iterations ? shred_order[i] : 0;
+                        b32 failed = shred_pass(handle, name, address_of pass_size, type,
+                                                i + 1, shown);
+
+                        if (failed)
+                        {
+                                good = false;
+                                if (failed < 0)
+                                        return false;
+                        }
+                }
+        }
+
+        if (how->removal)
+        {
+                bipolar cut = system_truncate_handle(handle, 0);
+
+                if (cut < 0 && format == MODE_FILE)
+                {
+                        file_shell_name_reason(log_error, (string_address)"shred: ", name,
+                                               (string_address)": error truncating: ", cut);
+                        return false;
+                }
         }
 
         return good;
 }
 
-/*
-        Every word an option carries is read where the option is written.
+static const p8 shred_name_letters[] =
+    "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_.";
 
-        The reference is a getopt loop: a pass count that is not a count, a
-        size that is not a size and a --remove that names no removal it knows
-        are each reported as that option is reached, so of two bad words the
-        first one written is the one reported. What this shred will not do --
-        wipe a name before unlinking it, take randomness from a file -- is
-        said afterwards, because the reference has nothing to say there and
-        the order can only be ours.
+//      The next name of the same length, counting in shred_name_letters;
+//      false once every name of that length has been tried.
+static bool shred_name_next(p8 address_to name, positive length)
+{
+        while (length--)
+        {
+                string_address at = string_first_of(shred_name_letters, name[length]);
+
+                if (at && at[1])
+                {
+                        name[length] = at[1];
+                        return true;
+                }
+                name[length] = shred_name_letters[0];
+        }
+        return false;
+}
+
+static p8 shred_new_name[FILE_PATH_MAX];
+static p8 shred_old_name[FILE_PATH_MAX];
+
+/*
+        --remove=wipe and wipesync, and -u: before the name is unlinked it is
+        renamed to names of zeros, one character shorter each time (the next
+        free name of that length when zeros is taken), so no trace of its
+        length stays in the directory slot; wipesync syncs the directory
+        after each rename. Only a name that is taken moves on to the next
+        candidate -- any other refusal gives up that length. The last name
+        is unlinked only if it is still the file that was shredded.
+*/
+static bool shred_remove(string_address path, file_facts address_to named,
+                         bool named_known, shred_how address_to how)
+{
+        positive length = string_length(path);
+        bool good = true;
+        bool first = true;
+        bipolar directory = -1;
+
+        if (length >= sizeof(shred_old_name))
+                return string_report(log_error, false, "shred: %w: File name too long\n",
+                                     writer_shell_quoted_name, path);
+
+        memory_copy_end(shred_old_name, path, length);
+        memory_copy_end(shred_new_name, path, length);
+
+        //      The last component and its length without trailing slashes.
+        positive base_end = length;
+
+        while (base_end > 1 && shred_new_name[base_end - 1] == '/')
+                base_end--;
+
+        positive base = base_end;
+
+        while (base && shred_new_name[base - 1] != '/')
+                base--;
+
+        p8 folder[FILE_PATH_MAX];
+
+        if (!base)
+                memory_copy_end(folder, ".", 1);
+        else
+        {
+                positive cut = base;
+
+                while (cut > 1 && shred_new_name[cut - 1] == '/')
+                        cut--;
+                memory_copy_end(folder, shred_new_name, cut);
+        }
+
+        if (how->removal == 's')
+                directory = system_open_at(AT_FDCWD, folder,
+                                           O_RDONLY | O_DIRECTORY | O_NOCTTY | O_NONBLOCK);
+
+        if (how->verbose)
+                file_shell_name_message(log_error, (string_address)"shred: ", path,
+                                        (string_address)": removing\n");
+
+        for (positive size = base_end - base; how->removal != 'u' && size; size--)
+        {
+                bipolar renamed;
+
+                memory_fill(shred_new_name + base, shred_name_letters[0], size);
+                shred_new_name[base + size] = end;
+
+                while ((renamed = system_rename_at(AT_FDCWD, shred_old_name, AT_FDCWD,
+                                                   shred_new_name, 1)) == -17 &&
+                       shred_name_next(shred_new_name + base, size))
+                        ;
+                if (renamed < 0)
+                        continue;
+
+                if (directory >= 0 && shred_sync(directory, folder) < 0)
+                        good = false;
+                if (how->verbose)
+                {
+                        if (first)
+                                file_shell_name_message(log_error, (string_address)"shred: ", path,
+                                                        (string_address)": renamed to ");
+                        else
+                                string_format(log_error, "shred: %s: renamed to ",
+                                              (string_address)shred_old_name);
+                        string_format(log_error, "%s\n", (string_address)shred_new_name);
+                        first = false;
+                }
+                memory_copy_end(shred_old_name + base, shred_new_name + base, size);
+        }
+
+        bipolar gone = named_known
+            ? file_remove_path_same(shred_old_name, 0, named)
+            : -ERROR_AGAIN;
+
+        if (gone < 0)
+        {
+                file_shell_name_reason(log_error, (string_address)"shred: ", path,
+                                       (string_address)": failed to remove: ", gone);
+                good = false;
+        }
+        else if (how->verbose)
+                file_shell_name_message(log_error, (string_address)"shred: ", path,
+                                        (string_address)": removed\n");
+
+        if (directory >= 0)
+        {
+                if (shred_sync(directory, folder) < 0)
+                        good = false;
+
+                bipolar closed = system_close(directory);
+
+                if (closed < 0)
+                {
+                        file_shell_name_reason(log_error, (string_address)"shred: ", folder,
+                                               (string_address)": failed to close: ", closed);
+                        good = false;
+                }
+        }
+
+        return good;
+}
+
+static bool shred_one(string_address path, shred_how address_to how)
+{
+        //      "-" is the standard output, shredded where it stands; it has no
+        //      name to remove.
+        if (string_is(path, '-') && !path[1])
+        {
+                bipolar flags = system_call_3(syscall(fcntl), 1, FILE_F_GETFL, 0);
+
+                if (flags < 0)
+                {
+                        file_shell_name_reason(log_error, (string_address)"shred: ", path,
+                                               (string_address)": fcntl failed: ", flags);
+                        return false;
+                }
+                if (flags & O_APPEND)
+                {
+                        file_shell_name_message(log_error, (string_address)"shred: ", path,
+                                                (string_address)": cannot shred append-only file descriptor\n");
+                        return false;
+                }
+                return shred_handle(1, path, how);
+        }
+
+        //      shred writes through a symlink but removes the name it was
+        //      given, so the two identities are kept apart.
+        file_facts named;
+        bool named_known = file_look_code(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW,
+                                          address_of named) >= 0;
+        positive flags = O_WRONLY | O_NOCTTY | O_NONBLOCK;
+        bipolar handle = system_open_at(AT_FDCWD, path, flags);
+
+        //      -f makes a file it may not write writable, and when that is
+        //      refused it is the refusal of the mode change that is reported.
+        if (handle == -ERROR_ACCESS && how->force)
+        {
+                bipolar changed = system_change_mode_at(AT_FDCWD, path, 0200);
+
+                handle = changed < 0 ? changed : system_open_at(AT_FDCWD, path, flags);
+        }
+
+        if (handle < 0)
+        {
+                file_shell_name_reason(log_error, (string_address)"shred: ", path,
+                                       (string_address)": failed to open for writing: ", handle);
+                return false;
+        }
+
+        //      Opened without blocking so a FIFO cannot hold shred at the
+        //      open; the writes to a device then block as GNU's do.
+        (void)system_call_3(syscall(fcntl), (positive)handle, 4, (positive)O_WRONLY);
+
+        bool good = shred_handle(handle, path, how);
+        bipolar closed = system_close(handle);
+
+        if (closed < 0)
+        {
+                file_shell_name_reason(log_error, (string_address)"shred: ", path,
+                                       (string_address)": failed to close: ", closed);
+                good = false;
+        }
+
+        if (good && how->removal && !shred_fatal)
+                good = shred_remove(path, address_of named, named_known, how);
+
+        return good;
+}
+
+/*
+        Every word an option carries is read where the option is written,
+        as GNU's getopt loop does: of two bad words the first one written is
+        the one reported.
 */
 static const file_word shred_removals[] = {
     {(string_address) "unlink", 'u', false},
@@ -27300,32 +27931,64 @@ static const file_word shred_removals[] = {
     {(string_address) "wipesync", 's', false},
 };
 
-static positive shred_iterations;
-static positive shred_asked_size;
+static p64 shred_iterations;
+static b64 shred_asked_size;
 static p8 shred_removal;
+static string_address shred_source_name;
 
 static bool shred_option_seen(p8 letter, string_address value)
 {
-        if (letter == 'n' && value &&
-            !file_unsigned_decimal(value, address_of shred_iterations))
-                return string_report(log_error, false,
-                                     "shred: invalid number of passes: '%w'\n", writer_terminal_quoted_name, value);
+        b32 read;
+        p64 number;
 
-        if (letter == 's' && value && !shred_size(value, address_of shred_asked_size))
-                return string_report(log_error, false,
-                                     "shred: invalid file size: '%w'\n", writer_terminal_quoted_name, value);
-
-        if (letter == 'u' && value)
+        if (letter == 'n' && value)
         {
-                b32 which = file_word_among((string_address) "shred",
-                                            (string_address) "--remove", value,
-                                            shred_removals,
-                                            array_count(shred_removals));
+                read = shred_number(value, false, ((p64)1 << 62) - 1, address_of number);
+                if (read)
+                        return string_report(log_error, false,
+                                             "shred: invalid number of passes: '%w'%s\n",
+                                             writer_terminal_quoted_name, value,
+                                             read == 2 ? (string_address)": Value too large for defined data type"
+                                                       : (string_address)"");
+                shred_iterations = number;
+        }
 
-                if (which < 0)
-                        return false;
+        if (letter == 's' && value)
+        {
+                read = shred_number(value, true, (p64)b64_max, address_of number);
+                if (read)
+                        return string_report(log_error, false,
+                                             "shred: invalid file size: '%w'%s\n",
+                                             writer_terminal_quoted_name, value,
+                                             read == 2 ? (string_address)": Value too large for defined data type"
+                                                       : (string_address)"");
+                shred_asked_size = (b64)number;
+        }
 
-                shred_removal = (p8)which;
+        if (letter == 'u')
+        {
+                if (!value)
+                        shred_removal = 's';
+                else
+                {
+                        b32 which = file_word_among((string_address) "shred",
+                                                    (string_address) "--remove", value,
+                                                    shred_removals,
+                                                    array_count(shred_removals));
+
+                        if (which < 0)
+                                return false;
+
+                        shred_removal = (p8)which;
+                }
+        }
+
+        if (letter == 'R' && value)
+        {
+                if (shred_source_name && !string_equals(shred_source_name, value))
+                        return string_report(log_error, false,
+                                             "shred: multiple random sources specified\n");
+                shred_source_name = value;
         }
 
         return true;
@@ -27336,8 +27999,10 @@ static b32 file_shred()
         file_operands_begin();
 
         shred_iterations = 3;
-        shred_asked_size = 0;
-        shred_removal = 'u';
+        shred_asked_size = -1;
+        shred_removal = 0;
+        shred_source_name = null;
+        shred_fatal = false;
 
         file_taking taking = {
             .program = (string_address) "shred",
@@ -27349,36 +28014,50 @@ static b32 file_shred()
         if (!file_take(address_of taking) || file_operand_failed)
                 return 1;
         if (!file_operand_count)
-                return string_report(log_error, 1, "%s: missing file operand\n", (string_address) "shred");
+                return string_report(log_error, 1, "shred: missing file operand\n"
+                                                   "Try 'shred --help' for more information.\n");
 
-        if (file_option_value(address_of taking, 'R'))
-                return string_report(log_error, 1, "shred: --random-source is unsupported; kernel randomness is mandatory\n");
+        shred_random.handle = -1;
+        shred_random.name = shred_source_name;
+        shred_random.have = 0;
+        shred_random.at = 0;
+        shred_random.number = 0;
+        shred_random.ceiling = 0;
 
-        if (shred_removal != 'u')
-                return string_report(log_error, 1, "shred: filename wiping modes are unsupported; use --remove=unlink\n");
+        if (shred_source_name)
+        {
+                bipolar source = system_open_at(AT_FDCWD, shred_source_name, O_RDONLY | O_CLOEXEC);
 
-        positive iterations = shred_iterations;
-        positive size = shred_asked_size;
-        string_address size_text = file_option_value(address_of taking, 's');
+                if (source < 0)
+                {
+                        file_shell_name_reason(log_error, (string_address)"shred: ",
+                                               shred_source_name, (string_address)": ", source);
+                        return 1;
+                }
+                shred_random.handle = source;
+        }
+        else if (!file_random_seed(address_of shred_random.state))
+                return string_report(log_error, 1, "shred: getrandom: %s\n",
+                                     file_reason(-ERROR_INVALID));
 
         positive flags = taking.flags;
-        bool remove = (flags & FILE_FLAG('u')) != 0;
+        shred_how how = {
+            .iterations = (positive)shred_iterations,
+            .size = shred_asked_size,
+            .exact = (flags & FILE_FLAG('x')) != 0,
+            .zero = (flags & FILE_FLAG('z')) != 0,
+            .verbose = (flags & FILE_FLAG('v')) != 0,
+            .force = (flags & FILE_FLAG('f')) != 0,
+            .removal = (flags & FILE_FLAG('u')) ? shred_removal : 0,
+        };
         b32 status = 0;
 
-        //      -u on its own asks the reference for a wiping removal, and
-        //      this one only unlinks; --remove=unlink asked for what it does.
-        if (remove && !file_option_value(address_of taking, 'u'))
-                log_error("shred: warning: -u uses unlink removal without filename wiping\n",
-                          0);
-
-        for (positive i = 0; i < file_operand_count; i++)
-                if (!shred_one(file_operand_at(i), iterations, size_text != null,
-                               size, (flags & FILE_FLAG('x')) != 0,
-                               (flags & FILE_FLAG('z')) != 0, remove,
-                               (flags & FILE_FLAG('f')) != 0,
-                               (flags & FILE_FLAG('v')) != 0))
+        for (positive i = 0; i < file_operand_count && !shred_fatal; i++)
+                if (!shred_one(file_operand_at(i), address_of how))
                         status = 1;
 
+        if (shred_random.handle >= 0)
+                system_close(shred_random.handle);
         log_flush();
         return status;
 }
