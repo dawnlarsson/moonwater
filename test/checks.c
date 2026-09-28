@@ -59570,6 +59570,7 @@ static fn malformed_bodies(void)
                 {{2, 7, 1}, 3},                              // cut inside its header
                 {{2, 7, 1, 0x80}, 4},                        // cut inside a number
                 {{2}, 1},                                    // a flags byte alone
+                {{8, 7, 1, 0, 8, 7, 2, 0}, 8},               // one key acknowledged twice
         };
         static const p8 widest[] = {1, WATERLINK_KEYS - 1, 0xfe, 0xff, 0xff,
                                     0xff, 0x0f, 1, 'z'};
@@ -59600,9 +59601,17 @@ static fn malformed_bodies(void)
         }
         check("a second spelling, a sequence out of range, an unknown or mixed "
               "flag, a key past the last, a number past 64 bits, bytes after "
-              "the end, a length past the body and a cut header are each "
-              "refused",
+              "the end, a length past the body, a cut header and a key "
+              "acknowledged twice are each refused",
               refused == sizeof wrong / sizeof wrong[0]);
+        {
+                static const p8 two[] = {8, 7, 1, 0, 8, 9, 1, 0};
+
+                waterlink_link_reset(address_of one);
+                check("sec: two keys acknowledged in one body are taken",
+                      waterlink_deliver(address_of one, (p8 address_to)two,
+                                        sizeof two, one.clock, null, null));
+        }
 
         waterlink_link_reset(address_of one);
         heard = 0;
@@ -59753,6 +59762,7 @@ static bipolar judge_model(p8 address_to body, positive length,
 {
         positive at = 0;
         positive count = 0;
+        p64 acknowledged = 0;
 
         if (length > 1168)
                 return -1;
@@ -59778,8 +59788,9 @@ static bipolar judge_model(p8 address_to body, positive length,
                 count++;
                 if (flags == 8)
                 {
-                        if (first >= 0xffffffffu)
+                        if (first >= 0xffffffffu || (acknowledged >> key & 1))
                                 return -1;
+                        acknowledged |= 1ull << key;
                         continue;
                 }
                 if (replaceable == durable || (flags & ~0x17u) || !first ||
