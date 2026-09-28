@@ -7005,9 +7005,17 @@ static b32 host_radio(string_address address_to arguments, positive count)
         is still at the epoch must be allowed a decades-long first step; one
         whose clock already looks like a civil date may not jump more than a
         day, and a refresh of a synchronised clock may not jump more than
-        two seconds. A kiss-o-death, a stratum 0, or a root delay/dispersion
-        worse than a second abandons that server rather than collecting more
-        samples from it.
+        two seconds. Past two seconds no single server is believed: another
+        answer has to agree (sntp_choose). A kiss-o-death, a stratum 0, or a
+        root delay/dispersion worse than a second abandons that server
+        rather than collecting more samples from it.
+
+        No step lands before SNTP_WALL_LEAST, which is not a guess at what
+        clocks read but the date of this source: a clock set earlier than
+        the code that set it is wrong by construction, which is systemd's
+        TIME_EPOCH rule. Moving it forward with each release is what keeps
+        an answer from taking the clock back to when a revoked or expired
+        certificate was still good.
 
         SNTP_WALL_MOST ends that window at 2036-01-01, which is before the
         NTP era rolls over rather than because of it: sntp_load_stamp reads
@@ -7075,13 +7083,14 @@ static b32 host_radio(string_address address_to arguments, positive count)
 #define SNTP_MALFORMED (-3)
 #define SNTP_BAD_SERVER (-4)
 #define SNTP_RATE_LIMITED (-5)
+#define SNTP_UNCONFIRMED (-6)
 #define SNTP_KISS_RATE 0x52415445u /* "RATE" */
 #define SNTP_KISS_DENY 0x44454e59u /* "DENY" */
 #define SNTP_KISS_RSTR 0x52535452u /* "RSTR" */
 #define SNTP_DELAY_MOST_NS ((bipolar)2 * (bipolar)SNTP_NANOSECONDS)
 #define SNTP_OFFSET_MOST_NS ((bipolar)24 * 3600 * (bipolar)SNTP_NANOSECONDS)
 #define SNTP_OFFSET_SYNCED_NS ((bipolar)2 * (bipolar)SNTP_NANOSECONDS)
-#define SNTP_WALL_LEAST 1577836800ll /* 2020-01-01 */
+#define SNTP_WALL_LEAST 1788220800ll /* 2026-09-01 */
 #define SNTP_WALL_MOST 2082758400ll  /* 2036-01-01 */
 #define SNTP_WALL_LEAST_NS \
         ((bipolar)SNTP_WALL_LEAST * (bipolar)SNTP_NANOSECONDS)
@@ -7109,7 +7118,7 @@ static b32 host_radio(string_address address_to arguments, positive count)
         ((SNTP_CONTROL_HEAD + sizeof(positive) - 1) & \
          ~(sizeof(positive) - 1))
 #define SNTP_TEST_NOW \
-        ((bipolar)1700000000 * (bipolar)SNTP_NANOSECONDS)
+        ((bipolar)1800000000 * (bipolar)SNTP_NANOSECONDS)
 
 typedef struct
 {
@@ -7122,6 +7131,11 @@ typedef struct
 static inline INLINE CONST bool sntp_wall_ok(bipolar ns)
 {
         return ns >= SNTP_WALL_LEAST_NS && ns <= SNTP_WALL_MOST_NS;
+}
+
+static inline INLINE CONST bool sntp_within(bipolar ns, bipolar most)
+{
+        return ns >= -most && ns <= most;
 }
 
 /*
@@ -7252,18 +7266,8 @@ static CONST COLD bool sntp_sample_sane(bipolar t1, bipolar t2, bipolar t3,
         if (delay_ns < 0 || delay_ns > SNTP_DELAY_MOST_NS)
                 return false;
         if (tight)
-        {
-                if (offset_ns < -SNTP_OFFSET_SYNCED_NS ||
-                    offset_ns > SNTP_OFFSET_SYNCED_NS)
-                        return false;
-        }
-        else if (sntp_wall_ok(t1))
-        {
-                if (offset_ns < -SNTP_OFFSET_MOST_NS ||
-                    offset_ns > SNTP_OFFSET_MOST_NS)
-                        return false;
-        }
-        return true;
+                return sntp_within(offset_ns, SNTP_OFFSET_SYNCED_NS);
+        return !sntp_wall_ok(t1) || sntp_within(offset_ns, SNTP_OFFSET_MOST_NS);
 }
 
 static COLD bool sntp_target_ok(bipolar now, bipolar offset_ns,
@@ -7298,23 +7302,32 @@ static PURE COLD bipolar sntp_pick(sntp_sample address_to row, positive count)
         meets fewer than half of the others' is a falseticker -- its clock is
         wrong, or its path is lopsided past what its round trip admits -- and
         is set aside; of the rest the least root distance wins, which is RFC
-        5905's rule for the system peer. Two that disagree cannot say which
-        is wrong, and one cannot disagree with anything, so then every
-        answer stands. Taking the first server that answered, which is what
-        was done, believed a falseticker whenever one answered first.
+        5905's rule for the system peer. Taking the first server that
+        answered, which is what was done, believed a falseticker whenever one
+        answered first.
+
+        Two that disagree cannot say which is wrong, and one cannot disagree
+        with anything. They used to all stand, so the least root distance
+        won -- a number the answer states about itself, which a forger sets
+        to nothing: one on-path answer 2 h out beat the honest server it
+        contradicted. Now no answer moves the clock past SNTP_OFFSET_SYNCED_NS
+        unless another answer's interval meets it, and one that leaves the
+        clock within that needs no second word. -1 when nothing may be
+        believed.
 */
 static PURE COLD bipolar sntp_choose(sntp_sample address_to row, positive count)
 {
         bipolar best = -1;
         bool any_kept = false;
         bool kept[SNTP_SERVERS];
+        positive meets[SNTP_SERVERS];
 
         for (positive at = 0; at < count; at++)
         {
-                positive meets = 0;
                 positive others = 0;
 
                 kept[at] = false;
+                meets[at] = 0;
                 if (!row[at].ok)
                         continue;
                 for (positive other = 0; other < count; other++)
@@ -7326,14 +7339,16 @@ static PURE COLD bipolar sntp_choose(sntp_sample address_to row, positive count)
                                 row[other].offset_ns + row[other].distance_ns &&
                             row[other].offset_ns - row[other].distance_ns <=
                                 row[at].offset_ns + row[at].distance_ns)
-                                meets++;
+                                meets[at]++;
                 }
-                kept[at] = others < 2 || meets * 2 >= others;
+                kept[at] = others < 2 || meets[at] * 2 >= others;
                 any_kept |= kept[at];
         }
 
         for (positive at = 0; at < count; at++)
                 if (row[at].ok && (kept[at] || !any_kept) &&
+                    (meets[at] ||
+                     sntp_within(row[at].offset_ns, SNTP_OFFSET_SYNCED_NS)) &&
                     (best < 0 || row[at].distance_ns < row[best].distance_ns))
                         best = (bipolar)at;
         return best;
@@ -7376,33 +7391,65 @@ static PURE COLD bipolar sntp_choose(sntp_sample address_to row, positive count)
         lengths are believed only as far as the buffer goes: a message
         claiming to be longer than what is left ends the walk.
 */
-static bool sntp_control_stamp(p8 address_to control, positive length,
-                               b32 kind, p64 address_to arrived)
+static p8 address_to sntp_control_find(p8 address_to control, positive length,
+                                       b32 level, b32 type, positive least)
 {
         positive at = 0;
 
         while (at + SNTP_CONTROL_DATA <= length)
         {
                 positive size = address_to(positive address_to)(control + at);
-                b32 level = address_to(b32 address_to)(control + at +
-                                                       sizeof(positive));
-                b32 type = address_to(b32 address_to)(control + at +
-                                                      sizeof(positive) + 4);
 
                 if (size < SNTP_CONTROL_DATA || size > length - at)
                         break;
-                if (level == SOL_SOCKET && type == kind &&
-                    size - SNTP_CONTROL_DATA >= 2 * sizeof(p64))
-                {
-                        arrived[0] = address_to(p64 address_to)(
-                            control + at + SNTP_CONTROL_DATA);
-                        arrived[1] = address_to(p64 address_to)(
-                            control + at + SNTP_CONTROL_DATA + sizeof(p64));
-                        return true;
-                }
+                if (address_to(b32 address_to)(control + at + sizeof(positive)) ==
+                        level &&
+                    address_to(b32 address_to)(control + at + sizeof(positive) +
+                                               4) == type &&
+                    size - SNTP_CONTROL_DATA >= least)
+                        return control + at + SNTP_CONTROL_DATA;
                 at += (size + sizeof(positive) - 1) & ~(sizeof(positive) - 1);
         }
-        return false;
+        return null;
+}
+
+static bool sntp_control_stamp(p8 address_to control, positive length,
+                               b32 kind, p64 address_to arrived)
+{
+        p8 address_to data = sntp_control_find(control, length, SOL_SOCKET,
+                                               kind, 2 * sizeof(p64));
+
+        if (!data)
+                return false;
+        arrived[0] = address_to(p64 address_to)data;
+        arrived[1] = address_to(p64 address_to)(data + sizeof(p64));
+        return true;
+}
+
+/*
+        recvmsg into one buffer and the control words beside it, with the
+        control length the kernel filled put in held.
+*/
+static HOT bipolar sntp_receive_message(b32 handle, p8 address_to into,
+                                        positive room,
+                                        positive address_to control,
+                                        positive address_to held,
+                                        positive flags)
+{
+        positive message[SNTP_MESSAGE_WORDS];
+        positive vector[2] = {(positive)into, room};
+        bipolar got;
+
+        memory_zero(message, sizeof(message));
+        memory_zero(control, SNTP_CONTROL_WORDS * sizeof(positive));
+        message[2] = (positive)vector;
+        message[3] = 1;
+        message[4] = (positive)control;
+        message[5] = SNTP_CONTROL_WORDS * sizeof(positive);
+        got = system_call_3(syscall(recvmsg), (positive)handle,
+                            (positive)message, flags);
+        address_to held = got < 0 ? 0 : message[5];
+        return got;
 }
 
 static HOT bipolar sntp_receive_stamped(b32 handle, p8 address_to reply,
@@ -7410,29 +7457,13 @@ static HOT bipolar sntp_receive_stamped(b32 handle, p8 address_to reply,
                                         p64 address_to arrived,
                                         bool address_to stamped)
 {
-        positive message[SNTP_MESSAGE_WORDS];
-        positive vector[2];
         positive control[SNTP_CONTROL_WORDS];
-        bipolar got;
+        positive held = 0;
+        bipolar got = sntp_receive_message(handle, reply, room, control,
+                                           address_of held, SNTP_DONTWAIT);
 
-        address_to stamped = false;
-        memory_zero(message, sizeof(message));
-        memory_zero(control, sizeof(control));
-        vector[0] = (positive)reply;
-        vector[1] = room;
-        message[2] = (positive)vector;
-        message[3] = 1;
-        message[4] = (positive)control;
-        message[5] = sizeof(control);
-
-        got = system_call_3(syscall(recvmsg), (positive)handle,
-                            (positive)message, SNTP_DONTWAIT);
-        if_rare (got < 0)
-                return got;
-
-        address_to stamped = sntp_control_stamp((p8 address_to)control,
-                                                message[5], SNTP_TIMESTAMPNS,
-                                                arrived);
+        address_to stamped = sntp_control_stamp((p8 address_to)control, held,
+                                                SNTP_TIMESTAMPNS, arrived);
         return got;
 }
 
@@ -7485,69 +7516,36 @@ static HOT bipolar sntp_receive_stamped(b32 handle, p8 address_to reply,
 static bool sntp_control_sequence(p8 address_to control, positive length,
                                   p32 address_to sequence)
 {
-        positive at = 0;
+        p8 address_to body = sntp_control_find(control, length, SNTP_SOL_IP,
+                                               SNTP_IP_RECVERR,
+                                               SNTP_ERROR_BYTES);
 
-        while (at + SNTP_CONTROL_DATA <= length)
-        {
-                positive size = address_to(positive address_to)(control + at);
-                b32 level = address_to(b32 address_to)(control + at +
-                                                       sizeof(positive));
-                b32 type = address_to(b32 address_to)(control + at +
-                                                      sizeof(positive) + 4);
-
-                if (size < SNTP_CONTROL_DATA || size > length - at)
-                        break;
-                if (level == SNTP_SOL_IP && type == SNTP_IP_RECVERR &&
-                    size - SNTP_CONTROL_DATA >= SNTP_ERROR_BYTES)
-                {
-                        p8 address_to body = control + at + SNTP_CONTROL_DATA;
-
-                        if (body[SNTP_ERROR_ORIGIN] == SNTP_ERROR_TIMESTAMPING)
-                        {
-                                address_to sequence =
-                                    address_to(p32 address_to)(
-                                        body + SNTP_ERROR_SEQUENCE);
-                                return true;
-                        }
-                }
-                at += (size + sizeof(positive) - 1) & ~(sizeof(positive) - 1);
-        }
-        return false;
+        if (!body || body[SNTP_ERROR_ORIGIN] != SNTP_ERROR_TIMESTAMPING)
+                return false;
+        address_to sequence = address_to(p32 address_to)(body + SNTP_ERROR_SEQUENCE);
+        return true;
 }
 
 static HOT bool sntp_transmit_stamp(b32 handle, p32 wanted,
                                     p64 address_to departed)
 {
-        positive message[SNTP_MESSAGE_WORDS];
-        positive vector[2];
         positive control[SNTP_CONTROL_WORDS];
         p8 sink[SNTP_PACKET];
         p64 stamp[2];
-        p32 sequence;
         bool found = false;
-        positive round;
 
-        for (round = 0; round < SNTP_ERRQUEUE_MOST; round++)
+        for (positive round = 0; round < SNTP_ERRQUEUE_MOST; round++)
         {
-                bipolar got;
+                positive held = 0;
+                p32 sequence = 0;
 
-                sequence = 0;
-                memory_zero(message, sizeof(message));
-                memory_zero(control, sizeof(control));
-                vector[0] = (positive)sink;
-                vector[1] = sizeof(sink);
-                message[2] = (positive)vector;
-                message[3] = 1;
-                message[4] = (positive)control;
-                message[5] = sizeof(control);
-                got = system_call_3(syscall(recvmsg), (positive)handle,
-                                    (positive)message,
-                                    SNTP_ERRQUEUE | SNTP_DONTWAIT);
-                if (got < 0)
+                if (sntp_receive_message(handle, sink, sizeof(sink), control,
+                                         address_of held,
+                                         SNTP_ERRQUEUE | SNTP_DONTWAIT) < 0)
                         break;
-                if (sntp_control_stamp((p8 address_to)control, message[5],
+                if (sntp_control_stamp((p8 address_to)control, held,
                                        SNTP_TIMESTAMPING, stamp) &&
-                    sntp_control_sequence((p8 address_to)control, message[5],
+                    sntp_control_sequence((p8 address_to)control, held,
                                           address_of sequence) &&
                     sequence == wanted)
                 {
@@ -7644,6 +7642,19 @@ static COLD bipolar sntp_reply_sample(p8 address_to reply,
         return SNTP_OK;
 }
 
+//      A control message laid out by hand for sntp_math_ok: the header,
+//      then a timespec where the payload starts.
+static COLD fn sntp_test_message(p8 address_to at, positive size, b32 level,
+                                 b32 type, p64 seconds, p64 nanoseconds)
+{
+        address_to(positive address_to)at = size;
+        address_to(b32 address_to)(at + sizeof(positive)) = level;
+        address_to(b32 address_to)(at + sizeof(positive) + 4) = type;
+        address_to(p64 address_to)(at + SNTP_CONTROL_DATA) = seconds;
+        address_to(p64 address_to)(at + SNTP_CONTROL_DATA + sizeof(p64)) =
+            nanoseconds;
+}
+
 static COLD bool sntp_math_ok(void)
 {
         bipolar offset = 0;
@@ -7653,7 +7664,8 @@ static COLD bool sntp_math_ok(void)
         positive at;
         p8 request[SNTP_PACKET];
         p8 reply[SNTP_PACKET];
-        p8 control[96];
+        positive words[12];
+        p8 address_to control = (p8 address_to)words;
         p64 arrived[2];
         p32 sequence;
         static const struct
@@ -7880,16 +7892,10 @@ static COLD bool sntp_math_ok(void)
 
         for (at = 0; at < array_count(control_case); at++)
         {
-                memory_zero(control, sizeof(control));
-                address_to(positive address_to)control = control_case[at].claimed;
-                address_to(b32 address_to)(control + sizeof(positive)) =
-                    control_case[at].level;
-                address_to(b32 address_to)(control + sizeof(positive) + 4) =
-                    control_case[at].kind;
-                address_to(p64 address_to)(control + SNTP_CONTROL_DATA) =
-                    1700000000ull;
-                address_to(p64 address_to)(control + SNTP_CONTROL_DATA +
-                                           sizeof(p64)) = 250000000ull;
+                memory_zero(words, sizeof(words));
+                sntp_test_message(control, control_case[at].claimed,
+                                  control_case[at].level, control_case[at].kind,
+                                  1700000000ull, 250000000ull);
                 arrived[0] = 0;
                 arrived[1] = 0;
                 if (sntp_control_stamp(control, control_case[at].held,
@@ -7906,21 +7912,12 @@ static COLD bool sntp_math_ok(void)
                 one we want is not always first. A message of another kind
                 in front of it must be stepped over, not stopped at.
         */
-        memory_zero(control, sizeof(control));
-        address_to(positive address_to)control = SNTP_CONTROL_DATA;
-        address_to(b32 address_to)(control + sizeof(positive)) = SOL_SOCKET;
-        address_to(b32 address_to)(control + sizeof(positive) + 4) =
-            SNTP_TIMESTAMPNS + 7;
-        address_to(positive address_to)(control + SNTP_CONTROL_DATA) =
-            SNTP_CONTROL_DATA + 16;
-        address_to(b32 address_to)(control + SNTP_CONTROL_DATA +
-                                   sizeof(positive)) = SOL_SOCKET;
-        address_to(b32 address_to)(control + SNTP_CONTROL_DATA +
-                                   sizeof(positive) + 4) = SNTP_TIMESTAMPNS;
-        address_to(p64 address_to)(control + 2 * SNTP_CONTROL_DATA) =
-            1700000001ull;
-        address_to(p64 address_to)(control + 2 * SNTP_CONTROL_DATA +
-                                   sizeof(p64)) = 750000000ull;
+        memory_zero(words, sizeof(words));
+        sntp_test_message(control, SNTP_CONTROL_DATA, SOL_SOCKET,
+                          SNTP_TIMESTAMPNS + 7, 0, 0);
+        sntp_test_message(control + SNTP_CONTROL_DATA, SNTP_CONTROL_DATA + 16,
+                          SOL_SOCKET, SNTP_TIMESTAMPNS, 1700000001ull,
+                          750000000ull);
         arrived[0] = 0;
         arrived[1] = 0;
         if (!sntp_control_stamp(control, 2 * SNTP_CONTROL_DATA + 16,
@@ -7936,14 +7933,9 @@ static COLD bool sntp_math_ok(void)
                 tell the two types apart rather than taking whichever
                 timestamp it meets first.
         */
-        memory_zero(control, sizeof(control));
-        address_to(positive address_to)control = SNTP_CONTROL_DATA + 48;
-        address_to(b32 address_to)(control + sizeof(positive)) = SOL_SOCKET;
-        address_to(b32 address_to)(control + sizeof(positive) + 4) =
-            SNTP_TIMESTAMPING;
-        address_to(p64 address_to)(control + SNTP_CONTROL_DATA) = 1700000002ull;
-        address_to(p64 address_to)(control + SNTP_CONTROL_DATA + sizeof(p64)) =
-            125000000ull;
+        memory_zero(words, sizeof(words));
+        sntp_test_message(control, SNTP_CONTROL_DATA + 48, SOL_SOCKET,
+                          SNTP_TIMESTAMPING, 1700000002ull, 125000000ull);
         arrived[0] = 0;
         arrived[1] = 0;
         if (!sntp_control_stamp(control, SNTP_CONTROL_DATA + 48,
@@ -7962,12 +7954,9 @@ static COLD bool sntp_math_ok(void)
                 a sequence number, or a refused port would start
                 claiming to be the answer to a send.
         */
-        memory_zero(control, sizeof(control));
-        address_to(positive address_to)control = SNTP_CONTROL_DATA +
-                                                 SNTP_ERROR_BYTES;
-        address_to(b32 address_to)(control + sizeof(positive)) = SNTP_SOL_IP;
-        address_to(b32 address_to)(control + sizeof(positive) + 4) =
-            SNTP_IP_RECVERR;
+        memory_zero(words, sizeof(words));
+        sntp_test_message(control, SNTP_CONTROL_DATA + SNTP_ERROR_BYTES,
+                          SNTP_SOL_IP, SNTP_IP_RECVERR, 0, 0);
         control[SNTP_CONTROL_DATA + SNTP_ERROR_ORIGIN] =
             SNTP_ERROR_TIMESTAMPING;
         address_to(p32 address_to)(control + SNTP_CONTROL_DATA +
@@ -7997,11 +7986,9 @@ static COLD bool sntp_math_ok(void)
                 return false;
 
         /* and no error header at all, which is the fallback case */
-        memory_zero(control, sizeof(control));
-        address_to(positive address_to)control = SNTP_CONTROL_DATA + 48;
-        address_to(b32 address_to)(control + sizeof(positive)) = SOL_SOCKET;
-        address_to(b32 address_to)(control + sizeof(positive) + 4) =
-            SNTP_TIMESTAMPING;
+        memory_zero(words, sizeof(words));
+        sntp_test_message(control, SNTP_CONTROL_DATA + 48, SOL_SOCKET,
+                          SNTP_TIMESTAMPING, 0, 0);
         sequence = 0;
         if (sntp_control_sequence(control, SNTP_CONTROL_DATA + 48,
                                   address_of sequence))
@@ -8063,11 +8050,24 @@ static COLD bool sntp_math_ok(void)
                     {20000000, 0, 500000, true},
                 };
 
+                /* an answer 2 h out claiming half a millisecond, against
+                   an honest 10 ms one: its own word is not enough, alone
+                   or against that one, and two that agree are */
+                sntp_sample far[2] = {
+                    {(bipolar)7200 * 1000000000, 0, 500000, true},
+                    {0, 0, 10000000, true},
+                };
+
                 if (sntp_choose(three, 3) != 1 || sntp_choose(three + 1, 2) != 1 ||
                     sntp_choose(three + 2, 1) != 0 || sntp_choose(apart, 3) != 2)
                         return false;
                 three[1].ok = false;
                 if (sntp_choose(three, 3) != 2)
+                        return false;
+                if (sntp_choose(far, 2) != 1 || sntp_choose(far, 1) != -1)
+                        return false;
+                far[1].offset_ns = far[0].offset_ns + 1000000;
+                if (sntp_choose(far, 2) != 0)
                         return false;
         }
 
@@ -9337,6 +9337,10 @@ static b32 locale_time_sync(void)
                 string_format(log, host_label "time: %s answered, but the "
                                    "clock could not be set: %s\n",
                               locale_ntp_answered, file_reason(failed));
+        else if (failed == SNTP_UNCONFIRMED)
+                string_format(log, host_label "time: no second server agreed "
+                                   "with a step past 2 s, so the clock was "
+                                   "left alone\n");
         else if (failed < 0)
                 string_format(log, host_label "time: no server answered%s\n",
                               failed == SNTP_RATE_LIMITED
@@ -9768,7 +9772,9 @@ static bipolar locale_ntp_take(string_address server,
         on after the first answer until SNTP_SERVERS have answered, and
         sntp_choose picks which to believe; a server named in
         /root/ntp.server is believed on its own, as before, and sampling off
-        takes the first answer, as before.
+        takes the first answer -- unless it would step the clock more than
+        two seconds, when a second is asked for, since sntp_choose believes
+        no such step on one word.
 */
 static bipolar locale_ntp_apply(void)
 {
@@ -9807,12 +9813,18 @@ static bipolar locale_ntp_apply(void)
                         heard_from[heard_count++] = (b32)at;
                 else if (failed == SNTP_RATE_LIMITED)
                         rated = true;
+                //      A far step is not taken on one server's word.
+                if (heard_count == 1 && wanted < 2 &&
+                    !sntp_within(heard[0].offset_ns, SNTP_OFFSET_SYNCED_NS))
+                        wanted = 2;
         }
 
         if (heard_count)
         {
                 bipolar chosen = sntp_choose(heard, heard_count);
 
+                if (chosen < 0)
+                        return SNTP_UNCONFIRMED;
                 return locale_ntp_take(
                     (string_address)locale_ntp_fallback[heard_from[chosen]],
                     heard + chosen);
@@ -9846,34 +9858,23 @@ static b32 locale_ntp_sampling_status(void)
         return 0;
 }
 
-static COLD b32 locale_ntp_sampling_set(string_address word)
+//      moonwater ntp on|off, and ntp sampling on|off; turning ntp on asks
+//      at once.
+static b32 locale_ntp_set(bool sampling, string_address word)
 {
         if (!string_equals(word, "on") && !string_equals(word, "off"))
                 return host_usage();
-        if (radio_write_word(LOCALE_NTP_SAMPLING_PATH, word) < 0)
+        if (radio_write_word(sampling ? LOCALE_NTP_SAMPLING_PATH : LOCALE_NTP_PATH,
+                             word) < 0)
                 return host_fail("ntp", -1);
-        string_format(log, host_label "ntp sampling %s\n", word);
-        log_flush();
-        return 0;
-}
-
-static b32 locale_ntp_set(string_address word)
-{
-        if (!string_equals(word, "on") && !string_equals(word, "off"))
-                return host_usage();
-        if (radio_write_word(LOCALE_NTP_PATH, word) < 0)
-                return host_fail("ntp", -1);
-        if (string_equals(word, "on"))
+        if (!sampling && string_equals(word, "on"))
         {
                 locale_ntp_next = 0;
                 if (locale_ntp_apply() < 0)
-                {
-                        string_format(log, host_label "ntp on, waiting for a reply\n");
-                        log_flush();
-                        return 0;
-                }
+                        word = "on, waiting for a reply";
         }
-        string_format(log, host_label "ntp %s\n", word);
+        string_format(log, host_label "ntp %s%s\n", sampling ? "sampling " : "",
+                      word);
         log_flush();
         return 0;
 }
@@ -10137,13 +10138,13 @@ static b32 host_locale(string_address address_to arguments, positive count)
                                 return host_usage();
                         if (!bowl_is_root())
                                 return host_refuse("%s needs root\n", "moonwater");
-                        return locale_ntp_sampling_set(arguments[3]);
+                        return locale_ntp_set(true, arguments[3]);
                 }
                 if (count != 3)
                         return host_usage();
                 if (!bowl_is_root())
                         return host_refuse("%s needs root\n", "moonwater");
-                return locale_ntp_set(word);
+                return locale_ntp_set(false, word);
         }
 
         if (count == 2)
