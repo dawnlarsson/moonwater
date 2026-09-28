@@ -234,7 +234,7 @@ static PURE bool exec_input_error()
 
 static fn exec_input_finish()
 {
-        if (exec_input_error())
+        if (exec_input_error() && !expand_discard_whole_line)
                 exec_signal = EXEC_SIGNAL_NONE;
 
         // eval and a sourced file catch a recoverable expansion error.
@@ -248,6 +248,7 @@ static fn exec_line_begin()
         if (exec_signal == EXEC_SIGNAL_FATAL || exec_input_error())
         {
                 exec_signal = EXEC_SIGNAL_NONE;
+                expand_discard_whole_line = false;
 
                 // A trap that arrived during the failed expansion belongs
                 // between input lines: not to the tail of the aborted one,
@@ -291,7 +292,7 @@ static PURE bool exec_line_aborted()
 */
 static bool exec_source_stop(b32 address_to startup_status)
 {
-        if (!exec_signal || exec_input_error())
+        if (!exec_signal || (exec_input_error() && !expand_discard_whole_line))
                 return false;
 
         if (exec_signal == EXEC_SIGNAL_RETURN)
@@ -8495,7 +8496,8 @@ static b32 exec_call(positive slot)
         // return leaves the function and nothing further out.
         // A failglob inside the body is the same: the rest of the
         // function is skipped, the caller is not.
-        if (exec_signal == EXEC_SIGNAL_RETURN || exec_input_error())
+        if (exec_signal == EXEC_SIGNAL_RETURN ||
+            (exec_input_error() && !expand_discard_whole_line))
                 exec_signal = EXEC_SIGNAL_NONE;
 
         if (held_parameters)
@@ -9807,6 +9809,11 @@ static COLD fn exec_return_bash()
                 {
                         shell_diagnostic_where();
                         log_error("return: too many arguments\n", 0);
+                        if (shell_bash_compat)
+                        {
+                                expand_discard_whole(2);
+                                return;
+                        }
                         shell_status = 1;
                         if (!shell_is_interactive || exec_forked ||
                             string_is(shell_option_flags, 'c'))
@@ -9880,7 +9887,7 @@ bool exec_control_builtin(string_address name, bool run)
                 if (shell_bash_compat && shell_argc > first + 1)
                 {
                         shell_told("%s: too many arguments\n", name);
-                        expand_fatal_status(1);
+                        expand_discard_whole(2);
                         return true;
                 }
 

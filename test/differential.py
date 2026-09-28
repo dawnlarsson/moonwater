@@ -14503,6 +14503,33 @@ def shell_lang_regex_operand(rng):
         before + "[[ " + subject + " =~ " + pattern + " ]] 2>/dev/null; echo \"s=$?\"",
         "echo \"${#BASH_REMATCH[@]}\"; printf '<%s>' \"${BASH_REMATCH[@]}\"; echo",
         "[[ " + subject + " =~ " + pattern + " && -n x ]] && echo both || echo not"))
+#       What bash does with a builtin handed words it has no place for, and
+#       with a subscript it cannot evaluate: the whole command the reader was
+#       running is dropped -- through eval, a sourced file and a function --
+#       and a script read from a file or standard input goes on at its next
+#       line with status 2, where a -c string ends with 1. This shell ended
+#       every script on `exit 1 2`, eval caught ${a[bad bad]}, and `exit abc`
+#       left where bash stays with 2 outside posix mode.
+def shell_lang_builtin_discard(rng):
+    fault = rng.choice(("exit 1 2", "command exit 1 2", "shift 1 2", "exit abc", "exit -- 1 2",
+                        "echo ${a[bad bad]}", "echo ${a[1/0]}", "return 1 2", "break 1 2"))
+    where = rng.choice(("top", "eval", "function", "subshell", "substitution", "dot", "group", "loop"))
+    if fault.startswith("return"):
+        where = rng.choice(("function", "dot"))
+    if fault.startswith("break"):
+        where = "loop"
+    body = {"top": fault + "; echo in",
+            "eval": "eval " + shell_quote(fault + "; echo in") + "; echo \"after=$?\"",
+            "function": "f() { " + fault + "; echo in; }; f; echo \"after=$?\"",
+            "subshell": "(" + fault + "; echo in); echo \"after=$?\"",
+            "substitution": "x=$(" + fault + "; echo in); echo \"after=$? x=$x\"",
+            "dot": "printf '%s\\n' " + shell_quote(fault) + " 'echo in' > inc.sh; . ./inc.sh; echo \"after=$?\"",
+            "group": "{ " + fault + "; echo in; } > /dev/null; echo \"after=$?\"",
+            "loop": "for i in 1 2; do " + fault + "; echo \"in=$i\"; done; echo \"after=$?\""}[where]
+    arrays = "${a[" in fault
+    return ("builtin-discard-" + where, shell_BASH if arrays else shell_ALL, shell_program(
+        "a=(1)" if arrays else ":", "set -- p q r", "echo start", body, 'echo "next=$?"'),
+        ("command", "stdin", "file"))
 
 
 #       break and continue with operands bash does not take: a word that is
@@ -17312,6 +17339,7 @@ SHELL_FAMILIES = (
     shell_lang_cfor_forms,
     shell_lang_regex_operand,
     shell_lang_loop_control_arguments,
+    shell_lang_builtin_discard,
     shell_lang_trap_return,
     shell_lang_funcname_stack,
     shell_lang_empty_at_joins,

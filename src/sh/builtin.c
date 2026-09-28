@@ -6786,6 +6786,11 @@ COLD fn shell_exit(writer write, string_address input)
                                        ? "%s: %s: numeric argument required\n"
                                        : "%s: Illegal number: %s\n",
                                    shell_argv[0], shell_argv[first]);
+                        //      Outside posix mode bash's exit answers 2 for
+                        //      a word that is no number and stays; under
+                        //      posix it is a special builtin's error.
+                        if (shell_bash_compat && !shell_posix_on())
+                                return shell_answer(2);
                         exec_special_error_note();
                         if (shell_bash_compat)
                         {
@@ -6798,7 +6803,7 @@ COLD fn shell_exit(writer write, string_address input)
                 if (shell_bash_compat && shell_argc > first + 1)
                 {
                         shell_told("%s: too many arguments\n", shell_argv[0]);
-                        expand_fatal_status(1);
+                        expand_discard_whole(2);
                         return;
                 }
         }
@@ -8445,7 +8450,7 @@ fn shell_shift(writer write, string_address input)
         {
                 shell_diagnostic_where();
                 log_error("shift: too many arguments\n", 0);
-                expand_fatal_status(1);
+                expand_discard_whole(2);
                 return;
         }
 

@@ -4975,6 +4975,24 @@ static COLD fn expand_discard(b32 status)
         exec_expand_input_error();
 }
 
+/*
+        The same discard, reached through bash's top_level_cleanup: a
+        subscript that cannot be evaluated, or a builtin handed words it has
+        no place for (exit 1 2, shift 1 2, return 1 2, break 1 2). eval, a
+        sourced file and a function do not catch it; the whole command the
+        reader was running is dropped and the reader goes on at its next one
+        with status 2. A -c string and a substitution end with 1.
+*/
+static bool expand_discard_whole_line;
+
+static COLD fn expand_discard_whole(b32 status)
+{
+        if (string_is(shell_option_flags, 'c') || expand_in_substitution)
+                status = 1;
+        expand_discard_whole_line = shell_bash_compat;
+        expand_discard(status);
+}
+
 static COLD fn expand_fatal_status(b32 status)
 {
         shell_status = status;
@@ -7006,7 +7024,10 @@ static COLD string_address expand_subscript_key(string_address base,
                         if (!arith_unset)
                                 shell_arith_report(writer_stderr_once, null,
                                                    key);
-                        expand_discard(shell_bash_compat ? 1 : 2);
+                        if (shell_bash_compat)
+                                expand_discard_whole(1);
+                        else
+                                expand_discard(2);
                         return null;
                 }
 

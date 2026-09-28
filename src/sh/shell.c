@@ -2160,7 +2160,7 @@ fn run_line(string_address line)
         // recovery before this one has reached the user's next command.
         shell_run_depth++;
 
-        if (top || exec_input_error())
+        if (top || (exec_input_error() && !expand_discard_whole_line))
                 exec_line_begin();
 
         run_line_inner(line);
