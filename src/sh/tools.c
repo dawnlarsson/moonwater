@@ -4527,6 +4527,9 @@ static numfmt_options numfmt;
 
 static const argument_option numfmt_arguments[] = {
     {"debug", 'D', ARGUMENT_LONG_ONLY},
+    //  GNU's developer switch, spelled ---debug: its messages trace the
+    //  reference's own internals, so here it is taken and says nothing.
+    {"-debug", 'X', ARGUMENT_LONG_ONLY},
     {"delimiter", 'd', ARGUMENT_REQUIRED},
     {"field", 'f', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"format", 'm', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
@@ -4792,254 +4795,6 @@ static bool numfmt_format_read(string_address text,
         return true;
 }
 
-/* Normalize only enough to let seq's checked parser own the value.  Leading
-   integral zeroes do not consume its coefficient budget, while the original
-   fractional width remains visible in `shown`. */
-static bool numfmt_decimal(p8 address_to bytes, positive length,
-                           seq_decimal address_to number)
-{
-        positive at = 0;
-        bool minus = false;
-
-        if (at < length && bytes[at] == '-')
-        {
-                minus = true;
-                at++;
-        }
-        else if (at < length && bytes[at] == '+')
-                return false;
-
-        positive point = positive_max;
-        positive digits = 0;
-        positive fractional = 0;
-
-        for (positive scan = at; scan < length; scan++)
-                if (bytes[scan] == '.')
-                {
-                        if (point != positive_max)
-                                return false;
-                        point = scan;
-                }
-                else if (byte_is_digit(bytes[scan]))
-                {
-                        digits++;
-                        if (point != positive_max)
-                                fractional++;
-                }
-                else
-                        return false;
-
-        if (!digits || (point != positive_max &&
-                        (point + 1 == length || fractional > 18)))
-                return false;
-
-        positive integral_end = point == positive_max ? length : point;
-        positive zeros = memory_span_byte(bytes + at, '0', integral_end - at);
-
-        positive integral = integral_end - at - zeros;
-        p8 normalized[48];
-        positive made = 0;
-
-        if (minus)
-                normalized[made++] = '-';
-
-        if (!integral)
-                normalized[made++] = '0';
-        else
-        {
-                if (integral > 20)
-                        return false;
-                memory_copy(normalized + made, bytes + at + zeros, integral);
-                made += integral;
-        }
-
-        if (point != positive_max)
-        {
-                normalized[made++] = '.';
-                memory_copy(normalized + made, bytes + point + 1, fractional);
-                made += fractional;
-        }
-
-        normalized[made] = end;
-        return seq_decimal_number(normalized, number);
-}
-
-static bool numfmt_ratio(seq_decimal address_to number, positive base,
-                         positive power, positive address_to numerator,
-                         positive address_to denominator)
-{
-        positive top[13];
-        positive bottom[2];
-        positive tops = 0;
-        positive bottoms = 0;
-        positive magnitude = (positive)number->coefficient;
-
-        if (number->coefficient < 0)
-                magnitude = (positive)0 - magnitude;
-
-        if (!magnitude)
-        {
-                address_to numerator = 0;
-                address_to denominator = 1;
-                return true;
-        }
-
-        top[tops++] = magnitude;
-        top[tops++] = numfmt.from_unit;
-
-        while (power--)
-                top[tops++] = base;
-
-        if (number->scale)
-                bottom[bottoms++] = positive_power_ten(number->scale);
-        bottom[bottoms++] = numfmt.to_unit;
-
-        for (positive b = 0; b < bottoms; b++)
-                for (positive t = 0; t < tops; t++)
-                {
-                        positive common = tools_gcd(top[t], bottom[b]);
-                        top[t] /= common;
-                        bottom[b] /= common;
-                }
-
-        positive n = 1;
-        positive d = 1;
-
-        for (positive at = 0; at < tops; at++)
-        {
-                if (n > positive_max / top[at])
-                        return false;
-                n *= top[at];
-        }
-
-        for (positive at = 0; at < bottoms; at++)
-        {
-                if (d > positive_max / bottom[at])
-                        return false;
-                d *= bottom[at];
-        }
-
-        address_to numerator = n;
-        address_to denominator = d;
-        return true;
-}
-
-/* floor(10 * remainder / divisor), without overflowing a native word.  The
-   threshold is k*d/10 rounded up; the new remainder uses the already
-   available double-width multiply but never requests double-width division. */
-static positive numfmt_decimal_digit(positive remainder, positive divisor,
-                                     positive address_to next)
-{
-        positive quotient = divisor / 10;
-        positive tail = divisor % 10;
-        positive low = 0;
-        positive high = 10;
-
-        while (low + 1 < high)
-        {
-                positive middle = (low + high) / 2;
-                positive threshold = middle * quotient +
-                                     (middle * tail + 9) / 10;
-
-                if (remainder >= threshold)
-                        low = middle;
-                else
-                        high = middle;
-        }
-
-        p128 changed = (p128)remainder * 10 - (p128)low * divisor;
-        address_to next = (positive)changed;
-        return low;
-}
-
-static bool numfmt_round(positive numerator, positive denominator,
-                         positive digits, bool negative,
-                         positive address_to whole,
-                         positive address_to fraction)
-{
-        positive integer = numerator / denominator;
-        positive remainder = numerator % denominator;
-        positive decimals = 0;
-
-        for (positive at = 0; at < digits; at++)
-        {
-                positive digit = numfmt_decimal_digit(remainder, denominator,
-                                                       address_of remainder);
-                decimals = decimals * 10 + digit;
-        }
-
-        bool increase = false;
-
-        if (remainder)
-                switch (numfmt.rounding)
-                {
-                case NUMFMT_ROUND_FROM_ZERO: increase = true; break;
-                case NUMFMT_ROUND_UP: increase = !negative; break;
-                case NUMFMT_ROUND_DOWN: increase = negative; break;
-                case NUMFMT_ROUND_TO_ZERO: break;
-                case NUMFMT_ROUND_NEAREST:
-                        increase = remainder >= denominator / 2 +
-                                                   (denominator & 1);
-                        break;
-                }
-
-        if (increase)
-        {
-                positive scale = positive_power_ten(digits);
-                decimals++;
-
-                if (decimals == scale)
-                {
-                        decimals = 0;
-                        if (integer == positive_max)
-                                return false;
-                        integer++;
-                }
-        }
-
-        address_to whole = integer;
-        address_to fraction = decimals;
-        return true;
-}
-
-static fn numfmt_put_number(positive whole, positive fraction,
-                            positive stored_precision,
-                            positive shown_precision, bool negative,
-                            p8 address_to bytes, positive address_to length)
-{
-        positive used = 0;
-
-        if (negative)
-                bytes[used++] = '-';
-
-        used += positive_into_string(bytes + used, whole);
-
-        if (shown_precision)
-        {
-                bytes[used++] = '.';
-
-                if (stored_precision)
-                {
-                        positive missing = stored_precision -
-                                           positive_digits(fraction);
-                        if (!fraction)
-                                missing = stored_precision - 1;
-                        memory_fill(bytes + used, '0', missing);
-                        used += missing;
-                        used += positive_into_string(bytes + used, fraction);
-                }
-
-                if (shown_precision > stored_precision)
-                {
-                        memory_fill(bytes + used, '0',
-                                    shown_precision - stored_precision);
-                        used += shown_precision - stored_precision;
-                }
-        }
-
-        address_to length = used;
-}
-
 static fn numfmt_body_out(p8 address_to number, positive number_length,
                           p8 address_to unit, positive unit_length,
                           positive automatic_width)
@@ -5131,119 +4886,198 @@ static fn numfmt_body_out(p8 address_to number, positive number_length,
         }
 }
 
-/*      A number too big to print without a scale is named the way the
-        reference names it: six significant digits and an exponent, which is
-        what %Lg gives it. The digits are the ones that were typed, so this
-        is a walk over the decimal string and not any arithmetic -- rounding
-        at the seventh digit, and a carry that can make the mantissa one and
-        the exponent one larger.
+/*
+        GNU numfmt's long double, done in software with seq's arithmetic
+        (add and multiply, rounded as the x87 or soft-fp round), and the
+        few pieces numfmt adds: a correctly rounded division, its powerld
+        and expld, the conversion to intmax_t its rounding functions lean
+        on, and a comparison against a small whole number.
 */
-static fn numfmt_short_form(p8 address_to digits, positive length,
-                            bool negative, p8 address_to into)
+static seq_wide numfmt_wide_word(p64 word)
 {
-        positive at = memory_span_byte(digits, '0', length);
-        p8 kept[8];
-        positive have = 0;
-        positive exponent = length > at ? length - at - 1 : 0;
-
-        have = min(length - at, (positive)7);
-        memory_copy(kept, digits + at, have);
-        memory_fill(kept + have, '0', 7 - have);
-        have = 7;
-        if (kept[6] >= '5')
-        {
-                positive carry = 6;
-                while (carry--)
-                {
-                        if (kept[carry] != '9')
-                        {
-                                kept[carry]++;
-                                break;
-                        }
-                        kept[carry] = '0';
-                        if (!carry)
-                        {
-                                kept[0] = '1';
-                                exponent++;
-                        }
-                }
-        }
-        positive shown = 6;
-        shown -= memory_span_byte_reverse(kept + 1, '0', shown - 1);
-
-        positive used = 0;
-        if (negative)
-                into[used++] = '-';
-        into[used++] = kept[0];
-        if (shown > 1)
-        {
-                into[used++] = '.';
-                memory_copy(into + used, kept + 1, shown - 1);
-                used += shown - 1;
-        }
-        into[used++] = 'e';
-        into[used++] = '+';
-        if (exponent < 10)
-                into[used++] = '0';
-        used += positive_into_base(into + used, exponent, 10, false);
-        into[used] = end;
+        return seq_wide_round(word, 0, false);
 }
 
-static fn numfmt_invalid_value(p8 address_to bytes, positive length)
+static seq_wide numfmt_wide_divide(seq_wide left, seq_wide right)
 {
-        numfmt.some_invalid = true;
-        if (numfmt.invalid == NUMFMT_INVALID_ABORT ||
-            numfmt.invalid == NUMFMT_INVALID_FAIL ||
-            numfmt.invalid == NUMFMT_INVALID_WARN)
+        bool negative = left.negative != right.negative;
+
+        if (left.kind == SEQ_WIDE_NAN)
+                return left;
+        if (right.kind == SEQ_WIDE_NAN)
+                return right;
+        if (left.kind == SEQ_WIDE_INFINITE)
+                return right.kind == SEQ_WIDE_INFINITE
+                           ? seq_wide_invalid()
+                           : (seq_wide){0, 0, SEQ_WIDE_INFINITE, negative};
+        if (right.kind == SEQ_WIDE_INFINITE || left.kind == SEQ_WIDE_ZERO)
+                return right.kind == SEQ_WIDE_ZERO ? seq_wide_invalid()
+                                                   : (seq_wide){0, 0, SEQ_WIDE_ZERO, negative};
+        if (right.kind == SEQ_WIDE_ZERO)
+                return (seq_wide){0, 0, SEQ_WIDE_INFINITE, negative};
+
+        p128 rest = left.significand, quotient = 0;
+
+        for (positive at = 0; at < SEQ_WIDE_BITS + 3; at++)
         {
-                p8 shown[128];
-                positive take = min(length, sizeof(shown) - 1);
-                memory_copy(shown, bytes, take);
-                shown[take] = end;
-
-                /* GNU names the failure: no number at all, a scale letter
-                   refused for want of --from, a scale lacking the i of
-                   --from=iec-i, or a suffix that is no scale. */
-                positive at = length && bytes[0] == '-';
-                positive digits = string_span_max(bytes + at, length - at,
-                                                  string_set_digits);
-                positive rest = at + digits;
-                if (rest < length && bytes[rest] == '.')
+                quotient <<= 1;
+                if (rest >= right.significand)
                 {
-                        rest++;
-                        digits++;
-                        rest += string_span_max(bytes + rest, length - rest,
-                                                string_set_digits);
+                        rest -= right.significand;
+                        quotient |= 1;
                 }
-                string_address reason = "invalid number";
-                string_address note = "";
-                positive power;
+                rest <<= 1;
+        }
+        quotient = quotient << 1 | (rest != 0);
+        return seq_wide_round(quotient, left.exponent - right.exponent - SEQ_WIDE_BITS - 3,
+                              negative);
+}
 
-                text_flush();
-                if (digits && rest < length &&
-                    numfmt_power_letter(bytes[rest], address_of power))
-                {
-                        if (numfmt.from == NUMFMT_SCALE_NONE)
-                        {
-                                reason = "rejecting suffix in input";
-                                note = " (consider using --from)";
-                        }
-                        else if (numfmt.from == NUMFMT_SCALE_IEC_I &&
-                                 !(rest + 1 < length && bytes[rest + 1] == 'i'))
-                        {
-                                reason = "missing 'i' suffix in input";
-                                note = " (e.g Ki/Mi/Gi)";
-                        }
-                        else
-                                reason = "invalid suffix in input";
-                }
-                else if (digits && rest < length)
-                        reason = "invalid suffix in input";
+// powerld: base times itself power - 1 times, and one for none.
+static seq_wide numfmt_wide_power(seq_wide base, positive power)
+{
+        seq_wide result = base;
 
-                string_format(writer_stderr, "numfmt: %s: '%w'%s\n", reason, writer_terminal_quoted_name, shown,
-                              note);
+        if (!power)
+                return numfmt_wide_word(1);
+        while (--power)
+                result = seq_wide_multiply(result, base);
+        return result;
+}
+
+// |value| < word
+static bool numfmt_wide_below(seq_wide value, p64 word)
+{
+        value.negative = false;
+        return value.kind == SEQ_WIDE_ZERO ||
+               (value.kind == SEQ_WIDE_FINITE &&
+                seq_wide_order(value, numfmt_wide_word(word)) < 0);
+}
+
+// expld: divided by base while it is at least base, counting.
+static seq_wide numfmt_wide_scale(seq_wide value, p64 base, positive address_to power)
+{
+        seq_wide divisor = numfmt_wide_word(base);
+
+        address_to power = 0;
+        if (value.kind != SEQ_WIDE_FINITE && value.kind != SEQ_WIDE_ZERO)
+                return value;
+        while (!numfmt_wide_below(value, base))
+        {
+                (address_to power)++;
+                value = numfmt_wide_divide(value, divisor);
+        }
+        return value;
+}
+
+// (intmax_t) value: toward zero, and the x87's indefinite past the range.
+static bipolar numfmt_wide_integer(seq_wide value)
+{
+        if (value.kind == SEQ_WIDE_ZERO)
+                return 0;
+        if (value.kind != SEQ_WIDE_FINITE)
+                return (bipolar)((positive)1 << 63);
+
+        p128 magnitude;
+
+        if (value.exponent >= 0)
+        {
+                if (value.exponent >= 64 || (value.significand >> (64 - value.exponent)))
+                        return (bipolar)((positive)1 << 63);
+                magnitude = value.significand << value.exponent;
+        }
+        else if (value.exponent <= -128)
+                magnitude = 0;
+        else
+                magnitude = value.significand >> -value.exponent;
+
+        if (magnitude > ((p128)1 << 63) || (magnitude == ((p128)1 << 63) && !value.negative))
+                return (bipolar)((positive)1 << 63);
+        return value.negative ? -(bipolar)magnitude : (bipolar)magnitude;
+}
+
+static seq_wide numfmt_wide_from(bipolar integer)
+{
+        bool negative = integer < 0;
+        positive magnitude = negative ? (positive)0 - (positive)integer : (positive)integer;
+        seq_wide out = numfmt_wide_word(magnitude);
+
+        out.negative = negative && magnitude;
+        return out;
+}
+
+// simple_round: the whole part in steps of INTMAX_MAX, the rest by --round.
+static seq_wide numfmt_wide_round(seq_wide value)
+{
+        seq_wide most = numfmt_wide_word((positive)bipolar_max);
+        bipolar times = numfmt_wide_integer(numfmt_wide_divide(value, most));
+        seq_wide product = seq_wide_multiply(most, numfmt_wide_from(times));
+
+        product.negative = !product.negative;
+        value = seq_wide_add(value, product);
+
+        bipolar truncated = numfmt_wide_integer(value);
+        seq_wide back = numfmt_wide_from(truncated);
+        b32 order = seq_wide_order(back, value);
+        bipolar rounded = truncated;
+
+        switch (numfmt.rounding)
+        {
+        case NUMFMT_ROUND_UP:
+                rounded = order < 0 ? truncated + 1 : truncated;
+                break;
+        case NUMFMT_ROUND_DOWN:
+                rounded = order > 0 ? truncated - 1 : truncated;
+                break;
+        case NUMFMT_ROUND_FROM_ZERO:
+                rounded = value.negative ? (order > 0 ? truncated - 1 : truncated)
+                                         : (order < 0 ? truncated + 1 : truncated);
+                break;
+        case NUMFMT_ROUND_TO_ZERO:
+                break;
+        case NUMFMT_ROUND_NEAREST:
+        {
+                seq_wide half = numfmt_wide_divide(numfmt_wide_word(1), numfmt_wide_word(2));
+
+                if (value.negative)
+                        half.negative = true;
+                rounded = numfmt_wide_integer(seq_wide_add(value, half));
+                break;
+        }
         }
 
+        return seq_wide_add(seq_wide_multiply(most, numfmt_wide_from(times)),
+                            numfmt_wide_from(rounded));
+}
+
+/* GNU's sentence for each way simple_strtod_human refuses a number. */
+static fn numfmt_refused(p8 kind, p8 address_to bytes, positive length, positive rest)
+{
+        numfmt.some_invalid = true;
+        if (numfmt.invalid != NUMFMT_INVALID_IGNORE)
+        {
+                p8 shown[512];
+                positive take = min(length, sizeof(shown) - 1);
+
+                memory_copy(shown, bytes, take);
+                shown[take] = end;
+                text_flush();
+                if (kind == 'T')
+                        string_format(writer_stderr, "numfmt: invalid suffix in input '%w': '%w'\n",
+                                      writer_terminal_quoted_name, shown,
+                                      writer_terminal_quoted_name, shown + min(rest, take));
+                else
+                        string_format(writer_stderr, "numfmt: %s: '%w'%s\n",
+                                      kind == 'O' ? (string_address)"value too large to be converted"
+                                      : kind == 'N' ? (string_address)"invalid number"
+                                      : kind == 'F' ? (string_address)"rejecting suffix in input"
+                                      : kind == 'I' ? (string_address)"missing 'i' suffix in input"
+                                                    : (string_address)"invalid suffix in input",
+                                      writer_terminal_quoted_name, shown,
+                                      kind == 'F' ? (string_address)" (consider using --from)"
+                                      : kind == 'I' ? (string_address)" (e.g Ki/Mi/Gi)"
+                                                    : (string_address)"");
+        }
         if (numfmt.invalid == NUMFMT_INVALID_ABORT ||
             numfmt.invalid == NUMFMT_INVALID_FAIL)
                 numfmt.failed = true;
@@ -5264,232 +5098,278 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
         if (numfmt.suffix && tools_span_ends(bytes, stop, numfmt.suffix))
                 stop -= string_length(numfmt.suffix);
 
-        // A supplied suffix matches the exact field end, including any
-        // spaces in the suffix itself. Keep the numeric span separate from
-        // its separator, scale and trailing blanks; the checked decimal
-        // parser below still owns whether the number itself is valid.
-        positive numeric_length = stop && bytes[0] == '-';
-        numeric_length += string_span_max(bytes + numeric_length,
-                                          stop - numeric_length, string_set_digits);
-        if (numeric_length < stop && bytes[numeric_length] == '.')
-        {
-                numeric_length++;
-                numeric_length += string_span_max(bytes + numeric_length,
-                                                  stop - numeric_length, string_set_digits);
-        }
-
-        positive tail = numeric_length;
-        positive separator_length = numfmt.unit_separator
-                                        ? string_length(numfmt.unit_separator) : 0;
-        if (separator_length && separator_length <= stop - tail &&
-            !memory_compare(bytes + tail, numfmt.unit_separator, separator_length))
-                tail += separator_length;
-        else if ((!numfmt.unit_separator || separator_length) && tail < stop &&
-                 byte_is_blank(bytes[tail]))
-                tail++;
-
-        // Before a scale, exactly one blank or the explicit separator is
-        // accepted, never both. After it, any run of blanks is harmless.
+        /*
+                The number as GNU's simple_strtod_human reads it: a sign,
+                digits, a point and digits (a point needs digits after it or
+                a second point), then at most one unit separator or blank,
+                one scale letter with its i, and trailing blanks. What is
+                left after that is a suffix it refuses, and each way of
+                failing has its sentence.
+        */
+        positive numeric_length = 0;
         positive power = 0;
         positive base = 1;
         positive suffix_bytes = 0;
+        p8 refused = 0;
+        positive at = stop && bytes[0] == '-';
+        positive count = 0;
+        bool found = false;
 
-        if (numfmt.from != NUMFMT_SCALE_NONE && tail < stop)
+        for (; at < stop && byte_is_digit(bytes[at]); at++)
         {
-                bool has_i = tail + 1 < stop && bytes[tail + 1] == 'i';
+                found = true;
+                if (count || bytes[at] != '0')
+                        count++;
+        }
+        if (count > 33)
+                refused = 'O';
+        else if (!found && !(at < stop && bytes[at] == '.'))
+                refused = 'N';
+        else if (at < stop && bytes[at] == '.')
+        {
+                at++;
+                if (at < stop && bytes[at] == '-')
+                        refused = 'N';
+                found = false;
+                count = 0;
+                for (; !refused && at < stop && byte_is_digit(bytes[at]); at++)
+                {
+                        found = true;
+                        if (count || bytes[at] != '0')
+                                count++;
+                }
+                if (!refused && count > 33)
+                        refused = 'O';
+                else if (!refused && !found && !(at < stop && bytes[at] == '.'))
+                        refused = 'N';
+        }
+        numeric_length = at;
+
+        positive separator_length = numfmt.unit_separator
+                                        ? string_length(numfmt.unit_separator) : 0;
+
+        while (!refused && at < stop)
+        {
+                if (numfmt.unit_separator)
+                {
+                        if (separator_length <= stop - at &&
+                            !memory_compare(bytes + at, numfmt.unit_separator, separator_length))
+                                at += separator_length;
+                        else if (bytes[at] == ' ' || bytes[at] == '\t')
+                                at++;
+                }
+                else if (bytes[at] == ' ' || bytes[at] == '\t')
+                        at++;
+                if (at == stop)
+                        break;
+
                 positive candidate = 0;
 
-                if (numfmt_power_letter(bytes[tail], address_of candidate) &&
-                    ((has_i && (numfmt.from == NUMFMT_SCALE_AUTO ||
-                                numfmt.from == NUMFMT_SCALE_IEC_I)) ||
-                     (!has_i && numfmt.from != NUMFMT_SCALE_IEC_I)))
+                if (!numfmt_power_letter(bytes[at], address_of candidate))
                 {
-                        power = candidate;
-                        base = has_i || numfmt.from == NUMFMT_SCALE_IEC ? 1024 : 1000;
-                        suffix_bytes = has_i ? 2 : 1;
-                        tail += suffix_bytes;
+                        while (at < stop && (bytes[at] == ' ' || bytes[at] == '\t' ||
+                                             bytes[at] == '\n'))
+                                at++;
+                        if (at < stop)
+                                refused = 'S';
+                        break;
                 }
+                if (numfmt.from == NUMFMT_SCALE_NONE)
+                {
+                        refused = 'F';
+                        break;
+                }
+                power = candidate;
+                base = numfmt.from == NUMFMT_SCALE_IEC ? 1024 : 1000;
+                suffix_bytes = 1;
+                at++;
+                if (numfmt.from == NUMFMT_SCALE_AUTO && at < stop && bytes[at] == 'i')
+                {
+                        base = 1024;
+                        suffix_bytes = 2;
+                        at++;
+                }
+                else if (numfmt.from == NUMFMT_SCALE_IEC_I)
+                {
+                        if (at < stop && bytes[at] == 'i')
+                        {
+                                base = 1024;
+                                suffix_bytes = 2;
+                                at++;
+                        }
+                        else
+                        {
+                                refused = 'I';
+                                break;
+                        }
+                }
+                while (at < stop && (bytes[at] == ' ' || bytes[at] == '\t' ||
+                                     bytes[at] == '\n'))
+                        at++;
+                break;
         }
+        if (!refused && at < stop)
+                refused = 'T';
 
-        tail += string_span_max(bytes + tail, stop - tail, string_set_blanks);
-
-        seq_decimal number;
-        positive numerator;
-        positive denominator;
-
-        if (tail != stop || !numfmt_decimal(bytes, numeric_length, address_of number) ||
-            !numfmt_ratio(address_of number, base, power,
-                          address_of numerator, address_of denominator))
+        if (refused)
         {
-                /*      A number the reference could read and this one cannot
-                        is one whose integer part has passed 1e19, and with
-                        no scale asked for that is what the reference itself
-                        refuses to print. */
-                positive sign = numeric_length && bytes[0] == '-';
-                positive whole = string_span_max(bytes + sign,
-                                                 numeric_length - sign,
-                                                 string_set_digits);
-                positive leading = memory_span_byte(bytes + sign, '0', whole);
-                if (tail == stop && !power && numfmt.to == NUMFMT_SCALE_NONE &&
-                    whole - leading >= 20)
-                {
-                        p8 shown[48];
-
-                        numfmt_short_form(bytes + sign, whole, sign != 0, shown);
-                        text_flush();
-                        string_format(writer_stderr,
-                            "numfmt: value too large to be printed: '%w' (consider using --to)\n",
-                            writer_terminal_quoted_name, shown);
-                        numfmt.failed = true;
-                        numfmt.stop = true;
-                        return false;
-                }
-                numfmt_invalid_value(bytes, length);
+                numfmt_refused(refused, bytes, stop, at);
                 if (!numfmt.stop)
                         text_put(original, original_length);
                 return false;
         }
 
         /*
-                Under --debug the reference says when the integer part of an
-                input carries more digits than a long double holds exactly,
-                because everything after them is the parser's guess.
+                From here the arithmetic is GNU's, in its long double: the
+                digits accumulated one at a time, the fraction divided by
+                its power of ten, the scale multiplied in, the units applied,
+                and the result rounded and printed by double_to_human's
+                steps. The long double is seq's software one, the x87's
+                eighty bits on x86_64 and binary128 elsewhere, so what GNU
+                rounds away on this machine is rounded away here too.
         */
-        if (numfmt.debug)
+        bool minus = numeric_length && bytes[0] == '-';
+        positive digit_at = minus;
+        positive whole_digits = 0, fraction_digits = 0, precision = 0;
+        seq_wide ten = numfmt_wide_word(10);
+        seq_wide value = {0, 0, SEQ_WIDE_ZERO, false};
+        bool loss = false;
+
+        for (; digit_at < numeric_length && byte_is_digit(bytes[digit_at]); digit_at++)
         {
-                positive at = numeric_length && bytes[0] == '-';
-                at += memory_span_byte(bytes + at, '0', numeric_length - at);
+                if (value.kind != SEQ_WIDE_ZERO || bytes[digit_at] != '0')
+                        whole_digits++;
+                value = seq_wide_add(seq_wide_multiply(value, ten),
+                                     numfmt_wide_word((p64)(bytes[digit_at] - '0')));
+        }
+        loss |= whole_digits > 18;
+        if (minus)
+                value.negative = !value.negative;
 
-                positive digits = string_span_max(bytes + at, numeric_length - at,
-                                                  string_set_digits);
+        if (digit_at < numeric_length && bytes[digit_at] == '.')
+        {
+                seq_wide part = {0, 0, SEQ_WIDE_ZERO, false};
+                positive from = ++digit_at;
 
-                at += digits;
-
-                if (digits > 18)
+                for (; digit_at < numeric_length && byte_is_digit(bytes[digit_at]); digit_at++)
                 {
-                        p8 shown[128];
-                        positive take = min(numeric_length, sizeof(shown) - 1);
-
-                        memory_copy(shown, bytes, take);
-                        shown[take] = end;
-                        text_flush();
-                        string_format(writer_stderr,
-                            "numfmt: large input value '%w': possible precision loss\n",
-                            writer_terminal_quoted_name, shown);
+                        if (part.kind != SEQ_WIDE_ZERO || bytes[digit_at] != '0')
+                                fraction_digits++;
+                        part = seq_wide_add(seq_wide_multiply(part, ten),
+                                            numfmt_wide_word((p64)(bytes[digit_at] - '0')));
                 }
+                loss |= fraction_digits > 18;
+                precision = digit_at - from;
+                part = numfmt_wide_divide(part, numfmt_wide_power(ten, precision));
+                if (minus)
+                        part.negative = !part.negative;
+                value = seq_wide_add(value, part);
         }
 
         if (suffix_bytes)
-                number.shown = 0;
+                precision = 0;
+        value = seq_wide_multiply(value, numfmt_wide_power(numfmt_wide_word(base), power));
 
-        bool negative = number.coefficient < 0 && numerator;
-        positive output_power = 0;
-        positive output_base = numfmt.to == NUMFMT_SCALE_SI ? 1000 : 1024;
+        if (loss && numfmt.debug)
+        {
+                p8 shown[256];
+                positive take = min(stop, sizeof(shown) - 1);
 
-        if (numfmt.to != NUMFMT_SCALE_NONE)
-                while (output_power < 10 &&
-                       numerator / output_base >= denominator)
+                memory_copy(shown, bytes, take);
+                shown[take] = end;
+                text_flush();
+                string_format(writer_stderr,
+                    "numfmt: large input value '%w': possible precision loss\n",
+                    writer_terminal_quoted_name, shown);
+        }
+
+        if (numfmt.from_unit != 1 || numfmt.to_unit != 1)
+                value = numfmt_wide_divide(
+                    seq_wide_multiply(value, numfmt_wide_word(numfmt.from_unit)),
+                    numfmt_wide_word(numfmt.to_unit));
+
+        bool user = numfmt.have_format && numfmt.format.has_precision;
+        positive used = user ? numfmt.format.precision : precision;
+        positive tens = 0;
+
+        numfmt_wide_scale(value, 10, address_of tens);
+
+        if ((numfmt.to == NUMFMT_SCALE_NONE && tens + used > 18) || tens > 32)
+        {
+                numfmt.some_invalid = true;
+                if (numfmt.invalid != NUMFMT_INVALID_IGNORE)
                 {
-                        denominator *= output_base;
+                        seq_format shape = {.conversion = 'g', .precise = true, .precision = 6};
+                        string_address shown = seq_wide_printed(address_of shape, value);
+                        p8 held[64];
+                        positive length = shown ? min(string_length(shown), sizeof(held) - 1) : 0;
+
+                        memory_copy(held, shown, length);
+                        held[length] = end;
+                        text_flush();
+                        if (numfmt.to != NUMFMT_SCALE_NONE)
+                                string_format(writer_stderr,
+                                    "numfmt: value too large to be printed: '%s' (cannot handle values > 999Q)\n",
+                                    held);
+                        else if (used)
+                                string_format(writer_stderr,
+                                    "numfmt: value/precision too large to be printed: '%s/%p' (consider using --to)\n",
+                                    held, used);
+                        else
+                                string_format(writer_stderr,
+                                    "numfmt: value too large to be printed: '%s' (consider using --to)\n",
+                                    held);
+                }
+                if (numfmt.invalid == NUMFMT_INVALID_ABORT ||
+                    numfmt.invalid == NUMFMT_INVALID_FAIL)
+                        numfmt.failed = true;
+                if (numfmt.invalid == NUMFMT_INVALID_ABORT)
+                        numfmt.stop = true;
+                if (!numfmt.stop)
+                        text_put(original, original_length);
+                return false;
+        }
+
+        positive output_power = 0;
+        positive shown_precision = used;
+
+        if (numfmt.to == NUMFMT_SCALE_NONE)
+        {
+                seq_wide scale = numfmt_wide_power(ten, used);
+
+                value = numfmt_wide_divide(numfmt_wide_round(seq_wide_multiply(value, scale)),
+                                           scale);
+        }
+        else
+        {
+                positive output_base = numfmt.to == NUMFMT_SCALE_SI ? 1000 : 1024;
+                seq_wide scale_base = numfmt_wide_word(output_base);
+
+                value = numfmt_wide_scale(value, output_base, address_of output_power);
+
+                positive adjust = user ? min(output_power * 3, used)
+                                       : numfmt_wide_below(value, 10) ? 1 : 0;
+                seq_wide scale = numfmt_wide_power(ten, adjust);
+
+                value = numfmt_wide_divide(numfmt_wide_round(seq_wide_multiply(value, scale)),
+                                           scale);
+                if (!numfmt_wide_below(value, output_base))
+                {
+                        value = numfmt_wide_divide(value, scale_base);
                         output_power++;
                 }
-
-        positive print_precision;
-
-        if (numfmt.have_format && numfmt.format.has_precision)
-                print_precision = numfmt.format.precision;
-        else if (numfmt.to == NUMFMT_SCALE_NONE)
-                print_precision = number.shown;
-        else
-                print_precision = output_power &&
-                                          numerator / denominator < 10
-                                      ? 1 : 0;
-
-        positive round_precision = print_precision;
-
-        if (numfmt.to != NUMFMT_SCALE_NONE)
-        {
-                if (numfmt.have_format && numfmt.format.has_precision)
-                        round_precision = min(round_precision,
-                                              output_power * 3);
-                else
-                        /* GNU carries one guard decimal below ten even when
-                           no suffix is needed.  The final integer rendering
-                           then uses nearest-even, which is why 0.5 is 0 but
-                           1.5 is 2. */
-                        round_precision = numerator / denominator < 10 ? 1 : 0;
+                shown_precision = user ? used
+                                       : value.kind != SEQ_WIDE_ZERO &&
+                                         numfmt_wide_below(value, 10) && output_power;
         }
 
-        positive whole;
-        positive fraction;
+        seq_format shape = {.conversion = 'f', .precise = true,
+                            .precision = shown_precision};
+        string_address printed = seq_wide_printed(address_of shape, value);
+        static p8 number_text[5000];
+        positive number_length = printed ? min(string_length(printed), sizeof(number_text)) : 0;
 
-        if (!numfmt_round(numerator, denominator, round_precision, negative,
-                          address_of whole, address_of fraction))
-        {
-                numfmt_invalid_value(bytes, length);
-                if (!numfmt.stop)
-                        text_put(original, original_length);
-                return false;
-        }
-
-        if (numfmt.to != NUMFMT_SCALE_NONE && whole == output_base &&
-            !fraction && output_power < 10)
-        {
-                whole = 1;
-                output_power++;
-        }
-
-        /* Automatic precision is chosen again after rounding.  9999 SI is
-           rounded with one decimal digit while it is 9.999k, but is printed
-           as 10k; 1000 remains 1.0k. */
-        if (numfmt.to != NUMFMT_SCALE_NONE &&
-            !(numfmt.have_format && numfmt.format.has_precision))
-                print_precision = output_power && whole < 10 ? 1 : 0;
-
-        /* snprintf supplies a final nearest-even rounding when the automatic
-           display has fewer places than the guarded value above.  Do that
-           directly in decimal so libc and binary floating point stay out. */
-        if (print_precision < round_precision)
-        {
-                positive divisor = positive_power_ten(round_precision -
-                                                 print_precision);
-                positive kept = fraction / divisor;
-                positive dropped = fraction % divisor;
-                positive half = divisor / 2;
-
-                positive last = print_precision ? kept : whole;
-
-                if (dropped > half || (dropped == half && (last & 1)))
-                        kept++;
-
-                positive display_scale = positive_power_ten(print_precision);
-                if (kept == display_scale)
-                {
-                        kept = 0;
-                        whole++;
-                }
-
-                fraction = kept;
-                round_precision = print_precision;
-        }
-
-        /* Match the exact decimal floor GNU promises for unscaled output:
-           a base-10 exponent plus requested precision above LDBL_DIG cannot
-           be printed reliably there.  Our parser is exact, but accepting a
-           wider surface would make portable scripts disagree on failure. */
-        if (numfmt.to == NUMFMT_SCALE_NONE &&
-            positive_digits(whole) + print_precision > 19)
-        {
-                numfmt_invalid_value(bytes, length);
-                if (!numfmt.stop)
-                        text_put(original, original_length);
-                return false;
-        }
-
-        p8 number_text[64];
-        positive number_length;
-        numfmt_put_number(whole, fraction, round_precision, print_precision,
-                          negative, number_text, address_of number_length);
+        memory_copy(number_text, printed, number_length);
 
         p8 unit[2];
         positive unit_length = 0;
@@ -5618,87 +5498,113 @@ static bool numfmt_word_refuse(string_address option, string_address value,
 }
 
 /*
-        A field list the reference will not read has three sentences of its
-        own, and which one depends on the shape rather than on the parser
-        failing: a byte that belongs to no list at all, a field numbered
-        zero, and a range that runs backwards.
+        A field list the reference will not read, named as its set_fields
+        names it, walking the list the same way: a second dash in one piece
+        is an invalid range, a dash after a zero or a lone zero is a field
+        numbered from 0, a range that runs backwards is decreasing, a number
+        that reaches the largest there is is too large (the digits it began
+        with), and any other byte is an invalid value from that byte on.
 */
 static bool numfmt_fields_refuse(string_address value)
 {
-        bool shaped = true;
-        positive left = 0;
-        positive right = 0;
-        bool have_left = false;
-        bool have_right = false;
-        bool range = false;
-        bool decreasing = false;
-        bool zero = false;
+        string_address at = value;
+        positive number = 0;
+        positive start = 1;
+        bool left = false, right = false, dash = false, digits = false;
+        string_address digits_from = value;
 
-        for (positive at = 0;; at++)
-        {
-                p8 byte = value[at];
-
-                if (byte_is_digit(byte))
-                {
-                        positive digit = (positive)(byte - '0');
-
-                        if (range)
-                        {
-                                have_right = true;
-                                right = right * 10 + digit;
-                        }
-                        else
-                        {
-                                have_left = true;
-                                left = left * 10 + digit;
-                        }
-                        continue;
-                }
-
-                if (byte == '-' && !range)
-                {
-                        range = true;
-                        continue;
-                }
-
-                if (byte && byte != ',' && !byte_is_space(byte))
-                {
-                        shaped = false;
-                        break;
-                }
-
-                /* The end of one component: a lone dash is every field, a
-                   side left empty is the first or the last, and a side
-                   spelled zero is the complaint. */
-                if (!range && !have_left)
-                        zero = true;
-                else if (range && have_left && have_right && right < left)
-                        decreasing = true;
-                if ((have_left && !left) || (have_right && !right))
-                        zero = true;
-
-                left = right = 0;
-                have_left = have_right = range = false;
-
-                if (!byte)
-                        break;
-        }
+        if (string_equals(value, "-"))
+                return true;
 
         text_flush();
+        for (;;)
+        {
+                p8 byte = *at;
 
-        if (!shaped)
-                string_format(writer_stderr,
-                              "numfmt: invalid field value '%w'\n", writer_terminal_quoted_name, value);
-        else if (decreasing)
-                string_format(writer_stderr,
-                              "numfmt: invalid decreasing range\n");
-        else if (zero)
-                string_format(writer_stderr,
-                              "numfmt: fields are numbered from 1\n");
-        else
-                string_format(writer_stderr,
-                              "numfmt: invalid field value '%w'\n", writer_terminal_quoted_name, value);
+                if (byte == '-')
+                {
+                        digits = false;
+                        if (dash)
+                        {
+                                writer_stderr("numfmt: invalid field range\n", 0);
+                                return numfmt_hint();
+                        }
+                        dash = true;
+                        at++;
+                        if (left && !number)
+                        {
+                                writer_stderr("numfmt: fields are numbered from 1\n", 0);
+                                return numfmt_hint();
+                        }
+                        start = left ? number : 1;
+                        number = 0;
+                }
+                else if (byte == ',' || byte == ' ' || byte == '\t' || !byte)
+                {
+                        digits = false;
+                        if (dash)
+                        {
+                                dash = false;
+                                if (right && number < start)
+                                {
+                                        writer_stderr("numfmt: invalid decreasing range\n", 0);
+                                        return numfmt_hint();
+                                }
+                        }
+                        else if (!number)
+                        {
+                                writer_stderr("numfmt: fields are numbered from 1\n", 0);
+                                return numfmt_hint();
+                        }
+                        number = 0;
+                        if (!byte)
+                                break;
+                        at++;
+                        left = right = false;
+                }
+                else if (byte_is_digit(byte))
+                {
+                        if (!digits)
+                                digits_from = at;
+                        digits = true;
+                        if (dash)
+                                right = true;
+                        else
+                                left = true;
 
+                        positive digit = (positive)(byte - '0');
+
+                        if (number > (positive_max - digit) / 10 ||
+                            number * 10 + digit == positive_max)
+                        {
+                                positive length = string_span_max(digits_from,
+                                                                  string_length(digits_from),
+                                                                  string_set_digits);
+                                p8 shown[64];
+
+                                length = min(length, sizeof(shown) - 1);
+                                memory_copy(shown, digits_from, length);
+                                shown[length] = end;
+                                string_format(writer_stderr,
+                                              "numfmt: field number '%w' is too large\n",
+                                              writer_terminal_quoted_name, shown);
+                                return numfmt_hint();
+                        }
+                        number = number * 10 + digit;
+                        at++;
+                }
+                else
+                {
+                        string_format(writer_stderr, "numfmt: invalid field value '%w'\n",
+                                      writer_terminal_quoted_name, at);
+                        return numfmt_hint();
+                }
+        }
+
+        //      Nothing the reference refuses: the list reader's own
+        //      complaint stands in.
+        string_format(writer_stderr, "numfmt: invalid field value '%w'\n",
+                      writer_terminal_quoted_name, value);
         return numfmt_hint();
 }
 
@@ -5976,7 +5882,8 @@ static b32 tools_numfmt()
 
         // GNU's two warnings about options that another option overrides,
         // both of which it prints only under --debug.
-        if (numfmt.debug && numfmt.have_format && numfmt.format.width && numfmt.padding)
+        if (numfmt.debug && numfmt.have_format && numfmt.format.width && numfmt.padding &&
+            !numfmt.format.zero)
         {
                 text_flush();
                 writer_stderr("numfmt: --format padding overriding --padding\n", 0);

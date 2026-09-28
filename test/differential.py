@@ -10592,14 +10592,29 @@ MISC_UTILITIES = (
                       ("1023", "1024", "1025", "9999", "-1025"), ("1024", "1048576"), ("1K", "1Ki", "2.5M", "2.5Mi"),
                       ("--", "1.50", "-2.00"), ("1_KB", "2_MiB"), ("--", "9990000", "10010000", "-9990000", "-10010000", "999950000"),
                       ("--", ".5", "-.5", "1.5", "-1.5", "999949000", "999950000"), ("1000000",), ("",), (" 12",),
-                      ("1e3",), ("0x10",), ("1,000",), ("--", "-"), ("nan",), ("inf",)),
+                      ("1e3",), ("0x10",), ("1,000",), ("--", "-"), ("nan",), ("inf",),
+                      # Past sixty four bits, GNU's long double all the way:
+                      # the four largest scales, a value too large to print
+                      # unscaled or at all, and its refusals, each in its
+                      # own words.
+                      ("1Z", "1Y", "1R", "1Q", "1Qi", "999Q", "1000Q", "1.5Y"),
+                      ("123456789012345678901234567890", "12345678901234567890", "1234567890123456789"),
+                      ("0.1234567890123456789012", "12345678901234567.5", "99999999999999999999999"),
+                      ("--", "-0.-1", "12.K", "12.", "12..", "4MJ", "4MiJ", "5 K Field2", "1.22.", "+5")),
             stdin=("numbers", "misc_numfmt_table", "misc_numfmt_units", "misc_numfmt_fields", "misc_numfmt_widths",
                    "misc_numfmt_random", "fields", "empty", "spaces", "tabs", "nul", "long", "text", "nonl"),
             fixture="misc", stderr="exact", max_flags=5,
             #   A field list is pieces split at commas or blanks, and a dash
             #   alone is every field wherever it stands. A second --field is
             #   refused whatever it says.
-            extra=(("--field", "1,2 4", "--to=si", "1000", "2000"), ("--field=3,-", "--to=si"),
+            extra=(("--field", "-foo", "1"), ("--field", "--3", "1"), ("--field", "1-2-3", "1"),
+                   ("--field", "18446744073709551615,22", "1"), ("--field", "0-1", "1"),
+                   ("--field", "1,2 4", "--to=si", "1000 2000 3000 4000"),
+                   ("--field", "3,-", "--to=si", "1000 2000 3000 4000"),
+                   ("-d:", "--from=si", "--unit-separator= ", "5 K Field2"),
+                   ("--suffix=QWE", "12q3QWE"), ("--from=si", "--to=si", "--format=%.3f", "1.23456Y"),
+                   ("--from=iec-i", "--to=si", "--round=nearest", "1.5Qi", "2Yi"),
+                   ("--field", "1,2 4", "--to=si", "1000", "2000"), ("--field=3,-", "--to=si"),
                    ("--field=-,1", "--to=si"), ("--field", "1,,2"), ("--field", " 1"), ("--field", "1 "),
                    ("--field", "1\t2", "--to=si"), ("--field", "1", "--field", "1"),
                    ("--field=-", "--field=1-"), ("--field", "1,2", "--field", "bad"),
@@ -42934,8 +42949,6 @@ PINNED = r"""
 {"domain":"misc","kind":"deliberate","list":"ledger","option":"-s","reason_id":"r210","utility":"last"},
 {"domain":"misc","kind":"deliberate","list":"ledger","option":"-t","reason_id":"r210","utility":"last"},
 {"candidate":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":[],"domain":"misc","family":null,"fixture":"misc","input_kind":"command","mode":null,"stdin":"long","tier":"singles","utility":"numfmt"},"domain":"misc","id":"39423f2adc7dd4f7","kind":"bug","list":"ledger","reason":"the leftovers of the field walk: a zero-terminated record whose delimiter is a tab keeps the whole line here where the reference keeps one field of it, a unit separator that is also the scale letter is read differently, and a line longer than the token buffer is reported by its ceiling rather than quoted whole.","reference":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"numfmt"},
-{"candidate":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--zero-terminated","--round=nearest","--header","-d","","--grouping","--debug","--suffix=_KB","18446744073709551616"],"domain":"misc","family":null,"fixture":"misc","input_kind":"command","mode":null,"stdin":"fields","tier":"random","utility":"numfmt"},"domain":"misc","id":"588cb4c3a2848500","kind":"bug","list":"ledger","reason":"the leftovers of the field walk: a zero-terminated record whose delimiter is a tab keeps the whole line here where the reference keeps one field of it, a unit separator that is also the scale letter is read differently, and a line longer than the token buffer is reported by its ceiling rather than quoted whole.","reference":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"numfmt"},
-{"candidate":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":0,"stdout":"f7663bd99e804b764bcf35a0e69db23fef11e898d66da9fc107c99315643a4a6"},"case":{"argv":["--invalid=ignore","--from-unit=3","--round=up","-d","\t","--suffix=","--to=iec","--unit-separator=K","--","-0","-1","1.2300","9223372036854775807"],"domain":"misc","family":null,"fixture":"misc","input_kind":"command","mode":null,"stdin":"spaces","tier":"random","utility":"numfmt"},"domain":"misc","id":"dca806181d88c0ef","kind":"bug","list":"ledger","reason":"the leftovers of the field walk: a zero-terminated record whose delimiter is a tab keeps the whole line here where the reference keeps one field of it, a unit separator that is also the scale letter is read differently, and a line longer than the token buffer is reported by its ceiling rather than quoted whole.","reference":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":0,"stdout":"e38612a7a01757244485971ebbca905eb622b413e123a2564e84c2149ddd696d"},"utility":"numfmt"},
 {"candidate":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-w","-q","-h","-i","-l","nosuchuser"],"domain":"misc","family":null,"fixture":"misc","input_kind":"command","mode":null,"stdin":"empty","utility":"pinky"},"domain":"misc","id":"153e26fa4611f097","kind":"deliberate","list":"ledger","reason_id":"r216","utility":"pinky"},
 {"candidate":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-q","-h","-b","-i","-f","-l","nosuchuser"],"domain":"misc","family":null,"fixture":"misc","input_kind":"command","mode":null,"stdin":"empty","utility":"pinky"},"domain":"misc","id":"16eb98e9c37b13ea","kind":"deliberate","list":"ledger","reason_id":"r216","utility":"pinky"},
 {"candidate":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-f","-i","--lookup","-w","-l","root"],"domain":"misc","family":null,"fixture":"misc","input_kind":"command","mode":null,"stdin":"empty","utility":"pinky"},"domain":"misc","id":"1a3401fecd6a787e","kind":"deliberate","list":"ledger","reason_id":"r216","utility":"pinky"},
