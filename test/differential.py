@@ -42653,7 +42653,12 @@ def harness_x509_corpus(argv):
     A certificate's http: caIssuers location is fetched too, once, into
     --work/aia (the lift's tls_aia_fetch reads it from there), and handed
     to openssl as untrusted, so openssl's verdict is the browser's that
-    completes a short chain the same way.
+    completes a short chain the same way. 2026-09-28, live again after
+    name constraints, the suffix check, RSA-8192 and caIssuers: 642 chains,
+    openssl (with the fetched issuers) accepts 636 and this tree all 636,
+    none it refuses; the pinned base over the same chains accepted 633 of
+    the 633 openssl took without fetching (gob.mx, monster.com, ssa.gov are
+    the three a fetch completes).
 
         python3 test/differential.py --harness x509_corpus --work DIR
     """
