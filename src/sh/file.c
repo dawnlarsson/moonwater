@@ -10076,12 +10076,13 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                 ls_time_key = 'a';
 
         /*
-                -u and -c say which time is meant, and where no long listing
-                and no sort was asked for they say the order as well: the
-                reference puts the newest of that time first. With -l the
-                order stays by name and the time is only shown, and with -lt
-                it is -t that orders it. So this is the case where neither
-                was named.
+                -u, -c and --time say which time is meant, and where no
+                long listing and no sort was asked for they say the order as
+                well: the reference puts the newest of that time first --
+                --time=mtime too, which names the time that is shown anyway.
+                With -l the order stays by name and the time is only shown,
+                and with -lt it is -t that orders it. So this is the case
+                where neither was named.
         */
         if (ls_time_key != 'm' && !ls_selected.sort && ls_format != 'l')
                 ls_sorting = 't';
