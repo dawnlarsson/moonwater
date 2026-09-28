@@ -580,6 +580,21 @@ static fn exec_debug_clause(parse_node address_to node, string_address clause)
 
 #define exec_debug_before(node) exec_debug_clause((node), null)
 
+//      The pipeline stage DEBUG was already raised for, in the shell before
+//      the stage started, and whether a pipeline about to start raised it.
+static b32 exec_debug_raised;
+static bool exec_pipe_debug_raised;
+
+//      DEBUG for each simple stage of a pipeline, or of a command started in
+//      the background, raised here in the shell before any of them starts.
+static fn exec_debug_stages(b32 stage)
+{
+        for (; stage; stage = parse_nodes[stage].next)
+                if (parse_nodes[stage].kind == NODE_SIMPLE)
+                        exec_debug_before(parse_nodes + stage);
+        exec_pipe_debug_raised = exec_debug_reaches();
+}
+
 static COLD fn exec_source_return_trap()
 {
         if (trap_return_here && exec_condition_reaches(SHELL_EXTRA_FUNCTRACE))
@@ -8774,6 +8789,16 @@ static b32 exec_call(positive slot)
                         exec_frames_forget();
         }
 
+        //      Under set -T bash raises DEBUG once more as the body begins,
+        //      for the call it is still reading, on the function's own line.
+        if (trap_debug_here && !exec_condition_inside &&
+            shell_extra_on(SHELL_EXTRA_FUNCTRACE))
+        {
+                if (parse_nodes[body].line)
+                        exec_line = parse_nodes[body].line;
+                exec_trap_condition(TRAP_DEBUG);
+        }
+
         status = exec_node(body);
 
         // A return anywhere below -- a trap action's among them -- left its
@@ -14474,6 +14499,7 @@ static PURE bool exec_pipe_lastpipes(b32 index)
 static b32 exec_pipe(b32 first, positive count, bool background,
                      bool pipefail, bool invert)
 {
+        bool debug_raised = exec_pipe_debug_raised;
         bipolar address_to children = null;
         positive children_room = 0;
         bipolar upstream = -1;
@@ -14484,6 +14510,8 @@ static b32 exec_pipe(b32 first, positive count, bool background,
         bool spawn_failed = false;
         bool monitor = job_monitor();
         bool monitor_retained = false;
+
+        exec_pipe_debug_raised = false;
         bool lastpipe = !background && !monitor &&
                         shell_shopt_on(LASTPIPE);
         bool lastpipe_ran = false;
@@ -14616,7 +14644,9 @@ static b32 exec_pipe(b32 first, positive count, bool background,
                                     early_status, started};
 
                                 exec_foreground_frames = &frame;
+                                exec_debug_raised = debug_raised ? child : 0;
                                 lastpipe_status = exec_node(child);
+                                exec_debug_raised = 0;
                                 exec_foreground_frames = frame.previous;
                         }
                         exec_lastpipe_live = false;
@@ -14679,6 +14709,13 @@ static b32 exec_pipe(b32 first, positive count, bool background,
                                         exec_child_leave(126);
                         }
 
+                        //      The shell raised this stage's DEBUG before it
+                        //      raised the next one's; the stage reads its own
+                        //      command, not the last one raised.
+                        exec_debug_raised = debug_raised ? child : 0;
+                        if (debug_raised &&
+                            parse_nodes[child].kind == NODE_SIMPLE)
+                                exec_bash_command_from(parse_nodes + child);
                         status = exec_node(child);
                         exec_child_leave(status);
                 }
@@ -15297,19 +15334,13 @@ static b32 exec_pipeline(b32 index)
                 bash raises DEBUG for each simple command of a pipeline in
                 the shell itself, before that stage is forked; a stage that
                 is a group or a subshell runs in its child, where the trap
-                does not reach. A lastpipe stage runs here and raises it
-                for itself.
+                does not reach. The last stage too under lastpipe: whether
+                it runs here is only known once it is started, and one that
+                does, or a child under set -T, is told the trap has been
+                raised for it (exec_debug_raised) and does not raise it again.
         */
         if (count > 1 && trap_debug_here)
-        {
-                bool lastpipe = !job_monitor() && shell_shopt_on(LASTPIPE);
-
-                for (b32 stage = node->left; stage;
-                     stage = parse_nodes[stage].next)
-                        if (parse_nodes[stage].kind == NODE_SIMPLE &&
-                            !(lastpipe && !parse_nodes[stage].next))
-                                exec_debug_before(parse_nodes + stage);
-        }
+                exec_debug_stages(node->left);
 
         status = count > 1
                      ? exec_pipe(node->left, count, false, shell_pipefail(),
@@ -15384,6 +15415,8 @@ static b32 exec_background(b32 index)
                         if (count == positive_max)
                                 return 2;
 
+                        if (trap_debug_here)
+                                exec_debug_stages(parse_nodes[body].left);
                         return exec_pipe(parse_nodes[body].left, count, true,
                                          shell_pipefail(),
                                          parse_nodes[body].flags);
@@ -15392,8 +15425,19 @@ static b32 exec_background(b32 index)
                 index = body;
         }
 
+        //      bash raises DEBUG for a simple command started in the
+        //      background here, before the child exists.
+        if (trap_debug_here && parse_nodes[index].kind == NODE_SIMPLE)
+        {
+                exec_debug_stages(index);
+                if (exec_pipe_debug_raised)
+                        exec_debug_raised = index;
+                exec_pipe_debug_raised = false;
+        }
+
         job_child_watch();
         child = exec_spawn_node(index, true);
+        exec_debug_raised = 0;
 
         if (child < 0)
                 return 1;
@@ -15514,7 +15558,12 @@ static b32 exec_node_kind(b32 index)
                 // Before the words are expanded, which is where Bash runs it
                 // and the only place the action can use argv of its own.
                 if (trap_debug_here)
-                        exec_debug_before(node);
+                {
+                        if (exec_debug_raised == index)
+                                exec_debug_raised = 0;
+                        else
+                                exec_debug_before(node);
+                }
 
                 bool expand_scratch = node->redirect_count != 0;
                 b32 word_at = node->word;

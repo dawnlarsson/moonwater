@@ -14973,6 +14973,21 @@ def shell_lang_debug_trap_places(rng):
         ("command", "stdin", "file"))
 
 
+#       Each simple stage of a pipeline, and a simple command started in the
+#       background, raises DEBUG once, in the shell, before it starts. Under
+#       lastpipe the last stage raised none when it was started as a process
+#       of its own, a background command raised none, and under set -T a
+#       forked stage raised it a second time for itself -- where set -T's
+#       one extra is at a function's entry, for the call.
+def shell_lang_debug_trap_pipelines(rng):
+    setting = rng.choice(("", "shopt -s lastpipe", "set -T", "shopt -s lastpipe; set -T"))
+    body = rng.choice(("echo p | /bin/cat", "echo p | cat", "echo p | cat | wc -l", "echo q | read v; echo v=$v",
+                       "echo r | { read w; echo w=$w; }", "f() { echo in-f; }; echo s | f", "echo t | cat >/dev/null",
+                       "echo x > o & wait; cat o", "f() { echo in-f; }; f > o & wait; cat o",
+                       "echo p | cat > o & wait; cat o", "f() { echo in-f; }; f", "{ echo y; } > o & wait; cat o"))
+    return ("debug-trap-pipelines", shell_BASH, shell_program(
+        setting, "trap 'echo \"dbg $BASH_COMMAND\"' DEBUG", body, "trap - DEBUG", 'echo "end=$?"'),
+        ("command", "stdin", "file"))
 #       type and command -v read the command table the executor keeps.
 #       dash's write what they find into it and bash's leave it as it was;
 #       this wrote in both, then in neither.
@@ -18397,6 +18412,7 @@ SHELL_FAMILIES = (
     shell_lang_globstar_exists,
     shell_lang_read_trailing_delimiter,
     shell_lang_debug_trap_places,
+    shell_lang_debug_trap_pipelines,
     shell_lang_query_table,
     shell_lang_globignore,
     shell_lang_funcnest,
