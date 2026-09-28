@@ -18290,6 +18290,9 @@ INPUTS.update({
     "text_lines_two_long": b"d" * 1200000 + b"\n" + b"d" * 1200000 + b"\nx\n",
     "text_fmt_3000_words": b" ".join(b"%d" % n for n in range(1, 3001)) + b"\n",
     "text_fmt_yes": b"y\n" * 5000,
+    "text_fmt_tagged": (b"> aaa bbb ccc ddd eee fff ggg hhh iii jjj\n\n>   kkk lll\n"
+                        b"> mmm nnn ooo ppp qqq rrr sss\n\n"
+                        b"#  one two three four five six seven eight nine\n"),
     "text_fmt_long_word": b"  " + b"a" * 12000 + b"\nb c.\n",
     "text_names0_empty": b"a.txt\x00\x00b.txt\x00",
     "text_names0_only_empty": b"\x00\x00",
@@ -20168,7 +20171,12 @@ TEXT_UTILITIES = (
                    ("--prefix", "-7", "-3"), ("-w", "30", "-72"), ("-w", "32768"), ("-w", "2501"),
                    ("-w", "99999999999999999999999"), ("-g", "80"), ("-w", "10", "-g", "11"), ("-72x",),
                    ("-w", "1k"), ("-w", "0x10"), ("-w", "010"), ("-w", "+5"), ("-w", " 5"), ("--w=3", "-4"),
-                   ("-g", "99999999999999999999999"))),
+                   ("-g", "99999999999999999999999"),
+                   #   A tagged paragraph's other lines can indent less
+                   #   than the prefix already written; GNU writes no
+                   #   space there, where this once wrote without end.
+                   *({"argv": ("-t", "-p", prefix) + width, "stdin": "text_fmt_tagged"}
+                     for prefix in (">", "#", "> ") for width in ((), ("-w", "20"), ("-u", "-w", "12"))))),
     Utility("fold",
             options=(Option("-b"), Option("--bytes"), Option("-c"), Option("--characters"), Option("-s"),
                      Option("--spaces"),

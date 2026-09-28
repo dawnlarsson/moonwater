@@ -11368,8 +11368,17 @@ static bool fmt_failed;
 static const b8 fmt_word_bytes[STRING_SET_BYTES] = {
     [0 ... 8] = 1, [14 ... 31] = 1, [33 ... 255] = 1};
 
-static fn fmt_put_space(positive count)
+/*
+        GNU's put_space takes an int and writes nothing for a negative one,
+        which fmt_put_line asks for when a tagged paragraph's other lines
+        indent less than the prefix already written: fmt -t -p '>' wrote
+        spaces without end there, a column before the prefix wrapped.
+*/
+static fn fmt_put_space(bipolar count)
 {
+        if (count <= 0)
+                return;
+
         positive target = fmt_out_column > positive_max - count
                               ? positive_max
                               : fmt_out_column + count;
