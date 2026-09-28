@@ -39340,10 +39340,10 @@ static p16 network_load_16(const p8 *bytes)
 {
         return (p16)(((p16)bytes[0] << 8) | (p16)bytes[1]);
 }
-static fn crypto_put_be64(p8 address_to bytes, p64 value)
+static fn network_store_16(p8 address_to bytes, p16 value)
 {
-        for (int i = 0; i < 8; i++)
-                bytes[i] = (p8)(value >> (56 - 8 * i));
+        bytes[0] = (p8)(value >> 8);
+        bytes[1] = (p8)value;
 }
 static fn fuzz_mix(p8 address_to out, positive out_length, const p8 *in,
                    positive in_length, p64 salt)

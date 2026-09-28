@@ -4645,82 +4645,44 @@ static COLD fn tls_traffic_keys(p8 address_to traffic, p8 address_to key,
         tls_expand_label(traffic, "iv", null, 0, iv, 12);
 }
 
+/* RFC 8446 5.3: the sequence number, big-endian, xored into the IV's end. */
 static fn tls_nonce(p8 address_to iv, p64 seq, p8 address_to nonce)
 {
-        p8 seq_bytes[12];
-        positive i;
-
-        memory_fill(seq_bytes, 0, 12);
-        crypto_put_be64(seq_bytes + 4, seq);
-        for (i = 0; i < 12; i++)
-                nonce[i] = iv[i] ^ seq_bytes[i];
-        crypto_forget(seq_bytes, sizeof seq_bytes);
+        memory_copy(nonce, iv, 12);
+        for (positive i = 0; i < 8; i++)
+                nonce[11 - i] ^= (p8)(seq >> (8 * i));
 }
 
-/* A record leaves in one send. Sent in pieces, everything after the first
-   piece waits under Nagle for the peer to acknowledge it. */
-static COLD bipolar tls_send_plain(tls_conn address_to tls, p8 type, p8 address_to body,
-                              positive length)
+static fn tls_record_header(p8 address_to header, p8 type, positive length)
 {
-        p8 record[5 + TLS_HS_MAX];
-
-        if (length > TLS_HS_MAX)
-                return TLS_FAIL;
-        record[0] = type;
-        record[1] = 0x03;
-        record[2] = 0x03;
-        record[3] = (p8)(length >> 8);
-        record[4] = (p8)length;
-        memory_copy(record + 5, body, length);
-        return network_stream_send_all(tls->handle, record, 5 + length)
-                   ? TLS_OK : TLS_FAIL;
+        header[0] = type;
+        header[1] = 0x03;
+        header[2] = 0x03;
+        network_store_16(header + 3, (p16)length);
 }
 
+/* A record leaves in one send: sent in pieces, everything after the first
+   piece waits under Nagle for the peer to acknowledge it. It is sealed where
+   it lies, so what leaves and what stays behind on the stack is ciphertext;
+   the plaintext is the caller's. */
 static bipolar tls_send_enc(tls_conn address_to tls, p8 inner_type,
                             p8 address_to body, positive length)
 {
         p8 record[5 + TLS_RECORD_MAX];
-        p8 address_to header = record;
-        p8 address_to inner = record + 5;
         p8 nonce[12];
-        p8 tag[16];
-        p8 aad[5];
-        positive inner_length = 0;
-        positive record_length = 0;
-        bipolar status = TLS_FAIL;
 
         if (length > TLS_PLAINTEXT_MAX ||
             tls->seq_write >= TLS_AES_GCM_RECORD_LIMIT)
-                goto done;
-        inner_length = length + 1;
-        record_length = inner_length + 16;
-
-        memory_copy(inner, body, length);
-        inner[length] = inner_type;
-
-        header[0] = TLS_CT_APP;
-        header[1] = 0x03;
-        header[2] = 0x03;
-        header[3] = (p8)(record_length >> 8);
-        header[4] = (p8)record_length;
-        memory_copy(aad, header, 5);
-
-        tls_nonce(tls->c_iv, tls->seq_write, nonce);
-        crypto_aesgcm_seal(address_of tls->c_gcm, nonce, aad, 5, inner, inner_length,
-                              tag);
-        tls->seq_write++;
-
-        memory_copy(inner + inner_length, tag, 16);
-        status = network_stream_send_all(tls->handle, record, 5 + record_length)
-                     ? TLS_OK : TLS_FAIL;
-
-done:
-        if (record_length)
-                crypto_forget(record, 5 + record_length);
+                return TLS_FAIL;
+        tls_record_header(record, TLS_CT_APP, length + 1 + 16);
+        memory_copy(record + 5, body, length);
+        record[5 + length] = inner_type;
+        tls_nonce(tls->c_iv, tls->seq_write++, nonce);
+        crypto_aesgcm_seal(address_of tls->c_gcm, nonce, record, 5, record + 5,
+                           length + 1, record + 5 + length + 1);
         crypto_forget(nonce, sizeof nonce);
-        crypto_forget(tag, sizeof tag);
-        crypto_forget(aad, sizeof aad);
-        return status;
+        return network_stream_send_all(tls->handle, record, 5 + length + 17)
+                   ? TLS_OK : TLS_FAIL;
 }
 
 static bipolar tls_decrypt_record(tls_conn address_to tls, p8 address_to payload,
@@ -6964,7 +6926,7 @@ static COLD bipolar tls_encrypted_flight_append(
 static COLD bipolar tls_handshake(
     tls_conn address_to tls, const network_deadline address_to deadline)
 {
-        p8 hello[1024];
+        p8 hello[5 + 1024];
         p8 address_to record = null;
         p8 peer[97];
         p8 shared[48];
@@ -6988,10 +6950,12 @@ static COLD bipolar tls_handshake(
         tls->encrypted = false;
         tls->application = false;
 
-        if (tls_client_hello(tls, hello, sizeof(hello), address_of hello_length))
+        if (tls_client_hello(tls, hello + 5, sizeof hello - 5,
+                             address_of hello_length))
                 goto done;
-        tls_transcript_add(tls, hello, hello_length);
-        if (tls_send_plain(tls, TLS_CT_HANDSHAKE, hello, hello_length))
+        tls_transcript_add(tls, hello + 5, hello_length);
+        tls_record_header(hello, TLS_CT_HANDSHAKE, hello_length);
+        if (!network_stream_send_all(tls->handle, hello, 5 + hello_length))
                 goto done;
 
         for (;;)
