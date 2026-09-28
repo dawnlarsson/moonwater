@@ -122,16 +122,7 @@ fn link_group_check(string_address namespace, p8 address_to secret,
 */
 static bipolar link_peers_lock(void)
 {
-        link_record_lock lock = {LINK_F_WRLCK, 0, 0, 0, 0, 0, 0};
-        bipolar handle = link_lock_file(LINK_PEERS_LOCK);
-
-        if (handle < 0)
-                return handle;
-        //      F_SETLKW: wait for the other writer.
-        while (system_call_3(syscall(fcntl), (positive)handle, 7,
-                             (positive)address_of lock) == -4)
-                ;
-        return handle;
+        return link_lock_file(LINK_PEERS_LOCK, 7, null); // F_SETLKW: wait
 }
 
 static fn link_peers_unlock(bipolar handle)

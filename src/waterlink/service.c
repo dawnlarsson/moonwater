@@ -653,46 +653,53 @@ typedef struct
 #define LINK_F_WRLCK 1
 #define LINK_F_UNLCK 2
 
-// A lock file in /run/moonwater, root's own.
-static bipolar link_lock_file(string_address path)
+/*
+        A lock file in /run/moonwater, root's own, asked command -- F_GETLK,
+        F_SETLK or F_SETLKW -- of a write lock over all of it: the handle or
+        the error, and with owner, who holds it (0 for nobody).
+*/
+static bipolar link_lock_file(string_address path, positive command,
+                              b32 address_to owner)
 {
+        link_record_lock lock = {LINK_F_WRLCK, 0, 0, 0, 0, 0, 0};
+        bipolar handle;
+        bipolar asked;
+
         host_state_ready();
-        return system_open_at_mode(AT_FDCWD, path,
-                                   FILE_READ_WRITE | FILE_CREATE | O_NOFOLLOW |
-                                           O_CLOEXEC,
-                                   0600);
+        handle = system_open_at_mode(AT_FDCWD, path,
+                                     FILE_READ_WRITE | FILE_CREATE | O_NOFOLLOW |
+                                             O_CLOEXEC,
+                                     0600);
+        if (handle < 0)
+                return handle;
+        do
+                asked = system_call_3(syscall(fcntl), (positive)handle, command,
+                                      (positive)address_of lock);
+        while (asked == -4);
+        if (asked < 0)
+        {
+                system_close(handle);
+                return asked;
+        }
+        if (owner)
+                address_to owner = lock.type == LINK_F_UNLCK ? 0 : lock.pid;
+        return handle;
 }
 
 static bipolar link_lock_owner(void)
 {
-        link_record_lock lock = {LINK_F_WRLCK, 0, 0, 0, 0, 0, 0};
-        bipolar handle = link_lock_file(LINK_LOCK_PATH);
-        bipolar asked;
+        b32 owner = 0;
+        bipolar handle = link_lock_file(LINK_LOCK_PATH, LINK_F_GETLK,
+                                        address_of owner);
 
-        if (handle < 0)
-                return 0;
-        asked = system_call_3(syscall(fcntl), (positive)handle, LINK_F_GETLK,
-                              (positive)address_of lock);
-        system_close(handle);
-        if (asked < 0 || lock.type == LINK_F_UNLCK)
-                return 0;
-        return lock.pid;
+        if (handle >= 0)
+                system_close(handle);
+        return owner;
 }
 
 static bipolar link_lock_take(void)
 {
-        link_record_lock lock = {LINK_F_WRLCK, 0, 0, 0, 0, 0, 0};
-        bipolar handle = link_lock_file(LINK_LOCK_PATH);
-
-        if (handle < 0)
-                return handle;
-        if (system_call_3(syscall(fcntl), (positive)handle, LINK_F_SETLK,
-                          (positive)address_of lock) < 0)
-        {
-                system_close(handle);
-                return -EAGAIN;
-        }
-        return handle;
+        return link_lock_file(LINK_LOCK_PATH, LINK_F_SETLK, null);
 }
 
 // A signal for whoever holds the lock, and never for a pid reused since.
