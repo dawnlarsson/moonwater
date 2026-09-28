@@ -8852,8 +8852,15 @@ static fn ls_print_long(string_address directory)
 static positive (address_to ls_column_widths_held)[LS_MAX_ENTRIES];
 #define ls_column_widths (*ls_column_widths_held)
 
+static fn ls_print_commas(string_address directory);
+
 static fn ls_print_columns(string_address directory, bool across)
 {
+        //      With no limit on the line there are no columns to line up:
+        //      the names follow one another two spaces apart.
+        if (!ls_width)
+                return ls_print_commas(directory);
+
         positive width_limit = ls_width ? ls_width : positive_max;
         positive most = ls_width
             ? ls_width / 3 + (ls_width % 3 != 0) : ls_count;
@@ -8965,15 +8972,18 @@ static fn ls_print_commas(string_address directory)
 
                 if (index)
                 {
-                        if (ls_width && position + width + 2 > ls_width)
+                        p8 separator = ls_format == 'm' ? ',' : ' ';
+
+                        if (ls_width && position + width + 2 >= ls_width)
                         {
-                                ls_out(",", 1);
+                                ls_out(address_of separator, 1);
                                 ls_out(address_of ls_eol, 1);
                                 position = 0;
                         }
                         else
                         {
-                                ls_out(", ", 2);
+                                ls_out(address_of separator, 1);
+                                ls_out(" ", 1);
                                 position += 2;
                         }
                 }
@@ -9574,15 +9584,19 @@ static bool ls_when_active(p8 when)
         return when == 'a' || (when == 't' && ls_terminal);
 }
 
-static bool ls_count_option(string_address value, string_address what,
-                            positive address_to into)
+/*
+        A width or tab size as strtoumax's base 0 reads it. A number too big
+        to hold is, for a line width, no limit at all, as GNU's -w and
+        COLUMNS both take it -- -w18446744073709551616 lists on one line --
+        while a tab size that big is refused like any other bad one.
+*/
+static bool ls_count_read(string_address value, positive address_to into,
+                          bool overflow_is_zero)
 {
         string_address at = value;
         positive parsed;
         positive base = 10;
 
-        // strtoumax's base 0, as GNU reads -w and -T: 0x is hexadecimal
-        // and a leading 0 octal.
         if (value && string_is(at, '0') && (at[1] == 'x' || at[1] == 'X') &&
             byte_is_hexadecimal(string_get(at + 2)))
         {
@@ -9592,15 +9606,41 @@ static bool ls_count_option(string_address value, string_address what,
         else if (value && string_is(at, '0') && string_get(at + 1))
                 base = 8;
 
-        if (!value || !string_digits_checked(address_of at, base, address_of parsed) ||
-            string_get(at) || !string_get(value))
+        if (!value || !string_get(value))
+                return false;
+
+        string_address digits = at;
+
+        if (string_digits_checked(address_of at, base, address_of parsed) && !string_get(at))
         {
-                return string_report(log_error, false, "%s: invalid %s: '%w'\n", ls_program, what,
-                              writer_terminal_quoted_name, value ? value : (string_address) "");
+                address_to into = parsed > (positive)bipolar_max && overflow_is_zero ? 0 : parsed;
+                return true;
         }
 
-        address_to into = parsed;
+        if (!overflow_is_zero || !string_get(digits))
+                return false;
+
+        for (at = digits; string_get(at); at++)
+        {
+                p8 byte = string_get(at);
+
+                if (base == 16 ? !byte_is_hexadecimal(byte)
+                               : byte < '0' || byte >= (p8)('0' + base))
+                        return false;
+        }
+
+        address_to into = 0;
         return true;
+}
+
+static bool ls_count_option(string_address value, string_address what,
+                            positive address_to into, bool overflow_is_zero)
+{
+        if (ls_count_read(value, into, overflow_is_zero))
+                return true;
+
+        return string_report(log_error, false, "%s: invalid %s: '%w'\n", ls_program, what,
+                             writer_terminal_quoted_name, value ? value : (string_address) "");
 }
 
 //      The options whose value is one word among several spellings. They
@@ -9668,7 +9708,7 @@ static bool ls_option_word(p8 letter, string_address value)
         {
         case 'w':
                 if (ls_count_option(value, (string_address) "line width",
-                                    address_of ls_width_option))
+                                    address_of ls_width_option, true))
                 {
                         ls_width_said = true;
                         return true;
@@ -9677,7 +9717,7 @@ static bool ls_option_word(p8 letter, string_address value)
                 return false;
         case 'T':
                 if (ls_count_option(value, (string_address) "tab size",
-                                    address_of ls_tabsize_option))
+                                    address_of ls_tabsize_option, false))
                 {
                         ls_tabsize_said = true;
                         return true;
@@ -9759,15 +9799,25 @@ static positive ls_column_limit()
         string_address given = file_environment((string_address) "COLUMNS");
         positive width = 80;
 
+        //      A terminal says how wide it is before COLUMNS is asked.
+        if (ls_terminal)
+        {
+                winsize size = {0, 0, 0, 0};
+
+                if (system_control(1, TIOCGWINSZ, address_of size) >= 0 && size.columns)
+                        return size.columns;
+        }
+
         if (given && string_get(given))
         {
-                string_address at = given;
                 positive parsed;
 
-                if (string_digits_checked(address_of at, 10,
-                                           address_of parsed) &&
-                    !string_get(at) && parsed)
+                if (ls_count_read(given, address_of parsed, true))
                         width = parsed;
+                else
+                        string_format(log_error,
+                                      "%s: ignoring invalid width in environment variable COLUMNS: '%w'\n",
+                                      ls_program, writer_terminal_quoted_name, given);
         }
 
         return width;
@@ -10194,8 +10244,31 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
         }
 
         // The line.
-        ls_width = ls_width_said ? ls_width_option : ls_column_limit();
-        ls_tabsize = ls_tabsize_said ? ls_tabsize_option : 8;
+        //      The width is looked for only when the format or colour will
+        //      use it, so a long listing says nothing of a bad COLUMNS; the
+        //      tab size is read, TABSIZE included, only for the formats
+        //      that indent.
+        bool ls_width_used = ls_format == 'C' || ls_format == 'x' || ls_format == 'm' ||
+                             (ls_when_active(ls_color_when) && (flags & FILE_FLAG('K')));
+
+        ls_width = ls_width_said ? ls_width_option : ls_width_used ? ls_column_limit() : 80;
+        ls_tabsize = 8;
+        if (ls_tabsize_said)
+                ls_tabsize = ls_tabsize_option;
+        else if (ls_format == 'C' || ls_format == 'x' || ls_format == 'm')
+        {
+                string_address given = file_environment((string_address) "TABSIZE");
+                positive parsed;
+
+                if (!given)
+                        ;
+                else if (ls_count_read(given, address_of parsed, false))
+                        ls_tabsize = parsed;
+                else
+                        string_format(log_error,
+                                      "%s: ignoring invalid tab size in environment variable TABSIZE: '%w'\n",
+                                      ls_program, writer_terminal_quoted_name, given);
+        }
 
         // Colour.
         ls_coloring = false;
@@ -10224,8 +10297,13 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
         if (flags & FILE_FLAG('6'))
                 ls_coloring = false;
 
+        //      Some terminals mishandle tabs among colour sequences, so a
+        //      coloured listing indents with spaces whatever -T said.
         if (ls_coloring)
+        {
                 ls_color_parse();
+                ls_tabsize = 0;
+        }
 
         if (flags & FILE_FLAG('y'))
         {

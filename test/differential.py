@@ -7292,7 +7292,12 @@ FILES_UTILITIES = (
                    # -w and -T read as strtoumax's base 0; clocale's C-locale
                    # quotes are the C string's.
                    ("-w", "0x20", "-C"), ("-w", "017", "-x"), ("-T", "010", "-C", "-w", "30"), ("-w", "0x", "-C"),
-                   ("-w", "09", "-C"), ("--quoting-style=clocale", "-1"), ("--quoting-style=locale", "-1"))),
+                   ("-w", "09", "-C"), ("--quoting-style=clocale", "-1"), ("--quoting-style=locale", "-1"),
+                   # A width too big to hold is no limit; no limit lays the
+                   # names out two spaces apart, and -m breaks a line that
+                   # would reach the width exactly.
+                   ("-w18446744073709551616", "-C"), ("-w0", "-x", "-T1"), ("-w0", "-C", "dir"),
+                   ("-m", "-w7"), ("-m", "-w12"), ("-m", "-w25"))),
     #       dir and vdir are ls with a different default format, so they
     #       answer for the same surface and are walked over it. A shorter
     #       list of their own left sixty-nine of ls's options untouched in
