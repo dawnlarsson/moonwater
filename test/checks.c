@@ -50734,6 +50734,40 @@ static fn fetching(void)
                       http_response_framing((p8 address_to)bad_name,
                                             sizeof bad_name - 1, address_of header,
                                             address_of response) == HTTP_MALFORMED);
+                /* RFC 9112 5: whitespace around a value is not the value, so
+                   a Location with trailing blanks still names "/next" (it
+                   named "/next \t", which the next hop refused for its
+                   space), and blanks after a length or a coding are
+                   ignored rather than read as part of it. */
+                {
+                        static const char padded[] =
+                            "HTTP/1.1 302 Found\r\nLocation: \t/next \t\r\n"
+                            "Content-Length: 0 \t\r\n\r\n";
+                        static const char coding[] =
+                            "HTTP/1.1 200 OK\r\nTransfer-Encoding:  chunked\t \r\n\r\n";
+                        static const char spaced_length[] =
+                            "HTTP/1.1 200 OK\r\nContent-Length: 1 2\r\n\r\n";
+
+                        check("a field value's surrounding blanks are not part of it",
+                              http_response_framing((p8 address_to)padded,
+                                                    sizeof padded - 1, address_of header,
+                                                    address_of response) == HTTP_OK &&
+                                  response.location_length == 5 &&
+                                  !memory_compare(response.location, "/next", 5) &&
+                                  response.body_kind == HTTP_BODY_LENGTH &&
+                                  !response.body_length &&
+                                  http_response_framing((p8 address_to)coding,
+                                                        sizeof coding - 1,
+                                                        address_of header,
+                                                        address_of response) == HTTP_OK &&
+                                  response.body_kind == HTTP_BODY_CHUNKED);
+                        check("a blank inside a Content-Length is still malformed",
+                              http_response_framing((p8 address_to)spaced_length,
+                                                    sizeof spaced_length - 1,
+                                                    address_of header,
+                                                    address_of response) ==
+                                  HTTP_MALFORMED);
+                }
         }
 
         /* Exercise every byte class, not only one example from each.  This

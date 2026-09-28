@@ -7596,8 +7596,13 @@ static string_address http_header(p8 address_to bytes, positive size,
                                 continue;
                         }
 
+                        /* RFC 9112 5: the optional whitespace around a
+                           value is not part of it, at either end. */
                         found = (string_address)(bytes + from);
                         found_length = stop - from;
+                        while (found_length &&
+                               byte_is_blank(found[found_length - 1]))
+                                found_length--;
                 }
         }
 
@@ -7829,28 +7834,20 @@ static bipolar http_response_framing_from(p8 address_to bytes, positive size,
 
                 if (transfer)
                 {
-                        if (value_length < 7 ||
-                            memory_compare_ascii_case(transfer, "chunked", 7) ||
-                            string_span_max(transfer + 7, value_length - 7,
-                                            string_set_blanks) !=
-                                value_length - 7)
+                        if (value_length != 7 ||
+                            memory_compare_ascii_case(transfer, "chunked", 7))
                                 return HTTP_MALFORMED;
                         response->body_kind = HTTP_BODY_CHUNKED;
                 }
                 else if (content_length)
                 {
                         string_address cursor = content_length;
-                        positive digits;
 
                         if (!string_digits_checked(
                                 address_of cursor, 10,
-                                address_of response->body_length))
-                                return HTTP_MALFORMED;
-                        digits = (positive)(cursor - content_length);
-                        digits += string_span_max(
-                            cursor, content_length_size - digits,
-                            string_set_blanks);
-                        if (digits != content_length_size)
+                                address_of response->body_length) ||
+                            (positive)(cursor - content_length) !=
+                                content_length_size)
                                 return HTTP_MALFORMED;
                         response->body_kind = HTTP_BODY_LENGTH;
                 }
@@ -7885,15 +7882,10 @@ static bipolar http_response_framing_from(p8 address_to bytes, positive size,
                             (string_address)"location",
                             address_of response->location_length,
                             address_of repeated);
+                        /* No control but tab reaches here, NUL included:
+                           http_header_block_valid refused the head. */
                         if (repeated)
                                 return HTTP_MALFORMED;
-                        /* Controls, NUL included, would silently cut the
-                           Location the string calls later copy. */
-                        for (positive byte = 0;
-                             byte < response->location_length; byte++)
-                                if (byte_is_control((p8)response->location[byte]) &&
-                                    response->location[byte] != '\t')
-                                        return HTTP_MALFORMED;
                 }
 
                 address_to header_length = at + (positive)header;
