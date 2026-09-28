@@ -38372,7 +38372,10 @@ def tls_der_fuzz_lift_parts(net):
 #include <stdbool.h>
 #include <ctype.h>
 typedef uint8_t p8;
-typedef uint8_t b8;
+/* lib.c's b8 is signed: crypto_wnaf's digits are negative half the time,
+   and an unsigned b8 indexes crypto_point_add_digit's table far past its 8
+   entries. */
+typedef int8_t b8;
 typedef uint16_t p16;
 typedef uint32_t p32;
 typedef uint64_t p64;
@@ -38843,6 +38846,37 @@ static void crypto_sha384(p8 *d, positive n, p8 *out)
 """
 
 
+def tls_verify_ecdsa_chain():
+    """C arrays of a fresh ECDSA chain, leaf first: a P-256 leaf signed with
+    SHA-256 by a P-256 intermediate, that signed with SHA-384 by a
+    self-signed P-384 root."""
+    import datetime
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+    keys = (ec.generate_private_key(ec.SECP256R1()),
+            ec.generate_private_key(ec.SECP256R1()),
+            ec.generate_private_key(ec.SECP384R1()))
+    names = [x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, n)])
+             for n in ("leaf", "intermediate", "root")]
+    ders = []
+    for at in range(3):
+        signer = min(at + 1, 2)
+        ders.append(x509.CertificateBuilder()
+                    .subject_name(names[at]).issuer_name(names[signer])
+                    .public_key(keys[at].public_key()).serial_number(at + 1)
+                    .not_valid_before(datetime.datetime(2020, 1, 1))
+                    .not_valid_after(datetime.datetime(2040, 1, 1))
+                    .sign(keys[signer], hashes.SHA256() if at == 0 else hashes.SHA384())
+                    .public_bytes(serialization.Encoding.DER))
+    return ("enum { FUZZ_ECDSA_CHAIN = 3 };\n"
+            "static const positive fuzz_ecdsa_length[] = { %s };\n"
+            "static const p8 fuzz_ecdsa_der[][1024] = { %s };\n" %
+            (", ".join(str(len(d)) for d in ders),
+             ", ".join("{ %s }" % ", ".join("0x%02x" % b for b in d) for d in ders)))
+
+
 def tls_verify_hosted_source(net, checks, driver):
     """tls_verify_fuzz's program: tls_der_fuzz's lifts, the ECDSA/RSA verify
     from net.c with lib.c's p256_/p384_ field fast paths cut so the C
@@ -38890,6 +38924,7 @@ def tls_verify_hosted_source(net, checks, driver):
     prove = r"""
 static const p8 fuzz_wr2_der[] = { %s };
 static const p8 fuzz_gts_der[] = { %s };
+%s
 
 static bool fuzz_prove_wr2_gts(void)
 {
@@ -38912,9 +38947,32 @@ static bool fuzz_prove_wr2_gts(void)
         wr2.sig[wr2.sig_length - 1] ^= 1;
         if (tls_verify_one(address_of wr2, address_of gts))
                 return false;
+        /* Each ECDSA link accepts, and refuses one flipped bit of r: an
+           ECDSA verify that is never seen to pass proves nothing when it
+           refuses. */
+        for (positive link = 0; link + 1 < FUZZ_ECDSA_CHAIN; link++)
+        {
+                p8 child_buf[1024];
+                p8 issuer_buf[1024];
+                tls_cert child, issuer;
+
+                memory_copy(child_buf, fuzz_ecdsa_der[link],
+                            fuzz_ecdsa_length[link]);
+                memory_copy(issuer_buf, fuzz_ecdsa_der[link + 1],
+                            fuzz_ecdsa_length[link + 1]);
+                if (tls_parse_cert(child_buf, fuzz_ecdsa_length[link],
+                                   address_of child, null) ||
+                    tls_parse_cert(issuer_buf, fuzz_ecdsa_length[link + 1],
+                                   address_of issuer, null) ||
+                    !tls_verify_one(address_of child, address_of issuer))
+                        return false;
+                child.sig[6] ^= 1;
+                if (tls_verify_one(address_of child, address_of issuer))
+                        return false;
+        }
         return true;
 }
-""" % (der("wr2_hex"), der("gts_r1_hex"))
+""" % (der("wr2_hex"), der("gts_r1_hex"), tls_verify_ecdsa_chain())
     source = "\n".join((shim + TLS_VERIFY_HOSTED_C, montgomery, ecdsa, rsa, oids,
                         parsers, policy, verify_one, prove, framing, driver))
     left = re.search(r"\bp(?:256|384)_(?:multiply|add|square|subtract)\s*\(", source)
