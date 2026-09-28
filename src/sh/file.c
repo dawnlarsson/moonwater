@@ -16024,12 +16024,15 @@ typedef struct
         positive width, precision;
 } stat_spec;
 
-static positive stat_digits(string_address at, positive address_to value)
+/* The digits at the front of a directive's first bound bytes: the directive
+   is read out of a copy that ends where its bound does, not at a terminator. */
+static positive stat_digits(string_address at, positive bound,
+                            positive address_to value)
 {
         positive length = 0;
 
         address_to value = 0;
-        while (byte_is_digit(string_get(at + length)))
+        while (length < bound && byte_is_digit(string_get(at + length)))
         {
                 if (address_to value < 100000000u)
                         address_to value = address_to value * 10 +
@@ -16055,11 +16058,12 @@ static fn stat_spec_read(string_address prefix, positive length,
                 spec->alternate |= flag == '#';
                 spec->zero |= flag == '0';
         }
-        at += stat_digits(prefix + at, address_of spec->width);
+        at += stat_digits(prefix + at, length - at, address_of spec->width);
         if (at < length && string_get(prefix + at) == '.')
         {
                 spec->precise = true;
-                stat_digits(prefix + at + 1, address_of spec->precision);
+                stat_digits(prefix + at + 1, length - at - 1,
+                            address_of spec->precision);
         }
 }
 
@@ -16078,7 +16082,9 @@ static positive stat_out_text(stat_spec address_to spec, string_address text,
 
         if (!spec->left)
                 stat_pad(pad, ' ');
-        log(text, length);
+        // A length of 0 would have log measure the text for itself.
+        if (length)
+                log(text, length);
         if (spec->left)
                 stat_pad(pad, ' ');
         return length + pad;
@@ -16104,6 +16110,8 @@ static positive stat_out_number(stat_spec address_to given, p8 kind,
         if (minus_zero)
                 spec.precise = false;
 
+        bool nonzero = magnitude != 0;
+
         if (!(spec.precise && !spec.precision && !magnitude) || minus_zero)
                 do
                 {
@@ -16112,10 +16120,12 @@ static positive stat_out_number(stat_spec address_to given, p8 kind,
                         magnitude /= base;
                 } while (magnitude);
 
-        while (spec.precise && count < spec.precision && count < sizeof(digits) - 8)
-                digits[sizeof(digits) - 1 - count++] = '0';
+        //      The precision's zeros are written, not stored: it has no
+        //      bound but the one the directive reader puts on it.
+        positive zeros = spec.precise && spec.precision > count
+                             ? spec.precision - count : 0;
 
-        if (kind == 'o' && spec.alternate &&
+        if (kind == 'o' && spec.alternate && !zeros &&
             (!count || digits[sizeof(digits) - count] != '0'))
                 digits[sizeof(digits) - 1 - count++] = '0';
 
@@ -16125,22 +16135,25 @@ static positive stat_out_number(stat_spec address_to given, p8 kind,
                 sign[signs++] = '+';
         else if (spec.space)
                 sign[signs++] = ' ';
-        if (kind == 'x' && spec.alternate && count &&
-            !(count == 1 && digits[sizeof(digits) - 1] == '0'))
+        if (kind == 'x' && spec.alternate && nonzero)
         {
                 sign[signs++] = '0';
                 sign[signs++] = 'x';
         }
 
-        positive length = signs + count;
+        positive length = signs + zeros + count;
         positive pad = spec.width > length ? spec.width - length : 0;
 
         if (!spec.left && !(spec.zero && !spec.precise))
                 stat_pad(pad, ' ');
-        log(sign, signs);
+        // Either may be empty, and log takes a length of 0 as "measure it".
+        if (signs)
+                log(sign, signs);
         if (!spec.left && spec.zero && !spec.precise)
                 stat_pad(pad, '0');
-        log(digits + sizeof(digits) - count, count);
+        stat_pad(zeros, '0');
+        if (count)
+                log(digits + sizeof(digits) - count, count);
         if (spec.left)
                 stat_pad(pad, ' ');
         return length + pad;
@@ -16165,21 +16178,21 @@ static fn stat_out_unsigned(string_address prefix, positive length, p8 kind,
 static fn stat_out_epoch(string_address prefix, positive length, b64 seconds,
                          positive nanoseconds)
 {
-        p8 whole[64];
-        positive whole_length = length < sizeof(whole) - 16 ? length : sizeof(whole) - 16;
+        //      The rewritten directive: its flags, each once, and a number.
+        p8 whole[32];
+        string_address shape = prefix;
+        positive shape_length = length;
         string_address dot = memory_first_of(prefix, '.', length);
         positive precision = 0;
         positive width = 0;
-
-        memory_copy_apart(whole, prefix, whole_length);
 
         if (dot)
         {
                 positive before = (positive)(dot - prefix);
 
-                whole_length = before;
-                if (byte_is_digit(string_get(dot + 1)))
-                        stat_digits(dot + 1, address_of precision);
+                shape_length = before;
+                if (before + 1 < length && byte_is_digit(string_get(dot + 1)))
+                        stat_digits(dot + 1, length - before - 1, address_of precision);
                 else
                         precision = 9;
 
@@ -16189,27 +16202,33 @@ static fn stat_out_epoch(string_address prefix, positive length, b64 seconds,
 
                         while (run && byte_is_digit(string_get(prefix + run - 1)))
                                 run--;
-                        stat_digits(prefix + run, address_of width);
+                        stat_digits(prefix + run, before - run, address_of width);
                         if (width > 1)
                         {
                                 run += string_get(prefix + run) == '0';
-                                whole_length = run;
+                                shape_length = run;
                                 if (width - 1 > 1 && width - 1 > precision + 1)
                                 {
                                         positive kept = 0;
                                         bool left = false;
 
+                                        /* Only flags stand before run, and a
+                                           flag said twice says nothing more,
+                                           so each is kept once. */
                                         for (positive at = 0; at < run; at++)
                                         {
-                                                if (string_get(prefix + at) == '-')
+                                                p8 flag = string_get(prefix + at);
+
+                                                if (flag == '-')
                                                         left = true;
-                                                else
-                                                        whole[kept++] = string_get(prefix + at);
+                                                else if (!memory_first_of(whole, flag, kept))
+                                                        whole[kept++] = flag;
                                         }
                                         if (!left)
                                                 kept += positive_into_string(
                                                     whole + kept, width - 1 - precision);
-                                        whole_length = kept;
+                                        shape = whole;
+                                        shape_length = kept;
                                 }
                         }
                 }
@@ -16232,7 +16251,7 @@ static fn stat_out_epoch(string_address prefix, positive length, b64 seconds,
 
         stat_spec spec;
 
-        stat_spec_read(whole, whole_length, address_of spec);
+        stat_spec_read(shape, shape_length, address_of spec);
         spec.alternate = false;
 
         positive written = stat_out_number(address_of spec, 'd',

@@ -6530,7 +6530,16 @@ files_STAT_FORMATS = (
     # printf's %f made of two integers, and the halves of a device number.
     "%Hd,%Ld %Hr,%Lr", "%.9Y|%-18.10Y|%12.Y|%.0Y", "%010.3X|%-3.10Y|%18.3Y|%-18.3Y", "%+5d|%#x|%#a|% i",
     "%5%", "%-", "%.4W|%W|%-5h|%-8F|", "%'5s|%I5s|%0-6o|", "%.2U|%12G|%-12N|",
-)
+) + tuple(
+    # Every flag, width and precision shape on one letter a row: a flag
+    # said again and again, a width the seconds' point splits, a precision
+    # of none and of more digits than a number has, and an empty result
+    # between two that are not.
+    "|".join("%" + flags + width + precision + letter
+             for flags in ("", "-", "0", "+", " ", "#", "'", "-0", "+ #", "+" * 70, "0" * 40 + "-")
+             for width in ("", "1", "3", "12", "30")
+             for precision in ("", ".", ".0", ".1", ".3", ".12", ".100"))
+    for letter in "YXsfhnot")
 
 files_MKTEMP_TEMPLATES = (
     ("tmp.XXXXXXXXXX",), ("run.XXXXXX",), ("run.XXXXXXXXXXXX",), ("run.XXX",), ("run.XXXXXX.log",), ("run.XX",),
