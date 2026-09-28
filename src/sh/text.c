@@ -20876,6 +20876,8 @@ static b32 text_uniq()
         positive previous_length = 0;
         bool have_previous = false;
         bool shown_group = false;
+        bool plain = !counting && !repeated_only && !unique_only &&
+                     !all_repeated && !grouping;
         positive count = 0;
         positive gap = grouping ? group_how : all_how;
 
@@ -20983,7 +20985,7 @@ static b32 text_uniq()
                         }
                 }
 
-                if (have_previous && !all_repeated && !grouping)
+                if (have_previous && !all_repeated && !grouping && !plain)
                 {
                         bool show = true;
 
@@ -21048,6 +21050,12 @@ static b32 text_uniq()
                 previous_length = line_length;
                 have_previous = true;
                 count = 1;
+
+                // With nothing to count or hold back, a line that starts a
+                // group is written as it is read, as GNU's uniq writes it,
+                // rather than once the next line shows the group has ended.
+                if (plain)
+                        text_put(previous, previous_length + 1);
 
                 if (grouping)
                 {
