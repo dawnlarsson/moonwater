@@ -10483,6 +10483,17 @@ def _misc_write_script(argv, stdin_name):
     return ul_live(argv[0], body, wrap="unshare -Urm")
 
 
+#       Whole numbers either side of every place numfmt's rounding turns:
+#       each power of 1000 and 1024 up to the fifth, times a fraction a
+#       little under, at and over a tenth's edge, a half's and the base's,
+#       the one below and above each, and their negatives.
+_MISC_NUMFMT_EDGES = tuple(sorted({
+    str(sign * (int(base ** power * fraction) + nudge))
+    for base in (1000, 1024) for power in range(0, 6)
+    for fraction in (1, 1.05, 1.15, 1.25, 9.949, 9.95, 9.951, 99.95, 999.5, 1023.95, 1023.949)
+    for nudge in (-1, 0, 1) for sign in (1, -1)
+    if 0 < int(base ** power * fraction) + nudge < 10 ** 18}, key=lambda word: (len(word), word)))
+
 MISC_UTILITIES = (
     Utility("write_errors", operands=_MISC_WRITE_CASES, stdin=("empty",), fixture="misc",
             stderr="exact", modes=("bash",), script=_misc_write_script, valid=_misc_write_valid),
@@ -10843,7 +10854,9 @@ MISC_UTILITIES = (
             #   A field list is pieces split at commas or blanks, and a dash
             #   alone is every field wherever it stands. A second --field is
             #   refused whatever it says.
-            extra=(("--field", "-foo", "1"), ("--field", "--3", "1"), ("--field", "1-2-3", "1"),
+            extra=(*(("--to=" + to, "--round=" + mode, "--") + _MISC_NUMFMT_EDGES
+                     for to in ("si", "iec", "iec-i", "none") for mode in ("up", "down", "from-zero", "towards-zero", "nearest")),
+                   ("--field", "-foo", "1"), ("--field", "--3", "1"), ("--field", "1-2-3", "1"),
                    ("--field", "18446744073709551615,22", "1"), ("--field", "0-1", "1"),
                    ("--field", "1,2 4", "--to=si", "1000 2000 3000 4000"),
                    ("--field", "3,-", "--to=si", "1000 2000 3000 4000"),

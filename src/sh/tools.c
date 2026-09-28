@@ -4448,16 +4448,6 @@ static b32 tools_tsort()
 
 // numfmt ----------------------------------------------------
 
-/*
-        Decimal input stays decimal here too.  numfmt needs multiplication
-        and division by user units in addition to seq's power-of-ten scale,
-        so the one extra representation is a reduced unsigned rational.  Its
-        numerator and denominator are each one native word; inputs whose
-        exact reduced form exceeds that bound are rejected instead of being
-        rounded through binary floating point.  The source coefficient is
-        consequently bounded by signed 64-bit and at most eighteen decimal
-        places, the same checked floor seq already owns.
-*/
 enum
 {
         NUMFMT_SCALE_NONE,
@@ -5045,6 +5035,157 @@ static seq_wide numfmt_wide_round(seq_wide value)
                             numfmt_wide_from(rounded));
 }
 
+/*
+        The whole number V -- no fraction, no units, under 10^17 -- that
+        GNU's long double would carry without a rounding it can show, done
+        in integers: most of what numfmt is handed. Written as is, V is V.
+        Scaled by 1024 it is dyadic, and each division, the multiply by ten
+        and the add of a half inside GNU's rounding are exact while V is
+        below 2^50, so the rounding is the integer one. Scaled by 1000 the
+        divisions round, but V / 1000^p is dyadic once 125^p divides V, and
+        otherwise its denominator keeps a five, so it is no integer or half:
+        the p + 1 roundings move it by at most (p + 2) 2^-64 of itself, and
+        a quotient that far from every boundary rounds as the exact one
+        does. Anything nearer, or any other shape, is the long double's.
+        Answers false, having written nothing, when it cannot answer.
+*/
+static bool numfmt_exact(positive magnitude, bool minus, positive automatic_width)
+{
+        bool user = numfmt.have_format && numfmt.format.has_precision;
+        positive used = user ? numfmt.format.precision : 0;
+        p8 number_text[48];
+        positive length = 0;
+        p8 unit[2];
+        positive unit_length = 0;
+
+        if (magnitude >= 100000000000000000ull || (!magnitude && minus) ||
+            numfmt.from_unit != 1 || numfmt.to_unit != 1)
+                return false;
+
+        if (numfmt.to == NUMFMT_SCALE_NONE)
+        {
+                positive tens = 0;
+
+                for (positive left = magnitude; left >= 10; left /= 10)
+                        tens++;
+                if (tens + used > 18 || used > sizeof(number_text) - 24)
+                        return false;
+                if (minus)
+                        number_text[length++] = '-';
+                length += positive_into(number_text + length, magnitude);
+                if (used)
+                {
+                        number_text[length++] = '.';
+                        memory_fill(number_text + length, '0', used);
+                        length += used;
+                }
+                numfmt_body_out(number_text, length, unit, 0, automatic_width);
+                return true;
+        }
+
+        if (user)
+                return false;
+
+        bool binary = numfmt.to != NUMFMT_SCALE_SI;
+        positive base = binary ? 1024 : 1000;
+        positive power = 0;
+        positive scale = 1;
+
+        while (magnitude / scale >= base)
+        {
+                scale *= base;
+                power++;
+        }
+        if (binary ? magnitude >= (positive)1 << 50 : false)
+                return false;
+
+        // Ten times over when below ten, as GNU keeps one decimal there.
+        positive adjust = magnitude < 10 * scale;
+        positive numerator = magnitude * (adjust ? 10 : 1); // below 10^18
+        positive whole = numerator / scale;
+        positive rest = numerator % scale;
+
+        if (!binary && rest)
+        {
+                positive fives = 1;
+
+                for (positive k = 0; k < power; k++)
+                        fives *= 125;
+                if (magnitude % fives)
+                {
+                        p128 margin = (((p128)(whole + 1) * (power + 2) * scale) >> 63) + 1;
+                        positive near = min(rest, scale - rest);
+                        positive half = rest * 2 > scale ? rest * 2 - scale : scale - rest * 2;
+
+                        if (near <= margin || half <= 2 * margin)
+                                return false;
+                }
+        }
+
+        bool up;
+
+        switch (numfmt.rounding)
+        {
+        case NUMFMT_ROUND_UP:
+                up = rest && !minus;
+                break;
+        case NUMFMT_ROUND_DOWN:
+                up = rest && minus;
+                break;
+        case NUMFMT_ROUND_TO_ZERO:
+                up = false;
+                break;
+        case NUMFMT_ROUND_NEAREST:
+                up = rest * 2 >= scale;
+                break;
+        default:
+                up = rest != 0;
+                break;
+        }
+
+        positive rounded = whole + up;
+        positive shown_tenths = adjust;
+
+        // Rounded up to the base: one more power, 1.0 of it.
+        if (rounded >= (adjust ? 10 : 1) * base)
+        {
+                rounded = 10;
+                shown_tenths = 1;
+                power++;
+        }
+        else if (adjust && (rounded >= 100 || !power))
+        {
+                // Ten or more, or no unit at all: no decimal is shown.
+                shown_tenths = 0;
+                if (rounded % 10 == 0 || !power)
+                        rounded /= 10;
+                else
+                        return false;
+        }
+
+        if (minus)
+                number_text[length++] = '-';
+        length += positive_into(number_text + length, shown_tenths ? rounded / 10 : rounded);
+        if (shown_tenths)
+        {
+                number_text[length++] = '.';
+                number_text[length++] = (p8)('0' + rounded % 10);
+        }
+
+        if (power)
+        {
+                static const p8 powers[] = "kMGTPEZYRQ";
+
+                unit[unit_length++] = power == 1 && !binary ? 'k'
+                                      : power == 1          ? 'K'
+                                                            : powers[power - 1];
+                if (numfmt.to == NUMFMT_SCALE_IEC_I)
+                        unit[unit_length++] = 'i';
+        }
+        numfmt_body_out(number_text, length, unit, unit_length, automatic_width);
+        return true;
+}
+
 /* GNU's sentence for each way simple_strtod_human refuses a number. */
 static fn numfmt_refused(p8 kind, p8 address_to bytes, positive length, positive rest)
 {
@@ -5212,6 +5353,24 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
                 if (!numfmt.stop)
                         text_put(original, original_length);
                 return false;
+        }
+
+        // A whole number the long double would carry exactly takes the
+        // integer path; any other goes on below.
+        {
+                bool minus = numeric_length && bytes[0] == '-';
+                positive digits_at = minus;
+                positive whole = 0;
+
+                while (digits_at < numeric_length && byte_is_digit(bytes[digits_at]) &&
+                       whole < 100000000000000000ull)
+                        whole = whole * 10 + (positive)(bytes[digits_at++] - '0');
+                for (positive k = 0; k < power; k++)
+                        whole = whole < 100000000000000000ull / base ? whole * base
+                                                                     : 100000000000000000ull;
+                if (digits_at == numeric_length && whole < 100000000000000000ull &&
+                    !numfmt.debug && numfmt_exact(whole, minus, automatic_width))
+                        return true;
         }
 
         /*
