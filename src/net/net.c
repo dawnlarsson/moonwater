@@ -6524,58 +6524,47 @@ static COLD fn tls_use_app_keys(tls_conn address_to tls)
         crypto_forget(address_of tls->transcript, sizeof tls->transcript);
 }
 
+/* A Finished's verify_data: HMAC over the transcript so far under the
+   finished key of one side's handshake traffic secret (RFC 8446 4.4.4). */
+static COLD fn tls_finished_mac(tls_conn address_to tls, p8 address_to traffic,
+                                p8 address_to out)
+{
+        p8 key[32];
+        p8 hash[32];
+        crypto_sha256 copy = tls->transcript;
+
+        tls_expand_label(traffic, "finished", null, 0, key, 32);
+        crypto_sha256_close(address_of copy, hash);
+        crypto_hmac_sha256(key, 32, hash, 32, out);
+        crypto_forget(key, sizeof key);
+        crypto_forget(hash, sizeof hash);
+        crypto_forget(address_of copy, sizeof copy);
+}
+
 static COLD bipolar tls_check_finished(tls_conn address_to tls, p8 address_to verify,
                                   positive length)
 {
-        p8 finished_key[32];
         p8 expect[32];
-        crypto_sha256 copy = tls->transcript;
-        p8 hash[32];
-        bipolar status = TLS_FAIL;
+        bool same;
 
         if (length != 32)
-                goto done;
-        tls_expand_label(tls->s_hs_traffic, "finished", null, 0, finished_key, 32);
-        crypto_sha256_close(address_of copy, hash);
-        crypto_hmac_sha256(finished_key, 32, hash, 32, expect);
-        status = crypto_same(expect, verify, 32) ? TLS_OK : TLS_FAIL;
-
-done:
-        crypto_forget(finished_key, sizeof finished_key);
+                return TLS_FAIL;
+        tls_finished_mac(tls, tls->s_hs_traffic, expect);
+        same = crypto_same(expect, verify, 32);
         crypto_forget(expect, sizeof expect);
-        crypto_forget(address_of copy, sizeof copy);
-        crypto_forget(hash, sizeof hash);
-        return status;
+        return same ? TLS_OK : TLS_FAIL;
 }
 
+/* Nothing reads the transcript after the client's Finished, so it is sent
+   without being added. */
 static COLD bipolar tls_send_finished(tls_conn address_to tls)
 {
-        p8 finished_key[32];
-        p8 verify[32];
-        p8 msg[36];
-        crypto_sha256 copy = tls->transcript;
-        p8 hash[32];
-        bipolar status = TLS_FAIL;
+        p8 msg[36] = {TLS_HS_FINISHED, 0, 0, 32};
+        bipolar status;
 
-        tls_expand_label(tls->c_hs_traffic, "finished", null, 0, finished_key, 32);
-        crypto_sha256_close(address_of copy, hash);
-        crypto_hmac_sha256(finished_key, 32, hash, 32, verify);
-        msg[0] = TLS_HS_FINISHED;
-        msg[1] = 0;
-        msg[2] = 0;
-        msg[3] = 32;
-        memory_copy(msg + 4, verify, 32);
-        if (tls_send_enc(tls, TLS_CT_HANDSHAKE, msg, 36))
-                goto done;
-        tls_transcript_add(tls, msg, 36);
-        status = TLS_OK;
-
-done:
-        crypto_forget(finished_key, sizeof finished_key);
-        crypto_forget(verify, sizeof verify);
+        tls_finished_mac(tls, tls->c_hs_traffic, msg + 4);
+        status = tls_send_enc(tls, TLS_CT_HANDSHAKE, msg, sizeof msg);
         crypto_forget(msg, sizeof msg);
-        crypto_forget(address_of copy, sizeof copy);
-        crypto_forget(hash, sizeof hash);
         return status;
 }
 
