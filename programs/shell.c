@@ -687,6 +687,7 @@ b32 main()
         // personality instead of scanning the path again after the fast exit.
         if (called && *called == '-')
                 called++;
+        shell_invocation_name = called;
         /* rbash is bash's restricted name: the same policy, already
            restricted before any option is read. A leading dash was
            stripped above, so -rbash is a login rbash. */
@@ -1091,7 +1092,10 @@ b32 main()
                                        : shell_bash_compat
                                            ? (string_address) "\\s-\\v\\$ "
                                            : (string_address) "$ ";
-                        shell_prompt_written(log_error, text);
+                        if (shell_bash_compat)
+                                log_error(shell_prompt_expand(text, false), 0);
+                        else
+                                shell_prompt_written(log_error, text);
                         log_flush();
                 }
 

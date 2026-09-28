@@ -1004,6 +1004,12 @@ fn job_monitor_told(bool on)
                 job_monitor_stop();
 }
 
+// How many jobs the shell holds, which a prompt's \j says.
+positive shell_job_count()
+{
+        return job_count;
+}
+
 static positive job_find(positive value, bool process)
 {
         for (positive at = 0; at < job_count; at++)
@@ -3729,6 +3735,12 @@ static PURE string_address history_file()
         string_address path = env_get((const_string) "HISTFILE");
 
         return path && string_get(path) ? path : null;
+}
+
+// The number the next line remembered will take, which \! and \# say.
+positive shell_history_next()
+{
+        return history_first + history_used;
 }
 
 static fn history_drop(positive at, positive count)
@@ -8991,10 +9003,25 @@ static fn exec_trace_ps4()
                 return;
         }
 
-        exec_ps4_expanding = true;
-        expanded = shell_expand_ps4(prefix);
-        exec_ps4_expanding = false;
-        if (expanded)
+        {
+                bool soft = expand_errors_soft;
+
+                expand_errors_soft = true;
+                exec_ps4_expanding = true;
+                //      bash decodes the prompt escapes first and expands
+                //      what that made; dash only expands.
+                expanded = shell_bash_compat ? shell_prompt_expand(prefix, false)
+                                             : shell_expand_ps4(prefix);
+                exec_ps4_expanding = false;
+                expand_errors_soft = soft;
+        }
+        //      An expansion PS4 could not finish leaves the prompt as it
+        //      was written, and the command still runs.
+        bool failed = expand_failed;
+
+        if (failed)
+                expand_failed = false;
+        else if (expanded)
                 prefix = expanded;
 
         if (shell_bash_compat)
@@ -9014,7 +9041,7 @@ static fn exec_trace_ps4()
                                 log_error(room, 1);
 
                         if (string_get(prefix + 1))
-                                shell_prompt_written(log_error, prefix + 1);
+                                log_error(prefix + 1, 0);
                         return;
                 }
         }

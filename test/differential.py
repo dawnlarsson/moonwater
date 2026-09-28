@@ -14575,6 +14575,16 @@ def shell_lang_directory_state(rng):
     return ("directory-state-" + shape, shell_ALL, shell_program(body, 'echo "end=$?"'))
 
 
+#       A PS4 whose expansion fails is reported and written as it stands, and
+#       the traced command still runs, in both references; dash here ended
+#       the script on the error.
+def shell_lang_ps4_errors(rng):
+    ps4 = rng.choice(("'+$((1/0)) '", "'+${nosuch?gone} '", "'+$((1+)) \\$ '", "'+${x:1/0} '", "'+ok '"))
+    return ("ps4-errors", shell_ALL, shell_program(
+        "x=abc", "PS4=" + ps4, "set -x", "echo one", "echo \"status=$?\"", "set +x", 'echo "end=$?"'),
+        ("command", "stdin", "file"))
+
+
 #       read from a directory, and ulimit with a negative number: each is a
 #       plain failure of 1 in dash too, where this answered 2, and a negative
 #       limit was taken as a number.
@@ -14796,6 +14806,28 @@ def shell_lang_globstar_exists(rng):
     return ("globstar-exists", shell_BASH, shell_program(
         "mkdir -p a/a/a b/a c; : > a/f; : > b/a/f", "shopt -s globstar",
         "printf '<%s>' " + rng.choice(("c/a/**", "c/**", "a/**", "nope/**", "b/a/**", "a/a/a/a/**")) + "; echo"))
+
+
+#       A prompt as bash makes one: the escapes decoded first -- \nnn octal,
+#       \s, \j, \l, \#, \! and \D{...} among them, which were left as
+#       written -- and then, under promptvars, the result expanded as a
+#       double-quoted word, with only the answers a user can set quoted. PS4
+#       and ${x@P} both come this way.
+def shell_lang_prompt_expansion(rng):
+    prompt = rng.choice(("'$'", "'\\$'", "'\\\\$'", "'\\\\\\$'", "'\\\\\\\\$'", "'$x$y'", "'\\1004$'",
+                         "'[\\045]'", "'\\555$'", "'[\\0455]'", "'\\s|\\v|\\j|\\l'", "'\\W $foo $(echo c) $((1+2))'",
+                         "'\\[x\\]y'", "'\\D{%Y}'", "'\\q\\z'", "'`echo b`\\n'", "'\\a\\e\\r' | od -c | head -1"))
+    use = rng.choice(("p", "p", "ps4", "nopromptvars"))
+    setup = "x='\\'; y=h; foo=fv; mkdir -p '$foo'; cd '$foo'"
+    if use == "ps4":
+        line = "PS4=" + prompt.split(" |")[0] + "; set -x; : traced; set +x"
+        line = "{ " + line + "; } 2>&1"
+    elif use == "nopromptvars":
+        line = "shopt -u promptvars; P=" + prompt.split(" |")[0] + "; echo \"${P@P}\""
+    else:
+        pipe = prompt.split(" |", 1)
+        line = "P=" + pipe[0] + "; echo \"${P@P}\"" + (" |" + pipe[1] if len(pipe) > 1 else "")
+    return ("prompt-expansion", shell_BASH, shell_program(setup, line, 'echo "end=$?"'), ("command", "stdin", "file"))
 
 
 #       bash's $'\x{H...}': every hex digit up to the brace and the low byte
@@ -17673,6 +17705,7 @@ SHELL_FAMILIES = (
     shell_lang_fd_prefix_range,
     shell_lang_case_substitution_lines,
     shell_lang_dollar_hex_brace,
+    shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,
     shell_lang_test_set_all,
@@ -17691,6 +17724,7 @@ SHELL_FAMILIES = (
     shell_lang_command_lookup_kinds,
     shell_lang_set_lone_plus,
     shell_lang_directory_state,
+    shell_lang_ps4_errors,
     shell_lang_builtin_refusals,
     shell_lang_background_reap,
     shell_lang_interactive_pipe,

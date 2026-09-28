@@ -423,6 +423,9 @@ static bool shell_exit_is_current HOT_STATE;
 static fn exec_command_reader_finish();
 static fn exec_input_finish();
 static fn exec_wait_background(bipolar child);
+/* The name this shell was started under, less any directory and a login
+   dash, which a prompt's \s says. */
+string_address shell_invocation_name;
 /* Whether FUNCNEST was ever given a value: a function call asks for it
    only then, rather than looking the name up on every call. */
 bool shell_funcnest_seen;
@@ -21579,8 +21582,63 @@ static COLD fn shell_prompt_directory(writer write, bool whole)
         write(path, length);
 }
 
+/*
+        What a prompt escape answers is quoted for the double-quoted expansion
+        that follows it under bash's promptvars, so \w naming a directory
+        called $foo stays $foo while a $foo written in the prompt expands.
+*/
+static bool prompt_quote;
+static writer prompt_writer;
+static byte_store address_to prompt_store;
+
+static fn prompt_store_write(address_any data, positive length)
+{
+        string_address bytes = (string_address)data;
+
+        if (!length)
+                length = string_length(bytes);
+        if (byte_store_reserve(prompt_store, prompt_store->used + length + 1,
+                               64))
+        {
+                memory_copy(prompt_store->bytes + prompt_store->used, bytes,
+                            length);
+                prompt_store->used += length;
+        }
+}
+
+static fn prompt_quoted(address_any data, positive length)
+{
+        string_address bytes = (string_address)data;
+
+        if (!length)
+                length = string_length(bytes);
+        for (positive at = 0; at < length; at++)
+        {
+                p8 value = bytes[at];
+
+                if (value == '\\' || value == '$' || value == '`' ||
+                    value == '"')
+                        prompt_writer("\\", 1);
+                prompt_writer(address_of value, 1);
+        }
+}
+
+positive shell_job_count();
+positive shell_history_next();
+
 COLD fn shell_prompt_written(writer write, string_address text)
 {
+        writer raw = write;
+        //      bash quotes only what a user can set: names, the directory,
+        //      the time. The rest go in as they are.
+        writer quoted = write;
+
+        if (prompt_quote)
+        {
+                prompt_writer = raw;
+                quoted = prompt_quoted;
+        }
+
         while (string_get(text))
         {
                 p8 value = string_get(text++);
@@ -21588,7 +21646,7 @@ COLD fn shell_prompt_written(writer write, string_address text)
 
                 if (value != '\\')
                 {
-                        write(address_of value, 1);
+                        raw(address_of value, 1);
                         continue;
                 }
 
@@ -21612,7 +21670,7 @@ COLD fn shell_prompt_written(writer write, string_address text)
 
                         if (file_user_name(id, name, sizeof(name)) &&
                             string_get(name))
-                                write(name, string_length(name));
+                                quoted(name, string_length(name));
                         else
                         {
                                 p8 written[24];
@@ -21632,45 +21690,140 @@ COLD fn shell_prompt_written(writer write, string_address text)
                                                 ? string_first_of(named, '.')
                                                 : null;
 
-                        write(named, stop ? (positive)(stop - named)
-                                          : string_length(named));
+                        quoted(named, stop ? (positive)(stop - named)
+                                           : string_length(named));
                         break;
                 }
 
-                case 'w': shell_prompt_directory(write, true); break;
-                case 'W': shell_prompt_directory(write, false); break;
+                case 'w': shell_prompt_directory(quoted, true); break;
+                case 'W': shell_prompt_directory(quoted, false); break;
 
+                //      Under promptvars bash writes \$ for a user, so that
+                //      the expansion after gives the dollar back.
                 case '$':
-                        write(system_call_1(syscall(geteuid), 0) ? "$" : "#",
-                              1);
+                        if (system_call_1(syscall(geteuid), 0))
+                                write(prompt_quote ? "\\$" : "$",
+                                      prompt_quote ? 2 : 1);
+                        else
+                                write("#", 1);
                         break;
 
                 case 'd':
-                        date_shape(write,
+                        date_shape(quoted,
                                    shell_clock_seconds(SHELL_CLOCK_REALTIME,
                                                        null),
                                    0, (string_address) "%a %b %d");
                         break;
 
                 case 't':
-                        date_shape(write,
+                        date_shape(quoted,
                                    shell_clock_seconds(SHELL_CLOCK_REALTIME,
                                                        null),
                                    0, (string_address) "%H:%M:%S");
                         break;
 
                 case 'A':
-                        date_shape(write,
+                        date_shape(quoted,
                                    shell_clock_seconds(SHELL_CLOCK_REALTIME,
                                                        null),
                                    0, (string_address) "%H:%M");
                         break;
 
+                case 'T':
+                case '@':
+                        date_shape(quoted,
+                                   shell_clock_seconds(SHELL_CLOCK_REALTIME,
+                                                       null),
+                                   0, letter == 'T'
+                                          ? (string_address) "%I:%M:%S"
+                                          : (string_address) "%I:%M %p");
+                        break;
+
+                //      \D{format}: strftime, the locale's time when empty.
+                case 'D':
+                        if (string_is(text, '{'))
+                        {
+                                string_address shut = string_first_of(text, '}');
+                                p8 format[128];
+                                positive length = shut ? (positive)(shut - text - 1)
+                                                       : 0;
+
+                                if (shut && length < sizeof(format))
+                                {
+                                        memory_copy_end(format, text + 1, length);
+                                        date_shape(quoted,
+                                                   shell_clock_seconds(
+                                                       SHELL_CLOCK_REALTIME, null),
+                                                   0, length ? format
+                                                             : (p8 address_to)"%X");
+                                        text = shut + 1;
+                                        break;
+                                }
+                        }
+                        write("\\D", 2);
+                        break;
+
+                case 'j':
+                {
+                        p8 written[24];
+
+                        write(written, positive_into_string(written,
+                                                            shell_job_count()));
+                        break;
+                }
+
+                case '!':
+                case '#':
+                {
+                        p8 written[24];
+
+                        write(written, positive_into_string(
+                                           written, shell_is_interactive
+                                                        ? shell_history_next()
+                                                        : 1));
+                        break;
+                }
+
+                //      The terminal's name without its directories, or tty
+                //      when standard input is none.
+                case 'l':
+                {
+                        p8 name[256];
+                        p8 settings[64];
+                        bipolar got = system_control(0, PTY_TCGETS, settings) == 0
+                                          ? system_read_link_at(AT_FDCWD,
+                                                                "/proc/self/fd/0",
+                                                                name,
+                                                                sizeof(name) - 1)
+                                          : -1;
+
+                        if (got > 0)
+                        {
+                                name[got] = end;
+                                string_address last = string_last_of(name, '/');
+                                string_address base = last ? last + 1 : name;
+                                write(base, string_length(base));
+                        }
+                        else
+                                write("tty", 3);
+                        break;
+                }
+
                 case 'n': write("\n", 1); break;
                 case 'r': write("\r", 1); break;
                 case 'a': write("\a", 1); break;
                 case 'e': write("\033", 1); break;
-                case 's': write("sh", 2); break;
+                case 's':
+                {
+                        string_address named = shell_invocation_name
+                                                   ? shell_invocation_name
+                                                   : shell_script_name;
+                        string_address last = string_last_of(named, '/');
+                        string_address base = last ? last + 1 : named;
+
+                        quoted(base, string_length(base));
+                        break;
+                }
                 case 'v': write("5.3", 3); break;
                 case 'V': write("5.3.15", 6); break;
                 case '\\': write("\\", 1); break;
@@ -21682,11 +21835,55 @@ COLD fn shell_prompt_written(writer write, string_address text)
                 case ']': break;
 
                 default:
-                        write("\\", 1);
-                        write(address_of letter, 1);
+                        //      \nnn: up to three octal digits, the low
+                        //      byte of what they spell.
+                        if (letter >= '0' && letter <= '7')
+                        {
+                                positive number = (positive)(letter - '0');
+                                positive digits = 1;
+                                p8 byte;
+
+                                while (digits < 3 && string_get(text) >= '0' &&
+                                       string_get(text) <= '7')
+                                {
+                                        number = number * 8 +
+                                                 (positive)(string_get(text++) - '0');
+                                        digits++;
+                                }
+                                byte = (p8)number;
+                                write(address_of byte, 1);
+                                break;
+                        }
+                        raw("\\", 1);
+                        raw(address_of letter, 1);
                         break;
                 }
         }
+}
+
+/*
+        A prompt as bash makes one: the backslash escapes decoded, each
+        answer quoted, and then -- promptvars is on unless a script turned it
+        off -- the whole expanded as a double-quoted word, so PS1='$x$y' reads
+        x and y and \w naming a directory called $foo stays $foo.
+*/
+string_address expand_capture_prompt(string_address text, bool nested);
+
+COLD string_address shell_prompt_expand(string_address text, bool nested)
+{
+        static byte_store decoded;
+        bool expand = shell_shopt_on(PROMPTVARS) || shell_posix_on();
+
+        decoded.used = 0;
+        prompt_quote = expand;
+        prompt_store = address_of decoded;
+        shell_prompt_written(prompt_store_write, text);
+        prompt_quote = false;
+        if (!byte_store_reserve(address_of decoded, decoded.used + 1, 64))
+                return text;
+        decoded.bytes[decoded.used] = end;
+        return expand ? expand_capture_prompt(decoded.bytes, nested)
+                      : decoded.bytes;
 }
 
 /*

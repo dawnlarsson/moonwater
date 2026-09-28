@@ -37,6 +37,7 @@ bool env_assign(const_string name, const_string value);
 //      these lines go out unbuffered, so the prefix has to travel with them.
 static COLD fn shell_diagnostic_where_to(writer write);
 COLD fn shell_prompt_written(writer write, string_address text);
+COLD string_address shell_prompt_expand(string_address text, bool nested);
 
 static COLD fn expand_where()
 {
@@ -335,6 +336,10 @@ static bool expand_failed HOT_STATE;
 // A here-document expanded in this process (dash) turns ${x?} into the
 // command's status rather than ending the script, so ${x:=} can still stick.
 static bool expand_redirect_error;
+// PS4 is being expanded for a trace line: an error there is reported and
+// the prompt written as it stands, and the command still runs, in both
+// references.
+static bool expand_errors_soft;
 static bool expand_name_at_empty;
 static bool expand_explicit_empty;
 static positive expand_depth;
@@ -4981,6 +4986,11 @@ static PURE b32 expand_nounset_status(b32 indirect)
 */
 static COLD fn expand_discard(b32 status)
 {
+        if (expand_errors_soft)
+        {
+                expand_failed = true;
+                return;
+        }
         if (!shell_bash_compat || shell_is_interactive ||
             string_is(shell_option_flags, 'c'))
         {
@@ -5013,6 +5023,12 @@ static COLD fn expand_discard_whole(b32 status)
 
 static COLD fn expand_fatal_status(b32 status)
 {
+        if (expand_errors_soft)
+        {
+                expand_failed = true;
+                return;
+        }
+
         shell_status = status;
 
         if (expand_redirect_error)
@@ -5728,6 +5744,11 @@ static PURE string_address expand_substring_separator(string_address at)
 // --posix. Native and dash errors retain their fatal policy.
 static COLD fn expand_slice_error()
 {
+        if (expand_errors_soft)
+        {
+                expand_failed = true;
+                return;
+        }
         if (!shell_bash_compat)
         {
                 expand_fatal_status(2);
@@ -6703,6 +6724,14 @@ static COLD fn transform_prompt(string_address value, positive length, p8 mark)
         memory_copy(held, value, length);
         held[length] = end;
         transform_write_mark = mark;
+        if (shell_bash_compat)
+        {
+                string_address made = shell_prompt_expand(held, true);
+
+                if (!expand_failed)
+                        transform_write(made, string_length(made));
+                return;
+        }
         shell_prompt_written(transform_write, held);
 }
 
@@ -11064,6 +11093,19 @@ RETURNS_NONNULL string_address shell_expand_regex(string_address word)
         counter or a command in the trace prefix. Backslash prompt
         escapes are applied afterwards, where the prefix is written.
 */
+/* A prompt's decoded text, expanded as a double-quoted word. Inside a
+   running expansion (${x@P}) the capture nests; a prompt on its own
+   begins one. */
+COLD string_address expand_capture_prompt(string_address text, bool nested)
+{
+        string_address ready;
+
+        if (!nested)
+                expand_begin();
+        ready = expand_capture(text, true, EXPAND_CAPTURE_TEXT);
+        return ready ? ready : (string_address) "";
+}
+
 COLD string_address shell_expand_ps4(string_address text)
 {
         string_address ready;
