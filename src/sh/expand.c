@@ -2213,6 +2213,9 @@ static string_address arith_at HOT_STATE;
 static bool arith_bad HOT_STATE;
 static string_address arith_why HOT_STATE;
 static p8 arith_token_buf[32] HOT_STATE;
+// Where the right operand of the binary operator just read began: bash
+// names a zero divisor from there on.
+static string_address arith_operand HOT_STATE;
 static string_address arith_origin HOT_STATE;
 static bool arith_said HOT_STATE;
 
@@ -2264,7 +2267,7 @@ static PURE inline INLINE string_address arith_skip_space(string_address at)
         names the whole expression. The first failure sticks -- a later
         leftover byte must not overwrite a division that already happened.
 */
-static COLD fn arith_fail(string_address why)
+static COLD fn arith_fail_from(string_address why, string_address from)
 {
         if (arith_bad)
                 return;
@@ -2273,7 +2276,7 @@ static COLD fn arith_fail(string_address why)
         arith_why = why;
 
         {
-                string_address at = arith_skip_space(arith_at);
+                string_address at = arith_skip_space(from);
                 positive n = 0;
 
                 if (!string_get(at) && arith_origin && arith_at > arith_origin)
@@ -2286,12 +2289,19 @@ static COLD fn arith_fail(string_address why)
                                 at--;
                 }
 
-                while (n + 1 < sizeof(arith_token_buf) && string_get(at) &&
-                       string_get(at) != ' ' && string_get(at) != '\t')
+                //      Bash names the rest of the expression from the
+                //      token it stopped at, blanks and all: "+ " for
+                //      `2 + `, "* 3 " for ` 1 +* 3 `.
+                while (n + 1 < sizeof(arith_token_buf) && string_get(at))
                         arith_token_buf[n++] = string_get(at++);
 
                 arith_token_buf[n] = end;
         }
+}
+
+static COLD fn arith_fail(string_address why)
+{
+        arith_fail_from(why, arith_at);
 }
 
 /*
@@ -2312,7 +2322,7 @@ COLD fn shell_arith_report(writer write, string_address command,
                 return;
 
         why = arith_why ? arith_why
-                        : (string_address) "syntax error in expression";
+                        : (string_address) "arithmetic syntax error in expression";
         token = string_get(arith_token_buf) ? arith_token_buf : expr;
         if (!token || !string_get(token))
                 token = expr ? expr : (string_address) "";
@@ -2323,6 +2333,7 @@ COLD fn shell_arith_report(writer write, string_address command,
 
         if (shell_bash_compat)
         {
+                expr = arith_skip_space(expr);
                 if (command)
                         string_format(write,
                                       "%s: %s: %s (error token is \"%s\")\n",
@@ -2336,7 +2347,7 @@ COLD fn shell_arith_report(writer write, string_address command,
 
         if (arith_why && !string_compare(arith_why, "division by 0"))
                 string_format(write,
-                              "arithmetic expression: division by zero: "
+                              "arithmetic expression: division error: "
                               "\"%s\"\n",
                               expr);
         else if (arith_why &&
@@ -2827,7 +2838,7 @@ static COLD bipolar arith_named_expression(string_address value)
         // Every byte of the value belongs to the expression, exactly as every
         // byte of the outer one does: x=12ab is not twelve.
         if (string_get(arith_at))
-                arith_fail("syntax error in expression");
+                arith_fail("arithmetic syntax error in expression");
 
         arith_at = outer;
         arith_names--;
@@ -2890,9 +2901,8 @@ static bipolar arith_divide(bipolar left, bipolar right, bool remainder)
 
         if (!right)
         {
-                arith_fail("division by 0");
-                arith_token_buf[0] = '0';
-                arith_token_buf[1] = end;
+                arith_fail_from("division by 0",
+                                arith_operand ? arith_operand : arith_at);
                 return 0;
         }
 
@@ -3336,7 +3346,7 @@ static bipolar arith_primary_step()
 
         // A byte that starts no value at all, which is where a missing
         // operand lands: $((1 + )) answered 1 and $((2 ** 3)) answered 0.
-        arith_fail(arith_bash_mode ? "syntax error: operand expected"
+        arith_fail(arith_bash_mode ? "arithmetic syntax error: operand expected"
                                   : "expecting primary");
 
         return 0;
@@ -3380,7 +3390,9 @@ static bipolar arith_power()
                         if (!(matches))                                     \
                                 return value;                               \
                         arith_at += (width);                                \
+                        string_address operand = arith_at;                  \
                         bipolar right = lower();                            \
+                        arith_operand = operand;                            \
                         arith_is_lvalue = false;                            \
                         value = (result);                                   \
                 }                                                           \
@@ -3559,12 +3571,17 @@ static bipolar arith_assign()
                 bipolar left = arith_held_value;
                 bipolar right;
 
+                string_address operand;
+
                 arith_at += skip;
+                operand = arith_at;
                 arith_is_lvalue = false;
                 right = arith_assign();
 
                 if (kind == '=')
                         return arith_store(address_of target, right);
+
+                arith_operand = operand;
 
                 return arith_store(address_of target,
                                    arith_combine(kind, left, right));
@@ -3761,6 +3778,7 @@ static bipolar arith_evaluate(string_address text)
         arith_unset = false;
         arith_why = null;
         arith_token_buf[0] = end;
+        arith_operand = null;
         arith_said = false;
         arith_active = true;
         arith_is_lvalue = false;
@@ -3798,7 +3816,7 @@ static bipolar arith_evaluate(string_address text)
         // Every byte has to belong to the grammar. This catches comma and
         // postfix increment/decrement instead of returning the left prefix.
         if (string_get(arith_at))
-                arith_fail(arith_bash_mode ? "syntax error in expression"
+                arith_fail(arith_bash_mode ? "arithmetic syntax error in expression"
                                           : "expecting EOF");
 
         arith_nounset = held_nounset;
