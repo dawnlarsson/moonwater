@@ -19702,6 +19702,9 @@ _TEXT_STREAM_CASES = (
     #   tail -c +N seeks where the input seeks, from wherever it was left.
     ("tail", "offset", "-c", "+5"), ("tail", "file", "-c", "+100000"), ("tail", "offset", "-c", "+1"),
     ("tail", "shared", "-c", "+3"), ("tail", "big", "-c", "+6888890"),
+    #   ... and an N - 1 past the largest offset is no seek at all.
+    *(("tail", "offset", "-c", "+" + count)
+      for count in ("9223372036854775808", "9223372036854775809", "18446744073709551615")),
     ("od", "shared", "-An", "-N3", "-c"), ("od", "shared", "-N4", "-tx1"),
     ("od", "shared", "-An", "-j2", "-N2", "-c"), ("od", "shared", "-An", "-N3", "-S1"),
     ("od", "sharedpipe", "-An", "-N3", "-c"), ("od", "offset", "-An", "-tx1"),
@@ -19711,7 +19714,7 @@ _TEXT_STREAM_CASES = (
     ("head", "shared", "-c", "3"), ("head", "shared", "-n", "1"),
     ("wc", "offset"), ("wc", "offset", "-c"), ("nl", "pipe"),
 )
-_TEXT_STREAM_TOOLS = ("tac", "cat", "od", "head", "wc", "nl")
+_TEXT_STREAM_TOOLS = ("tac", "tail", "cat", "od", "head", "wc", "nl")
 
 
 def _text_stream_valid(argv):

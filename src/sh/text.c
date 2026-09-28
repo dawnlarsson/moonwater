@@ -7707,20 +7707,17 @@ static bool text_tail_device(positive count)
         if (at < 0)
                 return false;
 
-        bipolar from = system_seek(text_input.handle,
-                                   count > (positive)0x7fffffffffffffff
-                                       ? (bipolar)0x8000000000000001
-                                       : -(bipolar)count,
-                                   FILE_SEEK_END);
-        bipolar stop = from >= 0 ? from + (bipolar)min(count, (positive)0x7fffffffffffffff)
+        // A count past the offsets there are is all of it, not a
+        // negative one: tail -c 18446744073709551615 of a disk read none.
+        bipolar want = (bipolar)min(count, (positive)bipolar_max);
+        bipolar from = system_seek(text_input.handle, -want, FILE_SEEK_END);
+        bipolar stop = from >= 0 ? from + want
                                 : system_seek(text_input.handle, 0, FILE_SEEK_END);
 
         if (from < 0)
                 from = stop;
 
-        bipolar start = at < stop && (bipolar)count < stop - at
-                            ? stop - (bipolar)count
-                            : at;
+        bipolar start = at < stop && want < stop - at ? stop - want : at;
 
         if (start != from)
                 system_seek(text_input.handle, start, FILE_SEEK_SET);
@@ -8410,7 +8407,10 @@ static inline INLINE bool tail_input(positive count, bool by_bytes, bool marked)
                         read through: tail -c +N of a two-terabyte disk's
                         last kilobyte ran out its time reading from byte 0.
                 */
-                if (by_bytes && count > 1 && !head_tail_pipe_presumed &&
+                // An N - 1 past the largest offset reached the kernel as
+                // a negative one and went backwards; GNU reads through.
+                if (by_bytes && count > 1 && count - 1 <= (positive)bipolar_max &&
+                    !head_tail_pipe_presumed &&
                     text_input.position == text_input.filled &&
                     system_seek(text_input.handle, count - 1, FILE_SEEK_CUR) >= 0)
                 {
