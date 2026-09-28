@@ -10091,6 +10091,13 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
         exec_compound_kept = false;
 }
 
+static fn shell_local_written(writer write, string_address name,
+                              positive length, b32 filter)
+{
+        if (local_depth && local_find(name, local_from[local_depth - 1]))
+                shell_declare_print_one(write, name, length, filter);
+}
+
 COLD fn shell_local(writer write, string_address input)
 {
         shell_declare_state state = {1};
@@ -10132,6 +10139,45 @@ COLD fn shell_local(writer write, string_address input)
 
         if (!shell_declare_options(address_of state))
                 return;
+
+        //      With no names local lists this function's own variables,
+        //      sorted, as declare -p writes them; -p with names prints
+        //      those of them that are this function's.
+        if (state.index >= shell_argc)
+        {
+                //      bash keeps `local -` as a variable named -, which
+                //      sorts first and lists as itself.
+                if (local_depth <= SHELL_LOCAL_OPTIONS_MAX &&
+                    local_options_kept[local_depth - 1])
+                        write("local -\n", 8);
+                return shell_answer(shell_inventory_sorted(
+                                        write, DECLARE_PRINT,
+                                        shell_local_written, false, false)
+                                        ? 0
+                                        : 1);
+        }
+        if (state.set & DECLARE_PRINT)
+        {
+                bool failed = false;
+
+                for (; state.index < shell_argc; state.index++)
+                {
+                        string_address name = shell_argv[state.index];
+                        positive length = string_length(name);
+
+                        if (!shell_valid_name(name, length) ||
+                            !local_find(name, local_from[local_depth - 1]) ||
+                            !shell_declare_print_one(write, name, length,
+                                                     state.set))
+                        {
+                                shell_diagnostic_where();
+                                string_format(log_error,
+                                              "local: %s: not found\n", name);
+                                failed = true;
+                        }
+                }
+                return shell_answer(failed ? 1 : 0);
+        }
 
         //      A lone "-" is a name to the walk and an instruction to Bash:
         //      keep the option letters as they are now and put them back

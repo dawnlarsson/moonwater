@@ -14879,6 +14879,18 @@ def shell_lang_compound_order(rng):
         ("command", "stdin", "file"))
 
 
+#       local with no names lists the function's own variables, sorted, as
+#       declare -p writes them, and local -p NAME prints NAME or says it is
+#       not found; these printed nothing and answered 0.
+def shell_lang_local_listing(rng):
+    body = rng.choice(("local", "local -p", "local -r", "local -p b", "local -p zz", "local -p b zz a",
+                       "local -; local", "local -i"))
+    decls = rng.choice(("local b=1 a=2 c; local -a arr=(1); local -i n=3", "local z", "", "local -x e=1 d='x y'"))
+    return ("local-listing", shell_BASH, shell_program(
+        "b=g", "f() { " + (decls + "; " if decls else "") + body + "; echo \"st=$?\"; }", "f", "local; echo \"out=$?\"",
+        'echo "end=$?"'), ("command", "stdin", "file"))
+
+
 #       A readonly assignment outside posix mode drops the rest of the line
 #       the reader was on: eval answers 1 and a sourced file goes on at its
 #       next line, where a function's caller still loses its whole line.
@@ -17848,6 +17860,7 @@ SHELL_FAMILIES = (
     shell_lang_list_null_tests,
     shell_lang_printf_quote_time,
     shell_lang_compound_order,
+    shell_lang_local_listing,
     shell_lang_readonly_discard_scope,
     shell_lang_readonly_subshell_status,
     shell_lang_prompt_expansion,
