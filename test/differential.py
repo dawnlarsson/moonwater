@@ -7863,6 +7863,9 @@ FILES_UTILITIES = (
                    ("-rT", "dir/sub", "aimed"), ("-u", "a.txt", "b.txt"), ("-u", "b.txt", "a.txt"), ("-r", "unreadable", "dir", "copied"),
                    ("--parents", "dir/inside", "hollow"), ("--parents", "dir/sub/deep", "hollow"), ("--parents", "-r", "dir/sub", "hollow"),
                    ("-r", "dir/.", "hollow"), ("-r", "loop", "copied"), ("-rL", "loop", "copied"), ("-r", "/dev/null", "made"),
+                   #   --copy-contents reads a special file as a regular one
+                   #   under -R, named or met in the walk, and makes a file.
+                   ("-R", "--copy-contents", "/dev/null", "made"), ("-R", "--copy-contents", "/dev/null", "dir"),
                    ("--attributes-only", "a.txt", "copy"), ("--attributes-only", "a.txt", "b.txt"), ("-b", "a.txt", "b.txt"),
                    ("-b", "-S", ".bak", "a.txt", "b.txt"), ("--backup=numbered", "a.txt", "b.txt"), ("--backup=numbered", "a.txt", "b.txt~"),
                    ("--remove-destination", "a.txt", "link"), ("-f", "a.txt", "link"), ("-d", "link", "kept"), ("-r", "dir", "copied", "extra"),

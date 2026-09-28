@@ -33671,7 +33671,8 @@ static bool file_copy_one(bipolar source_directory, string_address source,
             destination_entry_exists &&
             (destination_entry.mode & MODE_FORMAT) != MODE_DIRECTORY &&
             (kind == MODE_LINK ? !cp_force
-                               : cp_recursive && kind != MODE_DIRECTORY &&
+                               : cp_recursive && !cp_copy_contents &&
+                                     kind != MODE_DIRECTORY &&
                                      kind != MODE_FILE))
                 return string_report(
                     log_error, false, "cp: cannot create %s %w: %s\n",
@@ -33681,8 +33682,9 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                     writer_shell_quoted_name, destination_shown,
                     file_reason(-ERROR_EXISTS));
 
-        if (kind == MODE_LINK || ((moving || cp_recursive) &&
-                                  kind != MODE_DIRECTORY && kind != MODE_FILE))
+        if (kind == MODE_LINK ||
+            ((moving || (cp_recursive && !cp_copy_contents)) &&
+             kind != MODE_DIRECTORY && kind != MODE_FILE))
         {
                 p8 target[FILE_PATH_MAX];
                 bipolar pinned = known_source_handle >= 0
@@ -34498,7 +34500,8 @@ static fn cp_pair(string_address source, string_address destination)
                 ? FILE_READ | O_DIRECTORY
                 : kind == MODE_LINK || cp_hard || cp_symbolic ||
                           cp_attributes_only ||
-                          (cp_recursive && kind != MODE_FILE)
+                          (cp_recursive && !cp_copy_contents &&
+                           kind != MODE_FILE)
                       ? O_PATH
                       : FILE_READ | (kind == MODE_FILE ? O_NONBLOCK : 0);
         if (!follow)
