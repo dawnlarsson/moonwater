@@ -7909,7 +7909,35 @@ FILES_UTILITIES = (
                    ("--attributes-only", "a.txt", "copy"), ("--attributes-only", "a.txt", "b.txt"), ("-b", "a.txt", "b.txt"),
                    ("-b", "-S", ".bak", "a.txt", "b.txt"), ("--backup=numbered", "a.txt", "b.txt"), ("--backup=numbered", "a.txt", "b.txt~"),
                    ("--remove-destination", "a.txt", "link"), ("-f", "a.txt", "link"), ("-d", "link", "kept"), ("-r", "dir", "copied", "extra"),
-                   ("-s", "a.txt", "./made"), ("-s", "a.txt", "dir/../made"), ("-sv", "a.txt", "dir/made"))
+                   ("-s", "a.txt", "./made"), ("-s", "a.txt", "dir/../made"), ("-sv", "a.txt", "dir/made"),
+                   #   Options after the names, as getopt permutes them, and
+                   #   not under POSIXLY_CORRECT.
+                   ("a.txt", "copy", "-v"), ("a.txt", "b.txt", "-t", "dir"), ("a.txt", "--", "-v"),
+                   {"argv": ("a.txt", "copy", "-v"), "env": (("POSIXLY_CORRECT", "1"),)},
+                   #   Each attribute --preserve names, and only it: the mode
+                   #   or the links keep no times; --no-preserve=mode is the
+                   #   default mode, in the order the options came.
+                   ("--preserve=mode", "exe", "copy"), ("--preserve=links", "a.txt", "copy"), ("--preserve=time", "a.txt", "copy"),
+                   ("--preserve=owner,mode", "exe", "copy"), ("--no-preserve=mode", "exe", "copy"), ("-p", "--no-preserve=mode", "exe", "copy"),
+                   ("--no-preserve=mode", "-p", "exe", "copy"), ("-a", "--no-preserve=time", "dir", "copied"),
+                   ("--no-preserve=mode", "-r", "dir", "copied"), ("--preserve=mode", "-r", "shut", "copied"),
+                   #   --preserve=links, spelled short, across operands and
+                   #   through links followed on the line.
+                   ("--preserve=link", "b.txt", "twin", "hollow"), ("-d", "b.txt", "twin", "hollow"),
+                   ("--preserve=links", "-H", "a.txt", "link", "hollow"), ("--preserve=li", "-L", "a.txt", "link", "hollow"),
+                   ("--preserve=links", "-u", "b.txt", "twin", "dir"),
+                   #   --parents: each parent made from its source directory,
+                   #   said under -v, given its attributes under -p, and a
+                   #   source parent that is no directory refused first.
+                   ("--parents", "-p", "dir/sub/deep", "hollow"), ("--parents", "-v", "dir/sub/deep", "hollow"),
+                   ("--parents", "a.txt/x", "hollow"), ("--parents", "--no-preserve=mode", "dir/inside", "hollow"),
+                   ("--parents", "-a", "dir/sub/deep", "dir/inside", "hollow"),
+                   #   A destination that cannot be written is asked about
+                   #   by its mode.
+                   ("-i", "a.txt", "unreadable"), ("-if", "a.txt", "unreadable"), ("-i", "--remove-destination", "a.txt", "unreadable"),
+                   #   --debug says how each file's data went.
+                   ("--debug", "--sparse=never", "a.txt", "copy"), ("--debug", "--reflink=never", "empty", "copy"),
+                   ("--debug", "--sparse=always", "binary", "copy"), ("--debug", "-r", "dir", "copied"))
             #   A directory copied into itself is made there before the
             #   reference refuses it, and a tree linked with -s is refused
             #   in the order the reference reads the directory.

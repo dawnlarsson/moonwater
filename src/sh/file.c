@@ -6666,6 +6666,14 @@ static p8 address_to file_transfer_buffer(void)
 #define file_transfer_prepare() (true)
 #endif
 
+/* What cp --debug says of one copy, in GNU's words: whether the kernel
+   copied (copy offload) and how holes were found. Set by the copy below,
+   read by file_copy_debug_said; a pool job never reaches it, because
+   --debug copies name by name. */
+static p8 file_debug_offload;
+static p8 file_debug_sparse;
+static bool file_debug;
+
 static bool file_copy_range_fallback(bipolar result)
 {
         return result == -ERROR_NOT_PERMITTED || result == -ERROR_CROSS_DEVICE ||
@@ -6708,6 +6716,8 @@ static inline bool file_copy_stream(
                                                    offsets ? offsets + 1 : null, ask);
                         if (copied > 0)
                         {
+                                if (!stage)
+                                        file_debug_offload = 'y';
                                 if (stage && offsets)
                                         offsets[1] += (positive)copied;
                                 if (bounded)
@@ -6728,6 +6738,8 @@ static inline bool file_copy_stream(
                                 return false;
                         }
 
+                        if (!stage)
+                                file_debug_offload = 'u';
                         *enabled = false;
                 }
         }
@@ -6825,6 +6837,8 @@ static bipolar file_copy_sparse(bipolar in, bipolar out,
 
         bipolar data = system_seek(in, 0, 3);
 
+        if (data >= 0 || data == -ERROR_NO_DEVICE_ADDRESS)
+                file_debug_sparse = 'S';
         if (data == -ERROR_NO_DEVICE_ADDRESS)
                 return system_truncate_handle(out, facts->size) < 0 ? -1 : 1;
         if (data < 0)
@@ -6901,9 +6915,13 @@ static bipolar file_open_same(bipolar directory, string_address name,
 
 /* facts must have been read from in itself, so the extent probe and the
    stream agree on one length. */
+static fn file_copy_debug_said(void);
+
 static bool file_copy_handles_known(bipolar in, bipolar out,
                                     file_facts address_to facts)
 {
+        file_debug_offload = '?';
+        file_debug_sparse = 'n';
         bipolar sparse = file_copy_sparse(in, out, facts);
         bool complete = sparse > 0;
 
@@ -6915,6 +6933,9 @@ static bool file_copy_handles_known(bipolar in, bipolar out,
                                             address_of range_copy,
                                             address_of send_copy, null, null);
         }
+        //      --debug copies name by name, so no pool job gets here with it.
+        if (file_debug)
+                file_copy_debug_said();
         return complete;
 }
 
@@ -32474,6 +32495,34 @@ static bipolar file_stage_claim_at(
    skipped, as GNU 9.11's copy.c prints "skipped" under x->debug alone. */
 static bool file_debug;
 
+/* GNU's emit_debug after a regular file's data: --sparse=always looks for
+   zeros and so never offloads, --reflink=never allows no offload, and no
+   clone is ever made here. */
+static fn file_copy_debug_said(void)
+{
+        p8 offload = file_debug_offload;
+        p8 sparse = file_debug_sparse;
+
+        //      --sparse=never takes the reflink away with the holes.
+        bool no_reflink = cp_reflink_policy == 'n' || cp_sparse_policy == 'n';
+
+        if (cp_sparse_policy == 'A' || no_reflink)
+                offload = 'a';
+        if (cp_sparse_policy == 'A')
+                sparse = sparse == 'S' ? 'B' : 'z';
+        string_format(log, "copy offload: %s, reflink: %s, sparse detection: %s\n",
+                      offload == 'y'   ? (string_address) "yes"
+                      : offload == 'u' ? (string_address) "unsupported"
+                      : offload == 'a' ? (string_address) "avoided"
+                                       : (string_address) "unknown",
+                      no_reflink ? (string_address) "no"
+                                 : (string_address) "unsupported",
+                      sparse == 'S'   ? (string_address) "SEEK_HOLE"
+                      : sparse == 'B' ? (string_address) "SEEK_HOLE + zeros"
+                      : sparse == 'z' ? (string_address) "zeros"
+                                      : (string_address) "no");
+}
+
 static bool file_overwrite_allowed(string_address program, string_address shown,
                                    bool exists, bool never, bool newer, bool ask,
                                    bool fail_skip, bool loud,
@@ -34673,7 +34722,8 @@ static bool file_copy_one(bipolar source_directory, string_address source,
 
         /*      A directory cp made in its own stage is filled in batches; the
                 ones below it, and every other kind of copy, name by name. */
-        if (staged && !moving && !cp_hard && !cp_symbolic && !cp_attributes_only)
+        if (staged && !moving && !cp_hard && !cp_symbolic && !cp_attributes_only &&
+            !file_debug)
         {
                 complete = cp_tree_batched(walk.handle, source_shown,
                                            destination_handle, destination_shown,
@@ -34694,7 +34744,8 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         if (moving)
                 listed = file_listing_by_inode(address_of walk,
                                                address_of listed_count);
-        while (!(staged && !moving && !cp_hard && !cp_symbolic && !cp_attributes_only) &&
+        while (!(staged && !moving && !cp_hard && !cp_symbolic && !cp_attributes_only &&
+                 !file_debug) &&
                (child = listed ? (listed_at < listed_count ? listed[listed_at++] : null)
                                : file_walk_next(address_of walk)))
         {
