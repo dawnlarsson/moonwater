@@ -247,6 +247,17 @@ cover('direct_benchmark', 'test/checks.c#BENCH_offsets', 'memory_offsets_outside
       'byte-loop/assembly timing over the offsets of every byte outside printable ASCII')
 cover('direct_benchmark', 'test/checks.c#BENCH_offsets', 'memory_offsets_in_set',
       'byte-loop/assembly timing over the offsets of the bytes a table marks')
+cover('direct_benchmark', 'test/checks.c#BENCH_record_scans', 'memory_offsets_fields_blank',
+      "cut -w's two string_span_max a field against one pass a line, over lines of text.txt's shape")
+cover('benchmark_context', 'test/checks.c#BENCH_record_scans', 'memory_offsets_fields',
+      'the table entry of the same body, which the blank entry times',
+      anchors={'memory_offsets_fields': 'memory_offsets_fields_blank'})
+cover('direct_benchmark', 'test/checks.c#BENCH_record_scans', 'memory_nth_of',
+      "split -l's memory_first_of a line against one call a piece, at 1, 10 and 1000 lines")
+cover('direct_benchmark', 'test/checks.c#BENCH_record_scans', 'memory_nth_last_of',
+      "tail's memory_last_of a line against one call, at 1, 10 and 1000 lines")
+cover('direct_benchmark', 'test/checks.c#BENCH_record_scans', 'memory_last_of_either',
+      "fold -s's two memory_last_of over a window against one call, at widths 20, 80 and 200")
 cover('benchmark_context', 'test/checks.c#BENCH_offsets', 'memory_offsets_between',
       'the inside half of the same body, entered with the complement off',
       anchors={'memory_offsets_between': 'memory_offsets_outside'})
@@ -263,6 +274,12 @@ memory_search_prepared_core memory_search_ascii_case_prepared_core
 ''', 'private cores reached by the directly timed prepared searches',
       {'memory_search_prepared_core': 'memory_search_prepared',
        'memory_search_ascii_case_prepared_core': 'memory_search_ascii_case_prepared'})
+cover('benchmark_context', 'test/checks.c#BENCH_record_scans',
+      'memory_offsets_fields_x64 memory_offsets_fields_arm64 memory_offsets_fields_rv',
+      'private body both field entries tail-jump into, timed through them',
+      {'memory_offsets_fields_x64': 'memory_offsets_fields_blank',
+       'memory_offsets_fields_arm64': 'memory_offsets_fields_blank',
+       'memory_offsets_fields_rv': 'memory_offsets_fields_blank'})
 cover('benchmark_context', 'test/checks.c#BENCH_offsets', 'memory_offsets_range_x64',
       'private body both range entries tail-jump into, timed through them',
       {'memory_offsets_range_x64': 'memory_offsets_outside'})

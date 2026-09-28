@@ -265,6 +265,15 @@ cover('folds_already', 'size', 'memory_offsets_outside',
 cover('folds_already', 'size', 'memory_offsets_of_either',
       'cut hands it what is left of a read; no reachable call site passes a '
       'literal size')
+cover('folds_already', 'size', 'memory_offsets_fields memory_offsets_fields_blank',
+      'cut -w hands it the line it just read; no reachable call site passes a '
+      'literal size')
+cover('folds_already', 'size', 'memory_nth_of memory_nth_last_of',
+      'split hands it what is left of a read and a count from the command '
+      'line; no reachable call site passes a literal size')
+cover('folds_already', 'size', 'memory_last_of_either',
+      'fold hands it the window its width leaves; no reachable call site '
+      'passes a literal size')
 cover('folds_already', 'size', 'memory_squeeze_bytes',
       'tr hands it what its read and the delete or translate before it left; '
       'no reachable call site passes a literal size, and the table is built '
@@ -688,6 +697,7 @@ bipolar_into_core buffered_write_core path_split_core positive_digits_core
 positive_into_core string_to_number_core writer_field_core
 memory_search_prepared_core memory_search_ascii_case_prepared_core
 memory_span_byte_wide memory_offsets_range_x64 memory_utf8_span_wide
+memory_offsets_fields_x64 memory_offsets_fields_arm64 memory_offsets_fields_rv
 ''', 'a private core with no declaration, so C cannot name it and no call '
      'site can hand it a literal; its wrappers carry the classification')
 cover('nothing_to_fold', None, '''

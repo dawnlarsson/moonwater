@@ -13944,6 +13944,8 @@ fn check_span_byte()
         X(memory_fill_32) X(memory_fill_u32) X(memory_copy_until)             \
         X(memory_offsets_of_either) X(memory_offsets_between)                 \
         X(memory_offsets_outside) X(memory_escape_index)                      \
+        X(memory_offsets_fields_blank) X(memory_nth_of)                       \
+        X(memory_nth_last_of) X(memory_last_of_either)                        \
         X(memory_into_escaped) X(memory_search_prepare)                       \
         X(memory_count_records_with_prepared) X(memory_count_words)           \
         X(string_first_of) X(string_first_of_or_end) X(string_first_of_max)   \
@@ -14161,6 +14163,7 @@ typedef positive (*dirty_7)(positive, positive, positive, positive, positive,
                             positive, positive);
 typedef positive2 (*dirty_pair_2)(positive, positive);
 typedef positive2 (*dirty_pair_3)(positive, positive, positive);
+typedef positive2 (*dirty_pair_4)(positive, positive, positive, positive);
 typedef positive2 (*dirty_pair_5)(positive, positive, positive, positive,
                                   positive);
 #define DIRTY(arity, name) \
@@ -14507,6 +14510,67 @@ static fn dirty_offsets_one(positive size, positive residue, positive turn)
 }
 
 static fn dirty_offsets(void) { dirty_plane(dirty_offsets_one, 4000); }
+
+//      Field edges, the n-th of a byte from either end, and the last of two.
+static fn dirty_record_scans_one(positive size, positive residue, positive turn)
+{
+        static const positive limits[] = {1, 2, 7, 64, 2000};
+        p8 address_to at = dirty_in + 64 + residue;
+        p8 value = dirty_values[turn % array_count(dirty_values)];
+        p8 second = dirty_values[(turn / 3 + 5) % array_count(dirty_values)];
+        positive limit = limits[(turn / 7) % array_count(limits)];
+        positive n = 1 + turn % 5;
+        positive where = size << 16 | residue << 8 | limit;
+
+        for (positive i = 0; i < size + 64; i++)
+        {
+                positive pick = dirty_random();
+
+                at[i] = (pick & 7) == 0   ? value
+                        : (pick & 7) == 1 ? ' '
+                        : (pick & 7) == 2 ? '\t'
+                        : (pick & 7) == 3 ? second
+                                          : (p8)(pick >> 8);
+        }
+        if (DIRTY_HAS(memory_offsets_fields_blank))
+        {
+                positive clean = DIRTY_ROUTINE(memory_offsets_fields_blank)(
+                    dirty_at_one, at, size, C8(value), limit);
+                positive answer = DIRTY(5, memory_offsets_fields_blank)(
+                    P(dirty_at_two), P(at), size, D8(value), limit);
+                AGREE(memory_offsets_fields_blank, clean, answer, where);
+                AGREE(memory_offsets_fields_blank, 0,
+                      dirty_differ((p8 address_to)dirty_at_one,
+                                   (p8 address_to)dirty_at_two,
+                                   (clean < answer ? clean : answer) * 8),
+                      where);
+        }
+        if (DIRTY_HAS(memory_nth_of))
+        {
+                positive2 clean = DIRTY_ROUTINE(memory_nth_of)(at, CS8(value), size, n);
+                positive2 answer = DIRTY(pair_4, memory_nth_of)(P(at), D8(value), size, n);
+                AGREE(memory_nth_of, clean.x, answer.x, where);
+                AGREE(memory_nth_of, clean.y, answer.y, where);
+        }
+        if (DIRTY_HAS(memory_nth_last_of))
+        {
+                positive2 clean = DIRTY_ROUTINE(memory_nth_last_of)(at, CS8(value), size, n);
+                positive2 answer = DIRTY(pair_4, memory_nth_last_of)(P(at), D8(value), size, n);
+                AGREE(memory_nth_last_of, clean.x, answer.x, where);
+                AGREE(memory_nth_last_of, clean.y, answer.y, where);
+        }
+        if (DIRTY_HAS(memory_last_of_either))
+        {
+                address_any clean = DIRTY_ROUTINE(memory_last_of_either)(
+                    at, CS8(value), CS8B(second), size);
+                positive answer = DIRTY(4, memory_last_of_either)(
+                    P(at), D8(value), D8(second), size);
+                AGREE(memory_last_of_either, dirty_offset(clean, at),
+                      dirty_offset((address_any)answer, at), where);
+        }
+}
+
+static fn dirty_record_scans(void) { dirty_plane(dirty_record_scans_one, 4000); }
 
 /*
         The escapes: every policy, the hex categories 0..63 and JSON's 64,
@@ -15505,6 +15569,7 @@ fn check_dirty_arguments(void)
         dirty_tiers(dirty_hunts);
         dirty_tiers(dirty_fill);
         dirty_tiers(dirty_offsets);
+        dirty_tiers(dirty_record_scans);
         dirty_tiers(dirty_escape);
         dirty_tiers(dirty_words);
         dirty_tiers(dirty_records);
@@ -15552,6 +15617,230 @@ fn check_dirty_arguments(void)
         string_format(log, "  NOTE narrow arguments: %p answers compared, "
                            "%p routines not in this library\n",
                       compared, absent);
+}
+
+/*
+        The record scans against byte loops: memory_offsets_fields and
+        _blank at every size to 200 and every residue of sixty four, longer
+        sizes at a few, limits that stop inside a vector and resume from
+        where they said, and separators dense, sparse, absent and total;
+        memory_nth_of, memory_nth_last_of and memory_last_of_either over the
+        same sizes and residues with the value at three densities and n on
+        either side of the count. On x86_64 once per body: AVX-512 with
+        VBMI, without it, and SSE2.
+*/
+static positive record_fields_reference(p32 address_to out, const p8 address_to at,
+                                        positive size, const b8 address_to separators)
+{
+        positive count = 0;
+
+        for (positive i = 0; i < size;)
+        {
+                if (separators[at[i]])
+                {
+                        i++;
+                        continue;
+                }
+                positive start = i;
+
+                while (i < size && !separators[at[i]])
+                        i++;
+                out[2 * count] = (p32)start;
+                out[2 * count + 1] = (p32)i;
+                count++;
+        }
+        return count;
+}
+
+fn check_record_scans()
+{
+        static const positive sizes[] = {255, 256, 257, 511, 1000, 4095, 4096};
+        static p32 got[2 * 4200 + 8], want[2 * 4200 + 8];
+        static p8 block[4096 + 256];
+        static b8 table[256];
+        static const p8 extras[] = {' ', '\n', 0, 0xff, 'a'};
+        static const positive limits[] = {1, 2, 3, 7, 31, 32, 33, 64, 65, 5000};
+#if X64
+        p8 avx512 = cpu_has_avx512, vbmi = cpu_has_avx512_vbmi;
+        positive tiers = 3;
+#else
+        positive tiers = 1;
+#endif
+        for (positive tier = 0; tier < tiers; tier++)
+        {
+#if X64
+                cpu_has_avx512 = tier < 2 ? avx512 : 0;
+                cpu_has_avx512_vbmi = tier == 0 ? vbmi : 0;
+#endif
+                for (positive turn = 0; turn < 12; turn++)
+                {
+                        // What the block is made of this turn: separators
+                        // dense, sparse, absent, total or random bytes.
+                        p8 extra = extras[turn % array_count(extras)];
+                        positive kind = turn % 6;
+
+                        for (positive i = 0; i < sizeof(block); i++)
+                        {
+                                positive r = next();
+                                p8 b = (p8)('a' + r % 26);
+                                positive pick = (r >> 8) & 15;
+
+                                if (kind == 0 && pick < 6)
+                                        b = pick < 2 ? ' ' : pick < 4 ? '\t' : extra;
+                                else if (kind == 1 && pick == 0)
+                                        b = (r >> 12) & 1 ? ' ' : extra;
+                                else if (kind == 3)
+                                        b = pick < 8 ? ' ' : '\t';
+                                else if (kind == 4)
+                                        b = (p8)(r >> 16);
+                                else if (kind == 5 && pick < 3)
+                                        b = 0;
+                                block[i] = b;
+                        }
+                        for (positive i = 0; i < 256; i++)
+                                table[i] = i == ' ' || i == '\t' || i == extra;
+                        // Every size to 200 at every residue, then longer ones.
+                        for (positive s = 0; s < 201 + array_count(sizes); s++)
+                                for (positive residue = 0; residue < 64;
+                                     residue += s < 201 ? 1 : 13)
+                                {
+                                        positive size = s < 201 ? s : sizes[s - 201];
+                                        const p8 address_to at = block + residue;
+                                        positive count = record_fields_reference(want, at, size, table);
+                                        positive limit = limits[(s + residue + turn) % array_count(limits)];
+
+                                        for (positive form = 0; form < 2; form++)
+                                        {
+                                                positive have = 0, from = 0;
+                                                bool ok = true;
+
+                                                for (;;)
+                                                {
+                                                        positive answer = form
+                                                            ? (memory_offsets_fields)(got, at + from, size - from, table, limit)
+                                                            : (memory_offsets_fields_blank)(got, at + from, size - from, extra, limit);
+
+                                                        if (answer > limit)
+                                                        {
+                                                                ok = false;
+                                                                break;
+                                                        }
+                                                        for (positive i = 0; i < 2 * answer; i++)
+                                                                if (2 * have + i >= 2 * count ||
+                                                                    got[i] + from != want[2 * have + i])
+                                                                        ok = false;
+                                                        have += answer;
+                                                        if (answer < limit || !ok)
+                                                                break;
+                                                        from += got[2 * answer - 1];
+                                                }
+                                                if (!ok || have != count)
+                                                        string_format(log, "  record fields: form %p tier %p turn %p size %p residue %p limit %p\n",
+                                                                      form, tier, turn, size, residue, limit);
+                                                same(form ? "memory_offsets_fields" : "memory_offsets_fields_blank",
+                                                     "fields", ok, 1);
+                                                same(form ? "memory_offsets_fields" : "memory_offsets_fields_blank",
+                                                     "count", have, count);
+                                        }
+                                }
+                }
+                // The table form with sets no three bytes spell.
+                for (positive t = 0; t < 3; t++)
+                {
+                        for (positive i = 0; i < 256; i++)
+                                table[i] = t == 0 ? 0 : t == 1 ? (b8)(i < 33 || i > 126) : (b8)(next() & 1);
+                        for (positive i = 0; i < sizeof(block); i++)
+                                block[i] = (p8)next();
+                        for (positive size = 0; size < 300; size += 1 + size / 16)
+                                for (positive residue = 0; residue < 64; residue += 7)
+                                {
+                                        const p8 address_to at = block + residue;
+                                        positive count = record_fields_reference(want, at, size, table);
+                                        positive answer = (memory_offsets_fields)(got, at, size, table, 5000);
+                                        bool ok = answer == count;
+
+                                        for (positive i = 0; ok && i < 2 * count; i++)
+                                                ok = got[i] == want[i];
+                                        same("memory_offsets_fields", "a table set", ok, 1);
+                                }
+                }
+                // n-th from either end, and the last of two.
+                for (positive turn = 0; turn < 6; turn++)
+                {
+                        p8 value = extras[turn % array_count(extras)];
+                        p8 second = (p8)(value ^ 0x41);
+                        positive density = turn % 3 == 0 ? 2 : turn % 3 == 1 ? 8 : 64;
+
+                        for (positive i = 0; i < sizeof(block); i++)
+                        {
+                                positive r = next();
+                                p8 b = (p8)r;
+
+                                if (b == value || b == second)
+                                        b ^= 0x10;
+                                if ((r >> 16) % density == 0)
+                                        b = (r >> 24) & 1 ? value : second;
+                                block[i] = b;
+                        }
+                        for (positive s = 0; s < 201 + array_count(sizes); s++)
+                                for (positive residue = 0; residue < 64;
+                                     residue += s < 201 ? 1 : 13)
+                                {
+                                        positive size = s < 201 ? s : sizes[s - 201];
+                                        const p8 address_to at = block + residue;
+                                        positive count = 0;
+                                        const p8 address_to last = null;
+
+                                        for (positive i = 0; i < size; i++)
+                                        {
+                                                count += at[i] == value;
+                                                if (at[i] == value || at[i] == second)
+                                                        last = at + i;
+                                        }
+                                        same("memory_last_of_either", "address",
+                                             (positive)(memory_last_of_either)((address_any)at, (b8)value, (b8)second, size),
+                                             (positive)last);
+
+                                        positive ns[] = {0, 1, 2, 3, count ? count - 1 : 0, count, count + 1,
+                                                         1 + next() % (count + 1), positive_max};
+                                        for (positive k = 0; k < array_count(ns); k++)
+                                        {
+                                                positive n = ns[k];
+                                                positive ahead = n ? size : 0, seen = 0;
+                                                positive back = n ? 0 : size, seen_back = 0;
+
+                                                for (positive i = 0; n && i < size; i++)
+                                                        if (at[i] == value && ++seen == n)
+                                                        {
+                                                                ahead = i + 1;
+                                                                break;
+                                                        }
+                                                for (positive i = size; n && i-- > 0;)
+                                                        if (at[i] == value && ++seen_back == n)
+                                                        {
+                                                                back = i;
+                                                                break;
+                                                        }
+                                                positive2 front = (memory_nth_of)((address_any)at, (b8)value, size, n);
+                                                positive2 rear = (memory_nth_last_of)((address_any)at, (b8)value, size, n);
+
+                                                if (front.x != ahead || front.y != seen ||
+                                                    rear.x != back || rear.y != seen_back)
+                                                        string_format(log, "  nth: tier %p turn %p size %p residue %p n %p: %p/%p want %p/%p, last %p/%p want %p/%p\n",
+                                                                      tier, turn, size, residue, n, front.x, front.y, ahead, seen,
+                                                                      rear.x, rear.y, back, seen_back);
+                                                same("memory_nth_of", "offset", front.x, ahead);
+                                                same("memory_nth_of", "seen", front.y, seen);
+                                                same("memory_nth_last_of", "offset", rear.x, back);
+                                                same("memory_nth_last_of", "seen", rear.y, seen_back);
+                                        }
+                                }
+                }
+        }
+#if X64
+        cpu_has_avx512 = avx512;
+        cpu_has_avx512_vbmi = vbmi;
+#endif
 }
 
 /*
@@ -25024,6 +25313,7 @@ b32 main()
         check_span_byte();
         check_dirty_arguments();
         check_offsets_range();
+        check_record_scans();
         check_checksums();
         check_copy_match();
         check_move();
@@ -93102,6 +93392,280 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_offsets */
+
+#ifdef BENCH_record_scans
+/* The record scans at their callers' shapes, against the calls they
+   replace: cut -w's two string_span_max a field against one
+   memory_offsets_fields_blank a line, over lines of text.txt's shape (39
+   bytes, fields of about six letters, blank runs of about four); split
+   -l's memory_first_of a line against memory_nth_of, tail's memory_last_of
+   a line against memory_nth_last_of; and fold -s's two memory_last_of over
+   one window against memory_last_of_either. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define NOT_INLINED __attribute__((noinline, noclone))
+#define TRIES 9
+#define BLOCK (1u << 20)
+#define LINES (BLOCK / 16)
+
+static p8 text[BLOCK + 64];
+static p32 line_start[LINES + 1];
+static positive lines;
+static p32 edges[2 * 256];
+static volatile positive sink;
+static b8 inside[256];
+static b8 blanks[256];
+
+// Lines of words of one to eleven letters, blank runs of one to seven
+// spaces and tabs, a line ending after thirty to fifty bytes.
+static fn prepare_text(void)
+{
+        p64 seed = 0x9e3779b97f4a7c15ull;
+        positive at = 0, line = 0;
+
+        lines = 0;
+        while (at < BLOCK - 128)
+        {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                if (at - line > 30 + (seed >> 40) % 20)
+                {
+                        text[at++] = '\n';
+                        line_start[++lines] = (p32)at;
+                        line = at;
+                        continue;
+                }
+                positive word = 1 + seed % 11, blank = 1 + (seed >> 8) % 7;
+
+                for (positive i = 0; i < word; i++)
+                        text[at++] = (p8)('a' + (seed >> (16 + i)) % 26);
+                for (positive i = 0; i < blank; i++)
+                        text[at++] = (seed >> (32 + i)) & 3 ? ' ' : '\t';
+        }
+        for (positive i = 0; i < 256; i++)
+        {
+                blanks[i] = i == ' ' || i == '\t';
+                inside[i] = !blanks[i];
+        }
+}
+
+// cut -w's walk before: a span to learn whether the line splits, then a
+// span over each field and one over the blanks after it.
+NOT_INLINED static positive former_fields(const p8 address_to line, positive length)
+{
+        positive count = 0, at = 0;
+
+        if (string_span_max(line, length, inside) == length)
+                return 1;
+        while (at <= length)
+        {
+                positive from = at;
+
+                at += string_span_max(line + at, length - at, inside);
+                count += at - from;
+                if (at == length)
+                        break;
+                at++;
+                at += string_span_max(line + at, length - at, blanks);
+        }
+        return count;
+}
+
+NOT_INLINED static positive assembly_fields(const p8 address_to line, positive length)
+{
+        positive found = memory_offsets_fields_blank(edges, line, length, ' ', 256);
+        positive count = 0;
+
+        for (positive f = 0; f < found; f++)
+                count += edges[2 * f + 1] - edges[2 * f];
+        return count;
+}
+
+static p64 fields_run(bool assembly)
+{
+        p64 start = get_cpu_time();
+        positive total = 0;
+
+        for (positive l = 0; l < lines; l++)
+        {
+                const p8 address_to line = text + line_start[l];
+                positive length = line_start[l + 1] - line_start[l] - 1;
+
+                total += assembly ? assembly_fields(line, length) : former_fields(line, length);
+        }
+        sink += total;
+        return get_cpu_time() - start;
+}
+
+NOT_INLINED static positive former_nth(const p8 address_to block, positive size, positive n)
+{
+        const p8 address_to scan = block;
+
+        for (positive i = 0; i < n; i++)
+        {
+                const p8 address_to found = memory_first_of(scan, '\n', size - (positive)(scan - block));
+
+                if (!found)
+                        return size;
+                scan = found + 1;
+        }
+        return (positive)(scan - block);
+}
+
+NOT_INLINED static positive former_nth_last(const p8 address_to block, positive size, positive n)
+{
+        positive stop = size;
+
+        for (positive i = 0; i < n; i++)
+        {
+                const p8 address_to found = memory_last_of(block, '\n', stop);
+
+                if (!found)
+                        return 0;
+                stop = (positive)(found - block);
+        }
+        return stop;
+}
+
+static p64 nth_run(bool assembly, bool back, positive n)
+{
+        p64 start = get_cpu_time();
+        positive at = 0, total = 0;
+
+        // Pieces of n lines through the block, as split -l cuts it.
+        while (at < line_start[lines])
+        {
+                positive size = line_start[lines] - at;
+
+                if (back)
+                {
+                        positive window = n * 42 < size ? n * 42 : size;
+                        positive got = assembly ? memory_nth_last_of(text + at, '\n', window, n).x
+                                                : former_nth_last(text + at, window, n);
+                        total += got;
+                        at += window;
+                        continue;
+                }
+                positive got = assembly ? memory_nth_of(text + at, '\n', size, n).x
+                                        : former_nth(text + at, size, n);
+                total += got;
+                at += got ? got : size;
+        }
+        sink += total;
+        return get_cpu_time() - start;
+}
+
+NOT_INLINED static const p8 address_to former_either(const p8 address_to window, positive size)
+{
+        const p8 address_to space = memory_last_of(window, ' ', size);
+        const p8 address_to tab = memory_last_of(window, '\t', size);
+
+        return tab > space ? tab : space;
+}
+
+static p64 either_run(bool assembly, positive width)
+{
+        p64 start = get_cpu_time();
+        positive total = 0;
+
+        for (positive at = 0; at + width < BLOCK; at += width)
+                total += (positive)(assembly ? memory_last_of_either(text + at, ' ', '\t', width)
+                                             : former_either(text + at, width));
+        sink += total;
+        return get_cpu_time() - start;
+}
+
+static fn report_row(string_address name, positive address_to ratios, p64 best_c, p64 best_a,
+                     positive units, string_address unit)
+{
+        order(ratios, TRIES);
+        string_format(log, "  %s  median asm/C %p.%p%%  C %p ticks/%s x100, asm %p\n", name,
+                      ratios[TRIES / 2] / 100, ratios[TRIES / 2] % 100,
+                      (positive)(best_c * 100 / units), unit, (positive)(best_a * 100 / units));
+}
+
+b32 main(void)
+{
+        positive ratios[TRIES];
+        p64 best_c, best_a;
+
+        prepare_text();
+        for (positive l = 0; l < lines; l++)
+        {
+                const p8 address_to line = text + line_start[l];
+                positive length = line_start[l + 1] - line_start[l] - 1;
+
+                if (former_fields(line, length) != assembly_fields(line, length) &&
+                    former_fields(line, length) != 1)
+                {
+                        string_format(log, "record scans: fields disagree at line %p\n", l);
+                        log_flush();
+                        return 1;
+                }
+        }
+        string_format(log, "record scans, paired median of %p, %p lines of %p bytes\n",
+                      (positive)TRIES, lines, (positive)line_start[lines]);
+
+        best_c = best_a = ~0ull;
+        for (positive trial = 0; trial < TRIES; trial++)
+        {
+                p64 former = fields_run(false), assembly = fields_run(true);
+
+                best_c = former < best_c ? former : best_c;
+                best_a = assembly < best_a ? assembly : best_a;
+                ratios[trial] = (positive)(assembly * 10000 / (former ? former : 1));
+        }
+        report_row("cut -w fields of a line", ratios, best_c, best_a, lines, "line");
+
+        static const positive ns[] = {1, 10, 1000};
+        for (positive back = 0; back < 2; back++)
+                for (positive k = 0; k < array_count(ns); k++)
+                {
+                        if (memory_nth_of(text, '\n', BLOCK, ns[k]).x != former_nth(text, BLOCK, ns[k]) ||
+                            memory_nth_last_of(text, '\n', 5000, ns[k]).x != former_nth_last(text, 5000, ns[k]))
+                        {
+                                string_format(log, "record scans: nth disagrees at %p\n", ns[k]);
+                                log_flush();
+                                return 1;
+                        }
+                        best_c = best_a = ~0ull;
+                        for (positive trial = 0; trial < TRIES; trial++)
+                        {
+                                p64 former = nth_run(false, back, ns[k]),
+                                    assembly = nth_run(true, back, ns[k]);
+
+                                best_c = former < best_c ? former : best_c;
+                                best_a = assembly < best_a ? assembly : best_a;
+                                ratios[trial] = (positive)(assembly * 10000 / (former ? former : 1));
+                        }
+                        string_format(log, "  n = %p:", ns[k]);
+                        report_row(back ? "memory_nth_last_of" : "memory_nth_of", ratios, best_c, best_a,
+                                   line_start[lines] / 100, "100 B");
+                }
+
+        static const positive widths[] = {20, 80, 200};
+        for (positive k = 0; k < array_count(widths); k++)
+        {
+                best_c = best_a = ~0ull;
+                for (positive trial = 0; trial < TRIES; trial++)
+                {
+                        p64 former = either_run(false, widths[k]), assembly = either_run(true, widths[k]);
+
+                        best_c = former < best_c ? former : best_c;
+                        best_a = assembly < best_a ? assembly : best_a;
+                        ratios[trial] = (positive)(assembly * 10000 / (former ? former : 1));
+                }
+                string_format(log, "  window %p:", widths[k]);
+                report_row("memory_last_of_either", ratios, best_c, best_a, BLOCK / widths[k], "window");
+        }
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_record_scans */
 
 #ifdef BENCH_ascii_case
 /* ASCII-folded bounded comparison: scalar reference against library assembly. */

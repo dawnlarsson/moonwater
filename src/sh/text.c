@@ -18488,14 +18488,12 @@ static b32 text_fold()
                                         {
                                                 if (spaces)
                                                 {
-                                                        p8 address_to space = memory_last_of(
-                                                            line + at, ' ', run);
-                                                        p8 address_to tab = bytes
-                                                                                ? memory_last_of(line + at, '\t', run)
-                                                                                : null;
-
-                                                        if (tab > space)
-                                                                space = tab;
+                                                        // A tab is plain only
+                                                        // under -b; both are
+                                                        // asked in one pass.
+                                                        p8 address_to space = bytes
+                                                            ? memory_last_of_either(line + at, ' ', '\t', run)
+                                                            : memory_last_of(line + at, ' ', run);
 
                                                         if (space)
                                                                 gap = (positive)(space - line) + 1;
@@ -19543,6 +19541,77 @@ static bool cut_option_seen(p8 letter, string_address value)
         return true;
 }
 
+/*
+        cut -w over one line: its fields from one pass of
+        memory_offsets_fields_blank, where two string_span_max calls a field
+        were half the run. Blanks at the start part an empty first field
+        from the rest and blanks at the end an empty last one; a scan of
+        runs reports neither, so both are added here. A line of more fields
+        than the edges hold is asked again from the end of the last one.
+*/
+#define CUT_BLANK_FIELDS 256
+
+static p32 cut_blank_edges[2 * CUT_BLANK_FIELDS];
+
+static fn cut_blank_line(p8 address_to line, positive line_length, bool complement,
+                         bool only_delimited, string_address separator,
+                         positive separator_length)
+{
+        positive found = memory_offsets_fields_blank(cut_blank_edges, line, line_length,
+                                                     ' ', CUT_BLANK_FIELDS);
+        bool lead = line_length && byte_is_blank(line[0]);
+        bool trail = line_length && byte_is_blank(line[line_length - 1]);
+
+        // No blank anywhere: the line is one field, printed whole unless -s.
+        if (!lead && !trail && found <= 1)
+        {
+                if (!only_delimited)
+                {
+                        text_put(line, line_length);
+                        text_put_character(text_delimiter);
+                }
+                return;
+        }
+
+        positive which = 1;
+        positive base = 0;
+        bool wrote = false;
+
+        if (lead)
+        {
+                if (text_list_has(which) != complement)
+                        wrote = true;
+                which++;
+        }
+
+        for (;;)
+        {
+                for (positive f = 0; f < found; f++, which++)
+                {
+                        if (text_list_has(which) == complement)
+                                continue;
+                        if (wrote)
+                                text_put(separator, separator_length);
+                        text_put(line + base + cut_blank_edges[2 * f],
+                                 cut_blank_edges[2 * f + 1] - cut_blank_edges[2 * f]);
+                        wrote = true;
+                }
+
+                if (found < CUT_BLANK_FIELDS)
+                        break;
+
+                base += cut_blank_edges[2 * found - 1];
+                found = memory_offsets_fields_blank(cut_blank_edges, line + base,
+                                                    line_length - base, ' ',
+                                                    CUT_BLANK_FIELDS);
+        }
+
+        if (trail && text_list_has(which) != complement && wrote)
+                text_put(separator, separator_length);
+
+        text_put_character(text_delimiter);
+}
+
 static b32 text_cut()
 {
         file_taking taking = {
@@ -19990,10 +20059,15 @@ static b32 text_cut()
                                                 line_length--;
                                 }
 
-                                bool split = whitespace
-                                    ? string_span_max(line, line_length,
-                                                      text_set_inside) < line_length
-                                    : memory_first_of(line, delimiter, line_length) != null;
+                                if (whitespace)
+                                {
+                                        cut_blank_line(line, line_length, complement,
+                                                       only_delimited, separator,
+                                                       separator_length);
+                                        continue;
+                                }
+
+                                bool split = memory_first_of(line, delimiter, line_length) != null;
 
                                 //      The terminator that ended a whole-input
                                 //      record parts no fields, yet GNU reads the
@@ -20031,21 +20105,13 @@ static b32 text_cut()
                                 while (at <= line_length)
                                 {
                                         positive from = at;
+                                        p8 address_to next =
+                                            (p8 address_to)memory_first_of(
+                                                line + at, (b8)delimiter,
+                                                line_length - at);
 
-                                        if (whitespace)
-                                                at += string_span_max(
-                                                    line + at, line_length - at,
-                                                    text_set_inside);
-                                        else
-                                        {
-                                                p8 address_to next =
-                                                    (p8 address_to)memory_first_of(
-                                                        line + at, (b8)delimiter,
-                                                        line_length - at);
-
-                                                at = next ? (positive)(next - line)
-                                                          : line_length;
-                                        }
+                                        at = next ? (positive)(next - line)
+                                                  : line_length;
 
                                         if (text_list_has(which) != complement)
                                         {
@@ -20065,14 +20131,7 @@ static b32 text_cut()
                                         if (at == line_length)
                                                 break;
 
-                                        // A run of blanks is one delimiter,
-                                        // where a run of colons is several.
                                         at++;
-
-                                        if (whitespace)
-                                                at += string_span_max(line + at,
-                                                    line_length - at, string_set_blanks);
-
                                         which++;
                                 }
 

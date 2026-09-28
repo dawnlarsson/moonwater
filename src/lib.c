@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        357 routines (342 public, 15 local), 354 of them on all three and 3 local to one.
+        365 routines (347 public, 18 local), 359 of them on all three and 6 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -225,7 +225,15 @@
           memory_into_hex                public  yes     yes     yes
           memory_into_hex_case           public  yes     yes     yes
           memory_last_of                 public  yes     yes     yes
+          memory_last_of_either          public  yes     yes     yes
+          memory_nth_last_of             public  yes     yes     yes
+          memory_nth_of                  public  yes     yes     yes
           memory_offsets_between         public  yes     yes     yes
+          memory_offsets_fields          public  yes     yes     yes
+          memory_offsets_fields_arm64    local   --      yes     --
+          memory_offsets_fields_blank    public  yes     yes     yes
+          memory_offsets_fields_rv       local   --      --      yes
+          memory_offsets_fields_x64      local   yes     --      --
           memory_offsets_in_set          public  yes     yes     yes
           memory_offsets_of_either       public  yes     yes     yes
           memory_offsets_outside         public  yes     yes     yes
@@ -428,6 +436,9 @@
           zstd_sequences_run             public  yes     yes     yes
 
         Private to one machine, by choice:
+          memory_offsets_fields_arm64 -- local to arm64
+          memory_offsets_fields_rv -- local to riscv64
+          memory_offsets_fields_x64 -- local to x86_64
           memory_offsets_range_x64 -- local to x86_64
           memory_span_byte_wide -- local to x86_64
           memory_utf8_span_wide -- local to x86_64
@@ -60192,6 +60203,612 @@ __asm__(
 );
 #endif
 #undef DECIMAL_SHORT_POWERS
+#endif // KERNEL_MODE
+
+/*
+        Record scans: where a record's fields are, where its n-th separator
+        is, and the last of two bytes.
+
+        memory_offsets_fields(positions, block, size, table, limit) writes
+        every maximal run of bytes the table marks zero -- a field -- as a
+        pair of 32-bit offsets, the start and the end past it, until limit
+        fields, and answers how many. A separator run at either end makes no
+        field and an empty or all-separator block answers nought; when the
+        answer is limit the scan stopped just after that field's end, and
+        a caller that wants the rest goes on from there. The block is
+        shorter than four gigabytes and positions has room for two offsets
+        a field. memory_offsets_fields_blank is the same with the separator
+        set fixed at space, tab and extra, the set cut -w, awk's default
+        splitting, join and uniq -f all use, which is compared for rather
+        than looked up.
+
+        cut -w spent half its run in string_span_max, called twice for
+        every field of a 39-byte line, a vector's setup paid per run of six
+        bytes. This is memory_offsets_in_set's shape with one step more:
+        sixty four bytes classified into a mask f of field bytes, and the
+        edges are f ^ (f << 1 | carry), where carry is the last byte of the
+        vector before. Starts and ends alternate from a separator state, so
+        every set bit is written in turn and the pairs fall out, and a field
+        that reaches size is ended there. A mask with fewer than 64 slots of
+        room left takes the loop that counts against the limit; every other
+        takes the one that only walks the bits.
+
+        memory_nth_of(block, value, size, n) answers {the offset just past
+        the n-th value, n}, or {size, how many there were} when there are
+        fewer, and {0, 0} for n nought: split -l asked memory_first_of once
+        a line for a thousand lines a piece. A vector's matches are counted
+        with popcnt while the total stays under n, and the vector that
+        reaches it has its lowest bits cleared one at a time up to the one
+        that is n. memory_nth_last_of is the same from the end: {the offset
+        of the n-th value counting back, n}, {0, how many} when there are
+        fewer, and {size, 0} for n nought.
+
+        memory_last_of_either(block, first, second, size) is memory_last_of
+        for two bytes at once: fold -s asked for the last space and then for
+        the last tab in the same window, two passes.
+
+        x86_64: AVX-512 takes a vector with a masked load, so a line shorter
+        than sixty four bytes is one load and one mask; that body uses BMI1
+        and BMI2, which every AVX-512 processor has. Without it SSE2 compares
+        sixteen bytes at a time into the same 64-bit mask, and the part of a
+        block shorter than sixty four bytes is read from the aligned sixty
+        four bytes that hold its first byte and, when it reaches past them,
+        the aligned sixty four after: each holds a byte of the block, so
+        neither can reach a page the block does not. The table form wants
+        VBMI's vpermt2b; without it the table is asked a byte at a time.
+        arm64 compares sixty four bytes in four q registers and gathers the
+        mask with and and three addp; riscv64 walks bytes.
+
+        Not in a kernel build: nothing there splits records.
+*/
+#ifndef KERNEL_MODE
+WRITES(1) READS(2, 3) READS(4)
+positive memory_offsets_fields(p32 address_to positions, address_any block,
+                               positive size, address_any table, positive limit);
+WRITES(1) READS(2, 3)
+positive memory_offsets_fields_blank(p32 address_to positions, address_any block,
+                                     positive size, p8 extra, positive limit);
+PURE positive2 memory_nth_of(address_any block, b8 value, positive size, positive n);
+PURE positive2 memory_nth_last_of(address_any block, b8 value, positive size,
+                                  positive n);
+PURE address_any memory_last_of_either(address_any block, b8 first, b8 second,
+                                       positive size);
+
+#if X64
+//      Sixty four bytes at base into a mask in out, a bit a byte, by SSE2:
+//      each sixteen are loaded into xmm4 and compared by EQ, which may use
+//      xmm5 and xmm6 and compares against xmm1, xmm2 and xmm3.
+#define RECORD_SSE_EQ1 "pcmpeqb %xmm1, %xmm4\n"
+#define RECORD_SSE_EQ2                                                        \
+    "movdqa %xmm4, %xmm5\n   pcmpeqb %xmm1, %xmm4\n   pcmpeqb %xmm2, %xmm5\n" \
+    "por %xmm5, %xmm4\n"
+#define RECORD_SSE_EQ3                                                        \
+    "movdqa %xmm4, %xmm5\n   movdqa %xmm4, %xmm6\n   pcmpeqb %xmm1, %xmm4\n"  \
+    "pcmpeqb %xmm2, %xmm5\n   pcmpeqb %xmm3, %xmm6\n   por %xmm5, %xmm4\n"    \
+    "por %xmm6, %xmm4\n"
+#define RECORD_SSE_WINDOW(EQ, base, out, tmp)                                 \
+    "movdqu (" base "), %xmm4\n" EQ "pmovmskb %xmm4, " out "\n"               \
+    "movdqu 16(" base "), %xmm4\n" EQ "pmovmskb %xmm4, " tmp "\n"             \
+    "shl $16, " tmp "\n   or " tmp ", " out "\n"                              \
+    "movdqu 32(" base "), %xmm4\n" EQ "pmovmskb %xmm4, " tmp "\n"             \
+    "shl $32, " tmp "\n   or " tmp ", " out "\n"                              \
+    "movdqu 48(" base "), %xmm4\n" EQ "pmovmskb %xmm4, " tmp "\n"             \
+    "shl $48, " tmp "\n   or " tmp ", " out "\n"
+//      The n < 64 bytes from the address in at, as the low n bits of out,
+//      the rest nought, read from the aligned sixty four that hold the first
+//      and, if the n reach past them, the aligned sixty four after. valid is
+//      left holding the n low bits. rcx and at are spent.
+#define RECORD_SSE_PART(EQ, at, n, out, valid, tmp)                           \
+    "mov " at ", %rcx\n   and $63, %ecx\n   and $-64, " at "\n"               \
+    RECORD_SSE_WINDOW(EQ, at, out, tmp)                                       \
+    "shr %cl, " out "\n   lea (%rcx," n "), " tmp "\n   cmp $64, " tmp "\n"   \
+    "jbe 1f\n   add $64, " at "\n"                                            \
+    RECORD_SSE_WINDOW(EQ, at, valid, tmp)                                     \
+    "neg %ecx\n   shl %cl, " valid "\n   or " valid ", " out "\n"             \
+    "1:  mov " n ", %rcx\n   mov $-1, " valid "\n   shl %cl, " valid "\n"     \
+    "not " valid "\n   and " valid ", " out "\n"
+//      One mask of field bytes in r11 into edges, written from rdi[rax] on:
+//      r8 is the field bit carried from the vector before, r9 the vector's
+//      offset, r10 twice the limit. The loop that counts against the limit
+//      is taken only when the mask could reach it. rbx, rcx and r12 are
+//      spent; SCAN finds the lowest bit and CLEAR clears it and sets ZF.
+#define RECORD_FIELD_EDGES(tag, loop, full, SCAN, CLEAR)                      \
+    "lea (%r8,%r11,2), %rbx\n   mov %r11, %r8\n   shr $63, %r8\n"             \
+    "xor %rbx, %r11\n   jz " tag "_next\n"                                    \
+    "mov %r10, %rcx\n   sub %rax, %rcx\n   cmp $64, %rcx\n"                   \
+    "jb " tag "_careful\n"                                                    \
+    ".balign 16\n" tag "_fast:\n"                                             \
+    SCAN " %r11, %rbx\n   add %r9, %rbx\n   mov %ebx, (%rdi,%rax,4)\n"        \
+    "inc %rax\n" CLEAR "jnz " tag "_fast\n   jmp " tag "_next\n"              \
+    tag "_careful:\n"                                                         \
+    SCAN " %r11, %rbx\n   add %r9, %rbx\n   mov %ebx, (%rdi,%rax,4)\n"        \
+    "inc %rax\n   cmp %r10, %rax\n   je " full "\n"                           \
+    CLEAR "jnz " tag "_careful\n"                                             \
+    tag "_next:\n   add $64, %r9\n   cmp %rdx, %r9\n   jb " loop "\n"
+
+__asm__(
+    ASM_SECTION
+    ASM_FUNC(memory_offsets_fields_blank)
+    "xor %r11d, %r11d\n   jmp memory_offsets_fields_x64\n"
+    ASM_END(memory_offsets_fields_blank)
+    ASM_FUNC(memory_offsets_fields)
+    "mov $1, %r11d\n   jmp memory_offsets_fields_x64\n"
+    ASM_END(memory_offsets_fields)
+    ASM_LOCAL_FUNC(memory_offsets_fields_x64)
+    // rdi positions, rsi block, rdx size, rcx table or extra, r8 limit,
+    // r11 nonzero for the table
+    "xor %eax, %eax\n   test %r8, %r8\n   jz .Lfields_x64_none\n"
+    "test %rdx, %rdx\n   jz .Lfields_x64_none\n"
+    "push %rbx\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n"
+    "mov %r11, %r14\n   mov %rcx, %r13\n"
+    // Past four billion fields the block could not hold them.
+    "mov $1, %r10d\n   shl $32, %r10\n   cmp %r10, %r8\n   cmova %r10, %r8\n"
+    "lea (%r8,%r8), %r10\n   xor %r8d, %r8d\n   xor %r9d, %r9d\n"
+    ASM_NARROW("cpu_has_avx512", ".Lfields_x64_sse")
+    "test %r14, %r14\n   jz 1f\n"
+    ASM_NARROW("cpu_has_avx512_vbmi", ".Lfields_x64_sse")
+    "vmovdqu64 (%r13), %zmm10\n   vmovdqu64 64(%r13), %zmm11\n"
+    "vmovdqu64 128(%r13), %zmm12\n   vmovdqu64 192(%r13), %zmm13\n"
+    "1:  mov $0x20, %ebx\n   vpbroadcastb %ebx, %zmm1\n   mov $9, %ebx\n"
+    "vpbroadcastb %ebx, %zmm2\n   vpbroadcastb %r13d, %zmm3\n"
+    ".balign 16\n.Lfields_x64_z:\n"
+    "mov %rdx, %rcx\n   sub %r9, %rcx\n   mov $-1, %rbx\n   cmp $64, %rcx\n"
+    "jae 2f\n   bzhi %rcx, %rbx, %rbx\n"
+    "2:  kmovq %rbx, %k1\n   vmovdqu8 (%rsi,%r9), %zmm0{%k1}{z}\n"
+    "test %r14, %r14\n   jnz 3f\n"
+    // A byte is a separator when one of the three exclusive ors is nought,
+    // so the least of them is: one mask write, where three compares and
+    // two ors of masks are five.
+    "vpxorq %zmm1, %zmm0, %zmm4\n   vpxorq %zmm2, %zmm0, %zmm5\n"
+    "vpminub %zmm5, %zmm4, %zmm4\n   vpxorq %zmm3, %zmm0, %zmm5\n"
+    "vpminub %zmm5, %zmm4, %zmm4\n   vptestmb %zmm4, %zmm4, %k2{%k1}\n"
+    "jmp 4f\n"
+    "3:  vmovdqa64 %zmm10, %zmm4\n   vpermt2b %zmm11, %zmm0, %zmm4\n"
+    "vmovdqa64 %zmm12, %zmm5\n   vpermt2b %zmm13, %zmm0, %zmm5\n"
+    "vpmovb2m %zmm0, %k3\n   vmovdqu8 %zmm5, %zmm4{%k3}\n"
+    "vptestnmb %zmm4, %zmm4, %k2{%k1}\n"
+    "4:  kmovq %k2, %r11\n"
+    RECORD_FIELD_EDGES(".Lfields_x64_ze", ".Lfields_x64_z", ".Lfields_x64_zfull",
+                       "tzcnt", "blsr %r11, %r11\n")
+    "vzeroupper\n   jmp .Lfields_x64_end\n"
+    ".Lfields_x64_zfull:\n   vzeroupper\n   jmp .Lfields_x64_full\n"
+
+    ".Lfields_x64_sse:\n"
+    "movabs $0x2020202020202020, %rbx\n   movq %rbx, %xmm1\n   punpcklqdq %xmm1, %xmm1\n"
+    "movabs $0x0909090909090909, %rbx\n   movq %rbx, %xmm2\n   punpcklqdq %xmm2, %xmm2\n"
+    "movzbl %r13b, %ebx\n   movabs $0x0101010101010101, %rcx\n   imul %rcx, %rbx\n"
+    "movq %rbx, %xmm3\n   punpcklqdq %xmm3, %xmm3\n"
+    ".balign 16\n.Lfields_x64_s:\n"
+    "mov %rdx, %rcx\n   sub %r9, %rcx\n   test %r14, %r14\n   jnz .Lfields_x64_s_table\n"
+    "cmp $64, %rcx\n   jb .Lfields_x64_s_part\n   lea (%rsi,%r9), %r12\n"
+    RECORD_SSE_WINDOW(RECORD_SSE_EQ3, "%r12", "%r11", "%rbx")
+    "not %r11\n   jmp .Lfields_x64_s_mask\n"
+    // The last part of the block, and so the last use of extra's register.
+    ".Lfields_x64_s_part:\n   mov %rcx, %r13\n   lea (%rsi,%r9), %r12\n"
+    RECORD_SSE_PART(RECORD_SSE_EQ3, "%r12", "%r13", "%r11", "%r15", "%rbx")
+    "not %r11\n   and %r15, %r11\n   jmp .Lfields_x64_s_mask\n"
+    ".Lfields_x64_s_table:\n"
+    "mov $64, %ebx\n   cmp %rbx, %rcx\n   cmova %rbx, %rcx\n"
+    "xor %r11d, %r11d\n   lea (%rsi,%r9), %r12\n"
+    "1:  movzbl -1(%r12,%rcx), %ebx\n   cmpb $0, (%r13,%rbx)\n   sete %bl\n"
+    "movzbl %bl, %ebx\n   lea (%rbx,%r11,2), %r11\n   dec %rcx\n   jnz 1b\n"
+    ".Lfields_x64_s_mask:\n"
+    RECORD_FIELD_EDGES(".Lfields_x64_se", ".Lfields_x64_s", ".Lfields_x64_full",
+                       "bsf", "lea -1(%r11), %r12\n   and %r12, %r11\n")
+    // A field still open at the end ends at size.
+    ".Lfields_x64_end:\n"
+    "test %r8, %r8\n   jz 1f\n   mov %edx, (%rdi,%rax,4)\n   inc %rax\n"
+    "1:  shr $1, %rax\n   jmp .Lfields_x64_leave\n"
+    ".Lfields_x64_full:\n   mov %r10, %rax\n   shr $1, %rax\n"
+    ".Lfields_x64_leave:\n"
+    "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n"
+    ".Lfields_x64_none:\n"
+    ASM_RET
+    ASM_LOCAL_END(memory_offsets_fields_x64)
+
+    ASM_FUNC(memory_nth_of)
+    // rdi block, sil value, rdx size, rcx n; answers rax offset, rdx seen
+    "xor %eax, %eax\n   test %rcx, %rcx\n   jnz 1f\n   xor %edx, %edx\n"
+    ASM_RET
+    "1:  xor %r8d, %r8d\n   xor %r9d, %r9d\n"
+    ASM_NARROW("cpu_has_avx512", ".Lnth_x64_sse")
+    "vpbroadcastb %esi, %zmm1\n"
+    ".balign 16\n.Lnth_x64_z:\n"
+    "mov %rdx, %r10\n   sub %r9, %r10\n   jbe .Lnth_x64_z_short\n"
+    "cmp $64, %r10\n   jb .Lnth_x64_z_part\n"
+    "vpcmpeqb (%rdi,%r9), %zmm1, %k1\n   kmovq %k1, %r11\n   popcnt %r11, %rax\n"
+    "add %r8, %rax\n   cmp %rcx, %rax\n   jae .Lnth_x64_z_found\n"
+    "mov %rax, %r8\n   add $64, %r9\n   jmp .Lnth_x64_z\n"
+    ".Lnth_x64_z_part:\n   mov $-1, %r11\n   bzhi %r10, %r11, %r11\n   kmovq %r11, %k2\n"
+    "vmovdqu8 (%rdi,%r9), %zmm0{%k2}{z}\n   vpcmpeqb %zmm1, %zmm0, %k1{%k2}\n"
+    "kmovq %k1, %r11\n   popcnt %r11, %rax\n   add %r8, %rax\n   cmp %rcx, %rax\n"
+    "jae .Lnth_x64_z_found\n   mov %rax, %r8\n"
+    ".Lnth_x64_z_short:\n   vzeroupper\n   mov %rdx, %rax\n   mov %r8, %rdx\n"
+    ASM_RET
+    ".Lnth_x64_z_found:\n   vzeroupper\n"
+    // r11 holds the vector's matches, r8 those before it: the one wanted is
+    // its (n - r8)-th lowest.
+    ".Lnth_x64_found:\n   mov %rcx, %r10\n   sub %r8, %r10\n   dec %r10\n   jz 2f\n"
+    "1:  lea -1(%r11), %rax\n   and %rax, %r11\n   dec %r10\n   jnz 1b\n"
+    "2:  bsf %r11, %rax\n   lea 1(%r9,%rax), %rax\n   mov %rcx, %rdx\n"
+    ASM_RET
+    ".Lnth_x64_sse:\n"
+    "movzbl %sil, %eax\n   movabs $0x0101010101010101, %r10\n   imul %r10, %rax\n"
+    "movq %rax, %xmm1\n   punpcklqdq %xmm1, %xmm1\n"
+    ".balign 16\n.Lnth_x64_s:\n"
+    "mov %rdx, %r10\n   sub %r9, %r10\n   jbe .Lnth_x64_s_short\n"
+    "cmp $64, %r10\n   jb .Lnth_x64_s_part\n   lea (%rdi,%r9), %rsi\n"
+    RECORD_SSE_WINDOW(RECORD_SSE_EQ1, "%rsi", "%r11", "%rax")
+    "popcnt %r11, %rax\n   add %r8, %rax\n   cmp %rcx, %rax\n   jae .Lnth_x64_found\n"
+    "mov %rax, %r8\n   add $64, %r9\n   jmp .Lnth_x64_s\n"
+    ".Lnth_x64_s_part:\n   push %rbx\n   push %rcx\n   lea (%rdi,%r9), %rsi\n"
+    RECORD_SSE_PART(RECORD_SSE_EQ1, "%rsi", "%r10", "%r11", "%rbx", "%rax")
+    "pop %rcx\n   pop %rbx\n"
+    "popcnt %r11, %rax\n   add %r8, %rax\n   cmp %rcx, %rax\n   jae .Lnth_x64_found\n"
+    "mov %rax, %r8\n"
+    ".Lnth_x64_s_short:\n   mov %rdx, %rax\n   mov %r8, %rdx\n"
+    ASM_RET
+    ASM_END(memory_nth_of)
+
+    ASM_FUNC(memory_nth_last_of)
+    // rdi block, sil value, rdx size, rcx n; answers rax offset, rdx seen
+    "test %rcx, %rcx\n   jnz 1f\n   mov %rdx, %rax\n   xor %edx, %edx\n"
+    ASM_RET
+    "1:  xor %r8d, %r8d\n   mov %rdx, %r9\n"
+    ASM_NARROW("cpu_has_avx512", ".Lnthl_x64_sse")
+    "vpbroadcastb %esi, %zmm1\n"
+    ".balign 16\n.Lnthl_x64_z:\n"
+    "cmp $64, %r9\n   jb .Lnthl_x64_z_part\n   sub $64, %r9\n"
+    "vpcmpeqb (%rdi,%r9), %zmm1, %k1\n   kmovq %k1, %r11\n   popcnt %r11, %rax\n"
+    "add %r8, %rax\n   cmp %rcx, %rax\n   jae .Lnthl_x64_z_found\n"
+    "mov %rax, %r8\n   jmp .Lnthl_x64_z\n"
+    ".Lnthl_x64_z_part:\n   test %r9, %r9\n   jz .Lnthl_x64_z_none\n"
+    "mov $-1, %r11\n   bzhi %r9, %r11, %r11\n   kmovq %r11, %k2\n   xor %r9d, %r9d\n"
+    "vmovdqu8 (%rdi), %zmm0{%k2}{z}\n   vpcmpeqb %zmm1, %zmm0, %k1{%k2}\n"
+    "kmovq %k1, %r11\n   popcnt %r11, %rax\n   add %r8, %rax\n   cmp %rcx, %rax\n"
+    "jae .Lnthl_x64_z_found\n   mov %rax, %r8\n"
+    ".Lnthl_x64_z_none:\n   vzeroupper\n   xor %eax, %eax\n   mov %r8, %rdx\n"
+    ASM_RET
+    ".Lnthl_x64_z_found:\n   vzeroupper\n"
+    // The (n - r8)-th highest of r11's matches, r9 the vector's offset.
+    ".Lnthl_x64_found:\n   mov %rcx, %r10\n   sub %r8, %r10\n   dec %r10\n   jz 2f\n"
+    "1:  bsr %r11, %rax\n   btr %rax, %r11\n   dec %r10\n   jnz 1b\n"
+    "2:  bsr %r11, %rax\n   add %r9, %rax\n   mov %rcx, %rdx\n"
+    ASM_RET
+    ".Lnthl_x64_sse:\n"
+    "movzbl %sil, %eax\n   movabs $0x0101010101010101, %r10\n   imul %r10, %rax\n"
+    "movq %rax, %xmm1\n   punpcklqdq %xmm1, %xmm1\n"
+    ".balign 16\n.Lnthl_x64_s:\n"
+    "cmp $64, %r9\n   jb .Lnthl_x64_s_part\n   sub $64, %r9\n   lea (%rdi,%r9), %rsi\n"
+    RECORD_SSE_WINDOW(RECORD_SSE_EQ1, "%rsi", "%r11", "%rax")
+    "popcnt %r11, %rax\n   add %r8, %rax\n   cmp %rcx, %rax\n   jae .Lnthl_x64_found\n"
+    "mov %rax, %r8\n   jmp .Lnthl_x64_s\n"
+    ".Lnthl_x64_s_part:\n   test %r9, %r9\n   jz .Lnthl_x64_s_none\n"
+    "push %rbx\n   push %rcx\n   mov %rdi, %rsi\n   mov %r9, %r10\n"
+    RECORD_SSE_PART(RECORD_SSE_EQ1, "%rsi", "%r10", "%r11", "%rbx", "%rax")
+    "pop %rcx\n   pop %rbx\n   xor %r9d, %r9d\n"
+    "popcnt %r11, %rax\n   add %r8, %rax\n   cmp %rcx, %rax\n   jae .Lnthl_x64_found\n"
+    "mov %rax, %r8\n"
+    ".Lnthl_x64_s_none:\n   xor %eax, %eax\n   mov %r8, %rdx\n"
+    ASM_RET
+    ASM_END(memory_nth_last_of)
+
+    ASM_FUNC(memory_last_of_either)
+    // rdi block, sil first, dl second, rcx size; answers the address or null
+    "test %rcx, %rcx\n   jz .Leither_x64_none\n"
+    ASM_NARROW("cpu_has_avx512", ".Leither_x64_sse")
+    "vpbroadcastb %esi, %zmm1\n   vpbroadcastb %edx, %zmm2\n"
+    ".balign 16\n.Leither_x64_z:\n"
+    "cmp $64, %rcx\n   jb .Leither_x64_z_part\n   sub $64, %rcx\n"
+    "vmovdqu64 (%rdi,%rcx), %zmm0\n   vpxorq %zmm1, %zmm0, %zmm3\n"
+    "vpxorq %zmm2, %zmm0, %zmm4\n   vpminub %zmm4, %zmm3, %zmm3\n"
+    "vptestnmb %zmm3, %zmm3, %k1\n   kortestq %k1, %k1\n   jz .Leither_x64_z\n"
+    "jmp .Leither_x64_z_hit\n"
+    ".Leither_x64_z_part:\n   test %rcx, %rcx\n   jz .Leither_x64_z_none\n"
+    "mov $-1, %r11\n   bzhi %rcx, %r11, %r11\n   kmovq %r11, %k2\n   xor %ecx, %ecx\n"
+    "vmovdqu8 (%rdi), %zmm0{%k2}{z}\n   vpxorq %zmm1, %zmm0, %zmm3\n"
+    "vpxorq %zmm2, %zmm0, %zmm4\n   vpminub %zmm4, %zmm3, %zmm3\n"
+    "vptestnmb %zmm3, %zmm3, %k1{%k2}\n   kortestq %k1, %k1\n   jz .Leither_x64_z_none\n"
+    ".Leither_x64_z_hit:\n   kmovq %k1, %r11\n   vzeroupper\n"
+    ".Leither_x64_hit:\n   bsr %r11, %r11\n   lea (%rdi,%rcx), %rax\n   add %r11, %rax\n"
+    ASM_RET
+    ".Leither_x64_z_none:\n   vzeroupper\n"
+    ".Leither_x64_none:\n   xor %eax, %eax\n"
+    ASM_RET
+    ".Leither_x64_sse:\n"
+    "movabs $0x0101010101010101, %r10\n   movzbl %sil, %eax\n   imul %r10, %rax\n"
+    "movq %rax, %xmm1\n   punpcklqdq %xmm1, %xmm1\n"
+    "movzbl %dl, %eax\n   imul %r10, %rax\n   movq %rax, %xmm2\n   punpcklqdq %xmm2, %xmm2\n"
+    ".balign 16\n.Leither_x64_s:\n"
+    "cmp $64, %rcx\n   jb .Leither_x64_s_part\n   sub $64, %rcx\n   lea (%rdi,%rcx), %rsi\n"
+    RECORD_SSE_WINDOW(RECORD_SSE_EQ2, "%rsi", "%r11", "%rax")
+    "test %r11, %r11\n   jz .Leither_x64_s\n   jmp .Leither_x64_hit\n"
+    ".Leither_x64_s_part:\n   test %rcx, %rcx\n   jz .Leither_x64_none\n"
+    "mov %rcx, %r10\n   mov %rdi, %rsi\n"
+    RECORD_SSE_PART(RECORD_SSE_EQ2, "%rsi", "%r10", "%r11", "%rdx", "%rax")
+    "xor %ecx, %ecx\n   test %r11, %r11\n   jnz .Leither_x64_hit\n   xor %eax, %eax\n"
+    ASM_RET
+    ASM_END(memory_last_of_either)
+);
+#undef RECORD_SSE_EQ1
+#undef RECORD_SSE_EQ2
+#undef RECORD_SSE_EQ3
+#undef RECORD_SSE_WINDOW
+#undef RECORD_SSE_PART
+#undef RECORD_FIELD_EDGES
+#elif ARM64
+//      The sixty four bytes a window routine classified, in v0-v3 as bytes
+//      of all ones or nought, gathered into x11 a bit a byte: each byte
+//      keeps its bit of 1, 2, 4 ... 128 from v7 and three addp add them up.
+#define RECORD_A64_GATHER                                                     \
+    "and v0.16b, v0.16b, v7.16b\n   and v1.16b, v1.16b, v7.16b\n"             \
+    "and v2.16b, v2.16b, v7.16b\n   and v3.16b, v3.16b, v7.16b\n"             \
+    "addp v0.16b, v0.16b, v1.16b\n   addp v2.16b, v2.16b, v3.16b\n"           \
+    "addp v0.16b, v0.16b, v2.16b\n   addp v0.16b, v0.16b, v0.16b\n"           \
+    "fmov x11, d0\n"
+#define RECORD_A64_BITS                                                       \
+    "movz x10, #0x0201\n   movk x10, #0x0804, lsl #16\n"                      \
+    "movk x10, #0x2010, lsl #32\n   movk x10, #0x8040, lsl #48\n"             \
+    "dup v7.2d, x10\n"
+//      The n < 64 bytes from start as the low n bits of x11, the rest
+//      nought, from the aligned sixty four holding the first and, when they
+//      reach past it, the aligned sixty four after; x15 is left holding the
+//      bits past n. x12 is kept; x13 and x14 are spent.
+#define RECORD_A64_PART(window, start, n)                                     \
+    "and x13, " start ", #63\n   and x11, " start ", #-64\n   bl " window "\n"\
+    "lsr x14, x11, x13\n   add x15, x13, " n "\n   cmp x15, #64\n   b.ls 5f\n"\
+    "and x11, " start ", #-64\n   add x11, x11, #64\n   bl " window "\n"      \
+    "neg x15, x13\n   lsl x11, x11, x15\n   orr x14, x14, x11\n"              \
+    "5:  mov x15, #-1\n   lsl x15, x15, " n "\n   bic x11, x14, x15\n"
+
+__asm__(
+    ASM_SECTION
+    // memory_offsets_fields and _blank: sixty four bytes a turn into a
+    // mask, the edges read off it with rbit and clz. The x86_64 block
+    // carries the full contract.
+    ASM_FUNC(memory_offsets_fields_blank)
+    "mov x5, xzr\n   b memory_offsets_fields_arm64\n"
+    ASM_END(memory_offsets_fields_blank)
+    ASM_FUNC(memory_offsets_fields)
+    "mov x5, #1\n   b memory_offsets_fields_arm64\n"
+    ASM_END(memory_offsets_fields)
+    ASM_LOCAL_FUNC(memory_offsets_fields_arm64)
+    // x0 positions, x1 block, x2 size, x3 table or extra, x4 limit, x5 table?
+    "mov x6, xzr\n   cbz x4, .Lfields_arm64_out\n   cbz x2, .Lfields_arm64_out\n"
+    "mov x16, x30\n"
+    "mov x8, #1\n   lsl x8, x8, #32\n   cmp x4, x8\n   csel x4, x4, x8, ls\n"
+    "lsl x8, x4, #1\n   mov x9, xzr\n   mov x7, xzr\n"
+    RECORD_A64_BITS
+    "cbnz x5, 1f\n   movi v16.16b, #0x20\n   movi v17.16b, #9\n   dup v18.16b, w3\n   b 2f\n"
+    "1:  ld1 {v16.16b-v19.16b}, [x3], #64\n   ld1 {v20.16b-v23.16b}, [x3], #64\n"
+    "ld1 {v24.16b-v27.16b}, [x3], #64\n   ld1 {v28.16b-v31.16b}, [x3]\n   sub x3, x3, #192\n"
+    "movi v6.16b, #64\n"
+    "2:\n"
+    ".Lfields_arm64_loop:\n"
+    "sub x10, x2, x7\n   cmp x10, #64\n   b.lo .Lfields_arm64_part\n"
+    "add x11, x1, x7\n   bl .Lfields_arm64_window\n   mvn x11, x11\n   b .Lfields_arm64_mask\n"
+    ".Lfields_arm64_part:\n   add x12, x1, x7\n"
+    RECORD_A64_PART(".Lfields_arm64_window", "x12", "x10")
+    "orr x11, x11, x15\n   mvn x11, x11\n"
+    ".Lfields_arm64_mask:\n"
+    "lsl x12, x11, #1\n   orr x12, x12, x9\n   lsr x9, x11, #63\n   eor x11, x11, x12\n"
+    "cbz x11, .Lfields_arm64_next\n"
+    "sub x12, x8, x6\n   cmp x12, #64\n   b.lo .Lfields_arm64_careful\n"
+    ".Lfields_arm64_fast:\n"
+    "rbit x12, x11\n   clz x12, x12\n   add x12, x12, x7\n   str w12, [x0, x6, lsl #2]\n"
+    "add x6, x6, #1\n   sub x13, x11, #1\n   ands x11, x11, x13\n   b.ne .Lfields_arm64_fast\n"
+    "b .Lfields_arm64_next\n"
+    ".Lfields_arm64_careful:\n"
+    "rbit x12, x11\n   clz x12, x12\n   add x12, x12, x7\n   str w12, [x0, x6, lsl #2]\n"
+    "add x6, x6, #1\n   cmp x6, x8\n   b.eq .Lfields_arm64_full\n"
+    "sub x13, x11, #1\n   ands x11, x11, x13\n   b.ne .Lfields_arm64_careful\n"
+    ".Lfields_arm64_next:\n"
+    "add x7, x7, #64\n   cmp x7, x2\n   b.lo .Lfields_arm64_loop\n"
+    // A field still open at the end ends at size.
+    "cbz x9, 6f\n   str w2, [x0, x6, lsl #2]\n   add x6, x6, #1\n"
+    "6:  lsr x0, x6, #1\n   mov x30, x16\n"
+    ASM_RET
+    ".Lfields_arm64_full:\n   lsr x0, x8, #1\n   mov x30, x16\n"
+    ASM_RET
+    ".Lfields_arm64_out:\n   mov x0, xzr\n"
+    ASM_RET
+    // The sixty four bytes at x11 into x11, a bit for each separator.
+    ".Lfields_arm64_window:\n"
+    "ld1 {v0.16b-v3.16b}, [x11]\n   cbnz x5, 3f\n"
+    "cmeq v4.16b, v0.16b, v16.16b\n   cmeq v5.16b, v0.16b, v17.16b\n   orr v4.16b, v4.16b, v5.16b\n"
+    "cmeq v5.16b, v0.16b, v18.16b\n   orr v0.16b, v4.16b, v5.16b\n"
+    "cmeq v4.16b, v1.16b, v16.16b\n   cmeq v5.16b, v1.16b, v17.16b\n   orr v4.16b, v4.16b, v5.16b\n"
+    "cmeq v5.16b, v1.16b, v18.16b\n   orr v1.16b, v4.16b, v5.16b\n"
+    "cmeq v4.16b, v2.16b, v16.16b\n   cmeq v5.16b, v2.16b, v17.16b\n   orr v4.16b, v4.16b, v5.16b\n"
+    "cmeq v5.16b, v2.16b, v18.16b\n   orr v2.16b, v4.16b, v5.16b\n"
+    "cmeq v4.16b, v3.16b, v16.16b\n   cmeq v5.16b, v3.16b, v17.16b\n   orr v4.16b, v4.16b, v5.16b\n"
+    "cmeq v5.16b, v3.16b, v18.16b\n   orr v3.16b, v4.16b, v5.16b\n"
+    "b 4f\n"
+    // The table by four tbl of sixty four entries each, the byte less 64,
+    // 128 and 192 for the upper three, as memory_offsets_in_set asks it.
+#define RECORD_A64_TABLE(v)                                                   \
+    "tbl v4.16b, {v16.16b-v19.16b}, " v ".16b\n   sub " v ".16b, " v ".16b, v6.16b\n" \
+    "tbl v5.16b, {v20.16b-v23.16b}, " v ".16b\n   sub " v ".16b, " v ".16b, v6.16b\n" \
+    "orr v4.16b, v4.16b, v5.16b\n"                                            \
+    "tbl v5.16b, {v24.16b-v27.16b}, " v ".16b\n   sub " v ".16b, " v ".16b, v6.16b\n" \
+    "orr v4.16b, v4.16b, v5.16b\n"                                            \
+    "tbl v5.16b, {v28.16b-v31.16b}, " v ".16b\n   orr v4.16b, v4.16b, v5.16b\n" \
+    "cmtst " v ".16b, v4.16b, v4.16b\n"
+    "3:\n" RECORD_A64_TABLE("v0") RECORD_A64_TABLE("v1")
+    RECORD_A64_TABLE("v2") RECORD_A64_TABLE("v3")
+#undef RECORD_A64_TABLE
+    "4:\n" RECORD_A64_GATHER
+    "ret\n"
+    ASM_LOCAL_END(memory_offsets_fields_arm64)
+
+    // memory_nth_of: sixty four bytes a turn into a mask and its matches
+    // counted with cnt. The x86_64 block carries the full contract.
+    ASM_FUNC(memory_nth_of)
+    "cbnz x3, 1f\n   mov x0, xzr\n   mov x1, xzr\n"
+    ASM_RET
+    "1:  mov x16, x30\n   dup v16.16b, w1\n   mov x4, xzr\n   mov x5, xzr\n"
+    RECORD_A64_BITS
+    ".Lnth_arm64_loop:\n"
+    "cmp x5, x2\n   b.hs .Lnth_arm64_none\n   sub x10, x2, x5\n   cmp x10, #64\n"
+    "b.lo .Lnth_arm64_part\n   add x11, x0, x5\n   bl .Lnth_arm64_window\n   b 2f\n"
+    ".Lnth_arm64_part:\n   add x12, x0, x5\n"
+    RECORD_A64_PART(".Lnth_arm64_window", "x12", "x10")
+    "2:  fmov d1, x11\n   cnt v1.8b, v1.8b\n   addv b1, v1.8b\n   umov w12, v1.b[0]\n"
+    "add x12, x12, x4\n   cmp x12, x3\n   b.hs .Lnth_arm64_found\n"
+    "mov x4, x12\n   add x5, x5, #64\n   b .Lnth_arm64_loop\n"
+    ".Lnth_arm64_none:\n   mov x0, x2\n   mov x1, x4\n   mov x30, x16\n"
+    ASM_RET
+    // The (n - x4)-th lowest of x11's matches, x5 the vector's offset.
+    ".Lnth_arm64_found:\n   sub x10, x3, x4\n   subs x10, x10, #1\n   b.eq 4f\n"
+    "3:  sub x13, x11, #1\n   and x11, x11, x13\n   subs x10, x10, #1\n   b.ne 3b\n"
+    "4:  rbit x11, x11\n   clz x11, x11\n   add x0, x5, x11\n   add x0, x0, #1\n"
+    "mov x1, x3\n   mov x30, x16\n"
+    ASM_RET
+    ".Lnth_arm64_window:\n"
+    "ld1 {v0.16b-v3.16b}, [x11]\n"
+    "cmeq v0.16b, v0.16b, v16.16b\n   cmeq v1.16b, v1.16b, v16.16b\n"
+    "cmeq v2.16b, v2.16b, v16.16b\n   cmeq v3.16b, v3.16b, v16.16b\n"
+    RECORD_A64_GATHER
+    "ret\n"
+    ASM_END(memory_nth_of)
+
+    // memory_nth_last_of: memory_nth_of from the end, the highest bits
+    // cleared. The x86_64 block carries the full contract.
+    ASM_FUNC(memory_nth_last_of)
+    "cbnz x3, 1f\n   mov x0, x2\n   mov x1, xzr\n"
+    ASM_RET
+    "1:  mov x16, x30\n   dup v16.16b, w1\n   mov x4, xzr\n   mov x5, x2\n"
+    RECORD_A64_BITS
+    ".Lnthl_arm64_loop:\n"
+    "cmp x5, #64\n   b.lo .Lnthl_arm64_part\n   sub x5, x5, #64\n"
+    "add x11, x0, x5\n   bl .Lnthl_arm64_window\n   b 2f\n"
+    ".Lnthl_arm64_part:\n   cbz x5, .Lnthl_arm64_none\n   mov x10, x5\n   mov x12, x0\n"
+    RECORD_A64_PART(".Lnthl_arm64_window", "x12", "x10")
+    "mov x5, xzr\n"
+    "2:  fmov d1, x11\n   cnt v1.8b, v1.8b\n   addv b1, v1.8b\n   umov w12, v1.b[0]\n"
+    "add x12, x12, x4\n   cmp x12, x3\n   b.hs .Lnthl_arm64_found\n"
+    "mov x4, x12\n   cbnz x5, .Lnthl_arm64_loop\n"
+    ".Lnthl_arm64_none:\n   mov x0, xzr\n   mov x1, x4\n   mov x30, x16\n"
+    ASM_RET
+    ".Lnthl_arm64_found:\n   sub x10, x3, x4\n   subs x10, x10, #1\n   b.eq 4f\n"
+    "3:  clz x12, x11\n   mov x13, #63\n   sub x12, x13, x12\n   mov x13, #1\n"
+    "lsl x13, x13, x12\n   bic x11, x11, x13\n   subs x10, x10, #1\n   b.ne 3b\n"
+    "4:  clz x11, x11\n   mov x13, #63\n   sub x11, x13, x11\n   add x0, x5, x11\n"
+    "mov x1, x3\n   mov x30, x16\n"
+    ASM_RET
+    ".Lnthl_arm64_window:\n"
+    "ld1 {v0.16b-v3.16b}, [x11]\n"
+    "cmeq v0.16b, v0.16b, v16.16b\n   cmeq v1.16b, v1.16b, v16.16b\n"
+    "cmeq v2.16b, v2.16b, v16.16b\n   cmeq v3.16b, v3.16b, v16.16b\n"
+    RECORD_A64_GATHER
+    "ret\n"
+    ASM_END(memory_nth_last_of)
+
+    // memory_last_of_either: sixty four bytes a turn from the end, both
+    // bytes compared and the highest match taken with clz. The x86_64
+    // block carries the full contract.
+    ASM_FUNC(memory_last_of_either)
+    "cbz x3, .Leither_arm64_none\n   mov x16, x30\n"
+    "dup v16.16b, w1\n   dup v17.16b, w2\n"
+    RECORD_A64_BITS
+    ".Leither_arm64_loop:\n"
+    "cmp x3, #64\n   b.lo .Leither_arm64_part\n   sub x3, x3, #64\n"
+    "add x11, x0, x3\n   bl .Leither_arm64_window\n   cbz x11, .Leither_arm64_loop\n"
+    "b .Leither_arm64_hit\n"
+    ".Leither_arm64_part:\n   cbz x3, .Leither_arm64_miss\n   mov x10, x3\n   mov x12, x0\n"
+    RECORD_A64_PART(".Leither_arm64_window", "x12", "x10")
+    "mov x3, xzr\n   cbz x11, .Leither_arm64_miss\n"
+    ".Leither_arm64_hit:\n   clz x11, x11\n   mov x13, #63\n   sub x11, x13, x11\n"
+    "add x0, x0, x3\n   add x0, x0, x11\n   mov x30, x16\n"
+    ASM_RET
+    ".Leither_arm64_miss:\n   mov x30, x16\n"
+    ".Leither_arm64_none:\n   mov x0, xzr\n"
+    ASM_RET
+    ".Leither_arm64_window:\n"
+    "ld1 {v0.16b-v3.16b}, [x11]\n"
+    "cmeq v4.16b, v0.16b, v16.16b\n   cmeq v0.16b, v0.16b, v17.16b\n   orr v0.16b, v0.16b, v4.16b\n"
+    "cmeq v4.16b, v1.16b, v16.16b\n   cmeq v1.16b, v1.16b, v17.16b\n   orr v1.16b, v1.16b, v4.16b\n"
+    "cmeq v4.16b, v2.16b, v16.16b\n   cmeq v2.16b, v2.16b, v17.16b\n   orr v2.16b, v2.16b, v4.16b\n"
+    "cmeq v4.16b, v3.16b, v16.16b\n   cmeq v3.16b, v3.16b, v17.16b\n   orr v3.16b, v3.16b, v4.16b\n"
+    RECORD_A64_GATHER
+    "ret\n"
+    ASM_END(memory_last_of_either)
+);
+#undef RECORD_A64_GATHER
+#undef RECORD_A64_BITS
+#undef RECORD_A64_PART
+#elif RISCV64
+__asm__(
+    ASM_SECTION
+    // memory_offsets_fields and _blank: a byte at a time, its offset stored
+    // at the next slot every time and the count moved on when the byte's
+    // field bit differs from the one before. The x86_64 block carries the
+    // full contract.
+    ASM_FUNC(memory_offsets_fields_blank)
+    "li t6, 0\n   tail memory_offsets_fields_rv\n"
+    ASM_END(memory_offsets_fields_blank)
+    ASM_FUNC(memory_offsets_fields)
+    "li t6, 1\n   tail memory_offsets_fields_rv\n"
+    ASM_END(memory_offsets_fields)
+    ASM_LOCAL_FUNC(memory_offsets_fields_rv)
+    // a0 positions, a1 block, a2 size, a3 table or extra, a4 limit, t6 table?
+    "mv a5, a0\n   li a0, 0\n   beqz a4, 9f\n   beqz a2, 9f\n"
+    "li t0, 1\n   slli t0, t0, 32\n   bleu a4, t0, 1f\n   mv a4, t0\n"
+    "1:  slli a4, a4, 1\n   bnez t6, 2f\n   andi a3, a3, 255\n"
+    "2:  li t0, 0\n   li t1, 0\n   li t2, 0\n   li a6, 32\n   li a7, 9\n"
+    "3:  bgeu t1, a2, 7f\n   add t3, a1, t1\n   lbu t3, 0(t3)\n   bnez t6, 4f\n"
+    "xor t4, t3, a6\n   seqz t4, t4\n   xor t5, t3, a7\n   seqz t5, t5\n   or t4, t4, t5\n"
+    "xor t5, t3, a3\n   seqz t5, t5\n   or t4, t4, t5\n   xori t4, t4, 1\n   j 5f\n"
+    "4:  add t4, a3, t3\n   lbu t4, 0(t4)\n   seqz t4, t4\n"
+    "5:  slli t5, t0, 2\n   add t5, a5, t5\n   sw t1, 0(t5)\n   xor t5, t4, t2\n"
+    "add t0, t0, t5\n   mv t2, t4\n   addi t1, t1, 1\n   bne t0, a4, 3b\n"
+    "srli a0, t0, 1\n"
+    ASM_RET
+    // A field still open at the end ends at size.
+    "7:  beqz t2, 8f\n   slli t5, t0, 2\n   add t5, a5, t5\n   sw a2, 0(t5)\n   addi t0, t0, 1\n"
+    "8:  srli a0, t0, 1\n"
+    "9:\n"
+    ASM_RET
+    ASM_LOCAL_END(memory_offsets_fields_rv)
+
+    // memory_nth_of / memory_nth_last_of: a byte at a time, counted. The
+    // x86_64 block carries the full contract.
+    ASM_FUNC(memory_nth_of)
+    "bnez a3, 1f\n   li a0, 0\n   li a1, 0\n"
+    ASM_RET
+    "1:  andi a1, a1, 255\n   li t0, 0\n   li t1, 0\n"
+    "2:  bgeu t1, a2, 3f\n   add t2, a0, t1\n   lbu t2, 0(t2)\n   addi t1, t1, 1\n"
+    "bne t2, a1, 2b\n   addi t0, t0, 1\n   bne t0, a3, 2b\n"
+    "mv a0, t1\n   mv a1, a3\n"
+    ASM_RET
+    "3:  mv a0, a2\n   mv a1, t0\n"
+    ASM_RET
+    ASM_END(memory_nth_of)
+    ASM_FUNC(memory_nth_last_of)
+    "bnez a3, 1f\n   mv a0, a2\n   li a1, 0\n"
+    ASM_RET
+    "1:  andi a1, a1, 255\n   li t0, 0\n   mv t1, a2\n"
+    "2:  beqz t1, 3f\n   addi t1, t1, -1\n   add t2, a0, t1\n   lbu t2, 0(t2)\n"
+    "bne t2, a1, 2b\n   addi t0, t0, 1\n   bne t0, a3, 2b\n"
+    "mv a0, t1\n   mv a1, a3\n"
+    ASM_RET
+    "3:  li a0, 0\n   mv a1, t0\n"
+    ASM_RET
+    ASM_END(memory_nth_last_of)
+
+    // memory_last_of_either: a byte at a time from the end. The x86_64
+    // block carries the full contract.
+    ASM_FUNC(memory_last_of_either)
+    "andi a1, a1, 255\n   andi a2, a2, 255\n"
+    "1:  beqz a3, 2f\n   addi a3, a3, -1\n   add t0, a0, a3\n   lbu t1, 0(t0)\n"
+    "beq t1, a1, 3f\n   bne t1, a2, 1b\n"
+    "3:  mv a0, t0\n"
+    ASM_RET
+    "2:  li a0, 0\n"
+    ASM_RET
+    ASM_END(memory_last_of_either)
+);
+#endif
 #endif // KERNEL_MODE
 
 #if X64

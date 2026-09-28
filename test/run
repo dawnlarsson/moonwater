@@ -15520,7 +15520,7 @@ counted
 #       absolute number that is not. A Linux host target runs directly.
 #
 
-benchmarks="floor baseline numbers bases hex escape codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery shell tools awk find boot-time engines compression compression-floor cksum-crc unicode-width link"
+benchmarks="floor baseline numbers bases hex escape codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery shell tools awk find boot-time engines compression compression-floor cksum-crc unicode-width link"
 
 #       One benchmark's section and one line about it. A name with no section
 #       is one of the drivers below, which time a whole binary against the
@@ -15591,6 +15591,8 @@ bench_about()
                  bench_line="in-place squeezing of repeats by table against the former scalar C" ;;
         offsets) bench_section=BENCH_offsets
                  bench_line="every delimiter and line end of a read as offsets against a byte loop" ;;
+        record-scans) bench_section=BENCH_record_scans
+                 bench_line="field edges, n-th separators and the last of two at their callers' shapes against the calls they replace" ;;
         ascii-case) bench_section=BENCH_ascii_case
                  bench_line="ASCII-folded bounded comparison against a scalar reference" ;;
         ascii-case-fold) bench_section=BENCH_ascii_case_fold

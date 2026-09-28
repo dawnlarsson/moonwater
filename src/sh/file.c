@@ -25158,15 +25158,15 @@ static bool split_stream(bipolar in, positive piece, p8 separator, bool lines,
                                 break;
                         }
 
+                        // The read holds at least needed records, so
+                        // the needed-th separator is in it: one pass to
+                        // it, where a memory_first_of a record was most of
+                        // split -l.
                         p8 address_to scan = pending;
                         if (lines)
-                        {
-                                for (positive found_count = 0;
-                                     found_count < needed; found_count++)
-                                        scan = (p8 address_to)memory_first_of(
-                                            scan, separator,
-                                            (positive)(finish - scan)) + 1;
-                        }
+                                scan += memory_nth_of(pending, (b8)separator,
+                                                      (positive)(finish - pending),
+                                                      needed).x;
                         else
                                 scan += needed;
 
