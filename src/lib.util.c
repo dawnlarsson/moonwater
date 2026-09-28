@@ -90,6 +90,18 @@
 #define STANDARD_MODERN_C_LIBRARY_COMMON
 
 /*
+        The build's configuration, when there is one: the image build writes
+        artifacts/moonwater_config.h from the kernel's .config and names it
+        here, so the component switches, the strictness level below and the
+        per-tool and per-builtin switches reach every program through this
+        one include. A compile that names no header -- every test lane -- is
+        the default configuration: everything on, STRICT_SAFE.
+*/
+#ifdef MOONWATER_CONFIG
+#include MOONWATER_CONFIG
+#endif
+
+/*
         How strict this build is, where safety and the reference disagree.
 
         The utility surface is written against the tool on the machine

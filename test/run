@@ -88,7 +88,7 @@ export TEST_TALLY
 #       does not have: wifi wants an image built with kernel/profile/hwsim.
 asked_lanes="wifi"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine sensors cli differential_oracle text files misc util_linux shell builtins awk term edit kit boot install canvas"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine sensors cli differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas"
 
 describe()
 {
@@ -159,6 +159,7 @@ describe()
         term)     echo "the emulator driven a byte and a read at a time, and the line being edited" ;;
         edit)     echo "the full-screen editor, its key protocol, buffer, undo and redraws" ;;
         kit)      echo "build, source-inventory, remote-host and firmware tooling" ;;
+        switches) echo "a .config reaching the programs: what a switch turns off is not built, not linked and not found" ;;
         boot)     echo "the image boots, init starts, and the shell answers" ;;
         install)  echo "Moonwater installed to a disk, started from it, asked about and updated from a stick" ;;
         canvas)   echo "what is actually on the screen, read back a pixel at a time" ;;
@@ -9815,6 +9816,91 @@ fi
 #       with `|| exit 1` once kept twelve of them dark, the seal among them.
 #       objtool_shape stands in for the objtool pass of the kernel build,
 #       which no lane runs.
+#       The build's configuration reaching the programs. An image build
+#       writes artifacts/moonwater_config.h from the kernel's .config and the
+#       programs include it; `build config-header` writes the same header
+#       from any fragment, over the Kconfig defaults, so a shell is built
+#       here exactly as the image would build it. Every other lane builds
+#       with no header, which is the default configuration -- that is how
+#       the component switches went unread for as long as they did.
+switch_header()
+{
+        build_tool config-header "$1" "$2" > "$2.log" 2>&1 ||
+                { sed 's/^/    /' "$2.log"; return 1; }
+}
+
+switch_shell()
+{
+        freestanding programs/shell.c "$2" "$host_arch" \
+                "-DMOONWATER_CONFIG=\"$1\""
+}
+
+#       What a command answers with no PATH to fall back on: its status.
+#       A name the shell does not know is also looked for in the bowls, so
+#       where this machine has a /bowls it is hidden under an empty tmpfs in
+#       a mount namespace of the run's own, or an Arch bowl's lsblk would
+#       answer for the one switched off.
+switch_status()
+{
+        if [ -d /bowls ]; then
+                unshare -rm sh -c 'mount -t tmpfs none /bowls &&
+                        PATH="$1" exec "$2" -c "$3"' sh \
+                        "$switch_empty" "$1" "$2" < /dev/null > /dev/null 2>&1
+        else
+                PATH="$switch_empty" "$1" -c "$2" < /dev/null > /dev/null 2>&1
+        fi
+        echo $?
+}
+
+#       Whether the shell itself answers to a name: command -v prints a
+#       builtin or tool as the bare name, and anything else as a path or
+#       not at all.
+switch_own()
+{
+        if [ "$(PATH="$switch_empty" "$1" -c "command -v $2" < /dev/null \
+                2> /dev/null)" = "$2" ]; then
+                echo yes
+        else
+                echo no
+        fi
+}
+
+lane_switches()
+(
+counting switches 12 28
+switch_empty=$work/switch-empty
+mkdir -p "$switch_empty" || exit 1
+
+group handoff
+printf '%s\n' 'CONFIG_MOONWATER_CORE=y' \
+        '# CONFIG_MOONWATER_UTIL_LINUX is not set' \
+        'CONFIG_MOONWATER_SHELL_MONITOR=n' \
+        'CONFIG_MOONWATER_STRICT=2' > "$work/switch-components.config"
+if switch_header "$work/switch-components.config" "$work/switch-components.h" &&
+        switch_shell "$work/switch-components.h" "$work/switch-components"; then
+        won
+        switch_bin=$work/switch-components
+        switch_record=$(sed -n 's/^#define MOONWATER_CONFIG_RECORD "\(.*\)"$/\1/p' \
+                "$work/switch-components.h")
+        if [ -n "$switch_record" ] &&
+                grep -q -a -F "$switch_record" "$switch_bin"; then
+                won
+        else
+                lost 'record in the image' "no [$switch_record] in the shell"
+        fi
+        same 'strict level' 'MOONWATER_STRICT 2' \
+                "$(grep -o 'MOONWATER_STRICT [0-9]*' "$work/switch-components.h")"
+        same 'util-linux off' 127 "$(switch_status "$switch_bin" lsblk)"
+        same 'util-linux not its own' no "$(switch_own "$switch_bin" lsblk)"
+        same 'monitor not its own' no "$(switch_own "$switch_bin" monitor)"
+        same 'utilities still on' 0 "$(switch_status "$switch_bin" 'cat /dev/null')"
+else
+        lost 'components build' 'the header or the shell did not build'
+fi
+
+counted
+)
+
 lane_kit()
 (
 kit_failed=0

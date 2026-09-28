@@ -15561,6 +15561,28 @@ static const positive shell_tool_hash[] = {
 _Static_assert(array_count(shell_tool_key) == SHELL_TOOLS &&
                array_count(shell_tool_hash) == SHELL_TOOLS,
                "the key and hash arrays and the tool table describe the same tools");
+
+/*
+        What the build's configuration header says this table holds, counted
+        by the build tool from tools.inc and the .config. A switch that
+        stops reaching the table -- a category macro renamed, a gate that
+        expands to the wrong thing -- is a build that stops here, and the
+        record is what the build tool looks for in the finished image to
+        know the header reached the compile at all.
+*/
+#ifdef MOONWATER_CONFIG_TOOLS
+#ifdef SHELL_UTILITY_PROGRAM
+_Static_assert(SHELL_TOOLS == MOONWATER_CONFIG_TOOLS,
+               "the tool table holds what the configuration header counted");
+#else
+_Static_assert(SHELL_TOOLS == MOONWATER_CONFIG_TOOLS + MOONWATER_CONFIG_SYSTEM_TOOLS,
+               "the tool table holds what the configuration header counted");
+#endif
+#endif
+#ifdef MOONWATER_CONFIG_RECORD
+static const char moonwater_config_record[] KEEP
+    __attribute__((section(".rodata.moonwater_config"))) = MOONWATER_CONFIG_RECORD;
+#endif
 /*
         Room for every name with slots to spare, because the index is open:
         a full one has nowhere to put the next name and nowhere to stop

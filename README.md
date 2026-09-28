@@ -215,6 +215,7 @@ pieces:
 ./build freestanding [-v] [--run] [--watch] [source] [output]
 ./build floor [arch]                            prove the ISA floor
 ./build key <name>                              a value from artifacts/.config
+./build config-header <config> <header>         the header a .config gives the programs
 ```
 
 Nothing in it names this project; every path and setting can be overridden
@@ -233,7 +234,9 @@ The bundled userspace is two Kconfig options, both on by default:
 
 `CONFIG_MOONWATER_UTIL_LINUX=n` drops the util-linux applets and
 `CONFIG_MOONWATER_SHELL_MONITOR=n` the monitor; disabled applets are dropped
-from the binary, not just from the path.
+from the binary, not just from the path. The `.config` reaches the programs
+as one header, `artifacts/moonwater_config.h`, and the build refuses an image
+that does not carry that header's record.
 
 ## Tests
 
