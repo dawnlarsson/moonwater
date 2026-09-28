@@ -7972,6 +7972,15 @@ static bool file_destination_in(string_address program, string_address directory
         return true;
 }
 
+/* GNU's cp, mv and install answer a missing or extra operand through
+   usage(), which adds the line that points at --help. */
+static COLD bool file_try_help(string_address program)
+{
+        return string_report(log_error, false,
+                             "Try '%s --help' for more information.\n",
+                             program);
+}
+
 static bool file_source_destination(string_address program, positive first,
                                     positive count, string_address into, bool alone,
                                     fn(address_to pair)(string_address source,
@@ -7987,16 +7996,18 @@ static bool file_source_destination(string_address program, positive first,
 
         if (first >= count)
         {
-                return string_report(log_error, false, "%s: missing file operand\n", program);
+                string_format(log_error, "%s: missing file operand\n", program);
+                return file_try_help(program);
         }
 
         if (!into && first + 1 >= count)
         {
-                return string_report(log_error, false, "%s: missing destination file operand after %w\n",
-                              program, writer_shell_quoted_name, program_argument((b32)first));
+                string_format(log_error, "%s: missing destination file operand after %w\n",
+                              program, writer_shell_quoted_name, file_operand_at(first));
+                return file_try_help(program);
         }
 
-        string_address last = into ? into : program_argument((b32)(count - 1));
+        string_address last = into ? into : file_operand_at(count - 1);
         positive after = into ? count : count - 1;
 
         // -T says the destination is the thing itself however many names it
@@ -8008,12 +8019,13 @@ static bool file_source_destination(string_address program, positive first,
                 {
                         /* GNU extra operand is files[2], the first name
                            beyond the pair, not the destination. */
-                        return string_report(log_error, false, "%s: extra operand '%w'\n", program,
+                        string_format(log_error, "%s: extra operand '%w'\n", program,
                                       writer_terminal_quoted_name,
-                                      program_argument((b32)(first + 2)));
+                                      file_operand_at(first + 2));
+                        return file_try_help(program);
                 }
 
-                pair(program_argument((b32)first), last);
+                pair(file_operand_at(first), last);
                 log_flush();
 
                 return true;
@@ -8063,7 +8075,7 @@ static bool file_source_destination(string_address program, positive first,
         file_made_on = after - first >= 2;
         while (first < after)
         {
-                string_address source = program_argument((b32)first++);
+                string_address source = file_operand_at(first++);
                 static p8 destination[FILE_PATH_MAX];
 
                 file_made_last = first == after;
@@ -22041,6 +22053,8 @@ static b32 file_ln()
 
         file_taking taking = {
             .program = (string_address) "ln",
+            .operand = file_operand,
+            .posix_order = true,
             //      -d, -F and --directory ask for a hard link to a
             //      directory, which the kernel gives only to a privileged
             //      caller; taken and left to the link call to refuse.
@@ -22049,8 +22063,16 @@ static b32 file_ln()
             .seen = ln_option_seen,
         };
 
+        file_operands_begin();
         if (!file_take(address_of taking))
                 return 1;
+        if (file_operand_failed)
+                return string_report(log_error, 1, "%s: memory exhausted\n",
+                                     (string_address) "ln");
+        //      Options may follow the names, as getopt permutes them;
+        //      the names are gathered in order and read from there.
+        taking.first = 0;
+        count = file_operand_count;
 
         if (!file_backup_taken(address_of taking, (string_address) "ln"))
                 return 1;
@@ -22093,7 +22115,7 @@ static b32 file_ln()
                         string_format(log_error,
                                       "ln: missing destination file operand after %w\n",
                                       writer_shell_quoted_name,
-                                      program_argument((b32)first));
+                                      file_operand_at(first));
                         return string_report(log_error, 1,
                                       "Try 'ln --help' for more information.\n");
                 }
@@ -22102,13 +22124,13 @@ static b32 file_ln()
                 {
                         string_format(log_error, "ln: extra operand '%w'\n",
                                       writer_terminal_quoted_name,
-                                      program_argument((b32)(first + 2)));
+                                      file_operand_at(first + 2));
                         return string_report(log_error, 1,
                                       "Try 'ln --help' for more information.\n");
                 }
 
-                return ln_make(program_argument((b32)first),
-                               program_argument((b32)(first + 1)))
+                return ln_make(file_operand_at(first),
+                               file_operand_at(first + 1))
                            ? 0
                            : 1;
         }
@@ -22122,7 +22144,7 @@ static b32 file_ln()
         {
                 // One operand links into the working directory under the
                 // target's own last component.
-                string_address target = program_argument((b32)first);
+                string_address target = file_operand_at(first);
                 p8 name[FILE_PATH_MAX];
 
                 path_tail_copy(name, FILE_PATH_MAX, target);
@@ -22130,7 +22152,7 @@ static b32 file_ln()
                 return ln_make(target, name) ? 0 : 1;
         }
 
-        string_address last = into ? into : program_argument((b32)(count - 1));
+        string_address last = into ? into : file_operand_at(count - 1);
         positive after = into ? count : count - 1;
         bool directory;
 
@@ -22174,7 +22196,7 @@ static b32 file_ln()
                                       file_reason(looked < 0 ? looked : -ERROR_NOT_DIRECTORY));
                 }
 
-                return ln_make(program_argument((b32)first), last) ? 0 : 1;
+                return ln_make(file_operand_at(first), last) ? 0 : 1;
         }
 
         b32 status = 0;
@@ -22184,7 +22206,7 @@ static b32 file_ln()
                        !ln_symbolic && file_backup_kind != 'n';
         while (first < after)
         {
-                string_address target = program_argument((b32)first++);
+                string_address target = file_operand_at(first++);
                 p8 tail[FILE_PATH_MAX];
                 p8 name[FILE_PATH_MAX];
 
@@ -23187,15 +23209,24 @@ static b32 file_readlink()
 
         file_taking taking = {
             .program = (string_address) "readlink",
+            .operand = file_operand,
+            .posix_order = true,
             .options = readlink_options,
             .selection = (p8 address_to)address_of readlink_selected,
         };
 
+        file_operands_begin();
         if (!file_take(address_of taking))
                 return 1;
+        if (file_operand_failed)
+                return string_report(log_error, 1, "%s: memory exhausted\n",
+                                     (string_address) "readlink");
+        //      Options may follow the names, as getopt permutes them;
+        //      the names are gathered in order and read from there.
+        taking.first = 0;
 
         positive first = taking.first;
-        positive count = (positive)program_argument_count();
+        positive count = file_operand_count;
         positive flags = taking.flags;
 
         if (first >= count)
@@ -23222,7 +23253,7 @@ static b32 file_readlink()
 
         while (first < count)
         {
-                string_address path = program_argument((b32)first++);
+                string_address path = file_operand_at(first++);
                 p8 answer[FILE_PATH_MAX];
 
                 if (resolve)
@@ -24034,6 +24065,8 @@ static b32 file_mkdir()
         positive count = (positive)program_argument_count();
         file_taking taking = {
             .program = (string_address) "mkdir",
+            .operand = file_operand,
+            .posix_order = true,
             .options = mkdir_options,
             .seen = file_context_seen,
         };
@@ -24041,8 +24074,16 @@ static b32 file_mkdir()
         file_context_program = (string_address) "mkdir";
         file_context_said = false;
 
+        file_operands_begin();
         if (!file_take(address_of taking))
                 return 1;
+        if (file_operand_failed)
+                return string_report(log_error, 1, "%s: memory exhausted\n",
+                                     (string_address) "mkdir");
+        //      Options may follow the names, as getopt permutes them;
+        //      the names are gathered in order and read from there.
+        taking.first = 0;
+        count = file_operand_count;
 
         positive index = taking.first;
         positive mask = file_umask();
@@ -24078,7 +24119,7 @@ static b32 file_mkdir()
 
         while (index < count)
         {
-                string_address path = program_argument((b32)index++);
+                string_address path = file_operand_at(index++);
                 p8 failed[FILE_PATH_MAX];
                 bipolar made = file_make_directories_open(
                     path, parent_mode, mode, given_mode, parents,
@@ -31160,11 +31201,21 @@ static b32 file_rmdir()
         positive count = (positive)program_argument_count();
         file_taking taking = {
             .program = (string_address) "rmdir",
+            .operand = file_operand,
+            .posix_order = true,
             .options = rmdir_options,
         };
 
+        file_operands_begin();
         if (!file_take(address_of taking))
                 return 1;
+        if (file_operand_failed)
+                return string_report(log_error, 1, "%s: memory exhausted\n",
+                                     (string_address) "rmdir");
+        //      Options may follow the names, as getopt permutes them;
+        //      the names are gathered in order and read from there.
+        taking.first = 0;
+        count = file_operand_count;
 
         positive flags = taking.flags;
         positive first = taking.first;
@@ -31176,7 +31227,7 @@ static b32 file_rmdir()
 
         while (first < count)
         {
-                string_address path = program_argument((b32)first++);
+                string_address path = file_operand_at(first++);
                 p8 parent[FILE_PATH_MAX];
                 p8 above[FILE_PATH_MAX];
 
@@ -34847,9 +34898,12 @@ static bool mv_option_seen(p8 letter, string_address value)
 
 static bool ln_option_seen(p8 letter, string_address value)
 {
-        /* GNU ln.c stats every -t inside getopt; the last -t wins. */
+        /* GNU ln.c stats every -t inside getopt, and a second one is
+           refused there, before any later word is read. */
         if (letter != 't')
                 return true;
+        if (ln_target_directory)
+                return file_targets_told((string_address) "ln", true);
 
         file_facts facts;
         bipolar looked = file_look_code(AT_FDCWD, value, 0, address_of facts);
@@ -34912,6 +34966,8 @@ static b32 file_cp()
 
         file_taking taking = {
             .program = (string_address) "cp",
+            .operand = file_operand,
+            .posix_order = true,
             .options = cp_options,
             .selection = (p8 address_to)address_of cp_selected,
             .seen = cp_option_seen,
@@ -34924,8 +34980,16 @@ static b32 file_cp()
         file_join_source_path = false;
         file_backup_control_named = null;
 
+        file_operands_begin();
         if (!file_take(address_of taking))
                 return 1;
+        if (file_operand_failed)
+                return string_report(log_error, 1, "%s: memory exhausted\n",
+                                     (string_address) "cp");
+        //      Options may follow the names, as getopt permutes them;
+        //      the names are gathered in order and read from there.
+        taking.first = 0;
+        count = file_operand_count;
 
         if (!file_backup_taken(address_of taking, (string_address) "cp"))
                 return 1;
@@ -35015,7 +35079,7 @@ static b32 file_cp()
         if (file_join_source_path &&
             ((flags & FILE_FLAG('T')) != 0 ||
              (!into && count - first == 2 &&
-              !file_is_directory_through(program_argument((b32)(count - 1))))))
+              !file_is_directory_through(file_operand_at(count - 1)))))
         {
                 log_error("cp: with --parents, the destination must be a directory\n", 0);
                 return string_report(log_error, 1, "Try 'cp --help' for more information.\n");
@@ -36221,6 +36285,8 @@ static b32 file_mv()
 
         file_taking taking = {
             .program = (string_address) "mv",
+            .operand = file_operand,
+            .posix_order = true,
             //      X carries --exchange, which has no letter of its own
             //      in the reference either.
             .options = mv_options,
@@ -36235,8 +36301,16 @@ static b32 file_mv()
         file_join_source_path = false;
         file_backup_control_named = null;
 
+        file_operands_begin();
         if (!file_take(address_of taking))
                 return 1;
+        if (file_operand_failed)
+                return string_report(log_error, 1, "%s: memory exhausted\n",
+                                     (string_address) "mv");
+        //      Options may follow the names, as getopt permutes them;
+        //      the names are gathered in order and read from there.
+        taking.first = 0;
+        count = file_operand_count;
 
         if (!file_backup_taken(address_of taking, (string_address) "mv"))
                 return 1;
