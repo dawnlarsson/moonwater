@@ -2939,9 +2939,12 @@ static b32 zstd_entropy_block(zstd_encoder address_to e, positive n, bool last)
                         return 0;
                 address_to modes = (p8)(ll_mode << 6 | of_mode << 4 | ml_mode << 2);
                 at += described;
-                lt = ll_mode == 1 ? null : address_of pending[0].table;
-                ot = of_mode == 1 ? null : address_of pending[1].table;
-                mt = ml_mode == 1 ? null : address_of pending[2].table;
+                /* An RLE stream sends no state, and neither does a repeat of
+                   one: the table a repeat names is the RLE cell the decoder
+                   kept, not the last table this encoder built. */
+                lt = pending[0].mode == 1 ? null : address_of pending[0].table;
+                ot = pending[1].mode == 1 ? null : address_of pending[1].table;
+                mt = pending[2].mode == 1 ? null : address_of pending[2].table;
                 bits.acc = 0;
                 bits.bits = 0;
                 bits.start = at;

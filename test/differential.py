@@ -33480,6 +33480,28 @@ def harness_compression(argv):
                           back.stdout == text and own.stdout == text,
                           (made.stderr + back.stderr + own.stderr).decode(errors='replace'))
                     sizes[name] = len(made.stdout)
+                # A pool of random bytes and then only slices of it: past the
+                # first block every sequence is a match with no literals, so
+                # the literal-length stream is one symbol block after block
+                # and the second block sends it as a repeat of the first's
+                # RLE cell, which carries no state bits.
+                splicer = random.Random(8878)
+                pool = bytes(splicer.getrandbits(8) for _ in range(1 << 16))
+                spliced = bytearray(pool)
+                while len(spliced) < 1 << 20:
+                    at = splicer.randrange(0, len(pool) - 1024)
+                    spliced += pool[at:at + splicer.randrange(16, 1024)]
+                spliced = bytes(spliced)
+                for argv in (['-1'], ['-3'], ['-6'], ['-9'], ['-13'], ['-16'], ['-19'],
+                             ['--single-thread', '-6']):
+                    name = ' '.join(argv)
+                    made = call(ours_zstd + argv + ['-c'], spliced)
+                    back = call([refs['zstd'], '-dc'], made.stdout)
+                    own = call(ours_zstd + ['-dc'], made.stdout)
+                    check(label + '/zstd/level/spliced ' + name,
+                          made.returncode == back.returncode == own.returncode == 0 and
+                          back.stdout == spliced and own.stdout == spliced,
+                          (made.stderr + back.stderr + own.stderr).decode(errors='replace'))
                 for workers in ('-T1', '-T8', '-T0'):
                     check(label + '/zstd/level/' + workers + ' -9 is the bytes of -9',
                           call(ours_zstd + [workers, '-9', '-c'], text).stdout ==
