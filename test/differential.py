@@ -10861,16 +10861,24 @@ MISC_UTILITIES = (
                       ("PIPE", "30", "sleep", "21.37"), ("HUP", "30", "sleep", "21.37"),
                       ("ALRM", "-s", "INT", "30", "sleep", "21.37"),
                       ("ALRM", "-k", ".2", "30", "sh", "-c", "trap '' TERM; sleep 21.37"),
-                      ("none", "5", "true"), ("none", "5", "sh", "-c", "exit 3"), ("pipe", "-v", ".1", "sleep", "7")),
+                      ("none", "5", "true"), ("none", "5", "sh", "-c", "exit 3"), ("pipe", "-v", ".1", "sleep", "7"),
+                      ("ALRM-ignored", "5", "sh", "-c", "kill -ALRM $$; echo survived"),
+                      ("ALRM-ignored", "-s", "HUP", "5", "sh", "-c", "kill -ALRM $$; echo survived")),
             stdin=("empty",), fixture="misc", stderr="exact", modes=("bash",), timeout=10.0,
+            #       "ALRM-ignored" starts timeout with ALRM ignored: timeout
+            #       takes ALRM whatever it inherited, so its command starts
+            #       with the default and dies of one, where an ignore handed
+            #       through let it live.
             script=lambda argv, stdin_name: ul_live("timeout", (
                 "env --ignore-signal=CHLD bash -c 'exec -a timeout \"$0\" \"$@\"' \"$tool\" " + ul_words(argv[1:]) +
                 "\nstatus=$?\n" if argv[0] == "none" else
+                "(trap '' ALRM; exec -a timeout \"$tool\" " + ul_words(argv[1:]) + ") &\np=$!\n"
+                "{ wait $p; } 2> /dev/null\nstatus=$?\n" if argv[0] == "ALRM-ignored" else
                 "run " + ul_words(argv[1:]) + " 2>&1 | :\nstatus=${PIPESTATUS[0]}\n" if argv[0] == "pipe" else
                 "(exec -a timeout \"$tool\" " + ul_words(argv[1:]) + ") &\np=$!\nsleep .3\nkill -" + argv[0] +
                 " $p\n{ wait $p; } 2> /dev/null\nstatus=$?\n")
                 + "exit $status\n"),
-            valid=lambda argv: len(argv) > 2 and argv[0].isupper() or argv[:1] in (["none"], ["pipe"])),
+            valid=lambda argv: len(argv) > 2 and argv[0].isupper() or argv[:1] in (["none"], ["pipe"], ["ALRM-ignored"])),
 
     Utility("nohup",
             operands=(("./exe", "a"), ("./exe",), ("missing",), (), ("--", "./exe"), ("dir",), ("unreadable",),
