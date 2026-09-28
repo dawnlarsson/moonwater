@@ -15051,6 +15051,20 @@ def shell_lang_array_element_refusals(rng):
         "a=(1 2); x=1", line, 'echo "next=$?"', "declare -p a x 2>&1"), ("command", "stdin", "file"))
 
 
+#       bash 5.3's $BASH_TRAPSIG: the number of the signal whose trap is
+#       running, 0 in the EXIT trap, 65 66 and 67 for DEBUG ERR and RETURN,
+#       and unset outside a trap. It was never set.
+def shell_lang_bash_trapsig(rng):
+    line = rng.choice(("trap 'echo T=$BASH_TRAPSIG' USR1; kill -USR1 $$", "trap 'echo E=$BASH_TRAPSIG' EXIT",
+                       "trap 'echo R=$BASH_TRAPSIG' ERR; false", "trap 'echo D=$BASH_TRAPSIG' DEBUG; :; trap - DEBUG",
+                       "set -T; f() { :; }; trap 'echo F=$BASH_TRAPSIG' RETURN; f; trap - RETURN",
+                       "trap 'echo I=$BASH_TRAPSIG; trap - INT' INT; kill -INT $$",
+                       "trap 'echo \"${!BASH_TRAP*}\"' USR2; kill -USR2 $$", "(trap 'echo S=$BASH_TRAPSIG' EXIT)"))
+    return ("bash-trapsig", shell_BASH, shell_program(
+        'echo "[${BASH_TRAPSIG-unset}] ${!BASH_TRAP*}"', line, 'echo "after=${BASH_TRAPSIG-unset}"'),
+        ("command", "stdin", "file"))
+
+
 #       printf's quoting and time conversions as bash 5.3 has them: %q takes
 #       a width and cuts the quoted text to the precision, %Q cuts the
 #       argument and quotes the rest, a quoted character is its code point
@@ -18004,6 +18018,7 @@ SHELL_FAMILIES = (
     shell_lang_patsub_slash_tilde,
     shell_lang_array_indirect_operators,
     shell_lang_array_element_refusals,
+    shell_lang_bash_trapsig,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,

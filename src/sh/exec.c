@@ -386,8 +386,13 @@ static COLD fn exec_trap_condition(positive number)
         {
                 positive line = exec_line ? (positive)exec_line
                                           : shell_line_number;
+                bipolar kept_trapsig = shell_trap_signal;
 
+                shell_trap_signal = number == TRAP_DEBUG ? 65
+                                    : number == TRAP_ERR ? 66
+                                                         : 67;
                 exec_run_nested(action, false, line ? line - 1 : 0);
+                shell_trap_signal = kept_trapsig;
         }
         exec_condition_inside = false;
 
@@ -10772,6 +10777,9 @@ fn exec_traps()
                 exec_signal = EXEC_SIGNAL_NONE;
                 exec_tested = false;
                 exec_trap_status = kept_status;
+                bipolar kept_trapsig = shell_trap_signal;
+
+                shell_trap_signal = number;
                 // An action is source, however many lines of it there are,
                 // and what it leaves unfinished is its own syntax error --
                 // the same two calls eval makes. One line at a time used to
@@ -10780,6 +10788,7 @@ fn exec_traps()
                 // A signal's action counts its lines from one, as both
                 // references do.
                 exec_run_nested(action, false, 0);
+                shell_trap_signal = kept_trapsig;
 
                 if (exec_line_aborted())
                 {

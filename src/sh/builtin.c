@@ -2882,15 +2882,22 @@ static const string_address shell_dynamic_names[] = {
     "EUID", "RANDOM", "LINENO", "OSTYPE", "SECONDS", "SRANDOM",
     "BASHPID", "HOSTNAME", "HOSTTYPE", "MACHTYPE", "BASHOPTS",
     "SHELLOPTS", "BASH_COMMAND", "BASH_VERSION", "EPOCHSECONDS",
-    "BASH_SUBSHELL", "EPOCHREALTIME", "GROUPS", "DIRSTACK",
+    "BASH_SUBSHELL", "EPOCHREALTIME", "GROUPS", "DIRSTACK", "BASH_TRAPSIG",
 };
 static const string_address shell_dynamic_listed[] = {
     "EUID=", "RANDOM=", "LINENO=", "OSTYPE=", "SECONDS=", "SRANDOM=",
     "BASHPID=", "HOSTNAME=", "HOSTTYPE=", "MACHTYPE=", "BASHOPTS=",
     "SHELLOPTS=", "BASH_COMMAND=", "BASH_VERSION=", "EPOCHSECONDS=",
-    "BASH_SUBSHELL=", "EPOCHREALTIME=", "GROUPS=", "DIRSTACK=",
+    "BASH_SUBSHELL=", "EPOCHREALTIME=", "GROUPS=", "DIRSTACK=", "BASH_TRAPSIG=",
 };
 static p32 shell_dynamic_gone;
+
+/*
+        bash 5.3's $BASH_TRAPSIG: the number of the signal whose trap is
+        running, 0 for EXIT and bash's 65, 66 and 67 for DEBUG, ERR and
+        RETURN, and unset outside a trap.
+*/
+static bipolar shell_trap_signal = -1;
 
 static COLD bipolar shell_dynamic_index(const_string name, positive length)
 {
@@ -2979,6 +2986,9 @@ positive env_names_prefix(string_address prefix, positive length,
                 bool held = shell_dynamic_gone >> at & 1;
 
                 if (size < length || memory_compare(shell_dynamic_names[at], prefix, length))
+                        continue;
+                if (shell_trap_signal < 0 &&
+                    memory_is_word(shell_dynamic_names[at], size, "BASH_TRAPSIG"))
                         continue;
 
                 //      Not read to find out: reading RANDOM moves it. Every
@@ -4885,6 +4895,14 @@ COLD string_address shell_dynamic_value(const_string name, positive length,
                 if (shell_bash_compat &&
                     !memory_compare((address_any)text, "BASH_COMMAND", 12))
                         return exec_bash_command_value(value_length);
+
+                if (shell_bash_compat &&
+                    !memory_compare((address_any)text, "BASH_TRAPSIG", 12))
+                        return shell_trap_signal < 0
+                                   ? null
+                                   : shell_dynamic_number(
+                                         (positive)shell_trap_signal,
+                                         value_length);
 
                 if (shell_bash_compat &&
                     !memory_compare((address_any)text, "BASH_VERSION", 12))
@@ -18832,9 +18850,11 @@ fn shell_trap_exit()
         }
 
         // Taken away first, so a trap that leaves again does not run twice.
+        shell_trap_signal = 0;
         parse_nest_enter();
         run_lines(action);
         parse_nest_leave();
+        shell_trap_signal = -1;
         memory_free(action, action_room);
 
         shell_status = leaving;
