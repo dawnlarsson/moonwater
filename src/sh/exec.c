@@ -9345,9 +9345,6 @@ static string_address exec_compound_piece;
 //      A refused list keeps what it assigned though the command is dropped.
 static bool exec_compound_kept;
 static COLD fn exec_assignment_discard();
-//      Set by declare and local around their compound values: bash quotes
-//      the word it refuses there and not in a plain assignment.
-static bool exec_compound_declaring;
 
 static bool exec_compound_put(string_address name, positive name_length,
                               string_address key, positive key_length,

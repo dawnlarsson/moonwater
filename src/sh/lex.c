@@ -815,13 +815,8 @@ static bool lex_cases_operator(lex_cases address_to cases, string_address at,
                 return false;
         }
 
-        if (state == LEX_CASE_BODY && c == ';' && string_is(at + 1, ';'))
-        {
-                cases->state[cases->count - 1] = LEX_CASE_PATTERN;
-                cases->pattern_started = false;
-                cases->pattern_parens = 0;
-        }
-        else if (state == LEX_CASE_BODY && c == ';' && string_is(at + 1, '&'))
+        if (state == LEX_CASE_BODY && c == ';' &&
+            (string_is(at + 1, ';') || string_is(at + 1, '&')))
         {
                 cases->state[cases->count - 1] = LEX_CASE_PATTERN;
                 cases->pattern_started = false;

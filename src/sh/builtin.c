@@ -9610,6 +9610,8 @@ bool shell_compound_prepare(string_address name, positive name_length,
                             string_address body, positive body_length,
                             bool keyed);
 fn shell_compound_prepare_drop();
+//      Set by declare and local around their compound values: bash quotes
+//      the word it refuses there and not in a plain assignment.
 static bool exec_compound_declaring;
 static bool exec_compound_kept;
 static b32 shell_declare_value(string_address name, positive length,
@@ -15385,7 +15387,7 @@ COLD fn shell_trap(writer write, string_address input)
                            listed, as bash and dash have it. */
                         else if (!string_get(action))
                         {
-                                if (number != 17)
+                                if (number != SIGCHLD)
                                         shell_ignore((b32)number);
                         }
                         else
