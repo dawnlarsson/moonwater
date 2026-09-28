@@ -8086,36 +8086,56 @@ static bipolar http_copy_body(http_body address_to body, bipolar dest,
                          exact ? response->body_length : positive_max, exact);
 }
 
+//      The wait one read may take: a test's shorter one, else HTTP's.
+static positive http_body_seconds(const http_body address_to body)
+{
+        return body->read_seconds || body->read_nanoseconds
+                   ? body->read_seconds : HTTP_IDLE_SECONDS;
+}
+
+static bipolar http_body_borrow(http_body address_to body, positive room,
+                                p8 address_to address_to data,
+                                positive address_to got);
+
+/* Payload copied into the caller's bytes: the stash's and TLS's through
+   http_body_borrow, a plaintext socket's by a read that asks the clock and
+   polls only when nothing is queued yet. */
 static bipolar http_body_read(http_body address_to body, p8 address_to into,
                               positive room, positive address_to got)
 {
-        if (body->stash_used)
+        bipolar n;
+
+        if (body->stash_used || (body->link && body->link->tls))
         {
-                positive take = body->stash_used;
-                if (take > room)
-                        take = room;
-                memory_copy(into, body->stash, take);
-                body->stash += take;
-                body->stash_used -= take;
-                address_to got = take;
+                p8 address_to data = null;
+                bipolar status = http_body_borrow(body, room, address_of data, got);
+
+                if (!status && address_to got)
+                        memory_copy(into, data, address_to got);
+                return status;
+        }
+        if (!body->link)
+        {
+                address_to got = 0;
                 return HTTP_OK;
         }
 
-        if (body->link)
+        n = socket_receive((b32)body->link->handle, into, room, MSG_DONTWAIT,
+                           null, 0);
+        if (n == NETWORK_TRY_AGAIN || n == NETWORK_INTERRUPTED)
         {
                 network_deadline deadline;
-                positive seconds = body->read_seconds;
-                positive nanoseconds = body->read_nanoseconds;
 
-                if (!seconds && !nanoseconds)
-                        seconds = HTTP_IDLE_SECONDS;
-                if (!network_deadline_begin(address_of deadline, seconds,
-                                            nanoseconds))
+                if (!network_deadline_begin(address_of deadline,
+                                            http_body_seconds(body),
+                                            body->read_nanoseconds))
                         return HTTP_NO_REPLY;
-                return http_link_read_until(body->link, into, room, got,
-                                            address_of deadline);
+                n = network_stream_read_some_until(body->link->handle, into,
+                                                   room, address_of deadline);
         }
-        *got = 0;
+        if (n < 0 || (positive)n > room)
+                return HTTP_NO_REPLY;
+        address_to got = (positive)n;
         return HTTP_OK;
 }
 
@@ -8139,16 +8159,10 @@ static bipolar http_body_borrow(http_body address_to body, positive room,
         }
 
         if (body->link && body->link->tls)
-        {
-                positive seconds = body->read_seconds;
-                positive nanoseconds = body->read_nanoseconds;
-
-                if (!seconds && !nanoseconds)
-                        seconds = HTTP_IDLE_SECONDS;
                 return tls_borrow(address_of body->link->session, room, data,
-                                  got, seconds, nanoseconds)
+                                  got, http_body_seconds(body),
+                                  body->read_nanoseconds)
                            ? HTTP_NO_REPLY : HTTP_OK;
-        }
 
         address_to data = body->scratch;
         return http_body_read(body, body->scratch,
