@@ -4209,9 +4209,9 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #define TLS_RECORD_MAX (TLS_PLAINTEXT_MAX + 1 + 16)
 #define TLS12_RECORD_MAX (TLS_PLAINTEXT_MAX + 8 + 16)
 /* One receive takes as many whole records as the socket has queued and this
-   room holds: about fifteen full records. At least two whole records must
-   fit, since the unopened tail moves to the front only when a record would
-   not. */
+   room holds: about fifteen full records. At least one whole record must
+   fit: the unopened tail, at most one partial record, moves to the front
+   before every read, and the read has to be able to finish it. */
 #ifndef TLS_RECEIVE_ROOM
 #define TLS_RECEIVE_ROOM ((positive)1 << 18)
 #endif
