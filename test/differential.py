@@ -7141,6 +7141,42 @@ def files_cpcorner_cases():
     return tuple({"fixture": "files_cpcorner", "argv": argv} for argv in argvs)
 
 
+#       A tree copied into one that already holds its names: a file, a file
+#       one level down, a live and a dangling link, and a backup already
+#       there. Every name the walk meets below the operand is backed up as
+#       the operand itself is; cp -rb once overwrote them and kept nothing.
+FIXTURES["files_cpmerge"] = {
+    "m/d/f": files_file(b"new f\n", 1000000000),
+    "m/d/s/g": files_file(b"new g\n", 1010000000),
+    "m/d/h": files_file(b"new h\n", 1020000000),
+    "m/d/l": files_file(b"new l\n", 1025000000),
+    "m/d/s": files_dir(1030000000),
+    "m/d": files_dir(1040000000),
+    "m/one/f": files_file(b"one\n", 1045000000),
+    "m/one": files_dir(1046000000),
+    "m": files_dir(1050000000),
+    "t/d/f": files_file(b"old f\n", 1100000000),
+    "t/d/f~": files_file(b"older f\n", 1105000000),
+    "t/d/s/g": files_file(b"old g\n", 1110000000),
+    "t/d/h": files_link("nowhere", 1120000000),
+    "t/d/l": files_link("f", 1125000000),
+    "t/d/s": files_dir(1130000000),
+    "t/d": files_dir(1140000000),
+    "t/one/f": files_file(b"old one\n", 1145000000),
+    "t/one": files_dir(1146000000),
+    "t": files_dir(1150000000),
+}
+
+
+def files_cpmerge_cases():
+    controls = (("-b",), ("--backup=numbered",), ("--backup=existing",), ("-b", "-S", ".k"), ("--backup=none",))
+    copies = (("-r",), ("-a",), ("-rf",), ("-r", "--remove-destination"), ("-ru",))
+    cases = [("-r",) + control + ("m/d", "t") for control in controls]
+    cases += [copy + control + ("m/d", "t") for copy in copies[1:] for control in controls[:3]]
+    cases += [("-rbv", "m/one", "t"), ("-rv", "--backup=numbered", "m/one", "t"), ("-rb", "m/d", "m/d", "t")]
+    return tuple({"fixture": "files_cpmerge", "argv": argv} for argv in cases)
+
+
 FILES_UTILITIES = (
     # yes is the one program here the engine cannot bound: it writes until
     # something stops it, so both sides die on the harness's file-size limit
@@ -7976,7 +8012,7 @@ FILES_UTILITIES = (
             + tuple({"fixture": "files_self", "argv": words + ("sl", "x")}
                     for words in (("-rl",), ("--link", "-R"), ("-rlP",), ("-rlH",), ("-rld",), ("-al",),
                                   ("-rlL",), ("-l",), ("-lP",)))
-            + files_skip_cases("cp") + files_readonly_cases() + files_cpcorner_cases()
+            + files_skip_cases("cp") + files_readonly_cases() + files_cpcorner_cases() + files_cpmerge_cases()
             + files_made_cases("cp", ("-f", "-b", "--backup=numbered", "-d", "-R", "-l", "-s", "-v", "-a",
                                       "-dR", "--remove-destination", "-n")),
             normalize=files_sorted_lines),

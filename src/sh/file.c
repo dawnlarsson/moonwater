@@ -33533,16 +33533,24 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 }
         }
 
+        /* Under a backup GNU looks at a destination without following it,
+           as cp_pair does: a dangling link there is a name to weigh, back
+           up and replace, not a destination that is missing. */
+        bool weighed_link = file_backup_kind && !destination_exists &&
+                            destination_is_link;
+
         if (!moving && kind != MODE_DIRECTORY &&
             !(named && cp_destination_decided) &&
             !file_overwrite_allowed((string_address)"cp", destination_shown,
-                                    destination_exists,
+                                    destination_exists || weighed_link,
                                     cp_update_policy == 'n' ||
                                         cp_update_policy == 'F',
                                     cp_update_policy == 'u', cp_ask,
                                     cp_update_policy == 'F',
                                     cp_loud, address_of facts,
-                                    address_of there, address_of cp_status))
+                                    weighed_link ? address_of destination_entry
+                                                 : address_of there,
+                                    address_of cp_status))
         {
                 /* -u left a destination that is not older, and GNU still
                    remembers it as this file's copy, so the file's other
@@ -33586,6 +33594,27 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 return string_report(log_error, false, "cp: cannot stat %w: %s\n",
                                      writer_shell_quoted_name, destination_shown,
                                      file_reason(there_looked));
+
+        /* A name inside a tree is backed up as a named one is: cp_pair made
+           the named operand's backup, and nothing made one for what -r met
+           below it, so cp -rb x/d t overwrote t/d/f and kept nothing. GNU's
+           copy_internal backs up every destination that is not a directory. */
+        if (!moving && !named && !fresh && file_backup_kind &&
+            kind != MODE_DIRECTORY && destination_entry_exists &&
+            (destination_entry.mode & MODE_FORMAT) != MODE_DIRECTORY)
+        {
+                if (!file_backup_made_at(program, destination_directory,
+                                         destination, destination_shown,
+                                         address_of destination_entry))
+                        return false;
+                if (file_backup_did)
+                {
+                        destination_exists = false;
+                        destination_entry_exists = false;
+                        destination_is_link = false;
+                        there_looked = entry_looked = -ERROR_NO_ENTRY;
+                }
+        }
 
         /* GNU copy.c emit_verbose before the copy, so a later open/create
            failure still writes the arrow. -n skip above does not. A
