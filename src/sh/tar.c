@@ -1823,6 +1823,59 @@ static fn tar_ring_start(const tar_codec address_to codec)
         ring->running = parallel_beside(tar_ring_produce, ring);
 }
 
+/* The decoded bytes the ring holds next, in place: up to n of them from the
+   span at its tail, without copying, or the end (0) or failure (-1) once
+   nothing is left before it.  The span stays the caller's until
+   tar_ring_consume gives the bytes back. */
+static bipolar tar_ring_view(tar_ring address_to ring,
+                             p8 address_to address_to at, positive n)
+{
+        bipolar length;
+        positive take;
+
+        while (atomic_load(address_of ring->count) == 0)
+                thread_wait(address_of ring->count, 0);
+        length = ring->length[ring->tail];
+        if (length <= 0)
+                return length;
+        take = (positive)length - ring->taken;
+        if (take > n)
+                take = n;
+        address_to at = ring->storage + ring->tail * TAR_RING_SPAN + ring->taken;
+        return (bipolar)take;
+}
+
+static fn tar_ring_consume(tar_ring address_to ring, positive n)
+{
+        ring->taken += n;
+        if (ring->taken < (positive)ring->length[ring->tail])
+                return;
+        ring->taken = 0;
+        ring->tail = (ring->tail + 1) % TAR_RING_SPANS;
+        if (atomic_sub(address_of ring->count, 1) == TAR_RING_SPANS)
+                thread_wake(address_of ring->count, 1);
+}
+
+static bipolar tar_read_bytes(bipolar handle, p8 address_to into, positive n);
+
+/* Archive bytes to pass over or write out as they are: the ring's own span
+   when a codec runs beside, else a read into scratch.  tar_view_done hands
+   them back once they are used. */
+static bipolar tar_view_bytes(bipolar handle, p8 address_to address_to at,
+                              positive n, p8 address_to scratch)
+{
+        if (tar_ring_state.running)
+                return tar_ring_view(address_of tar_ring_state, at, n);
+        address_to at = scratch;
+        return tar_read_bytes(handle, scratch, n > TAR_RECORD ? TAR_RECORD : n);
+}
+
+static fn tar_view_done(positive n)
+{
+        if (tar_ring_state.running)
+                tar_ring_consume(address_of tar_ring_state, n);
+}
+
 static bipolar tar_read_bytes(bipolar handle, p8 address_to into, positive n)
 {
         bipolar got;
@@ -1852,6 +1905,18 @@ static bipolar tar_read_bytes(bipolar handle, p8 address_to into, positive n)
 {
         return tar_decoder ? tar_decoder->read(into, n)
                            : system_read_retry((positive)handle, into, n);
+}
+
+static bipolar tar_view_bytes(bipolar handle, p8 address_to address_to at,
+                              positive n, p8 address_to scratch)
+{
+        address_to at = scratch;
+        return tar_read_bytes(handle, scratch, n > TAR_RECORD ? TAR_RECORD : n);
+}
+
+static fn tar_view_done(positive n)
+{
+        (void)n;
 }
 #endif
 
@@ -2077,8 +2142,11 @@ static bool tar_skip(bipolar handle, p64 bytes, bool seekable)
 
         while (bytes)
         {
-                positive ask = bytes > TAR_RECORD ? TAR_RECORD : (positive)bytes;
-                bipolar got = tar_read_bytes(handle, tar_record, ask);
+                positive ask = bytes > positive_max ? positive_max
+                                                    : (positive)bytes;
+                p8 address_to at;
+                bipolar got = tar_view_bytes(handle, address_of at, ask,
+                                             tar_record);
 
                 if (got <= 0)
                 {
@@ -2086,6 +2154,7 @@ static bool tar_skip(bipolar handle, p64 bytes, bool seekable)
                         return false;
                 }
 
+                tar_view_done((positive)got);
                 bytes -= (positive)got;
         }
 
@@ -2181,6 +2250,43 @@ static bool tar_copy_n(bipolar archive, bipolar out, p64 size, bool seekable)
                                 return false;
 
                         return !tar_write_failure;
+                }
+
+                /* A packed member past what the record holds is written
+                   from the codec's own span, not copied into the record
+                   first. */
+                if (tar_at >= tar_have && tar_packed())
+                {
+                        p8 address_to at;
+                        bipolar got = tar_view_bytes(
+                            archive, address_of at,
+                            left > positive_max ? positive_max : (positive)left,
+                            tar_record);
+
+                        tar_at = 0;
+                        tar_have = 0;
+                        if (got <= 0)
+                        {
+                                tar_write_failure = 0;
+                                if (got < 0)
+                                        tar_refuse("cannot read archive");
+                                tar_refuse("unexpected EOF in archive");
+                                return false;
+                        }
+                        if (out >= 0)
+                        {
+                                bipolar wrote = tar_write_reason(
+                                    out, at, (positive)got);
+
+                                if (wrote < 0)
+                                {
+                                        tar_write_failure = wrote;
+                                        out = -1;
+                                }
+                        }
+                        tar_view_done((positive)got);
+                        left -= (positive)got;
+                        continue;
                 }
 
                 /* An archive that ends early stops here whatever was written:
