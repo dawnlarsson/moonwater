@@ -11350,19 +11350,25 @@ counted
 #           MOONWATER_IMAGE=dist/bootx64.efi sh test/run wifi
 #
 #       with an image built with kernel/profile/hwsim added to the usual
-#       profiles. The machine boots with no radios; the script
-#       differential.py --harness wifi_air writes makes them with
-#       hwsim_radio (test/checks.c, CHECK_hwsim_radio, static) and runs
-#       access points on them with this machine's own wpa_supplicant,
+#       profiles. The machine boots with no radios and no wired network;
+#       the script differential.py --harness wifi_air writes makes them
+#       with hwsim_radio (test/checks.c, CHECK_hwsim_radio, static) and
+#       runs access points on them with this machine's own wpa_supplicant,
 #       carried in on a stick with every library it loads and the loader
 #       that loads them. moonwater then joins, lists and explains from a
 #       radio of its own. Not in a plain run: only named, and only here,
 #       with an x86_64 image, a wpa_supplicant and a C compiler.
 #
+#       A hostapd built with CONFIG_TESTING_OPTIONS (MOONWATER_HOSTAPD, or
+#       one on PATH that has them) adds the rekey family: rekeys started
+#       from its control socket. Without one that family is not run, and
+#       says so. MOONWATER_WIFI_TRANSCRIPT keeps the guest's transcript.
+#
 lane_wifi()
 (
 image=${MOONWATER_IMAGE:-dist/bootx64.efi}
 supplicant=$(command -v wpa_supplicant 2>/dev/null)
+hostapd=${MOONWATER_HOSTAPD:-$(command -v hostapd 2>/dev/null)}
 
 for need in qemu-system-x86_64 timeout cc ldd; do
         if ! command -v "$need" > /dev/null 2>&1; then
@@ -11391,14 +11397,26 @@ if ! cc -static -O2 -DCHECK_hwsim_radio -o "$work/stick/hwsim_radio" test/checks
         exit 1
 fi
 cp -L "$supplicant" "$work/stick/wpa_supplicant"
-ldd "$supplicant" | awk '$2 == "=>" && $3 ~ /^\// { print $3 } $1 ~ /^\/.*ld-linux/ { print $1 }' |
-        while read -r library; do
-                cp -L "$library" "$work/stick/lib/"
-        done
+set -- "$supplicant"
+if [ -n "$hostapd" ] && [ -x "$hostapd" ] && [ -x "${hostapd%/*}/hostapd_cli" ] &&
+        grep -a -q 'REKEY_PTK ' "$hostapd"; then
+        cp -L "$hostapd" "$work/stick/hostapd"
+        cp -L "${hostapd%/*}/hostapd_cli" "$work/stick/hostapd_cli"
+        set -- "$@" "$hostapd" "${hostapd%/*}/hostapd_cli"
+else
+        echo "  wifi       rekey          NOT RUN -- no hostapd with CONFIG_TESTING_OPTIONS (MOONWATER_HOSTAPD)"
+fi
+for program in "$@"; do
+        ldd "$program" | awk '$2 == "=>" && $3 ~ /^\// { print $3 } $1 ~ /^\/.*ld-linux/ { print $1 }'
+done | sort -u | while read -r library; do
+        cp -L "$library" "$work/stick/lib/"
+done
 [ -f "$work/stick/lib/ld-linux-x86-64.so.2" ] ||
         lost 'the loader' "ldd named no ld-linux-x86-64.so.2 for $supplicant"
 
-if ! python3 test/differential.py --harness wifi_air --seed "${MOONWATER_GUEST_SEED:-1}" \
+set --
+[ -f "$work/stick/hostapd" ] && set -- --hostapd
+if ! python3 test/differential.py --harness wifi_air --seed "${MOONWATER_GUEST_SEED:-1}" "$@" \
         > "$work/script" 2> "$work/script.err"; then
         lost 'wifi scenarios' "the generator failed: $(tail -1 "$work/script.err")"
         counted
@@ -11416,15 +11434,17 @@ fi
 
 set -- -cpu Nehalem
 [ -w /dev/kvm ] && set -- -enable-kvm -cpu host
-timeout 300 qemu-system-x86_64 -m 1G -smp 2 "$@" -kernel "$image" \
-        -no-reboot -display none -vga none -serial stdio \
+timeout 900 qemu-system-x86_64 -m 1G -smp 2 "$@" -kernel "$image" \
+        -no-reboot -display none -vga none -serial stdio -nic none \
         -device qemu-xhci \
         -drive "if=none,id=stick,format=raw,file=fat:ro:$work/stick,readonly=on" \
         -device usb-storage,drive=stick,removable=on \
         -append "console=ttyS0 drm_client_lib.active= mac80211_hwsim.radios=0" \
         < "$work/commands" > "$work/transcript" 2>&1 || true
+[ -n "${MOONWATER_WIFI_TRANSCRIPT:-}" ] && cp "$work/transcript" "$MOONWATER_WIFI_TRANSCRIPT"
 
 says transcript 'simulated radios (an image with the hwsim profile)' 'no-mswh'
+tr -d '\r' < "$work/transcript" | grep -a '^wifi-time ' | sed 's/^/    /'
 while read -r mark family total; do
         [ "$mark" = "#expect" ] || continue
         says transcript "wifi: $family" \

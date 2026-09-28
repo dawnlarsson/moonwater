@@ -48763,12 +48763,29 @@ def harness_wifi_air(argv):
              first, marked joined or saved, its name made safe; then with
              only a network whose password is wrong saved, why the machine
              is not joined, there and in moonwater status
+      watch  ip watch leases the station and never the radio's monitor
+             (hwsim0) or an access point in the machine's own namespace
+      reassoc the link held while idle; the access point gone and back,
+             joined again; a twin by the same name taking over when the
+             first goes, and the first again after it
+      rekey  (--hostapd, a hostapd built with CONFIG_TESTING_OPTIONS) the
+             access point's group and pairwise rekeys and resent messages
+             answered with the link and its data intact; an access point
+             that never sends message 1 is said to have ended the
+             handshake, quickly; one that stops answering authentication
+             is left for its twin
+
+    The access points other than the WPA3-only one run in a network
+    namespace of their own (hwsim_radio hold/move/in), with a DHCP server
+    in raw frames on the first (hwsim_radio dhcp), so the station's lease
+    comes over the air. Lines "wifi-time NAME SECONDS" are join times.
     """
     import random
     seed = 1
     if "--seed" in argv:
         seed = int(argv[argv.index("--seed") + 1])
     rng = random.Random(seed)
+    hostapd = "--hostapd" in argv
     out = []
     expects = []
 
@@ -48855,8 +48872,17 @@ def harness_wifi_air(argv):
     prep.append("[ -d /sys/module/mac80211_hwsim ] && echo hwsm-on | rev")
     prep.append("for i in $(seq 40); do [ -b /dev/sda1 ] && break; sleep 0.25; done")
     prep.append("mkdir -p /mnt/stick && mount -r -t vfat /dev/sda1 /mnt/stick")
-    prep.append("W=\"/mnt/stick/lib/ld-linux-x86-64.so.2 --library-path /mnt/stick/lib /mnt/stick/wpa_supplicant\"")
+    prep.append("L=\"/mnt/stick/lib/ld-linux-x86-64.so.2 --library-path /mnt/stick/lib\"")
+    prep.append("W=\"$L /mnt/stick/wpa_supplicant\"")
     prep.append("rm -f /root/wifi /root/wifi.power /run/moonwater/wifi.last")
+    prep.append("printf 'wifi\\n' > /root/internet")
+    # Every access point's radio made first, so each is wlanN by its place;
+    # all but the WPA3-only one then go to the access points' namespace.
+    # That one stays as an access point beside the station, for ip watch
+    # to pass over.
+    prep.append("NS=$(/mnt/stick/hwsim_radio hold); A=\"/mnt/stick/hwsim_radio in $NS\"; K=wlan3")
+    for at, ap in enumerate(aps):
+        prep.append("/mnt/stick/hwsim_radio new > /dev/null")
     for at, ap in enumerate(aps):
         body = ["network={", "ssid=%s" % ap["ssid"].hex(), "mode=2",
                 "frequency=%d" % (2407 + 5 * ap["channel"])]
@@ -48872,15 +48898,28 @@ def harness_wifi_air(argv):
                 body += ["sae_password=\"%s\"" % ap["password"],
                          "ieee80211w=%d" % (2 if ap["kind"] == "wpa3" else 1)]
         body.append("}")
-        prep.append("/mnt/stick/hwsim_radio new > /dev/null")
         prep.append("printf '%%s\\n' %s > /tmp/ap%d.conf" % (" ".join(q(line) for line in body), at))
-        prep.append("$W -B -i wlan%d -c /tmp/ap%d.conf -D nl80211 -f /tmp/ap%d.log" % (at, at, at))
+        if at == 3:
+            prep.append("i3=wlan3; $W -B -i wlan3 -c /tmp/ap3.conf -D nl80211 -f /tmp/ap3.log -P /tmp/ap3.pid")
+        else:
+            prep.append("i%d=$(/mnt/stick/hwsim_radio move $NS wlan%d)" % (at, at))
+            prep.append("$A $W -B -i $i%d -c /tmp/ap%d.conf -D nl80211 -f /tmp/ap%d.log -P /tmp/ap%d.pid"
+                        % (at, at, at, at))
     prep.append("for i in $(seq 40); do n=$(cat /tmp/ap*.log 2>/dev/null | grep -c AP-ENABLED); [ \"$n\" = %d ] && break; sleep 0.25; done" % len(aps))
     for at, ap in enumerate(aps):
-        prep.append("/mnt/stick/hwsim_radio power wlan%d %d" % (at, ap["power"]))
+        prep.append("%s/mnt/stick/hwsim_radio power $i%d %d" % ("" if at == 3 else "$A ", at, ap["power"]))
+    prep.append("$A /mnt/stick/hwsim_radio dhcp $i0 40 > /tmp/dhcp0.log 2>&1 &")
     for at, ap in enumerate(aps):
         prep.append("ap%d=\"$(printf '%s')\"" % (at, octal(ap["ssid"])))
-    station = "wlan%d" % len(aps)
+    # The station: the one radio here that is not the access point K.
+    prep.append("station() { for f in /sys/class/net/*/phy80211; do d=${f%/phy80211}; d=${d##*/}; "
+                "[ \"$d\" = \"$K\" ] || [ \"$d\" = \"$1\" ] || echo $d; done | head -1; }")
+    prep.append("uptime_now() { cut -d' ' -f1 /proc/uptime; }")
+    prep.append("took() { awk -v a=\"$1\" -v b=\"$(uptime_now)\" 'BEGIN { printf \"%.2f\\n\", b - a }'; }")
+    prep.append("joined() { moonwater status 2>/dev/null | grep -c -x -F \"  wifi joined $1\"; }")
+    # When the station last associated: how long a handshake took to fail
+    # is from there, not from before the scan a join may start with.
+    prep.append("associated_at() { dmesg | grep \": associated\\$\" | tail -1 | sed 's/^\\[ *\\([0-9.]*\\)\\].*/\\1/'; }")
     out.extend(prep)
 
     # ---- late: saved first, the radio after
@@ -48893,11 +48932,72 @@ def harness_wifi_air(argv):
     lines.append("scen_count 'late radio joined with no command' 1 \"$(moonwater status 2>/dev/null | grep -c -x -F \"  wifi joined $ap0\")\"")
     family("late", lines)
 
+    # ---- watch: the lease is for the station and nothing else wifi
+    lines = []
+    lines.append("S=$(station); echo \"station $S\"")
+    lines.append("for i in $(seq 120); do dmesg | grep -q \"ip: 192.168.77.100/24 on $S\" && break; sleep 0.5; done")
+    lines.append("scen_count 'watch leased the station' 1 \"$(dmesg | grep -c \"ip: 192.168.77.100/24 on $S\")\"")
+    lines.append("scen_count 'watch never took the radio monitor' 0 \"$(dmesg | grep -c 'ip: using hwsim0')\"")
+    lines.append("scen_count 'watch never took an access point' 0 \"$(dmesg | grep -c \"ip: using $K\\$\")\"")
+    family("watch", lines)
+
+    # ---- reassoc: joined, the machine keeps the association while idle;
+    # the access point goes and comes back, and the machine joins again;
+    # then a second access point with the same name and password takes
+    # over when the first goes (a roam), and the first once more after it.
+    lines = []
+    lines.append("a0=$(dmesg | grep -c \"$S: authenticate with\"); l0=$(dmesg | grep -c \"$S: deauthenticating from .* by local choice\")")
+    lines.append("sleep 20")
+    lines.append("scen_count 'reassoc idle still joined' 1 \"$(joined \"$ap0\")\"")
+    lines.append("scen_count 'reassoc idle no new authentication' \"$a0\" \"$(dmesg | grep -c \"$S: authenticate with\")\"")
+    lines.append("scen_count 'reassoc idle no local deauth' \"$l0\" \"$(dmesg | grep -c \"$S: deauthenticating from .* by local choice\")\"")
+    lines.append("kill $(cat /tmp/ap0.pid)")
+    lines.append("for i in $(seq 60); do [ \"$(joined \"$ap0\")\" = 0 ] && break; sleep 0.5; done")
+    lines.append("scen_count 'reassoc access point gone' 0 \"$(joined \"$ap0\")\"")
+    lines.append("sleep 2; t0=$(uptime_now); $A $W -B -i $i0 -c /tmp/ap0.conf -D nl80211 -f /tmp/ap0.log -P /tmp/ap0.pid")
+    lines.append("for i in $(seq 120); do [ \"$(joined \"$ap0\")\" = 1 ] && break; sleep 0.25; done; echo \"wifi-time back $(took $t0)\"")
+    lines.append("scen_count 'reassoc access point back, joined again' 1 \"$(joined \"$ap0\")\"")
+    lines.append("scen_count 'reassoc no four-way timeout' 0 \"$(dmesg | grep -c 4WAY_HANDSHAKE_TIMEOUT)\"")
+    lines.append("for i in $(seq 60); do ip addr 2>/dev/null | grep -q 192.168.77.100 && break; sleep 0.5; done")
+    lines.append("scen_count 'reassoc lease held after rejoin' 1 \"$(ip addr 2>/dev/null | grep -c 192.168.77.100)\"")
+    body = ["network={", "ssid=%s" % good["ssid"].hex(), "mode=2",
+            "frequency=%d" % (2407 + 5 * (1 if good["channel"] != 1 else 6)),
+            "proto=RSN", "pairwise=CCMP", "group=CCMP", "key_mgmt=WPA-PSK",
+            "psk=\"%s\"" % good["password"], "}"]
+    lines.append("/mnt/stick/hwsim_radio new > /dev/null")
+    lines.append("printf '%%s\\n' %s > /tmp/aptwin.conf" % " ".join(q(line) for line in body))
+    lines.append("tn=$(station $S); tm=$(cat /sys/class/net/$tn/address); it=$(/mnt/stick/hwsim_radio move $NS $tn); echo \"twin $tn $tm $it\"")
+    lines.append("$A $W -B -i $it -c /tmp/aptwin.conf -D nl80211 -f /tmp/aptwin.log -P /tmp/aptwin.pid")
+    lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/aptwin.log 2>/dev/null && break; sleep 0.25; done")
+    lines.append("$A /mnt/stick/hwsim_radio power $it %d" % good["power"])
+    lines.append("$A /mnt/stick/hwsim_radio dhcp $it 40 > /tmp/dhcp1.log 2>&1 &")
+    lines.append("t1=$(dmesg | grep -c \"$S: authenticate with $tm\")")
+    lines.append("kill $(cat /tmp/ap0.pid); t0=$(uptime_now)")
+    lines.append("for i in $(seq 60); do [ \"$(joined \"$ap0\")\" = 0 ] && break; sleep 0.25; done")
+    lines.append("for i in $(seq 120); do [ \"$(joined \"$ap0\")\" = 1 ] && break; sleep 0.25; done; echo \"wifi-time roam $(took $t0)\"")
+    lines.append("scen_count 'reassoc roamed to the twin, joined' 1 \"$(joined \"$ap0\")\"")
+    lines.append("scen_count 'reassoc roam went to the twin' 1 \"$([ \"$(dmesg | grep -c \"$S: authenticate with $tm\")\" -gt \"$t1\" ] && echo 1 || echo 0)\"")
+    lines.append("scen_count 'reassoc roam no four-way timeout' 0 \"$(dmesg | grep -c 4WAY_HANDSHAKE_TIMEOUT)\"")
+    # An access point that has gone stays in the kernel's list for thirty
+    # seconds; a join by name alone took it from there and waited out its
+    # authentication, once for every access point that went.
+    lines.append("scen_count 'reassoc never tried a gone access point' 0 \"$(dmesg | grep -c \"$S: authentication with .* timed out\")\"")
+    lines.append("$A $W -B -i $i0 -c /tmp/ap0.conf -D nl80211 -f /tmp/ap0.log -P /tmp/ap0.pid")
+    lines.append("kill $(cat /tmp/aptwin.pid)")
+    lines.append("for i in $(seq 120); do [ \"$(joined \"$ap0\")\" = 1 ] && [ ! -d /proc/$(cat /tmp/aptwin.pid) ] && break; sleep 0.5; done")
+    lines.append("scen_count 'reassoc back on the first, joined' 1 \"$(joined \"$ap0\")\"")
+    lines.append("dmesg | grep -a -e \"$S:\" -e 'ip:' | tail -60 | sed 's/^/reassoc-log /'")
+    family("reassoc", lines)
+
     # ---- join
     lines = []
-    lines.append("moonwater wifi add \"$ap1\" %s > /tmp/sc.got 2>&1; scen_status 'join wrong password' 1 $?" % q(wrong))
+    lines.append("t0=$(uptime_now); moonwater wifi add \"$ap1\" %s > /tmp/sc.got 2>&1; scen_status 'join wrong password' 1 $?; echo \"wifi-time wrong-password $(took $t0)\"" % q(wrong))
+    # The access point sends the machine away some three seconds after it
+    # gives up on message 2; the join used to wait out eight on its own.
+    lines.append("echo \"wifi-time wrong-password-handshake $(took $(associated_at))\"")
+    lines.append("scen_count 'join wrong password said within 6 s of associating' 1 \"$(awk -v t=\"$(took $(associated_at))\" 'BEGIN { print (t < 6) }')\"")
     lines.append("scen_count 'join wrong password says so' 1 \"$(grep -c 'saved, but the network did not accept the password' /tmp/sc.got)\"")
-    lines.append("moonwater wifi add \"$ap2\" < /dev/null > /tmp/sc.got 2>&1; scen_status 'join open' 0 $?")
+    lines.append("t0=$(uptime_now); moonwater wifi add \"$ap2\" < /dev/null > /tmp/sc.got 2>&1; scen_status 'join open' 0 $?; echo \"wifi-time open $(took $t0)\"")
     lines.append("scen_count 'join open joined' 1 \"$(grep -c -x -F \"$(printf '\\033[1m[Moonwater]\\033[0m ')wifi joined $ap2\" /tmp/sc.got)\"")
     lines.append("moonwater wifi add \"$ap3\" %s > /tmp/sc.got 2>&1; scen_status 'join WPA3 alone' 1 $?" % q(sae["password"]))
     lines.append("scen_count 'join WPA3 alone refused' 1 \"$(grep -c 'saved, but it asks for WPA3, which moonwater cannot join yet' /tmp/sc.got)\"")
@@ -48938,6 +49038,67 @@ def harness_wifi_air(argv):
     lines.append("scen_count 'air none in range' 1 \"$(moonwater wifi 2>&1 | scen_strip | grep -c -x 'not joined: no saved network is in range')\"")
     lines.append("rm -f /root/wifi /run/moonwater/wifi.last")
     family("air", lines)
+
+    # ---- rekey: hostapd, whose control socket starts rekeys on demand.
+    # Two access points by one name, the first much the stronger, each
+    # with its own DHCP server; a lease of 20 s, so a renewal every ten
+    # is unicast data through the pairwise key.
+    if hostapd:
+        lines = []
+        rk = name(plain, taken)
+        word = "".join(rng.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(12))
+        lines.append("H=\"$L /mnt/stick/hostapd\"; HC=\"$L /mnt/stick/hostapd_cli -p /tmp/hostapd\"")
+        lines.append("rk=\"$(printf '%s')\"" % octal(rk))
+        for at, (channel, power) in enumerate(((1, 20), (11, 4))):
+            lines.append("/mnt/stick/hwsim_radio new > /dev/null; r=$(station $S); "
+                         "rm%d=$(cat /sys/class/net/$r/address); j%d=$(/mnt/stick/hwsim_radio move $NS $r)" % (at, at))
+            conf = ["driver=nl80211", "ssid2=%s" % rk.hex(), "hw_mode=g",
+                    "channel=%d" % channel, "wpa=2", "wpa_key_mgmt=WPA-PSK",
+                    "rsn_pairwise=CCMP", "wpa_passphrase=%s" % word,
+                    "ctrl_interface=/tmp/hostapd"]
+            lines.append("printf '%%s\\n' \"interface=$j%d\" %s > /tmp/rk%d.conf" % (at, " ".join(q(c) for c in conf), at))
+            lines.append("$A $H -B -dd -t -P /tmp/rk%d.pid -f /tmp/rk%d.log /tmp/rk%d.conf" % (at, at, at))
+            lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/rk%d.log 2>/dev/null && break; sleep 0.25; done" % at)
+            lines.append("$A /mnt/stick/hwsim_radio power $j%d %d" % (at, power))
+            lines.append("$A /mnt/stick/hwsim_radio dhcp $j%d 20 > /tmp/dhcprk%d.log 2>&1 &" % (at, at))
+        lines.append("mac=$(cat /sys/class/net/$S/address)")
+        lines.append("t0=$(uptime_now); moonwater wifi add \"$rk\" %s > /tmp/sc.got 2>&1; scen_status 'rekey join' 0 $?; echo \"wifi-time hostapd $(took $t0)\"" % q(word))
+        lines.append("for i in $(seq 60); do [ \"$(dmesg | grep -c \"lease renewed on $S\")\" -gt 0 ] && ip addr | grep -q 192.168.77.100 && break; sleep 0.5; done")
+        lines.append("a0=$(dmesg | grep -c \"$S: authenticate with\"); g0=$(grep -c 'group key handshake completed' /tmp/rk0.log); p0=$(grep -c 'pairwise key handshake completed' /tmp/rk0.log)")
+        lines.append("h0=$(dmesg | grep -c -e 4WAY_HANDSHAKE_TIMEOUT -e GROUP_KEY_HANDSHAKE_TIMEOUT)")
+        lines.append("$HC -i $j0 raw REKEY_GTK > /dev/null; sleep 6")
+        lines.append("scen_count 'rekey group key handshake completed' 1 \"$(( $(grep -c 'group key handshake completed' /tmp/rk0.log) - g0 ))\"")
+        lines.append("$HC -i $j0 raw REKEY_PTK $mac > /dev/null; sleep 6")
+        lines.append("scen_count 'rekey pairwise key handshake completed' 1 \"$(( $(grep -c 'pairwise key handshake completed' /tmp/rk0.log) - p0 ))\"")
+        lines.append("$HC -i $j0 raw RESEND_M3 $mac > /dev/null; sleep 3")
+        lines.append("$HC -i $j0 raw RESEND_GROUP_M1 $mac > /dev/null; sleep 6")
+        lines.append("scen_count 'rekey still joined' 1 \"$(joined \"$rk\")\"")
+        lines.append("scen_count 'rekey no new authentication' \"$a0\" \"$(dmesg | grep -c \"$S: authenticate with\")\"")
+        lines.append("scen_count 'rekey no handshake timeout' \"$h0\" \"$(dmesg | grep -c -e 4WAY_HANDSHAKE_TIMEOUT -e GROUP_KEY_HANDSHAKE_TIMEOUT)\"")
+        lines.append("n0=$(dmesg | grep -c \"lease renewed on $S\"); for i in $(seq 60); do [ \"$(dmesg | grep -c \"lease renewed on $S\")\" -gt \"$n0\" ] && break; sleep 0.5; done")
+        lines.append("scen_count 'rekey data through the new keys' 1 \"$([ \"$(dmesg | grep -c \"lease renewed on $S\")\" -gt \"$n0\" ] && echo 1 || echo 0)\"")
+        # No message 1 from either: hostapd hands its EAPOL frames to the
+        # control socket instead of the air, then gives up on its own
+        # schedule and sends the machine away.
+        lines.append("rm -f /root/wifi; $HC -i $j0 SET ext_eapol_frame_io 1 > /dev/null; $HC -i $j1 SET ext_eapol_frame_io 1 > /dev/null")
+        lines.append("t0=$(uptime_now); moonwater wifi add \"$rk\" %s > /tmp/sc.got 2>&1; scen_status 'rekey no message 1' 1 $?; echo \"wifi-time no-message-1 $(took $t0)\"" % q(word))
+        lines.append("echo \"wifi-time no-message-1-handshake $(took $(associated_at))\"")
+        lines.append("scen_count 'rekey no message 1 said within 6 s of associating' 1 \"$(awk -v t=\"$(took $(associated_at))\" 'BEGIN { print (t < 6) }')\"")
+        lines.append("scen_count 'rekey no message 1 says the network ended it' 1 \"$(grep -c 'saved, but the network ended the handshake (reason 15)' /tmp/sc.got)\"")
+        lines.append("$HC -i $j0 SET ext_eapol_frame_io 0 > /dev/null; $HC -i $j1 SET ext_eapol_frame_io 0 > /dev/null")
+        lines.append("rm -f /run/moonwater/wifi.avoid; moonwater wifi add \"$rk\" %s > /tmp/sc.got 2>&1; scen_status 'rekey joined again' 0 $?" % q(word))
+        # The first stops answering authentication and sends the machine
+        # away: it still beacons, strongest by far, and the twin is the
+        # one to join.
+        lines.append("b0=$(dmesg | grep -c \"$S: authenticate with $rm0\"); c0=$(dmesg | grep -c \"$S: authenticate with $rm1\")")
+        lines.append("$HC -i $j0 SET ignore_auth_probability 1.0 > /dev/null; t0=$(uptime_now); $HC -i $j0 deauthenticate $mac > /dev/null")
+        lines.append("for i in $(seq 160); do [ \"$(dmesg | grep -c \"$S: authenticate with $rm1\")\" -gt \"$c0\" ] && [ \"$(joined \"$rk\")\" = 1 ] && break; sleep 0.25; done; echo \"wifi-time roam-silent $(took $t0)\"")
+        lines.append("scen_count 'rekey roam: the twin joined' 1 \"$([ \"$(dmesg | grep -c \"$S: authenticate with $rm1\")\" -gt \"$c0\" ] && [ \"$(joined \"$rk\")\" = 1 ] && echo 1 || echo 0)\"")
+        lines.append("scen_count 'rekey roam: the silent one tried at most twice' 1 \"$([ $(( $(dmesg | grep -c \"$S: authenticate with $rm0\") - b0 )) -le 2 ] && echo 1 || echo 0)\"")
+        lines.append("sleep 1; scen_count 'rekey no zombie keeper' 0 \"$(scen_zombies)\"")
+        lines.append("grep -a -h -e 'handshake completed' -e 'disassoc' -e 'deauth' /tmp/rk0.log /tmp/rk1.log | tail -20 | sed 's/^/rekey-ap /'")
+        lines.append("rm -f /root/wifi")
+        family("rekey", lines)
 
     head = ["#expect %s %d" % item for item in expects]
     print("\n".join(head))

@@ -98143,18 +98143,36 @@ void probe_fill_32(void *d)
             hwsim_radio new             make a mac80211_hwsim radio; print its id
             hwsim_radio power IF DBM    fix IF's transmit power, which is what
                                         another radio hears as its signal
+            hwsim_radio hold            make the access points' network namespace;
+                                        print the pid that holds it
+            hwsim_radio move PID IF     move IF's radio into it; print IF's name there
+            hwsim_radio in PID CMD...   run CMD inside it
+            hwsim_radio dhcp IF SECONDS a DHCP server in raw frames on IF: one
+                                        address, 192.168.77.100, leased for SECONDS
+
+        The access points live in a namespace of their own so that the
+        station's machine sees only its station, and the DHCP server, with
+        no address on its interface, never lets the guest's own routing
+        short-cut the station's packets.
 
         Radios outlive this program: nothing asks hwsim to destroy them when
         the socket closes, so one made after `moonwater wifi add` is a card
         that arrived late and stays.
 */
+#define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <fcntl.h>
 #include <linux/genetlink.h>
+#include <linux/if_packet.h>
 #include <linux/netlink.h>
 #include <linux/nl80211.h>
+#include <net/ethernet.h>
 #include <net/if.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -98236,6 +98254,180 @@ static int hwsim_family(int handle, const char *name)
         return hwsim_ask(handle, GENL_ID_CTRL, CTRL_CMD_GETFAMILY, attributes, length, 1);
 }
 
+static int hwsim_enter(const char *pid)
+{
+        char path[64];
+        int handle;
+
+        snprintf(path, sizeof path, "/proc/%s/ns/net", pid);
+        handle = open(path, O_RDONLY | O_CLOEXEC);
+        if (handle < 0 || setns(handle, CLONE_NEWNET) < 0)
+        {
+                perror("hwsim_radio: setns");
+                return -1;
+        }
+        close(handle);
+        return 0;
+}
+
+static unsigned short hwsim_sum(const unsigned char *at, int length)
+{
+        unsigned long sum = 0;
+
+        for (int i = 0; i + 1 < length; i += 2)
+                sum += (unsigned)(at[i] << 8 | at[i + 1]);
+        while (sum >> 16)
+                sum = (sum & 0xffff) + (sum >> 16);
+        return (unsigned short)~sum;
+}
+
+/* One DHCP reply in place of the request in frame: an OFFER to a DISCOVER,
+   an ACK to a REQUEST for the pool address, a NAK to one for any other;
+   the frame's length, or 0 for nothing to answer. */
+static int hwsim_dhcp_answer(const unsigned char *frame, int got, const unsigned char *mine,
+                             unsigned lease, unsigned char *out, const char **said)
+{
+        const unsigned server = 0xc0a84d01u, pool = 0xc0a84d64u;
+        const unsigned char *ip = frame + 14;
+        const unsigned char *udp, *boot, *option, *stop = frame + got;
+        unsigned char *rip = out + 14, *rudp = rip + 20, *rboot = rudp + 8, *ropt = rboot + 240;
+        unsigned ciaddr, value, wanted = 0;
+        int kind = 0, nak, length;
+
+        if (got < 14 + 20 + 8 + 240 || frame[12] != 0x08 || frame[13] != 0 || ip[9] != 17 ||
+            (ip[0] & 15) < 5 || 14 + (ip[0] & 15) * 4 + 8 + 240 > got)
+                return 0;
+        udp = ip + (ip[0] & 15) * 4;
+        boot = udp + 8;
+        if (udp[2] != 0 || udp[3] != 67 || boot[0] != 1 ||
+            memcmp(boot + 236, "\x63\x82\x53\x63", 4))
+                return 0;
+        for (option = boot + 240; option + 2 <= stop && *option != 255;)
+        {
+                if (!*option)
+                {
+                        option++;
+                        continue;
+                }
+                if (option[1] > stop - option - 2)
+                        break;
+                if (option[0] == 53 && option[1] >= 1)
+                        kind = option[2];
+                if (option[0] == 50 && option[1] >= 4)
+                        memcpy(&wanted, option + 2, 4), wanted = ntohl(wanted);
+                option += 2 + option[1];
+        }
+        memcpy(&ciaddr, boot + 12, 4);
+        ciaddr = ntohl(ciaddr);
+        if (kind != 1 && kind != 3)
+                return 0;
+        if (kind == 3 && !wanted)
+                wanted = ciaddr;
+        nak = kind == 3 && wanted != pool;
+
+        memset(out, 0, 14 + 20 + 8 + 300);
+        //      To the client's own address on a renewal, else to everyone.
+        if (ciaddr)
+                memcpy(out, boot + 28, 6);
+        else
+                memset(out, 0xff, 6);
+        memcpy(out + 6, mine, 6);
+        out[12] = 0x08;
+        rboot[0] = 2, rboot[1] = 1, rboot[2] = 6;
+        memcpy(rboot + 4, boot + 4, 4);
+        memcpy(rboot + 10, boot + 10, 2);
+        value = htonl(nak ? 0 : pool);
+        memcpy(rboot + 16, &value, 4);
+        value = htonl(server);
+        memcpy(rboot + 20, &value, 4);
+        memcpy(rboot + 28, boot + 28, 16);
+        memcpy(rboot + 236, "\x63\x82\x53\x63", 4);
+        *ropt++ = 53, *ropt++ = 1, *ropt++ = kind == 1 ? 2 : nak ? 6 : 5;
+        *ropt++ = 54, *ropt++ = 4;
+        memcpy(ropt, &value, 4), ropt += 4;
+        if (!nak)
+        {
+                unsigned words[6] = {htonl(lease), htonl(lease / 2), htonl(lease * 7 / 8),
+                                     htonl(0xffffff00u), htonl(server), htonl(server)};
+                unsigned char codes[6] = {51, 58, 59, 1, 3, 6};
+
+                for (int i = 0; i < 6; i++)
+                {
+                        *ropt++ = codes[i], *ropt++ = 4;
+                        memcpy(ropt, &words[i], 4), ropt += 4;
+                }
+        }
+        *ropt++ = 255;
+        length = (int)(ropt - rboot) < 300 ? 300 : (int)(ropt - rboot);
+        rip[0] = 0x45;
+        rip[2] = (unsigned char)((28 + length) >> 8), rip[3] = (unsigned char)(28 + length);
+        rip[8] = 64, rip[9] = 17;
+        value = htonl(server);
+        memcpy(rip + 12, &value, 4);
+        value = ciaddr && !nak ? htonl(ciaddr) : 0xffffffffu;
+        memcpy(rip + 16, &value, 4);
+        value = hwsim_sum(rip, 20);
+        rip[10] = (unsigned char)(value >> 8), rip[11] = (unsigned char)value;
+        rudp[1] = 67, rudp[3] = 68;
+        rudp[4] = (unsigned char)((8 + length) >> 8), rudp[5] = (unsigned char)(8 + length);
+        *said = kind == 1 ? "offer" : nak ? "nak" : "ack";
+        return 14 + 28 + length;
+}
+
+static int hwsim_dhcp(const char *name, unsigned lease)
+{
+        unsigned char mine[6], frame[2048], out[14 + 28 + 300];
+        const unsigned server = htonl(0xc0a84d01u);
+        struct ifreq request;
+        struct sockaddr_ll self;
+        int handle = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+
+        memset(&request, 0, sizeof request);
+        strncpy(request.ifr_name, name, IFNAMSIZ - 1);
+        if (handle < 0 || ioctl(handle, SIOCGIFINDEX, &request) < 0)
+                return perror("hwsim_radio: dhcp"), 1;
+        memset(&self, 0, sizeof self);
+        self.sll_family = AF_PACKET;
+        self.sll_protocol = htons(ETH_P_ALL);
+        self.sll_ifindex = request.ifr_ifindex;
+        if (ioctl(handle, SIOCGIFHWADDR, &request) < 0 ||
+            bind(handle, (struct sockaddr *)&self, sizeof self) < 0)
+                return perror("hwsim_radio: dhcp"), 1;
+        memcpy(mine, request.ifr_hwaddr.sa_data, 6);
+        for (;;)
+        {
+                struct sockaddr_ll from;
+                socklen_t from_length = sizeof from;
+                int got = (int)recvfrom(handle, frame, sizeof frame, 0,
+                                        (struct sockaddr *)&from, &from_length);
+                const char *said = "";
+                int length;
+
+                if (got < 42 || from.sll_pkttype == PACKET_OUTGOING)
+                        continue;
+                //      ARP for the server's address, answered with this one.
+                if (frame[12] == 0x08 && frame[13] == 0x06 && frame[21] == 1 &&
+                    !memcmp(frame + 38, &server, 4))
+                {
+                        memcpy(out, frame + 6, 6);
+                        memcpy(out + 6, mine, 6);
+                        memcpy(out + 12, frame + 12, 8);
+                        out[21] = 2;
+                        memcpy(out + 22, mine, 6);
+                        memcpy(out + 28, frame + 38, 4);
+                        memcpy(out + 32, frame + 22, 10);
+                        send(handle, out, 42, 0);
+                        continue;
+                }
+                length = hwsim_dhcp_answer(frame, got, mine, lease, out, &said);
+                if (length && send(handle, out, (size_t)length, 0) == length)
+                {
+                        printf("dhcp-serve %s %s\n", name, said);
+                        fflush(stdout);
+                }
+        }
+}
+
 int main(int count, char **words)
 {
         int handle = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
@@ -98248,6 +98440,62 @@ int main(int count, char **words)
                 perror("hwsim_radio: netlink");
                 return 1;
         }
+        if (count == 2 && !strcmp(words[1], "hold"))
+        {
+                pid_t child = fork();
+
+                if (child == 0)
+                {
+                        if (unshare(CLONE_NEWNET) < 0)
+                                _exit(1);
+                        close(0), close(1), close(2);
+                        for (;;)
+                                pause();
+                }
+                usleep(200000);
+                printf("%d\n", (int)child);
+                return child > 0 ? 0 : 1;
+        }
+        if (count == 4 && !strcmp(words[1], "move"))
+        {
+                char name[IF_NAMESIZE];
+                unsigned index = if_nametoindex(words[3]);
+                unsigned pid = (unsigned)atoi(words[2]);
+                int length = 0;
+
+                family = hwsim_family(handle, "nl80211");
+                if (!index || family < 0)
+                {
+                        fprintf(stderr, "hwsim_radio: no %s or no nl80211\n", words[3]);
+                        return 1;
+                }
+                length = hwsim_put(attributes, length, NL80211_ATTR_IFINDEX, &index, 4);
+                length = hwsim_put(attributes, length, NL80211_ATTR_PID, &pid, 4);
+                answer = hwsim_ask(handle, family, NL80211_CMD_SET_WIPHY_NETNS, attributes,
+                                   length, 0);
+                if (answer < 0)
+                {
+                        fprintf(stderr, "hwsim_radio: move: %s\n", strerror(-answer));
+                        return 1;
+                }
+                if (hwsim_enter(words[2]) < 0 || !if_indextoname(index, name))
+                {
+                        fprintf(stderr, "hwsim_radio: %s did not arrive\n", words[3]);
+                        return 1;
+                }
+                printf("%s\n", name);
+                return 0;
+        }
+        if (count >= 4 && !strcmp(words[1], "in"))
+        {
+                if (hwsim_enter(words[2]) < 0)
+                        return 1;
+                execv(words[3], words + 3);
+                perror("hwsim_radio: exec");
+                return 127;
+        }
+        if (count == 4 && !strcmp(words[1], "dhcp"))
+                return hwsim_dhcp(words[2], (unsigned)atoi(words[3]));
         if (count == 2 && !strcmp(words[1], "new"))
         {
                 family = hwsim_family(handle, "MAC80211_HWSIM");
@@ -98293,7 +98541,8 @@ int main(int count, char **words)
                 }
                 return 0;
         }
-        fprintf(stderr, "usage: hwsim_radio new | power IFNAME DBM\n");
+        fprintf(stderr, "usage: hwsim_radio new | power IF DBM | hold | move PID IF |"
+                        " in PID CMD... | dhcp IF SECONDS\n");
         return 2;
 }
 #endif /* CHECK_hwsim_radio */
