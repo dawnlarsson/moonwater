@@ -24522,7 +24522,7 @@ static b32 file_split()
         still written through the same system_write_all path as split; there
         is no second file reader, regex engine, or buffered writer here.
 */
-#define CSPLIT_REGEX_POLICY 5 /* dot-newline | basic-repeat */
+#define CSPLIT_REGEX_POLICY (5 | 32) /* dot-newline | basic-repeat | regcomp's intervals */
 
 enum
 {
@@ -24535,6 +24535,10 @@ enum
         CSPLIT_EXECUTED,
         CSPLIT_NOT_FOUND,
         CSPLIT_FAILED,
+        // A match whose offset puts the break before the section or past
+        // the input: GNU's write_to_file says the line is out of range.
+        CSPLIT_BEFORE,
+        CSPLIT_PAST,
 };
 
 typedef struct
@@ -24737,6 +24741,8 @@ static bool csplit_line_offset(csplit_state address_to state,
         return true;
 }
 
+static string_address regex_failure_reason();
+
 static bipolar csplit_parse_regex(string_address word,
                                   csplit_pattern address_to pattern)
 {
@@ -24747,21 +24753,25 @@ static bipolar csplit_parse_regex(string_address word,
         if (delimiter != '/' && delimiter != '%')
                 return 0;
 
-        while (string_get(word + source) &&
-               string_get(word + source) != delimiter)
+        // The expression runs to the last delimiter in the word, as GNU's
+        // extract_regexp finds it with strrchr: /x\/ is the expression x\,
+        // which regcomp refuses, and /a/b/ is a/b.
+        positive closing = 0;
+
+        for (positive at = 1; string_get(word + at); at++)
+                if (string_get(word + at) == delimiter)
+                        closing = at;
+        if (!closing)
+                return -2;
+
+        while (source < closing)
         {
                 if (used + 2 >= sizeof(pattern->expression))
                         return 0;
-
-                p8 byte = string_get(word + source++);
-                pattern->expression[used++] = byte;
-
-                if (byte == '\\' && string_get(word + source))
-                        pattern->expression[used++] = string_get(word + source++);
+                pattern->expression[used++] = string_get(word + source++);
         }
 
-        if (!string_is(word + source, delimiter) || !used)
-                return 0;
+        // An empty expression is GNU's too, and matches every line.
 
         pattern->expression[used] = end;
         pattern->kind = CSPLIT_REGEX;
@@ -24783,7 +24793,13 @@ static bool csplit_parse_line(string_address word,
 {
         positive line;
 
-        if (!file_unsigned_decimal(word, address_of line) || !line)
+        // xstrtoumax's reading: blanks before, then an optional +.
+        while (byte_is_space(string_get(word)))
+                word++;
+        if (string_is(word, '+'))
+                word++;
+        if (!string_digits_checked_exact(word, 10, address_of line) ||
+            line > (positive)bipolar_max)
                 return false;
 
         pattern->kind = CSPLIT_LINE;
@@ -24793,30 +24809,13 @@ static bool csplit_parse_line(string_address word,
         return true;
 }
 
+static b32 csplit_repeat_read(string_address word, bool address_to forever,
+                              positive address_to count);
+
 static bool csplit_repeat(string_address word, bool address_to forever,
                           positive address_to count)
 {
-        if (!string_is(word, '{'))
-                return false;
-
-        if (string_is(word + 1, '*') && string_is(word + 2, '}') &&
-            !string_get(word + 3))
-        {
-                address_to forever = true;
-                address_to count = 0;
-                return true;
-        }
-
-        string_address at = word + 1;
-        positive got;
-
-        if (!string_digits_checked(address_of at, 10, address_of got) ||
-            !string_is(at, '}') || string_get(at + 1))
-                return false;
-
-        address_to forever = false;
-        address_to count = got;
-        return true;
+        return string_is(word, '{') && csplit_repeat_read(word, forever, count) == 0;
 }
 
 static fn csplit_skip_line(csplit_state address_to state, positive at,
@@ -24939,8 +24938,8 @@ static b32 csplit_execute_regex(csplit_state address_to state,
         {
                 positive back = (positive)(-(pattern->offset + 1)) + 1;
 
-                if (back >= matched_line)
-                        return CSPLIT_NOT_FOUND;
+                if (back >= matched_line || matched_line - back < state->cursor_line)
+                        return CSPLIT_BEFORE;
                 target = matched_line - back;
         }
         else
@@ -24948,14 +24947,14 @@ static b32 csplit_execute_regex(csplit_state address_to state,
                 positive ahead = (positive)pattern->offset;
 
                 if (matched_line > positive_max - ahead)
-                        return CSPLIT_NOT_FOUND;
+                        return CSPLIT_PAST;
                 target = matched_line + ahead;
         }
 
         positive boundary;
 
         if (!csplit_line_offset(state, target, true, address_of boundary))
-                return CSPLIT_NOT_FOUND;
+                return CSPLIT_PAST;
 
         if (!csplit_section(state, state->cursor, boundary,
                             !pattern->discard))
@@ -24981,9 +24980,15 @@ static b32 csplit_execute_regex(csplit_state address_to state,
                 state->cursor_line = target;
         }
 
+        // GNU's process_regexp moves its current line to the break when the
+        // offset is ahead of the match, so the next search starts after the
+        // line the section ended at, not on it: /./1 {*} over a, b, c cuts
+        // after a and then after c.
         pattern->search_line = matched_line + 1;
         if (pattern->search_line < state->cursor_line)
                 pattern->search_line = state->cursor_line;
+        if (pattern->offset > 0 && pattern->search_line <= target)
+                pattern->search_line = target + 1;
         state->next_search_line = pattern->search_line;
         return CSPLIT_EXECUTED;
 }
@@ -24994,6 +24999,150 @@ static b32 csplit_execute(csplit_state address_to state,
         return pattern->kind == CSPLIT_LINE
                    ? csplit_execute_line(state, pattern, repeated)
                    : csplit_execute_regex(state, pattern);
+}
+
+/*
+        A {N} or {*} after a pattern, as GNU's parse_repeat_count reads it:
+        the word must end in }, and what is between must be * or a count
+        xstrtoumax takes -- blanks and a + before it -- or GNU names the
+        word cut at its brace.
+*/
+static b32 csplit_repeat_read(string_address word, bool address_to forever,
+                              positive address_to count)
+{
+        positive length = string_length(word);
+
+        if (!length || word[length - 1] != '}')
+                return 1;
+        if (length == 3 && word[1] == '*')
+        {
+                address_to forever = true;
+                address_to count = 0;
+                return 0;
+        }
+
+        p8 digits[64];
+        positive used = 0;
+        string_address at = word + 1;
+
+        while (byte_is_space(*at))
+                at++;
+        if (*at == '+')
+                at++;
+        while (at < word + length - 1 && used + 1 < sizeof(digits))
+                digits[used++] = *at++;
+        digits[used] = 0;
+
+        positive got;
+
+        if (at != word + length - 1 || !used ||
+            !string_digits_checked_exact(digits, 10, address_of got))
+                return 2;
+        address_to forever = false;
+        address_to count = got;
+        return 0;
+}
+
+static bool csplit_patterns_valid()
+{
+        positive last_line = 0;
+
+        for (positive i = 1; i < file_operand_count; i++)
+        {
+                string_address word = file_operand_at(i);
+                csplit_pattern pattern;
+
+                memory_fill(address_of pattern, 0, sizeof(pattern));
+                if (string_is(word, '/') || string_is(word, '%'))
+                {
+                        bipolar parsed = csplit_parse_regex(word, address_of pattern);
+
+                        if (parsed == -2)
+                                return string_report(log_error, false,
+                                                     "csplit: %s: closing delimiter '%s' missing\n",
+                                                     word, string_is(word, '%') ? (string_address) "%"
+                                                                                : (string_address) "/");
+                        if (parsed == 0)
+                                return string_report(log_error, false, "csplit: '%w': invalid pattern\n",
+                                                     writer_terminal_quoted_name, word);
+
+                        // A backslash with nothing after it to escape is
+                        // regcomp's "Trailing backslash".
+                        positive tail = 0;
+                        for (positive at = string_length(pattern.expression);
+                             at && pattern.expression[at - 1] == '\\'; at--)
+                                tail++;
+                        if (tail & 1)
+                                return string_report(log_error, false,
+                                                     "csplit: '%w': invalid regular expression: Trailing backslash\n",
+                                                     writer_terminal_quoted_name, word);
+                        if (!regex_compile(pattern.expression, false, false, false,
+                                           CSPLIT_REGEX_POLICY))
+                                return string_report(log_error, false,
+                                                     "csplit: '%w': invalid regular expression: %s\n",
+                                                     writer_terminal_quoted_name, word,
+                                                     regex_failure_reason());
+                        if (parsed < 0)
+                                return string_report(log_error, false,
+                                                     "csplit: '%w': integer expected after delimiter\n",
+                                                     writer_terminal_quoted_name, word);
+                }
+                else
+                {
+                        if (!csplit_parse_line(word, address_of pattern))
+                                return string_report(log_error, false, "csplit: '%w': invalid pattern\n",
+                                                     writer_terminal_quoted_name, word);
+                        // GNU names this one unquoted.
+                        if (!pattern.line_target)
+                                return string_report(log_error, false,
+                                                     "csplit: %s: line number must be greater than zero\n",
+                                                     word);
+                        if (pattern.line_target < last_line)
+                        {
+                                string_format(log_error,
+                                              "csplit: line number '%w' is smaller than preceding line number, ",
+                                              writer_terminal_quoted_name, word);
+                                positive_to_string(log_error, last_line);
+                                log_error("\n", 1);
+                                return false;
+                        }
+                        if (pattern.line_target == last_line)
+                                string_format(log_error,
+                                              "csplit: warning: line number '%w' is the same as preceding line number\n",
+                                              writer_terminal_quoted_name, word);
+                        last_line = pattern.line_target;
+                }
+
+                if (i + 1 < file_operand_count && string_is(file_operand_at(i + 1), '{'))
+                {
+                        string_address repeat = file_operand_at(++i);
+                        bool forever;
+                        positive count;
+                        b32 read = csplit_repeat_read(repeat, address_of forever,
+                                                      address_of count);
+
+                        if (read == 1)
+                                return string_report(log_error, false,
+                                                     "csplit: '%w': '}' is required in repeat count\n",
+                                                     writer_terminal_quoted_name, repeat);
+                        if (read == 2)
+                        {
+                                // GNU quotes the word with its closing brace
+                                // cut off, then prints the brace after.
+                                positive length = string_length(repeat);
+                                p8 cut[FILE_PATH_MAX];
+
+                                if (length >= sizeof(cut))
+                                        length = sizeof(cut) - 1;
+                                memory_copy(cut, repeat, length - 1);
+                                cut[length - 1] = 0;
+                                return string_report(log_error, false,
+                                                     "csplit: '%w'}: integer required between '{' and '}'\n",
+                                                     writer_terminal_quoted_name, cut);
+                        }
+                }
+        }
+        return true;
 }
 
 static b32 file_csplit()
@@ -25008,8 +25157,13 @@ static b32 file_csplit()
 
         if (!file_take(address_of taking) || file_operand_failed)
                 return 1;
+        if (!file_operand_count)
+                return string_report(log_error, 1, "csplit: missing operand\n"
+                                     "Try 'csplit --help' for more information.\n");
         if (file_operand_count < 2)
-                return string_report(log_error, 1, "csplit: missing operand\n");
+                return string_report(log_error, 1, "csplit: missing operand after '%w'\n"
+                                     "Try 'csplit --help' for more information.\n",
+                                     writer_terminal_quoted_name, file_operand_at(0));
 
         positive digits = 2;
         string_address digit_text = file_option_value(address_of taking, 'n');
@@ -25025,40 +25179,6 @@ static b32 file_csplit()
                                       writer_terminal_quoted_name, digit_text);
         }
 
-        /* GNU reads every line-number pattern before the first section, so
-           `3 2` refuses the smaller number with no pre0000. */
-        {
-                positive last_line = 0;
-
-                for (positive i = 1; i < file_operand_count; i++)
-                {
-                        string_address word = file_operand_at(i);
-                        bool forever = false;
-                        positive repeats = 1;
-                        csplit_pattern pattern;
-
-                        if (csplit_repeat(word, address_of forever,
-                                          address_of repeats))
-                                continue;
-                        if (string_is(word, '/') || string_is(word, '%'))
-                                continue;
-
-                        memory_fill(address_of pattern, 0, sizeof(pattern));
-                        if (!csplit_parse_line(word, address_of pattern))
-                                continue;
-                        if (pattern.line_target < last_line)
-                        {
-                                string_format(log_error,
-                                              "csplit: line number '%w' is smaller than preceding line number, ",
-                                              writer_terminal_quoted_name, word);
-                                positive_to_string(log_error, last_line);
-                                log_error("\n", 1);
-                                return 1;
-                        }
-                        last_line = pattern.line_target;
-                }
-        }
-
         string_address input_name = file_operand_at(0);
         bipolar in = string_is(input_name, '-') && !string_get(input_name + 1)
                          ? 0
@@ -25068,6 +25188,17 @@ static b32 file_csplit()
         {
                 return string_report(log_error, 1, "csplit: cannot open %w for reading: %s\n",
                               writer_shell_quoted_name, input_name, file_reason(in));
+        }
+
+        /* GNU's parse_patterns reads every pattern once the input is open
+           and before the first section, and the first word it cannot take
+           ends the run with nothing made: `2 /[/` leaves no xx00 behind,
+           even under -k. */
+        if (!csplit_patterns_valid())
+        {
+                if (in > 0)
+                        system_close(in);
+                return 1;
         }
 
         file_facts facts;
@@ -25134,6 +25265,9 @@ static b32 file_csplit()
         bool have_pattern = false;
         bool failed = false;
         positive last_line = 0;
+        // The operand a repetition's messages name: the pattern's, as GNU's
+        // control records its argnum, not the {N} that repeated it.
+        string_address pattern_word = null;
 
         for (positive i = 1; i < file_operand_count && !failed; i++)
         {
@@ -25156,12 +25290,24 @@ static b32 file_csplit()
                 else
                 {
                         memory_fill(address_of pattern, 0, sizeof(pattern));
+                        pattern_word = word;
 
                         if (string_is(word, '/') || string_is(word, '%'))
                         {
                                 bipolar parsed = csplit_parse_regex(
                                     word, address_of pattern);
 
+                                if (parsed == -2)
+                                {
+                                        // GNU names the word as it is here,
+                                        // unquoted.
+                                        string_format(log_error,
+                                                      "csplit: %s: closing delimiter '%s' missing\n",
+                                                      word, string_is(word, '%') ? (string_address) "%"
+                                                                                 : (string_address) "/");
+                                        failed = true;
+                                        break;
+                                }
                                 if (parsed <= 0)
                                 {
                                         string_format(
@@ -25173,12 +25319,28 @@ static b32 file_csplit()
                                         failed = true;
                                         break;
                                 }
+
+                                // A backslash with nothing after it to
+                                // escape is regcomp's "Trailing backslash".
+                                positive tail = 0;
+                                for (positive at = string_length(pattern.expression);
+                                     at && pattern.expression[at - 1] == '\\'; at--)
+                                        tail++;
+                                if (tail & 1)
+                                {
+                                        string_format(log_error, "csplit: '%w': invalid regular expression: Trailing backslash\n",
+                                                      writer_terminal_quoted_name, word);
+                                        failed = true;
+                                        break;
+                                }
                                 if (!regex_compile(pattern.expression, false, false,
                                                    false, CSPLIT_REGEX_POLICY))
                                 {
-                                        string_format(log_error, "csplit: invalid regular expression: '%w'\n",
-                                                      writer_terminal_quoted_name,
-                                                      pattern.expression);
+                                        // GNU names the operand and gives
+                                        // regcomp's reason.
+                                        string_format(log_error, "csplit: '%w': invalid regular expression: %s\n",
+                                                      writer_terminal_quoted_name, word,
+                                                      regex_failure_reason());
                                         failed = true;
                                         break;
                                 }
@@ -25191,6 +25353,15 @@ static b32 file_csplit()
                         {
                                 string_format(log_error, "csplit: '%w': invalid pattern\n",
                                               writer_terminal_quoted_name, word);
+                                failed = true;
+                                break;
+                        }
+                        else if (!pattern.line_target)
+                        {
+                                // GNU names this one unquoted.
+                                string_format(log_error,
+                                              "csplit: %s: line number must be greater than zero\n",
+                                              word);
                                 failed = true;
                                 break;
                         }
@@ -25207,14 +25378,26 @@ static b32 file_csplit()
                                         break;
                                 }
 
-                                if (pattern.line_target == last_line)
-                                        string_format(log_error,
-                                                      "csplit: warning: line number '%w' is the same as preceding line number\n",
-                                                      writer_terminal_quoted_name, word);
+                                // The pre-pass warned of a repeated number.
 
                                 last_line = pattern.line_target;
                         }
                         have_pattern = true;
+                }
+
+                /* GNU reads a pattern and the {*} after it as one control
+                   that repeats for ever, so a regular expression that never
+                   matches at all ends the input quietly there too. */
+                bool until_gone = forever;
+                if (!repeated && pattern.kind != CSPLIT_LINE &&
+                    i + 1 < file_operand_count)
+                {
+                        bool next_forever = false;
+                        positive next_repeats = 0;
+
+                        if (csplit_repeat(file_operand_at(i + 1), address_of next_forever,
+                                          address_of next_repeats) && next_forever)
+                                until_gone = true;
                 }
 
                 for (positive repetition = 0; forever || repetition < repeats;
@@ -25225,6 +25408,29 @@ static b32 file_csplit()
 
                         if (done == CSPLIT_EXECUTED)
                                 continue;
+                        if (done == CSPLIT_BEFORE || done == CSPLIT_PAST)
+                        {
+                                // What was read up to the end goes into the
+                                // section when the break is past it; one
+                                // before the section starts has nothing. GNU
+                                // says why before it closes the section and
+                                // counts it, so the reason comes first.
+                                string_format(log_error,
+                                              "csplit: '%w': line number out of range\n",
+                                              writer_terminal_quoted_name, pattern_word);
+                                csplit_section(address_of state, state.cursor,
+                                               done == CSPLIT_PAST ? length : state.cursor,
+                                               !pattern.discard);
+                                failed = true;
+                                break;
+                        }
+                        if (done == CSPLIT_NOT_FOUND && pattern.kind != CSPLIT_LINE &&
+                            until_gone)
+                        {
+                                if (pattern.discard)
+                                        state.suppress_final = true;
+                                break;
+                        }
                         if (done == CSPLIT_NOT_FOUND && forever)
                         {
                                 if (pattern.kind == CSPLIT_LINE)
@@ -25236,16 +25442,9 @@ static b32 file_csplit()
                                         if (n >= sizeof(shown))
                                                 n = sizeof(shown) - 1;
                                         shown[n] = end;
-                                        /* GNU writes the leftover tail as a
-                                           section, then names the failing
-                                           {*} repeat in 1-based form. */
-                                        if (!csplit_section(address_of state,
-                                                            state.cursor, length,
-                                                            true))
-                                        {
-                                                failed = true;
-                                                break;
-                                        }
+                                        /* GNU names the failing {*} repeat
+                                           in 1-based form, then closes the
+                                           leftover tail as a section. */
                                         string_format(log_error,
                                                       "csplit: '%w': line number out of range",
                                                       writer_terminal_quoted_name,
@@ -25254,6 +25453,8 @@ static b32 file_csplit()
                                         positive_to_string(log_error,
                                                            repetition + 1);
                                         log_error("\n", 1);
+                                        csplit_section(address_of state,
+                                                       state.cursor, length, true);
                                         failed = true;
                                         break;
                                 }
@@ -25266,21 +25467,20 @@ static b32 file_csplit()
 
                         if (done == CSPLIT_NOT_FOUND)
                         {
-                                if (!csplit_section(address_of state, state.cursor,
-                                                     length, !pattern.discard))
-                                {
-                                        failed = true;
-                                        break;
-                                }
-                                string_format(log_error, "csplit: '%w%s",
-                                              writer_terminal_quoted_name, word,
-                                              repeated ? (string_address) "': match not found on repetition " : (string_address) "': match not found\n");
+                                string_format(log_error, "csplit: '%w': %s%s",
+                                              writer_terminal_quoted_name, pattern_word,
+                                              pattern.kind == CSPLIT_LINE
+                                                  ? (string_address) "line number out of range"
+                                                  : (string_address) "match not found",
+                                              repeated ? (string_address) " on repetition " : (string_address) "\n");
                                 if (repeated)
                                 {
                                         positive_to_string(
                                             log_error, repetition + 1);
                                         log_error("\n", 1);
                                 }
+                                csplit_section(address_of state, state.cursor,
+                                               length, !pattern.discard);
                         }
                         failed = true;
                         break;

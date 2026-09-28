@@ -1273,6 +1273,18 @@ static string_address text_literal_find(string_address text, positive length,
 
 #include "regex_graph.c"
 
+// regcomp's reason for the last pattern that would not compile, in the
+// words glibc's regerror gives it, for the tools that report it.
+static string_address regex_failure_reason()
+{
+        return regex_failure == REGEX_FAILED_BRACE ? (string_address) "Unmatched \\{"
+               : regex_failure == REGEX_FAILED_CONTENT ? (string_address) "Invalid content of \\{\\}"
+               : regex_failure == REGEX_FAILED_SIZE ? (string_address) "Regular expression too big"
+               : regex_failure == REGEX_FAILED_OPEN ? (string_address) "Unmatched ( or \\("
+               : regex_failure == REGEX_FAILED_CLOSE ? (string_address) "Unmatched ) or \\)"
+                                                     : (string_address) "Invalid regular expression";
+}
+
 // What the kernel says about an open descriptor, through the one statx
 // layout file.c reads everywhere rather than a struct stat whose field
 // offsets differ between x86_64, arm64 and riscv64.
