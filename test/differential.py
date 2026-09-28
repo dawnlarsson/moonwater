@@ -18106,6 +18106,9 @@ def _text_sort_valid(argv):
 _TEXT_SORT_SAID_INPUTS = {
     "none": "",
     "keys": "b 2\na 10\n\tc 1\n",
+    "nuls": "\\0\\0",
+    "minus": "a.txt\\0-\\0b.txt\\0",
+    "names": "b.txt\\0a.txt",
 }
 _TEXT_SORT_SAID_CASES = (
     ("none", "-k0"), ("none", "-k1.0"), ("none", "-k0.1"), ("none", "-k1,0"), ("none", "-k1,"),
@@ -18118,6 +18121,13 @@ _TEXT_SORT_SAID_CASES = (
     ("none", "--check=quiet", "-o", "x"), ("none", "-C", "a.txt", "b.txt"),
     ("none", "-c", "a.txt", "b.txt"),
     ("keys", "-di"), ("keys", "-id"), ("keys", "-k1,1di"), ("keys", "-s", "-k2n", "-k1,1Vf"),
+    #   --files0-from and -o as GNU words them: the list that will not
+    #   open or read, the empty one, an operand beside it, the first bad
+    #   name ending the list, and an output that cannot be opened.
+    ("names", "--files0-from=-"), ("names", "--files0-from=-", "no-such"), ("none", "--files0-from=missing"),
+    ("none", "--files0-from=/dev/null"), ("none", "--files0-from=empty"), ("none", "--files0-from=dir"),
+    ("nuls", "--files0-from=-"), ("minus", "--files0-from=-"), ("none", "-o", "no/such/file", "/dev/null"),
+    ("none", "-m", "-o", "missing/x", "a.txt"), ("none", "-c", "--files0-from=-"),
 )
 
 

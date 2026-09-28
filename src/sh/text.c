@@ -1205,6 +1205,9 @@ static bool text_files_failed;
 // --files0-from replaces the operand list with names cut from a file.
 static string_address address_to text_file_list;
 static positive text_files_from_bad;
+// GNU sort's reading of a list: the first name it refuses ends it, and "-" is
+// refused in any list, not only in one read from standard input.
+static bool text_files_from_strict;
 // What text_files_from says about the list beside the names: see there.
 static positive text_files_from_names;
 static bool text_files_from_ahead;
@@ -6370,13 +6373,17 @@ static bool text_files_from(string_address path)
                         string_format(writer_stderr, "%s: %w:%p: invalid zero-length file name\n",
                                       text_name, writer_shell_name, path, text_files_from_names);
                         text_files_from_bad++;
+                        if (text_files_from_strict)
+                                break;
                         continue;
                 }
 
-                if (from_stdin && string_equals(name, "-"))
+                if ((from_stdin || text_files_from_strict) && string_equals(name, "-"))
                 {
                         string_diagnostic(&text_diagnostic, 0, null, "when reading file names from standard input, no file name of '-' allowed");
                         text_files_from_bad++;
+                        if (text_files_from_strict)
+                                break;
                         continue;
                 }
 
@@ -31191,7 +31198,7 @@ static bool sort_output_take(string_address output, bipolar handle,
         {
                 if (handle < 0)
                 {
-                        string_diagnostic(&text_diagnostic, 2, output, "cannot open for writing");
+                        sort_open_failed(output, handle);
                         return false;
                 }
 
@@ -31672,17 +31679,53 @@ static b32 text_sort()
                 string_address list = file_option_value(address_of taking, 'Z');
 
                 if (text_files_count)
-                        return text_done(string_diagnostic(&text_diagnostic, 2, text_file_name(0),
-                                                          "extra operand; file operands cannot be combined with --files0-from"));
+                {
+                        text_flush();
+                        string_format(writer_stderr,
+                                      "%s: extra operand %w\nfile operands cannot be combined with --files0-from\n",
+                                      text_name, writer_shell_quoted_name, text_file_name(0));
+                        return text_done(string_report(writer_stderr, 2,
+                                                       "Try '%s --help' for more information.\n",
+                                                       text_name));
+                }
 
-                if (!text_files_from(list))
-                        return text_done(2);
+                // A list that will not open is GNU's xfopen: open failed,
+                // the name, and why.
+                if (!string_equals(list, "-"))
+                {
+                        bipolar handle = text_open_handle(list, FILE_READ, 0);
 
-                if (text_files_from_bad)
+                        if (handle < 0)
+                                return text_done(sort_open_failed(list, handle));
+
+                        bool directory = text_directory((positive)handle);
+
+                        system_close((positive)handle);
+
+                        // A list that opens and cannot be read -- a
+                        // directory -- is GNU's readtokens0 failing.
+                        if (directory)
+                        {
+                                text_flush();
+                                return text_done(string_report(
+                                    writer_stderr, 2, "%s: cannot read file names from %w\n",
+                                    text_name, writer_shell_quoted_name, list));
+                        }
+                }
+
+                text_files_from_strict = true;
+                bool listed = text_files_from(list);
+                text_files_from_strict = false;
+
+                if (!listed || text_files_from_bad)
                         return text_done(2);
 
                 if (!text_files_count)
-                        return text_done(string_diagnostic(&text_diagnostic, 2, list, "no input from"));
+                {
+                        text_flush();
+                        return text_done(string_report(writer_stderr, 2, "%s: no input from %w\n",
+                                                       text_name, writer_shell_quoted_name, list));
+                }
         }
 
         sort_ordering defaults = {
