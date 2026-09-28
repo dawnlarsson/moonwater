@@ -55340,7 +55340,7 @@ static fn tls_client_hello_bounds(void)
         memory_fill(hello, 0xa5, sizeof hello);
         check("an undersized ClientHello buffer is refused",
               tls_client_hello(address_of client, hello, 50,
-                               address_of used) == TLS_FAIL);
+                               address_of used, null, 0) == TLS_FAIL);
         check("a refused ClientHello leaves its result length alone", used == 99);
         {
                 bool bounded = true;
@@ -55353,16 +55353,16 @@ static fn tls_client_hello_bounds(void)
 
         used = 0;
         check("a ClientHello fits its exact named-host bound",
-              tls_client_hello(address_of client, hello, 310,
-                               address_of used) == TLS_OK &&
-                  used == 310);
+              tls_client_hello(address_of client, hello, 140,
+                               address_of used, null, 0) == TLS_OK &&
+                  used == 140);
 
         client.host = "127.0.0.1";
         used = 0;
         check("a numeric-host ClientHello omits SNI at its exact bound",
-              tls_client_hello(address_of client, hello, 290,
-                               address_of used) == TLS_OK &&
-                  used == 290);
+              tls_client_hello(address_of client, hello, 120,
+                               address_of used, null, 0) == TLS_OK &&
+                  used == 120);
 }
 
 /*
@@ -55544,7 +55544,7 @@ static fn tls_client_hello_groups(void)
                 client.host = hosts[host];
                 check("a ClientHello can be built to inspect its groups",
                       tls_client_hello(address_of client, hello, sizeof hello,
-                                       address_of used) == TLS_OK &&
+                                       address_of used, null, 0) == TLS_OK &&
                           used);
                 check("ClientHello advertises its implemented X25519 group",
                       tls_hello_offers_group(hello, used, 0x001d));
@@ -55554,10 +55554,10 @@ static fn tls_client_hello_groups(void)
                       tls_hello_offers_group(hello, used, 0x0018));
                 check("ClientHello includes an X25519 key share",
                       tls_hello_offers_share(hello, used, 0x001d, 32));
-                check("ClientHello includes a P-256 key share",
-                      tls_hello_offers_share(hello, used, 0x0017, 65));
-                check("ClientHello includes a P-384 key share",
-                      tls_hello_offers_share(hello, used, 0x0018, 97));
+                check("ClientHello carries no P-256 key share until asked",
+                      !tls_hello_offers_share(hello, used, 0x0017, 65));
+                check("ClientHello carries no P-384 key share until asked",
+                      !tls_hello_offers_share(hello, used, 0x0018, 97));
                 for (at = 0; at < array_count(ciphers); at++)
                         check("ClientHello offers the TLS 1.3 ciphers it implements",
                               tls_hello_offers_cipher(hello, used, ciphers[at]));
@@ -55570,6 +55570,8 @@ static fn tls_server_hello_validation(void)
         p8 peer[32] = {0};
         positive share = 0;
         positive group = 0;
+        p8 address_to cookie = null;
+        positive cookie_length = 0;
         p8 changed[91];
 
         hello[0] = TLS_HS_SERVER_HELLO;
@@ -55601,41 +55603,41 @@ static fn tls_server_hello_validation(void)
         hello[58] = 9;
 
         check("a complete TLS 1.3 ServerHello is accepted",
-              tls_server_hello_keys(hello, 90, peer, sizeof peer, &share, &group) ==
+              tls_server_hello_keys(hello, 90, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) ==
                       TLS_OK && group == 0x001d && share == 32 &&
                   !memory_compare(peer, hello + 58, 32));
 
         memory_copy(changed, hello, 90);
         changed[5] = 0x02;
         check("a ServerHello with the wrong legacy version is refused",
-              tls_server_hello_keys(changed, 90, peer, sizeof peer, &share, &group) == TLS_FAIL);
+              tls_server_hello_keys(changed, 90, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[38] = 1;
         check("a ServerHello cannot invent a session id echo",
-              tls_server_hello_keys(changed, 90, peer, sizeof peer, &share, &group) == TLS_FAIL);
+              tls_server_hello_keys(changed, 90, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[41] = 1;
         check("a ServerHello with compression is refused",
-              tls_server_hello_keys(changed, 90, peer, sizeof peer, &share, &group) == TLS_FAIL);
+              tls_server_hello_keys(changed, 90, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[49] = 0x03;
         check("a ServerHello must select TLS 1.3",
-              tls_server_hello_keys(changed, 90, peer, sizeof peer, &share, &group) == TLS_FAIL);
+              tls_server_hello_keys(changed, 90, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[45] = 0x34;
         check("an unexpected ServerHello extension is refused",
-              tls_server_hello_keys(changed, 90, peer, sizeof peer, &share, &group) == TLS_FAIL);
+              tls_server_hello_keys(changed, 90, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[3] = 87;
         changed[43] = 47;
         changed[90] = 0;
         check("trailing ServerHello extension bytes are refused",
-              tls_server_hello_keys(changed, 91, peer, sizeof peer, &share, &group) == TLS_FAIL);
+              tls_server_hello_keys(changed, 91, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         memory_copy(changed, hello, 90);
         changed[3] = 87;
@@ -55643,7 +55645,7 @@ static fn tls_server_hello_validation(void)
         changed[53] = 37;
         changed[90] = 0;
         check("an overlong X25519 ServerHello share is refused",
-              tls_server_hello_keys(changed, 91, peer, sizeof peer, &share, &group) == TLS_FAIL);
+              tls_server_hello_keys(changed, 91, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) == TLS_FAIL);
 
         {
                 p8 assembled[128];
@@ -55658,7 +55660,7 @@ static fn tls_server_hello_validation(void)
                           assembled, sizeof assembled, address_of used,
                           hello + 2, 88) == TLS_HANDSHAKE_COMPLETE &&
                           used == 90 &&
-                          tls_server_hello_keys(assembled, used, peer, sizeof peer, &share, &group) ==
+                          tls_server_hello_keys(assembled, used, 0x1d, peer, sizeof peer, &share, &group, &cookie, &cookie_length) ==
                               TLS_OK);
 
                 memory_copy(changed, hello, 90);
@@ -55672,6 +55674,149 @@ static fn tls_server_hello_validation(void)
                       tls_handshake_one_append(
                           assembled, sizeof assembled, address_of used,
                           hello, 0) == TLS_FAIL);
+        }
+}
+
+/*
+        HelloRetryRequest rows: the extension block after a retry's fixed
+        fields, and what tls_server_hello_keys answers -- the group asked
+        for and the cookie body's length when it is a retry. A retry has to
+        ask for a group this client offers or bring a non-empty cookie, and
+        may carry nothing else; a cookie in a plain ServerHello is refused.
+*/
+static fn tls_hello_retry_rows(void)
+{
+        static const struct
+        {
+                string_address name;
+                bool retry;
+                p16 offered;
+                p8 length;
+                p8 bytes[48];
+                bipolar expect;
+                positive group;
+                positive cookie;
+        } rows[] = {
+            {"P-256 asked", true, 0x1d, 12,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 2, 0, 0x17}, TLS_RETRY, 0x17, 0},
+            {"P-384 asked", true, 0x1d, 12,
+             {0, 0x33, 0, 2, 0, 0x18, 0, 0x2b, 0, 2, 3, 4}, TLS_RETRY, 0x18, 0},
+            {"the group already shared asked again", true, 0x1d, 12,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 2, 0, 0x1d}, TLS_FAIL, 0, 0},
+            {"X25519 asked after a P-256 share", true, 0x17, 12,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 2, 0, 0x1d}, TLS_RETRY, 0x1d, 0},
+            {"cookie alone", true, 0x1d, 15,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x2c, 0, 5, 0, 3, 0xaa, 0xbb, 0xcc},
+             TLS_RETRY, 0, 5},
+            {"cookie and group", true, 0x1d, 21,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 2, 0, 0x17, 0, 0x2c, 0, 5, 0,
+              3, 1, 2, 3}, TLS_RETRY, 0x17, 5},
+            {"asks nothing", true, 0x1d, 6, {0, 0x2b, 0, 2, 3, 4}, TLS_FAIL, 0, 0},
+            {"group not offered", true, 0x1d, 12,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 2, 0, 0x19}, TLS_FAIL, 0, 0},
+            {"share bytes in a retry", true, 0x1d, 14,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 4, 0, 0x17, 0, 0}, TLS_FAIL, 0, 0},
+            {"empty cookie", true, 0x1d, 12,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x2c, 0, 2, 0, 0}, TLS_FAIL, 0, 0},
+            {"cookie length short of its body", true, 0x1d, 13,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x2c, 0, 3, 0, 2, 7}, TLS_FAIL, 0, 0},
+            {"two cookies", true, 0x1d, 20,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x2c, 0, 3, 0, 1, 7, 0, 0x2c, 0, 3, 0, 1, 7},
+             TLS_FAIL, 0, 0},
+            {"two key shares", true, 0x1d, 18,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 2, 0, 0x17, 0, 0x33, 0, 2, 0, 0x18},
+             TLS_FAIL, 0, 0},
+            {"no supported_versions", true, 0x1d, 6, {0, 0x33, 0, 2, 0, 0x17}, TLS_FAIL,
+             0, 0},
+            {"an unknown extension", true, 0x1d, 16,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 2, 0, 0x17, 0xfe, 0, 0, 0},
+             TLS_FAIL, 0, 0},
+            {"a ServerHello answering its share", false, 0x1d, 46,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 36, 0, 0x1d, 0, 32, 9},
+             TLS_OK, 0, 0},
+            {"a ServerHello answering a share not sent", false, 0x17, 46,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x33, 0, 36, 0, 0x1d, 0, 32, 9},
+             TLS_FAIL, 0, 0},
+            {"a cookie in a ServerHello", false, 0x1d, 15,
+             {0, 0x2b, 0, 2, 3, 4, 0, 0x2c, 0, 5, 0, 3, 1, 2, 3}, TLS_FAIL, 0, 0},
+        };
+        static const p8 retry_random[32] = {
+            0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c,
+            0x02, 0x1e, 0x65, 0xb8, 0x91, 0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb,
+            0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c};
+        bool all = true;
+
+        for (positive row = 0; row < array_count(rows); row++)
+        {
+                p8 hello[44 + 48] = {TLS_HS_SERVER_HELLO, 0, 0, 0, 3, 3};
+                p8 peer[97];
+                positive share = 0;
+                positive group = 99;
+                p8 address_to cookie = null;
+                positive cookie_length = 0;
+                positive length = 44 + rows[row].length;
+                bipolar got;
+
+                hello[3] = (p8)(length - 4);
+                if (rows[row].retry)
+                        memory_copy(hello + 6, retry_random, 32);
+                hello[39] = 0x13;
+                hello[40] = 0x01;
+                hello[43] = rows[row].length;
+                memory_copy(hello + 44, rows[row].bytes, rows[row].length);
+                got = tls_server_hello_keys(hello, length, rows[row].offered,
+                                            peer, sizeof peer,
+                                            &share, &group, &cookie,
+                                            &cookie_length);
+                if (got != rows[row].expect ||
+                    (got == TLS_RETRY &&
+                     (group != rows[row].group || share ||
+                      cookie_length != rows[row].cookie ||
+                      (cookie_length && cookie != hello + length - cookie_length))))
+                {
+                        all = false;
+                        string_format(log, "  HelloRetryRequest row: %s\n",
+                                      rows[row].name);
+                }
+        }
+        check("each HelloRetryRequest row answers its verdict", all);
+
+        /* The second hello is the first with the asked-for share and the
+           cookie: the same random, one P-256 share, the cookie verbatim. */
+        {
+                tls_conn client = {.host = "example.com"};
+                static const p8 cookie[] = {0, 3, 0xaa, 0xbb, 0xcc};
+                p8 first[512];
+                p8 second[512];
+                positive first_used = 0;
+                positive second_used = 0;
+                positive at = 0;
+                positive length = 0;
+
+                check("a first ClientHello builds for a retry",
+                      tls_client_hello(address_of client, first, sizeof first,
+                                       address_of first_used, null, 0) == TLS_OK &&
+                          client.group == 0x001d);
+                check("the asked-for P-256 share is drawn",
+                      tls_share_scalar(address_of client, 0x0017));
+                check("the retry ClientHello builds with its cookie",
+                      tls_client_hello(address_of client, second, sizeof second,
+                                       address_of second_used, cookie,
+                                       sizeof cookie) == TLS_OK);
+                check("the retry ClientHello keeps the first one's random",
+                      !memory_compare(first + 6, second + 6, 32));
+                check("the retry ClientHello carries only the asked-for share",
+                      tls_hello_offers_share(second, second_used, 0x0017, 65) &&
+                          !tls_hello_offers_share(second, second_used, 0x001d, 32));
+                check("the retry ClientHello echoes the cookie verbatim",
+                      tls_hello_extension(second, second_used, 0x002c,
+                                          address_of at, address_of length) &&
+                          length == sizeof cookie &&
+                          !memory_compare(second + at, cookie, sizeof cookie));
+                check("the first ClientHello carries no cookie",
+                      !tls_hello_extension(first, first_used, 0x002c,
+                                           address_of at, address_of length));
+                crypto_forget(client.scalar, sizeof client.scalar);
         }
 }
 
@@ -59925,6 +60070,7 @@ b32 main(void)
         tls_client_hello_bounds();
         tls_client_hello_groups();
         tls_server_hello_validation();
+        tls_hello_retry_rows();
         tls_server_flight_validation();
         tls_midpath_append_refusal();
         tls_encrypted_flight_hs_reassembly();

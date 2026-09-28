@@ -37408,7 +37408,9 @@ def harness_tls_peer(argv):
     middle: a TLS 1.3 server written here over the cryptography package
     (X25519, P-256 or P-384 shares, TLS_AES_128_GCM_SHA256, a P-256 leaf
     that signs its CertificateVerify) runs a grammar of flights and
-    post-handshake streams
+    post-handshake streams -- HelloRetryRequests for a group, a cookie or
+    both, a second retry, a retry for a group already shared or never
+    offered, and a ServerHello that changes the retry's suite or group
     -- tickets whole, split and at close, KeyUpdate, compatibility and
     protected CCS, empty, padded and all-padding records, the 2^14 content
     edge, bad tags, alerts, truncation with and without close_notify, data
@@ -37524,6 +37526,7 @@ def harness_tls_peer(argv):
         return ("inner", data + b"\x17" + b"\0" * padding)
 
     close = ("inner", b"\1\0\x15")
+    RETRY_RANDOM = sha256(b"HelloRetryRequest")
     CURVES = {None: (0x1d, None), "prime256v1": (0x17, ec.SECP256R1),
               "secp384r1": (0x18, ec.SECP384R1)}
     SCRIPTS = [
@@ -37575,6 +37578,25 @@ def harness_tls_peer(argv):
          [app(length_head + body), close]),
         ("key share on P-256", {"curve": "prime256v1"}, [app(length_head + body), close]),
         ("key share on P-384", {"curve": "secp384r1"}, [app(length_head + body), close]),
+        ("HelloRetryRequest with a cookie", {"retry": {"cookie": b"c" * 40}},
+         [app(length_head + body), close]),
+        ("HelloRetryRequest to P-256 with a cookie",
+         {"curve": "prime256v1", "retry": {"cookie": os.urandom(300)}},
+         [app(length_head + body), close]),
+        ("HelloRetryRequest with a 3000-byte cookie", {"retry": {"cookie": b"k" * 3000}},
+         [app(length_head + body), close]),
+        ("compatibility CCS after HelloRetryRequest",
+         {"curve": "prime256v1", "retry": {"ccs": True}}, [app(length_head + body), close]),
+        ("a second HelloRetryRequest", {"retry": {"cookie": b"c" * 8, "twice": True}},
+         [app(length_head + body), close]),
+        ("HelloRetryRequest naming the group already shared", {"retry": {"group": 0x1d}},
+         [app(length_head + body), close]),
+        ("HelloRetryRequest naming an unoffered group", {"retry": {"group": 0x15}},
+         [app(length_head + body), close]),
+        ("ServerHello after HelloRetryRequest changes the suite",
+         {"curve": "prime256v1", "suite": b"\x13\2"}, [app(length_head + body), close]),
+        ("ServerHello after HelloRetryRequest changes the group",
+         {"curve": "prime256v1", "answer": 0x18}, [app(length_head + body), close]),
         ("flight one message a record", {"split": True},
          [app(length_head + body), close]),
         ("EncryptedExtensions answering supported_groups",
@@ -37603,6 +37625,9 @@ def harness_tls_peer(argv):
         "KeyUpdate, no update requested", "KeyUpdate, update requested",
         "compatibility CCS after ServerHello", "flight one message a record",
         "key share on P-256", "key share on P-384",
+        "HelloRetryRequest with a cookie", "HelloRetryRequest to P-256 with a cookie",
+        "HelloRetryRequest with a 3000-byte cookie",
+        "compatibility CCS after HelloRetryRequest",
         "EncryptedExtensions answering supported_groups",
         "CertificateRequest in the flight",
     }
@@ -37661,8 +37686,12 @@ def harness_tls_peer(argv):
         header = read_exact(sock, 5)
         return header, read_exact(sock, int.from_bytes(header[3:5], "big"))
 
-    def run(sock, flight, steps):
+    def read_hello(sock):
+        """The next ClientHello, past any compatibility CCS: the message,
+        its session id, its shares by group and its extensions by kind."""
         header, hello = read_record(sock)
+        while header[0] == 20:
+            header, hello = read_record(sock)
         if header[0] != 22 or hello[0] != 1:
             raise ValueError("no ClientHello")
         at = 4 + 2 + 32
@@ -37672,39 +37701,78 @@ def harness_tls_peer(argv):
         at += 1 + hello[at]
         end = at + 2 + int.from_bytes(hello[at:at + 2], "big")
         at += 2
-        peer = None
-        chosen = CURVES[flight.get("curve")][0]
+        shares, kinds = {}, {}
         while at < end:
             kind = int.from_bytes(hello[at:at + 2], "big")
             size = int.from_bytes(hello[at + 2:at + 4], "big")
             data = hello[at + 4:at + 4 + size]
+            kinds[kind] = data
             at += 4 + size
             if kind == 0x33:
                 share = 2
                 while share < len(data):
                     group = int.from_bytes(data[share:share + 2], "big")
                     width = int.from_bytes(data[share + 2:share + 4], "big")
-                    if group == chosen:
-                        peer = data[share + 4:share + 4 + width]
+                    shares[group] = data[share + 4:share + 4 + width]
                     share += 4 + width
-        if chosen == 0x1d:
+        return hello, session, shares, kinds
+
+    def retry_request(session, suite, group, cookie):
+        extensions = b"\0\x2b\0\2\3\4"
+        if group is not None:
+            extensions += b"\0\x33\0\2" + group.to_bytes(2, "big")
+        if cookie is not None:
+            extensions += b"\0\x2c" + (len(cookie) + 2).to_bytes(2, "big") + \
+                len(cookie).to_bytes(2, "big") + cookie
+        return message(2, b"\3\3" + RETRY_RANDOM + bytes([len(session)]) + session +
+                       suite + b"\0" + len(extensions).to_bytes(2, "big") + extensions)
+
+    def run(sock, flight, steps):
+        hello, session, shares, kinds = read_hello(sock)
+        chosen = CURVES[flight.get("curve")][0]
+        transcript = hello
+        # A HelloRetryRequest when the chosen group has no share or the
+        # script asks for one: the group it names (the chosen one unless the
+        # script overrides it), a cookie the second hello has to echo.
+        retry = flight.get("retry", {})
+        rounds = 2 if retry.get("twice") else 1
+        while rounds and (chosen not in shares or retry):
+            rounds -= 1
+            cookie = retry.get("cookie")
+            group = retry.get("group", chosen if chosen not in shares else None)
+            request = retry_request(session, b"\x13\1", group, cookie)
+            transcript = message(254, sha256(transcript)) + request
+            sock.sendall(record(22, request))
+            if retry.get("ccs"):
+                sock.sendall(record(20, b"\1"))
+            hello, session, shares, kinds = read_hello(sock)
+            if cookie is not None and kinds.get(0x2c) != len(cookie).to_bytes(2, "big") + cookie:
+                raise ValueError("the second ClientHello lost the cookie")
+            transcript += hello
+            if not retry.get("twice"):
+                break
+        # The answering share is on the chosen group unless the script
+        # names another; one the client never offered agrees on nothing.
+        answer = flight.get("answer", chosen)
+        peer = shares.get(answer)
+        if answer == 0x1d:
             mine = X25519PrivateKey.generate()
-            shared = mine.exchange(X25519PublicKey.from_public_bytes(peer))
+            shared = mine.exchange(X25519PublicKey.from_public_bytes(peer)) if peer else bytes(32)
             public = mine.public_key().public_bytes(serialization.Encoding.Raw,
                                                     serialization.PublicFormat.Raw)
         else:
-            curve = CURVES[flight.get("curve")][1]()
+            curve = {0x17: ec.SECP256R1, 0x18: ec.SECP384R1}[answer]()
             mine = ec.generate_private_key(curve)
-            shared = mine.exchange(ec.ECDH(),
-                                   ec.EllipticCurvePublicKey.from_encoded_point(curve, peer))
+            shared = mine.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(
+                curve, peer)) if peer else bytes(32)
             public = mine.public_key().public_bytes(serialization.Encoding.X962,
                                                     serialization.PublicFormat.UncompressedPoint)
-        share = chosen.to_bytes(2, "big") + len(public).to_bytes(2, "big") + public
+        share = answer.to_bytes(2, "big") + len(public).to_bytes(2, "big") + public
         extensions = (b"\0\x2b\0\2\3\4\0\x33" + len(share).to_bytes(2, "big") + share)
         server_hello = message(2, b"\3\3" + os.urandom(32) + bytes([len(session)]) +
-                               session + b"\x13\1\0" +
+                               session + flight.get("suite", b"\x13\1") + b"\0" +
                                len(extensions).to_bytes(2, "big") + extensions)
-        transcript = hello + server_hello
+        transcript += server_hello
         sock.sendall(record(22, server_hello))
         if flight.get("ccs"):
             sock.sendall(record(20, b"\1"))
@@ -37786,9 +37854,10 @@ def harness_tls_peer(argv):
         return None
 
     def openssl_client(port, expected, curve):
+        # OpenSSL's default groups share X25519 (and a hybrid) and list
+        # P-256 and P-384 without shares, so it meets the same retries.
+        del curve
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        if curve:
-            context.set_ecdh_curve(curve)
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
         context.minimum_version = ssl.TLSVersion.TLSv1_3
@@ -40027,6 +40096,19 @@ def tls_seed_server_hello(group=0x1d, extra=b""):
                             len(extensions).to_bytes(2, "big") + extensions)
 
 
+def tls_seed_retry(group=None, cookie=None, suite=b"\x13\1"):
+    """A HelloRetryRequest record asking for group and echoing cookie."""
+    extensions = b"\0\x2b\0\2\3\4"
+    if group is not None:
+        extensions += b"\0\x33\0\2" + group.to_bytes(2, "big")
+    if cookie is not None:
+        extensions += (b"\0\x2c" + (len(cookie) + 2).to_bytes(2, "big") +
+                       len(cookie).to_bytes(2, "big") + cookie)
+    return tls_seed_record(22, tls_seed_message(
+        2, b"\3\3" + hashlib.sha256(b"HelloRetryRequest").digest() + b"\0" + suite +
+        b"\0" + len(extensions).to_bytes(2, "big") + extensions))
+
+
 def tls_seed_flight(leaf=0, scheme=b"\4\3", signature=b"\x30\x06\1\1\1\1\1\1"):
     """EncryptedExtensions, Certificate (its last byte picks the stubbed
     leaf), CertificateVerify and a Finished of the stub MAC's zeros."""
@@ -40054,10 +40136,24 @@ def tls_seed_connections():
     control = b"\0\0\0\1"
     seeds = {
         "conn_x25519.bin": (control, hello, ccs, flight, data, close),
-        "conn_p256.bin": (control, tls_seed_record(22, tls_seed_server_hello(0x17)),
-                          flight, data, close),
-        "conn_p384_leaf.bin": (b"\0\0\1\2", tls_seed_record(22, tls_seed_server_hello(0x18)),
+        "conn_p256.bin": (control, tls_seed_retry(0x17),
+                          tls_seed_record(22, tls_seed_server_hello(0x17)), flight, data, close),
+        "conn_p384_leaf.bin": (b"\0\0\1\2", tls_seed_retry(0x18),
+                               tls_seed_record(22, tls_seed_server_hello(0x18)),
                                tls_seed_sealed(22, tls_seed_flight(1, b"\5\3")), data, close),
+        "conn_retry_cookie.bin": (control, tls_seed_retry(None, b"c" * 40), hello, flight,
+                                  data, close),
+        "conn_retry_group_cookie_ccs.bin": (control, tls_seed_retry(0x17, b"k" * 3000), ccs,
+                                            tls_seed_record(22, tls_seed_server_hello(0x17)),
+                                            flight, data, close),
+        "conn_retry_twice.bin": (control, tls_seed_retry(None, b"c"), tls_seed_retry(0x17),
+                                 tls_seed_record(22, tls_seed_server_hello(0x17)), flight, close),
+        "conn_retry_same_group.bin": (control, tls_seed_retry(0x1d), hello, flight, close),
+        "conn_retry_group_changed.bin": (control, tls_seed_retry(0x17),
+                                         tls_seed_record(22, tls_seed_server_hello(0x18)),
+                                         flight, close),
+        "conn_unasked_p256.bin": (control, tls_seed_record(22, tls_seed_server_hello(0x17)),
+                                  flight, close),
         "conn_rsa_leaf.bin": (b"\2\0\1\3", hello,
                               tls_seed_sealed(22, tls_seed_flight(2, b"\x08\4", b"\1" * 256)),
                               data, close),

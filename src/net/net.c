@@ -1782,8 +1782,9 @@ static COLD bipolar dns_resolve_any(string_address path, string_address name,
         TLS 1.3 client for wget.
 
         One cipher: TLS_AES_128_GCM_SHA256. Groups: X25519, P-256 and
-        P-384, each with a ClientHello key share so Chimera's secp384r1
-        servers do not HelloRetryRequest. Certificates walk to one of the
+        P-384; the ClientHello carries an X25519 share alone, and a
+        HelloRetryRequest may ask once for either of the others (Chimera's
+        secp384r1 servers, Microsoft's P-256 ones). Certificates walk to one of the
         Mozilla TLS roots in anchors.inc: a served certificate carrying an
         anchor's key ends the chain, or the last one served names an anchor
         as its issuer and verifies under it. Chain signatures may be ECDSA
@@ -4368,6 +4369,7 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #define TLS_FAIL (-1)
 #define TLS_EOF 1
 #define TLS_AGAIN 2
+#define TLS_RETRY 3
 
 #define TLS_CT_CCS 20
 #define TLS_CT_ALERT 21
@@ -4421,9 +4423,10 @@ typedef struct
         bool named;
         string_address host;
         crypto_sha256 transcript;
-        p8 x25519_scalar[32];
-        p8 p256_scalar[32];
-        p8 p384_scalar[48];
+        /* The one key share on offer: its group and secret scalar. */
+        p16 group;
+        p8 scalar[48];
+        p8 client_random[32];
         p8 hs_secret[32];
         p8 c_hs_traffic[32];
         p8 s_hs_traffic[32];
@@ -6103,8 +6106,71 @@ static COLD bool tls_hello_append(p8 address_to out, positive room,
         return true;
 }
 
+/* A key share on one of the groups supported_groups names, as its group
+   id: the scalar in tls->scalar, the public value's length, and the shared
+   secret's. X25519 is the one share a first ClientHello carries, as curl's
+   and OpenSSL's do; a HelloRetryRequest may ask for P-256 or P-384 instead,
+   which costs one round trip on the servers that want it and spares every
+   other connection the two NIST key generations. */
+static COLD positive tls_share_length(positive group)
+{
+        return group == 0x001d ? 32 : group == 0x0017 ? 65 : group == 0x0018 ? 97 : 0;
+}
+
+static COLD bool tls_share_scalar(tls_conn address_to tls, positive group)
+{
+        p8 raw[48];
+        positive width = group == 0x0018 ? 48 : 32;
+        bool made = false;
+
+        tls->group = (p16)group;
+        if (group == 0x001d)
+                made = system_random_fill(tls->scalar, 32, 0) >= 0;
+        for (positive tries = 0; group != 0x001d && !made && tries < 9; tries++)
+        {
+                if (system_random_fill(raw, width, 0) < 0)
+                        break;
+                made = crypto_scalar_reduce_be(tls->scalar, raw, width,
+                                               width == 48 ? crypto_p384_n
+                                                           : crypto_p256_n,
+                                               width / 8);
+        }
+        crypto_forget(raw, sizeof raw);
+        return made;
+}
+
+/* The public value for the share, or the secret agreed with the peer's: out
+   takes tls_share_length bytes, or 48 for a shared secret. The length
+   written, 0 on failure. */
+static COLD positive tls_share_use(tls_conn address_to tls, p8 address_to peer,
+                                   p8 address_to out)
+{
+        static const p8 base[32] = {9};
+        bool made;
+
+        if (tls->group == 0x001d)
+                made = crypto_x25519(out, tls->scalar,
+                                     peer ? peer : (p8 address_to)base);
+        else if (tls->group == 0x0017)
+                made = peer ? crypto_ecdh_p256_shared(out, tls->scalar, peer)
+                            : crypto_ecdh_p256_public(out, tls->scalar);
+        else
+                made = peer ? crypto_ecdh_p384_shared(out, tls->scalar, peer)
+                            : crypto_ecdh_p384_public(out, tls->scalar);
+        if (!made)
+                return 0;
+        return peer ? (tls->group == 0x0018 ? 48 : 32)
+                    : tls_share_length(tls->group);
+}
+
+/* The first ClientHello draws the random and an X25519 share; after a
+   HelloRetryRequest the same hello goes again with the share the server
+   asked for (already drawn into tls) and its cookie echoed, the whole
+   cookie extension body, length included (RFC 8446 4.1.2). */
 static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
-                                positive room, positive address_to used)
+                                positive room, positive address_to used,
+                                const p8 address_to cookie,
+                                positive cookie_length)
 {
         static const p8 prefix[] = {
             TLS_HS_CLIENT_HELLO, 0, 0, 0, 0x03, 0x03};
@@ -6115,61 +6181,33 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
             0, 0};                // extensions length, filled below
         static const p8 groups[] = {
             0, 0x0a, 0, 8, 0, 6, 0, 0x1d, 0, 0x17, 0, 0x18};
-        static const p8 share_intro[] = {
-            0, 0x33, 0, 208, 0, 206};
-        static const p8 x25519_item[] = {0, 0x1d, 0, 32};
-        static const p8 p256_item[] = {0, 0x17, 0, 65};
-        static const p8 p384_item[] = {0, 0x18, 0, 97};
         static const p8 tail[] = {
             0, 0x2b, 0, 3, 2, 0x03, 0x04,
             0, 0x0d, 0, 8, 0, 6, 0x04, 0x03, 0x05, 0x03, 0x08, 0x04};
-        p8 random[32];
-        p8 x25519_public[32];
-        p8 p256_public[65];
-        p8 p384_public[97];
-        p8 base[32];
-        p8 raw[48];
+        p8 share[10 + 97];
+        positive share_length;
         positive host_length = string_length(tls->host);
         bool named = string_to_host(tls->host) < 0;
         positive at = 0;
         positive ext_len_at;
-        positive tries;
         bipolar status = TLS_FAIL;
 
-        if (system_random_fill(random, 32, 0) < 0)
+        if (!tls->group &&
+            (system_random_fill(tls->client_random, 32, 0) < 0 ||
+             !tls_share_scalar(tls, 0x001d)))
                 goto done;
-        if (system_random_fill(tls->x25519_scalar, 32, 0) < 0)
+        share_length = tls_share_use(tls, null, share + 10);
+        if (!share_length)
                 goto done;
-
-        memory_fill(base, 0, 32);
-        base[0] = 9;
-        if (!crypto_x25519(x25519_public, tls->x25519_scalar, base))
-                goto done;
-
-        for (tries = 0;; tries++)
-        {
-                if (tries > 8 || system_random_fill(raw, 32, 0) < 0)
-                        goto done;
-                if (crypto_scalar_reduce_be(tls->p256_scalar, raw, 32,
-                                            crypto_p256_n, 4))
-                        break;
-        }
-        if (!crypto_ecdh_p256_public(p256_public, tls->p256_scalar))
-                goto done;
-
-        for (tries = 0;; tries++)
-        {
-                if (tries > 8 || system_random_fill(raw, 48, 0) < 0)
-                        goto done;
-                if (crypto_scalar_reduce_be(tls->p384_scalar, raw, 48,
-                                            crypto_p384_n, 6))
-                        break;
-        }
-        if (!crypto_ecdh_p384_public(p384_public, tls->p384_scalar))
-                goto done;
+        share[0] = 0;
+        share[1] = 0x33;
+        network_store_16(share + 2, (p16)(share_length + 6));
+        network_store_16(share + 4, (p16)(share_length + 4));
+        network_store_16(share + 6, tls->group);
+        network_store_16(share + 8, (p16)share_length);
 
         if (!tls_hello_append(out, room, address_of at, prefix, sizeof prefix) ||
-            !tls_hello_append(out, room, address_of at, random, sizeof random) ||
+            !tls_hello_append(out, room, address_of at, tls->client_random, 32) ||
             !tls_hello_append(out, room, address_of at, parameters,
                               sizeof parameters))
                 goto done;
@@ -6193,21 +6231,22 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
                         goto done;
         }
 
+        if (cookie_length)
+        {
+                p8 head[4] = {0, 0x2c, (p8)(cookie_length >> 8),
+                              (p8)cookie_length};
+
+                if (cookie_length > 0xffff ||
+                    !tls_hello_append(out, room, address_of at, head,
+                                      sizeof head) ||
+                    !tls_hello_append(out, room, address_of at, cookie,
+                                      cookie_length))
+                        goto done;
+        }
+
         if (!tls_hello_append(out, room, address_of at, groups, sizeof groups) ||
-            !tls_hello_append(out, room, address_of at, share_intro,
-                              sizeof share_intro) ||
-            !tls_hello_append(out, room, address_of at, x25519_item,
-                              sizeof x25519_item) ||
-            !tls_hello_append(out, room, address_of at, x25519_public,
-                              sizeof x25519_public) ||
-            !tls_hello_append(out, room, address_of at, p256_item,
-                              sizeof p256_item) ||
-            !tls_hello_append(out, room, address_of at, p256_public,
-                              sizeof p256_public) ||
-            !tls_hello_append(out, room, address_of at, p384_item,
-                              sizeof p384_item) ||
-            !tls_hello_append(out, room, address_of at, p384_public,
-                              sizeof p384_public) ||
+            !tls_hello_append(out, room, address_of at, share,
+                              10 + share_length) ||
             !tls_hello_append(out, room, address_of at, tail, sizeof tail))
                 goto done;
 
@@ -6227,27 +6266,35 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
         status = TLS_OK;
 
 done:
-        crypto_forget(random, sizeof random);
-        crypto_forget(x25519_public, sizeof x25519_public);
-        crypto_forget(p256_public, sizeof p256_public);
-        crypto_forget(p384_public, sizeof p384_public);
-        crypto_forget(base, sizeof base);
-        crypto_forget(raw, sizeof raw);
         if (status)
-        {
-                crypto_forget(tls->x25519_scalar, sizeof tls->x25519_scalar);
-                crypto_forget(tls->p256_scalar, sizeof tls->p256_scalar);
-                crypto_forget(tls->p384_scalar, sizeof tls->p384_scalar);
-        }
+                crypto_forget(tls->scalar, sizeof tls->scalar);
         return status;
 }
 
+/* HelloRetryRequest is a ServerHello whose random is SHA-256 of
+   "HelloRetryRequest" (RFC 8446 4.1.3). */
+static const p8 tls_retry_random[32] = {
+    0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02,
+    0x1e, 0x65, 0xb8, 0x91, 0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e,
+    0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c};
+
+/* A ServerHello answers TLS_OK with the peer's share in peer, on offered,
+   the one group the client sent a share for; a HelloRetryRequest answers
+   TLS_RETRY with the group it asks for in group (0 when it asks for none)
+   and its cookie extension body in cookie and cookie_length (null and 0
+   when it has none). A retry has to ask for something -- a group offered
+   but not already shared, or a cookie -- and may carry nothing else (RFC
+   8446 4.1.4). */
 static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
+                                     positive offered,
                                      p8 address_to peer, positive room,
                                      positive address_to share_length,
-                                     positive address_to group)
+                                     positive address_to group,
+                                     p8 address_to address_to cookie,
+                                     positive address_to cookie_length)
 {
         positive at;
+        bool retry;
         bool seen_share = false;
         bool seen_version = false;
 
@@ -6256,6 +6303,10 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
             hello[5] != 0x03)
                 return TLS_FAIL;
 
+        retry = !memory_compare(hello + 6, tls_retry_random, 32);
+        address_to group = 0;
+        address_to cookie = null;
+        address_to cookie_length = 0;
         at = 4 + 2 + 32;
         /* The client sent an empty legacy_session_id, so the echo is empty. */
         if (hello[at++])
@@ -6292,22 +6343,31 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                         positive named;
                         positive klen;
 
-                        if (seen_share || elen < 4)
+                        if (seen_share || elen < 2)
                                 return TLS_FAIL;
                         named = network_load_16(hello + at);
-                        klen = network_load_16(hello + at + 2);
-                        if (klen != elen - 4)
+                        klen = tls_share_length(named);
+                        /* A retry names an offered group not yet shared; a
+                           hello answers the share, at its one length. */
+                        if (!klen || (named == offered) == retry ||
+                            (retry ? elen != 2
+                                   : elen != 4 + klen || klen > room ||
+                                         network_load_16(hello + at + 2) !=
+                                             klen))
                                 return TLS_FAIL;
-                        if (!((named == 0x001d && klen == 32) ||
-                              (named == 0x0017 && klen == 65) ||
-                              (named == 0x0018 && klen == 97)))
-                                return TLS_FAIL;
-                        if (klen > room)
-                                return TLS_FAIL;
+                        if (retry)
+                                klen = 0;
                         memory_copy(peer, hello + at + 4, klen);
                         address_to share_length = klen;
                         address_to group = named;
                         seen_share = true;
+                }
+                else if (id == 0x002c && retry && !address_to cookie)
+                {
+                        if (elen < 3 || network_load_16(hello + at) != elen - 2)
+                                return TLS_FAIL;
+                        address_to cookie = hello + at;
+                        address_to cookie_length = elen;
                 }
                 else
                         return TLS_FAIL;
@@ -6315,7 +6375,11 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                 at += elen;
         }
 
-        return seen_version && seen_share ? TLS_OK : TLS_FAIL;
+        if (!seen_version)
+                return TLS_FAIL;
+        if (retry)
+                return seen_share || address_to cookie ? TLS_RETRY : TLS_FAIL;
+        return seen_share ? TLS_OK : TLS_FAIL;
 }
 
 #define TLS_HANDSHAKE_MORE 0
@@ -6771,7 +6835,9 @@ static COLD bipolar tls_encrypted_flight_append(
 static COLD bipolar tls_handshake(
     tls_conn address_to tls, const network_deadline address_to deadline)
 {
-        p8 hello[5 + 1024];
+        /* A retry's cookie comes back in the second hello, which has to
+           fit one record. */
+        p8 hello[5 + TLS_PLAINTEXT_MAX];
         p8 address_to record = null;
         p8 peer[97];
         p8 shared[48];
@@ -6782,62 +6848,92 @@ static COLD bipolar tls_handshake(
         positive hs_used = 0;
         p8 flight = TLS_SERVER_FLIGHT_EE;
         bool seen_ccs = false;
+        bool retried = false;
         bipolar status = TLS_FAIL;
+        bipolar hello_kind;
         positive share_length = 0;
         positive group = 0;
+        p8 address_to cookie = null;
+        positive cookie_length = 0;
 
         crypto_sha256_open(address_of tls->transcript);
 
-        if (tls_client_hello(tls, hello + 5, sizeof hello - 5,
-                             address_of hello_length))
-                goto done;
-        tls_transcript_add(tls, hello + 5, hello_length);
-        tls_record_header(hello, TLS_CT_HANDSHAKE, hello_length);
-        if (!network_stream_send_all(tls->handle, hello, 5 + hello_length))
-                goto done;
-
         for (;;)
         {
-                bipolar assembled;
-
-                if (tls_next_record(tls, address_of type, address_of record,
-                                    address_of length, deadline))
+                if (tls_client_hello(tls, hello + 5, sizeof hello - 5,
+                                     address_of hello_length, cookie,
+                                     cookie_length))
                         goto done;
-                if (type == TLS_CT_CCS)
+                tls_transcript_add(tls, hello + 5, hello_length);
+                tls_record_header(hello, TLS_CT_HANDSHAKE, hello_length);
+                if (!network_stream_send_all(tls->handle, hello,
+                                             5 + hello_length))
+                        goto done;
+
+                for (hs_used = 0;;)
                 {
-                        if (!tls_compatibility_ccs_take(address_of seen_ccs))
-                                goto done;
-                        continue;
-                }
-                if (type != TLS_CT_HANDSHAKE)
-                        goto done;
+                        bipolar assembled;
 
-                assembled = tls_handshake_one_append(
-                    hs, sizeof(hs), address_of hs_used, record, length);
-                if (assembled == TLS_FAIL)
-                        goto done;
-                if (assembled == TLS_HANDSHAKE_COMPLETE)
+                        if (tls_next_record(tls, address_of type,
+                                            address_of record,
+                                            address_of length, deadline))
+                                goto done;
+                        if (type == TLS_CT_CCS)
+                        {
+                                if (!tls_compatibility_ccs_take(
+                                        address_of seen_ccs))
+                                        goto done;
+                                continue;
+                        }
+                        if (type != TLS_CT_HANDSHAKE)
+                                goto done;
+
+                        assembled = tls_handshake_one_append(
+                            hs, sizeof(hs), address_of hs_used, record,
+                            length);
+                        if (assembled == TLS_FAIL)
+                                goto done;
+                        if (assembled == TLS_HANDSHAKE_COMPLETE)
+                                break;
+                }
+
+                hello_kind = tls_server_hello_keys(
+                    hs, hs_used, tls->group, peer, sizeof peer,
+                    address_of share_length,
+                    address_of group, address_of cookie,
+                    address_of cookie_length);
+                if (hello_kind != TLS_RETRY)
                         break;
+
+                /* One retry, and it must change the share or bring a
+                   cookie. The transcript restarts as message_hash over the
+                   first ClientHello, then the retry and the second hello
+                   (RFC 8446 4.4.1). */
+                if (retried || (group && !tls_share_scalar(tls, group)))
+                        goto done;
+                retried = true;
+                {
+                        p8 message_hash[4 + 32] = {254, 0, 0, 32};
+
+                        crypto_sha256_close(address_of tls->transcript,
+                                            message_hash + 4);
+                        crypto_sha256_open(address_of tls->transcript);
+                        tls_transcript_add(tls, message_hash,
+                                           sizeof message_hash);
+                }
+                tls_transcript_add(tls, hs, hs_used);
         }
 
-        tls_transcript_add(tls, hs, hs_used);
-        if (tls_server_hello_keys(hs, hs_used, peer, sizeof peer,
-                                  address_of share_length, address_of group))
+        if (hello_kind)
                 goto done;
+        tls_transcript_add(tls, hs, hs_used);
         hs_used = 0;
 
-        /* tls_server_hello_keys admits only the three groups offered, each
-           at its own share length. */
-        if (!(group == 0x001d
-                  ? crypto_x25519(shared, tls->x25519_scalar, peer)
-              : group == 0x0017
-                  ? crypto_ecdh_p256_shared(shared, tls->p256_scalar, peer)
-                  : crypto_ecdh_p384_shared(shared, tls->p384_scalar, peer)))
+        length = tls_share_use(tls, peer, shared);
+        crypto_forget(tls->scalar, sizeof tls->scalar);
+        if (!length)
                 goto done;
-        tls_install_handshake_keys(tls, shared, group == 0x0018 ? 48 : 32);
-        crypto_forget(tls->x25519_scalar, sizeof tls->x25519_scalar);
-        crypto_forget(tls->p256_scalar, sizeof tls->p256_scalar);
-        crypto_forget(tls->p384_scalar, sizeof tls->p384_scalar);
+        tls_install_handshake_keys(tls, shared, length);
         crypto_forget(shared, sizeof shared);
 
         while (flight != TLS_SERVER_FLIGHT_COMPLETE)
@@ -6867,13 +6963,11 @@ static COLD bipolar tls_handshake(
         status = TLS_OK;
 
 done:
-        crypto_forget(hello, sizeof hello);
+        crypto_forget(hello, 5 + hello_length);
         crypto_forget(peer, sizeof peer);
         crypto_forget(shared, sizeof shared);
         crypto_forget(hs, sizeof hs);
-        crypto_forget(tls->x25519_scalar, sizeof tls->x25519_scalar);
-        crypto_forget(tls->p256_scalar, sizeof tls->p256_scalar);
-        crypto_forget(tls->p384_scalar, sizeof tls->p384_scalar);
+        crypto_forget(tls->scalar, sizeof tls->scalar);
         return status;
 }
 
