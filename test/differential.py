@@ -19153,7 +19153,7 @@ TEXT_UTILITIES = (
                       ("nonl",), ("empty",), ("wide",), ("tabs",), ("fields", "missing", "a.txt")),
             stdin=("fields", "text_cut", "tabs", "spaces", "empty", "nonl", "nul_lines", "high",
                    "edge_65537", "text", "words", "text_random_lines", "edge_65535", "edge_65536", "text_utf8"),
-            fixture="text", valid=text_cut_valid,
+            fixture="text", valid=text_cut_valid, stderr="exact",
             #       -c is characters and -b is bytes, and the generator pairs
             #       an option with the first input alone, which is ASCII. The
             #       rows naming utf8.txt carry the set those files are in, so
@@ -19185,6 +19185,15 @@ TEXT_UTILITIES = (
                    ("-d", ":", "-f", "1  3"), ("-d", ":", "-f", "1,"), ("-d", ":", "-f", " 1"), ("-d", ":", "-f", "1,-"),
                    #   -F joins with a space whatever splits the fields.
                    ("-F", "2,3", "-d", ",", "fields"), ("-F", "1,3", "-d", ":"), ("-F", "2-", "-w"), ("-F", "1,2", "-O", "|"),
+                   #   set_fields' own words for each list it refuses, and the
+                   #   option loop's for a second list or a long delimiter,
+                   #   said as each is read.
+                   ("-b", "0"), ("-f", ""), ("-b", ""), ("-f", "1,,2"), ("-c", "1-2-3"), ("-f", "-"), ("-b", "-"),
+                   ("-f", "3-1"), ("-b", "-0"), ("-b", "0-3"), ("-b", "18446744073709551615"),
+                   ("-b", "1,999999999999999999999,3"), ("-f", "1x"), ("-b", "1,a,3"), ("-b", "1", "-b", "2"),
+                   ("-b", "1", "-Q", "-c", "2"), ("-b", "1", "-c", "2", "-Q"), ("-f", "1", "-d", "ab", "-Q"),
+                   ("-b", "1", "-s"), ("-b", "1", "-w"), ("-b", "1", "-s", "-d", ":"), ("-f", "1", "--whitespace-delimited=tr"),
+                   ("-f", "1", "--whitespace-delimited=x"), ("-F", "1", "-f", "2"), ("-f", "0", "-d", "ab"),
                    #   A field delimiter that also ends records makes the input
                    #   one record whose fields are its records.
                    *({"argv": argv, "stdin": stdin, "fixture": "text"} for stdin in ("text", "nonl", "empty", "blank_runs")
@@ -19778,7 +19787,9 @@ TEXT_UTILITIES = (
 #       which GNU formats a piece at a time. Added to each grammar's extras
 #       so the cases carry their own identities.
 _TEXT_LONG_RECORD_ROWS = {
-    "cut": (("-c1-3",), ("-d:", "-f1"), ("-b2-",), ("-f2",), ("-d:", "-f2", "-s"), ("--complement", "-c", "1-5")),
+    "cut": (("-c1-3",), ("-d:", "-f1"), ("-b2-",), ("-f2",), ("-d:", "-f2", "-s"), ("--complement", "-c", "1-5"),
+            ("-c1,3-5", "--output-delimiter=|"), ("-d:", "-f2-", "--output-delimiter=|"), ("-b", "1-1500000,2500000-"),
+            ("-d:", "-s", "-f1")),
     "fold": (("-w", "100"), ("-w7",), ("-s", "-w", "40")),
     "paste": (("-", "a.txt"), ("-s",), ("-d:", "-", "-")),
     "pr": (("-t",), ("-2", "-t"), ("-n", "-t"), ("-m", "-t", "-", "a.txt"), ("-J", "-2", "-t")),

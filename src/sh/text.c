@@ -1056,6 +1056,15 @@ static bool text_line_view_refill(p8 address_to address_to line,
                                   p8 address_to previous_storage);
 
 /*
+        A tool that can cut a line as it streams sets text_line_stream_ok:
+        a line that is not whole in the read is then not gathered, and the
+        view answers false with text_line_stream_now set and the line left
+        unread, for the tool to take it as it comes.
+*/
+static bool text_line_stream_ok;
+static bool text_line_stream_now;
+
+/*
         A line that is whole in the reader is the common answer and needs
         only its end found, so that part is taken where the caller is; the
         refill and the line that runs past the read are the call. As one
@@ -1112,6 +1121,12 @@ static bool text_line_view_refill(p8 address_to address_to line,
                 text_input.position += address_to length + 1;
                 text_line_ended = true;
                 return true;
+        }
+
+        if (text_line_stream_ok)
+        {
+                text_line_stream_now = true;
+                return false;
         }
 
         // text_line_next refills the reader and reuses text_line. Preserve a
@@ -1307,6 +1322,8 @@ static fn text_begin(string_address name)
         text_files_count = 0;
         text_files_failed = false;
         text_quiet_open = false;
+        text_line_stream_ok = false;
+        text_line_stream_now = false;
         text_file_list = null;
         text_delimiter = '\n';
 }
@@ -17696,70 +17713,15 @@ static b32 text_fold()
 
 /*
         A list of positions -- 1,3-5,7- -- which cut takes for both fields and
-        characters. The open ended tail is kept as a number rather than as
-        marks, because "7-" means every field a line happens to have.
+        characters, kept as GNU keeps it: the ranges sorted and merged where
+        one overlaps the next (two that only touch stay two), an open tail
+        running to the largest count. Membership below a small ceiling is
+        also a mark per position, since a line asks about every byte or
+        field it has; a position past the marks asks the ranges, so a list
+        names any position at all -- the old megabyte of marks stopped
+        there, and was a megabyte of address space whatever the list.
 */
-/*
-        A line that can be accepted can name any of its bytes or fields. The
-        old 4096-entry bitmap made `cut -c5000` quietly print an empty line
-        from a 6000-byte record. One slot beyond the record is useful for the
-        final empty field after a delimiter; anything higher cannot select a
-        value before the line reader's explicit ceiling.
-*/
-#define TEXT_LIST_MAX (TEXT_LINE_MAX + 2)
-
-static p8 (address_to text_list_held)[TEXT_LIST_MAX];
-#define text_list UTILITY_HELD(text_list)
-
-/*
-        Where each range began, for --output-delimiter.
-
-        cut -c1,2 and cut -c1-2 select the same two characters and GNU puts
-        its output delimiter between the first pair and not the second, so
-        the bitmap alone cannot answer. A range start already covered by an
-        earlier range is not one, which is how GNU's merging of overlapping
-        ranges shows up here; two overlapping ranges written the wrong way
-        round is the one spec this still parts differently from GNU.
-*/
-static p8 (address_to text_list_begins_held)[TEXT_LIST_MAX];
-#define text_list_begins UTILITY_HELD(text_list_begins)
-
-static positive text_list_open;
-
-/*
-        One past the highest position either bitmap has had a byte written to.
-
-        The two of them are a megabyte each, and a shell may run cut and then
-        numfmt in one process, so the second has to start from a clean list.
-        Clearing them whole costs two megabytes of writes and makes two
-        megabytes of otherwise untouched reservation resident, to forget a
-        handful of positions -- `cut -c1,3` writes three bytes.
-
-        A high-water mark is enough because every write below is a run that
-        starts at `first` and ends at `through`: nothing is ever set above
-        this, so nothing above it needs clearing.
-*/
-static positive text_list_used;
-
-static bool text_list_single;
-static positive text_list_single_first;
-static positive text_list_single_last;
-// A position at or past the largest count is one no line can reach, and GNU
-// says so rather than treating the whole list as malformed.
-static bool text_list_too_large;
-// numfmt reads a piece that is a dash alone as every field, where cut
-// refuses it as a range with no end.
-static bool text_list_dash_all;
-
-/*
-        The ranges as written, kept so the range starts can be settled the way
-        GNU settles them once the whole list is in: sorted, and merged where
-        one reaches into the next -- an open range reaches into every later
-        start, and two that only touch stay two. Measured against GNU with
-        3-,5 and 5,3-6 and 2-3,1-4 (one range each) and 1-2,3-4 (two).
-        A list with more ranges than this keeps the marks the parse made.
-*/
-#define TEXT_RANGES_MAX 64
+#define TEXT_LIST_MARKS_MAX 65536
 
 typedef struct
 {
@@ -17767,211 +17729,365 @@ typedef struct
         positive last; // TEXT_UNSET when the range is open
 } text_range;
 
-static text_range text_list_ranges[TEXT_RANGES_MAX];
+static p8 address_to text_list;
+static p8 address_to text_list_begins_map;
+static positive text_list_room;
+static positive text_list_open;
 
-static fn text_list_merge_begins(positive count)
+/*
+        One past the highest position a list names outside its open tail, so
+        a walk can tell the rest of a line is all kept or all dropped.
+*/
+static positive text_list_used;
+
+static bool text_list_single;
+static positive text_list_single_first;
+static positive text_list_single_last;
+// numfmt reads a piece that is a dash alone as every field, where cut
+// refuses it as a range with no end.
+static bool text_list_dash_all;
+
+// The pieces as written, then merged in place.
+static text_range address_to text_list_ranges;
+static positive text_list_ranges_room;
+static positive text_list_ranges_count;
+
+// Whether some range of the merged list starts at WHICH.
+static bool text_list_begins_far(positive which);
+
+static inline INLINE bool text_list_begins_at(positive which)
 {
-        for (positive i = 1; i < count; i++)
-        {
-                text_range moving = text_list_ranges[i];
-                positive j = i;
+        if (likely(which < text_list_room))
+                return text_list_begins_map[which] != 0;
 
-                while (j && text_list_ranges[j - 1].first > moving.first)
-                {
-                        text_list_ranges[j] = text_list_ranges[j - 1];
-                        j--;
-                }
-
-                text_list_ranges[j] = moving;
-        }
-
-        memory_fill(text_list_begins, 0, text_list_used);
-
-        positive reach = 0;
-
-        for (positive i = 0; i < count; i++)
-        {
-                text_range address_to range = text_list_ranges + i;
-
-                if (i && range->first <= reach)
-                {
-                        reach = max(reach, range->last);
-                        continue;
-                }
-
-                if (range->first < TEXT_LIST_MAX)
-                        text_list_begins[range->first] = 1;
-
-                reach = range->last;
-        }
+        return text_list_begins_far(which);
 }
 
-static bool text_list_parse(string_address spec)
+static COLD bool text_list_begins_far(positive which)
 {
-        positive at = 0;
-        positive pieces = 0;
+        positive low = 0;
+        positive high = text_list_ranges_count;
 
-        text_list_single = spec[0] != '\0';
-
-        while (spec[at])
+        while (low < high)
         {
-                string_address cursor = spec + at;
-                positive first = 0;
-                bool have_first = byte_is_digit(cursor[0]);
-                bool open = false;
+                positive middle = low + (high - low) / 2;
 
-                if (have_first && !string_digits_checked(
-                        address_of cursor, 10, address_of first))
-                {
-                        text_list_too_large = true;
-                        return false;
-                }
-
-                if (have_first && first == positive_max)
-                {
-                        text_list_too_large = true;
-                        return false;
-                }
-
-                at = (positive)(cursor - spec);
-
-                positive last = 0;
-                bool have_last = false;
-
-                if (spec[at] == '-')
-                {
-                        at++;
-
-                        cursor = spec + at;
-                        have_last = byte_is_digit(cursor[0]);
-
-                        if (have_last && !string_digits_checked(
-                                address_of cursor, 10, address_of last))
-                        {
-                                text_list_too_large = true;
-                                return false;
-                        }
-
-                        if (have_last && last == positive_max)
-                        {
-                                text_list_too_large = true;
-                                return false;
-                        }
-
-                        at = (positive)(cursor - spec);
-
-                        if (!have_first && !have_last && !text_list_dash_all)
-                                return false;
-
-                        if (!have_first)
-                                first = 1;
-
-                        if (!have_last)
-                        {
-                                if (!text_list_open || first < text_list_open)
-                                        text_list_open = first;
-
-                                open = true;
-                                last = first;
-                        }
-                        else if (last < first)
-                                return false;
-                }
+                if (text_list_ranges[middle].first < which)
+                        low = middle + 1;
                 else
-                {
-                        if (!have_first)
-                                return false;
-
-                        last = first;
-                }
-
-                if (!first)
-                        return false;
-
-                if (!pieces++)
-                {
-                        text_list_single_first = first;
-                        text_list_single_last = open ? TEXT_UNSET : last;
-                }
-                else
-                        text_list_single = false;
-
-                if (pieces <= TEXT_RANGES_MAX)
-                        text_list_ranges[pieces - 1] =
-                            (text_range){first, open ? TEXT_UNSET : last};
-
-                if (first < TEXT_LIST_MAX)
-                {
-                        if (!text_list[first])
-                                text_list_begins[first] = 1;
-
-                        if (first >= text_list_used)
-                                text_list_used = first + 1;
-
-                        if (last >= first)
-                        {
-                                positive through = min(last, TEXT_LIST_MAX - 1);
-
-                                memory_fill(text_list + first, 1, through - first + 1);
-
-                                if (through >= text_list_used)
-                                        text_list_used = through + 1;
-                        }
-                }
-
-                //      A piece ends at a comma or a blank, as GNU's
-                //      set_fields has it: `-f "1 3"` is two fields. There is
-                //      exactly one separator between pieces, so a doubled
-                //      one, a leading one or a trailing one is an empty
-                //      piece and refused.
-                if (spec[at] == ',' || spec[at] == ' ' || spec[at] == '\t')
-                {
-                        at++;
-
-                        if (!spec[at])
-                                return false;
-
-                        continue;
-                }
-
-                if (spec[at])
-                        return false;
+                        high = middle;
         }
-
-        if (pieces && pieces <= TEXT_RANGES_MAX)
-                text_list_merge_begins(pieces);
-
-        return pieces != 0;
+        return low < text_list_ranges_count && text_list_ranges[low].first == which;
 }
 
 /*
-        Forget every position the list holds, and no more than that.
+        Sort by start (a shell sort: lists come nearly sorted, and a reversed
+        one of any length still costs little) and merge as set_fields does,
+        then lay down the marks for the positions under the ceiling.
+*/
+static bool text_list_settle()
+{
+        positive count = text_list_ranges_count;
+        text_range address_to r = text_list_ranges;
 
-        For the caller that has to: a tool reached in a process where another
-        one has already parsed a list of its own.
+        for (positive gap = count / 2; gap; gap /= 2)
+                for (positive i = gap; i < count; i++)
+                {
+                        text_range moving = r[i];
+                        positive j = i;
+
+                        while (j >= gap && r[j - gap].first > moving.first)
+                        {
+                                r[j] = r[j - gap];
+                                j -= gap;
+                        }
+                        r[j] = moving;
+                }
+
+        positive kept = 0;
+
+        for (positive i = 0; i < count; i++)
+        {
+                if (kept && r[i].first <= r[kept - 1].last)
+                {
+                        if (r[i].last > r[kept - 1].last)
+                                r[kept - 1].last = r[i].last;
+                        continue;
+                }
+                r[kept++] = r[i];
+        }
+        text_list_ranges_count = count = kept;
+
+        text_list_open = count && r[count - 1].last == TEXT_UNSET ? r[count - 1].first : 0;
+        text_list_used = 0;
+        for (positive i = 0; i < count; i++)
+                if (r[i].last != TEXT_UNSET)
+                        text_list_used = r[i].last + 1;
+                else if (r[i].first + 1 > text_list_used)
+                        text_list_used = r[i].first + 1;
+
+        // Past the highest listed position the marks are all nought; they
+        // still answer a line's first few thousand bytes or fields in line.
+        text_list_room = max(min(text_list_used, (positive)TEXT_LIST_MARKS_MAX) + 1,
+                             (positive)4096);
+        text_list = (p8 address_to)memory_take(text_list_room);
+        text_list_begins_map = (p8 address_to)memory_take(text_list_room);
+        if (!text_list || !text_list_begins_map)
+                return false;
+        memory_fill(text_list, 0, text_list_room);
+        memory_fill(text_list_begins_map, 0, text_list_room);
+
+        for (positive i = 0; i < count; i++)
+        {
+                if (r[i].first >= text_list_room)
+                        break;
+                text_list_begins_map[r[i].first] = 1;
+
+                positive through = r[i].last == TEXT_UNSET ? r[i].first : r[i].last;
+
+                through = min(through, text_list_room - 1);
+                memory_fill(text_list + r[i].first, 1, through - r[i].first + 1);
+        }
+        return true;
+}
+
+// The words GNU's set_fields says about a list it refuses, in the -b and -c
+// wording when cut asked for positions; the subject is quoted after them.
+static bool text_list_positions;
+static string_address text_list_complaint;
+static string_address text_list_subject;
+static positive text_list_subject_length;
+
+static bool text_list_refuse(string_address fields, string_address positions)
+{
+        text_list_complaint = text_list_positions ? positions : fields;
+        text_list_subject = null;
+        return false;
+}
+
+// One piece of a list, as the single-range fast path and the ranges to
+// merge keep it.
+static fn text_list_piece(positive first, positive last, bool open,
+                          positive address_to pieces)
+{
+        if (!address_to pieces)
+        {
+                text_list_single_first = first;
+                text_list_single_last = open ? TEXT_UNSET : last;
+        }
+        else
+                text_list_single = false;
+        address_to pieces += 1;
+
+        if (!array_store_reserve(text_list_ranges, text_list_ranges_room,
+                                 text_list_ranges_count,
+                                 text_list_ranges_count + 1, 16))
+        {
+                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                exit(text_done(1));
+        }
+        text_list_ranges[text_list_ranges_count++] =
+            (text_range){first, open ? TEXT_UNSET : last};
+}
+
+/*
+        set_fields as GNU walks it, a byte at a time: numbers and ranges
+        parted by commas or blanks, "-m" meaning 1-m and "n-" n to the end.
+        What it refuses, and the words it refuses with, are its own: a zero
+        or an empty piece is "numbered from 1", a second dash in one piece an
+        invalid range, a dash alone a range with no endpoint, m-n with n
+        below m a decreasing range, a number of twenty digits or the largest
+        one "too large" (naming the digits), and any other byte an invalid
+        value (naming the rest of the list).
+*/
+static bool text_list_parse(string_address spec)
+{
+        positive initial = 1;
+        positive value = 0;
+        bool lhs = false;
+        bool rhs = false;
+        bool dash = false;
+        bool in_digits = false;
+        string_address digits_start = spec;
+        positive pieces = 0;
+
+        text_list_single = spec[0] != '\0';
+        text_list_complaint = null;
+
+        for (;; spec++)
+        {
+                p8 at = (p8)spec[0];
+
+                if (at == '-')
+                {
+                        in_digits = false;
+                        if (dash)
+                                return text_list_refuse("invalid field range",
+                                                        "invalid byte or character range");
+                        dash = true;
+                        if (lhs && !value)
+                                return text_list_refuse("fields are numbered from 1",
+                                                        "byte/character positions are numbered from 1");
+                        initial = lhs ? value : 1;
+                        value = 0;
+                }
+                else if (at == ',' || at == ' ' || at == '\t' || !at)
+                {
+                        in_digits = false;
+                        if (dash)
+                        {
+                                dash = false;
+                                if (!lhs && !rhs)
+                                {
+                                        if (!text_list_dash_all)
+                                                return text_list_refuse("invalid range with no endpoint: -",
+                                                                        "invalid range with no endpoint: -");
+                                        initial = 1;
+                                }
+
+                                if (!rhs)
+                                        text_list_piece(initial, 0, true, address_of pieces);
+                                else if (value < initial)
+                                        return text_list_refuse("invalid decreasing range",
+                                                                "invalid decreasing range");
+                                else
+                                        text_list_piece(initial, value, false, address_of pieces);
+                                value = 0;
+                        }
+                        else
+                        {
+                                if (!value)
+                                        return text_list_refuse("fields are numbered from 1",
+                                                                "byte/character positions are numbered from 1");
+                                text_list_piece(value, value, false, address_of pieces);
+                                value = 0;
+                        }
+
+                        if (!at)
+                                break;
+                        lhs = false;
+                        rhs = false;
+                }
+                else if (byte_is_digit(at))
+                {
+                        if (!in_digits)
+                                digits_start = spec;
+                        in_digits = true;
+                        if (dash)
+                                rhs = true;
+                        else
+                                lhs = true;
+
+                        positive digit = (positive)(at - '0');
+
+                        if (value > (positive_max - digit) / 10 ||
+                            value * 10 + digit == positive_max)
+                        {
+                                text_list_refuse("field number %s is too large",
+                                                 "byte/character offset %s is too large");
+                                text_list_subject = digits_start;
+                                text_list_subject_length =
+                                    string_span(digits_start, string_set_digits);
+                                return false;
+                        }
+                        value = value * 10 + digit;
+                }
+                else
+                {
+                        text_list_refuse("invalid field value %s",
+                                         "invalid byte/character position %s");
+                        text_list_subject = spec;
+                        text_list_subject_length = string_length(spec);
+                        return false;
+                }
+        }
+
+        if (!pieces)
+                return text_list_refuse("missing list of fields",
+                                        "missing list of byte/character positions");
+
+        if (!text_list_settle())
+        {
+                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                exit(text_done(1));
+        }
+
+        return true;
+}
+
+// What text_list_parse refused, then usage's pointer at --help.
+static b32 text_list_trouble()
+{
+        text_flush();
+        string_format(writer_stderr, "%s: ", text_name);
+        if (text_list_subject)
+        {
+                string_address mark = string_first_of(text_list_complaint, '%');
+                positive before = (positive)(mark - text_list_complaint);
+
+                writer_stderr(text_list_complaint, before);
+                writer_stderr("'", 1);
+                writer_terminal_quoted_name_span(writer_stderr, text_list_subject,
+                                                 text_list_subject_length);
+                writer_stderr("'", 1);
+                writer_stderr(mark + 2, 0);
+        }
+        else
+                writer_stderr(text_list_complaint, 0);
+        string_format(writer_stderr, "\nTry '%s --help' for more information.\n",
+                      text_name);
+        return 1;
+}
+
+/*
+        Forget every position the list holds: a shell may run cut more than
+        once in one process.
 */
 static fn text_list_reset()
 {
-        if (text_list_used)
-        {
-                memory_fill(text_list, 0, text_list_used);
-                memory_fill(text_list_begins, 0, text_list_used);
-                text_list_used = 0;
-        }
-
+        memory_give(text_list);
+        memory_give(text_list_begins_map);
+        text_list = null;
+        text_list_begins_map = null;
+        text_list_room = 0;
+        text_list_used = 0;
+        text_list_ranges_count = 0;
         text_list_open = 0;
         text_list_single = false;
         text_list_single_first = 0;
         text_list_single_last = 0;
-        text_list_too_large = false;
 }
 
-static bool text_list_has(positive which)
+static bool text_list_has_far(positive which);
+
+// The marks answer every position a line usually reaches; only one past
+// them asks the ranges, out of line.
+static inline INLINE bool text_list_has(positive which)
 {
         if (text_list_open && which >= text_list_open)
                 return true;
 
-        return which < TEXT_LIST_MAX && text_list[which];
+        if (likely(which < text_list_room))
+                return text_list[which] != 0;
+
+        return text_list_has_far(which);
+}
+
+static COLD bool text_list_has_far(positive which)
+{
+        positive low = 0;
+        positive high = text_list_ranges_count;
+
+        while (low < high)
+        {
+                positive middle = low + (high - low) / 2;
+
+                if (text_list_ranges[middle].last < which)
+                        low = middle + 1;
+                else
+                        high = middle;
+        }
+        return low < text_list_ranges_count && text_list_ranges[low].first <= which;
 }
 
 /*
@@ -18000,65 +18116,37 @@ static positive text_spans_count;
 
 static bool text_spans_build(bool complement)
 {
-        positive limit = max(text_list_used, text_list_open);
-        /*      Only the marked positions are walked one at a time. Between
-                the last mark and an open range that starts far beyond it
-                nothing is listed and nothing begins, so it is one gap: the
-                walk to it was per position, and cut -b 1,100000000000000-
-                spent hours here before reading a byte, where GNU answers. */
-        positive walked = text_list_open > text_list_used ? text_list_used
-                                                          : limit;
-        bool ran = false;
+        text_range address_to r = text_list_ranges;
+        positive count = text_list_ranges_count;
 
         text_spans_count = 0;
-
-        for (positive at = 1; at < walked; at++)
+        if (!complement)
         {
-                if (text_list_has(at) == complement)
+                if (count > TEXT_SPANS_MAX)
+                        return false;
+                for (positive i = 0; i < count; i++)
+                        text_spans[text_spans_count++] = (text_span){r[i].first, r[i].last};
+                return true;
+        }
+
+        // The complement is the gaps, each a span of its own.
+        positive next = 1;
+
+        for (positive i = 0; i < count; i++)
+        {
+                if (r[i].first > next)
                 {
-                        ran = false;
-                        continue;
+                        if (text_spans_count == TEXT_SPANS_MAX)
+                                return false;
+                        text_spans[text_spans_count++] = (text_span){next, r[i].first - 1};
                 }
-
-                if (ran && (complement || !text_list_begins[at]))
-                        text_spans[text_spans_count - 1].last = at;
-                else if (text_spans_count == TEXT_SPANS_MAX)
-                        return false;
-                else
-                        text_spans[text_spans_count++] = (text_span){at, at};
-
-                ran = true;
+                if (r[i].last == TEXT_UNSET)
+                        return true;
+                next = r[i].last + 1;
         }
-
-        if (max(walked, (positive)1) < limit)
-        {
-                if (!complement)
-                        ran = false;
-                else if (ran)
-                        text_spans[text_spans_count - 1].last = limit - 1;
-                else if (text_spans_count == TEXT_SPANS_MAX)
-                        return false;
-                else
-                {
-                        text_spans[text_spans_count++] =
-                            (text_span){max(walked, (positive)1), limit - 1};
-                        ran = true;
-                }
-        }
-
-        // Every position from limit on answers alike, and none of them was
-        // ever the start of a range.
-        if ((text_list_open != 0) != complement)
-        {
-                if (ran)
-                        text_spans[text_spans_count - 1].last = TEXT_UNSET;
-                else if (text_spans_count == TEXT_SPANS_MAX)
-                        return false;
-                else
-                        text_spans[text_spans_count++] =
-                            (text_span){limit ? limit : 1, TEXT_UNSET};
-        }
-
+        if (text_spans_count == TEXT_SPANS_MAX)
+                return false;
+        text_spans[text_spans_count++] = (text_span){next, TEXT_UNSET};
         return true;
 }
 
@@ -18308,6 +18396,215 @@ static positive cut_lines(p8 address_to base, positive left, p8 delimiter,
 // records too.
 static byte_store cut_record;
 
+/*
+        A line that is not whole in the read, cut as it streams past rather
+        than gathered first: GNU cut holds nothing of a line but, where -s
+        or an unselected first field needs it, that first field, so an
+        endless line with no newline in it goes through in the memory of one
+        read. The answers are the ones the line walks below give a whole
+        line: bytes by the same marks and separator rule, fields by GNU's
+        own order -- the first field kept back only when whether it is
+        written depends on a delimiter still to come.
+*/
+static byte_store cut_first_field;
+
+static fn cut_stream_bytes(bool complement, string_address separator,
+                           positive separator_length)
+{
+        positive position = 0;
+        bool wrote = false;
+        bool ran = false;
+
+        for (;;)
+        {
+                if (!text_fill())
+                {
+                        text_put_character(text_delimiter);
+                        return;
+                }
+
+                p8 address_to at = text_input.buffer + text_input.position;
+                positive left = text_input.filled - text_input.position;
+                p8 address_to found = memory_first_of(at, text_delimiter, left);
+                positive take = found ? (positive)(found - at) : left;
+                positive i = 0;
+
+                while (i < take)
+                {
+                        // Past every mark and range start, the rest of the
+                        // line is all kept or all dropped.
+                        if (position + 1 >= text_list_used &&
+                            (!text_list_open || position + 1 > text_list_open))
+                        {
+                                bool keep = (text_list_open != 0) != complement;
+
+                                if (keep)
+                                {
+                                        if (separator && wrote && !ran)
+                                                text_put(separator, separator_length);
+                                        text_put(at + i, take - i);
+                                        wrote = true;
+                                }
+                                ran = keep;
+                                position += take - i;
+                                break;
+                        }
+
+                        position++;
+
+                        bool keep = text_list_has(position) != complement;
+
+                        if (keep)
+                        {
+                                if (separator && wrote &&
+                                    (!ran || (!complement && text_list_begins_at(position))))
+                                        text_put(separator, separator_length);
+                                text_put_character(at[i]);
+                                wrote = true;
+                        }
+                        ran = keep;
+                        i++;
+                }
+
+                text_input.position += take;
+                if (found)
+                {
+                        text_input.position++;
+                        text_put_character(text_delimiter);
+                        return;
+                }
+        }
+}
+
+static fn cut_stream_fields(p8 delimiter, bool complement, bool only_delimited,
+                            string_address separator, positive separator_length)
+{
+        positive which = 1;
+        bool any = false;
+        bool buffer_first = only_delimited != (text_list_has(1) == complement);
+        bool writing;
+
+        cut_first_field.used = 0;
+        writing = !buffer_first && text_list_has(1) != complement;
+        if (writing)
+                any = true;
+
+        for (;;)
+        {
+                if (!text_fill())
+                        break;
+
+                p8 address_to at = text_input.buffer + text_input.position;
+                positive left = text_input.filled - text_input.position;
+                p8 address_to line_end = memory_first_of(at, text_delimiter, left);
+                positive line = line_end ? (positive)(line_end - at) : left;
+                positive i = 0;
+
+                while (i < line)
+                {
+                        p8 address_to cut = memory_first_of(at + i, delimiter, line - i);
+                        positive span = cut ? (positive)(cut - (at + i)) : line - i;
+
+                        if (which == 1 && buffer_first)
+                        {
+                                if (!byte_store_reserve(address_of cut_first_field,
+                                                        cut_first_field.used + span, 1 << 16))
+                                {
+                                        string_diagnostic(&text_diagnostic, 0, null,
+                                                          "memory exhausted");
+                                        exit(text_done(1));
+                                }
+                                memory_copy_apart(cut_first_field.bytes + cut_first_field.used,
+                                                  at + i, span);
+                                cut_first_field.used += span;
+                        }
+                        else if (writing)
+                                text_put(at + i, span);
+                        i += span;
+
+                        if (!cut)
+                                break;
+
+                        // A delimiter: the first field is settled, and the
+                        // next field begins, with the output delimiter in
+                        // front of it when something was written before.
+                        i++;
+                        if (which == 1 && buffer_first)
+                        {
+                                if (text_list_has(1) != complement)
+                                {
+                                        text_put(cut_first_field.bytes, cut_first_field.used);
+                                        any = true;
+                                }
+                                cut_first_field.used = 0;
+                        }
+                        which++;
+                        writing = text_list_has(which) != complement;
+                        if (writing)
+                        {
+                                if (any)
+                                {
+                                        if (separator)
+                                                text_put(separator, separator_length);
+                                        else
+                                                text_put_character(delimiter);
+                                }
+                                any = true;
+                        }
+                }
+
+                text_input.position += line;
+                if (line_end)
+                {
+                        text_input.position++;
+                        break;
+                }
+        }
+
+        if (which == 1 && buffer_first)
+        {
+                if (!only_delimited)
+                {
+                        text_put(cut_first_field.bytes, cut_first_field.used);
+                        text_put_character(text_delimiter);
+                }
+        }
+        else if (which != 1 || any)
+                text_put_character(text_delimiter);
+        cut_first_field.used = 0;
+}
+
+/*
+        What GNU's option loop refuses the moment it reads it, before any
+        later word is looked at: a second list of any kind, a delimiter of
+        more than one character, and a --whitespace-delimited argument that
+        is no beginning of "trimmed".
+*/
+static positive cut_lists_seen;
+
+static bool cut_option_seen(p8 letter, string_address value)
+{
+        if (letter == 'b' || letter == 'c' || letter == 'f' || letter == 'F')
+        {
+                if (cut_lists_seen++)
+                        return !text_operand_trouble("only one list may be specified",
+                                                     null, null);
+                return true;
+        }
+
+        if (letter == 'd' && value[0] && value[1])
+                return !text_operand_trouble("the delimiter must be a single character",
+                                             null, null);
+
+        if (letter == 'w' && value &&
+            (string_length(value) > 7 ||
+             memory_compare("trimmed", value, string_length(value))))
+                return !text_argmatch("--whitespace-delimited", value,
+                                      "Valid arguments are:\n  - 'trimmed'\n", null);
+
+        return true;
+}
+
 static b32 text_cut()
 {
         file_taking taking = {
@@ -18316,10 +18613,12 @@ static b32 text_cut()
             // every character here is one byte.
             .options = cut_options,
             .operand = text_file_add,
+            .seen = cut_option_seen,
         };
 
         text_begin("cut");
         text_list_reset();
+        cut_lists_seen = 0;
 
         if (!text_took(address_of taking))
                 return text_done(1);
@@ -18364,52 +18663,41 @@ static b32 text_cut()
                                                                            : 'c');
 
         if (flags & FILE_FLAG('w'))
-        {
-                string_address word = file_option_value(address_of taking, 'w');
-
-                if (word && !string_equals(word, "trimmed"))
-                        return text_done(string_diagnostic(&text_diagnostic, 1, word, "invalid argument for --whitespace-delimited"));
-
-                trimmed = word != null;
-        }
+                trimmed = file_option_value(address_of taking, 'w') != null;
 
         if (have_delimiter)
-        {
-                string_address said = file_option_value(address_of taking, 'd');
-
-                if (said[0] && said[1])
-                        return text_done(string_diagnostic(&text_diagnostic, 1, null, "the delimiter must be a single character"));
-
-                delimiter = said[0];
-        }
+                delimiter = file_option_value(address_of taking, 'd')[0];
 
         if (flags & FILE_FLAG('z'))
                 text_delimiter = '\0';
 
-        if (have_list && !multiple_lists && !text_list_parse(said))
-                return text_done(string_diagnostic(&text_diagnostic, 1, text_list_too_large ? said : null,
-                                                  text_list_too_large
-                                                      ? (by_field ? "field number is too large"
-                                                                  : "byte/character offset is too large")
-                                                      : "invalid list"));
-
-        if (!have_list)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "you must specify a list of bytes, characters, or fields"));
-
         /*
-                Three ways of saying the same no. GNU refuses two lists of
-                different kinds, a delimiter for something that has no fields
-                in it, and -s for the same reason -- and refusing them is what
-                stops cut -d: -c1 from quietly ignoring the -d.
+                In GNU's order once the options are read: no list at all, then
+                a delimiter or -s for something that has no fields in it --
+                refusing them is what stops cut -d: -c1 from quietly ignoring
+                the -d -- then -d beside -w, and only then the list itself.
+                A second list never gets here; the option loop refused it.
         */
-        if (multiple_lists)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "only one type of list may be specified"));
+        (void)multiple_lists;
+        if (!have_list)
+                return text_done(text_operand_trouble("you must specify a list of bytes, characters, or fields",
+                                                      null, null));
+
+        if (!by_field && (have_delimiter || (flags & FILE_FLAG('w'))))
+                return text_done(text_operand_trouble("an input delimiter makes sense\n\tonly when operating on fields",
+                                                      null, null));
+
+        if (!by_field && only_delimited)
+                return text_done(text_operand_trouble("suppressing non-delimited lines makes sense\n\tonly when operating on fields",
+                                                      null, null));
 
         if ((flags & FILE_FLAG('w')) && have_delimiter)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "-d and -w are mutually exclusive"));
+                return text_done(text_operand_trouble("-d and -w are mutually exclusive",
+                                                      null, null));
 
-        if (!by_field && (have_delimiter || only_delimited || whitespace))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "an input delimiter makes sense only when operating on fields"));
+        text_list_positions = !by_field;
+        if (!text_list_parse(said))
+                return text_done(text_list_trouble());
 
         // -w splits on runs of blanks and joins with a tab, which is the one
         // place cut's two delimiters are not the same character. -F joins
@@ -18445,6 +18733,30 @@ static b32 text_cut()
         // Fields by one byte with nothing else asked go a read at a time.
         bool whole_lines = by_field && !whitespace && !separator && !trimmed &&
                            delimiter != text_delimiter;
+        /*
+                A complement that leaves no field at all: GNU finds its
+                selection spent before the first field and writes only the
+                line's end -- except where the block it read has no delimiter
+                anywhere, which it copies through whole as it would any
+                undelimited lines. Under -s nothing at all is written.
+        */
+        bool nothing_selected = by_field && !whitespace && !whole_record &&
+                                complement && text_list_ranges_count &&
+                                text_list_ranges[0].first == 1 &&
+                                text_list_open;
+
+        for (positive i = 1; nothing_selected && i < text_list_ranges_count; i++)
+                nothing_selected = text_list_ranges[i].first ==
+                                   text_list_ranges[i - 1].last + 1;
+        positive chunk_fills = 0;
+        bool chunk_delimited = false;
+        text_line_stream_ok = !whole_record && !nothing_selected &&
+                              (by_field ? !whitespace && !trimmed && !by_blanks
+                                        : !characters);
+        text_line_stream_now = false;
+
+        if (nothing_selected)
+                whole_lines = false;
 
         for (b32 i = 0; i < inputs; i++)
         {
@@ -18506,11 +18818,30 @@ static b32 text_cut()
                                         continue;
                         }
 
+                        /*
+                                A line not whole in this read goes through
+                                as it streams, where its kind of cut allows
+                                that; the whole-line walks below keep every
+                                line that is.
+                        */
                         if (!whole_record &&
                             !text_line_view(address_of line,
                                             address_of line_length,
                                             null, 0, null))
-                                break;
+                        {
+                                if (!text_line_stream_now)
+                                        break;
+
+                                text_line_stream_now = false;
+                                if (by_field)
+                                        cut_stream_fields(delimiter, complement,
+                                                          only_delimited, separator,
+                                                          separator_length);
+                                else
+                                        cut_stream_bytes(complement, separator,
+                                                         separator_length);
+                                continue;
+                        }
 
                         if (by_character)
                         {
@@ -18545,7 +18876,7 @@ static b32 text_cut()
                                                         if (separator && wrote &&
                                                             (!ran ||
                                                              (!complement &&
-                                                              text_list_begins[which])))
+                                                              text_list_begins_at(which))))
                                                                 text_put(separator,
                                                                          separator_length);
 
@@ -18636,7 +18967,7 @@ static b32 text_cut()
                                         }
 
                                         if (separator && wrote &&
-                                            (!ran || (!complement && text_list_begins[c + 1])))
+                                            (!ran || (!complement && text_list_begins_at(c + 1))))
                                                 text_put(separator, separator_length);
 
                                         text_put_character(line[c]);
@@ -18644,6 +18975,26 @@ static b32 text_cut()
                                         ran = true;
                                 }
 
+                                text_put_character(text_delimiter);
+                                continue;
+                        }
+
+                        if (nothing_selected)
+                        {
+                                // An unterminated last line is passed over
+                                // without its end ever being written.
+                                if (only_delimited || !text_line_ended)
+                                        continue;
+                                if (text_input.fills != chunk_fills)
+                                {
+                                        chunk_fills = text_input.fills;
+                                        chunk_delimited = memory_first_of(
+                                            text_input.buffer, delimiter,
+                                            text_input.filled) != null;
+                                }
+                                if (!chunk_delimited &&
+                                    !memory_first_of(line, delimiter, line_length))
+                                        text_put(line, line_length);
                                 text_put_character(text_delimiter);
                                 continue;
                         }
@@ -18759,6 +19110,8 @@ static b32 text_cut()
                 text_close();
         }
 
+        byte_store_release(address_of cut_first_field);
+        text_line_stream_ok = false;
         return text_done(text_status);
 }
 
