@@ -59451,6 +59451,356 @@ b32 main(void)
 }
 #endif /* CHECK_net */
 
+#ifdef CHECK_crypto_vectors
+/*
+        The crypto in src/net/net.c against OpenSSL, one vector a line.
+
+        test/differential.py --harness crypto_vectors writes the lines --
+        Wycheproof's categories, generated from a seed and answered by
+        Python's cryptography -- and lane_net hands them to this program on
+        its standard input, on each of the three machines. A line is a kind,
+        a number, the verdict expected (1 accept, 0 refuse) and the kind's
+        fields in hexadecimal, "-" for an empty one. Every vector goes
+        through the production routine over lib.c's assembly; the kinds whose
+        work lands in a routine with more than one hardware body (the hashes,
+        HMAC, HKDF, PBKDF2, AES-GCM and PSS's MGF1) run once for each: the
+        widest the machine has, x86_64's narrow VPCLMULQDQ-less and VAES-less
+        one, and the integer and software floors with every feature byte
+        down. A vector that disagrees is printed with its number and body.
+*/
+#include "../src/lib.util.c"
+#include "../src/net/net.c"
+
+#define SHARED_counted
+#include "checks.c"
+#undef SHARED_counted
+
+#define CRYPTO_VECTOR_FIELDS 7
+#define CRYPTO_VECTOR_ROOM 20000
+
+static p8 crypto_vector_text[1 << 23];
+static p8 crypto_vector_field[CRYPTO_VECTOR_FIELDS][CRYPTO_VECTOR_ROOM];
+static positive crypto_vector_length[CRYPTO_VECTOR_FIELDS];
+static p8 crypto_vector_work[CRYPTO_VECTOR_ROOM];
+static p8 crypto_vector_out[CRYPTO_VECTOR_ROOM];
+static crypto_aesgcm_key crypto_vector_gcm;
+
+static p8 crypto_vector_nibble(p8 c)
+{
+        return (p8)(c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10);
+}
+
+//      A space-delimited word at at; its length.
+static positive crypto_vector_word(p8 address_to address_to at,
+                                   p8 address_to address_to word)
+{
+        positive length = 0;
+
+        while (**at == ' ')
+                (*at)++;
+        *word = *at;
+        while (**at && **at != ' ' && **at != '\n')
+        {
+                (*at)++;
+                length++;
+        }
+        return length;
+}
+
+static bool crypto_vector_hex(p8 address_to word, positive length,
+                              positive field)
+{
+        if (length == 1 && word[0] == '-')
+                length = 0;
+        if (length % 2 || length / 2 > CRYPTO_VECTOR_ROOM)
+                return false;
+        for (positive i = 0; i < length / 2; i++)
+                crypto_vector_field[field][i] =
+                    (p8)(crypto_vector_nibble(word[2 * i]) << 4 |
+                         crypto_vector_nibble(word[2 * i + 1]));
+        crypto_vector_length[field] = length / 2;
+        return true;
+}
+
+static bool crypto_vector_is(const p8 address_to got, positive field)
+{
+        return memory_compare(got, crypto_vector_field[field],
+                              crypto_vector_length[field]) == 0;
+}
+
+static p64 crypto_vector_number(positive field)
+{
+        p64 value = 0;
+
+        for (positive i = 0; i < crypto_vector_length[field]; i++)
+                value = value << 8 | crypto_vector_field[field][i];
+        return value;
+}
+
+#define CV(i) crypto_vector_field[i]
+#define CL(i) crypto_vector_length[i]
+
+//      One vector, under whichever body the feature bytes now name: whether
+//      it came out as expected. A field of the wrong size for its kind is a
+//      bad line, and that is a disagreement too.
+static bool crypto_vector_run(p8 address_to kind, positive kind_length,
+                              bool expect)
+{
+        p8 address_to out = crypto_vector_out;
+        p8 address_to work = crypto_vector_work;
+
+#define KIND(name) (kind_length == sizeof(name) - 1 && \
+                    memory_compare(kind, name, sizeof(name) - 1) == 0)
+        if (KIND("sha256"))
+        {
+                crypto_sha256_of(CV(0), CL(0), out);
+                return CL(1) == 32 && crypto_vector_is(out, 1);
+        }
+        if (KIND("sha384"))
+        {
+                crypto_sha384(CV(0), CL(0), out);
+                return CL(1) == 48 && crypto_vector_is(out, 1);
+        }
+        if (KIND("hmac256"))
+        {
+                crypto_hmac_sha256(CV(0), CL(0), CV(1), CL(1), out);
+                return CL(2) == 32 && crypto_vector_is(out, 2);
+        }
+        if (KIND("hkdf"))
+        {
+                p8 prk[32];
+                positive length = (positive)crypto_vector_number(3);
+
+                crypto_hkdf_extract(CV(0), CL(0), CV(1), CL(1), prk);
+                crypto_hkdf_expand(prk, CV(2), CL(2), out, length);
+                return CL(4) == length && crypto_vector_is(out, 4);
+        }
+        if (KIND("pbkdf2"))
+        {
+                positive algorithm = CV(0)[0];
+
+                crypto_pbkdf2(algorithm, algorithm == DIGEST_SHA1 ? 20 : 32,
+                              CV(1), CL(1), CV(2), CL(2),
+                              (positive)crypto_vector_number(3), out, CL(4));
+                return crypto_vector_is(out, 4);
+        }
+        if (KIND("gcm"))
+        {
+                p8 tag[16];
+                bool opened;
+
+                if (CL(0) != 16 || CL(1) != 12 || CL(5) != 16 ||
+                    CL(3) != CL(4))
+                        return false;
+                crypto_aesgcm_prepare(address_of crypto_vector_gcm, CV(0));
+                if (expect)
+                {
+                        memory_copy(work, CV(3), CL(3));
+                        crypto_aesgcm_seal(address_of crypto_vector_gcm, CV(1),
+                                           CV(2), CL(2), work, CL(3), tag);
+                        if (!crypto_vector_is(work, 4) ||
+                            memory_compare(tag, CV(5), 16) != 0)
+                                return false;
+                }
+                memory_copy(work, CV(4), CL(4));
+                opened = crypto_aesgcm_open(address_of crypto_vector_gcm,
+                                            CV(1), CV(2), CL(2), work, CL(4),
+                                            CV(5));
+                if (opened != expect)
+                        return false;
+                //      Opened, the text is the plaintext; refused, it is gone.
+                if (expect)
+                        return crypto_vector_is(work, 3);
+                for (positive i = 0; i < CL(4); i++)
+                        if (work[i])
+                                return false;
+                return true;
+        }
+        if (KIND("x25519"))
+        {
+                bool valid;
+
+                if (CL(0) != 32 || CL(1) != 32 || CL(2) != 32)
+                        return false;
+                valid = crypto_x25519(out, CV(0), CV(1));
+                return valid == expect && crypto_vector_is(out, 2);
+        }
+        if (KIND("share256") || KIND("share384"))
+        {
+                positive size = KIND("share256") ? 32 : 48;
+                bool valid;
+
+                if (CL(0) != size || CL(1) != 2 * size + 1)
+                        return false;
+                valid = size == 32 ? crypto_ecdh_p256_public(out, CV(0))
+                                   : crypto_ecdh_p384_public(out, CV(0));
+                return valid == expect && (!valid || crypto_vector_is(out, 1));
+        }
+        if (KIND("ecdh256") || KIND("ecdh384"))
+        {
+                positive size = KIND("ecdh256") ? 32 : 48;
+                bool valid;
+
+                if (CL(0) != size || CL(1) != 2 * size + 1 || CL(2) != size)
+                        return false;
+                valid = size == 32 ? crypto_ecdh_p256_shared(out, CV(0), CV(1))
+                                   : crypto_ecdh_p384_shared(out, CV(0), CV(1));
+                return valid == expect && (!valid || crypto_vector_is(out, 2));
+        }
+        if (KIND("ecdsa256") || KIND("ecdsa384"))
+        {
+                positive size = KIND("ecdsa256") ? 32 : 48;
+
+                if (CL(3) != size || CL(4) != size)
+                        return false;
+                return expect == (size == 32
+                                      ? crypto_ecdsa_p256(CV(0), CL(0), CV(1),
+                                                          CL(1), CV(2), CL(2),
+                                                          CV(3), CV(4))
+                                      : crypto_ecdsa_p384(CV(0), CL(0), CV(1),
+                                                          CL(1), CV(2), CL(2),
+                                                          CV(3), CV(4)));
+        }
+        if (KIND("pkcs256") || KIND("pkcs384"))
+        {
+                positive size = KIND("pkcs256") ? 32 : 48;
+                p64 exponent = crypto_vector_number(1);
+
+                if (CL(3) != size)
+                        return false;
+                return expect == (size == 32
+                                      ? crypto_rsa_pkcs1_sha256(CV(0), CL(0),
+                                                                exponent, CV(2),
+                                                                CL(2), CV(3))
+                                      : crypto_rsa_pkcs1_sha384(CV(0), CL(0),
+                                                                exponent, CV(2),
+                                                                CL(2), CV(3)));
+        }
+        if (KIND("pss"))
+                return expect == crypto_rsa_pss_sha256(
+                                     CV(0), CL(0), crypto_vector_number(1),
+                                     CV(2), CL(2), CV(3), CL(3));
+#undef KIND
+        return false;
+}
+
+//      The kinds whose routines have a body for each feature byte.
+static bool crypto_vector_tiered(p8 address_to kind, positive length)
+{
+        static const char tiered[] = "sha2 sha3 hmac hkdf pbkd gcm  pss ";
+
+        for (positive at = 0; length >= 3 && at < sizeof tiered - 1; at += 5)
+                if (memory_compare(kind, tiered + at, min(length, 4)) == 0)
+                        return true;
+        return false;
+}
+
+b32 main(void)
+{
+        positive have = 0;
+        bipolar got;
+        p8 address_to at = crypto_vector_text;
+        p8 digest[32];
+        p8 pclmul, aes, vpclmul, vaes, sha, sha512;
+
+        while (have + 1 < sizeof crypto_vector_text &&
+               (got = (bipolar)system_call_3(
+                    syscall(read), 0, (positive)(crypto_vector_text + have),
+                    sizeof crypto_vector_text - 1 - have)) > 0)
+                have += (positive)got;
+        crypto_vector_text[have] = end;
+
+        //      The hash cores ask for their features on the first call.
+        crypto_sha256_of(digest, 0, digest);
+        pclmul = cpu_has_pclmul;
+        aes = cpu_has_aes;
+        vpclmul = cpu_has_vpclmul;
+        vaes = cpu_has_vaes;
+        sha = cpu_has_sha;
+        sha512 = cpu_has_sha512;
+
+        while (*at)
+        {
+                p8 address_to kind;
+                p8 address_to word;
+                positive kind_length = crypto_vector_word(address_of at,
+                                                          address_of kind);
+                positive number_length = crypto_vector_word(address_of at,
+                                                            address_of word);
+                p8 address_to number = word;
+                positive expect_length = crypto_vector_word(address_of at,
+                                                            address_of word);
+                bool expect = expect_length == 1 && word[0] == '1';
+                bool parsed = kind_length && number_length && expect_length == 1;
+                positive fields = 0;
+                positive bodies;
+
+                memory_fill(crypto_vector_length, 0, sizeof crypto_vector_length);
+                while (*at && *at != '\n')
+                {
+                        positive length = crypto_vector_word(address_of at,
+                                                             address_of word);
+
+                        if (!length)
+                                break;
+                        if (fields == CRYPTO_VECTOR_FIELDS ||
+                            !crypto_vector_hex(word, length, fields))
+                                parsed = false;
+                        else
+                                fields++;
+                }
+                while (*at == '\n')
+                        at++;
+                if (!kind_length)
+                        continue;
+
+                bodies = parsed && crypto_vector_tiered(kind, kind_length) ? 3 : 1;
+                for (positive body = 0; body < bodies; body++)
+                {
+                        cpu_has_vpclmul = body ? 0 : vpclmul;
+                        cpu_has_vaes = body ? 0 : vaes;
+                        cpu_has_pclmul = body == 2 ? 0 : pclmul;
+                        cpu_has_aes = body == 2 ? 0 : aes;
+                        cpu_has_sha = body == 2 ? 0 : sha;
+                        cpu_has_sha512 = body == 2 ? 0 : sha512;
+                        checks++;
+                        if (!parsed ||
+                            !crypto_vector_run(kind, kind_length, expect))
+                        {
+                                p8 name[16];
+                                p8 line[24];
+
+                                memory_fill(name, 0, sizeof name);
+                                memory_fill(line, 0, sizeof line);
+                                memory_copy(name, kind, min(kind_length, sizeof name - 1));
+                                memory_copy(line, number, min(number_length, sizeof line - 1));
+                                if (failures++ < 40)
+                                        string_format(log,
+                                                      "  FAIL %s vector %s, expected %s, body %p%s\n",
+                                                      (string_address)name,
+                                                      (string_address)line,
+                                                      expect ? (string_address)"accept"
+                                                             : (string_address)"refuse",
+                                                      body,
+                                                      parsed ? (string_address)""
+                                                             : (string_address)" (bad line)");
+                        }
+                }
+                cpu_has_pclmul = pclmul;
+                cpu_has_aes = aes;
+                cpu_has_vpclmul = vpclmul;
+                cpu_has_vaes = vaes;
+                cpu_has_sha = sha;
+                cpu_has_sha512 = sha512;
+        }
+
+        crypto_forget(address_of crypto_vector_gcm, sizeof crypto_vector_gcm);
+        return test_report(null);
+}
+#undef CV
+#undef CL
+#endif /* CHECK_crypto_vectors */
+
 #ifdef CHECK_waterlink
 #include "../src/lib.util.c"
 #include "../src/net/net.c"
@@ -90458,7 +90808,8 @@ b32 main(void)
         A row named on the command line runs alone for that many rounds and
         prints nothing, which is what perf stat -e instructions:u,cycles:u
         is pointed at: multiply-c, multiply, square-c and square take a limb
-        count, and ecdsa-p256, ecdsa-p384, rsa-2048 and rsa-4096 take only
+        count, and ecdsa-p256, ecdsa-p384, rsa-2048, rsa-4096, x25519,
+        p256-public, p256-shared, p384-public, p384-shared and gcm take only
         the rounds. The RSA rows are the public operation a verify runs,
         crypto_rsa_modexp with e = 65537, over a fixed odd modulus whose top
         bit is set; the ECDSA rows verify real signatures, RFC 6979's P-256
@@ -90650,6 +91001,82 @@ static fn montgomery_bench_rsa_row(void)
         }
 }
 
+//      The key exchange a handshake runs: one X25519 and the P-256 and
+//      P-384 key shares made, then one shared secret on each curve. The
+//      peer point is the share made from the same fixed scalar, so the
+//      shared rows multiply a real curve point. gcm seals one 16 KiB
+//      record in place.
+static p8 montgomery_bench_scalar[48];
+static p8 montgomery_bench_peer[97];
+static p8 montgomery_bench_record[16384];
+static crypto_aesgcm_key montgomery_bench_gcm;
+
+static fn montgomery_bench_x25519_row(void)
+{
+        static const p8 nine[32] = {9};
+        p8 out[32];
+
+        for (positive i = 0; i < montgomery_bench_rounds; i++)
+        {
+                crypto_x25519(out, montgomery_bench_scalar, (p8 address_to)nine);
+                montgomery_bench_sink += out[0];
+        }
+}
+
+static fn montgomery_bench_p256_public_row(void)
+{
+        p8 out[65];
+
+        for (positive i = 0; i < montgomery_bench_rounds; i++)
+                montgomery_bench_sink += crypto_ecdh_p256_public(
+                    out, montgomery_bench_scalar);
+}
+
+static fn montgomery_bench_p384_public_row(void)
+{
+        p8 out[97];
+
+        for (positive i = 0; i < montgomery_bench_rounds; i++)
+                montgomery_bench_sink += crypto_ecdh_p384_public(
+                    out, montgomery_bench_scalar);
+}
+
+static fn montgomery_bench_p256_shared_row(void)
+{
+        p8 out[32];
+
+        crypto_ecdh_p256_public(montgomery_bench_peer, montgomery_bench_scalar);
+        for (positive i = 0; i < montgomery_bench_rounds; i++)
+                montgomery_bench_sink += crypto_ecdh_p256_shared(
+                    out, montgomery_bench_scalar, montgomery_bench_peer);
+}
+
+static fn montgomery_bench_p384_shared_row(void)
+{
+        p8 out[48];
+
+        crypto_ecdh_p384_public(montgomery_bench_peer, montgomery_bench_scalar);
+        for (positive i = 0; i < montgomery_bench_rounds; i++)
+                montgomery_bench_sink += crypto_ecdh_p384_shared(
+                    out, montgomery_bench_scalar, montgomery_bench_peer);
+}
+
+static fn montgomery_bench_gcm_row(void)
+{
+        static const p8 iv[12] = {1, 2, 3};
+        static const p8 aad[5] = {23, 3, 3, 0x40, 0x11};
+        p8 tag[16];
+
+        for (positive i = 0; i < montgomery_bench_rounds; i++)
+        {
+                crypto_aesgcm_seal(address_of montgomery_bench_gcm,
+                                   (p8 address_to)iv, (p8 address_to)aad, 5,
+                                   montgomery_bench_record,
+                                   sizeof montgomery_bench_record, tag);
+                montgomery_bench_sink += tag[0];
+        }
+}
+
 static positive montgomery_bench_number(string_address text)
 {
         positive value = 0;
@@ -90683,6 +91110,11 @@ b32 main(void)
                 montgomery_bench_p384[i] = (p8)(high << 4 | low);
         }
         montgomery_bench_operands(4);
+        for (positive i = 0; i < sizeof montgomery_bench_scalar; i++)
+                montgomery_bench_scalar[i] = (p8)(0x5a ^ (i * 29));
+        montgomery_bench_scalar[0] = 0x1f;
+        crypto_aesgcm_prepare(address_of montgomery_bench_gcm,
+                              montgomery_bench_scalar);
 
         if (arguments > 1)
         {
@@ -90720,6 +91152,18 @@ b32 main(void)
                         work = montgomery_bench_ecdsa_p256_row;
                 else if (string_compare(row, (string_address)"ecdsa-p384") == 0)
                         work = montgomery_bench_ecdsa_p384_row;
+                else if (string_compare(row, (string_address)"x25519") == 0)
+                        work = montgomery_bench_x25519_row;
+                else if (string_compare(row, (string_address)"p256-public") == 0)
+                        work = montgomery_bench_p256_public_row;
+                else if (string_compare(row, (string_address)"p256-shared") == 0)
+                        work = montgomery_bench_p256_shared_row;
+                else if (string_compare(row, (string_address)"p384-public") == 0)
+                        work = montgomery_bench_p384_public_row;
+                else if (string_compare(row, (string_address)"p384-shared") == 0)
+                        work = montgomery_bench_p384_shared_row;
+                else if (string_compare(row, (string_address)"gcm") == 0)
+                        work = montgomery_bench_gcm_row;
                 else if (string_compare(row, (string_address)"rsa-2048") == 0)
                 {
                         montgomery_bench_operands(32);
@@ -90772,6 +91216,25 @@ b32 main(void)
         montgomery_bench_report((string_address)"ECDSA P-384",
                                 montgomery_bench_ecdsa_p384_row, 32,
                                 (string_address)"verify");
+        string_format(log, " key exchange and one record\n");
+        montgomery_bench_report((string_address)"X25519     ",
+                                montgomery_bench_x25519_row, 64,
+                                (string_address)"multiply");
+        montgomery_bench_report((string_address)"P-256 share",
+                                montgomery_bench_p256_public_row, 64,
+                                (string_address)"share");
+        montgomery_bench_report((string_address)"P-256 ECDH ",
+                                montgomery_bench_p256_shared_row, 32,
+                                (string_address)"secret");
+        montgomery_bench_report((string_address)"P-384 share",
+                                montgomery_bench_p384_public_row, 32,
+                                (string_address)"share");
+        montgomery_bench_report((string_address)"P-384 ECDH ",
+                                montgomery_bench_p384_shared_row, 16,
+                                (string_address)"secret");
+        montgomery_bench_report((string_address)"AES-GCM 16K",
+                                montgomery_bench_gcm_row, 64,
+                                (string_address)"record");
         montgomery_bench_operands(32);
         montgomery_bench_report((string_address)"RSA-2048 public",
                                 montgomery_bench_rsa_row, 256,
