@@ -17864,6 +17864,89 @@ static bipolar df_device_mount(storage_mount_table address_to mounts, string_add
         return best ? (bipolar)best : eclipsed ? -1 : 0;
 }
 
+// Which operand each tableless row stands for, and whether one failed.
+static positive address_to df_tableless_operand;
+static bool df_tableless_failed;
+
+/*
+        The table df makes when it cannot read the kernel's: one entry per
+        operand it can look at, named - with no type, on the mount point
+        found by walking up from it -- from the file's own directory for a
+        file -- while the parent is on the same device and is not itself.
+*/
+static bool df_tableless(storage_mount_table address_to mounts, positive first, positive count)
+{
+        positive room = count - first;
+
+        memory_fill(mounts, 0, sizeof(*mounts));
+        df_tableless_failed = false;
+        mounts->entry = (storage_mount address_to)memory_take(room * sizeof(storage_mount) + 1);
+        df_tableless_operand = (positive address_to)memory_take(room * sizeof(positive) + 1);
+        if (!mounts->entry || !df_tableless_operand)
+                return false;
+
+        for (positive i = first; i < count; i++)
+        {
+                string_address path = program_argument((b32)i);
+                file_facts facts;
+                bipolar looked = file_look_code(AT_FDCWD, path, 0, address_of facts);
+                p8 address_to place = (p8 address_to)memory_take(FILE_PATH_MAX);
+                p8 above[FILE_PATH_MAX];
+                file_facts here;
+                file_facts up;
+
+                if (!place)
+                        return false;
+                if (looked < 0)
+                {
+                        string_format(log_error, "df: %w: %s\n", writer_terminal_name, path,
+                                      file_reason(looked));
+                        df_tableless_failed = true;
+                        memory_give(place);
+                        continue;
+                }
+                if (!file_resolve_as(path, place, true, FILE_RESOLVE_DIRECTORIES))
+                        string_copy_max_end(place, path, FILE_PATH_MAX - 1);
+                if ((facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
+                {
+                        path_head_copy(above, FILE_PATH_MAX, place);
+                        string_copy_max_end(place, above, FILE_PATH_MAX - 1);
+                }
+                if (file_look_code(AT_FDCWD, place, 0, address_of here) == 0)
+                        while (!string_equals(place, "/"))
+                        {
+                                path_head_copy(above, FILE_PATH_MAX, place);
+                                if (file_look_code(AT_FDCWD, above, 0, address_of up) < 0 ||
+                                    up.device_major != here.device_major ||
+                                    up.device_minor != here.device_minor ||
+                                    up.inode == here.inode)
+                                        break;
+                                string_copy_max_end(place, above, FILE_PATH_MAX - 1);
+                                here = up;
+                        }
+
+                storage_mount address_to entry = mounts->entry + mounts->count;
+
+                memory_fill(entry, 0, sizeof(*entry));
+                entry->source = (string_address) "-";
+                entry->type = (string_address) "-";
+                entry->target = place;
+                df_tableless_operand[mounts->count++] = i;
+        }
+        return true;
+}
+
+static fn df_release(storage_mount_table address_to mounts, bool tableless)
+{
+        if (!tableless)
+                return storage_mount_table_release(mounts);
+        for (positive at = 0; at < mounts->count; at++)
+                memory_give((address_any)mounts->entry[at].target);
+        memory_give(mounts->entry);
+        memory_give(df_tableless_operand);
+        df_tableless_operand = null;
+}
+
 static fn df_measure(storage_mount address_to mount, df_sample address_to sample)
 {
         sample->queried = true;
@@ -18245,8 +18328,39 @@ static b32 file_df()
 
         storage_mount_table mounts;
 
+        /*
+                With no table of mounts to read -- /proc not mounted, or a
+                tmpfs over it -- GNU's df still measures the files it is
+                named, warning first, and fails only when it was asked for
+                the table itself or for anything that needs it (-a, -l, -t,
+                -x). Such a row has no device and no type to name, and its
+                mount point is found by walking up while the device holds.
+        */
+        bool tableless = false;
+
         if (!storage_mount_table_load(address_of mounts, null))
-                return string_report(log_error, 1, "df: cannot read mount table\n");
+        {
+                bipolar reason = system_open_at(AT_FDCWD, (string_address) "/proc/self/mountinfo",
+                                                FILE_READ | O_CLOEXEC);
+
+                if (reason >= 0)
+                {
+                        system_close((positive)reason);
+                        reason = -ERROR_INPUT_OUTPUT;
+                }
+                if (first >= count || df_all || df_local || df_selected_count || df_excluded_count)
+                        return string_report(log_error, 1,
+                                             "df: cannot read table of mounted file systems: %s\n",
+                                             file_reason(reason));
+                //      The operands are looked at first, so a bad one is
+                //      named before the warning, as GNU names it.
+                if (!df_tableless(address_of mounts, first, count))
+                        return string_report(log_error, 1, "df: out of memory\n");
+                df_failed = df_tableless_failed;
+                string_format(log_error, "df: Warning: cannot read table of mounted file systems: %s\n",
+                              file_reason(reason));
+                tableless = true;
+        }
 
         // POSIX spells the unit out in bytes, and GNU does even when -m chose it.
         string_address size_heading =
@@ -18310,11 +18424,29 @@ static b32 file_df()
             (filtering && !array_store_reserve(df_order_file, df_order_file_room, 0,
                                                count - first, 8)))
         {
-                storage_mount_table_release(address_of mounts);
+                df_release(address_of mounts, tableless);
                 return string_report(log_error, 1, "df: out of memory\n");
         }
 
         memory_fill(df_samples, 0, mounts.count * sizeof(*df_samples));
+
+        for (positive at = 0; tableless && at < mounts.count; at++)
+        {
+                df_sample address_to sample = df_samples + at;
+
+                df_measure(mounts.entry + at, sample);
+                if (sample->reason)
+                {
+                        string_format(log_error, "df: %w: %s\n", writer_terminal_name,
+                                      program_argument((b32)df_tableless_operand[at]),
+                                      file_reason(sample->reason));
+                        df_failed = true;
+                        continue;
+                }
+                sample->shown = true;
+                df_order_file[ordered] = df_tableless_operand[at];
+                df_order[ordered++] = at;
+        }
 
         for (positive at = 0; !filtering && at < mounts.count; at++)
         {
@@ -18344,7 +18476,7 @@ static b32 file_df()
 
         /* statx supplies the mount ID directly. Each operand is therefore one
            syscall and one exact table match, including stacked/bind mounts. */
-        if (filtering)
+        if (filtering && !tableless)
                 for (positive i = first; i < count; i++)
                 {
                         string_address path = program_argument((b32)i);
@@ -18476,7 +18608,7 @@ static b32 file_df()
            on the way that is itself the complaint. */
         if (!showing)
         {
-                storage_mount_table_release(address_of mounts);
+                df_release(address_of mounts, tableless);
                 log_flush();
                 if (!df_failed)
                         log_error("df: no file systems processed\n", 0);
@@ -18512,7 +18644,7 @@ static b32 file_df()
                 df_row((string_address) "total", (string_address) "-", sum_where, null,
                        address_of sum, true);
 
-        storage_mount_table_release(address_of mounts);
+        df_release(address_of mounts, tableless);
         log_flush();
 
         return df_failed ? 1 : 0;
