@@ -62079,6 +62079,8 @@ static fn held_answer_lost(void)
         refusing = false;
         waterlink_resume(address_of held_reader, 5, hear_or_refuse, null);
         (void)waterlink_fill(address_of held_reader, body, now + 3, address_of alone);
+        check("sec: a link whose frames the far side still holds is not idle",
+              !waterlink_idle(address_of held_sender));
         check("sec: a held key whose freeing acknowledgement was lost is due "
               "to be asked about",
               heard == 3 && held_sender.flight_head == WATERLINK_NONE &&
