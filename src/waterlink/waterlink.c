@@ -318,7 +318,8 @@ struct waterlink_peer {
         unsigned char address[16]; // last seen, v6 or v4 mapped
         unsigned short port;
         unsigned short address_flags;
-        unsigned int seen; // seconds, this machine's clock, 0 for never
+        unsigned int seen; // group-paired: the member's last greeting stamp,
+                           // older ones are replays; 0 for never
 };
 
 _Static_assert(sizeof(struct waterlink_peer) == 96,

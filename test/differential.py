@@ -27152,7 +27152,7 @@ call-frame lifetime are covered separately by harness shell_functions.
     #define FILE_PROTECT_WRITE PROT_WRITE
     #define FILE_MAP_PRIVATE MAP_PRIVATE
     #define FILE_MAP_ANONYMOUS MAP_ANONYMOUS
-    typedef uint8_t b8;
+    typedef int8_t b8;
     typedef char p8;
     typedef uintptr_t positive;
     typedef char *string_address;
@@ -38240,7 +38240,7 @@ def harness_http_response_framing(argv):
 #include <stdbool.h>
 #include <ctype.h>
 typedef uint8_t p8;
-typedef uint8_t b8;
+typedef int8_t b8;
 typedef uint16_t p16;
 typedef uint32_t p32;
 typedef uint64_t p64;
@@ -38852,7 +38852,7 @@ def http_fuzz_source(net, util, driver):
 #include <stddef.h>
 #include <stdbool.h>
 typedef uint8_t p8;
-typedef uint8_t b8;
+typedef int8_t b8;
 typedef uint16_t p16;
 typedef uint32_t p32;
 typedef uint64_t p64;
@@ -42722,7 +42722,7 @@ NET_ZONE_FUZZ_SHIM = r"""
 #include <stdbool.h>
 #include <stdarg.h>
 typedef uint8_t p8; typedef uint16_t p16; typedef uint32_t p32; typedef uint64_t p64;
-typedef int16_t b16; typedef int32_t b32; typedef int64_t b64; typedef uint8_t b8;
+typedef int16_t b16; typedef int32_t b32; typedef int64_t b64; typedef int8_t b8;
 typedef long bipolar; typedef unsigned long positive;
 typedef void *address_any; typedef char *string_address; typedef const char *const_string;
 typedef void (*writer)(address_any data, positive length);
@@ -44446,6 +44446,32 @@ static void disagree(const char *what)
         abort();
 }
 
+/* PKCS#1 v1.5 at the two digests the vectors ask about; production
+   reaches crypto_rsa_pkcs1 through tls_verify_one's signature table. */
+static bool crypto_rsa_pkcs1_sha256(p8 address_to n_bytes, positive n_length,
+                                    p64 exponent, p8 address_to sig,
+                                    positive sig_length, p8 address_to hash)
+{
+        static const p8 digestinfo[19] = {
+            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+            0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20};
+
+        return crypto_rsa_pkcs1(n_bytes, n_length, exponent, sig, sig_length,
+                                digestinfo, sizeof digestinfo, hash, 32);
+}
+
+static bool crypto_rsa_pkcs1_sha384(p8 address_to n_bytes, positive n_length,
+                                    p64 exponent, p8 address_to sig,
+                                    positive sig_length, p8 address_to hash)
+{
+        static const p8 digestinfo[19] = {
+            0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+            0x65, 0x03, 0x04, 0x02, 0x02, 0x05, 0x00, 0x04, 0x30};
+
+        return crypto_rsa_pkcs1(n_bytes, n_length, exponent, sig, sig_length,
+                                digestinfo, sizeof digestinfo, hash, 48);
+}
+
 #ifndef CRYPTO_FUZZ_NO_ORACLE
 static int oracle_curve(positive size) { return size == 32 ? NID_X9_62_prime256v1 : NID_secp384r1; }
 
@@ -45296,7 +45322,7 @@ def harness_msan_net(argv):
 #include <stdbool.h>
 #include <ctype.h>
 typedef uint8_t p8;
-typedef uint8_t b8;
+typedef int8_t b8;
 typedef uint16_t p16;
 typedef uint32_t p32;
 typedef uint64_t p64;
@@ -47748,13 +47774,19 @@ say(status != 0 and b"not a usable link key" in err,
 status, _, err = on("b", "%s link pair me %s" % (moon, keys["b"]))
 say(status != 0, "a machine will not pair its own key")
 
-server = subprocess.Popen(argv_on("b", moon + " link serve"), stdin=subprocess.DEVNULL,
+#       Descriptor 7 open in the server stands for anything a hand-started
+#       `link serve` inherited; no remote command may see it.
+server = subprocess.Popen(argv_on("b", moon + " link serve 7</etc/hostname"), stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
 time.sleep(0.5)
 
 def runs(tag):
     status, out, err = on("a", moon + " link run b 'echo hello; echo there'")
     say(status == 0 and out == b"hello\nthere\n", tag + "run carries output and status 0 (%r %r)" % (status, out[:80]))
+    status, out, err = on("a", moon + " link run b 'ls /proc/self/fd'")
+    fds = [int(x) for x in out.split() if x.isdigit()]
+    say(status == 0 and fds and max(fds) <= 3,
+        tag + "a remote command holds only its own descriptors (%r)" % (fds,))
     status, out, err = on("a", moon + " link run b 'echo to-error >&2; exit 7'")
     say(status == 7 and err.endswith(b"to-error\n") and out == b"", tag + "standard error and status 7 (%r)" % (status,))
     status, out, err = on("a", moon + " link run b 'kill -9 $$'")

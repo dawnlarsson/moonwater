@@ -1582,8 +1582,6 @@ static COLD net_state address_to net_state_of(p32 index)
    is taken between the two, so every boot released a lease a millisecond
    old and asked again. The held link is asked as it is now, and carrier
    (IFF_LOWER_UP) counts. */
-#define NET_LOWER_UP 0x10000
-
 static COLD bool net_link_carrier_now(const net_holding address_to held)
 {
         netlink_search now = {.wanted = (string_address)held->name};
@@ -1591,7 +1589,7 @@ static COLD bool net_link_carrier_now(const net_holding address_to held)
         bool carrier = handle >= 0 &&
                        netlink_link_find((b32)handle, address_of now) >= 0 &&
                        now.index == held->index &&
-                       (now.flags & (IFF_RUNNING | NET_LOWER_UP));
+                       (now.flags & (IFF_RUNNING | IFF_LOWER_UP));
 
         if (handle >= 0)
                 socket_close((b32)handle);
@@ -1657,14 +1655,11 @@ static COLD bool net_link_removed(p32 index, net_holding address_to held)
 static COLD bool net_link_event(netlink_header address_to header,
                            net_holding address_to held)
 {
-        netlink_link address_to link;
+        netlink_link address_to link =
+            header ? netlink_message_body(header, sizeof(netlink_link)) : null;
 
-        if (!header || header->port ||
-            header->length < NETLINK_HEADER + sizeof(netlink_link))
+        if (!link || header->port)
                 return false;
-
-        link = (netlink_link address_to)((p8 address_to)header +
-                                         NETLINK_HEADER);
         if (header->type == RTM_DELLINK)
                 return net_link_removed(link->index, held);
         if (header->type != RTM_NEWLINK || (link->flags & IFF_LOOPBACK))

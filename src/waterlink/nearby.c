@@ -325,19 +325,17 @@ typedef struct
 static bool link_nearby_address(netlink_header address_to header,
                                 address_any context)
 {
-        netlink_address address_to body;
+        netlink_address address_to body =
+            netlink_message_body(header, sizeof(netlink_address));
         positive size = 0;
         p8 address_to host;
         link_mreqn join = {network_order_32(WATERLINK_MDNS_GROUP), 0, 0};
         bipolar joined;
 
         (void)context;
-        if (header->type != RTM_NEWADDR ||
-            header->length < NETLINK_HEADER + sizeof(netlink_address) ||
+        if (header->type != RTM_NEWADDR || !body ||
             link_nearby.interfaces == LINK_INTERFACES)
                 return true;
-        body = (netlink_address address_to)((p8 address_to)header +
-                                            NETLINK_HEADER);
         host = netlink_find(header, sizeof(netlink_address), IFA_LOCAL,
                              address_of size);
         if (body->family != AF_INET || !host || size < 4)

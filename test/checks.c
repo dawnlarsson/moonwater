@@ -59970,6 +59970,32 @@ b32 main(void)
 #include "../src/lib.util.c"
 #include "../src/net/net.c"
 
+/* PKCS#1 v1.5 at the two digests the vectors ask about; production
+   reaches crypto_rsa_pkcs1 through tls_verify_one's signature table. */
+static bool crypto_rsa_pkcs1_sha256(p8 address_to n_bytes, positive n_length,
+                                    p64 exponent, p8 address_to sig,
+                                    positive sig_length, p8 address_to hash)
+{
+        static const p8 digestinfo[19] = {
+            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+            0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20};
+
+        return crypto_rsa_pkcs1(n_bytes, n_length, exponent, sig, sig_length,
+                                digestinfo, sizeof digestinfo, hash, 32);
+}
+
+static bool crypto_rsa_pkcs1_sha384(p8 address_to n_bytes, positive n_length,
+                                    p64 exponent, p8 address_to sig,
+                                    positive sig_length, p8 address_to hash)
+{
+        static const p8 digestinfo[19] = {
+            0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+            0x65, 0x03, 0x04, 0x02, 0x02, 0x05, 0x00, 0x04, 0x30};
+
+        return crypto_rsa_pkcs1(n_bytes, n_length, exponent, sig, sig_length,
+                                digestinfo, sizeof digestinfo, hash, 48);
+}
+
 #define SHARED_counted
 #include "checks.c"
 #undef SHARED_counted

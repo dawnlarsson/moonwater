@@ -111,6 +111,7 @@
 #define IFF_BROADCAST 2
 #define IFF_LOOPBACK 8
 #define IFF_RUNNING 64
+#define IFF_LOWER_UP 0x10000
 
 #define IFNAME_SIZE 16
 
@@ -4264,30 +4265,6 @@ static bool crypto_rsa_pkcs1(p8 address_to n_bytes, positive n_length,
         return memory_compare(em + i, digestinfo, digestinfo_length) == 0 &&
                memory_compare(em + i + digestinfo_length, hash, hash_length) ==
                    0;
-}
-
-static bool crypto_rsa_pkcs1_sha256(p8 address_to n_bytes, positive n_length,
-                                    p64 exponent, p8 address_to sig,
-                                    positive sig_length, p8 address_to hash)
-{
-        static const p8 digestinfo[19] = {
-            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
-            0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20};
-
-        return crypto_rsa_pkcs1(n_bytes, n_length, exponent, sig, sig_length,
-                                digestinfo, sizeof digestinfo, hash, 32);
-}
-
-static bool crypto_rsa_pkcs1_sha384(p8 address_to n_bytes, positive n_length,
-                                    p64 exponent, p8 address_to sig,
-                                    positive sig_length, p8 address_to hash)
-{
-        static const p8 digestinfo[19] = {
-            0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
-            0x65, 0x03, 0x04, 0x02, 0x02, 0x05, 0x00, 0x04, 0x30};
-
-        return crypto_rsa_pkcs1(n_bytes, n_length, exponent, sig, sig_length,
-                                digestinfo, sizeof digestinfo, hash, 48);
 }
 
 /* MGF1-SHA-256 of seed, xored over the want bytes at into. */

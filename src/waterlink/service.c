@@ -1324,6 +1324,10 @@ static DEAD_END fn link_child_exec(string_address address_to words,
         positive at = 0;
         positive blocked = 0;
 
+        //      Only the three descriptors the caller installed cross into
+        //      the command: not the service's sockets and state files, nor
+        //      whatever a hand-started `link serve` inherited.
+        (void)system_call_3(syscall(close_range), 3, ~0u, 0);
         (void)system_signal_mask(2, address_of blocked, null, 8);
         for (b32 signal = 1; signal < 32; signal++)
         {
