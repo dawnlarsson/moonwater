@@ -42359,6 +42359,18 @@ static bipolar network_stream_read_some_until(
                 abort();
         return fuzz_read(into, length);
 }
+/* wait.c's: what is queued, an interrupted receive asked again. */
+static bipolar network_stream_read_now(bipolar handle, p8 address_to into,
+                                       positive length)
+{
+        bipolar got;
+
+        do
+                got = socket_receive((b32)handle, into, length, MSG_DONTWAIT,
+                                     null, 0);
+        while (got == NETWORK_INTERRUPTED);
+        return got;
+}
 /* One wait in sixty-four finds the budget spent. */
 static bool network_deadline_left(const network_deadline address_to deadline,
                                   positive address_to seconds,

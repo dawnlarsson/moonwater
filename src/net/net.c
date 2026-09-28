@@ -4585,50 +4585,35 @@ static bool tls_record_version_valid(p8 address_to header)
         return header[1] == 0x03 && header[2] == 0x03;
 }
 
-/* Receive behind receive_end. Opened bytes before receive_start are dropped:
-   for free when nothing unopened remains, and otherwise the unopened tail
-   moves to the front only when the room behind it could not hold a whole
-   record, so a record arriving in pieces is not moved again per piece. The
-   read is tried before any wait, because mid-transfer the socket almost
-   always has bytes queued; only an empty socket polls, under the deadline,
-   and nothing blocks past it. */
+/* Receive behind receive_end. Opened bytes before receive_start are dropped
+   first, so every read has the whole room behind what is still unopened --
+   at most one partial record, moved to the front at most once -- and takes
+   as much as the socket has queued: a read into the few kilobytes left
+   behind a partial record was a second read, and a second writev, for what
+   one could carry. The read is tried before any wait, because mid-transfer
+   the socket almost always has bytes queued; only an empty socket polls,
+   under the deadline, and nothing blocks past it. */
 static bool tls_receive(tls_conn address_to tls,
                         const network_deadline address_to deadline)
 {
         positive have = tls->receive_end - tls->receive_start;
+        p8 address_to into;
         positive room;
         bipolar got;
 
-        if (!have)
-        {
-                tls->receive_start = 0;
-                tls->receive_end = 0;
-        }
-        else if (sizeof(tls->receive) - tls->receive_end < 5 + TLS12_RECORD_MAX)
-        {
+        if (tls->receive_start)
                 memory_copy(tls->receive, tls->receive + tls->receive_start,
                             have);
-                tls->receive_start = 0;
-                tls->receive_end = have;
-        }
-        room = sizeof(tls->receive) - tls->receive_end;
-
-        do
-        {
-                p8 address_to into = tls->receive + tls->receive_end;
-
-                if (!deadline)
-                        got = system_read_retry((positive)tls->handle, into,
-                                                room);
-                else
-                {
-                        got = socket_receive((b32)tls->handle, into, room,
-                                             MSG_DONTWAIT, null, 0);
-                        if (got == NETWORK_TRY_AGAIN)
-                                got = network_stream_read_some_until(
-                                    tls->handle, into, room, deadline);
-                }
-        } while (got == NETWORK_INTERRUPTED);
+        tls->receive_start = 0;
+        tls->receive_end = have;
+        into = tls->receive + have;
+        room = sizeof(tls->receive) - have;
+        if (!deadline)
+                got = system_read_retry((positive)tls->handle, into, room);
+        else if ((got = network_stream_read_now(tls->handle, into, room)) ==
+                 NETWORK_TRY_AGAIN)
+                got = network_stream_read_some_until(tls->handle, into, room,
+                                                     deadline);
 
         if (got <= 0 || (positive)got > room)
                 return false;

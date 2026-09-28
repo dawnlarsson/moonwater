@@ -54545,6 +54545,44 @@ static fn tls_seal_in_receive(tls_conn address_to tls, positive content)
    plaintext record and for a protected record's inner plaintext, so
    TLS_RECORD_MAX, the header's gate, is that plus the type byte and the
    AES-GCM tag. Exact fills are accepted, one past and empty are refused. */
+/*
+        A receive behind a partial record moves it to the front first, so
+        the read has the whole room: with 200,000 bytes opened and three of
+        the next record's header held, 64 KiB queued on the socket come in
+        one read. Left where it was, the partial record's 62,141 bytes of
+        room took the first read and the rest a second.
+*/
+static tls_conn tls_receive_conn;
+
+static fn tls_receive_whole_room(void)
+{
+        static p8 queued[65536];
+        tls_conn address_to tls = address_of tls_receive_conn;
+        b32 pair[2];
+        bool opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM,
+                                    0, (positive)pair) == 0;
+
+        check("TLS receive-room socket pair opens", opened);
+        if (!opened)
+                return;
+        memory_fill(tls, 0, TLS_CONN_HEAD);
+        tls->handle = pair[0];
+        memory_fill(queued, 0x5a, sizeof queued);
+        memory_copy(tls->receive + 200000, "\x17\x03\x03", 3);
+        tls->receive_start = 200000;
+        tls->receive_end = tls->receive_high = 200003;
+        check("TLS receive-room bytes queue",
+              socket_send(pair[1], queued, sizeof queued, 0, null, 0) ==
+                  (bipolar)sizeof queued);
+        check("a receive behind a partial record takes the whole room in one read",
+              tls_receive(tls, null) && tls->receive_start == 0 &&
+                  tls->receive_end == 3 + sizeof queued &&
+                  !memory_compare(tls->receive, "\x17\x03\x03", 3));
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+        tls_forget(tls);
+}
+
 static fn tls_record_payload_ceiling(void)
 {
         tls_conn tls = {0};
@@ -62372,6 +62410,7 @@ b32 main(void)
         network_stream_sigpipe();
         tls_closure_boundaries();
         tls_record_payload_ceiling();
+        tls_receive_whole_room();
         tls_sensitive_state_erasure();
         tls_certificate_dates();
         tls_certificate_identity_rules();
