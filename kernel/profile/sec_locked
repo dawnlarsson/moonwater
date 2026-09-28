@@ -10,11 +10,13 @@
 #
 # The allow list is what a boot script and a service supervisor use: move,
 # copy, read and search files, look at the processes, the mounts and the
-# kernel log, log a line, take a lock, time a command out, check a download's
-# sha256, and power off. What it leaves out, it leaves out because each is a
-# way out of a single-purpose machine:
+# kernel log, bring the network up, log a line, take a lock, time a command
+# out, check a download's sha256, and power off. What it leaves out, it
+# leaves out because each is a way out of a single-purpose machine:
 #
-#   the network        ip, host, fetch, wget
+#   fetching           host, fetch, wget (ip stays: init brings the links
+#                      up and asks for an address with it, and a machine
+#                      behind a port needs one)
 #   archives, codecs   tar, gzip, xz, zstd and their readers
 #   languages          awk (sed stays; boot scripts edit a line with it)
 #   privilege          chroot, chown, chgrp, nsenter, unshare, setpriv, chrt,
@@ -58,6 +60,7 @@ CONFIG_MOONWATER_TOOL_GREP=y
 CONFIG_MOONWATER_TOOL_HEAD=y
 CONFIG_MOONWATER_TOOL_HOSTNAME=y
 CONFIG_MOONWATER_TOOL_ID=y
+CONFIG_MOONWATER_TOOL_IP=y
 CONFIG_MOONWATER_TOOL_KILL=y
 CONFIG_MOONWATER_TOOL_LN=y
 CONFIG_MOONWATER_TOOL_LS=y

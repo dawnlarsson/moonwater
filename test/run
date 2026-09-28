@@ -9992,6 +9992,49 @@ else
         lost 'single build' 'the header or the shell did not build'
 fi
 
+#       sec_reference is the only tier that compiles the STRICT_REFERENCE
+#       branches, and a utility-only image is the only build of
+#       programs/utilities.c against a header: each is built once here so
+#       neither can rot unseen. The utility program drops the monitor and
+#       every SYSTEM name, and has no shell to fall back to.
+group reference
+{ echo CONFIG_MOONWATER_CORE=y; cat kernel/profile/sec_reference; } \
+        > "$work/switch-reference.config"
+if switch_header "$work/switch-reference.config" "$work/switch-reference.h" &&
+        switch_shell "$work/switch-reference.h" "$work/switch-reference"; then
+        won
+        same 'strict level' 'MOONWATER_STRICT 0' \
+                "$(grep -o 'MOONWATER_STRICT [0-9]*' "$work/switch-reference.h")"
+        same 'cat runs' 0 "$(switch_status "$work/switch-reference" 'cat /dev/null')"
+else
+        lost 'reference build' 'the header or the shell did not build'
+fi
+
+group utility
+printf '%s\n' 'CONFIG_MOONWATER_CORE=y' '# CONFIG_MOONWATER_SHELL is not set' \
+        '# CONFIG_MOONWATER_TOOL_TAC is not set' > "$work/switch-utility.config"
+if build_tool config-header "$work/switch-utility.config" \
+                "$work/switch-utility.h" utility > "$work/switch-utility.log" 2>&1 &&
+        freestanding programs/utilities.c "$work/switch-utility" "$host_arch" \
+                "-DMOONWATER_CONFIG=\"$work/switch-utility.h\""; then
+        won
+        mkdir -p "$work/switch-utility-bin"
+        for switch_name in tac tail monitor init; do
+                ln -sf "$work/switch-utility" "$work/switch-utility-bin/$switch_name"
+        done
+        for switch_name in tac monitor init; do
+                "$work/switch-utility-bin/$switch_name" < /dev/null > /dev/null 2>&1
+                same "$switch_name not a utility" 127 "$?"
+        done
+        "$work/switch-utility-bin/tail" < /dev/null > /dev/null 2>&1
+        same 'tail a utility' 0 "$?"
+        same 'utility surface' tail \
+                "$(build_tool surface "$work/switch-utility.config" |
+                        grep -x -e tac -e tail -e monitor -e init)"
+else
+        lost 'utility build' "$(head -3 "$work/switch-utility.log")"
+fi
+
 #       kernel/profile/sec_locked as the build composes it over the
 #       defaults, after profile/any turns the core on: its allow list in,
 #       everything else out, the core kept.
@@ -10004,11 +10047,11 @@ if switch_header "$work/switch-locked.config" "$work/switch-locked.h" &&
         switch_bin=$work/switch-locked
         same 'strict level' 'MOONWATER_STRICT 2' \
                 "$(grep -o 'MOONWATER_STRICT [0-9]*' "$work/switch-locked.h")"
-        for switch_name in cat ls sed grep mount blkid echo printf test \
+        for switch_name in cat ls sed grep ip mount blkid echo printf test \
                 read poweroff cd exit trap eval; do
                 same "$switch_name kept" yes "$(switch_own "$switch_bin" "$switch_name")"
         done
-        for switch_name in awk wget ip tar gzip chroot nsenter unshare dd \
+        for switch_name in awk wget host tar gzip chroot nsenter unshare dd \
                 monitor edit bowl history alias source declare enable \
                 pushd jobs; do
                 same "$switch_name gone" no "$(switch_own "$switch_bin" "$switch_name")"
