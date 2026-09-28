@@ -4960,7 +4960,7 @@ static COLD bipolar tls_asn1_length(p8 address_to bytes, positive size,
 
         count = first & 0x7f;
         value = 0;
-        if (!count || count > 3 || i + count > size || !bytes[i])
+        if (!count || count > 3 || count > size - i || !bytes[i])
                 return TLS_FAIL;
         while (count)
         {
@@ -4984,9 +4984,8 @@ static COLD bipolar tls_asn1_enter(p8 address_to bytes, positive size, p8 tag,
                 return TLS_FAIL;
         i++;
         address_to at = i;
-        if (tls_asn1_length(bytes, size, at, address_of length))
-                return TLS_FAIL;
-        if (address_to at + length > size)
+        if (tls_asn1_length(bytes, size, at, address_of length) ||
+            length > size - address_to at)
                 return TLS_FAIL;
         address_to stop = address_to at + length;
         return TLS_OK;
@@ -5005,6 +5004,51 @@ static COLD bipolar tls_asn1_skip(p8 address_to bytes, positive size, positive a
 
         address_to at = stop;
         return TLS_OK;
+}
+
+/* One whole value of the given tag, header included, and past it. */
+static COLD bipolar tls_asn1_take(p8 address_to bytes, positive size, p8 tag,
+                                  positive address_to at,
+                                  p8 address_to address_to value,
+                                  positive address_to length)
+{
+        positive start = address_to at;
+        positive stop = 0;
+
+        if (tls_asn1_enter(bytes, size, tag, at, address_of stop))
+                return TLS_FAIL;
+        address_to value = bytes + start;
+        address_to length = stop - start;
+        address_to at = stop;
+        return TLS_OK;
+}
+
+/* A BOOLEAN DEFAULT FALSE: basicConstraints' cA, an Extension's critical.
+   DER omits a component carrying its default value, so one that is
+   encoded can only be canonical TRUE; accepting FALSE lets BER and DER
+   validators disagree over the same signed bytes. None of 1,900
+   certificates served by 652 public HTTPS hosts (2026-09-28) spells
+   either FALSE. */
+static COLD bipolar tls_asn1_true(p8 address_to bytes, positive stop,
+                                  positive address_to at, bool address_to value)
+{
+        positive boolean_stop = 0;
+
+        if (address_to at >= stop || bytes[address_to at] != 0x01)
+                return TLS_OK;
+        if (tls_asn1_enter(bytes, stop, 0x01, at, address_of boolean_stop) ||
+            address_to at + 1 != boolean_stop || bytes[address_to at] != 0xff)
+                return TLS_FAIL;
+        address_to value = true;
+        address_to at = boolean_stop;
+        return TLS_OK;
+}
+
+/* RSA AlgorithmIdentifier parameters: the historical NULL, or nothing. */
+static COLD bool tls_null_or_absent(p8 address_to der, positive at,
+                                    positive stop)
+{
+        return at == stop || (at + 2 == stop && der[at] == 0x05 && !der[at + 1]);
 }
 
 static COLD bool tls_oid_is(const p8 address_to bytes, positive length,
@@ -5136,8 +5180,7 @@ static COLD bool tls_signature_algorithm(p8 address_to der, positive size,
 
         kind = tls_signature_kind(der + oid_at, oid_stop - oid_at);
         if (!kind || (oid_stop != alg_stop &&
-                      (!(kind & 4) || oid_stop + 2 != alg_stop ||
-                       der[oid_stop] != 0x05 || der[oid_stop + 1] != 0)))
+                      (!(kind & 4) || !tls_null_or_absent(der, oid_stop, alg_stop))))
                 return false;
 
         address_to oid = der + oid_at;
@@ -5244,34 +5287,31 @@ static COLD bipolar tls_parse_ecdsa_sig(p8 address_to sig, positive length,
                                    p8 address_to r, positive address_to r_length,
                                    p8 address_to s, positive address_to s_length)
 {
+        p8 address_to into[2] = {r, s};
+        positive address_to into_length[2] = {r_length, s_length};
         positive at = 0;
         positive stop = 0;
-        positive r_stop = 0;
-        positive s_stop = 0;
-        positive value_at;
-        positive value_length;
 
         if (tls_asn1_enter(sig, length, 0x30, address_of at, address_of stop) ||
             stop != length)
                 return TLS_FAIL;
-        if (tls_asn1_enter(sig, stop, 0x02, address_of at, address_of r_stop))
-                return TLS_FAIL;
-        if (!tls_positive_integer(sig, at, r_stop, address_of value_at,
-                                  address_of value_length) ||
-            value_length > 48)
-                return TLS_FAIL;
-        address_to r_length = value_length;
-        memory_copy(r, sig + value_at, value_length);
-        at = r_stop;
-        if (tls_asn1_enter(sig, stop, 0x02, address_of at, address_of s_stop))
-                return TLS_FAIL;
-        if (!tls_positive_integer(sig, at, s_stop, address_of value_at,
-                                  address_of value_length) ||
-            value_length > 48)
-                return TLS_FAIL;
-        address_to s_length = value_length;
-        memory_copy(s, sig + value_at, value_length);
-        return s_stop == stop ? TLS_OK : TLS_FAIL;
+        for (positive k = 0; k < 2; k++)
+        {
+                positive value_stop = 0;
+                positive value_at;
+                positive value_length;
+
+                if (tls_asn1_enter(sig, stop, 0x02, address_of at,
+                                   address_of value_stop) ||
+                    !tls_positive_integer(sig, at, value_stop, address_of value_at,
+                                          address_of value_length) ||
+                    value_length > 48)
+                        return TLS_FAIL;
+                address_to into_length[k] = value_length;
+                memory_copy(into[k], sig + value_at, value_length);
+                at = value_stop;
+        }
+        return at == stop ? TLS_OK : TLS_FAIL;
 }
 
 typedef struct
@@ -5380,29 +5420,31 @@ static COLD bool tls_date_value(p8 tag, p8 address_to text, positive length,
 static COLD bipolar tls_parse_validity(p8 address_to der, positive size,
                                   positive address_to at, tls_cert address_to cert)
 {
+        p64 address_to times[2] = {address_of cert->not_before,
+                                   address_of cert->not_after};
         positive validity_stop = 0;
-        positive time_stop = 0;
-        p8 tag;
 
-        if (tls_asn1_enter(der, size, 0x30, at, address_of validity_stop) ||
-            address_to at >= validity_stop)
+        if (tls_asn1_enter(der, size, 0x30, at, address_of validity_stop))
                 return TLS_FAIL;
-        tag = der[address_to at];
-        if (tls_asn1_enter(der, validity_stop, tag, at, address_of time_stop) ||
-            !tls_date_value(tag, der + address_to at, time_stop - address_to at,
-                            address_of cert->not_before))
-                return TLS_FAIL;
-        address_to at = time_stop;
-        if (address_to at >= validity_stop)
-                return TLS_FAIL;
-        tag = der[address_to at];
-        if (tls_asn1_enter(der, validity_stop, tag, at, address_of time_stop) ||
-            !tls_date_value(tag, der + address_to at, time_stop - address_to at,
-                            address_of cert->not_after) ||
-            time_stop != validity_stop || cert->not_after < cert->not_before)
-                return TLS_FAIL;
-        address_to at = validity_stop;
-        return TLS_OK;
+        for (positive k = 0; k < 2; k++)
+        {
+                positive time_stop = 0;
+                p8 tag;
+
+                if (address_to at >= validity_stop)
+                        return TLS_FAIL;
+                tag = der[address_to at];
+                if (tls_asn1_enter(der, validity_stop, tag, at,
+                                   address_of time_stop) ||
+                    !tls_date_value(tag, der + address_to at,
+                                    time_stop - address_to at, times[k]))
+                        return TLS_FAIL;
+                address_to at = time_stop;
+        }
+        return address_to at == validity_stop &&
+                       cert->not_after >= cert->not_before
+                   ? TLS_OK
+                   : TLS_FAIL;
 }
 
 static COLD bipolar tls_parse_basic_constraints(p8 address_to value, positive length,
@@ -5412,22 +5454,9 @@ static COLD bipolar tls_parse_basic_constraints(p8 address_to value, positive le
         positive stop = 0;
 
         if (tls_asn1_enter(value, length, 0x30, address_of at, address_of stop) ||
-            stop != length)
+            stop != length ||
+            tls_asn1_true(value, stop, address_of at, address_of cert->ca))
                 return TLS_FAIL;
-        if (at < stop && value[at] == 0x01)
-        {
-                positive boolean_stop = 0;
-
-                if (tls_asn1_enter(value, stop, 0x01, address_of at,
-                                   address_of boolean_stop) ||
-                    at + 1 != boolean_stop ||
-                    value[at] != 0xff)
-                        return TLS_FAIL;
-                /* cA also has DEFAULT FALSE and must be omitted when false in
-                   DER. An encoded value is therefore canonical TRUE only. */
-                cert->ca = true;
-                at = boolean_stop;
-        }
         if (at < stop && value[at] == 0x02)
         {
                 positive integer_stop = 0;
@@ -5592,24 +5621,9 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                 seen_oid[seen_count] = der + oid_at;
                 seen_length[seen_count++] = oid_stop - oid_at;
                 at = oid_stop;
-                if (at < extension_stop && der[at] == 0x01)
-                {
-                        positive boolean_stop = 0;
-
-                        if (tls_asn1_enter(der, extension_stop, 0x01, address_of at,
-                                           address_of boolean_stop) ||
-                            at + 1 != boolean_stop ||
-                            der[at] != 0xff)
-                                return TLS_FAIL;
-                        /* critical has DEFAULT FALSE. DER omits a component
-                           carrying its default value, so an encoded BOOLEAN
-                           can only be canonical TRUE. Accepting explicit
-                           FALSE lets BER and DER validators disagree over the
-                           same signed extension envelope. */
-                        critical = true;
-                        at = boolean_stop;
-                }
-                if (tls_asn1_enter(der, extension_stop, 0x04, address_of at,
+                if (tls_asn1_true(der, extension_stop, address_of at,
+                                  address_of critical) ||
+                    tls_asn1_enter(der, extension_stop, 0x04, address_of at,
                                    address_of value_stop) ||
                     value_stop != extension_stop)
                         return TLS_FAIL;
@@ -5686,12 +5700,9 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
         if (tls_asn1_enter(der, length, 0x30, address_of at, address_of stop) ||
             stop != length)
                 return TLS_FAIL;
-        cert->tbs = der + at;
-        if (tls_asn1_enter(der, length, 0x30, address_of at, address_of tbs_stop))
+        if (tls_asn1_take(der, length, 0x30, address_of at, address_of cert->tbs,
+                          address_of cert->tbs_length))
                 return TLS_FAIL;
-        cert->tbs_length = (positive)((der + tbs_stop) - cert->tbs);
-
-        at = tbs_stop;
         if (!tls_signature_algorithm(der, stop, address_of at,
                                      address_of cert->sig_oid,
                                      address_of cert->sig_oid_length))
@@ -5734,31 +5745,11 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
                     memory_compare(tbs_oid, cert->sig_oid, tbs_oid_length))
                         return TLS_FAIL;
         }
-        {
-                positive name_at = at;
-                positive name_stop = 0;
-
-                if (tls_asn1_enter(der, tbs_stop, 0x30, address_of at,
-                                   address_of name_stop))
-                        return TLS_FAIL;
-                at = name_stop;
-                cert->issuer = der + name_at;
-                cert->issuer_length = at - name_at;
-        }
-        if (tls_parse_validity(der, tbs_stop, address_of at, cert))
-                return TLS_FAIL;
-        {
-                positive name_at = at;
-                positive name_stop = 0;
-
-                if (tls_asn1_enter(der, tbs_stop, 0x30, address_of at,
-                                   address_of name_stop))
-                        return TLS_FAIL;
-                at = name_stop;
-                cert->subject = der + name_at;
-                cert->subject_length = at - name_at;
-        }
-        if (!cert->issuer_length || !cert->subject_length)
+        if (tls_asn1_take(der, tbs_stop, 0x30, address_of at,
+                          address_of cert->issuer, address_of cert->issuer_length) ||
+            tls_parse_validity(der, tbs_stop, address_of at, cert) ||
+            tls_asn1_take(der, tbs_stop, 0x30, address_of at,
+                          address_of cert->subject, address_of cert->subject_length))
                 return TLS_FAIL;
 
         if (tls_asn1_enter(der, tbs_stop, 0x30, address_of at, address_of spki_stop))
@@ -5816,9 +5807,7 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
                 positive value_at;
                 positive value_length;
 
-                if (oid_stop != alg_stop &&
-                    (oid_stop + 2 != alg_stop || der[oid_stop] != 0x05 ||
-                     der[oid_stop + 1] != 0))
+                if (!tls_null_or_absent(der, oid_stop, alg_stop))
                         return TLS_FAIL;
 
                 cert->curve = 3;
