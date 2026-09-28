@@ -1354,26 +1354,41 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
         address_changed = !net_holds_address(previous, index, lease);
         route_changed = !net_holds_route(previous, index, lease);
 
-        /* The address carries the lease's lifetimes, so the kernel drops
-           it at expiry even with no watcher left, and a renewal of the same
-           address puts the new lease's on it. EEXIST from the exclusive
-           create is the address already there: an operator's stays theirs,
-           present and not owned, but one this client leased -- a watcher's
-           before init restarted this one -- is taken back, so that a NAK or
-           expiry removes it as it would have. */
+        /* A watcher's address carries the lease's lifetimes, so the kernel
+           drops it at expiry even with no watcher left, and a renewal of
+           the same address puts the new lease's on it; a one-shot ip auto,
+           which nothing renews, installs it as it always did. EEXIST from
+           the exclusive create is the address already there: an operator's
+           stays theirs, present and not owned, but one this client leased
+           -- a watcher's before init restarted this one -- is taken back,
+           so that a NAK or expiry removes it as it would have. A watcher's
+           first lease also removes any other lease left on the link: the
+           server that handed out a new address may hand the old one to
+           somebody else. */
         if (address_changed || net_owns_address(previous))
         {
                 p8 prefix = dhcp_prefix_of(lease->mask);
+                p32 seconds = held ? lease->seconds : 0;
+                netlink_lease_search found = {.index = index,
+                                              .host = lease->address,
+                                              .prefix = prefix};
 
                 status = netlink_address_lease(
-                    handle, index, lease->address, prefix, lease->seconds,
+                    handle, index, lease->address, prefix, seconds,
                     !net_owns_address(previous));
-                if (status == -EEXIST &&
-                    netlink_address_leased(handle, index, lease->address,
-                                           prefix) > 0)
-                        status = netlink_address_lease(
-                            handle, index, lease->address, prefix,
-                            lease->seconds, false);
+                if (held && !previous &&
+                    (status >= 0 || status == -EEXIST) &&
+                    netlink_leases_on(handle, address_of found) >= 0)
+                {
+                        for (positive at = 0; at < found.others; at++)
+                                (void)netlink_address_delete(
+                                    handle, index, found.other_host[at],
+                                    found.other_prefix[at]);
+                        if (status == -EEXIST && found.leased)
+                                status = netlink_address_lease(
+                                    handle, index, lease->address, prefix,
+                                    seconds, false);
+                }
                 address_applied = address_changed && status >= 0;
                 if (status < 0 && status != -EEXIST)
                 {
@@ -1653,12 +1668,20 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         if (net_apply_lease(handle, search.index, search.name,
                             search.hardware, address_of lease, held, true))
                 return 1;
-        //      Counted before the exchange: a carrier lost while it ran is
-        //      a carrier lost since the lease.
+        /* Counted once the lease is taken, not before the exchange:
+           bringing a link up can itself cost a carrier loss -- a PHY that
+           starts by dropping the carrier it was registered with -- which
+           is no reason to doubt a lease taken after it. */
         if (held)
         {
-                held->carrier_counted = search.carrier_counted;
-                held->carrier_downs = search.carrier_downs;
+                netlink_search now = {.wanted = (string_address)search.name};
+
+                if (netlink_link_find(handle, address_of now) >= 0 &&
+                    now.index == search.index)
+                {
+                        held->carrier_counted = now.carrier_counted;
+                        held->carrier_downs = now.carrier_downs;
+                }
         }
         return 0;
 }

@@ -73537,8 +73537,11 @@ static bool storage_test_address_seen(netlink_header address_to header,
 
 /* The same address when the lease stamped it: a restarted watcher takes it
    back, so a NAK or expiry removes it, and the kernel holds it to the
-   lease's lifetime on its own. Exit 4: no finite lifetime; 5: not taken
-   back; 6: not removed on release. */
+   lease's lifetime on its own. A restarted watcher handed another address
+   removes the lease it inherited instead, and a one-shot ip auto, which
+   nothing renews, installs its address as it always did. Exit 4: no finite
+   lifetime; 5: not taken back; 6: not removed on release; 7: an inherited
+   lease outlived a new one; 8: a one-shot address expires. */
 static fn storage_test_lease_inherited(void)
 {
         bipolar child = system_fork();
@@ -73549,9 +73552,12 @@ static fn storage_test_lease_inherited(void)
                 dhcp_lease lease = {.address = 0x0a090a0a, .mask = 0xffffff00,
                                     .server = 0x0a090a01, .seconds = 60,
                                     .renewal = 30, .rebinding = 52};
+                dhcp_lease other = lease;
                 net_holding first = {0};
                 net_holding second = {0};
+                net_holding third = {0};
                 storage_test_address_facts facts = {.host = lease.address};
+                storage_test_address_facts moved = {.host = 0x0a090a0b};
                 bipolar handle = storage_test_net_namespace();
 
                 if (net_apply_lease((b32)handle, 1, "lo", hardware, address_of lease,
@@ -73566,13 +73572,30 @@ static fn storage_test_lease_inherited(void)
                                     address_of second, false) != 0 ||
                     !second.address_owned)
                         system_call_1(syscall(exit_group), 5);
+                other.address = moved.host;
                 facts.found = false;
-                if (net_holding_release((b32)handle, address_of second) != 0 ||
+                if (net_apply_lease((b32)handle, 1, "lo", hardware, address_of other,
+                                    address_of third, false) != 0 ||
                     netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
                                  AF_INET, storage_test_address_seen,
                                  address_of facts) < 0 ||
                     facts.found)
+                        system_call_1(syscall(exit_group), 7);
+                if (net_holding_release((b32)handle, address_of third) != 0 ||
+                    netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
+                                 AF_INET, storage_test_address_seen,
+                                 address_of moved) < 0 ||
+                    moved.found)
                         system_call_1(syscall(exit_group), 6);
+                other.address = 0x0a090a0c;
+                moved.host = other.address;
+                if (net_apply_lease((b32)handle, 1, "lo", hardware, address_of other,
+                                    null, false) != 0 ||
+                    netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
+                                 AF_INET, storage_test_address_seen,
+                                 address_of moved) < 0 ||
+                    !moved.found || moved.valid != 0xffffffff)
+                        system_call_1(syscall(exit_group), 8);
                 system_call_1(syscall(exit_group), 0);
         }
         b32 status = storage_test_child_status(child);
@@ -73584,7 +73607,12 @@ static fn storage_test_lease_inherited(void)
                       status != 4 && status != 1);
                 check("a restarted watcher takes back the address its predecessor leased",
                       status != 5 && status != 1);
+                check("a restarted watcher handed another address removes the one it inherited",
+                      status != 7 && status != 5 && status != 4 && status != 1);
                 check("an inherited lease is removed when it is released",
+                      status != 6 && status != 7 && status != 5 && status != 4 &&
+                          status != 1);
+                check("a one-shot ip auto address keeps no lifetime",
                       status == 0);
         }
 }
@@ -73679,10 +73707,12 @@ static fn storage_test_carrier_bounce(void)
                     netlink_link_find((b32)handle, address_of link) < 0 ||
                     netlink_link_up((b32)handle, link.index) < 0)
                         system_call_1(syscall(exit_group), 2);
+                //      A kernel, or an emulator, that keeps no count is
+                //      not a failure of the watcher's.
                 if (netlink_link_find((b32)handle, address_of link) < 0 ||
                     !link.carrier_counted ||
                     (events = netlink_open_groups(RTNLGRP_LINK_MASK)) < 0)
-                        system_call_1(syscall(exit_group), 1);
+                        system_call_1(syscall(exit_group), 2);
                 held.index = link.index;
                 held.lease.address = 0x0a090b0b;
                 held.lease.seconds = 60;

@@ -1095,12 +1095,19 @@ static bipolar netlink_dump(b32 handle, p16 type, positive body, p8 family,
                                 visit, context);
 }
 
+#define NETLINK_LEASES_MAX 8
+
+/* The addresses on one link stamped as this client's leases: whether one
+   is the address asked about, and the others, up to a handful. */
 typedef struct
 {
         p32 index;
         p32 host;
         p8 prefix;
         bool leased;
+        positive others;
+        p32 other_host[NETLINK_LEASES_MAX];
+        p8 other_prefix[NETLINK_LEASES_MAX];
 } netlink_lease_search;
 
 static COLD bool netlink_lease_seen(netlink_header address_to header,
@@ -1113,33 +1120,37 @@ static COLD bool netlink_lease_seen(netlink_header address_to header,
         positive size = 0;
         p8 address_to named;
         p8 address_to protocol;
+        p32 host;
 
-        if (!body || body->family != AF_INET || body->index != search->index ||
-            body->prefix != search->prefix)
-                return true;
-        named = (p8 address_to)netlink_find(header, sizeof(netlink_address),
-                                            IFA_LOCAL, address_of size);
-        if (!named || size != 4 ||
-            memory_load_unaligned(p32, named) != network_order_32(search->host))
+        if (!body || body->family != AF_INET || body->index != search->index)
                 return true;
         protocol = (p8 address_to)netlink_find(header, sizeof(netlink_address),
                                                IFA_PROTO, address_of size);
-        search->leased = protocol && size == 1 && protocol[0] == IFA_PROTO_DHCP;
-        return false;
+        if (!protocol || size != 1 || protocol[0] != IFA_PROTO_DHCP)
+                return true;
+        named = (p8 address_to)netlink_find(header, sizeof(netlink_address),
+                                            IFA_LOCAL, address_of size);
+        if (!named || size != 4)
+                return true;
+        host = network_order_32(memory_load_unaligned(p32, named));
+        if (host == search->host && body->prefix == search->prefix)
+                search->leased = true;
+        else if (search->others < NETLINK_LEASES_MAX)
+        {
+                search->other_host[search->others] = host;
+                search->other_prefix[search->others++] = body->prefix;
+        }
+        return true;
 }
 
-/* 1 when the address on a link is a lease this client put there -- what a
-   restarted watcher inherits from the one before it -- and 0 when it is
-   anybody else's, an operator's static address included. */
-static COLD bipolar netlink_address_leased(b32 handle, p32 index, p32 host,
-                                           p8 prefix)
+/* Which addresses on a link are leases this client put there -- what a
+   restarted watcher inherits from the one before it -- as against anybody
+   else's, an operator's static address included. */
+static COLD bipolar netlink_leases_on(b32 handle,
+                                      netlink_lease_search address_to search)
 {
-        netlink_lease_search search = {index, host, prefix, false};
-        bipolar status = netlink_dump(handle, RTM_GETADDR,
-                                      sizeof(netlink_address), AF_INET,
-                                      netlink_lease_seen, address_of search);
-
-        return status < 0 ? status : search.leased;
+        return netlink_dump(handle, RTM_GETADDR, sizeof(netlink_address),
+                            AF_INET, netlink_lease_seen, search);
 }
 
 #endif // STANDARD_MODERN_C_NET_NETLINK
