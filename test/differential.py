@@ -19088,10 +19088,14 @@ TEXT_UTILITIES = (
             operands=(("cleft", "cright"), ("cleft", "cleft"), ("unordered", "unordered"),
                       ("unordered", "unordered2"), ("zleft", "zright"), ("-", "cright"), ("cleft", "-"),
                       ("cleft",), (), ("cleft", "cright", "a.txt"), ("missing", "cright"), ("empty", "cright"),
-                      ("cleft", "empty"), ("dir", "cright"), ("wide", "wide"), ("-", "-"), ("a.txt", "b.txt"),
-                      ("repeats", "repeats"), ("big", "big")),
+                      ("cleft", "empty"), ("dir", "cright"), ("wide", "wide"), ("a.txt", "b.txt"),
+                      ("repeats", "repeats"), ("big", "big"), ("unordered", "cleft"),
+                      ("cleft", "unordered"), ("same", "unordered2")),
+            #       Each file out of order is named as it is found, once, and
+            #       only after a line went unpaired or --check-order asked.
+            stderr="exact",
             stdin=("text_sorted_a", "empty", "nonl", "nul", "text", "text_fifteen", "edge_65535", "edge_65536", "edge_65537", "text_utf8"), fixture="text",
-            extra=(("--nosuchflag", "cleft", "cright"), ("-Q", "cleft", "cright"),
+            extra=(("--nosuchflag", "cleft", "cright"), ("-Q", "cleft", "cright"), ("-", "-"),
                    #       Two different delimiters are refused as the second
                    #       is read; the same one twice, or empty twice, is one.
                    ("--output-delimiter=:", "--output-delimiter=,", "cleft", "cright"),

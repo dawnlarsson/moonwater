@@ -2522,21 +2522,60 @@ static fn comm_record(p8 address_to record, positive length, positive column,
 // text_record_hold as text_comm took it, once, so a line is not a look.
 static p8 address_to comm_hold;
 
-static bool comm_advance(text_record_cursor address_to cursor,
-                         p8 delimiter, bool check,
-                         bool address_to disorder)
+/*
+        GNU looks at a pair of lines only when it reads the second, and only
+        once a line has gone unpaired (or --check-order said to look always);
+        at the end of a file it looks again at the last pair, which an
+        unpaired line found later may now make count. Each file is named once,
+        as it is found; --check-order stops at the first.
+*/
+typedef struct
 {
+        p8 mode;
+        bool unpaired;
+        bool warned[2];
+        bool last_bad[2];
+        positive read[2];
+} comm_order;
+
+static fn comm_order_look(comm_order address_to order, positive side,
+                          bool bad)
+{
+        if (!bad || order->warned[side] || order->mode == 'N' ||
+            (order->mode != 'C' && !order->unpaired))
+                return;
+
+        order->warned[side] = true;
+        string_diagnostic(&text_diagnostic, 0, null,
+                          side ? "file 2 is not in sorted order"
+                               : "file 1 is not in sorted order");
+}
+
+static bool comm_advance(text_record_cursor address_to cursor,
+                         positive side, p8 delimiter,
+                         comm_order address_to order)
+{
+        bool check = order->mode != 'N';
         p8 address_to old = cursor->record;
         positive old_length = cursor->length;
         bool more = text_record_next(
             cursor, delimiter, check ? address_of old : null,
             old_length, comm_hold);
 
-        if (more && check && sort_compare_bytes(old, old_length,
-                                                 cursor->record,
-                                                 cursor->length, 0) > 0)
+        if (!check)
+                return more;
+
+        if (more)
         {
-                address_to disorder = true;
+                order->read[side]++;
+                order->last_bad[side] =
+                    sort_compare_bytes(old, old_length, cursor->record,
+                                       cursor->length, 0) > 0;
+                comm_order_look(order, side, order->last_bad[side]);
+        }
+        else if (order->read[side] >= 2 && !cursor->reader.failed)
+        {
+                comm_order_look(order, side, order->last_bad[side]);
         }
 
         return more;
@@ -2616,8 +2655,7 @@ static b32 text_comm()
         }
 
         positive totals[3] = {0, 0, 0};
-        bool disorder = false;
-        bool unpaired = false;
+        comm_order order = {.mode = comm_order_mode};
         //      An input that cannot be read ends the program where the
         //      reference ends it, before the other is asked for a line: comm
         //      d d said "Is a directory" twice where GNU says it once.
@@ -2626,15 +2664,18 @@ static b32 text_comm()
         bool have_right = !sides[0].reader.failed &&
                           text_record_next(sides + 1, text_delimiter,
                                            null, 0, null);
+        order.read[0] = have_left;
+        order.read[1] = have_right;
+#define comm_stop (order.mode == 'C' && (order.warned[0] || order.warned[1]))
 
         while (have_left && have_right)
         {
-                bipolar order = sort_compare_bytes(
+                bipolar compared = sort_compare_bytes(
                     sides[0].record, sides[0].length,
                     sides[1].record, sides[1].length, 0);
-                positive which = order < 0 ? 0 : order > 0 ? 1 : 2;
+                positive which = compared < 0 ? 0 : compared > 0 ? 1 : 2;
 
-                unpaired |= which != 2;
+                order.unpaired |= which != 2;
 
                 totals[which]++;
                 if (show[which])
@@ -2644,19 +2685,16 @@ static b32 text_comm()
                                     text_delimiter);
 
                 if (which != 1)
-                        have_left = comm_advance(
-                            sides, text_delimiter,
-                            comm_order_mode != 'N',
-                            address_of disorder);
-                if (disorder && comm_order_mode == 'C')
+                        have_left = comm_advance(sides, 0, text_delimiter,
+                                                 address_of order);
+                if (comm_stop)
                         break;
                 if (which != 0)
-                        have_right = comm_advance(
-                            sides + 1, text_delimiter,
-                            comm_order_mode != 'N',
-                            address_of disorder);
+                        have_right = comm_advance(sides + 1, 1,
+                                                  text_delimiter,
+                                                  address_of order);
 
-                if (disorder && comm_order_mode == 'C')
+                if (comm_stop)
                         break;
 
                 if (sides[0].reader.failed || sides[1].reader.failed)
@@ -2667,33 +2705,30 @@ static b32 text_comm()
         // so does disorder when the order was to be checked: the total that
         // would have followed is not written either.
         bool stopped = sides[0].reader.failed || sides[1].reader.failed ||
-                       (disorder && comm_order_mode == 'C');
+                       comm_stop;
         bool remaining[] = {have_left && !stopped, have_right && !stopped};
         for (positive side = 0; side < array_count(remaining); side++)
         {
                 while (remaining[side] &&
-                       !(disorder && comm_order_mode == 'C') &&
+                       !comm_stop &&
                        !sides[0].reader.failed && !sides[1].reader.failed)
                 {
-                        unpaired = true;
+                        order.unpaired = true;
                         totals[side]++;
                         if (show[side])
                                 comm_record(sides[side].record, sides[side].length,
                                             column[side], before, separator,
                                             text_delimiter);
                         remaining[side] = comm_advance(
-                            sides + side, text_delimiter,
-                            comm_order_mode != 'N',
-                            address_of disorder);
+                            sides + side, side, text_delimiter,
+                            address_of order);
                 }
         }
 
         bool failed = sides[0].reader.failed || sides[1].reader.failed;
-        bool order_failed = disorder &&
-            (comm_order_mode == 'C' || unpaired);
+        bool order_failed = order.warned[0] || order.warned[1];
 
-        if ((taking.flags & FILE_FLAG('T')) && !failed &&
-            !(disorder && comm_order_mode == 'C'))
+        if ((taking.flags & FILE_FLAG('T')) && !failed && !comm_stop)
         {
                 for (positive side = 0; side < array_count(totals); side++)
                 {
@@ -2704,7 +2739,8 @@ static b32 text_comm()
                 text_put_character(text_delimiter);
         }
 
-        if (order_failed)
+#undef comm_stop
+        if (order_failed && order.mode != 'C')
                 string_diagnostic(&text_diagnostic, 0, null, "input is not in sorted order");
 
         text_record_close(sides);
