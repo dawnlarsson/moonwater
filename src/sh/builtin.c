@@ -10819,6 +10819,24 @@ bool test_variable_set(string_address name)
 
                 if (!shell_valid_name(name, base))
                         return false;
+                //      a[@] and a[*] ask whether anything is set at all,
+                //      an element of an indexed array or a scalar's value;
+                //      an associative array looks up the key @ itself.
+                if (length - base == 3 &&
+                    (open[1] == '@' || open[1] == '*') &&
+                    !(shell_array_attributes(name, base) &
+                      SHELL_ARRAY_ASSOCIATIVE))
+                {
+                        if (shell_array_attributes(name, base) &
+                            SHELL_ARRAY_EITHER)
+                                return shell_array_length(name, base) != 0;
+                        p8 plain[256];
+
+                        if (base >= sizeof(plain))
+                                return false;
+                        memory_copy_end(plain, name, base);
+                        return env_get(plain) != null;
+                }
                 key = shell_expand_subscript(name, base, open + 1,
                                              length - base - 2,
                                              address_of key_length);
