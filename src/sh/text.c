@@ -8955,6 +8955,26 @@ static b32 text_tee()
                 goto finished;
         }
 
+        /*
+                One file named twice (tee out out) is written through two
+                descriptors, one after the other for each block read, so
+                what it ends up holding depends on the blocks: GNU reads
+                BUFSIZ, 8192 bytes, at a time, and so does tee then.
+        */
+        positive block = TEXT_READ_MAX;
+        file_facts seen_facts[2];
+
+        for (positive i = 1; i < count && block == TEXT_READ_MAX; i++)
+                for (positive j = 0; j < i && handles[i] >= 0; j++)
+                        if (handles[j] >= 0 &&
+                            text_handle_facts((positive)handles[i], address_of seen_facts[0]) &&
+                            text_handle_facts((positive)handles[j], address_of seen_facts[1]) &&
+                            file_same_identity(address_of seen_facts[0], address_of seen_facts[1]))
+                        {
+                                block = 8192;
+                                break;
+                        }
+
         bool watch = false;
 
         if (nopipe)
@@ -8999,7 +9019,8 @@ static b32 text_tee()
                         }
                 }
 
-                if (!text_fill())
+                if (text_input.position >= text_input.filled &&
+                    !text_fill_amount(block))
                         break;
 
                 p8 address_to at = text_input.buffer + text_input.position;
