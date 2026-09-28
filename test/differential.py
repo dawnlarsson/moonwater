@@ -15020,6 +15020,21 @@ def shell_lang_patsub_slash_tilde(rng):
         ("command", "stdin", "file"))
 
 
+#       ${!a[@]} alone lists subscripts, but with an operator after it bash
+#       reads ${!r<op>} whose r is the elements joined: a=(v) makes
+#       ${!a[@]:2} ${v:2}; no element is an invalid indirect expansion and a
+#       joined value that names nothing an invalid variable name. These
+#       applied the operator to the subscripts.
+def shell_lang_array_indirect_operators(rng):
+    target = rng.choice(("v1", "v2", "a1", "'a2[0]'", "'a3[@]'", "'x y'", "''"))
+    op = rng.choice((":2", ":1:2", ":-empty", ":+set", ":=assign", "#?", "%?", "//[a-f]", "//[a-f]/x", "@Q", "^^",
+                     "-d", "+s"))
+    return ("array-indirect-operators", shell_BASH, shell_program(
+        "v1=value; v2=; a1=(); a2=(element); a3=(1 2 3); declare -A ref=([k]=" + target + ")",
+        "printf '<%s>' \"${!ref[@]" + op + "}\"; echo", 'echo "st=$?"', "unset b; (echo \"${!b[@]" + op + "}\"); echo \"b=$?\"",
+        'printf "<%s>" "${!ref[@]}" "${!a3[*]}"; echo'), ("command", "stdin", "file"))
+
+
 #       printf's quoting and time conversions as bash 5.3 has them: %q takes
 #       a width and cuts the quoted text to the precision, %Q cuts the
 #       argument and quotes the rest, a quoted character is its code point
@@ -17971,6 +17986,7 @@ SHELL_FAMILIES = (
     shell_lang_editing_modes,
     shell_lang_nameref_indirect,
     shell_lang_patsub_slash_tilde,
+    shell_lang_array_indirect_operators,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,

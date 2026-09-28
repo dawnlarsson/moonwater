@@ -8234,6 +8234,87 @@ static PURE bool expand_indirect_element(string_address name, positive length)
         return shut == name + length - 1;
 }
 
+static COLD string_address expand_indirect_through(string_address name,
+                                                   positive length, p8 form,
+                                                   string_address rest,
+                                                   string_address close,
+                                                   bool quoted)
+{
+        positive tail = (positive)(close - rest);
+        p8 address_to joined_text;
+        string_address joined;
+        positive joined_length;
+        p8 address_to built;
+
+        if (!shell_array_length(name, length))
+        {
+                p8 which[2] = {form, end};
+
+                expand_where();
+                string_format(writer_stderr_once,
+                              "%s[%s]: invalid indirect expansion\n", name,
+                              which);
+                expand_indirect_error();
+                return close + 1;
+        }
+        {
+                positive count = shell_array_length(name, length);
+                positive room = 1;
+                shell_array_item address_to items;
+
+                if (count > positive_max / sizeof(items[0]) ||
+                    !(items = (shell_array_item address_to)shell_store_take(
+                          address_of expand_store, count * sizeof(items[0]))))
+                {
+                        expand_fail_state();
+                        return close + 1;
+                }
+                shell_array_items(name, length, items, count);
+                for (positive at = 0; at < count; at++)
+                        room += items[at].value_length + 1;
+                if (!(joined_text = shell_store_take(address_of expand_store,
+                                                     room)))
+                {
+                        expand_fail_state();
+                        return close + 1;
+                }
+                joined_length = 0;
+                for (positive at = 0; at < count; at++)
+                {
+                        if (at)
+                                joined_text[joined_length++] = ' ';
+                        memory_copy(joined_text + joined_length,
+                                    items[at].value, items[at].value_length);
+                        joined_length += items[at].value_length;
+                }
+                joined_text[joined_length] = end;
+                joined = joined_text;
+        }
+        if (!expand_parameter_name(joined, joined_length) &&
+            !expand_indirect_element(joined, joined_length))
+        {
+                expand_where();
+                string_format(writer_stderr_once,
+                              "%s: invalid variable name\n", joined);
+                expand_indirect_error();
+                return close + 1;
+        }
+        if (!(built = shell_store_take(address_of expand_store,
+                                       joined_length + tail + 4)))
+        {
+                expand_fail_state();
+                return close + 1;
+        }
+        built[0] = '$';
+        built[1] = '{';
+        memory_copy(built + 2, joined, joined_length);
+        memory_copy(built + 2 + joined_length, rest, tail);
+        built[2 + joined_length + tail] = '}';
+        built[3 + joined_length + tail] = end;
+        expand_braced_body(built, built + 2 + joined_length + tail, quoted);
+        return close + 1;
+}
+
 /*
         Whether ${#...} asks for a length. Only a whole parameter may follow
         the #: a name, a positional number or one special character, with a
@@ -8400,6 +8481,18 @@ static string_address expand_braced_body(string_address step,
                 step = shut + 1;
                 seen = string_get(step);
         }
+
+        /*
+                ${!a[@]} alone is the subscripts. With an operator after it
+                bash reads ${!r...} whose r is "${a[*]}": the elements,
+                joined, name the parameter the operator is applied to, so
+                a=(v) makes ${!a[@]:2} the same as ${v:2}.
+        */
+        if (array_form && (parameter_mode & EXPAND_PARAMETER_INDIRECT) &&
+            step < close && shell_bash_compat)
+                return expand_indirect_through(plain_name, plain_length,
+                                               array_form, step, close,
+                                               quoted);
 
         if (!array_form && !reference.key && (parameter_mode & EXPAND_PARAMETER_INDIRECT) &&
             expand_assignable_name(name) && step + 1 == close &&
