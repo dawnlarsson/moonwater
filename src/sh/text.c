@@ -26360,6 +26360,150 @@ static PURE bipolar sort_compare_number(p8 address_to a, positive la, p8 address
         return sort_compare_parsed(address_of one, address_of two);
 }
 
+/*
+        -g, which is strtold's answer compared, as GNU's general_numcompare
+        compares it: text that is no number at all first, then NaNs, a
+        negative one before a positive one as their printed forms order,
+        then every number in value order with -0 equal to 0.
+
+        The long double is the machine's own -- the x87 eighty bit format on
+        x86_64, binary128 on arm64 and riscv64 -- read by lib.util.c's
+        string_to_extended and never used as a number: its bits are taken
+        through a union and turned into an unsigned integer that orders as
+        the values do, a sign-magnitude flipped about the middle. That is
+        what keeps -g exact on 1.189731495357231765e+4932 and on subnormals
+        a double would round to zero, and it needs no floating point
+        instruction on any of the three, where a binary128 comparison would
+        be a call into a libgcc this does not link.
+
+        The key is copied so the text strtold reads ends where the key does:
+        only the bytes any number could be spelled with, after the blanks it
+        skips, so a long key that is mostly words costs a short copy.
+*/
+typedef struct
+{
+        p8 rank;
+        p128 order;
+} sort_general;
+
+enum
+{
+        SORT_GENERAL_NONE,
+        SORT_GENERAL_NAN,
+        SORT_GENERAL_NUMBER,
+};
+
+static inline INLINE bool sort_general_byte(p8 byte)
+{
+        return byte_is_alnum(byte) || byte == '.' || byte == '+' || byte == '-' ||
+               byte == '_' || byte == '(' || byte == ')';
+}
+
+static sort_general sort_general_of(p8 address_to text, positive length)
+{
+        sort_general out = {SORT_GENERAL_NONE, 0};
+        positive at = string_span_max(text, length, string_set_space);
+        positive stop = at;
+        p8 small[96];
+        p8 address_to copy = small;
+
+        while (stop < length && sort_general_byte(text[stop]))
+                stop++;
+
+        if (stop == at)
+                return out;
+
+        if (stop - at >= sizeof(small) &&
+            !(copy = memory_take(stop - at + 1)))
+                return out;
+
+        memory_copy(copy, text + at, stop - at);
+        copy[stop - at] = 0;
+
+        union
+        {
+                f128 value;
+                p128 bits;
+        } shape;
+        string_address stopped = copy;
+
+        shape.bits = 0;
+        shape.value = string_to_extended(copy, address_of stopped);
+
+        bool converted = stopped != copy;
+
+        if (copy != small)
+                memory_give(copy);
+
+        if (!converted)
+                return out;
+
+#if __LDBL_MANT_DIG__ == 64
+        p128 bits = shape.bits & (((p128)1 << 80) - 1);
+        bool negative = (bits >> 79) & 1;
+        p128 magnitude = bits & (((p128)1 << 79) - 1);
+        bool not_a_number = (magnitude >> 64) == 0x7fff && ((p64)magnitude << 1);
+        p128 middle = (p128)1 << 80;
+#else
+        p128 bits = shape.bits;
+        bool negative = (bits >> 127) & 1;
+        p128 magnitude = bits & (((p128)1 << 127) - 1);
+        bool not_a_number = magnitude > ((p128)0x7fff << 112);
+        p128 middle = (p128)1 << 127;
+#endif
+
+        if (not_a_number)
+        {
+                out.rank = SORT_GENERAL_NAN;
+                out.order = !negative;
+                return out;
+        }
+
+        out.rank = SORT_GENERAL_NUMBER;
+        out.order = negative ? middle - magnitude : middle + magnitude;
+        return out;
+}
+
+/*
+        The same order as a radix window: the rank in the top two bits, then
+        as much of the value's ordered bits as the other sixty two hold. A
+        window is the whole answer when the bits it drops are zero, which
+        every integer and short fraction has, so the radix settles most keys
+        and only values that agree in their first sixty two bits are read
+        again.
+*/
+#if __LDBL_MANT_DIG__ == 64
+#define SORT_GENERAL_DROPPED 19
+#else
+#define SORT_GENERAL_DROPPED 66
+#endif
+
+static p64 sort_general_window(p8 address_to text, positive length,
+                               bool address_to exact)
+{
+        sort_general value = sort_general_of(text, length);
+
+        if (value.rank != SORT_GENERAL_NUMBER)
+        {
+                address_to exact = true;
+                return (p64)value.rank << 62 | (p64)value.order;
+        }
+
+        address_to exact = !(value.order & (((p128)1 << SORT_GENERAL_DROPPED) - 1));
+        return (p64)SORT_GENERAL_NUMBER << 62 | (p64)(value.order >> SORT_GENERAL_DROPPED);
+}
+
+static bipolar sort_compare_general(p8 address_to a, positive la, p8 address_to b, positive lb)
+{
+        sort_general one = sort_general_of(a, la);
+        sort_general two = sort_general_of(b, lb);
+
+        if (one.rank != two.rank)
+                return one.rank < two.rank ? -1 : 1;
+
+        return one.order == two.order ? 0 : one.order < two.order ? -1 : 1;
+}
+
 static bool sort_looked_at(p8 character, positive how)
 {
         // -d keeps blanks and alphanumerics; -i keeps what a terminal would
@@ -26702,6 +26846,9 @@ static PURE bipolar sort_compare_kind(p8 kind, positive how, p8 address_to a, po
         if (kind == 'n')
                 return sort_compare_number(a, la, b, lb);
 
+        if (kind == 'g')
+                return sort_compare_general(a, la, b, lb);
+
         if (kind == 'h')
                 return sort_compare_human(a, la, b, lb);
 
@@ -26857,7 +27004,8 @@ static fn sort_stages_ready()
                 sort_stage_reverse[stage] = order->reverse;
                 sort_stage_fold[stage] = (order->how & SORT_FOLD) != 0;
                 sort_stage_kind[stage] =
-                    order->kind == 'n' || order->kind == 'M' ? SORT_STAGE_WINDOW
+                    order->kind == 'n' || order->kind == 'M' || order->kind == 'g'
+                        ? SORT_STAGE_WINDOW
                     : !order->kind && !(order->how & ~(positive)SORT_FOLD)
                         ? SORT_STAGE_BYTES
                         : SORT_STAGE_COMPARE;
@@ -27091,10 +27239,13 @@ static inline INLINE fn sort_item_window(sort_item address_to item,
         {
                 bool exact = true;
 
-                window = sort_keys[stage].order.kind == 'n'
-                             ? sort_number_window(view->at + from, to - from,
-                                                  address_of exact)
-                             : (p64)sort_month_of(view->at + from, to - from) << 56;
+                p8 kind = sort_keys[stage].order.kind;
+
+                window = kind == 'n'   ? sort_number_window(view->at + from, to - from,
+                                                            address_of exact)
+                         : kind == 'g' ? sort_general_window(view->at + from, to - from,
+                                                             address_of exact)
+                                       : (p64)sort_month_of(view->at + from, to - from) << 56;
                 item->left = exact ? 8 : 9;
         }
         else
@@ -30021,6 +30172,7 @@ static p8 sort_kind_bit(p8 letter)
 {
         switch (letter)
         {
+        case 'g': return SORT_KIND_G;
         case 'h': return SORT_KIND_H;
         case 'M': return SORT_KIND_M;
         case 'n': return SORT_KIND_N;
@@ -30282,6 +30434,7 @@ static const argument_option sort_options[] = {
     {"ignore-leading-blanks", 'b'},
     {"dictionary-order", 'd'},
     {"ignore-case", 'f'},
+    {"general-numeric-sort", 'g'},
     {"ignore-nonprinting", 'i'},
     {"human-numeric-sort", 'h'},
     {"month-sort", 'M'},
@@ -30798,8 +30951,7 @@ static bool sort_key_seen(p8 letter, string_address value)
                 return false;
         }
 
-        if (letter == 'W' && (string_equals(value, "general-numeric") ||
-                              string_equals(value, "random")))
+        if (letter == 'W' && string_equals(value, "random"))
         {
                 sort_option_status = 1;
                 return string_diagnostic(&text_diagnostic, 0, value, "invalid argument for --sort");
