@@ -31,6 +31,10 @@ typedef struct
         bool variable_length;
 } checksum_algorithm;
 
+/* SHA-3 and SM3 have their cores below, not in the library's streamer. */
+#define CHECKSUM_DIGEST_SHA3 16
+#define CHECKSUM_DIGEST_SM3 17
+
 static const checksum_algorithm checksum_algorithms[] = {
     {(string_address) "b2sum", (string_address) "blake2b",
      (string_address) "BLAKE2b", DIGEST_BLAKE2B, 64, true},
@@ -46,11 +50,24 @@ static const checksum_algorithm checksum_algorithms[] = {
      (string_address) "SHA384", DIGEST_SHA384, 48, false},
     {(string_address) "sha512sum", (string_address) "sha512",
      (string_address) "SHA512", DIGEST_SHA512, 64, false},
+    //  Only cksum -a names these; no command is spelled like the empty one.
+    {(string_address) "", (string_address) "sha3-224",
+     (string_address) "SHA3-224", CHECKSUM_DIGEST_SHA3, 28, false},
+    {(string_address) "", (string_address) "sha3-256",
+     (string_address) "SHA3-256", CHECKSUM_DIGEST_SHA3, 32, false},
+    {(string_address) "", (string_address) "sha3-384",
+     (string_address) "SHA3-384", CHECKSUM_DIGEST_SHA3, 48, false},
+    {(string_address) "", (string_address) "sha3-512",
+     (string_address) "SHA3-512", CHECKSUM_DIGEST_SHA3, 64, false},
+    {(string_address) "", (string_address) "sm3",
+     (string_address) "SM3", CHECKSUM_DIGEST_SM3, 32, false},
 };
 
 #define CHECKSUM_INTERRUPTED (-4)
 #define CHECKSUM_SHA2_FIRST 3
 #define CHECKSUM_SHA2_LAST 6
+#define CHECKSUM_SHA3_FIRST 7
+#define CHECKSUM_SHA3_LAST 10
 
 typedef struct { p8 style, mode, verify; } checksum_selection;
 _Static_assert(sizeof(checksum_selection) <= 16, "selection record fits its mask");
@@ -84,7 +101,7 @@ static bool checksum_raw;
 static positive checksum_length;
 /* cksum -a sha2 --check without -l: each record's own width picks which of
    the four SHA-2 digests reads it. */
-static bool checksum_sha2_family;
+static positive checksum_sha2_family;
 /* Which untagged record shape this invocation's check run settled on:
    -1 before the first, 0 the standard "digest  name", 1 the reversed BSD
    "digest name". */
@@ -111,7 +128,7 @@ static fn checksum_modes_reset()
         checksum_base64 = false;
         checksum_raw = false;
         checksum_length = 0;
-        checksum_sha2_family = false;
+        checksum_sha2_family = 0;
         checksum_bsd_reversed = -1;
         checksum_base64_read = false;
 }
@@ -122,6 +139,11 @@ static positive checksum_base64_length(positive bytes)
 }
 
 /* A base64 digest of exactly bytes bytes, padding and all, into expected. */
+/* A base64 digest whose last character carries bits past the digest is
+   still a digest to coreutils, which compares spellings: it is read, and it
+   can never match. */
+static bool checksum_base64_loose;
+
 static bool checksum_base64_decode(string_address text, positive length,
                                    positive bytes, p8 address_to expected)
 {
@@ -159,7 +181,8 @@ static bool checksum_base64_decode(string_address text, positive length,
                 }
         }
 
-        return made == bytes && !held;
+        checksum_base64_loose = held != 0;
+        return made == bytes;
 }
 
 /* The digest of a record, hex or (for cksum) base64, at its width. */
@@ -216,25 +239,46 @@ static b32 checksum_refuse_modes(string_address command, bool checking,
             "Try '%s --help' for more information.\n", command, verifying, command));
 }
 
-/* A length in bits as coreutils reads one: decimal digits and nothing else. */
-static bool checksum_decimal(string_address text, positive address_to value)
+/*
+        A length in bits as coreutils reads one, through strtoimax: blanks,
+        a sign, then decimal digits and nothing after them. A number past
+        the largest is quietly the largest, which the width checks then
+        refuse; a negative one is out of range and says so. The answer is
+        the tail the complaint takes, null when the length is good.
+*/
+static string_address checksum_decimal(string_address text, positive address_to value)
 {
         positive total = 0;
+        bool negative = false, digits = false;
 
-        if (!text || !string_get(text))
-                return false;
+        if (!text)
+                return (string_address) "";
+
+        while (string_get(text) == ' ' ||
+               ((p8)string_get(text) >= '\t' && (p8)string_get(text) <= '\r'))
+                text++;
+        if (string_get(text) == '+' || string_get(text) == '-')
+                negative = string_get(text++) == '-';
 
         for (; string_get(text); text++)
         {
                 positive digit = (positive)(p8)string_get(text) - '0';
 
-                if (digit > 9 || total > (((positive)-1) - digit) / 10)
-                        return false;
-                total = total * 10 + digit;
+                if (digit > 9)
+                        return (string_address) "";
+                digits = true;
+                total = total > ((positive)bipolar_max - digit) / 10
+                            ? (positive)bipolar_max
+                            : total * 10 + digit;
         }
 
+        if (!digits)
+                return (string_address) "";
+        if (negative && total)
+                return (string_address) ": Value too large for defined data type";
+
         address_to value = total;
-        return true;
+        return null;
 }
 
 /* -l for BLAKE2b, in coreutils' order and words: a number, at most 512 bits,
@@ -243,12 +287,13 @@ static b32 checksum_blake2b_length(string_address program, string_address text,
                                    positive address_to bytes)
 {
         positive bits;
+        string_address why = checksum_decimal(text, address_of bits);
 
-        if (!checksum_decimal(text, address_of bits))
+        if (why)
         {
                 text_flush();
                 return text_done(string_report(writer_stderr, 1,
-                    "%s: invalid length: '%w'\n", program, writer_terminal_quoted_name, text));
+                    "%s: invalid length: '%w'%s\n", program, writer_terminal_quoted_name, text, why));
         }
         if (bits > 512)
         {
@@ -311,6 +356,201 @@ static bipolar checksum_open(string_address path, bool address_to standard)
 
 /* One file's digest: read into block, a FILE_TRANSFER_SIZE buffer the
    calling thread owns, and hashed where it lies. */
+/*
+        SHA-3 and SM3, which only cksum -a asks for and nothing else in the
+        system hashes with, so they stay here rather than beside the library's
+        cores: Keccak-f[1600] under the SHA-3 padding (rate 200 bytes less
+        twice the digest), and SM3's Merkle-Damgard rounds over SHA-256's
+        padding. Plain C; neither has a floor to hold.
+*/
+#define checksum_rotl32(x, n) (((x) << (n)) | ((x) >> ((32 - (n)) & 31)))
+#define checksum_rotl64(x, n) (((x) << (n)) | ((x) >> ((64 - (n)) & 63)))
+
+static fn checksum_keccak(p64 address_to a)
+{
+        static const p64 round[24] = {
+            0x0000000000000001ull, 0x0000000000008082ull, 0x800000000000808aull,
+            0x8000000080008000ull, 0x000000000000808bull, 0x0000000080000001ull,
+            0x8000000080008081ull, 0x8000000000008009ull, 0x000000000000008aull,
+            0x0000000000000088ull, 0x0000000080008009ull, 0x000000008000000aull,
+            0x000000008000808bull, 0x800000000000008bull, 0x8000000000008089ull,
+            0x8000000000008003ull, 0x8000000000008002ull, 0x8000000000000080ull,
+            0x000000000000800aull, 0x800000008000000aull, 0x8000000080008081ull,
+            0x8000000000008080ull, 0x0000000080000001ull, 0x8000000080008008ull,
+        };
+        static const p8 rho[25] = {
+            0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43,
+            25, 39, 41, 45, 15, 21, 8, 18, 2, 61, 56, 14,
+        };
+
+        for (positive r = 0; r < 24; r++)
+        {
+                p64 c[5], b[25];
+
+                for (positive x = 0; x < 5; x++)
+                        c[x] = a[x] ^ a[x + 5] ^ a[x + 10] ^ a[x + 15] ^ a[x + 20];
+                for (positive x = 0; x < 5; x++)
+                {
+                        p64 d = c[(x + 4) % 5] ^ checksum_rotl64(c[(x + 1) % 5], 1);
+
+                        for (positive y = 0; y < 25; y += 5)
+                                a[y + x] ^= d;
+                }
+                // rho and pi: lane (x, y) moves to (y, 2x + 3y).
+                for (positive x = 0; x < 5; x++)
+                        for (positive y = 0; y < 5; y++)
+                                b[y + 5 * ((2 * x + 3 * y) % 5)] =
+                                    checksum_rotl64(a[x + 5 * y], rho[x + 5 * y]);
+                for (positive y = 0; y < 25; y += 5)
+                        for (positive x = 0; x < 5; x++)
+                                a[y + x] = b[y + x] ^
+                                           (~b[y + (x + 1) % 5] & b[y + (x + 2) % 5]);
+                a[0] ^= round[r];
+        }
+}
+
+static fn checksum_sm3_block(p32 address_to v, const p8 address_to data)
+{
+        p32 w[68];
+
+        for (positive j = 0; j < 16; j++)
+                w[j] = (p32)data[4 * j] << 24 | (p32)data[4 * j + 1] << 16 |
+                       (p32)data[4 * j + 2] << 8 | data[4 * j + 3];
+        for (positive j = 16; j < 68; j++)
+        {
+                p32 x = w[j - 16] ^ w[j - 9] ^ checksum_rotl32(w[j - 3], 15);
+
+                w[j] = (x ^ checksum_rotl32(x, 15) ^ checksum_rotl32(x, 23)) ^
+                       checksum_rotl32(w[j - 13], 7) ^ w[j - 6];
+        }
+
+        p32 a = v[0], b = v[1], c = v[2], d = v[3];
+        p32 e = v[4], f = v[5], g = v[6], h = v[7];
+
+        for (positive j = 0; j < 64; j++)
+        {
+                p32 t = j < 16 ? 0x79cc4519u : 0x7a879d8au;
+                p32 a12 = checksum_rotl32(a, 12);
+                p32 ss1 = checksum_rotl32(a12 + e + checksum_rotl32(t, j % 32), 7);
+                p32 ss2 = ss1 ^ a12;
+                p32 ff = j < 16 ? a ^ b ^ c : (a & b) | (a & c) | (b & c);
+                p32 gg = j < 16 ? e ^ f ^ g : (e & f) | (~e & g);
+                p32 tt1 = ff + d + ss2 + (w[j] ^ w[j + 4]);
+                p32 tt2 = gg + h + ss1 + w[j];
+
+                d = c;
+                c = checksum_rotl32(b, 9);
+                b = a;
+                a = tt1;
+                h = g;
+                g = checksum_rotl32(f, 19);
+                f = e;
+                e = tt2 ^ checksum_rotl32(tt2, 9) ^ checksum_rotl32(tt2, 17);
+        }
+
+        v[0] ^= a; v[1] ^= b; v[2] ^= c; v[3] ^= d;
+        v[4] ^= e; v[5] ^= f; v[6] ^= g; v[7] ^= h;
+}
+
+typedef struct
+{
+        p64 lanes[25];
+        p32 words[8];
+        p8 block[144];
+        positive used, rate, size;
+        p64 bytes;
+        bool sm3;
+} checksum_sponge;
+
+static fn checksum_sponge_block(checksum_sponge address_to s, const p8 address_to data)
+{
+        if (s->sm3)
+        {
+                checksum_sm3_block(s->words, data);
+                return;
+        }
+        for (positive lane = 0; lane < s->rate / 8; lane++)
+        {
+                p64 value = 0;
+
+                for (positive at = 0; at < 8; at++)
+                        value |= (p64)data[lane * 8 + at] << (8 * at);
+                s->lanes[lane] ^= value;
+        }
+        checksum_keccak(s->lanes);
+}
+
+static fn checksum_sponge_open(checksum_sponge address_to s, bool sm3,
+                               positive size)
+{
+        static const p32 initial[8] = {
+            0x7380166f, 0x4914b2b9, 0x172442d7, 0xda8a0600,
+            0xa96f30bc, 0x163138aa, 0xe38dee4d, 0xb0fb0e4e,
+        };
+
+        memory_fill(s, 0, sizeof(address_to s));
+        s->sm3 = sm3;
+        s->size = size;
+        s->rate = sm3 ? 64 : 200 - 2 * size;
+        memory_copy(s->words, initial, sizeof(initial));
+}
+
+static fn checksum_sponge_write(checksum_sponge address_to s,
+                                const p8 address_to data, positive length)
+{
+        s->bytes += length;
+        while (length)
+        {
+                if (!s->used && length >= s->rate)
+                {
+                        checksum_sponge_block(s, data);
+                        data += s->rate;
+                        length -= s->rate;
+                        continue;
+                }
+
+                positive take = min(length, s->rate - s->used);
+
+                memory_copy(s->block + s->used, data, take);
+                s->used += take;
+                data += take;
+                length -= take;
+                if (s->used == s->rate)
+                {
+                        checksum_sponge_block(s, s->block);
+                        s->used = 0;
+                }
+        }
+}
+
+static fn checksum_sponge_close(checksum_sponge address_to s, p8 address_to out)
+{
+        memory_fill(s->block + s->used, 0, s->rate - s->used);
+        if (!s->sm3)
+        {
+                s->block[s->used] = 0x06;
+                s->block[s->rate - 1] |= 0x80;
+                checksum_sponge_block(s, s->block);
+                for (positive at = 0; at < s->size; at++)
+                        out[at] = (p8)(s->lanes[at / 8] >> (8 * (at % 8)));
+                return;
+        }
+
+        p64 bits = s->bytes << 3;
+
+        s->block[s->used] = 0x80;
+        if (s->used + 1 > 56)
+        {
+                checksum_sponge_block(s, s->block);
+                memory_fill(s->block, 0, 64);
+        }
+        for (positive at = 0; at < 8; at++)
+                s->block[63 - at] = (p8)(bits >> (8 * at));
+        checksum_sponge_block(s, s->block);
+        for (positive at = 0; at < 32; at++)
+                out[at] = (p8)(s->words[at / 4] >> (24 - 8 * (at % 4)));
+}
+
 static bipolar checksum_hash_path(const checksum_algorithm address_to algorithm,
                                    positive bytes, string_address path,
                                    p8 address_to digest, p8 address_to block)
@@ -321,8 +561,27 @@ static bipolar checksum_hash_path(const checksum_algorithm address_to algorithm,
         if (input < 0)
                 return input;
 
-        digest_state state;
         bipolar got;
+
+        if (algorithm->algorithm >= CHECKSUM_DIGEST_SHA3)
+        {
+                checksum_sponge sponge;
+
+                checksum_sponge_open(address_of sponge,
+                                     algorithm->algorithm == CHECKSUM_DIGEST_SM3,
+                                     bytes);
+                while ((got = system_read_retry((positive)input, block,
+                                                FILE_TRANSFER_SIZE)) > 0)
+                        checksum_sponge_write(address_of sponge, block, (positive)got);
+                if (!standard)
+                        system_close((positive)input);
+                if (got < 0)
+                        return got;
+                checksum_sponge_close(address_of sponge, digest);
+                return 0;
+        }
+
+        digest_state state;
 
         digest_open(address_of state, algorithm->algorithm, bytes);
         while ((got = system_read_retry((positive)input, block,
@@ -817,10 +1076,19 @@ static bool checksum_line_parse(const checksum_algorithm address_to algorithm,
                 */
                 bool accepted = !algorithm || one == algorithm ||
                                 (checksum_sha2_family &&
-                                 one >= checksum_algorithms + CHECKSUM_SHA2_FIRST &&
-                                 one <= checksum_algorithms + CHECKSUM_SHA2_LAST);
+                                 one >= checksum_algorithms + checksum_sha2_family &&
+                                 one <= checksum_algorithms + checksum_sha2_family + 3);
+                //      A malformed line later is called by the family a
+                //      SHA2-NNN or SHA3-NNN tag names, and by its own label
+                //      otherwise.
                 if (!algorithm)
-                        checksum_check_label = one->label;
+                        checksum_check_label =
+                            !string_compare_max(text_line + at, "SHA2-", 5)
+                                ? (string_address) "SHA2"
+                            : one >= checksum_algorithms + CHECKSUM_SHA3_FIRST &&
+                                      one <= checksum_algorithms + CHECKSUM_SHA3_LAST
+                                ? (string_address) "SHA3"
+                                : one->label;
                 if (!accepted)
                         return false;
                 // A tag without a width is the algorithm's full one,
@@ -895,8 +1163,8 @@ static bool checksum_line_parse(const checksum_algorithm address_to algorithm,
                         else
                         {
                                 one = null;
-                                for (positive which = CHECKSUM_SHA2_FIRST;
-                                     which <= CHECKSUM_SHA2_LAST; which++)
+                                for (positive which = checksum_sha2_family;
+                                     which <= checksum_sha2_family + 3; which++)
                                         if (width == (positive)checksum_algorithms[which].bytes)
                                                 one = checksum_algorithms + which;
                                 if (!one)
@@ -1025,6 +1293,7 @@ typedef struct
         positive line;
         positive name;
         p8 width;
+        bool loose;
         p8 expected[64];
 } checksum_record;
 
@@ -1093,11 +1362,15 @@ static fn checksum_check_collect(checksum_check_run address_to run)
                 positive bytes;
 
                 line++;
-                // An empty record is passed over in silence.
-                if (!text_line_length)
+                // An empty record is passed over in silence, and so is a
+                // comment -- a line whose first byte is '#' -- and a line
+                // that is nothing but the CR of a CR LF ending.
+                if (!text_line_length || text_line[0] == '#' ||
+                    (text_line_length == 1 && text_line[0] == '\r'))
                         continue;
 
                 record.line = line;
+                checksum_base64_loose = false;
                 if (checksum_line_parse(run->algorithm, address_of one,
                                         address_of bytes, record.expected,
                                         address_of filename))
@@ -1111,6 +1384,7 @@ static fn checksum_check_collect(checksum_check_run address_to run)
                         memory_copy(run->names + run->names_used, filename, length);
                         record.algorithm = one;
                         record.width = (p8)bytes;
+                        record.loose = checksum_base64_loose;
                         record.name = run->names_used;
                         run->names_used += length;
                 }
@@ -1206,7 +1480,8 @@ static fn checksum_check_one(checksum_check_run address_to run,
         }
 
         run->verified++;
-        if (memory_compare(record->expected, answer->digest, record->width))
+        if (record->loose ||
+            memory_compare(record->expected, answer->digest, record->width))
         {
                 run->mismatched++;
                 run->failed = true;
@@ -1540,6 +1815,64 @@ static fn cksum_debug_say(address_any data, positive length)
                 cksum_debug_lost = true;
 }
 
+/*
+        coreutils asks the CPU for each accelerated CRC and lets
+        GLIBC_TUNABLES=glibc.cpu.hwcaps=-NAME,... switch one off: the last
+        glibc.cpu.hwcaps= in the variable holds, up to the next colon, and a
+        name counts only whole. --debug says which it tried and which it
+        took, and the test suite turns them off to see the words change.
+*/
+static bool cksum_hwcap_allowed(string_address name)
+{
+        string_address tunables = file_environment("GLIBC_TUNABLES");
+        string_address caps = null;
+        if (!tunables)
+                return true;
+
+        for (string_address at = tunables; *at; at++)
+                if (string_has_prefix(at, "glibc.cpu.hwcaps="))
+                        caps = at + sizeof("glibc.cpu.hwcaps=") - 1;
+
+        if (!caps)
+                return true;
+
+        positive length = string_length(name);
+
+        for (string_address at = caps; *at && *at != ':'; )
+        {
+                string_address word = at;
+
+                while (*at && *at != ',' && *at != ':')
+                        at++;
+                if ((positive)(at - word) == length + 1 && word[0] == '-' &&
+                    !memory_compare(word + 1, name, length))
+                        return false;
+                if (*at == ',')
+                        at++;
+        }
+
+        return true;
+}
+
+static bool cksum_pclmul_usable()
+{
+#if X64 && !defined(KERNEL_MODE)
+        return cpu_has_pclmul && cpu_has_avx2 &&
+               cksum_hwcap_allowed("AVX") && cksum_hwcap_allowed("PCLMULQDQ");
+#else
+        return false;
+#endif
+}
+
+static fn cksum_debug_line(string_address kind, bool taken)
+{
+        text_flush();
+        string_format(cksum_debug_say,
+                      taken ? "cksum: using %s hardware support\n"
+                            : "cksum: %s support not detected\n",
+                      kind);
+}
+
 static bool cksum_other_path(p8 kind, string_address path, bool debug,
                              p32 address_to result, p64 address_to size)
 {
@@ -1552,12 +1885,9 @@ static bool cksum_other_path(p8 kind, string_address path, bool debug,
         // coreutils names the crc32b machinery for every input it reads.
         if (debug && kind == 'c')
         {
-                text_flush();
-                string_format(cksum_debug_say, "cksum: using %s hardware support\n",
-#if !defined(KERNEL_MODE) && (X64 || ARM64 || RISCV64)
-                              cpu_has_pclmul ? (string_address) "pclmul" :
+#if X64 && !defined(KERNEL_MODE)
+                cksum_debug_line("pclmul", cksum_pclmul_usable());
 #endif
-                              (string_address) "generic");
         }
 
         p32 sum = kind == 'c' ? ~(p32)0 : 0;
@@ -1681,10 +2011,13 @@ static b32 cksum_others(p8 kind, bool debug)
         return text_done(answer);
 }
 
-/* -a sha2 -l N: the SHA-2 digest N bits wide, or null for any other N. */
-static const checksum_algorithm address_to cksum_sha2_width(positive bits)
+/* -a sha2 or sha3 -l N: the family's digest N bits wide, or null for any
+   other N. first is the family's first row, CHECKSUM_SHA2_FIRST or
+   CHECKSUM_SHA3_FIRST. */
+static const checksum_algorithm address_to cksum_sha2_width(positive first,
+                                                            positive bits)
 {
-        for (positive which = CHECKSUM_SHA2_FIRST; which <= CHECKSUM_SHA2_LAST; which++)
+        for (positive which = first; which <= first + 3; which++)
                 if ((positive)checksum_algorithms[which].bytes * 8 == bits)
                         return checksum_algorithms + which;
         return null;
@@ -1775,11 +2108,13 @@ static b32 cksum_main()
                 zero is no length at all -- it asks for the algorithm's own
                 width -- so it does not reach the second.
         */
-        if (lengthed && !checksum_decimal(length, address_of bits))
+        string_address why = lengthed ? checksum_decimal(length, address_of bits) : null;
+
+        if (why)
         {
                 text_flush();
                 return text_done(string_report(writer_stderr, 1,
-                    "cksum: invalid length: '%w'\n", writer_terminal_quoted_name, length));
+                    "cksum: invalid length: '%w'%s\n", writer_terminal_quoted_name, length, why));
         }
         if (lengthed && bits && !blake2b && !sha2 && !sha3)
         {
@@ -1794,7 +2129,9 @@ static b32 cksum_main()
                 if (refused)
                         return refused;
         }
-        if (lengthed && (sha2 || sha3) && !cksum_sha2_width(bits))
+        positive family = sha2 ? CHECKSUM_SHA2_FIRST : CHECKSUM_SHA3_FIRST;
+
+        if (lengthed && (sha2 || sha3) && !cksum_sha2_width(family, bits))
         {
                 text_flush();
                 return text_done(string_report(writer_stderr, 1,
@@ -1838,10 +2175,10 @@ static b32 cksum_main()
         // The digest an --algorithm names; SHA-2 by the width -l gave it.
         const checksum_algorithm address_to digest = null;
 
-        if (sha2)
-                digest = bits ? cksum_sha2_width(bits)
-                              : checksum_algorithms + CHECKSUM_SHA2_FIRST + 1;
-        else if (algorithm && !sha3)
+        if (sha2 || sha3)
+                digest = bits ? cksum_sha2_width(family, bits)
+                              : checksum_algorithms + family + 1;
+        else if (algorithm)
                 digest = checksum_algorithm_find(algorithm, true);
 
         if (checking)
@@ -1849,18 +2186,20 @@ static b32 cksum_main()
                 /*
                         Without --algorithm the reference reads whichever
                         algorithm each tagged line names; with one, that
-                        algorithm reads every line, tagged or not. sha2
-                        without a width reads each record at the width its
-                        digits have.
+                        algorithm reads every line, tagged or not. sha2 and
+                        sha3 read each record at the width its tag or its
+                        digits have, whatever -l said: the reference checks
+                        the -l it is given and then reads by the record.
                 */
                 if (algorithm && !digest)
                         return text_done(string_diagnostic(address_of text_diagnostic, 1, algorithm, "algorithm is not supported by the available checksum engine"));
 
-                checksum_sha2_family = sha2 && !bits;
+                checksum_sha2_family = sha2 || sha3 ? family : 0;
                 checksum_base64_read = true;
                 checksum_manifest_files = true;
                 checksum_program = (string_address) "cksum";
-                checksum_check_label = sha2 ? (string_address) "SHA2"
+                checksum_check_label = sha2   ? (string_address) "SHA2"
+                                       : sha3 ? (string_address) "SHA3"
                                        : digest ? digest->label
                                                 : (string_address) "CRC";
                 return text_done(checksum_verify(digest, address_of taking));
@@ -1888,16 +2227,24 @@ static b32 cksum_main()
         /* --debug names the machinery the CRC is computed with, once. */
         if (debug)
         {
-                string_address machinery = (string_address) "generic";
 #if X64 && !defined(KERNEL_MODE)
-                if (cpu_has_pclmul && cpu_has_vpclmul && cpu_has_avx512)
-                        machinery = (string_address) "avx512";
-                else if (cpu_has_pclmul)
-                        machinery = (string_address) "pclmul";
+                bool avx512 = cpu_has_avx512 && cpu_has_vpclmul &&
+                              cksum_hwcap_allowed("AVX512F") &&
+                              cksum_hwcap_allowed("AVX512BW") &&
+                              cksum_hwcap_allowed("VPCLMULQDQ");
+
+                cksum_debug_line("avx512", avx512);
+                if (!avx512)
+                {
+                        bool avx2 = cpu_has_avx2 && cpu_has_vpclmul &&
+                                    cksum_hwcap_allowed("AVX2") &&
+                                    cksum_hwcap_allowed("VPCLMULQDQ");
+
+                        cksum_debug_line("avx2", avx2);
+                        if (!avx2)
+                                cksum_debug_line("pclmul", cksum_pclmul_usable());
+                }
 #endif
-                text_flush();
-                string_format(cksum_debug_say, "cksum: using %s hardware support\n",
-                              machinery);
         }
 
         b32 answered = cksum_others('p', debug);

@@ -9760,6 +9760,13 @@ def misc_sum_forms(algorithm, tag):
 
 for misc_name, (misc_algorithm, misc_tag) in misc_SUMS.items():
     INPUTS["misc_sums_forms_" + misc_name] = misc_sum_forms(misc_algorithm, misc_tag)
+#   cksum's SHA-3 read the same ways, and a manifest with a comment, a line
+#   that is only a CR, and a base64 digest whose last character carries bits
+#   past the digest: coreutils skips the first two and reads the third as a
+#   digest that cannot match.
+INPUTS["misc_sums_forms_sha3"] = misc_sum_forms("sha3_256", b"SHA3-256")
+INPUTS["misc_sums_commented"] = (b"# a comment\n#\n\r\n" + misc_hex("md5", misc_basic_bytes("a.txt"))
+                                 + b"  a.txt\n" + b"1B2M2Y8AsgTpgAmY7PhCfh==  empty\n")
 misc_FIXTURE["sums.crc"] = b"".join(
     b"%d %d %s\n" % (0, len(misc_basic_bytes(name)), name.encode()) for name in ("a.txt", "empty"))
 FIXTURES["misc"] = misc_FIXTURE
@@ -10185,7 +10192,8 @@ def misc_checksum(name, variable_length=False):
                Option("-z"), Option("--ignore-missing"), Option("--quiet"), Option("--status"),
                Option("--strict"), Option("-w")]
     if variable_length:
-        options.append(Option("-l", ("8", "128", "256", "512", "0", "7", "513", "bad"), None))
+        options.append(Option("-l", ("8", "128", "256", "512", "0", "7", "513", "bad", " 8", "+8", "-0", "-1",
+                                     "18446744073709551616", "08", "0x10", ""), None))
     return Utility(
         name, options=tuple(options),
         extra=(("--text", "a.txt"), ("--zero", "a.txt", "b.txt"), ("--warn", "-c", "sums." + name + ".bad"),
@@ -10197,7 +10205,8 @@ def misc_checksum(name, variable_length=False):
                   ("sums." + name, "sums.malformed"), ("sums.malformed", "sums." + name),
                   ("sums." + name, "empty"), ("sums." + name, "missing"), ("-", "-"),
                   ("sums." + name + ".tagged",), ("sums.md5sum",), ("sums.sha256sum.bad",)),
-        stdin=("text", "empty", "misc_sums_" + name, "misc_sums_malformed", "misc_sums_forms_" + name, "edge_65535",
+        stdin=("text", "empty", "misc_sums_" + name, "misc_sums_malformed", "misc_sums_forms_" + name,
+               "misc_sums_commented", "edge_65535",
                "edge_65536", "edge_65537", "long", "nul", "high", "nonl"),
         fixture="misc", stderr="exact")
 
@@ -10568,7 +10577,7 @@ MISC_UTILITIES = (
     misc_checksum("b2sum", variable_length=True),
     Utility("cksum",
             options=(Option("-a", ("crc", "crc32b", "bsd", "sysv", "md5", "sha1", "sha224", "sha256", "sha384",
-                                   "sha512", "sha2", "blake2b", "bad", ""), None),
+                                   "sha512", "sha2", "sha3", "sm3", "blake2b", "bad", ""), None),
                      Option("--algorithm", ("crc", "sha256", "blake2b"), True),
                      Option("--base64"), Option("--raw"), Option("--tag"), Option("--untagged"), Option("-z"),
                      Option("-c"), Option("--check"), Option("-l", ("256", "0", "8", "224", "384", "512", "7", "513", "bad"), None),
@@ -10585,6 +10594,17 @@ MISC_UTILITIES = (
             extra=tuple({"argv": argv, "stdin": "misc_sums_forms_" + name, "fixture": "misc"}
                         for name in ("md5sum", "sha256sum", "b2sum", "sha512sum")
                         for argv in (("-c", "-"), ("-c", "-w", "-"), ("-a", name[:-3].replace("b2", "blake2b"), "-c", "-"))) +
+                  tuple({"argv": argv, "stdin": "misc_sums_forms_sha3", "fixture": "misc"}
+                        for argv in (("-c", "-"), ("-c", "-w", "-"), ("-a", "sha3", "-c", "-"),
+                                     ("-a", "sha3", "-l", "256", "-c", "-"), ("-a", "sha3", "-l", "384", "-c", "-"))) +
+                  tuple({"argv": argv, "stdin": "misc_sums_commented", "fixture": "misc"}
+                        for argv in (("-c", "-"), ("-a", "md5", "-c", "-"), ("-a", "md5", "--strict", "-c", "-w", "-"))) +
+                  (("-a", "sha3", "-l", "224", "a.txt"), ("-a", "sha3", "-l", "256", "--untagged", "binary"),
+                   ("-a", "sha3", "-l", "384", "--base64", "long"), ("-a", "sha3", "-l", "512", "edge_65536"),
+                   ("-a", "sha3", "-l", "512", "--raw", "blob"), ("-a", "sha3", "-l", "248", "a.txt"),
+                   ("-a", "sha3", "-l", "18446744073709551616", "a.txt"), ("-a", "sm3", "--untagged", "edge_65537"),
+                   ("-a", "sm3", "--base64", "binary", "empty"), ("-a", "blake2b", "-l", "+256", "a.txt"),
+                   ("-a", "blake2b", "-l", "-8", "a.txt"), ("-a", "blake2b", "-l", "99999999999999999999", "a.txt")) +
                   (("-a", "md5", "-b", "--untagged", "a.txt"), ("-a", "md5", "-t", "--untagged", "a.txt"),
                    ("-a", "md5", "-t", "a.txt"), ("-t", "a.txt"), ("-b", "a.txt"), ("--binary", "a.txt"),
                    ("--text", "--untagged", "-a", "sha1", "a.txt"), ("-a", "md5", "-b", "-c", "sums.md5sum"),
@@ -42677,7 +42697,6 @@ PINNED = r"""
 {"domain":"files","kind":"bug","list":"ledger","option":"--show-limits","reason_id":"r138","utility":"xargs"},
 {"domain":"misc","kind":"deliberate","list":"ledger","option":"--groups","reason_id":"r141","utility":"chroot"},
 {"domain":"misc","kind":"deliberate","list":"ledger","option":"--userspec","reason_id":"r141","utility":"chroot"},
-{"candidate":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-a","sm3","a.txt"],"domain":"misc","family":null,"fixture":"misc","input_kind":"command","mode":null,"stdin":"text","tier":"extra","utility":"cksum"},"domain":"misc","id":"f1ad5d9c4312268f","kind":"deliberate","list":"ledger","reason_id":"r142","reference":{"effects":"d3429fd95c8bb44b11bb42d0016d39ef70e4b44349f8f06276d17ef7b2721f60","status":0,"stdout":"5f6af0a369fe4245958c1fa46d35d533d655f94205bfa7262c910010ddbada23"},"utility":"cksum"},
 {"domain":"misc","kind":"deliberate","list":"ledger","option":"conv=ascii","reason_id":"r143","utility":"dd"},
 {"domain":"misc","kind":"deliberate","list":"ledger","option":"conv=block","reason_id":"r144","utility":"dd"},
 {"domain":"misc","kind":"deliberate","list":"ledger","option":"conv=ebcdic","reason_id":"r143","utility":"dd"},
