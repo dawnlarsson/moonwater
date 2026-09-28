@@ -71809,6 +71809,30 @@ static fn storage_test_link_state(void)
         netlink_forget(address_of net_states);
         memory_fill(address_of held, 0, sizeof held);
 
+        /* Link up sends news without IFF_RUNNING at once and RUNNING up to a
+           second later; a lease taken between them must survive the first.
+           The loopback link stands in: news says down, the link says up. */
+        {
+                netlink_search loopback = {.wanted = (string_address)"lo"};
+                bipolar handle = netlink_open_groups(0);
+                bool found = handle >= 0 &&
+                             netlink_link_find((b32)handle, address_of loopback) >= 0;
+
+                if (handle >= 0)
+                        socket_close((b32)handle);
+                held.index = loopback.index;
+                held.lease.address = 0x7f000002;
+                string_copy_max_end(held.name, (string_address)"lo", IFNAME_SIZE - 1);
+                if (!found)
+                        log_direct(str("storage_io: link news against lo NOT RUN -- no routing socket\n"));
+                else
+                        check("news without RUNNING is judged by the link as it is now",
+                              !net_link_news(loopback.index, IFF_UP, address_of held) &&
+                                  !held.lost);
+        }
+        netlink_forget(address_of net_states);
+        memory_fill(address_of held, 0, sizeof held);
+
         {
                 p8 record[NETLINK_HEADER + sizeof(netlink_link)] = {0};
                 netlink_header address_to header =

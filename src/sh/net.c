@@ -1562,6 +1562,37 @@ typedef struct
 
 static netlink_buffer net_states;
 
+static COLD net_state address_to net_state_of(p32 index)
+{
+        net_state address_to states = (net_state address_to)net_states.bytes;
+
+        for (positive at = 0; at < net_states.used / sizeof(net_state); at++)
+                if (states[at].index == index)
+                        return states + at;
+        return null;
+}
+
+/* News without IFF_RUNNING is also what the kernel sends the moment a link
+   is brought up; linkwatch says RUNNING up to a second later, and the lease
+   is taken between the two, so every boot released a lease a millisecond
+   old and asked again. The held link is asked as it is now, and carrier
+   (IFF_LOWER_UP) counts. */
+#define NET_LOWER_UP 0x10000
+
+static COLD bool net_link_carrier_now(const net_holding address_to held)
+{
+        netlink_search now = {.wanted = (string_address)held->name};
+        bipolar handle = netlink_open_groups(0);
+        bool carrier = handle >= 0 &&
+                       netlink_link_find((b32)handle, address_of now) >= 0 &&
+                       now.index == held->index &&
+                       (now.flags & (IFF_RUNNING | NET_LOWER_UP));
+
+        if (handle >= 0)
+                socket_close((b32)handle);
+        return carrier;
+}
+
 /* Remember every carrier transition, and reconfigure when no lease is
    active, when its interface loses carrier, or when another link gains it:
    the preference may favour that one, and auto keeps the lease when the
@@ -1569,37 +1600,26 @@ static netlink_buffer net_states;
    actionable while unconfigured. */
 static COLD bool net_link_news(p32 index, p32 flags, net_holding address_to held)
 {
-        net_state address_to entry;
-        positive count = net_states.used / sizeof(net_state);
-        positive at;
+        net_state address_to entry = net_state_of(index);
 
-        for (at = 0; at < count; at++)
-        {
-                entry = ((net_state address_to)net_states.bytes) + at;
-
-                if (entry->index != index)
-                        continue;
-
-                if (((entry->flags ^ flags) & IFF_RUNNING) == 0)
-                        return false;
-
-                entry->flags = flags;
-
-                goto changed;
-        }
-
-        if (net_states.used > positive_max - sizeof(net_state) ||
-            !net_room(address_of net_states,
-                      net_states.used + sizeof(net_state)))
+        if (entry && ((entry->flags ^ flags) & IFF_RUNNING) == 0)
                 return false;
 
-        entry = ((net_state address_to)net_states.bytes) + count;
-        entry->index = index;
+        if (!entry)
+        {
+                if (net_states.used > positive_max - sizeof(net_state) ||
+                    !net_room(address_of net_states,
+                              net_states.used + sizeof(net_state)))
+                        return false;
+                entry = (net_state address_to)(net_states.bytes +
+                                               net_states.used);
+                entry->index = index;
+                net_states.used += sizeof(net_state);
+        }
         entry->flags = flags;
-        net_states.used += sizeof(net_state);
 
-changed:
-        if (held && held->index == index && !(flags & IFF_RUNNING))
+        if (held && held->index == index && !(flags & IFF_RUNNING) &&
+            !net_link_carrier_now(held))
                 held->lost = true;
         if (!held || held->index == 0 || held->lost)
                 return true;
@@ -1608,21 +1628,17 @@ changed:
 
 static COLD bool net_link_removed(p32 index, net_holding address_to held)
 {
-        net_state address_to states = (net_state address_to)net_states.bytes;
-        positive count = net_states.used / sizeof(net_state);
+        net_state address_to state = net_state_of(index);
 
         /* Forget the carrier snapshot as well as the lease.  Interface
            indexes may be reused, and retaining the deleted device's flags
            could suppress the replacement device's first event. */
-        for (positive at = 0; at < count; at++)
-                if (states[at].index == index)
-                {
-                        count--;
-                        if (at != count)
-                                states[at] = states[count];
-                        net_states.used = count * sizeof(net_state);
-                        break;
-                }
+        if (state)
+        {
+                net_states.used -= sizeof(net_state);
+                *state = *(net_state address_to)(net_states.bytes +
+                                                 net_states.used);
+        }
 
         if (!held || held->index != index)
                 return false;
