@@ -4523,8 +4523,6 @@ typedef struct
         p8 s_hs_traffic[32];
         p8 c_ap_traffic[32];
         p8 s_ap_traffic[32];
-        p8 c_key[16];
-        p8 s_key[16];
         p8 c_iv[12];
         p8 s_iv[12];
         crypto_aesgcm_key c_gcm;
@@ -4585,7 +4583,7 @@ static fn tls_forget(tls_conn address_to tls)
 }
 
 static COLD fn tls_expand_label(p8 address_to secret, string_address label,
-                           p8 address_to context, positive context_length,
+                           const p8 address_to context, positive context_length,
                            p8 address_to out, positive out_length)
 {
         p8 info[256];
@@ -4629,20 +4627,30 @@ static COLD fn tls_derive_secret(p8 address_to secret, string_address label,
         crypto_forget(hash, sizeof hash);
 }
 
-static COLD fn tls_empty_hash(p8 address_to out)
-{
-        crypto_sha256 hash;
+/* With no PSK the early secret is a constant, and so is the salt derived
+   from it for the handshake secret; every "derived" is taken over SHA-256
+   of nothing (RFC 8446 7.1; the values are RFC 8448's). */
+static const p8 tls_derived_early[32] = {
+    0x6f, 0x26, 0x15, 0xa1, 0x08, 0xc7, 0x02, 0xc5, 0x67, 0x8f, 0x54, 0xfc,
+    0x9d, 0xba, 0xb6, 0x97, 0x16, 0xc0, 0x76, 0x18, 0x9c, 0x48, 0x25, 0x0c,
+    0xeb, 0xea, 0xc3, 0x57, 0x6c, 0x36, 0x11, 0xba};
+static const p8 tls_empty_sha256[32] = {
+    0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8,
+    0x99, 0x6f, 0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c,
+    0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55};
 
-        crypto_sha256_open(address_of hash);
-        crypto_sha256_close(address_of hash, out);
-        crypto_forget(address_of hash, sizeof hash);
-}
-
-static COLD fn tls_traffic_keys(p8 address_to traffic, p8 address_to key,
-                           p8 address_to iv)
+/* One direction's key and IV from its traffic secret, and the key prepared
+   for AES-GCM; the raw key lives only as long as preparing it takes. */
+static COLD fn tls_traffic_keys(p8 address_to traffic,
+                                crypto_aesgcm_key address_to gcm,
+                                p8 address_to iv)
 {
+        p8 key[16];
+
         tls_expand_label(traffic, "key", null, 0, key, 16);
         tls_expand_label(traffic, "iv", null, 0, iv, 12);
+        crypto_aesgcm_prepare(gcm, key);
+        crypto_forget(key, sizeof key);
 }
 
 /* RFC 8446 5.3: the sequence number, big-endian, xored into the IV's end. */
@@ -6463,68 +6471,47 @@ static COLD bipolar tls_handshake_one_append(p8 address_to held, positive room,
                                                    : TLS_FAIL;
 }
 
-static COLD bipolar tls_install_handshake_keys(tls_conn address_to tls,
+/* The handshake secret, its two traffic secrets and their keys: the flight
+   after ServerHello is protected under these. tls_connect left both
+   sequence numbers at zero. */
+static COLD fn tls_install_handshake_keys(tls_conn address_to tls,
                                           p8 address_to shared,
                                           positive shared_length)
 {
-        p8 early[32];
-        p8 zeros[32];
-        p8 derived[32];
-        p8 empty[32];
-
-        memory_fill(zeros, 0, 32);
-        tls_empty_hash(empty);
-        crypto_hkdf_extract(zeros, 32, zeros, 32, early);
-        tls_expand_label(early, "derived", empty, 32, derived, 32);
-        crypto_hkdf_extract(derived, 32, shared, shared_length, tls->hs_secret);
+        crypto_hkdf_extract((p8 address_to)tls_derived_early, 32, shared,
+                            shared_length, tls->hs_secret);
         tls_derive_secret(tls->hs_secret, "c hs traffic",
                           address_of tls->transcript, tls->c_hs_traffic);
         tls_derive_secret(tls->hs_secret, "s hs traffic",
                           address_of tls->transcript, tls->s_hs_traffic);
-        tls_traffic_keys(tls->c_hs_traffic, tls->c_key, tls->c_iv);
-        tls_traffic_keys(tls->s_hs_traffic, tls->s_key, tls->s_iv);
-        crypto_aesgcm_prepare(address_of tls->c_gcm, tls->c_key);
-        crypto_aesgcm_prepare(address_of tls->s_gcm, tls->s_key);
-        tls->seq_read = 0;
-        tls->seq_write = 0;
+        tls_traffic_keys(tls->c_hs_traffic, address_of tls->c_gcm, tls->c_iv);
+        tls_traffic_keys(tls->s_hs_traffic, address_of tls->s_gcm, tls->s_iv);
         tls->encrypted = true;
-        tls->application = false;
-
-        crypto_forget(early, sizeof early);
-        crypto_forget(zeros, sizeof zeros);
-        crypto_forget(derived, sizeof derived);
-        crypto_forget(empty, sizeof empty);
-        return TLS_OK;
 }
 
 static COLD fn tls_derive_app_keys(tls_conn address_to tls)
 {
         p8 zeros[32];
         p8 derived[32];
-        p8 empty[32];
         p8 master[32];
 
         memory_fill(zeros, 0, 32);
-        tls_empty_hash(empty);
-        tls_expand_label(tls->hs_secret, "derived", empty, 32, derived, 32);
+        tls_expand_label(tls->hs_secret, "derived", tls_empty_sha256, 32,
+                         derived, 32);
         crypto_hkdf_extract(derived, 32, zeros, 32, master);
         tls_derive_secret(master, "c ap traffic", address_of tls->transcript,
                           tls->c_ap_traffic);
         tls_derive_secret(master, "s ap traffic", address_of tls->transcript,
                           tls->s_ap_traffic);
 
-        crypto_forget(zeros, sizeof zeros);
         crypto_forget(derived, sizeof derived);
-        crypto_forget(empty, sizeof empty);
         crypto_forget(master, sizeof master);
 }
 
 static COLD fn tls_use_app_keys(tls_conn address_to tls)
 {
-        tls_traffic_keys(tls->c_ap_traffic, tls->c_key, tls->c_iv);
-        tls_traffic_keys(tls->s_ap_traffic, tls->s_key, tls->s_iv);
-        crypto_aesgcm_prepare(address_of tls->c_gcm, tls->c_key);
-        crypto_aesgcm_prepare(address_of tls->s_gcm, tls->s_key);
+        tls_traffic_keys(tls->c_ap_traffic, address_of tls->c_gcm, tls->c_iv);
+        tls_traffic_keys(tls->s_ap_traffic, address_of tls->s_gcm, tls->s_iv);
         tls->seq_read = 0;
         tls->seq_write = 0;
         tls->application = true;
@@ -6933,13 +6920,6 @@ static COLD bipolar tls_handshake(
         positive group = 0;
 
         crypto_sha256_open(address_of tls->transcript);
-        tls->receive_start = 0;
-        tls->receive_end = 0;
-        tls->plain_used = 0;
-        tls->closed = false;
-        tls->post_handshake_used = 0;
-        tls->encrypted = false;
-        tls->application = false;
 
         if (tls_client_hello(tls, hello + 5, sizeof hello - 5,
                              address_of hello_length))
@@ -6979,32 +6959,15 @@ static COLD bipolar tls_handshake(
                 goto done;
         hs_used = 0;
 
-        if (group == 0x001d)
-        {
-                if (share_length != 32 ||
-                    !crypto_x25519(shared, tls->x25519_scalar, peer))
-                        goto done;
-                if (tls_install_handshake_keys(tls, shared, 32))
-                        goto done;
-        }
-        else if (group == 0x0017)
-        {
-                if (share_length != 65 ||
-                    !crypto_ecdh_p256_shared(shared, tls->p256_scalar, peer))
-                        goto done;
-                if (tls_install_handshake_keys(tls, shared, 32))
-                        goto done;
-        }
-        else if (group == 0x0018)
-        {
-                if (share_length != 97 ||
-                    !crypto_ecdh_p384_shared(shared, tls->p384_scalar, peer))
-                        goto done;
-                if (tls_install_handshake_keys(tls, shared, 48))
-                        goto done;
-        }
-        else
+        /* tls_server_hello_keys admits only the three groups offered, each
+           at its own share length. */
+        if (!(group == 0x001d
+                  ? crypto_x25519(shared, tls->x25519_scalar, peer)
+              : group == 0x0017
+                  ? crypto_ecdh_p256_shared(shared, tls->p256_scalar, peer)
+                  : crypto_ecdh_p384_shared(shared, tls->p384_scalar, peer)))
                 goto done;
+        tls_install_handshake_keys(tls, shared, group == 0x0018 ? 48 : 32);
         crypto_forget(tls->x25519_scalar, sizeof tls->x25519_scalar);
         crypto_forget(tls->p256_scalar, sizeof tls->p256_scalar);
         crypto_forget(tls->p384_scalar, sizeof tls->p384_scalar);
