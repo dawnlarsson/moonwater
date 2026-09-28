@@ -9448,10 +9448,11 @@ def files_address_cap(farm):
     with ulimit -v: every tool once carried 59.6 MB of static buffers in its
     bss and died of a segmentation fault under ulimit -v 50000 before its
     first word, cat and rm among them. Each runs a small real job under a
-    20 MB cap and must answer as the reference does under the same cap;
-    fmt is left out, which takes a million-word table from the arena at
-    once. ls, dir and vdir were left out too while their tables were 36 MB
-    mapped at their start; they grow with the listing now."""
+    20 MB cap and must answer as the reference does under the same cap.
+    fmt was left out while it took a million-word table from the arena at
+    once, and ls, dir and vdir while their tables were 36 MB mapped at their
+    start; the table is a thousand words and the listings grow now. cut, pr
+    and sed start at the image's own size, their stores grown on need."""
     import resource
     import subprocess
     import tempfile
@@ -9463,7 +9464,8 @@ def files_address_cap(farm):
             ("head", "-n1", "f"), ("tail", "-n1", "f"), ("wc", "f"), ("sort", "f"), ("uniq", "f"), ("tr", "a", "b"),
             ("grep", "a", "f"), ("csplit", "f", "2"), ("touch", "g"), ("mkdir", "d"), ("stat", "-c", "%s", "f"),
             ("ls", "-a"), ("ls", "-lR", "--time-style=+"), ("dir", "-a"), ("vdir", "--time-style=+"),
-            ("du", "-a", "--apparent-size"))
+            ("du", "-a", "--apparent-size"), ("fmt", "f"), ("paste", "f", "f"), ("comm", "f", "f"),
+            ("ptx", "f"), ("ptx", "-O", "f"), ("expr", "1", "+", "1"), ("basenc", "--base58", "f"))
     passed = total = 0
     notes = []
 
