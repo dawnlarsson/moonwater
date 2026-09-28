@@ -2280,7 +2280,38 @@ static b32 z85_decode(bool ignore_garbage)
 */
 static const p8 base58_alphabet[] =
     "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-#define BASE58_CHUNK 656356768u // 58^5
+/*
+        The number is worked in 64-bit limbs, ten base-58 digits at a time:
+        58^10 is below 2^59, and dividing a two-limb value by it is two
+        multiplications with its reciprocal, taken once (the divisor shifted
+        up five bits so its top bit is set), in place of a division.
+*/
+#define BASE58_CHUNK 430804206899405824ull // 58^10
+#define BASE58_SHIFT 5
+#define BASE58_NORMAL 0xbf50c498ff748000ull // 58^10 << 5
+#define BASE58_INVERSE 0x568df8b76cbf212cull // floor((2^128 - 1) / NORMAL) - 2^64
+
+// (high:low) / NORMAL with high below it: the quotient, and the remainder.
+static inline INLINE p64 base58_divide(p64 high, p64 low, p64 address_to rest)
+{
+        unsigned __int128 q = (unsigned __int128)BASE58_INVERSE * high +
+                              (((unsigned __int128)high << 64) | low);
+        p64 quotient = (p64)(q >> 64) + 1;
+        p64 remainder = low - quotient * BASE58_NORMAL;
+
+        if (remainder > (p64)q)
+        {
+                quotient--;
+                remainder += BASE58_NORMAL;
+        }
+        if (remainder >= BASE58_NORMAL)
+        {
+                quotient++;
+                remainder -= BASE58_NORMAL;
+        }
+        address_to rest = remainder;
+        return quotient;
+}
 
 static bool base58_emit(encoding_output address_to output,
                         p8 address_to symbols, positive length)
@@ -2361,9 +2392,9 @@ static b32 base58_encode(positive wrap)
 
         if (writing && number.used)
         {
-                positive limbs = (number.used + 3) / 4;
-                positive digits_room = number.used * 138 / 100 + 16;
-                p32 address_to limb = (p32 address_to)memory_take(limbs * sizeof(p32));
+                positive limbs = (number.used + 7) / 8;
+                positive digits_room = number.used * 138 / 100 + 32;
+                p64 address_to limb = (p64 address_to)memory_take(limbs * sizeof(p64));
                 p8 address_to digits = (p8 address_to)memory_take(digits_room);
 
                 if (!limb || !digits)
@@ -2378,11 +2409,11 @@ static b32 base58_encode(positive wrap)
                 // Big-endian bytes into little-endian limbs.
                 for (positive at = 0; at < limbs; at++)
                 {
-                        p32 value = 0;
+                        p64 value = 0;
 
-                        for (positive byte = 4; byte; byte--)
+                        for (positive byte = 8; byte; byte--)
                         {
-                                positive index = at * 4 + byte - 1;
+                                positive index = at * 8 + byte - 1;
 
                                 value = (value << 8) |
                                         (index < number.used
@@ -2400,18 +2431,20 @@ static b32 base58_encode(positive wrap)
 
                 while (used)
                 {
-                        positive rest = 0;
+                        p64 rest = 0;
 
                         for (positive at = used; at; at--)
                         {
-                                positive wide = (rest << 32) | limb[at - 1];
+                                p64 value = limb[at - 1];
 
-                                limb[at - 1] = (p32)(wide / BASE58_CHUNK);
-                                rest = wide % BASE58_CHUNK;
+                                limb[at - 1] = base58_divide(
+                                    (rest << BASE58_SHIFT) | (value >> (64 - BASE58_SHIFT)),
+                                    value << BASE58_SHIFT, address_of rest);
+                                rest >>= BASE58_SHIFT;
                         }
                         while (used && !limb[used - 1])
                                 used--;
-                        for (positive digit = 0; digit < 5; digit++)
+                        for (positive digit = 0; digit < 10; digit++)
                         {
                                 digits[made++] = (p8)(rest % 58);
                                 rest /= 58;
@@ -2505,21 +2538,21 @@ static b32 base58_decode(bool ignore_garbage)
         if (digits.used)
         {
                 // 58 < 2^6, so a digit is at most six bits of the number.
-                positive limbs = (digits.used * 6 + 31) / 32 + 1;
-                p32 address_to limb = (p32 address_to)memory_take(limbs * sizeof(p32));
+                positive limbs = (digits.used * 6 + 63) / 64 + 1;
+                p64 address_to limb = (p64 address_to)memory_take(limbs * sizeof(p64));
 
                 if (!limb)
                         return base58_refuse_memory(address_of digits);
 
                 positive used = 0;
                 positive at = 0;
-                positive first = digits.used % 5 ? digits.used % 5 : 5;
+                positive first = digits.used % 10 ? digits.used % 10 : 10;
 
                 while (at < digits.used)
                 {
-                        positive take = at ? 5 : first;
-                        positive scale = 1;
-                        positive chunk = 0;
+                        positive take = at ? 10 : first;
+                        p64 scale = 1;
+                        p64 chunk = 0;
 
                         for (positive k = 0; k < take; k++)
                         {
@@ -2528,17 +2561,18 @@ static b32 base58_decode(bool ignore_garbage)
                         }
                         at += take;
 
-                        positive carry = chunk;
+                        p64 carry = chunk;
 
                         for (positive k = 0; k < used; k++)
                         {
-                                positive wide = (positive)limb[k] * scale + carry;
+                                unsigned __int128 wide =
+                                    (unsigned __int128)limb[k] * scale + carry;
 
-                                limb[k] = (p32)wide;
-                                carry = wide >> 32;
+                                limb[k] = (p64)wide;
+                                carry = (p64)(wide >> 64);
                         }
                         if (carry)
-                                limb[used++] = (p32)carry;
+                                limb[used++] = carry;
                 }
 
                 // Most significant first, with the leading zero bytes gone.
@@ -2547,7 +2581,7 @@ static b32 base58_decode(bool ignore_garbage)
                 positive held = 0;
 
                 for (positive k = used; k; k--)
-                        for (positive shift = 32; shift; shift -= 8)
+                        for (positive shift = 64; shift; shift -= 8)
                         {
                                 p8 byte = (p8)(limb[k - 1] >> (shift - 8));
 
