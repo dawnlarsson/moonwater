@@ -2058,41 +2058,25 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         if (!waterlink_admit(address_of link_self.admission, address, now))
                 return;
         if (!waterlink_accept(address_of noise, me, psk, datagram, who, hello))
-        {
-                crypto_forget(address_of noise, sizeof noise);
-                return;
-        }
+                goto forget;
         if (psk)
         {
-                crypto_forget(address_of noise, sizeof noise);
-                if (link_stamp_new(who, hello))
-                {
-                        if (link_pair_greeted(group, who,
-                                             hello + WATERLINK_STAMP_BYTES,
-                                             address, port, now))
-                                link_stamp_keep(who, hello);
-                }
-                return;
+                if (link_stamp_new(who, hello) &&
+                    link_pair_greeted(group, who, hello + WATERLINK_STAMP_BYTES,
+                                      address, port, now))
+                        link_stamp_keep(who, hello);
+                goto forget;
         }
 
         link_peers_load(address_of peers);
         peer = link_peer_keyed(address_of peers, who);
-        if (!peer || !link_stamp_new(who, hello))
-        {
-                crypto_forget(address_of noise, sizeof noise);
-                return;
-        }
-
         memory_copy(address_of conversation, hello + WATERLINK_STAMP_BYTES, 8);
         memory_copy(address_of theirs, hello + WATERLINK_STAMP_BYTES + 8, 4);
         /* Zero is not a session index: link_index_new deliberately never
            issues it, and no carried reply can find it. Refuse it before it
            can reserve a session or consume the peer's replay stamp. */
-        if (!theirs)
-        {
-                crypto_forget(address_of noise, sizeof noise);
-                return;
-        }
+        if (!peer || !link_stamp_new(who, hello) || !theirs)
+                goto forget;
 
         for (positive at = 0; at < LINK_SESSIONS; at++)
         {
@@ -2112,12 +2096,7 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         if (!ours || system_random_fill(ephemeral, 32, 0) < 0 ||
             !waterlink_respond(address_of noise, ephemeral, theirs, ours,
                                answer))
-        {
-                crypto_forget(ephemeral, sizeof ephemeral);
-                crypto_forget(address_of noise, sizeof noise);
-                return;
-        }
-        crypto_forget(ephemeral, sizeof ephemeral);
+                goto forget;
 
         if (!s)
         {
@@ -2126,10 +2105,7 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
                                 if (!link_self.session[at].used)
                                         s = link_self.session + at;
                 if (!s || !link_session_open(s))
-                {
-                        crypto_forget(address_of noise, sizeof noise);
-                        return;
-                }
+                        goto forget;
                 memory_copy(s->peer, who, 32);
                 memory_copy(s->name, peer->name, WATERLINK_NAME_MAX);
                 s->may = peer->may;
@@ -2160,6 +2136,9 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         s->heard = now;
         (void)link_send_to(answer, WATERLINK_DATAGRAM, address, port);
         link_self.state_dirty = true;
+forget:
+        crypto_forget(address_of noise, sizeof noise);
+        crypto_forget(ephemeral, sizeof ephemeral);
 }
 
 // Receiving, at either end ----------------------------------------------------
