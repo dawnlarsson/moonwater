@@ -11584,795 +11584,1813 @@ static b32 text_fmt()
 /*
         Page layout.
 
-        pr is another view of the record stream, not another input system.
-        One page of small descriptors points into relation_spill; records are
-        still obtained by text_line_next, or by the same text_record_cursor
-        used by paste when --merge keeps several files live.  This also makes
-        the down-column order a permutation of descriptors rather than a
-        second collection of lines.
+        pr as GNU's pr is built, because its answers are its algorithm: every
+        column is a reader of characters (one input shared by all the columns
+        of a single file, one input each under --merge), and a page is a walk
+        across the columns asking each for its next line until the body is
+        full or nothing is left. A line is printed a character at a time as it
+        is read, so a line of any length -- an endless one included -- goes
+        straight through in the memory of one read; only the columns of a
+        single file printed down the page are stored first, so the last page
+        can be balanced. Form feeds in the input hold a column until the next
+        page, and a full page followed at once by a form feed does not make an
+        empty one. Spaces are held back and written as tabs where -i or more
+        than one column asks for that, and the header's date, name and page
+        number share out the width left between them.
 */
-#define PR_LENGTH_DEFAULT 66
-#define PR_WIDTH_DEFAULT 72
+#define PR_ANYWHERE 0
 #define PR_HEADER_LINES 5
 #define PR_FOOTER_LINES 5
-
-typedef struct
-{
-        positive offset;
-        positive length;
-        bipolar number;
-        bool present;
-} pr_record;
-
-static pr_record address_to pr_records;
-static positive pr_record_room;
-static positive pr_spill_used;
-static positive pr_columns;
-static positive pr_body_lines;
-static positive pr_page_length;
-static positive pr_page_width;
-static positive pr_margin;
-static positive pr_first_page;
-static positive pr_last_page;
-static positive pr_separator_length;
-static positive pr_number_digits;
-static positive pr_number_width;
-static positive pr_input_tab_width;
-static positive pr_output_tab_width;
-static bipolar pr_line_number;
-static bipolar pr_start_line_number;
-static string_address pr_separator;
-static p8 pr_number_separator;
-static string_address pr_header;
-static string_address pr_date_format;
-static p8 pr_input_tab;
-static p8 pr_output_tab;
-static bool pr_across;
-static bool pr_merge;
-static bool pr_double;
-static bool pr_form_feed;
-static bool pr_join;
-static bool pr_number;
-static bool pr_number_reset;
-static bool pr_omit_header;
-static bool pr_omit_pagination;
-static bool pr_truncate;
-static bool pr_expand_input;
-static bool pr_tabify_output;
-static bool pr_page_option_failed;
-static bool pr_pending;
-static positive pr_pending_length;
-static bool pr_failed;
-static positive pr_output_column;
-static b64 pr_now;
 
 static bool pr_parse_positive(string_address value, positive address_to into)
 {
         return text_unsigned_option(value, false, into) && address_to into;
 }
 
-/*
-        +FIRST[:LAST]. A page number of zero is no page at all, and pr reads
-        the whole word as a file name instead -- measured; a word with no
-        digits in it is the invalid argument pr complains about.
-*/
-static bool pr_pages_operand;
 
-static bool pr_pages(string_address value)
+enum
 {
-        positive first = 0;
-        positive last = positive_max;
-        positive used = 0;
+        PR_OPEN,
+        PR_FF_FOUND,
+        PR_ON_HOLD,
+        PR_CLOSED,
+};
 
-        pr_pages_operand = false;
+// One input: a reader and the one character read back into it.
+typedef struct
+{
+        text_reader reader;
+        bipolar pushed;
+        bool is_stdin;
+} pr_stream;
 
-        if (!value)
-                return false;
+typedef struct
+{
+        pr_stream address_to stream;
+        string_address name;
+        p8 status;
+        bool stored; // lines come out of the store, not the stream
+        bipolar current_line;
+        bipolar lines_stored;
+        bipolar lines_to_print;
+        bipolar start_position;
+        bool numbered;
+        bool full_page_printed;
+} pr_column;
 
-        used = string_span(value, string_set_digits);
+static pr_column address_to pr_column_vector;
+static bipolar pr_columns;
 
-        if (!used)
-                return false;
+// The store for the columns of one file printed down the page.
+static byte_store pr_buff;
+static b32 address_to pr_line_vector;
+static b32 address_to pr_end_vector;
 
-        p8 saved = value[used];
-        ((p8 address_to)value)[used] = '\0';
-        bool okay = pr_parse_positive(value, address_of first);
-        ((p8 address_to)value)[used] = saved;
+static bool pr_parallel;
+static bool pr_align_empty_cols;
+static bool pr_empty_line;
+static bool pr_ff_only;
+static bool pr_explicit_columns;
+static bool pr_extremities;
+static bool pr_keep_ff;
+static bool pr_print_a_ff;
+static bool pr_print_a_header;
+static bool pr_use_form_feed;
+static bool pr_across;
+static bool pr_storing;
+static bool pr_balance;
+static bipolar pr_lines_per_page;
+static bipolar pr_lines_per_body;
+static bipolar pr_chars_per_line;
+static bool pr_truncate;
+static bool pr_join;
+static bipolar pr_chars_per_column;
+static bool pr_untabify;
+static p8 pr_input_tab_char;
+static bipolar pr_chars_per_input_tab;
+static bool pr_tabify;
+static p8 pr_output_tab_char;
+static bipolar pr_chars_per_output_tab;
+static bipolar pr_spaces_not_printed;
+static bipolar pr_chars_per_margin;
+static bipolar pr_output_position;
+static bipolar pr_input_position;
+static bool pr_failed_opens;
+static positive pr_first_page;
+static positive pr_last_page;
+static bipolar pr_files_ready;
+static positive pr_page_number;
+static bipolar pr_line_number;
+static bool pr_numbered;
+static p8 pr_number_separator;
+static bipolar pr_line_count;
+static bool pr_skip_count;
+static bipolar pr_start_line_num;
+static bipolar pr_chars_per_number;
+static bipolar pr_number_width;
+static bool pr_use_esc;
+static bool pr_use_cntrl;
+static bool pr_double;
+static bipolar pr_total_files;
+static bool pr_ignore_failed_opens;
+static bool pr_use_col_separator;
+static string_address pr_col_sep_string;
+static bipolar pr_col_sep_length;
+static bipolar pr_separators_not_printed;
+static bipolar pr_padding_not_printed;
+static bool pr_pad_vertically;
+static string_address pr_custom_header;
+static string_address pr_date_format;
+static p8 address_to pr_date_text;
+static positive pr_date_length;
+static string_address pr_file_text;
+static bipolar pr_header_width_available;
+static p8 address_to pr_clump;
+static bool pr_last_line;
 
-        if (!okay || !first)
+// The options as they arrive, in GNU's order.
+static bool pr_old_options;
+static bool pr_old_w;
+static bool pr_old_s;
+static byte_store pr_column_digits;
+static bool pr_column_digits_given;
+static bool pr_digits_run;
+
+/*
+        The bytes a line can be copied in runs of: printable, not the input
+        tab character, and not a space where spaces are held back to become
+        tabs. Each of them is one column wide and nothing else about it
+        needs a look, so a run goes out (or into the store) in one piece.
+*/
+static p8 pr_plain[256];
+
+static fn pr_plain_build()
+{
+        for (positive b = 0; b < 256; b++)
+                pr_plain[b] = b > 0x20 && b < 0x7f;
+        // A space is one column too; where spaces become tabs it is held
+        // back rather than written, which pr_plain_put does for a run.
+        pr_plain[' '] = pr_tabify ? 2 : 1;
+        pr_plain[pr_input_tab_char] = 0;
+}
+
+static fn pr_print_white_space();
+
+// A run of plain bytes to the output, spaces held back where they are to
+// become tabs, exactly as print_char would take them one at a time.
+static fn pr_plain_put(p8 address_to at, positive run)
+{
+        if (!pr_tabify)
         {
-                pr_pages_operand = okay || !first;
-                return false;
+                text_put(at, run);
+                return;
         }
 
-        if (saved)
+        // Words here are a few bytes long: a plain walk, not the library's
+        // wide searches, whose setup is the cost at this length.
+        positive i = 0;
+
+        while (i < run)
         {
-                if (saved != ':' || !value[used + 1] ||
-                    !pr_parse_positive(value + used + 1, address_of last) ||
-                    last < first)
+                positive from = i;
+
+                while (i < run && at[i] == ' ')
+                        i++;
+                pr_spaces_not_printed += (bipolar)(i - from);
+                if (i == run)
+                        break;
+
+                from = i;
+                while (i < run && at[i] != ' ')
+                        i++;
+                if (pr_spaces_not_printed > 0)
+                        pr_print_white_space();
+                pr_output_position += (bipolar)(i - from);
+                text_put(at + from, i - from);
+        }
+}
+
+static inline INLINE positive pr_plain_run(p8 address_to at, positive left)
+{
+        positive run = 0;
+
+        while (run < left && pr_plain[at[run]])
+                run++;
+        return run;
+}
+
+static pr_stream address_to pr_stdin;
+static bool pr_stdin_read;
+static file_moment pr_now_moment;
+
+/* gnulib's xstrtoumax in base 10 with no suffixes and an stop pointer. */
+enum
+{
+        PR_NUMBER_OK,
+        PR_NUMBER_OVERFLOW,
+        PR_NUMBER_SUFFIX,
+        PR_NUMBER_SUFFIX_OVERFLOW,
+        PR_NUMBER_INVALID,
+};
+
+static p8 pr_unsigned(string_address text, string_address address_to stop,
+                      positive address_to value)
+{
+        string_address at = text + string_span(text, string_set_space);
+
+        address_to stop = text;
+        if (at[0] == '-')
+                return PR_NUMBER_INVALID;
+        if (at[0] == '+')
+                at++;
+        if (!byte_is_digit(at[0]))
+                return PR_NUMBER_INVALID;
+
+        positive made = 0;
+        bool over = false;
+
+        for (; byte_is_digit(at[0]); at++)
+        {
+                positive digit = (positive)(at[0] - '0');
+
+                if (made > (positive_max - digit) / 10)
+                        over = true;
+                else
+                        made = made * 10 + digit;
+        }
+
+        address_to stop = at;
+        address_to value = over ? positive_max : made;
+        if (at[0])
+                return over ? PR_NUMBER_SUFFIX_OVERFLOW : PR_NUMBER_SUFFIX;
+        return over ? PR_NUMBER_OVERFLOW : PR_NUMBER_OK;
+}
+
+// xstrtol_fatal's three sentences: for --pages the option is "--pages",
+// for an old +FIRST word it is a bare "+".
+static fn pr_number_fatal(p8 error, bool pages, string_address argument)
+{
+        string_address option = pages ? (string_address)"--pages" : (string_address)"+";
+
+        text_flush();
+        if (error == PR_NUMBER_INVALID)
+                string_format(writer_stderr, "%s: invalid %s argument '%s'\n",
+                              text_name, option, argument);
+        else if (error == PR_NUMBER_OVERFLOW)
+                string_format(writer_stderr, "%s: %s argument '%s' too large\n",
+                              text_name, option, argument);
+        else
+                string_format(writer_stderr, "%s: invalid suffix in %s argument '%s'\n",
+                              text_name, option, argument);
+        exit(text_done(1));
+}
+
+/*
+        FIRST[:LAST]. A first page of zero, a last page before the first or
+        anything after them is no page range (a +word is then a file name); a
+        number that cannot be read at all is refused on the spot.
+*/
+static bool pr_first_last_page(bool pages, string_address text)
+{
+        string_address stop;
+        positive first;
+        positive last = positive_max;
+        p8 error = pr_unsigned(text, address_of stop, address_of first);
+
+        if (error != PR_NUMBER_OK && error != PR_NUMBER_SUFFIX)
+                pr_number_fatal(error, pages, text);
+
+        if (stop == text || !first)
+                return false;
+
+        if (stop[0] == ':')
+        {
+                string_address from = stop + 1;
+
+                error = pr_unsigned(from, address_of stop, address_of last);
+                if (error != PR_NUMBER_OK)
+                        pr_number_fatal(error, pages, text);
+                if (stop == from || last < first)
                         return false;
         }
+
+        if (stop[0])
+                return false;
 
         pr_first_page = first;
         pr_last_page = last;
         return true;
 }
 
-static bool pr_option_seen(p8 letter, string_address value)
+/*
+        xnumtoimax between FLOOR and INT_MAX: a number below a floor of one or
+        more is out of range, one past INT_MAX (or below a floor of zero or
+        less) too large for its type, and anything unreadable plainly
+        invalid -- each after WHAT and the word in quotes.
+*/
+static bipolar pr_number_option(string_address text, bipolar floor,
+                                string_address what)
 {
-        if (letter != 'P')
-                return true;
+        string_address at = text + string_span(text, string_set_space);
+        bool negative = at[0] == '-';
+        bool invalid = false;
+        bool over = false;
+        positive made = 0;
 
-        if (pr_pages(value))
-                return true;
-
-        string_diagnostic(&text_diagnostic, 0, value, "invalid page range");
-        pr_page_option_failed = true;
-        return false;
-}
-
-static fn pr_operand_add(b32 which)
-{
-        string_address value = program_argument(which);
-
-        if (value[0] == '+')
+        if (negative || at[0] == '+')
+                at++;
+        if (!byte_is_digit(at[0]))
+                invalid = true;
+        for (; !invalid && byte_is_digit(at[0]); at++)
         {
-                if (pr_pages(value + 1))
-                        return;
+                positive digit = (positive)(at[0] - '0');
 
-                // A page number of nought is no page: pr reads the word as
-                // a file name instead. A word with no digits is the invalid
-                // argument pr complains about.
-                if (!pr_pages_operand)
-                {
-                        string_diagnostic(&text_diagnostic, 0, value + 1, "invalid + argument");
-                        pr_page_option_failed = true;
-                        return;
-                }
+                if (made > (positive_max - digit) / 10)
+                        over = true;
+                else
+                        made = made * 10 + digit;
+        }
+        if (at[0])
+                invalid = true;
+
+        string_address reason = null;
+        bipolar value = 0;
+
+        if (!invalid)
+        {
+                if (over || made > (negative ? ((positive)1 << 63) : (positive)b32_max))
+                        value = negative ? b64_min : b64_max;
+                else
+                        value = negative ? -(bipolar)made : (bipolar)made;
+
+                if (value < floor)
+                        reason = floor > 0 ? (string_address) ": Numerical result out of range"
+                                           : (string_address) ": Value too large for defined data type";
+                else if (value > b32_max)
+                        reason = ": Value too large for defined data type";
+                else
+                        return value;
         }
 
-        text_file_add(which);
+        text_flush();
+        string_format(writer_stderr, "%s: %s: '%w'%s\n", text_name, what,
+                      writer_terminal_quoted_name, text, reason ? reason : (string_address) "");
+        exit(text_done(1));
+        return 0;
 }
 
-// -e, -i and -n: a character that is not a digit, then a width, either one
-// left out keeping what the caller set.
-static bool pr_tab_option(string_address value, p8 address_to character,
-                          positive address_to width)
+// usage(EXIT_FAILURE): the pointer at --help, and out.
+static fn pr_usage_exit()
 {
-        if (!value)
-                return true;
-
-        positive at = 0;
-
-        if (value[at] && !byte_is_digit(value[at]))
-                address_to character = value[at++];
-
-        return !value[at] || pr_parse_positive(value + at, width);
+        string_format(writer_stderr, "Try '%s --help' for more information.\n",
+                      text_name);
+        exit(text_done(1));
 }
 
-static bool pr_signed(string_address value, bipolar address_to into)
+// getoptarg: -e, -i and -n take a non-digit character and then a width.
+static fn pr_option_argument(string_address text, p8 letter,
+                             p8 address_to character, bipolar address_to number)
 {
-        if (!value)
-                return false;
-        value += string_span(value, string_set_space);
-        bipolar made;
-        if (!file_signed_decimal(value, address_of made) ||
-            made < b32_min || made > b32_max)
-                return false;
-        address_to into = made;
-        return true;
-}
+        p8 named[2] = {letter, 0};
 
-static fn pr_pad(positive target)
-{
-        if (target <= pr_output_column)
+        if (!text[0])
+        {
+                text_flush();
+                string_format(writer_stderr, "%s: '-%s': Invalid argument: '%w'\n",
+                              text_name, (string_address)named,
+                              writer_terminal_quoted_name, text);
+                pr_usage_exit();
+        }
+
+        if (!byte_is_digit(text[0]))
+                address_to character = (p8)(text++)[0];
+
+        if (!text[0])
                 return;
 
-        if (pr_tabify_output && pr_output_tab_width)
+        string_address at = text + string_span(text, string_set_space);
+        bool negative = at[0] == '-';
+        bool over = false;
+        bool invalid = false;
+        positive made = 0;
+
+        if (negative || at[0] == '+')
+                at++;
+        if (!byte_is_digit(at[0]))
+                invalid = true;
+        for (; !invalid && byte_is_digit(at[0]); at++)
         {
-                for (;;)
+                positive digit = (positive)(at[0] - '0');
+
+                if (made > (positive_max - digit) / 10)
+                        over = true;
+                else
+                        made = made * 10 + digit;
+        }
+        if (!invalid && at[0])
+                invalid = true;
+        // xstrtol's own overflow is past a long; INT_MAX is getoptarg's.
+        if (!over && made > (negative ? ((positive)1 << 63) : (positive)b64_max))
+                over = true;
+        if (!invalid && !over && (negative || !made))
+                invalid = true;
+        else if (!invalid && !over && made > (positive)b32_max)
+                over = true;
+
+        if (invalid || over)
+        {
+                text_flush();
+                string_format(writer_stderr,
+                              "%s: '-%s' extra characters or invalid number in the argument: '%w'%s\n",
+                              text_name, (string_address)named,
+                              writer_terminal_quoted_name, text,
+                              over ? ": Value too large for defined data type" : "");
+                pr_usage_exit();
+        }
+
+        address_to number = (bipolar)made;
+}
+
+static fn pr_separator_string(string_address text)
+{
+        pr_col_sep_length = (bipolar)string_length(text);
+        pr_col_sep_string = text;
+}
+
+static fn pr_column_count(string_address text)
+{
+        pr_columns = pr_number_option(text, 1, "invalid number of columns");
+        pr_explicit_columns = true;
+}
+
+/* streams ----------------------------------------------------------- */
+
+static pr_stream address_to pr_stream_open(string_address name)
+{
+        bool standard = string_equals(name, "-");
+
+        if (standard && pr_stdin)
+        {
+                pr_stdin_read = true;
+                return pr_stdin;
+        }
+
+        pr_stream address_to made = (pr_stream address_to)memory_take(sizeof(pr_stream));
+
+        if (!made)
+        {
+                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                exit(text_done(1));
+        }
+
+        made->pushed = -1;
+        made->is_stdin = standard;
+        if (!text_reader_open(address_of made->reader, name))
+        {
+                memory_give(made);
+                return null;
+        }
+
+        if (standard)
+        {
+                pr_stdin = made;
+                pr_stdin_read = true;
+        }
+        return made;
+}
+
+static inline INLINE bipolar pr_getc(pr_stream address_to stream)
+{
+        if (stream->pushed >= 0)
+        {
+                bipolar c = stream->pushed;
+
+                stream->pushed = -1;
+                return c;
+        }
+
+        text_reader address_to reader = address_of stream->reader;
+
+        if (reader->position < reader->filled || text_reader_fill(reader))
+                return reader->buffer[reader->position++];
+        return -1;
+}
+
+static inline INLINE fn pr_ungetc(bipolar c, pr_stream address_to stream)
+{
+        if (c >= 0)
+                stream->pushed = c;
+}
+
+/* The columns' states -------------------------------------------------- */
+
+static bipolar pr_cols_ready()
+{
+        bipolar ready = 0;
+
+        for (bipolar i = 0; i < pr_columns; i++)
+        {
+                pr_column address_to q = pr_column_vector + i;
+
+                if (q->status == PR_OPEN || q->status == PR_FF_FOUND ||
+                    (pr_storing && q->lines_stored > 0 && q->lines_to_print > 0))
+                        ready++;
+        }
+        return ready;
+}
+
+static fn pr_close_file(pr_column address_to p)
+{
+        if (p->status == PR_CLOSED)
+                return;
+
+        pr_stream address_to stream = p->stream;
+
+        // A read that failed ends pr where it stands, as GNU's close_file
+        // does; the reader has said why.
+        if (stream->reader.failed)
+                exit(text_done(1));
+
+        if (stream->is_stdin)
+                stream->reader.finished = false;
+        else
+        {
+                text_close_handle(address_of stream->reader.opened,
+                                  stream->reader.handle);
+        }
+
+        if (!pr_parallel)
+        {
+                for (bipolar i = 0; i < pr_columns; i++)
                 {
-                        positive stop =
-                            (pr_output_column / pr_output_tab_width + 1) *
-                            pr_output_tab_width;
+                        pr_column address_to q = pr_column_vector + i;
 
-                        if (stop > target || target - pr_output_column < 2)
-                                break;
+                        q->status = PR_CLOSED;
+                        if (q->lines_stored == 0)
+                                q->lines_to_print = 0;
+                }
+        }
+        else
+        {
+                p->status = PR_CLOSED;
+                p->lines_to_print = 0;
+        }
 
-                        text_put_character(pr_output_tab);
-                        pr_output_column = stop;
+        pr_files_ready--;
+}
+
+static fn pr_hold_file(pr_column address_to p)
+{
+        if (!pr_parallel)
+                for (bipolar i = 0; i < pr_columns; i++)
+                        pr_column_vector[i].status = pr_storing ? PR_FF_FOUND : PR_ON_HOLD;
+        else
+                p->status = PR_ON_HOLD;
+
+        p->lines_to_print = 0;
+        pr_files_ready--;
+}
+
+static fn pr_reset_status()
+{
+        for (bipolar i = 0; i < pr_columns; i++)
+        {
+                pr_column address_to p = pr_column_vector + i;
+
+                if (p->status == PR_ON_HOLD)
+                {
+                        p->status = PR_OPEN;
+                        pr_files_ready++;
                 }
         }
 
-        writer_fill_bulk(text_put, target - pr_output_column, ' ');
-        pr_output_column = target;
+        if (pr_storing)
+                pr_files_ready = pr_column_vector->status == PR_CLOSED ? 0 : 1;
 }
 
-static fn pr_put_margin()
+/* Output -------------------------------------------------------------- */
+
+static inline INLINE fn pr_putchar(p8 c)
 {
-        pr_output_column = 0;
-        writer_fill_bulk(text_put, pr_margin, ' ');
-        pr_output_column = pr_margin;
+        text_put_character(c);
 }
 
-static fn pr_put_number(bipolar number, positive field_start)
+static fn pr_print_white_space()
 {
-        p8 digits[64];
-        positive length = bipolar_into_string(digits, number);
-        positive blanks = length < pr_number_digits
-                              ? pr_number_digits - length
-                              : 0;
+        bipolar h_old = pr_output_position;
+        bipolar goal = h_old + pr_spaces_not_printed;
+
+        while (goal - h_old > 1)
+        {
+                bipolar h_new = h_old + pr_chars_per_output_tab -
+                                h_old % pr_chars_per_output_tab;
+
+                if (h_new > goal)
+                        break;
+                pr_putchar(pr_output_tab_char);
+                h_old = h_new;
+        }
+        while (++h_old <= goal)
+                pr_putchar(' ');
+
+        pr_output_position = goal;
+        pr_spaces_not_printed = 0;
+}
+
+static fn pr_pad_across_to(bipolar position)
+{
+        bipolar h = pr_output_position;
+
+        if (pr_tabify)
+                pr_spaces_not_printed = position - pr_output_position;
+        else
+        {
+                while (++h <= position)
+                        pr_putchar(' ');
+                pr_output_position = position;
+        }
+}
+
+static fn pr_pad_down(bipolar lines)
+{
+        if (pr_use_form_feed)
+                pr_putchar('\f');
+        else
+                for (bipolar i = lines; i > 0; i--)
+                        pr_putchar('\n');
+}
+
+static fn pr_print_sep_string()
+{
+        string_address s = pr_col_sep_string;
+        bipolar l = pr_col_sep_length;
+
+        if (pr_separators_not_printed <= 0)
+        {
+                if (pr_spaces_not_printed > 0)
+                        pr_print_white_space();
+                return;
+        }
+
+        for (; pr_separators_not_printed > 0; pr_separators_not_printed--)
+        {
+                while (l-- > 0)
+                {
+                        if (*s == ' ')
+                        {
+                                s++;
+                                pr_spaces_not_printed++;
+                        }
+                        else
+                        {
+                                if (pr_spaces_not_printed > 0)
+                                        pr_print_white_space();
+                                pr_putchar((p8)*s++);
+                                pr_output_position++;
+                        }
+                }
+                if (pr_spaces_not_printed > 0)
+                        pr_print_white_space();
+        }
+}
+
+static fn pr_print_char(p8 c)
+{
+        if (pr_tabify)
+        {
+                if (c == ' ')
+                {
+                        pr_spaces_not_printed++;
+                        return;
+                }
+                if (pr_spaces_not_printed > 0)
+                        pr_print_white_space();
+
+                // A byte that is not printable is taken to be no width, but
+                // a backspace, which takes one back.
+                if (c < 0x20 || c >= 0x7f)
+                {
+                        if (c == '\b')
+                                pr_output_position--;
+                }
+                else
+                        pr_output_position++;
+        }
+        pr_putchar(c);
+}
+
+static fn pr_store_char(p8 c)
+{
+        if (pr_buff.used >= pr_buff.room &&
+            !byte_store_reserve(address_of pr_buff, pr_buff.used + 1, 1 << 12))
+        {
+                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                exit(text_done(1));
+        }
+        pr_buff.bytes[pr_buff.used++] = c;
+}
+
+static inline INLINE fn pr_char_func(pr_column address_to p, p8 c)
+{
+        if (p->stored)
+                pr_store_char(c);
+        else
+                pr_print_char(c);
+}
+
+static fn pr_print_clump(pr_column address_to p, bipolar n, p8 address_to clump)
+{
+        while (n-- > 0)
+                pr_char_func(p, *clump++);
+}
+
+static fn pr_add_line_number(pr_column address_to p)
+{
+        p8 digits[40];
+        positive length = bipolar_into_string(digits, pr_line_number);
+        bipolar width = pr_chars_per_number;
+        bipolar at = 0;
+
+        pr_line_number++;
+
+        // "%*d" and then the low WIDTH characters of that: the high digits
+        // are the ones cut off.
+        if ((bipolar)length < width)
+        {
+                for (bipolar i = 0; i < width - (bipolar)length; i++)
+                        pr_char_func(p, ' ');
+                at = 0;
+        }
+        else
+                at = (bipolar)length - width;
+        for (; at < (bipolar)length; at++)
+                pr_char_func(p, digits[at]);
 
         if (pr_columns > 1)
-                pr_pad(pr_output_column + blanks);
-        else
-                writer_fill_bulk(text_put, blanks, ' ');
-        text_put(digits, length);
-        pr_output_column += length + (pr_columns > 1 ? 0 : blanks);
-
-        if (pr_columns > 1 && pr_number_separator == '\t')
-                /* Multi-column pr treats the default number tab as the
-                   remaining field width, then lets ordinary output
-                   tabification encode those blanks. */
-                pr_pad(field_start + pr_number_width);
-        else
         {
-                text_put_character(pr_number_separator);
-
                 if (pr_number_separator == '\t')
-                        pr_output_column =
-                            (pr_output_column / 8 + 1) * 8;
+                {
+                        for (bipolar i = pr_number_width - pr_chars_per_number; i > 0; i--)
+                                pr_char_func(p, ' ');
+                }
                 else
-                        pr_output_column++;
-        }
-}
-
-/*
-        pr's two stores, taken once where it starts rather than looked up
-        per record: the page's records by offset, and the line being read.
-        Either may move to the heap when a record outgrows it, and moves
-        these with it.
-*/
-static p8 address_to pr_spill_base;
-static p8 address_to pr_hold_base;
-
-static fn pr_put_record(pr_record address_to record, positive width)
-{
-        if (!record->present)
-                return;
-
-        p8 address_to bytes = pr_spill_base + record->offset;
-        positive record_column = 0;
-
-        for (positive at = 0; at < record->length; at++)
-        {
-                p8 character = bytes[at];
-
-                if (pr_expand_input && character == pr_input_tab)
-                {
-                        positive stop =
-                            (record_column / pr_input_tab_width + 1) *
-                            pr_input_tab_width;
-                        positive count = stop - record_column;
-
-                        if (pr_truncate && stop > width)
-                                count = record_column < width
-                                            ? width - record_column
-                                            : 0;
-
-                        pr_pad(pr_output_column + count);
-                        record_column += count;
-                        continue;
-                }
-
-                if (character == '\b')
-                {
-                        // A backspace with nothing behind it moves nowhere
-                        // and is not written, as GNU's pr leaves it out.
-                        if (!record_column && !pr_output_column)
-                                continue;
-
-                        if (!pr_truncate || record_column)
-                        {
-                                text_put_character(character);
-                                record_column = record_column
-                                                    ? record_column - 1
-                                                    : 0;
-                                pr_output_column = pr_output_column
-                                                       ? pr_output_column - 1
-                                                       : 0;
-                        }
-                        continue;
-                }
-
-                if (character == '\r')
-                {
-                        // Measured: a return starts the line again and
-                        // then stands in its first column, so the next tab
-                        // reaches the stop after one rather than after none.
-                        text_put_character(character);
-                        record_column = 1;
-                        pr_output_column = 0;
-                        continue;
-                }
-
-                positive after = character == '\t'
-                                     ? (record_column / 8 + 1) * 8
-                                     : record_column + 1;
-
-                if (pr_truncate && after > width)
-                        continue;
-
-                text_put_character(character);
-                record_column = after;
-
-                if (character == '\t')
-                        pr_output_column =
-                            (pr_output_column / 8 + 1) * 8;
-                else
-                        pr_output_column++;
-        }
-}
-
-static bool pr_store(p8 address_to bytes, positive length, bipolar number,
-                     pr_record address_to record)
-{
-        //      A page's records are kept by offset, so the store may move to
-        //      the heap when a page outgrows it, as GNU's pr keeps a line
-        //      of any length.
-        if (pr_spill_used + length > TEXT_LINE_MAX &&
-            !text_spill_room(address_of pr_spill_base, pr_spill_used,
-                             pr_spill_used + length, null))
-        {
-                string_diagnostic(&text_diagnostic, 0, null, "page is too large");
-                pr_failed = true;
-                return false;
-        }
-
-        record->offset = pr_spill_used;
-        record->number = number;
-        record->present = true;
-        record->length = length;
-        memory_copy(pr_spill_base + pr_spill_used, bytes, length);
-        pr_spill_used += length;
-        return true;
-}
-
-/* 0: EOF, 1: record, 2: page break, 3: record then page break. */
-static b32 pr_source_record(pr_record address_to record)
-{
-        p8 address_to bytes;
-        positive length;
-
-        if (pr_pending)
-        {
-                bytes = pr_hold_base;
-                length = pr_pending_length;
-                pr_pending = false;
+                        pr_char_func(p, pr_number_separator);
         }
         else
         {
-                if (!text_line_next(pr_hold_base, 0))
-                        return 0;
-
-                if (unlikely(text_spill_moved != null))
-                        pr_hold_base = text_spill_moved;
-
-                bytes = pr_hold_base;
-                length = text_line_length;
+                pr_char_func(p, pr_number_separator);
+                if (pr_number_separator == '\t')
+                        pr_output_position = pr_output_position + pr_chars_per_output_tab -
+                                             pr_output_position % pr_chars_per_output_tab;
         }
 
-        /* A form feed ends the record even when -T suppresses its output;
-           the retained suffix becomes the next record. */
-        {
-                p8 address_to page = memory_first_of(bytes, '\f', length);
-
-                if (page)
-                {
-                        positive prefix = (positive)(page - bytes);
-                        positive suffix = length - prefix - 1;
-
-                        if (prefix &&
-                            !pr_store(bytes, prefix, pr_line_number++, record))
-                                return 0;
-
-                        if (suffix)
-                        {
-                                memory_copy(pr_hold_base, page + 1, suffix);
-                                pr_pending_length = suffix;
-                                pr_pending = true;
-                        }
-
-                        return prefix ? 3 : 2;
-                }
-        }
-
-        if (!pr_store(bytes, length, pr_line_number++, record))
-                return 0;
-
-        return 1;
+        if (pr_truncate && !pr_parallel)
+                pr_input_position += pr_number_width;
 }
 
-static positive pr_load_page(bool address_to forced)
+static fn pr_align_column(pr_column address_to p)
 {
-        positive count = 0;
-        pr_spill_used = 0;
-        address_to forced = false;
-
-        while (count < pr_record_room)
+        pr_padding_not_printed = p->start_position;
+        if (pr_col_sep_length < pr_padding_not_printed)
         {
-                b32 answer = pr_source_record(pr_records + count);
-
-                if (!answer)
-                        break;
-
-                if (answer == 1)
-                        count++;
-                else
-                {
-                        if (answer == 3)
-                                count++;
-                        address_to forced = true;
-                        break;
-                }
+                pr_pad_across_to(pr_padding_not_printed - pr_col_sep_length);
+                pr_padding_not_printed = PR_ANYWHERE;
         }
 
-        return count;
+        if (pr_use_col_separator)
+                pr_print_sep_string();
+
+        if (p->numbered)
+                pr_add_line_number(p);
 }
 
-static positive pr_load_merge(text_record_cursor address_to cursors,
-                              positive inputs)
+/* The width of the header's texts, as mbswidth measures them. */
+static bipolar pr_text_width(string_address text, positive length)
 {
-        positive rows = 0;
-        pr_spill_used = 0;
+        bipolar width = 0;
+        bool utf8 = text_locale_utf8();
 
-        while (rows < pr_body_lines)
+        for (positive at = 0; at < length;)
         {
-                bool any = false;
+                p8 c = (p8)text[at];
 
-                for (positive column = 0; column < inputs; column++)
+                if (c < 0x80 || !utf8)
                 {
-                        pr_record address_to record =
-                            pr_records + rows * inputs + column;
-
-                        record->present = false;
-                        record->length = 0;
-                        record->number = pr_line_number;
-
-                        if (cursors[column].reader.failed ||
-                            cursors[column].reader.finished)
-                                continue;
-
-                        if (text_record_next(cursors + column, '\n', null, 0,
-                                             null))
-                        {
-                                if (memory_first_of(cursors[column].record,
-                                                    '\f',
-                                                    cursors[column].length))
-                                {
-                                        string_diagnostic(&text_diagnostic, 0, null, "form feed with --merge is unsupported");
-                                        pr_failed = true;
-                                        return rows;
-                                }
-
-                                any = true;
-
-                                if (!pr_store(cursors[column].record,
-                                              cursors[column].length,
-                                              pr_line_number, record))
-                                        return rows;
-                        }
-                        else if (cursors[column].reader.failed)
-                                text_status = 1;
+                        at++;
+                        if (c >= 0x20 && c < 0x7f)
+                                width++;
+                        else if (c >= 0x80)
+                                width += utf8 ? 1 : 1;
+                        continue;
                 }
 
-                if (!any)
-                        break;
+                positive size = memory_utf8_span(text + at, length - at, 1).x;
 
-                rows++;
-                pr_line_number++;
+                if (!size || memory_utf8_span(text + at, size, 1).y != size)
+                {
+                        at++;
+                        width++;
+                        continue;
+                }
+
+                p32 code = c & (size == 2 ? 0x1f : size == 3 ? 0x0f : 0x07);
+
+                for (positive k = 1; k < size; k++)
+                        code = (code << 6) | ((p8)text[at + k] & 0x3f);
+                width += unicode_width(code, UNICODE_WIDTH_WCWIDTH);
+                at += size;
+        }
+        return width;
+}
+
+static fn pr_print_header()
+{
+        pr_output_position = 0;
+        pr_pad_across_to(pr_chars_per_margin);
+        pr_print_white_space();
+
+        if (pr_page_number == 0)
+        {
+                string_diagnostic(&text_diagnostic, 0, null, "page number overflow");
+                exit(text_done(1));
         }
 
-        return rows;
-}
-
-static bool pr_date(p8 address_to into, positive room, b64 stamp,
-                    positive address_to length)
-{
-        time_t time = (time_t)stamp;
-        tm broken;
-
-        if (!localtime_r(address_of time, address_of broken))
-                return false;
-
-        address_to length = clock_format_extended(into, room, pr_date_format,
-                                                   address_of broken, 0);
-        return address_to length || !pr_date_format[0];
-}
-
-static fn pr_put_header(string_address name, b64 stamp, positive page)
-{
-        p8 date[512];
-        p8 page_text[80];
-        positive date_length = 0;
-        positive page_digits = positive_into(page_text + 5, page);
+        p8 page_text[40];
+        positive page_length = 5 + positive_into(page_text + 5, pr_page_number);
 
         memory_copy(page_text, "Page ", 5);
 
-        if (!pr_date(date, sizeof(date), stamp, address_of date_length))
-        {
-                string_diagnostic(&text_diagnostic, 0, pr_date_format, "date format is too long");
-                pr_failed = true;
-                return;
-        }
+        bipolar available = pr_header_width_available -
+                            pr_text_width(page_text, page_length);
 
-        positive name_length = string_length(name);
-        positive page_length = page_digits + 5;
-        positive occupied = date_length + name_length + page_length;
-        // The margin sits in front of the header rather than inside it.
-        positive room = pr_page_width > pr_margin ? pr_page_width - pr_margin
-                                                  : 0;
-        positive available = occupied < room ? room - occupied : 0;
-        positive left = available / 2;
-        positive right = available - left;
+        if (available < 0)
+                available = 0;
 
-        if (!left)
-                left = 1;
-        if (!right)
-                right = 1;
+        bipolar lhs = available >> 1;
+        bipolar rhs = available - lhs;
 
-        pr_put_margin();
         text_put_string("\n\n");
-        pr_put_margin();
-        text_put(date, date_length);
-        writer_fill_bulk(text_put, left, ' ');
-        text_put_string(name);
-        writer_fill_bulk(text_put, right, ' ');
+        writer_fill_bulk(text_put, (positive)pr_chars_per_margin, ' ');
+        text_put(pr_date_text, pr_date_length);
+        writer_fill_bulk(text_put, lhs > 1 ? (positive)lhs : 1, ' ');
+        text_put_string(pr_file_text);
+        writer_fill_bulk(text_put, rhs > 1 ? (positive)rhs : 1, ' ');
         text_put(page_text, page_length);
         text_put_string("\n\n\n");
+
+        pr_print_a_header = false;
+        pr_output_position = 0;
 }
 
-static fn pr_put_separator()
+/*
+        One character as it is to be written, into the clump, and how far it
+        moves the input position: a tab is spaces to the next stop when the
+        input is untabified, a byte that is not printable is spelled \ooo
+        under -v, ^X (or \ooo past 127) under -c, and otherwise written as it
+        is, with a width of nothing -- a backspace one back, never before the
+        start.
+*/
+static bipolar pr_char_to_clump(p8 c)
 {
-        text_put(pr_separator, pr_separator_length);
-        pr_output_column += pr_separator_length;
-}
+        p8 address_to s = pr_clump;
+        bipolar width;
+        bipolar chars;
+        bipolar per = 8;
 
-/* Vertical pages fill each column top-to-bottom.  On an incomplete page GNU
-   gives one extra record to each leftmost column, so later column starts are
-   cumulative rather than a fixed ceil(count / columns) stride. */
-static positive pr_page_index(positive count, positive row, positive column,
-                              bool address_to present)
-{
-        positive index;
-        if (pr_merge || pr_across)
-                index = row * pr_columns + column;
-        else
+        if (c == pr_input_tab_char)
+                per = pr_chars_per_input_tab;
+
+        if (c == pr_input_tab_char || c == '\t')
         {
-                positive short_rows = count / pr_columns;
-                positive long_columns = count % pr_columns;
-                positive column_rows = short_rows +
-                                       (column < long_columns);
-                if (row >= column_rows)
+                width = per - pr_input_position % per;
+                if (pr_untabify)
                 {
-                        address_to present = false;
-                        return count;
+                        memory_fill(s, ' ', (positive)width);
+                        chars = width;
                 }
-                index = column * short_rows +
-                        min(column, long_columns) + row;
-        }
-        address_to present = index < count;
-        return index;
-}
-
-static fn pr_put_page(positive count, positive rows, positive page,
-                      string_address name, b64 stamp, bool forced)
-{
-        bool shown_header = !pr_omit_header;
-
-        if (shown_header)
-                pr_put_header(name, stamp, page);
-
-        positive number_fields = pr_number && pr_merge ? 1 : 0;
-        positive fixed = pr_margin +
-                         (pr_columns - 1) * pr_separator_length +
-                         number_fields * pr_number_width;
-        positive useful = pr_page_width > fixed
-                              ? pr_page_width - fixed
-                              : 0;
-        positive column_width = useful / pr_columns;
-        // A column narrower than the number beside it leaves nothing for
-        // the record, which is a truncation and not a width that wrapped.
-        positive record_width = pr_number && !pr_merge
-                                    ? (column_width > pr_number_width
-                                           ? column_width - pr_number_width
-                                           : 0)
-                                    : column_width;
-
-        for (positive row = 0; row < rows; row++)
-        {
-                pr_put_margin();
-
-                for (positive column = 0; column < pr_columns; column++)
-                {
-                        bool present;
-                        positive index = pr_page_index(count, row, column,
-                                                       address_of present);
-                        if (!present)
-                                break;
-
-                        pr_record address_to record = pr_records + index;
-                        positive field_start = pr_output_column;
-
-                        if (pr_number && (!pr_merge || !column))
-                                pr_put_number(record->number, field_start);
-
-                        positive data_start = pr_output_column;
-                        pr_put_record(record, record_width);
-
-                        bool later = false;
-                        if (column + 1 < pr_columns)
-                        {
-                                bool next_present;
-                                (void)pr_page_index(count, row, column + 1,
-                                                    address_of next_present);
-                                later = next_present;
-                        }
-
-                        if (later)
-                        {
-                                bool blank_separator =
-                                    pr_separator_length == 1 &&
-                                    pr_separator[0] == ' ';
-
-                                if (!pr_join)
-                                        pr_pad(data_start + record_width +
-                                               blank_separator);
-
-                                if (!blank_separator)
-                                        pr_put_separator();
-                        }
-                }
-
-                text_put_character('\n');
-
-                if (pr_double)
-                        text_put_character('\n');
-        }
-
-        if (shown_header)
-        {
-                if (pr_form_feed)
-                        text_put_character('\f');
                 else
                 {
-                        positive used = PR_HEADER_LINES +
-                                        rows * (pr_double ? 2 : 1);
-
-                        if (used < pr_page_length)
-                                writer_fill_bulk(text_put, pr_page_length - used, '\n');
+                        *s = c;
+                        chars = 1;
                 }
         }
-        else if (forced && !pr_omit_pagination)
-                text_put_character('\f');
+        else if (c < 0x20 || c >= 0x7f)
+        {
+                if (pr_use_esc || (pr_use_cntrl && c >= 0x80))
+                {
+                        width = 4;
+                        chars = 4;
+                        s[0] = '\\';
+                        s[1] = (p8)('0' + (c >> 6));
+                        s[2] = (p8)('0' + ((c >> 3) & 7));
+                        s[3] = (p8)('0' + (c & 7));
+                }
+                else if (pr_use_cntrl)
+                {
+                        width = 2;
+                        chars = 2;
+                        s[0] = '^';
+                        s[1] = c ^ 0100;
+                }
+                else if (c == '\b')
+                {
+                        width = -1;
+                        chars = 1;
+                        *s = c;
+                }
+                else
+                {
+                        width = 0;
+                        chars = 1;
+                        *s = c;
+                }
+        }
+        else
+        {
+                width = 1;
+                chars = 1;
+                *s = c;
+        }
+
+        if (width < 0 && pr_input_position == 0)
+        {
+                chars = 0;
+                pr_input_position = 0;
+        }
+        else if (width < 0 && pr_input_position <= -width)
+                pr_input_position = 0;
+        else
+                pr_input_position += width;
+
+        return chars;
 }
 
-static b64 pr_stamp(positive handle)
+static fn pr_read_rest_of_line(pr_column address_to p)
 {
+        pr_stream address_to f = p->stream;
+        bipolar c;
+
+        for (;;)
+        {
+                // What is left of a truncated line is passed over in the
+                // buffer; only its end is read a character at a time.
+                if (f->pushed < 0)
+                {
+                        text_reader address_to reader = address_of f->reader;
+                        p8 address_to at = reader->buffer + reader->position;
+                        positive left = reader->filled - reader->position;
+                        positive i = 0;
+
+                        while (i < left && at[i] != '\n' && at[i] != '\f')
+                                i++;
+                        reader->position += i;
+                }
+
+                if ((c = pr_getc(f)) == '\n')
+                        break;
+                if (c == '\f')
+                {
+                        if ((c = pr_getc(f)) != '\n')
+                                pr_ungetc(c, f);
+                        if (pr_keep_ff)
+                                pr_print_a_ff = true;
+                        pr_hold_file(p);
+                        break;
+                }
+                if (c < 0)
+                {
+                        pr_close_file(p);
+                        break;
+                }
+        }
+}
+
+static fn pr_skip_read(pr_column address_to p, bipolar column_number)
+{
+        pr_stream address_to f = p->stream;
+        bool single_ff = false;
+        bipolar c = pr_getc(f);
+
+        // A form feed straight after a full page is the stop of that page,
+        // not an empty page of its own.
+        if (c == '\f' && p->full_page_printed)
+                if ((c = pr_getc(f)) == '\n')
+                        c = pr_getc(f);
+
+        p->full_page_printed = false;
+
+        if (c == '\f')
+                single_ff = true;
+
+        if (pr_last_line)
+                p->full_page_printed = true;
+
+        while (c != '\n')
+        {
+                if (c == '\f')
+                {
+                        if (pr_last_line)
+                        {
+                                if (!pr_parallel)
+                                        for (bipolar i = 0; i < pr_columns; i++)
+                                                pr_column_vector[i].full_page_printed = false;
+                                else
+                                        p->full_page_printed = false;
+                        }
+
+                        if ((c = pr_getc(f)) != '\n')
+                                pr_ungetc(c, f);
+                        pr_hold_file(p);
+                        break;
+                }
+                if (c < 0)
+                {
+                        pr_close_file(p);
+                        break;
+                }
+                c = pr_getc(f);
+        }
+
+        if (pr_skip_count)
+                if ((!pr_parallel || column_number == 1) && !single_ff)
+                        pr_line_count++;
+}
+
+static bool pr_skip_to_page(positive page)
+{
+        for (positive n = 1; n < page; n++)
+        {
+                for (bipolar i = 1; i < pr_lines_per_body; i++)
+                        for (bipolar j = 0; j < pr_columns; j++)
+                                if (pr_column_vector[j].status == PR_OPEN)
+                                        pr_skip_read(pr_column_vector + j, j + 1);
+
+                pr_last_line = true;
+                for (bipolar j = 0; j < pr_columns; j++)
+                        if (pr_column_vector[j].status == PR_OPEN)
+                                pr_skip_read(pr_column_vector + j, j + 1);
+
+                if (pr_storing)
+                        for (bipolar j = 0; j < pr_columns; j++)
+                                if (pr_column_vector[j].status != PR_CLOSED)
+                                        pr_column_vector[j].status = PR_ON_HOLD;
+
+                pr_reset_status();
+                pr_last_line = false;
+
+                if (pr_files_ready < 1)
+                {
+                        text_flush();
+                        string_format(writer_stderr,
+                                      "%s: starting page number %p exceeds page count %p\n",
+                                      text_name, page, n);
+                        break;
+                }
+        }
+        return pr_files_ready > 0;
+}
+
+/*
+        A line of column P, printed (or stored) as it is read. The first
+        character says whether there is a line at all: a form feed holds the
+        column until the next page (and may bring a header with it), the stop
+        of the input closes it. Past the column's width under truncation the
+        rest of the line is left for read_rest_of_line, which is what the
+        false answer asks for.
+*/
+static bool pr_read_line(pr_column address_to p)
+{
+        pr_stream address_to f = p->stream;
+        bipolar c = pr_getc(f);
+        bipolar chars = 0;
+        bipolar last_input_position = pr_input_position;
+
+        if (c == '\f' && p->full_page_printed)
+                if ((c = pr_getc(f)) == '\n')
+                        c = pr_getc(f);
+        p->full_page_printed = false;
+
+        if (c == '\f')
+        {
+                if ((c = pr_getc(f)) != '\n')
+                        pr_ungetc(c, f);
+                pr_ff_only = true;
+                if (pr_print_a_header && !pr_storing)
+                {
+                        pr_pad_vertically = true;
+                        pr_print_header();
+                }
+                else if (pr_keep_ff)
+                        pr_print_a_ff = true;
+                pr_hold_file(p);
+                return true;
+        }
+        if (c < 0)
+        {
+                pr_close_file(p);
+                return true;
+        }
+        if (c != '\n')
+                chars = pr_char_to_clump((p8)c);
+
+        if (pr_truncate && pr_input_position > pr_chars_per_column)
+        {
+                pr_input_position = last_input_position;
+                return false;
+        }
+
+        if (!p->stored)
+        {
+                pr_pad_vertically = true;
+
+                if (pr_print_a_header && !pr_storing)
+                        pr_print_header();
+
+                if (pr_parallel && pr_align_empty_cols)
+                {
+                        bipolar k = pr_separators_not_printed;
+
+                        pr_separators_not_printed = 0;
+                        for (bipolar j = 0; j < k; j++)
+                        {
+                                pr_align_column(pr_column_vector + j);
+                                pr_separators_not_printed += 1;
+                        }
+                        pr_padding_not_printed = p->start_position;
+                        pr_spaces_not_printed = pr_truncate ? pr_chars_per_column : 0;
+                        pr_align_empty_cols = false;
+                }
+
+                if (pr_col_sep_length < pr_padding_not_printed)
+                {
+                        pr_pad_across_to(pr_padding_not_printed - pr_col_sep_length);
+                        pr_padding_not_printed = PR_ANYWHERE;
+                }
+
+                if (pr_use_col_separator)
+                        pr_print_sep_string();
+        }
+
+        if (p->numbered)
+                pr_add_line_number(p);
+
+        pr_empty_line = false;
+        if (c == '\n')
+                return true;
+
+        pr_print_clump(p, chars, pr_clump);
+
+        for (;;)
+        {
+                if (f->pushed < 0)
+                {
+                        text_reader address_to reader = address_of f->reader;
+                        p8 address_to at = reader->buffer + reader->position;
+                        positive left = reader->filled - reader->position;
+
+                        if (pr_truncate)
+                        {
+                                bipolar room = pr_chars_per_column - pr_input_position;
+
+                                left = room <= 0 ? 0 : min(left, (positive)room);
+                        }
+
+                        positive run = pr_plain_run(at, left);
+                        if (run)
+                        {
+                                if (p->stored)
+                                {
+                                        if (!byte_store_reserve(address_of pr_buff,
+                                                                pr_buff.used + run, 1 << 12))
+                                        {
+                                                string_diagnostic(&text_diagnostic, 0, null,
+                                                                  "memory exhausted");
+                                                exit(text_done(1));
+                                        }
+                                        memory_copy_apart(pr_buff.bytes + pr_buff.used, at, run);
+                                        pr_buff.used += run;
+                                }
+                                else
+                                        pr_plain_put(at, run);
+                                reader->position += run;
+                                pr_input_position += (bipolar)run;
+                        }
+                }
+
+                c = pr_getc(f);
+
+                if (c == '\n')
+                        return true;
+                if (c == '\f')
+                {
+                        if ((c = pr_getc(f)) != '\n')
+                                pr_ungetc(c, f);
+                        if (pr_keep_ff)
+                                pr_print_a_ff = true;
+                        pr_hold_file(p);
+                        return true;
+                }
+                if (c < 0)
+                {
+                        pr_close_file(p);
+                        return true;
+                }
+
+                last_input_position = pr_input_position;
+                chars = pr_char_to_clump((p8)c);
+                if (pr_truncate && pr_input_position > pr_chars_per_column)
+                {
+                        pr_input_position = last_input_position;
+                        return false;
+                }
+
+                pr_print_clump(p, chars, pr_clump);
+        }
+}
+
+static bool pr_print_stored(pr_column address_to p)
+{
+        bipolar line = p->current_line++;
+        p8 address_to first = pr_buff.bytes + pr_line_vector[line];
+        p8 address_to last = pr_buff.bytes + pr_line_vector[line + 1];
+
+        pr_pad_vertically = true;
+
+        if (pr_print_a_header)
+                pr_print_header();
+
+        if (p->status == PR_FF_FOUND)
+        {
+                for (bipolar i = 0; i < pr_columns; i++)
+                        pr_column_vector[i].status = PR_ON_HOLD;
+                if (pr_column_vector->lines_to_print <= 0)
+                {
+                        if (!pr_extremities)
+                                pr_pad_vertically = false;
+                        return true;
+                }
+        }
+
+        if (pr_col_sep_length < pr_padding_not_printed)
+        {
+                pr_pad_across_to(pr_padding_not_printed - pr_col_sep_length);
+                pr_padding_not_printed = PR_ANYWHERE;
+        }
+
+        if (pr_use_col_separator)
+                pr_print_sep_string();
+
+        while (first != last)
+        {
+                positive run = pr_plain_run(first, (positive)(last - first));
+
+                if (run)
+                {
+                        pr_plain_put(first, run);
+                        first += run;
+                        continue;
+                }
+                pr_print_char(*first++);
+        }
+
+        if (pr_spaces_not_printed == 0)
+        {
+                pr_output_position = p->start_position + pr_end_vector[line];
+                if (p->start_position - pr_col_sep_length == pr_chars_per_margin)
+                        pr_output_position -= pr_col_sep_length;
+        }
+
+        return true;
+}
+
+static inline INLINE bool pr_print_func(pr_column address_to p)
+{
+        return p->stored ? pr_print_stored(p) : pr_read_line(p);
+}
+
+/* Storing the columns of one file printed down --------------------------- */
+
+static fn pr_balance_columns(bipolar total)
+{
+        bipolar first_line = 0;
+
+        for (bipolar i = 1; i <= pr_columns; i++)
+        {
+                pr_column address_to p = pr_column_vector + i - 1;
+                bipolar lines = total / pr_columns;
+
+                if (i <= total % pr_columns)
+                        lines++;
+                p->lines_stored = lines;
+                p->current_line = first_line;
+                first_line += lines;
+        }
+}
+
+static fn pr_store_columns()
+{
+        bipolar line = 0;
+        b32 buff_start = 0;
+        bipolar last_col = pr_balance ? pr_columns : pr_columns - 1;
+
+        pr_buff.used = 0;
+
+        for (bipolar i = 0; i < last_col; i++)
+                pr_column_vector[i].lines_stored = 0;
+
+        for (bipolar i = 0; i < last_col && pr_files_ready; i++)
+        {
+                pr_column address_to p = pr_column_vector + i;
+
+                p->current_line = line;
+                for (bipolar j = pr_lines_per_body; j && pr_files_ready; j--)
+                        if (p->status == PR_OPEN)
+                        {
+                                pr_input_position = 0;
+
+                                if (!pr_read_line(p))
+                                        pr_read_rest_of_line(p);
+
+                                if (p->status == PR_OPEN ||
+                                    buff_start != (b32)pr_buff.used)
+                                {
+                                        p->lines_stored++;
+                                        pr_line_vector[line] = buff_start;
+                                        pr_end_vector[line++] = (b32)pr_input_position;
+                                        buff_start = (b32)pr_buff.used;
+                                }
+                        }
+        }
+
+        pr_line_vector[line] = buff_start;
+
+        if (pr_balance)
+                pr_balance_columns(line);
+}
+
+static fn pr_init_store_cols()
+{
+        positive total = (positive)pr_lines_per_body * (positive)pr_columns;
+
+        memory_give(pr_line_vector);
+        memory_give(pr_end_vector);
+        pr_line_vector = (b32 address_to)memory_take((total + 1) * sizeof(b32));
+        pr_end_vector = (b32 address_to)memory_take((total ? total : 1) * sizeof(b32));
+        pr_buff.used = 0;
+
+        if (!pr_line_vector || !pr_end_vector ||
+            !byte_store_reserve(address_of pr_buff,
+                                min(total * ((positive)pr_chars_per_column + 1) *
+                                        (pr_use_col_separator + 1),
+                                    (positive)1 << 20),
+                                1 << 12))
+        {
+                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                exit(text_done(1));
+        }
+}
+
+/* Setting up ------------------------------------------------------------ */
+
+static fn pr_init_parameters(positive number_of_files)
+{
+        bipolar chars_used_by_number = 0;
+
+        pr_lines_per_body = pr_lines_per_page - PR_HEADER_LINES - PR_FOOTER_LINES;
+        if (pr_lines_per_body <= 0)
+        {
+                pr_extremities = false;
+                pr_keep_ff = true;
+        }
+        if (!pr_extremities)
+                pr_lines_per_body = pr_lines_per_page;
+
+        if (pr_double)
+                pr_lines_per_body = max(1, pr_lines_per_body / 2);
+
+        if (!number_of_files)
+                pr_parallel = false;
+
+        if (pr_parallel)
+                pr_columns = (bipolar)number_of_files;
+
+        if (pr_storing)
+                pr_balance = true;
+
+        if (pr_columns > 1)
+        {
+                if (!pr_use_col_separator)
+                {
+                        pr_col_sep_string = pr_join ? (string_address) "\t" : (string_address) " ";
+                        pr_col_sep_length = 1;
+                        pr_use_col_separator = true;
+                }
+                else if (!pr_join && pr_col_sep_length == 1 && pr_col_sep_string[0] == '\t')
+                        pr_col_sep_string = " ";
+
+                pr_truncate = true;
+                if (!(pr_col_sep_length == 1 && pr_col_sep_string[0] == '\t'))
+                        pr_untabify = true;
+                pr_tabify = true;
+        }
+        else
+                pr_storing = false;
+
+        if (pr_join)
+                pr_truncate = false;
+
+        if (pr_numbered)
+        {
+                pr_line_count = pr_start_line_num;
+
+                if (pr_number_separator == '\t')
+                        pr_number_width = pr_chars_per_number + 8 - pr_chars_per_number % 8;
+                else
+                        pr_number_width = pr_chars_per_number + 1;
+
+                if (pr_parallel)
+                        chars_used_by_number = pr_number_width;
+        }
+
+        bipolar sep_chars = (pr_columns - 1) * pr_col_sep_length;
+        bipolar useful = pr_chars_per_line - chars_used_by_number - sep_chars;
+
+        if (sep_chars > b32_max || useful < 0)
+                useful = 0;
+        pr_chars_per_column = useful / pr_columns;
+
+        if (pr_chars_per_column < 1)
+        {
+                string_diagnostic(&text_diagnostic, 0, null, "page width too narrow");
+                exit(text_done(1));
+        }
+
+        memory_give(pr_clump);
+        pr_clump = (p8 address_to)memory_take((positive)max(8, pr_chars_per_input_tab));
+        if (!pr_clump)
+        {
+                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                exit(text_done(1));
+        }
+}
+
+// The date and name for a header: the file's own modification time, or
+// the time pr started for standard input and --merge.
+static fn pr_init_header(string_address filename, pr_stream address_to stream)
+{
+        file_moment when = pr_now_moment;
+        bool own = stream && !string_equals(filename, "-");
         file_facts facts;
 
-        if (text_handle_facts(handle, address_of facts))
-                return (b64)facts.modified.seconds;
+        if (own && text_handle_facts(stream->reader.handle, address_of facts))
+                when = facts.modified;
 
-        return pr_now;
+        time_t seconds = (time_t)when.seconds;
+        tm broken;
+        positive room = 256;
+
+        pr_date_length = 0;
+        if (localtime_r(address_of seconds, address_of broken))
+        {
+                for (;;)
+                {
+                        memory_give(pr_date_text);
+                        pr_date_text = (p8 address_to)memory_take(room);
+                        if (!pr_date_text)
+                        {
+                                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                                exit(text_done(1));
+                        }
+                        pr_date_length = clock_format_extended(pr_date_text, room, pr_date_format,
+                                                               address_of broken, when.nanoseconds);
+                        if (pr_date_length || !pr_date_format[0] || room > (1 << 20))
+                                break;
+                        room *= 4;
+                }
+        }
+        else
+        {
+                memory_give(pr_date_text);
+                pr_date_text = (p8 address_to)memory_take(64);
+                if (!pr_date_text)
+                        exit(text_done(1));
+                pr_date_length = bipolar_into_string(pr_date_text, when.seconds);
+                pr_date_text[pr_date_length++] = '.';
+                for (positive digit = 9; digit; digit--)
+                {
+                        positive power = 1;
+
+                        for (positive k = 1; k < digit; k++)
+                                power *= 10;
+                        pr_date_text[pr_date_length++] = (p8)('0' + when.nanoseconds / power % 10);
+                }
+        }
+
+        pr_file_text = pr_custom_header ? pr_custom_header : own ? filename : (string_address) "";
+        pr_header_width_available = pr_chars_per_line -
+                                    pr_text_width(pr_date_text, pr_date_length) -
+                                    pr_text_width(pr_file_text, string_length(pr_file_text));
 }
 
-static fn pr_single_file(string_address path)
+static bool pr_open_file(string_address name, pr_column address_to p)
 {
-        if (!text_open(path))
-                return;
-
-        b64 stamp = pr_stamp(text_input.handle);
-        // Standard input has no name in the header, however it was asked
-        // for: a bare - is the same input as no operand at all.
-        string_address heading =
-            pr_header ? pr_header
-                      : (path && !string_equals(path, "-") ? path
-                                                           : (string_address)"");
-        positive page = 1;
-        positive filled = 0;
-
-        pr_pending = false;
-        pr_pending_length = 0;
-        pr_line_number = pr_number_reset ? pr_start_line_number : 1;
-
-        while (!pr_failed)
+        p->name = name;
+        p->stream = pr_stream_open(name);
+        if (!p->stream)
         {
-                if (pr_number_reset && page == pr_first_page)
-                        pr_line_number = pr_start_line_number;
-
-                bool forced;
-                positive count = pr_load_page(address_of forced);
-
-                if (!count && !forced)
-                        break;
-
-                positive rows = pr_columns == 1
-                                    ? count
-                                    : (count + pr_columns - 1) / pr_columns;
-
-                filled = page;
-
-                if (page >= pr_first_page && page <= pr_last_page)
-                        pr_put_page(count, rows, page, heading, stamp, forced);
-
-                if (page >= pr_last_page)
-                        break;
-
-                page++;
+                pr_failed_opens = true;
+                return false;
         }
-
-        // A first page beyond the last one that had anything on it is a
-        // complaint on the error stream and nothing else: the status stays.
-        // Nobody asked for a first page when nobody wrote a +.
-        if (pr_first_page > 1 && pr_first_page > filled)
-                string_report(writer_stderr, 0,
-                              "%s: starting page number %p exceeds page count %p\n",
-                              text_name, pr_first_page, filled);
-
-        text_close();
+        p->status = PR_OPEN;
+        p->full_page_printed = false;
+        pr_total_files++;
+        return true;
 }
 
-static fn pr_merge_files()
+// The inputs of one print_files, closed and given back; standard input
+// stays for a later "-".
+static fn pr_release_streams()
 {
-        positive inputs = text_files_count;
-        text_record_cursor address_to cursors =
-            (text_record_cursor address_to)utility_arena_take(
-                inputs * sizeof(text_record_cursor));
+        bipolar count = pr_parallel ? pr_columns : (pr_columns ? 1 : 0);
 
-        if (!cursors)
+        for (bipolar i = 0; i < count; i++)
         {
-                pr_failed = true;
-                return;
+                pr_stream address_to stream = pr_column_vector[i].stream;
+
+                if (!stream || stream == pr_stdin)
+                        continue;
+                text_close_handle(address_of stream->reader.opened,
+                                  stream->reader.handle);
+                memory_give(stream);
+                for (bipolar j = i; j < pr_columns; j++)
+                        if (pr_column_vector[j].stream == stream)
+                                pr_column_vector[j].stream = null;
         }
-
-        for (positive input = 0; input < inputs; input++)
-        {
-                string_address path = text_file_name(input);
-
-                if (!text_record_open(cursors + input, path,
-                                      text_record_hold))
-                        text_status = 1;
-        }
-
-        positive page = 1;
-        pr_line_number = pr_number_reset ? pr_start_line_number : 1;
-
-        while (!pr_failed)
-        {
-                if (pr_number_reset && page == pr_first_page)
-                        pr_line_number = pr_start_line_number;
-
-                positive rows = pr_load_merge(cursors, inputs);
-
-                if (!rows)
-                        break;
-
-                if (page >= pr_first_page && page <= pr_last_page)
-                        pr_put_page(rows * inputs, rows, page,
-                                    pr_header ? pr_header
-                                              : (string_address)"",
-                                    pr_now, false);
-
-                if (page >= pr_last_page)
-                        break;
-
-                page++;
-        }
-
-        for (positive input = 0; input < inputs; input++)
-                text_record_close(cursors + input);
 }
+
+static bool pr_init_fps(positive number_of_files, string_address address_to names)
+{
+        pr_total_files = 0;
+
+        memory_give(pr_column_vector);
+        pr_column_vector = (pr_column address_to)memory_take((positive)pr_columns * sizeof(pr_column));
+        if (!pr_column_vector)
+        {
+                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                exit(text_done(1));
+        }
+        memory_fill(pr_column_vector, 0, (positive)pr_columns * sizeof(pr_column));
+
+        if (pr_parallel)
+        {
+                pr_column address_to p = pr_column_vector;
+
+                for (positive left = 0; left < number_of_files; left++)
+                {
+                        if (pr_open_file(names[left], p))
+                                p++;
+                        else
+                                pr_columns--;
+                }
+                if (pr_columns == 0)
+                        return false;
+                pr_init_header("", null);
+        }
+        else
+        {
+                pr_column address_to p = pr_column_vector;
+
+                if (number_of_files)
+                {
+                        if (!pr_open_file(names[0], p))
+                                return false;
+                        pr_init_header(names[0], p->stream);
+                }
+                else
+                {
+                        p->name = "standard input";
+                        p->stream = pr_stream_open("-");
+                        p->status = PR_OPEN;
+                        p->full_page_printed = false;
+                        pr_total_files++;
+                        pr_init_header("", null);
+                }
+                p->lines_stored = 0;
+
+                for (bipolar i = 1; i < pr_columns; i++)
+                {
+                        pr_column address_to q = pr_column_vector + i;
+
+                        q->name = p->name;
+                        q->stream = p->stream;
+                        q->status = PR_OPEN;
+                        q->full_page_printed = false;
+                        q->lines_stored = 0;
+                }
+        }
+
+        pr_files_ready = pr_total_files;
+        return true;
+}
+
+static fn pr_init_funcs()
+{
+        bipolar h = pr_chars_per_margin;
+        bipolar h_next;
+        bipolar i;
+        pr_column address_to p = pr_column_vector;
+
+        if (!pr_truncate)
+                h_next = PR_ANYWHERE;
+        else if (pr_parallel && pr_numbered)
+                h_next = h + pr_chars_per_column + pr_number_width;
+        else
+                h_next = h + pr_chars_per_column;
+
+        h = h + pr_col_sep_length;
+
+        for (i = 1; i < pr_columns; i++, p++)
+        {
+                p->stored = pr_storing;
+                p->numbered = pr_numbered && (!pr_parallel || i == 1);
+                p->start_position = h;
+
+                if (!pr_truncate)
+                {
+                        h = PR_ANYWHERE;
+                        h_next = PR_ANYWHERE;
+                }
+                else
+                {
+                        h = h_next + pr_col_sep_length;
+                        h_next = h + pr_chars_per_column;
+                }
+        }
+
+        p->stored = pr_storing && pr_balance;
+        p->numbered = pr_numbered && (!pr_parallel || i == 1);
+        p->start_position = h;
+}
+
+static fn pr_init_page()
+{
+        if (pr_storing)
+        {
+                pr_store_columns();
+                for (bipolar j = 0; j < pr_columns - 1; j++)
+                        pr_column_vector[j].lines_to_print = pr_column_vector[j].lines_stored;
+
+                pr_column address_to p = pr_column_vector + pr_columns - 1;
+
+                if (pr_balance)
+                        p->lines_to_print = p->lines_stored;
+                else
+                        p->lines_to_print = p->status == PR_OPEN ? pr_lines_per_body : 0;
+        }
+        else
+                for (bipolar j = 0; j < pr_columns; j++)
+                {
+                        pr_column address_to p = pr_column_vector + j;
+
+                        p->lines_to_print = p->status == PR_OPEN ? pr_lines_per_body : 0;
+                }
+}
+
+static bool pr_print_page()
+{
+        bipolar lines_left;
+        bool pv;
+
+        pr_init_page();
+
+        if (pr_cols_ready() == 0)
+                return false;
+
+        if (pr_extremities)
+                pr_print_a_header = true;
+
+        pr_pad_vertically = false;
+        pv = false;
+
+        lines_left = pr_lines_per_body;
+        if (pr_double)
+                lines_left *= 2;
+
+        while (lines_left > 0 && pr_cols_ready() > 0)
+        {
+                pr_output_position = 0;
+                pr_spaces_not_printed = 0;
+                pr_separators_not_printed = 0;
+                pr_pad_vertically = false;
+                pr_align_empty_cols = false;
+                pr_empty_line = true;
+
+                for (bipolar j = 0; j < pr_columns; j++)
+                {
+                        pr_column address_to p = pr_column_vector + j;
+
+                        pr_input_position = 0;
+                        if (p->lines_to_print > 0 || p->status == PR_FF_FOUND)
+                        {
+                                pr_ff_only = false;
+                                pr_padding_not_printed = p->start_position;
+                                if (!pr_print_func(p))
+                                        pr_read_rest_of_line(p);
+                                pv |= pr_pad_vertically;
+
+                                p->lines_to_print--;
+                                if (p->lines_to_print <= 0 && pr_cols_ready() == 0)
+                                        break;
+
+                                if (pr_parallel && p->status != PR_OPEN)
+                                {
+                                        if (pr_empty_line)
+                                                pr_align_empty_cols = true;
+                                        else if (p->status == PR_CLOSED ||
+                                                 (p->status == PR_ON_HOLD && pr_ff_only))
+                                                pr_align_column(p);
+                                }
+                        }
+                        else if (pr_parallel)
+                        {
+                                if (pr_empty_line)
+                                        pr_align_empty_cols = true;
+                                else
+                                        pr_align_column(p);
+                        }
+
+                        if (pr_use_col_separator)
+                                pr_separators_not_printed++;
+                }
+
+                if (pr_pad_vertically)
+                {
+                        pr_putchar('\n');
+                        lines_left--;
+                }
+
+                if (pr_cols_ready() == 0 && !pr_extremities)
+                        break;
+
+                if (pr_double && pv)
+                {
+                        pr_putchar('\n');
+                        lines_left--;
+                }
+        }
+
+        if (lines_left == 0)
+                for (bipolar j = 0; j < pr_columns; j++)
+                        if (pr_column_vector[j].status == PR_OPEN)
+                                pr_column_vector[j].full_page_printed = true;
+
+        pr_pad_vertically = pv;
+
+        if (pr_pad_vertically && pr_extremities)
+                pr_pad_down(lines_left + PR_FOOTER_LINES);
+        else if (pr_keep_ff && pr_print_a_ff)
+        {
+                pr_putchar('\f');
+                pr_print_a_ff = false;
+        }
+
+        if (text_out_failed)
+                exit(text_done(1));
+
+        if (pr_last_page < ++pr_page_number)
+                return false;
+
+        pr_reset_status();
+        return true;
+}
+
+static fn pr_print_files(positive number_of_files, string_address address_to names)
+{
+        pr_init_parameters(number_of_files);
+        if (!pr_init_fps(number_of_files, names))
+                return;
+        if (pr_storing)
+                pr_init_store_cols();
+
+        if (pr_first_page > 1)
+        {
+                if (!pr_skip_to_page(pr_first_page))
+                        return;
+                pr_page_number = pr_first_page;
+        }
+        else
+                pr_page_number = 1;
+
+        pr_init_funcs();
+
+        pr_line_number = pr_line_count;
+        pr_plain_build();
+        while (pr_print_page())
+                ;
+        pr_release_streams();
+}
+
+/* Options ----------------------------------------------------------------- */
 
 static const argument_option pr_options[] = {
     {"pages", 'P', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
@@ -12381,27 +13399,335 @@ static const argument_option pr_options[] = {
     {"show-control-chars", 'c'},
     {"double-space", 'd'},
     {"date-format", 'D', ARGUMENT_REQUIRED},
-    {"expand-tabs", 'e', ARGUMENT_OPTIONAL | ARGUMENT_STICKY},
+    {"expand-tabs", 'e', ARGUMENT_OPTIONAL},
     {"form-feed", 'F'},
     {"header", 'h', ARGUMENT_REQUIRED},
-    {"output-tabs", 'i', ARGUMENT_OPTIONAL | ARGUMENT_STICKY},
+    {"output-tabs", 'i', ARGUMENT_OPTIONAL},
     {"join-lines", 'J'},
     {"length", 'l', ARGUMENT_REQUIRED},
     {"merge", 'm'},
-    {"number-lines", 'n', ARGUMENT_OPTIONAL | ARGUMENT_STICKY},
+    {"number-lines", 'n', ARGUMENT_OPTIONAL},
     {"first-line-number", 'N', ARGUMENT_REQUIRED},
     {"indent", 'o', ARGUMENT_REQUIRED},
     {"no-file-warnings", 'r'},
-    {"separator", 's', ARGUMENT_OPTIONAL | ARGUMENT_STICKY},
-    {"sep-string", 'S', ARGUMENT_OPTIONAL | ARGUMENT_STICKY},
+    {"separator", 's', ARGUMENT_OPTIONAL},
+    {"sep-string", 'S', ARGUMENT_OPTIONAL},
     {"omit-header", 't'},
     {"omit-pagination", 'T'},
     {"show-nonprinting", 'v'},
     {"width", 'w', ARGUMENT_REQUIRED},
     {"page-width", 'W', ARGUMENT_REQUIRED},
-    {"f", 0},
+    {"bf", 0},
     {null},
 };
+
+/*
+        Whether the operand at WHICH comes after the "--" that ends the
+        options: a +FIRST word there is a file name like any other. The
+        words before it are walked as getopt walks them, so an option's own
+        argument that happens to be "--" is not taken for the stop.
+*/
+static bool pr_after_options(b32 which)
+{
+        static const string_address valued[] = {
+            "pages", "columns", "date-format", "header", "length",
+            "first-line-number", "indent", "width", "page-width",
+        };
+        static const string_address plain[] = {
+            "across", "show-control-chars", "double-space", "expand-tabs",
+            "form-feed", "output-tabs", "join-lines", "merge", "number-lines",
+            "no-file-warnings", "separator", "sep-string", "omit-header",
+            "omit-pagination", "show-nonprinting", "help", "version",
+        };
+
+        for (b32 at = 1; at < which; at++)
+        {
+                string_address word = program_argument(at);
+
+                if (word[0] != '-' || !word[1])
+                        continue;
+                if (word[1] == '-')
+                {
+                        if (!word[2])
+                                return true;
+
+                        positive name = (positive)(string_first_of_or_end(word + 2, '=') - (word + 2));
+                        positive hits = 0;
+                        bool takes = false;
+
+                        for (positive k = 0; k < array_count(valued); k++)
+                                if (string_length(valued[k]) >= name &&
+                                    !memory_compare(valued[k], word + 2, name))
+                                {
+                                        hits++;
+                                        takes = true;
+                                }
+                        for (positive k = 0; k < array_count(plain); k++)
+                                if (string_length(plain[k]) >= name &&
+                                    !memory_compare(plain[k], word + 2, name))
+                                        hits++;
+                        if (hits == 1 && takes && !word[2 + name])
+                                at++;
+                        continue;
+                }
+                for (positive letter = 1; word[letter]; letter++)
+                {
+                        p8 c = (p8)word[letter];
+
+                        if (string_first_of("DNWhlow", c))
+                        {
+                                if (!word[letter + 1])
+                                        at++;
+                                break;
+                        }
+                        if (string_first_of("eimnsS", c))
+                                break;
+                }
+        }
+        return false;
+}
+
+static fn pr_operand_add(b32 which)
+{
+        string_address value = program_argument(which);
+
+        pr_digits_run = false;
+        if (value[0] == '+' && !pr_first_page && !pr_after_options(which) &&
+            pr_first_last_page(false, value + 1))
+                return;
+
+        text_file_add(which);
+}
+
+static bool pr_option_seen(p8 letter, string_address value)
+{
+        if (letter == 'K')
+        {
+                // Old -NUMBER columns: digits in a row are one number, and a
+                // run begins again after any other option or operand.
+                positive digits = string_span(value, string_set_digits);
+
+                if (!pr_digits_run)
+                        pr_column_digits.used = 0;
+                pr_digits_run = true;
+                pr_column_digits_given = true;
+                if (!byte_store_reserve(address_of pr_column_digits,
+                                        pr_column_digits.used + digits + 1, 64))
+                {
+                        string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                        exit(text_done(1));
+                }
+                memory_copy_apart(pr_column_digits.bytes + pr_column_digits.used, value, digits);
+                pr_column_digits.used += digits;
+                pr_column_digits.bytes[pr_column_digits.used] = 0;
+                return true;
+        }
+
+        pr_digits_run = false;
+
+        switch (letter)
+        {
+        case 'P':
+                if (!pr_first_last_page(true, value))
+                {
+                        text_flush();
+                        string_format(writer_stderr, "%s: invalid page range '%w'\n",
+                                      text_name, writer_terminal_quoted_name, value);
+                        exit(text_done(1));
+                }
+                break;
+        case 'C':
+                pr_column_count(value);
+                pr_column_digits_given = false;
+                pr_column_digits.used = 0;
+                break;
+        case 'a':
+                pr_across = true;
+                pr_storing = false;
+                break;
+        case 'b':
+                pr_balance = true;
+                break;
+        case 'c':
+                pr_use_cntrl = true;
+                break;
+        case 'd':
+                pr_double = true;
+                break;
+        case 'D':
+                pr_date_format = value;
+                break;
+        case 'e':
+                if (value)
+                        pr_option_argument(value, 'e', address_of pr_input_tab_char,
+                                           address_of pr_chars_per_input_tab);
+                pr_untabify = true;
+                break;
+        case 'f':
+        case 'F':
+                pr_use_form_feed = true;
+                break;
+        case 'h':
+                pr_custom_header = value;
+                break;
+        case 'i':
+                if (value)
+                        pr_option_argument(value, 'i', address_of pr_output_tab_char,
+                                           address_of pr_chars_per_output_tab);
+                pr_tabify = true;
+                break;
+        case 'J':
+                pr_join = true;
+                break;
+        case 'l':
+                pr_lines_per_page = pr_number_option(value, 1,
+                                                     "'-l PAGE_LENGTH' invalid number of lines");
+                break;
+        case 'm':
+                pr_parallel = true;
+                pr_storing = false;
+                break;
+        case 'n':
+                pr_numbered = true;
+                if (value)
+                        pr_option_argument(value, 'n', address_of pr_number_separator,
+                                           address_of pr_chars_per_number);
+                break;
+        case 'N':
+                pr_skip_count = false;
+                pr_start_line_num = pr_number_option(value, b32_min,
+                                                     "'-N NUMBER' invalid starting line number");
+                break;
+        case 'o':
+                pr_chars_per_margin = pr_number_option(value, 0,
+                                                       "'-o MARGIN' invalid line offset");
+                break;
+        case 'r':
+                pr_ignore_failed_opens = true;
+                text_quiet_open = true;
+                break;
+        case 's':
+                pr_old_options = true;
+                pr_old_s = true;
+                if (!pr_use_col_separator && value)
+                        pr_separator_string(value);
+                break;
+        case 'S':
+                pr_old_s = false;
+                pr_col_sep_string = "";
+                pr_col_sep_length = 0;
+                pr_use_col_separator = true;
+                if (value)
+                        pr_separator_string(value);
+                break;
+        case 't':
+                pr_extremities = false;
+                pr_keep_ff = true;
+                break;
+        case 'T':
+                pr_extremities = false;
+                pr_keep_ff = false;
+                break;
+        case 'v':
+                pr_use_esc = true;
+                break;
+        case 'w':
+        {
+                pr_old_options = true;
+                pr_old_w = true;
+
+                bipolar width = pr_number_option(value, 1,
+                                                 "'-w PAGE_WIDTH' invalid number of characters");
+
+                if (!pr_truncate)
+                        pr_chars_per_line = width;
+                break;
+        }
+        case 'W':
+                pr_old_w = false;
+                pr_truncate = true;
+                pr_chars_per_line = pr_number_option(value, 1,
+                                                     "'-W PAGE_WIDTH' invalid number of characters");
+                break;
+        }
+        return true;
+}
+
+static fn pr_reset()
+{
+        pr_columns = 1;
+        pr_parallel = false;
+        pr_explicit_columns = false;
+        pr_extremities = true;
+        pr_keep_ff = false;
+        pr_print_a_ff = false;
+        pr_print_a_header = false;
+        pr_use_form_feed = false;
+        pr_across = false;
+        pr_storing = true;
+        pr_balance = false;
+        pr_lines_per_page = 66;
+        pr_chars_per_line = 72;
+        pr_truncate = false;
+        pr_join = false;
+        pr_untabify = false;
+        pr_input_tab_char = '\t';
+        pr_chars_per_input_tab = 8;
+        pr_tabify = false;
+        pr_output_tab_char = '\t';
+        pr_chars_per_output_tab = 8;
+        pr_spaces_not_printed = 0;
+        pr_chars_per_margin = 0;
+        pr_output_position = 0;
+        pr_input_position = 0;
+        pr_failed_opens = false;
+        pr_first_page = 0;
+        pr_last_page = positive_max;
+        pr_files_ready = 0;
+        pr_page_number = 0;
+        pr_line_number = 0;
+        pr_numbered = false;
+        pr_number_separator = '\t';
+        pr_line_count = 1;
+        pr_skip_count = true;
+        pr_start_line_num = 1;
+        pr_chars_per_number = 5;
+        pr_number_width = 0;
+        pr_use_esc = false;
+        pr_use_cntrl = false;
+        pr_double = false;
+        pr_total_files = 0;
+        pr_ignore_failed_opens = false;
+        pr_use_col_separator = false;
+        pr_col_sep_string = "";
+        pr_col_sep_length = 0;
+        pr_separators_not_printed = 0;
+        pr_padding_not_printed = 0;
+        pr_pad_vertically = false;
+        pr_custom_header = null;
+        pr_date_format = null;
+        pr_last_line = false;
+        pr_old_options = false;
+        pr_old_w = false;
+        pr_old_s = false;
+        pr_column_digits = (byte_store){0};
+        pr_column_digits_given = false;
+        pr_digits_run = false;
+        pr_stdin = null;
+        pr_stdin_read = false;
+        pr_buff = (byte_store){0};
+        pr_line_vector = null;
+        pr_end_vector = null;
+        pr_column_vector = null;
+        pr_date_text = null;
+        pr_clump = null;
+
+        p64 wall[2] = {0, 0};
+
+        system_call_2(syscall(clock_gettime), 0, (positive)wall);
+        pr_now_moment.seconds = (b64)wall[0];
+        pr_now_moment.nanoseconds = (p32)wall[1];
+}
 
 static b32 text_pr()
 {
@@ -12410,204 +13736,97 @@ static b32 text_pr()
             .options = pr_options,
             .operand = pr_operand_add,
             .seen = pr_option_seen,
-            .digits = 'C',
+            .digits = 'K',
+            .digits_in_clusters = true,
         };
 
         text_begin("pr");
-        utility_arena.used = 0;
-        pr_spill_base = relation_spill;
-        pr_hold_base = text_record_hold;
-        pr_page_option_failed = false;
-        pr_first_page = 1;
-        pr_last_page = positive_max;
+        pr_reset();
 
-        if (!file_take(address_of taking) || pr_page_option_failed ||
-            (text_files_failed && string_diagnostic(&text_diagnostic, 1, null, "too many operands")))
+        if (!text_took(address_of taking))
                 return text_done(1);
 
-        if ((taking.flags & FILE_FLAG('c')) ||
-            (taking.flags & FILE_FLAG('v')))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "control-character display is unsupported"));
+        if (pr_column_digits_given && pr_column_digits.used)
+                pr_column_count((string_address)pr_column_digits.bytes);
+        byte_store_release(address_of pr_column_digits);
 
-        pr_merge = (taking.flags & FILE_FLAG('m')) != 0;
-        pr_across = (taking.flags & FILE_FLAG('a')) != 0;
+        if (!pr_date_format)
+                pr_date_format = file_environment("POSIXLY_CORRECT") && !text_locale_utf8()
+                                     ? (string_address) "%b %e %H:%M %Y"
+                                     : (string_address) "%Y-%m-%d %H:%M";
 
-        if (pr_merge && (pr_across || (taking.flags & FILE_FLAG('C'))))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "cannot combine --merge and --columns"));
+        if (!pr_first_page)
+                pr_first_page = 1;
 
-        if (pr_merge && !text_files_count)
-                pr_merge = false;
+        if (pr_parallel && pr_explicit_columns)
+                return text_done(string_diagnostic(&text_diagnostic, 1, null,
+                                                   "cannot specify number of columns when printing in parallel"));
 
-        pr_columns = pr_merge ? text_files_count : 1;
+        if (pr_parallel && pr_across)
+                return text_done(string_diagnostic(&text_diagnostic, 1, null,
+                                                   "cannot specify both printing across and printing in parallel"));
 
-        if (!pr_merge && (taking.flags & FILE_FLAG('C')) &&
-            (!pr_parse_positive(file_option_value(address_of taking, 'C'),
-                                address_of pr_columns) ||
-             pr_columns > TEXT_LINE_MAX))
-                return text_done(string_diagnostic(&text_diagnostic, 1, file_option_value(address_of taking, 'C'), "invalid number of columns"));
-
-        pr_page_length = PR_LENGTH_DEFAULT;
-        pr_page_width = PR_WIDTH_DEFAULT;
-        pr_margin = 0;
-
-        if ((taking.flags & FILE_FLAG('l')) &&
-            !pr_parse_positive(file_option_value(address_of taking, 'l'),
-                               address_of pr_page_length))
-                return text_done(string_diagnostic(&text_diagnostic, 1, file_option_value(address_of taking, 'l'), "invalid page length"));
-
-        p8 width_letter = (taking.flags & FILE_FLAG('W')) ? 'W' : 'w';
-
-        if ((taking.flags & (FILE_FLAG('W') | FILE_FLAG('w'))) &&
-            !pr_parse_positive(file_option_value(address_of taking,
-                                                  width_letter),
-                               address_of pr_page_width))
-                return text_done(string_diagnostic(&text_diagnostic, 1, file_option_value(address_of taking,
-                                                      width_letter), "invalid page width"));
-
-        if ((taking.flags & FILE_FLAG('o')) &&
-            !text_unsigned_option(file_option_value(address_of taking, 'o'),
-                                  false, address_of pr_margin))
-                return text_done(string_diagnostic(&text_diagnostic, 1, file_option_value(address_of taking, 'o'), "invalid indentation"));
-
-        /* An explicit page length restores input page breaks even with -T;
-           the omitted header policy remains independent of that override. */
-        pr_omit_pagination = (taking.flags & FILE_FLAG('T')) &&
-                             !(taking.flags & FILE_FLAG('l'));
-        pr_omit_header = (taking.flags & (FILE_FLAG('T') | FILE_FLAG('t'))) ||
-                         pr_page_length <= PR_HEADER_LINES + PR_FOOTER_LINES;
-        pr_double = (taking.flags & FILE_FLAG('d')) != 0;
-        pr_form_feed = (taking.flags & (FILE_FLAG('F') | FILE_FLAG('f'))) != 0;
-        pr_join = (taking.flags & FILE_FLAG('J')) != 0;
-        pr_header = (taking.flags & FILE_FLAG('h'))
-                        ? file_option_value(address_of taking, 'h')
-                        : null;
-        pr_date_format = (taking.flags & FILE_FLAG('D'))
-                             ? file_option_value(address_of taking, 'D')
-                             : (string_address)"%Y-%m-%d %H:%M";
-
-        positive printable = pr_omit_header
-                                 ? pr_page_length
-                                 : pr_page_length - PR_HEADER_LINES -
-                                       PR_FOOTER_LINES;
-        pr_body_lines = pr_double ? (printable > 1 ? printable / 2 : 1)
-                                  : printable;
-
-        if (!pr_body_lines)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "page length leaves no body"));
-
-        pr_separator = pr_join ? (string_address)"\t"
-                               : (string_address)" ";
-
-        if (taking.flags & FILE_FLAG('S'))
-                pr_separator = file_option_value(address_of taking, 'S')
-                                   ? file_option_value(address_of taking, 'S')
-                                   : (string_address)"";
-        else if (taking.flags & FILE_FLAG('s'))
-                pr_separator = file_option_value(address_of taking, 's')
-                                   ? file_option_value(address_of taking, 's')
-                                   : (string_address)"\t";
-
-        pr_separator_length = string_length(pr_separator);
-        pr_number = (taking.flags & FILE_FLAG('n')) != 0;
-        pr_start_line_number = 1;
-        pr_number_reset = (taking.flags & FILE_FLAG('N')) != 0;
-
-        pr_number_digits = 5;
-        pr_number_separator = '\t';
-
-        if (pr_number &&
-            (!pr_tab_option(file_option_value(address_of taking, 'n'),
-                            address_of pr_number_separator,
-                            address_of pr_number_digits) ||
-             !pr_number_digits))
-                return text_done(string_diagnostic(&text_diagnostic, 1, file_option_value(address_of taking, 'n'), "invalid line-number format"));
-
-        if (pr_number_reset &&
-            !pr_signed(file_option_value(address_of taking, 'N'),
-                       address_of pr_start_line_number))
-                return text_done(string_diagnostic(&text_diagnostic, 1, file_option_value(address_of taking, 'N'), "invalid first line number"));
-
-        pr_number_width = pr_number
-                              ? (pr_number_separator == '\t'
-                                     ? ((pr_number_digits / 8) + 1) * 8
-                                     : pr_number_digits + 1)
-                              : 0;
-
-        pr_input_tab = '\t';
-        pr_input_tab_width = 8;
-        pr_output_tab = '\t';
-        pr_output_tab_width = 8;
-
-        if ((taking.flags & FILE_FLAG('e')) &&
-            !pr_tab_option(file_option_value(address_of taking, 'e'),
-                           address_of pr_input_tab,
-                           address_of pr_input_tab_width))
-                return text_done(string_diagnostic(&text_diagnostic, 1, file_option_value(address_of taking, 'e'), "invalid tab width"));
-
-        if ((taking.flags & FILE_FLAG('i')) &&
-            !pr_tab_option(file_option_value(address_of taking, 'i'),
-                           address_of pr_output_tab,
-                           address_of pr_output_tab_width))
-                return text_done(string_diagnostic(&text_diagnostic, 1, file_option_value(address_of taking, 'i'), "invalid tab width"));
-
-        pr_expand_input = (taking.flags & FILE_FLAG('e')) || pr_columns > 1;
-        pr_tabify_output = (taking.flags & FILE_FLAG('i')) || pr_columns > 1;
-        /* GNU turns truncation on for a page that really has more than one
-           column, lets a lone -s take it back off, and lets an explicit width
-           or -W put it back; -J is the only switch that overrides all three.
-           A bare -1, or -m over a single file, is still one column and leaves
-           long records whole. */
-        bool given_width = (taking.flags & FILE_FLAG('w')) != 0;
-
-        pr_truncate = !pr_join &&
-                      ((taking.flags & FILE_FLAG('W')) != 0 ||
-                       (given_width &&
-                        (pr_merge ||
-                         (taking.flags & FILE_FLAG('C')) != 0)) ||
-                       (!given_width && pr_columns > 1 &&
-                        !(taking.flags & FILE_FLAG('s'))));
-        text_quiet_open = (taking.flags & FILE_FLAG('r')) != 0;
-
-        // The margin is added to the page width rather than taken out of
-        // it, which is what pr's own help says of -o.
-        pr_page_width += pr_margin;
-
-        // pr complains only where the columns have no room at all; a page
-        // too narrow for the numbers beside them is one it truncates.
-        positive number_fields = pr_number && pr_merge ? 1 : 0;
-        positive fixed = pr_margin +
-                         (pr_columns - 1) * pr_separator_length +
-                         number_fields * pr_number_width;
-
-        if (fixed >= pr_page_width ||
-            !((pr_page_width - fixed) / pr_columns))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "page width is too narrow"));
-
-        if (pr_body_lines > positive_max / pr_columns ||
-            pr_body_lines * pr_columns > TEXT_LINE_MAX)
-                return text_done(string_diagnostic(&text_diagnostic, 1, null, "page has too many records"));
-
-        pr_record_room = pr_body_lines * pr_columns;
-        pr_records = (pr_record address_to)utility_arena_take(
-            pr_record_room * sizeof(pr_record));
-
-        if (!pr_records)
-                return text_done(1);
-
-        pr_now = file_now();
-        pr_failed = false;
-
-        if (pr_merge)
-                pr_merge_files();
-        else
+        if (pr_old_options)
         {
-                b32 inputs = text_input_count();
-
-                for (b32 input = 0; input < inputs && !pr_failed; input++)
-                        pr_single_file(text_file_name(input));
+                if (pr_old_w)
+                {
+                        if (pr_parallel || pr_explicit_columns)
+                        {
+                                pr_truncate = true;
+                                if (pr_old_s)
+                                        pr_use_col_separator = true;
+                        }
+                        else
+                                pr_join = true;
+                }
+                else if (!pr_use_col_separator)
+                {
+                        if (pr_old_s && (pr_parallel || pr_explicit_columns))
+                        {
+                                if (!pr_truncate)
+                                {
+                                        pr_join = true;
+                                        if (pr_col_sep_length > 0)
+                                                pr_use_col_separator = true;
+                                }
+                                else
+                                        pr_use_col_separator = true;
+                        }
+                }
         }
 
-        return text_done((text_status || pr_failed) ? 1 : 0);
+        positive files = text_files_count;
+
+        if (!files)
+                pr_print_files(0, null);
+        else
+        {
+                string_address address_to names =
+                    (string_address address_to)memory_take(files * sizeof(string_address));
+
+                if (!names)
+                        return text_done(string_diagnostic(&text_diagnostic, 1, null, "memory exhausted"));
+                for (positive at = 0; at < files; at++)
+                        names[at] = text_file_name(at);
+
+                if (pr_parallel)
+                        pr_print_files(files, names);
+                else
+                        for (positive at = 0; at < files; at++)
+                                pr_print_files(1, names + at);
+                memory_give(names);
+        }
+
+        if (pr_stdin)
+                memory_give(pr_stdin);
+        byte_store_release(address_of pr_buff);
+        memory_give(pr_line_vector);
+        memory_give(pr_end_vector);
+        memory_give(pr_column_vector);
+        memory_give(pr_date_text);
+        memory_give(pr_clump);
+
+        return text_done(pr_failed_opens ? 1 : 0);
 }
 
 /*
