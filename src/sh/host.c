@@ -9479,15 +9479,27 @@ static bool locale_ntp_wants_step(bipolar offset_ns)
 static CONST bipolar locale_ntp_learned(bipolar offset_ns, bipolar elapsed_ns,
                                         bipolar frequency)
 {
+        bipolar milliseconds = elapsed_ns / 1000000;
+        bipolar magnitude;
         bipolar learned;
 
         if (elapsed_ns < LOCALE_NTP_LEARN_LEAST_NS ||
             offset_ns > elapsed_ns / 1000 || offset_ns < -(elapsed_ns / 1000))
                 return frequency;
-        learned = offset_ns * 65536 / (elapsed_ns / 1000000);
-        learned = learned * (offset_ns < 0 ? -offset_ns : offset_ns) /
-                  ((offset_ns < 0 ? -offset_ns : offset_ns) +
-                   LOCALE_NTP_NOISE_NS);
+        magnitude = offset_ns < 0 ? -offset_ns : offset_ns;
+        /*
+                Offset over elapsed, in the kernel's 2^-16 ppm, taken whole
+                and remainder so neither product can pass 2^63; and the
+                gain, whose product with the rate did pass it for an offset
+                past 140 s -- 39 hours since the last poll that set the
+                clock is enough -- and came out with the wrong sign. Past
+                four seconds the gain is within 1e-4 of one and is left out.
+        */
+        learned = offset_ns / milliseconds * 65536 +
+                  offset_ns % milliseconds * 65536 / milliseconds;
+        if (magnitude < (bipolar)1 << 32)
+                learned = learned * magnitude /
+                          (magnitude + LOCALE_NTP_NOISE_NS);
         learned += frequency;
         if (learned > LOCALE_NTP_FREQ_MOST)
                 return LOCALE_NTP_FREQ_MOST;
@@ -9623,7 +9635,10 @@ static COLD bool locale_discipline_ok(void)
             locale_ntp_learned(-144000000, (bipolar)1800 * 1000000000,
                                -((bipolar)490 << 16)) != -LOCALE_NTP_FREQ_MOST ||
             locale_ntp_learned(-144000000, (bipolar)30 * 1000000000, 5) != 5 ||
-            locale_ntp_learned(-5000000000, (bipolar)1800 * 1000000000, 5) != 5)
+            locale_ntp_learned(-5000000000, (bipolar)1800 * 1000000000, 5) != 5 ||
+            locale_ntp_learned((bipolar)199 * 1000000000,
+                               (bipolar)200000 * 1000000000, 0) !=
+                LOCALE_NTP_FREQ_MOST)
                 return false;
         /* a 10 ms distance is 10 ms, rounded up a microsecond; a negative
            or absurd one still gives a bound the kernel accepts */
