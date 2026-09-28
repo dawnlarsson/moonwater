@@ -3099,7 +3099,7 @@ static fn tar_extract_member(bipolar archive, p8 type, string_address path,
                                 meets the name already there first, and the
                                 reference takes that away and tries again
                                 before the kernel refuses the directory. */
-                        if (made == -ERROR_ACCESS &&
+                        if (made == -ERROR_ACCESS && source_handle >= 0 &&
                             (source_facts.mask & STATX_BASIC) == STATX_BASIC &&
                             (source_facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
                         {
