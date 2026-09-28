@@ -2594,103 +2594,88 @@ static fn crypto_cswap(crypto_x25519_fe a, crypto_x25519_fe b, p64 swap)
 
 static bool crypto_x25519(p8 address_to out, p8 address_to scalar, p8 address_to u)
 {
-        p8 e[32];
-        crypto_x25519_fe x1, x2, z2, x3, z3;
-        crypto_x25519_fe a, b, c, d, aa, bb, ee, da, cb, t;
+        //      Everything the ladder derives from the scalar, wiped as one.
+        struct
+        {
+                p8 e[32];
+                crypto_x25519_fe x1, x2, z2, x3, z3;
+                crypto_x25519_fe a, b, c, d, aa, bb, ee, da, cb, t;
+                p64 bit;
+                p64 swap;
+                p8 nonzero;
+        } w;
         positive i;
-        p64 bit;
-        p64 swap = 0;
         bool valid;
 
-        memory_copy(e, scalar, 32);
-        e[0] &= 248;
-        e[31] &= 127;
-        e[31] |= 64;
+        memory_copy(w.e, scalar, 32);
+        w.swap = 0;
+        w.e[0] &= 248;
+        w.e[31] &= 127;
+        w.e[31] |= 64;
 
-        crypto_x25519_load(x1, u);
-        memory_fill(x2, 0, sizeof(x2));
-        x2[0] = 1;
-        memory_fill(z2, 0, sizeof(z2));
-        crypto_x25519_copy(x3, x1);
-        memory_fill(z3, 0, sizeof(z3));
-        z3[0] = 1;
+        crypto_x25519_load(w.x1, u);
+        memory_fill(w.x2, 0, sizeof(w.x2));
+        w.x2[0] = 1;
+        memory_fill(w.z2, 0, sizeof(w.z2));
+        crypto_x25519_copy(w.x3, w.x1);
+        memory_fill(w.z3, 0, sizeof(w.z3));
+        w.z3[0] = 1;
 
         for (i = 254; i < 256; i--)
         {
-                bit = (e[i >> 3] >> (i & 7)) & 1;
-                swap ^= bit;
-                crypto_cswap(x2, x3, swap);
-                crypto_cswap(z2, z3, swap);
-                swap = bit;
+                w.bit = (w.e[i >> 3] >> (i & 7)) & 1;
+                w.swap ^= w.bit;
+                crypto_cswap(w.x2, w.x3, w.swap);
+                crypto_cswap(w.z2, w.z3, w.swap);
+                w.swap = w.bit;
 
-                crypto_x25519_copy(a, x2);
-                crypto_x25519_sum(a, z2);
-                crypto_x25519_copy(b, z2);
-                crypto_x25519_diff(b, x2);
-                crypto_x25519_copy(c, x3);
-                crypto_x25519_sum(c, z3);
-                crypto_x25519_copy(d, z3);
-                crypto_x25519_diff(d, x3);
+                crypto_x25519_copy(w.a, w.x2);
+                crypto_x25519_sum(w.a, w.z2);
+                crypto_x25519_copy(w.b, w.z2);
+                crypto_x25519_diff(w.b, w.x2);
+                crypto_x25519_copy(w.c, w.x3);
+                crypto_x25519_sum(w.c, w.z3);
+                crypto_x25519_copy(w.d, w.z3);
+                crypto_x25519_diff(w.d, w.x3);
 
-                crypto_x25519_mul(da, d, a);
-                crypto_x25519_mul(cb, c, b);
-                crypto_x25519_sqr_n(aa, a, 1);
-                crypto_x25519_sqr_n(bb, b, 1);
+                crypto_x25519_mul(w.da, w.d, w.a);
+                crypto_x25519_mul(w.cb, w.c, w.b);
+                crypto_x25519_sqr_n(w.aa, w.a, 1);
+                crypto_x25519_sqr_n(w.bb, w.b, 1);
 
-                crypto_x25519_copy(t, da);
-                crypto_x25519_sum(t, cb);
-                crypto_x25519_sqr_n(x3, t, 1);
+                crypto_x25519_copy(w.t, w.da);
+                crypto_x25519_sum(w.t, w.cb);
+                crypto_x25519_sqr_n(w.x3, w.t, 1);
 
-                crypto_x25519_copy(t, cb);
-                crypto_x25519_diff(t, da);
-                crypto_x25519_sqr_n(t, t, 1);
-                crypto_x25519_mul(z3, x1, t);
+                crypto_x25519_copy(w.t, w.cb);
+                crypto_x25519_diff(w.t, w.da);
+                crypto_x25519_sqr_n(w.t, w.t, 1);
+                crypto_x25519_mul(w.z3, w.x1, w.t);
 
-                crypto_x25519_mul(x2, aa, bb);
+                crypto_x25519_mul(w.x2, w.aa, w.bb);
 
-                crypto_x25519_copy(ee, bb);
-                crypto_x25519_diff(ee, aa);
-                crypto_x25519_mul121665(t, ee);
-                crypto_x25519_sum(t, aa);
-                crypto_x25519_mul(z2, ee, t);
+                crypto_x25519_copy(w.ee, w.bb);
+                crypto_x25519_diff(w.ee, w.aa);
+                crypto_x25519_mul121665(w.t, w.ee);
+                crypto_x25519_sum(w.t, w.aa);
+                crypto_x25519_mul(w.z2, w.ee, w.t);
         }
 
-        crypto_cswap(x2, x3, swap);
-        crypto_cswap(z2, z3, swap);
-        crypto_x25519_invert(z2, z2);
-        crypto_x25519_mul(x2, x2, z2);
-        crypto_x25519_store(out, x2);
+        crypto_cswap(w.x2, w.x3, w.swap);
+        crypto_cswap(w.z2, w.z3, w.swap);
+        crypto_x25519_invert(w.z2, w.z2);
+        crypto_x25519_mul(w.x2, w.x2, w.z2);
+        crypto_x25519_store(out, w.x2);
 
         /* RFC 7748's low-order inputs produce the all-zero shared secret.
            Returning its validity lets a protocol reject that public result
            without adding a second, easy-to-forget check at every caller. */
-        {
-                p8 nonzero = 0;
+        w.nonzero = 0;
+        for (i = 0; i < 32; i++)
+                w.nonzero |= out[i];
+        valid = w.nonzero != 0;
 
-                for (i = 0; i < 32; i++)
-                        nonzero |= out[i];
-                valid = nonzero != 0;
-                crypto_forget(address_of nonzero, sizeof nonzero);
-        }
-
-        crypto_forget(e, sizeof e);
-        crypto_forget(x1, sizeof x1);
-        crypto_forget(x2, sizeof x2);
-        crypto_forget(z2, sizeof z2);
-        crypto_forget(x3, sizeof x3);
-        crypto_forget(z3, sizeof z3);
-        crypto_forget(a, sizeof a);
-        crypto_forget(b, sizeof b);
-        crypto_forget(c, sizeof c);
-        crypto_forget(d, sizeof d);
-        crypto_forget(aa, sizeof aa);
-        crypto_forget(bb, sizeof bb);
-        crypto_forget(ee, sizeof ee);
-        crypto_forget(da, sizeof da);
-        crypto_forget(cb, sizeof cb);
-        crypto_forget(t, sizeof t);
-        crypto_forget(address_of bit, sizeof bit);
-        crypto_forget(address_of swap, sizeof swap);
+        crypto_forget(address_of w, sizeof w);
         return valid;
 }
 
