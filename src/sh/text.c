@@ -19905,11 +19905,49 @@ static b32 text_cut()
                                         positive at = 0;
                                         positive which = 1;
 
+                                        /*
+                                                A run of characters the list
+                                                answers alike at a time: the
+                                                marks say how far one goes, and
+                                                past the open tail or the last
+                                                position listed the rest of the
+                                                line is one run. A kept run
+                                                ends where a range begins when
+                                                ranges are written apart. The
+                                                run's bytes are one span.
+                                        */
                                         while (at < line_length)
                                         {
-                                                positive size = memory_utf8_span(
-                                                    line + at, line_length - at, 1).x;
                                                 bool take = text_list_has(which) != complement;
+                                                positive run = 1;
+
+                                                if (text_list_open ? which >= text_list_open
+                                                                   : which >= text_list_used)
+                                                        run = positive_max;
+                                                else if (which < text_list_room)
+                                                {
+                                                        positive limit = text_list_room - which;
+
+                                                        if (text_list_open && text_list_open - which < limit)
+                                                                limit = text_list_open - which;
+                                                        run = memory_span_byte(text_list + which,
+                                                                               text_list[which], limit);
+                                                        if (take && separator && !complement && run > 1)
+                                                        {
+                                                                p8 address_to begins = text_list_begins_map + which;
+                                                                p8 address_to next = memory_first_of(begins + 1, 1,
+                                                                                                     run - 1);
+
+                                                                if (next)
+                                                                        run = (positive)(next - begins);
+                                                        }
+                                                }
+
+                                                if (!take && run == positive_max)
+                                                        break;
+
+                                                positive2 span = memory_utf8_span(
+                                                    line + at, line_length - at, run);
 
                                                 if (take)
                                                 {
@@ -19920,13 +19958,13 @@ static b32 text_cut()
                                                                 text_put(separator,
                                                                          separator_length);
 
-                                                        text_put(line + at, size);
+                                                        text_put(line + at, span.x);
                                                         wrote = true;
                                                 }
 
                                                 ran = take;
-                                                at += size;
-                                                which++;
+                                                at += span.x;
+                                                which += span.y;
                                         }
 
                                         text_put_character(text_delimiter);
