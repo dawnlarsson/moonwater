@@ -45603,6 +45603,9 @@ int main(void)
     # --- 2. Thin hosted lifts: dns_copy_name + TLS record header. ---
     dns_copy = sec(
         net,
+        "//      A wire name is at most 255 bytes",
+        "\n#define DNS_OK 0") + "\n" + sec(
+        net,
         "static COLD bipolar dns_copy_name(",
         "//      Where a name ends, for a caller")
     tls_ver = sec(
@@ -50757,6 +50760,7 @@ int main(int argc, char **argv)
 
     mdns_source = "\n".join([
         SHIM, wl,
+        sec(net, "//      A wire name is at most 255 bytes", "\n#define DNS_OK 0"),
         sec(net, "static COLD bipolar dns_copy_name(",
             "//      Where a name ends, for a caller"),
         sec(disc, "#define WATERLINK_MDNS_PORT 5353", "struct waterlink_group_keys {"),
@@ -51393,6 +51397,7 @@ static fn link_peers_unlock(bipolar handle) { (void)handle; }
         sec(link, "struct waterlink_part\n{", "/*\n        Judge an authenticated body whole"),
         sec(link, "#define WATERLINK_REPLAY_BLOCKS", "#endif // WATERLINK_LINK_INCLUDED"),
         LINK_STUBS,
+        sec(net, "//      A wire name is at most 255 bytes", "\n#define DNS_OK 0"),
         sec(net, "static COLD bipolar dns_copy_name(",
             "//      Where a name ends, for a caller"),
         sec(hs, "#define WATERLINK_PROTOCOL", "#endif // WATERLINK_HANDSHAKE_INCLUDED"),
