@@ -10783,6 +10783,9 @@ __asm__(
     "mov $0xffffffff, %edi\n sub %rdi, %rax\n not %rdi\n sbb %rdi, %rdx\n"
     "sbb $-2, %rcx\n sbb $-1, %rbp\n sbb $-1, %rbx\n sbb $-1, %r14\n sbb $0, %r12\n"
     "cmovnc %rax, %r13\n cmovnc %rdx, %rsi\n cmovnc %rcx, %r8\n cmovnc %rbp, %r9\n cmovnc %rbx, %r10\n cmovnc %r14, %r11\n"
+    /* t0 and the high half t6..t11 are the square of a secret: wiped. */
+    "xor %eax, %eax\n mov %rax, (%rsp)\n mov %rax, 8(%rsp)\n mov %rax, 16(%rsp)\n mov %rax, 24(%rsp)\n"
+    "mov %rax, 32(%rsp)\n mov %rax, 40(%rsp)\n mov %rax, 48(%rsp)\n"
     "add $56, %rsp\n pop %rdi\n"
     "mov %r13, (%rdi)\n mov %rsi, 8(%rdi)\n mov %r8, 16(%rdi)\n mov %r9, 24(%rdi)\n mov %r10, 32(%rdi)\n mov %r11, 40(%rdi)\n"
     "pop %r15\n pop %r14\n pop %r13\n pop %r12\n pop %rbp\n pop %rbx\n"

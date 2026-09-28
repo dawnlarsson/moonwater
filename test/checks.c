@@ -57023,12 +57023,72 @@ static positive field_check_wrong(const crypto_field address_to f,
         return wrong;
 }
 
+/*
+        What a field body leaves on the stack once it has returned.
+
+        A square or product of a secret is as secret as the operand, so a
+        body that spills part of one must wipe it before it pops its frame.
+        field_residue_call runs the body one frame down; field_residue_scan,
+        called next from the same frame, reads the kilobyte of stack that
+        now lies under it -- where the body's frame was -- and counts the
+        words that are a limb of the double-width square the body computed.
+        x86_64's p384_square spilled t0 and the high half t6..t11 there and
+        left them; the other bodies keep everything in registers.
+*/
+static __attribute__((noinline, noclone)) fn field_residue_call(
+    fn (*body)(p64 address_to, const p64 address_to), p64 address_to d,
+    const p64 address_to a)
+{
+        body(d, a);
+}
+
+static __attribute__((noinline, noclone)) positive field_residue_scan(
+    const p64 address_to limbs, positive count)
+{
+        volatile p64 window[128];
+        positive found = 0;
+
+        for (positive i = 0; i < array_count(window); i++)
+                for (positive j = 0; j < count; j++)
+                        found += window[i] == limbs[j];
+        return found;
+}
+
+static positive field_residue(fn (*body)(p64 address_to, const p64 address_to),
+                              positive n)
+{
+        p64 a[CRYPTO_FE_MAX], d[CRYPTO_FE_MAX], wide[2 * CRYPTO_FE_MAX];
+
+        for (positive i = 0; i < n; i++)
+                a[i] = 0x9e3779b97f4a7c15ull * (i + 3) ^ 0x0123456789abcdefull;
+        a[n - 1] >>= 1;
+        memory_fill(wide, 0, sizeof wide);
+        for (positive i = 0; i < n; i++)
+        {
+                p64 carry = 0;
+
+                for (positive j = 0; j < n; j++)
+                {
+                        crypto_wide t = (crypto_wide)a[i] * a[j] + wide[i + j] + carry;
+
+                        wide[i + j] = (p64)t;
+                        carry = (p64)(t >> 64);
+                }
+                wide[i + n] = carry;
+        }
+        field_residue_call(body, d, a);
+        return field_residue_scan(wide, 2 * n);
+}
+
 static fn crypto_floor_field(void)
 {
         check("p256_ field routines agree with the C Montgomery arithmetic",
               field_check_wrong(address_of crypto_p256_field, 3000) == 0);
         check("p384_ field routines agree with the C Montgomery arithmetic",
               field_check_wrong(address_of crypto_p384_field, 3000) == 0);
+        check("p256_square and p384_square leave no limb of the square on the stack",
+              field_residue(p256_square, 4) == 0 &&
+                  field_residue(p384_square, 6) == 0);
 }
 
 /*
