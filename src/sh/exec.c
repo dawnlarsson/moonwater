@@ -12111,6 +12111,10 @@ static b32 exec_cfor(b32 index)
 
         while (1)
         {
+                //      The clauses are on the for's line, and $LINENO in
+                //      them says so rather than the body's last line.
+                if (node->line)
+                        exec_line = node->line;
                 if (trap_debug_here)
                         exec_debug_clause(node, condition);
                 if (string_get(condition))
@@ -12133,6 +12137,8 @@ static b32 exec_cfor(b32 index)
                 if (!exec_loop_again())
                         break;
 
+                if (node->line)
+                        exec_line = node->line;
                 if (trap_debug_here)
                         exec_debug_clause(node, update);
                 if (string_get(update) &&

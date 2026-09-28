@@ -14857,6 +14857,16 @@ def shell_lang_underscore_forms(rng):
             ("command", "stdin", "file"))
 
 
+#       $LINENO read in an arithmetic for's clauses is the for's own line; it
+#       read the line the body ended on, so the loop ran once too often.
+def shell_lang_cfor_lineno(rng):
+    gap = rng.choice(("", "\n", "\n\n"))
+    body = rng.choice(("echo $i", "echo $i\n  :", "echo \"$i:$LINENO\""))
+    return ("cfor-lineno", shell_BASH, shell_program(
+        "echo one" + gap, "for (( i = 0; i < $LINENO; i++ )); do\n  " + body + "\ndone", 'echo "end=$?"'),
+        ("command", "stdin", "file"))
+
+
 #       bash's $'\x{H...}': every hex digit up to the brace and the low byte
 #       of their value, the brace taken when it is there; no digits is a zero,
 #       which ends the string. This kept \x{ as it was written.
@@ -17733,6 +17743,7 @@ SHELL_FAMILIES = (
     shell_lang_case_substitution_lines,
     shell_lang_dollar_hex_brace,
     shell_lang_underscore_forms,
+    shell_lang_cfor_lineno,
     shell_lang_list_null_tests,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
