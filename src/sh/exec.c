@@ -12905,19 +12905,6 @@ static COLD bool conditional_regex_element_read(
         return true;
 }
 
-static COLD bool conditional_regex_class_known(p8 address_to name)
-{
-        static const p8 names[] =
-            "alpha\0upper\0lower\0digit\0xdigit\0space\0print\0punct\0"
-            "graph\0cntrl\0blank\0alnum\0";
-
-        for (string_address one = names; string_get(one);
-             one += string_length(one) + 1)
-                if (!string_compare(one, name))
-                        return true;
-        return false;
-}
-
 static COLD fn conditional_regex_bracket(conditional_regex_walk address_to walk)
 {
         p8 type;
@@ -12987,7 +12974,8 @@ static COLD fn conditional_regex_bracket(conditional_regex_walk address_to walk)
                                 return (void)(walk->why = (string_address) "Invalid range end");
                 }
                 else if (start.kind == RE_CLASS &&
-                         !conditional_regex_class_known(start.name))
+                         byte_class_index(start.name,
+                                          string_length(start.name)) < 0)
                         return (void)(walk->why = (string_address) "Invalid character class name");
                 else if ((start.kind == RE_COLL || start.kind == RE_EQUIV) &&
                          start.length != 1)
