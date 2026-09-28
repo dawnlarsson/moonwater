@@ -713,12 +713,94 @@ static COLD bipolar net_staged_name_publish(file_staged_name address_to stage)
         return 0;
 }
 
+/* wget's exit statuses are GNU wget's: 1 anything else, 2 a command line
+   it cannot parse, 3 a file it cannot write, 4 the network, 6 a server
+   refusing credentials, 8 a server answering with an error. */
+#define WGET_GENERIC 1
+#define WGET_USAGE 2
+#define WGET_FILE 3
+#define WGET_NETWORK 4
+#define WGET_AUTH 6
+#define WGET_SERVER 8
+
+//      Why a download failed, in GNU wget's words where it has them.
+static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
+                                string_address output)
+{
+        p8 host[256];
+        string_address path;
+        p16 port;
+        bool tls;
+
+        if (http_split_into(where, host, sizeof host, address_of port,
+                            address_of path, address_of tls))
+                host[0] = end;
+        switch (status)
+        {
+        case HTTP_SCHEME:
+                return string_report(log_error, WGET_GENERIC,
+                                     "%w: Unsupported scheme.\n",
+                                     writer_terminal_quoted_name, where);
+        case HTTP_BAD_URL:
+                return string_report(log_error, WGET_GENERIC,
+                                     "wget: %w is not a url this understands\n",
+                                     writer_terminal_quoted_name, where);
+        case HTTP_NO_HOST:
+                return string_report(log_error, WGET_NETWORK,
+                                     "wget: unable to resolve host address '%w'\n",
+                                     writer_terminal_quoted_name, host);
+        case HTTP_NO_ROUTE:
+                return string_report(log_error, WGET_NETWORK,
+                                     "wget: cannot reach %w\n",
+                                     writer_terminal_quoted_name, host);
+        case HTTP_NO_REPLY:
+                return string_report(log_error, WGET_NETWORK,
+                                     "wget: no reply from %w\n",
+                                     writer_terminal_quoted_name, host);
+        case HTTP_MALFORMED:
+                return string_report(log_error, WGET_NETWORK,
+                                     "wget: %w sent a reply this cannot read\n",
+                                     writer_terminal_quoted_name, host);
+        case HTTP_TLS:
+                return string_report(log_error, WGET_NETWORK,
+                                     "wget: TLS handshake with %w failed\n",
+                                     writer_terminal_quoted_name, host);
+        case HTTP_DOWNGRADE:
+                return string_report(log_error, WGET_GENERIC,
+                                     "wget: refused an HTTPS to HTTP redirect "
+                                     "to %w\n",
+                                     writer_terminal_quoted_name, where);
+        case HTTP_REDIRECTS:
+                return string_report(log_error, WGET_SERVER,
+                                     "%p redirections exceeded.\n",
+                                     (positive)(HTTP_HOPS - 1));
+        //      GNU wget's own line, and its file I/O status.
+        case HTTP_WRITE:
+                return string_report(log_error, WGET_FILE,
+                                     "Cannot write to '%w' (%s).\n",
+                                     writer_terminal_quoted_name, output,
+                                     file_reason(http_write_failure));
+        case HTTP_STATUS:
+                if (code == 401)
+                        return string_report(
+                            log_error, WGET_AUTH,
+                            "Username/Password Authentication Failed.\n");
+                return string_report(log_error, WGET_SERVER,
+                                     "wget: %w returned %p\n",
+                                     writer_terminal_quoted_name, host,
+                                     (positive)code);
+        }
+        return string_report(log_error, WGET_GENERIC, "wget: download failed\n");
+}
+
 /*
         wget [ -q ] [ -O FILE ] [ --no-check-certificate ] URL
 
-        BusyBox's subset: save the body under the URL's last component, or
-        under -O, and follow redirects. HTTPS is the reason this exists;
-        fetch remains the small plaintext tool.
+        BusyBox's subset of GNU wget, with GNU's defaults: save the body under
+        the URL's last component -- as NAME.1, NAME.2 and on when that name is
+        taken -- or under -O, which replaces; follow redirects; exit with
+        GNU's statuses. HTTPS is the reason this exists; fetch remains the
+        small plaintext tool.
 */
 static b32 net_wget(void)
 {
@@ -730,6 +812,8 @@ static b32 net_wget(void)
         string_address output;
         p8 name[256];
         p8 leaf[256];
+        p8 numbered[256 + 24];
+        p8 where[HTTP_URL_MAX];
         string_address path;
         p16 port;
         bool tls;
@@ -742,7 +826,7 @@ static b32 net_wget(void)
         file_staged_name staged;
 
         if (!file_take(address_of taking))
-                return 1;
+                return WGET_USAGE;
 
         if (file_meta(address_of taking,
                       (string_address) "[-q] [-O FILE] [--no-check-certificate] URL",
@@ -755,14 +839,17 @@ static b32 net_wget(void)
         if (taking.first >= (positive)program_argument_count())
         {
                 string_format(log_error, "wget: missing URL\n");
-                return string_report(log_error, 1, "Usage: wget [-q] [-O FILE] "
-                                         "[--no-check-certificate] URL\n");
+                return string_report(log_error, WGET_GENERIC,
+                                     "Usage: wget [-q] [-O FILE] "
+                                     "[--no-check-certificate] URL\n");
         }
 
         if (taking.first + 1 < (positive)program_argument_count())
         {
-                return string_report(log_error, 1, "wget: extra operand '%w'\n", writer_terminal_quoted_name,
-                              program_argument((b32)(taking.first + 1)));
+                return string_report(log_error, WGET_GENERIC,
+                                     "wget: extra operand '%w'\n",
+                                     writer_terminal_quoted_name,
+                                     program_argument((b32)(taking.first + 1)));
         }
 
         url = program_argument((b32)taking.first);
@@ -773,31 +860,56 @@ static b32 net_wget(void)
         status = http_split_into(url, name, sizeof name, address_of port,
                                  address_of path, address_of tls);
         if (status)
-        {
-                return string_report(log_error, 1, "wget: %w is not a url this understands\n",
-                              writer_terminal_quoted_name, url);
-        }
+                return net_wget_failed(status, 0, url, null);
 
         if (output && string_equals(output, (string_address) "-"))
                 dest = 1;
         else
         {
-                if (!output)
-                {
-                        http_url_leaf(path, leaf, sizeof leaf);
-                        output = leaf;
-                }
                 /* A device or FIFO is written into, as GNU wget does, never
                    replaced: as root, -O /dev/null would otherwise put a
-                   regular file where the device was. */
-                dest = file_staged_name_open(
-                    address_of staged, output, 0644 & ~file_umask(),
-                    FILE_STAGED_STREAM_SPECIAL);
-                if (dest < 0)
+                   regular file where the device was. Without -O a name that
+                   is taken is left alone for the next number, and a
+                   directory there is GNU's "Is a directory"; publication
+                   refuses to replace a name that appears meanwhile. */
+                bool named = output != null;
+
+                if (!named)
+                        http_url_leaf(path, leaf, sizeof leaf);
+                output = named ? output : leaf;
+                for (positive copy = 1;; copy++)
                 {
-                        return string_report(log_error, 1, "wget: cannot write %w\n",
-                                      writer_terminal_quoted_name, output);
+                        file_facts taken;
+
+                        dest = file_staged_name_open(
+                            address_of staged, output, 0666 & ~file_umask(),
+                            FILE_STAGED_STREAM_SPECIAL |
+                                (named ? 0 : FILE_STAGED_NO_REPLACE));
+                        if (named || dest != -ERROR_EXISTS || copy > 999999)
+                                break;
+                        if (file_look_code(AT_FDCWD, output, 0,
+                                           address_of taken) >= 0 &&
+                            (taken.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                        {
+                                dest = -ERROR_IS_DIRECTORY;
+                                break;
+                        }
+                        positive used = string_length(leaf);
+
+                        memory_copy(numbered, leaf, used);
+                        numbered[used++] = '.';
+                        numbered[used + positive_into(numbered + used, copy)] = end;
+                        output = numbered;
                 }
+                if (dest < 0)
+                        return named ? string_report(log_error, WGET_GENERIC,
+                                                     "%w: %s\n",
+                                                     writer_terminal_quoted_name,
+                                                     output, file_reason(dest))
+                                     : string_report(log_error, WGET_FILE,
+                                                     "Cannot write to '%w' (%s).\n",
+                                                     writer_terminal_quoted_name,
+                                                     output, file_reason(dest));
                 own_file = true;
         }
 
@@ -807,47 +919,25 @@ static b32 net_wget(void)
                               writer_terminal_quoted_name, output);
         }
 
-        status = http_fetch_to(url, dest, check_cert, address_of code);
+        string_copy(where, url);
+        status = http_fetch_to(url, dest, check_cert, address_of code, where);
 
         if (status)
         {
                 if (own_file)
-                {
                         file_staged_name_abort(address_of staged);
-                }
-                if (status == HTTP_NO_HOST)
-                        string_format(log_error, "wget: cannot resolve %w\n",
-                                      writer_terminal_quoted_name, name);
-                else if (status == HTTP_NO_ROUTE)
-                        string_format(log_error, "wget: cannot reach %w\n",
-                                      writer_terminal_quoted_name, name);
-                else if (status == HTTP_TLS)
-                        string_format(log_error, "wget: TLS handshake failed\n");
-                else if (status == HTTP_DOWNGRADE)
-                        string_format(log_error,
-                                      "wget: refused an HTTPS to HTTP redirect\n");
-                else if (status == HTTP_REDIRECTS)
-                        string_format(log_error, "wget: too many redirects\n");
-                //      GNU wget's own line, and its file I/O status below.
-                else if (status == HTTP_WRITE)
-                        string_format(log_error, "Cannot write to '%w' (%s).\n",
-                                      writer_terminal_quoted_name, output,
-                                      file_reason(http_write_failure));
-                else if (status == HTTP_NO_REPLY)
-                        string_format(log_error, "wget: no reply from %w\n",
-                                      writer_terminal_quoted_name, name);
-                else if (status == HTTP_STATUS)
-                        string_format(log_error, "wget: server returned %p\n",
-                                      (positive)code);
-                else
-                        string_format(log_error, "wget: download failed\n");
-                return status == HTTP_WRITE ? 3 : 1;
+                return net_wget_failed(status, code, where, output);
         }
 
-        if (own_file && net_staged_name_publish(address_of staged) < 0)
+        if (own_file)
         {
-                return string_report(log_error, 1, "wget: cannot publish %w\n",
-                              writer_terminal_quoted_name, output);
+                bipolar published = net_staged_name_publish(address_of staged);
+
+                if (published < 0)
+                        return string_report(log_error, WGET_FILE,
+                                             "Cannot write to '%w' (%s).\n",
+                                             writer_terminal_quoted_name,
+                                             output, file_reason(published));
         }
 
         return 0;

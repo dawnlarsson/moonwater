@@ -6511,6 +6511,188 @@ Cannot write to 'out' (File too large)."
         kill "$wget_server" 2>/dev/null || :
         wait "$wget_server" 2>/dev/null || :
 
+        #       wget against GNU wget, row by row: exit status, the last
+        #       thing said, and every file left behind with its mode and its
+        #       bytes, which are the path the server was asked for -- so a
+        #       dot segment shows as the request it became. A row's pinned
+        #       answer holds ours; GNU wget, where installed, must give the
+        #       same unless the row is ours alone (a name ending =), where
+        #       this client is stricter on purpose.
+        cat > "$work/wget-rows-server.py" <<'PY'
+import socket
+import sys
+import threading
+
+def reply(path):
+    if path.startswith("/to/"):
+        return (302, "Location: " + path[4:].replace("~", "/"), b"")
+    fixed = {
+        "/404": (404, "", b"no\n"), "/500": (500, "", b"no\n"),
+        "/401": (401, 'WWW-Authenticate: Basic realm="x"', b"no\n"),
+        "/407": (407, "", b"no\n"),
+        "/dots": (302, "Location: ../../a/./b/../file", b""),
+        "/dots-absolute": (302, "Location: /x/../y/./%2e%2E/z", b""),
+        "/loop": (302, "Location: /loop", b""),
+    }
+    return fixed.get(path, (200, "", path.encode() + b"\n"))
+
+def serve(connection):
+    with connection:
+        request = b""
+        while b"\r\n\r\n" not in request:
+            part = connection.recv(4096)
+            if not part:
+                return
+            request += part
+        target = request.split(b" ")[1].decode()
+        if target == "/malformed":
+            connection.sendall(b"HTTP/1.1 2x0 Odd\r\n\r\n")
+            return
+        if target == "/empty":
+            return
+        code, extra, body = reply(target)
+        head = "HTTP/1.1 %d X\r\nContent-Length: %d\r\nConnection: close\r\n" % (
+            code, len(body))
+        head += (extra + "\r\n" if extra else "") + "\r\n"
+        try:
+            connection.sendall(head.encode() + body)
+        except OSError:
+            pass
+
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", 0))
+server.listen(16)
+with open(sys.argv[1], "w", encoding="ascii") as port:
+    port.write(str(server.getsockname()[1]))
+while True:
+    connection, _ = server.accept()
+    threading.Thread(target=serve, args=(connection,), daemon=True).start()
+PY
+        rows_place="$work/wget-rows"
+        mkdir -p "$rows_place"
+        rm -f "$rows_place/port"
+        python3 "$work/wget-rows-server.py" "$rows_place/port" &
+        rows_server=$!
+        rows_wait=0
+        while [ ! -s "$rows_place/port" ] && [ "$rows_wait" -lt 200 ]; do
+                sleep 0.01
+                rows_wait=$((rows_wait + 1))
+        done
+        rows_url="http://127.0.0.1:$(cat "$rows_place/port" 2>/dev/null)"
+        #       wget_row_run WGET DIR SETUP ARGUMENT...: run in a fresh DIR
+        #       after the SETUP shell text, standard output to a file; print
+        #       "status|last line|files", that file last as (stdout).
+        wget_row_run()
+        {
+                rows_program=$1
+                rows_dir=$2
+                rows_setup=$3
+                shift 3
+                rm -rf "$rows_dir"
+                mkdir -p "$rows_dir/in"
+                (
+                        cd "$rows_dir/in" || exit 125
+                        eval "$rows_setup"
+                        LC_ALL=C exec timeout 20 "$rows_program" "$@" \
+                                > "$rows_dir/stdout" 2> "$rows_dir/stderr"
+                )
+                rows_status=$?
+                rows_line=$(sed '/^[[:space:]]*$/d' "$rows_dir/stderr" |
+                        tail -n 1 | sed "s|$rows_url|URL|g")
+                rows_files=$(cd "$rows_dir/in" && for rows_file in *; do
+                        [ -f "$rows_file" ] || continue
+                        printf '%s:%s:%s ' "$rows_file" \
+                                "$(stat -c %a "$rows_file")" \
+                                "$(tr -d '\n' < "$rows_file")"
+                done
+                [ -s "$rows_dir/stdout" ] &&
+                        printf '(stdout):%s ' "$(tr -d '\n' < "$rows_dir/stdout")")
+                printf '%s|%s|%s\n' "$rows_status" "$rows_line" "${rows_files% }"
+        }
+        #       NAME|STATUS|LINE ("*" for any)|FILES|SETUP|ARGUMENT|...,
+        #       URL standing for the server. location-ftp is ours alone:
+        #       GNU wget follows it into FTP, which this client lacks.
+        wget_rows="404|8|*|||-q|URL/404
+500|8|*|||-q|URL/500
+401|6|Username/Password Authentication Failed.|||URL/401
+407|8|*|||-q|URL/407
+unsupported-scheme|1|gopher://127.0.0.1/x: Unsupported scheme.|||gopher://127.0.0.1/x
+location-ftp=|1|ftp://127.0.0.1/x: Unsupported scheme.|||URL/to/ftp:~~127.0.0.1~x
+location-mailto|1|mailto:x: Unsupported scheme.|||URL/to/mailto:x
+location-no-slashes|1|http:path: Unsupported scheme.|||URL/to/http:path
+dots-relative|0|*|dots:644:/a/file|umask 022|-q|URL/dots
+dots-absolute|0|*|dots-absolute:644:/z|umask 022|-q|URL/dots-absolute
+dots-start|0|*|d:644:/a/d|umask 022|-q|URL/a/./b/../c%2e/%2e%2e/d
+dots-root|0|*|index.html:644:/|umask 022|-q|URL/a/..
+twenty-redirects|8|20 redirections exceeded.|||URL/loop
+unresolved-after-redirect|4|wget: unable to resolve host address 'no-such-host.invalid'|||URL/to/http:~~no-such-host.invalid~x
+refused|4|*|||-q|http://127.0.0.1:1/x
+malformed|4|*|||-q|URL/malformed
+empty|4|*|||-q|URL/empty
+numbered|0|*|f:644:keep f.1:644:keep f.2:644:/f|umask 022; printf keep > f; printf keep > f.1|-q|URL/f
+directory|3|Cannot write to 'd' (Is a directory).||mkdir d|URL/d
+umask-002|0|*|g:664:/g|umask 002|-q|URL/g
+umask-077|0|*|g:600:/g|umask 077|-q|URL/g
+replace-keeps-mode|0|*|h:640:/h|printf old > h; chmod 640 h|-q|-O|h|URL/h
+missing-directory|1|/nonexistent-wget-row/x: No such file or directory|||-q|-O|/nonexistent-wget-row/x|URL/x
+bad-option|2|*|||--wget-row-no-such-option|URL/x"
+        rows_failed=0
+        rows_gnu_failed=0
+        rows_count=0
+        rows_gnu=$(PATH=/usr/local/bin:/usr/bin:/bin command -v wget)
+        if [ -n "$rows_gnu" ] &&
+                ! "$rows_gnu" --version 2>/dev/null | head -n 1 | grep -q '^GNU Wget'; then
+                rows_gnu=
+        fi
+        printf '%s\n' "$wget_rows" > "$rows_place/rows"
+        while IFS='|' read -r rows_name rows_status rows_line rows_files \
+                rows_setup rows_args; do
+                [ -n "$rows_name" ] || continue
+                rows_count=$((rows_count + 1))
+                #       The arguments, split at | with URL put in.
+                set --
+                rows_rest=$rows_args
+                while [ -n "$rows_rest" ]; do
+                        rows_word=${rows_rest%%|*}
+                        case $rows_rest in
+                        *'|'*) rows_rest=${rows_rest#*|} ;;
+                        *) rows_rest= ;;
+                        esac
+                        case $rows_word in URL*) rows_word=$rows_url${rows_word#URL} ;; esac
+                        set -- "$@" "$rows_word"
+                done
+                rows_want="$rows_status|$rows_line|$rows_files"
+                rows_ours=$(wget_row_run "$farm/wget" "$rows_place/ours" \
+                        "$rows_setup" "$@")
+                [ "$rows_line" = '*' ] &&
+                        rows_ours="${rows_ours%%|*}|*|${rows_ours#*|*|}"
+                if [ "$rows_ours" != "$rows_want" ]; then
+                        rows_failed=$((rows_failed + 1))
+                        note "wget row $rows_name: ours [$rows_ours], want [$rows_want]"
+                fi
+                case $rows_name in *=) continue ;; esac
+                [ -n "$rows_gnu" ] || continue
+                rows_theirs=$(wget_row_run "$rows_gnu" "$rows_place/gnu" \
+                        "$rows_setup" --no-config --no-proxy --no-hsts -t 1 "$@")
+                [ "$rows_line" = '*' ] &&
+                        rows_theirs="${rows_theirs%%|*}|*|${rows_theirs#*|*|}"
+                if [ "$rows_theirs" != "$rows_want" ]; then
+                        rows_gnu_failed=$((rows_gnu_failed + 1))
+                        note "wget row $rows_name: GNU wget [$rows_theirs], want [$rows_want]"
+                fi
+        done < "$rows_place/rows"
+        kill "$rows_server" 2>/dev/null || :
+        wait "$rows_server" 2>/dev/null || :
+        tally wget-rows $((rows_count - rows_failed)) "$rows_count"
+        [ "$rows_failed" = 0 ] || builtins_failed=1
+        if [ -n "$rows_gnu" ]; then
+                tally wget-rows-match-gnu $((rows_count - rows_gnu_failed)) "$rows_count"
+                [ "$rows_gnu_failed" = 0 ] || builtins_failed=1
+        else
+                note "wget rows against GNU wget: NOT RUN -- no GNU wget"
+        fi
+
         differential_domain builtins || builtins_failed=1
         return "$builtins_failed"
 }

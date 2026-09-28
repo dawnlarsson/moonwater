@@ -7079,7 +7079,8 @@ static bipolar tls_read_until(
 #define HTTP_URL_MAX 2048
 #define HTTP_HEAD_MAX 16384
 #define HTTP_FETCH_MAX (16 * 1024 * 1024)
-#define HTTP_HOPS 10
+//      GNU wget's twenty redirects, and the request after the last.
+#define HTTP_HOPS 21
 #define HTTP_IDLE_SECONDS 30
 #define HTTP_HEAD_SECONDS 30
 
@@ -7094,6 +7095,7 @@ static bipolar tls_read_until(
 #define HTTP_DOWNGRADE (-9)
 #define HTTP_STATUS (-10)
 #define HTTP_WRITE (-11)
+#define HTTP_SCHEME (-12)
 
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
@@ -7166,7 +7168,7 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
         if (scheme && url[scheme] == '/' && url[scheme + 1] == '/')
         {
                 if (!http_web_scheme(url, scheme))
-                        return HTTP_BAD_URL;
+                        return HTTP_SCHEME;
                 selected_tls = scheme == 6;
                 at = url + scheme + 2;
         }
@@ -8353,14 +8355,16 @@ static bipolar http_absolutize(bool tls, string_address host, p16 port,
 
         /* An absolute reference is http or https followed by "//", in any
            case; http_split_into reads the rest.  Any other scheme -- ftp:,
-           javascript:, a bare "http:path" -- is refused rather than taken
-           for a relative path on the current host.  A network-path "//host"
-           keeps the current scheme. */
+           javascript:, a bare "http:path" -- is an unsupported scheme, as
+           GNU wget names it, never a relative path on the current host.  A
+           network-path "//host" keeps the current scheme. */
         scheme = http_scheme_length(kept);
         if (scheme)
         {
                 if (!http_web_scheme(kept, scheme) || kept[scheme] != '/' ||
-                    kept[scheme + 1] != '/' || length >= room)
+                    kept[scheme + 1] != '/')
+                        return HTTP_SCHEME;
+                if (length >= room)
                         return HTTP_BAD_URL;
                 memory_copy_apart_end(into, kept, length);
                 return HTTP_OK;
@@ -8564,7 +8568,8 @@ static const http_manners http_manners_wget = {
    actually arrives. */
 static bipolar http_run(string_address start, const http_manners address_to how,
                         bool check_cert, bipolar dest,
-                        http_buffer address_to into, b32 address_to code)
+                        http_buffer address_to into, b32 address_to code,
+                        p8 address_to where)
 {
         p8 url[HTTP_URL_MAX];
         http_buffer whole = {0};
@@ -8630,25 +8635,26 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                 if (!status && how->follow &&
                     http_response_is_redirect(response.code))
                 {
+                        p8 placed[HTTP_URL_MAX];
+
                         status = !response.location_length ? HTTP_MALFORMED
-                                 : response.location_length >= sizeof next
+                                 : response.location_length >= sizeof placed
                                      ? HTTP_BAD_URL : HTTP_OK;
                         if (!status)
                         {
-                                p8 placed[HTTP_URL_MAX];
-
                                 memory_copy(placed, response.location,
                                             response.location_length);
                                 placed[response.location_length] = end;
                                 status = http_absolutize(tls, host, port, path, placed,
                                                          next, sizeof next);
+                                //      The next hop, or the Location a failure
+                                //      names; both terminate inside a buffer
+                                //      exactly as large as url.
+                                string_copy(url, status ? placed : next);
                         }
                         http_link_close(address_of link);
                         if (status)
                                 goto done;
-                        //      http_absolutize terminates inside next, which is
-                        //      exactly as large as url.
-                        string_copy(url, next);
                         continue;
                 }
 
@@ -8681,6 +8687,9 @@ static bipolar http_run(string_address start, const http_manners address_to how,
         status = HTTP_REDIRECTS;
 
 done:
+        //      Where it ended: the URL a failure names.
+        if (where)
+                string_copy(where, url);
         //      The store path of http_copy terminates what it appends.
         if (into && !status)
         {
@@ -8698,15 +8707,16 @@ static bipolar http_get(string_address url, http_buffer address_to body,
                         b32 address_to code)
 {
         return http_run(url, address_of http_manners_fetch, false, -1, body,
-                        code);
+                        code, null);
 }
 
-//      wget: TLS, redirects, and the body written as it arrives.
+//      wget: TLS, redirects, and the body written as it arrives; where, if
+//      given, is HTTP_URL_MAX bytes and gets the URL the fetch ended on.
 static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert,
-                             b32 address_to code)
+                             b32 address_to code, p8 address_to where)
 {
         return http_run(start, address_of http_manners_wget, check_cert, dest,
-                        null, code);
+                        null, code, where);
 }
 
 #endif // STANDARD_MODERN_C_NET_HTTP

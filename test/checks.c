@@ -48996,8 +48996,8 @@ static bool net_as_emulated(void)
           body / store       HTTP_FETCH_MAX (16MiB)
             exact framing:   "Content-Length of exactly HTTP_FETCH_MAX is framed"
             one-over e2e:    "Content-Length past HTTP_FETCH_MAX is refused in memory"
-          redirect hops      HTTP_HOPS (10)
-            exact+one-over:  fetching_for_real HTTP_HOPS nine-then-refuse coverage
+          redirect hops      HTTP_HOPS (21)
+            exact+one-over:  fetching_for_real HTTP_HOPS twenty-then-refuse coverage
           writev gather      HTTP_WRITE_SPANS (64)
             hit:             TLS write-span flush with HTTP_WRITE_SPANS + 1 records;
                              http_write_spans_partial short-write resume
@@ -50675,7 +50675,7 @@ static fn fetching(void)
         check("unsupported explicit schemes are not reinterpreted as hosts",
               http_split_into((string_address) "gopher://127.0.0.1/", name,
                          sizeof name, address_of port, address_of path,
-                         address_of tls) == HTTP_BAD_URL);
+                         address_of tls) == HTTP_SCHEME);
         check("userinfo cannot disguise the connected HTTP host",
               http_split_into((string_address) "http://allowed@127.0.0.1/", name,
                          sizeof name, address_of port, address_of path,
@@ -52104,7 +52104,7 @@ static fn http_tls_resource_exhaustion(void)
 
                         status = http_fetch_to(
                             (string_address)"https://127.0.0.1:1/", -1, false,
-                            address_of code);
+                            address_of code, null);
                         check("HTTPS fetch fails closed when TLS open cannot get a socket",
                               status == HTTP_NO_ROUTE);
 
@@ -58144,8 +58144,9 @@ static fn redirect_urls(void)
         /* One scheme rule for the parser and the redirect resolver: http and
            https in any case (RFC 3986 3.1), and any other scheme refused by
            both rather than read as a host or as a path on the current one.
-           split is the URL's verdict (1 plain, 2 TLS, 0 refused); location
-           is the Location's from https://h/dir/old, and 0 is refused. */
+           split is the URL's verdict (1 plain, 2 TLS, 0 refused, 3 an
+           unsupported scheme, GNU wget's words); location is the Location's
+           from https://h/dir/old, and 0 is an unsupported scheme. */
         {
                 static const struct
                 {
@@ -58156,9 +58157,9 @@ static fn redirect_urls(void)
                     {"HTTP://h/x", 1, "HTTP://h/x"},
                     {"Https://h/x", 2, "Https://h/x"},
                     {"hTtPs://h:444/x", 2, "hTtPs://h:444/x"},
-                    {"ftp://h/x", 0, 0},
-                    {"httpx://h/x", 0, 0},
-                    {"web+x.y-z://h/x", 0, 0},
+                    {"ftp://h/x", 3, 0},
+                    {"httpx://h/x", 3, 0},
+                    {"web+x.y-z://h/x", 3, 0},
                     {"javascript:alert(1)", 0, 0},
                     {"http:x", 0, 0},
                     {"h:81/x", 1, 0},
@@ -58177,14 +58178,15 @@ static fn redirect_urls(void)
                             (string_address)schemes[row].text, into, sizeof into);
 
                         check("a URL scheme splits in any case, and no other scheme does",
-                              schemes[row].split
-                                  ? split == HTTP_OK && tls == (schemes[row].split == 2)
-                                  : split == HTTP_BAD_URL);
+                              schemes[row].split == 3   ? split == HTTP_SCHEME
+                              : schemes[row].split      ? split == HTTP_OK &&
+                                                         tls == (schemes[row].split == 2)
+                                                        : split == HTTP_BAD_URL);
                         check("a Location scheme resolves in any case, and no other scheme does",
                               schemes[row].location
                                   ? placed == HTTP_OK &&
                                         string_equals(into, (string_address)schemes[row].location)
-                                  : placed == HTTP_BAD_URL);
+                                  : placed == HTTP_SCHEME);
                 }
         }
         {
@@ -58306,7 +58308,7 @@ static fn redirect_urls(void)
                           http_get(url, address_of body, address_of code) ==
                               HTTP_BAD_URL);
                 check("wget's start URL ceiling matches fetch",
-                      http_fetch_to(url, -1, false, address_of code) ==
+                      http_fetch_to(url, -1, false, address_of code, null) ==
                           HTTP_BAD_URL);
                 /* A target the request builder refuses is refused before
                    the connect: port 1 is closed, so a client that dials
@@ -58315,7 +58317,7 @@ static fn redirect_urls(void)
                       http_get((string_address)"http://127.0.0.1:1/caf\xe9",
                                address_of body, address_of code) == HTTP_BAD_URL &&
                           http_fetch_to((string_address)"http://127.0.0.1:1/%0d",
-                                        -1, false, address_of code) == HTTP_BAD_URL);
+                                        -1, false, address_of code, null) == HTTP_BAD_URL);
 
                 /* Absolute Location that already fills the next-URL buffer. */
                 {
@@ -58691,19 +58693,19 @@ static fn fetching_for_real(void)
 
                 {
                         status = http_fetch_to(url, -1, false,
-                                               address_of code);
+                                               address_of code, null);
                         check("a streaming 204 succeeds without writing its forbidden body",
                               status == HTTP_OK && code == 204);
                         status = http_fetch_to(url, -1, false,
-                                               address_of code);
+                                               address_of code, null);
                         check("a terminal 304 is not redirected or accepted as a download",
                               status == HTTP_STATUS && code == 304);
                         status = http_fetch_to(url, -1, false,
-                                               address_of code);
+                                               address_of code, null);
                         check("a 305 Location is not followed",
                               status == HTTP_STATUS && code == 305);
                         status = http_fetch_to(url, -1, false,
-                                               address_of code);
+                                               address_of code, null);
                         check("a 306 Location is not followed",
                               status == HTTP_STATUS && code == 306);
                 }
@@ -58766,9 +58768,10 @@ static fn fetching_for_real(void)
         system_wait4_retry((b32)child, null, 0, null);
         socket_close((b32)listening);
 
-        /* HTTP_HOPS: wget follows through nine redirects, then refuses a
-           tenth that still points elsewhere. Location stays on this
-           listener so the hop count is the only thing under test. */
+        /* HTTP_HOPS: wget follows through twenty redirects, as GNU wget
+           does, then refuses a twenty-first that still points elsewhere.
+           Location stays on this listener so the hop count is the only
+           thing under test. */
         {
                 socket_address_internet hops_where;
                 p32 hops_size = sizeof hops_where;
@@ -58811,8 +58814,8 @@ static fn fetching_for_real(void)
                         p8 answer_ok[] = "HTTP/1.1 200 OK\r\n"
                                          "Content-Length: 0\r\n"
                                          "\r\n";
-                        /* Nine redirects then a final body, then ten
-                           redirects that never land. */
+                        /* Twenty redirects then a final body, then
+                           twenty-one redirects that never land. */
                         positive answers = HTTP_HOPS - 1 + 1 + HTTP_HOPS;
 
                         for (positive at = 0; at < answers; at++)
@@ -58851,12 +58854,12 @@ static fn fetching_for_real(void)
                         url[url_used++] = '/';
                         url[url_used] = end;
 
-                        status = http_fetch_to(url, -1, false, address_of code);
-                        check("nine redirects then a final response succeed",
+                        status = http_fetch_to(url, -1, false, address_of code, null);
+                        check("twenty redirects then a final response succeed",
                               status == HTTP_OK && code == 200);
 
-                        status = http_fetch_to(url, -1, false, address_of code);
-                        check("ten redirects still pointing elsewhere are refused",
+                        status = http_fetch_to(url, -1, false, address_of code, null);
+                        check("twenty-one redirects still pointing elsewhere are refused",
                               status == HTTP_REDIRECTS);
                 }
 
@@ -58933,13 +58936,15 @@ static fn fetching_for_real(void)
                         p8 answer_ok[] = "HTTP/1.1 200 OK\r\n"
                                          "Content-Length: 0\r\n"
                                          "\r\n";
-                        /* Nine absolute redirects then a final body, then
-                           ten absolute redirects that never land. */
+                        /* Twenty absolute redirects then a final body,
+                           then twenty-one absolute redirects that never
+                           land. */
                         positive answers = HTTP_HOPS - 1 + 1 + HTTP_HOPS;
 
                         for (positive at = 0; at < answers; at++)
                         {
-                                bool on_a = (at & 1) == 0;
+                                //      Each fetch starts on 127.0.0.1.
+                                bool on_a = ((at < HTTP_HOPS ? at : at - HTTP_HOPS) & 1) == 0;
                                 bipolar listening = on_a ? listen_a : listen_b;
                                 p16 next_port = on_a ? port_b : port_a;
                                 string_address next_host =
@@ -59005,12 +59010,12 @@ static fn fetching_for_real(void)
                         url[url_used++] = '/';
                         url[url_used] = end;
 
-                        status = http_fetch_to(url, -1, false, address_of code);
-                        check("nine absolute multi-host redirects then a final response succeed",
+                        status = http_fetch_to(url, -1, false, address_of code, null);
+                        check("twenty absolute multi-host redirects then a final response succeed",
                               status == HTTP_OK && code == 200);
 
-                        status = http_fetch_to(url, -1, false, address_of code);
-                        check("ten absolute multi-host redirects are refused before a landing",
+                        status = http_fetch_to(url, -1, false, address_of code, null);
+                        check("twenty-one absolute multi-host redirects are refused before a landing",
                               status == HTTP_REDIRECTS);
                 }
 
@@ -59092,7 +59097,7 @@ static fn fetching_for_real(void)
                         url[url_used] = end;
 
                         check("a redirect Location of HTTP_URL_MAX is refused end to end",
-                              http_fetch_to(url, -1, false, address_of code) ==
+                              http_fetch_to(url, -1, false, address_of code, null) ==
                                   HTTP_BAD_URL);
                 }
 

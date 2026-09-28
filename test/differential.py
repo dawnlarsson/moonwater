@@ -39380,7 +39380,7 @@ static void fuzz_run(const p8 *data, positive size, int lane)
         fuzz_requests = 0;
         fuzz_sink_used = 0;
         status = fetch ? http_get((string_address)start, &store, &code)
-                       : http_fetch_to((string_address)start, 7, true, &code);
+                       : http_fetch_to((string_address)start, 7, true, &code, null);
         if (fuzz_requests != fuzz_opened)
                 fuzz_die("a connection was opened with no request written on it");
 
