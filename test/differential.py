@@ -7352,7 +7352,10 @@ FILES_UTILITIES = (
                    ("-sd", "-k", "--block-size=512", "dir"), ("-sd", "--block-size=512", "-k", "dir"),
                    ("-sdk", "-h", "dir"), ("-sd", "--si", "-k", "dir"),
                    # --zero turns colour off where it is read.
-                   ("--zero", "--color=always", "-d", "dir", "exe"), ("--color=always", "--zero", "-d", "dir"))),
+                   ("--zero", "--color=always", "-d", "dir", "exe"), ("--color=always", "--zero", "-d", "dir"),
+                   # Unsorted is not reversed, and not grouped.
+                   ("-U", "-r", "-d", "dir", "a.txt", "exe"), ("-f", "-r", "dir"),
+                   ("-U", "--group-directories-first", "-r", "-d", "a.txt", "dir"))),
     #       dir and vdir are ls with a different default format, so they
     #       answer for the same surface and are walked over it. A shorter
     #       list of their own left sixty-nine of ls's options untouched in

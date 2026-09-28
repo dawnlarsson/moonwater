@@ -9321,13 +9321,11 @@ static fn ls_sort()
         if (ls_count < 2)
                 return;
 
+        //      Unsorted is the directory's own order: GNU returns before
+        //      any comparison, so -r and --group-directories-first do
+        //      nothing to it.
         if (ls_sorting == 'U')
-        {
-                if (ls_reversed)
-                        for (positive i = 0; i < ls_count; i++)
-                                ls_sorted[i] = ls_count - 1 - i;
                 return;
-        }
 
         positive address_to from = array_merge_sort(
             ls_sorted, ls_sort_spare, ls_count, ls_index_order);
