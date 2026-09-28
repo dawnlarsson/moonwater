@@ -73248,6 +73248,18 @@ static fn storage_test_link_state(void)
         netlink_forget(address_of net_states);
 }
 
+static bool storage_test_write_text(string_address path, const void address_to text,
+                                    positive length)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path, 1 | O_CLOEXEC);
+        bool written = handle >= 0 &&
+                       system_write_all((positive)handle, text, length) == length;
+
+        if (handle >= 0)
+                system_close(handle);
+        return written;
+}
+
 /* The lease clock's first second.  A boot takes its lease there, and zero is
    what net_seconds says for a clock that failed -- which expires every lease
    at once.  A time namespace whose monotonic clock starts about now puts a
@@ -73260,9 +73272,7 @@ static fn storage_test_lease_clock_origin(void)
         if (child == 0)
         {
                 p8 offsets[48] = "monotonic -";
-                p8 digits[24];
                 positive at = 11;
-                positive count = 0;
                 positive now = clock_monotonic_nanoseconds();
                 timespec pause = {0, 250000000};
                 b32 inner = 0;
@@ -73274,17 +73284,10 @@ static fn storage_test_lease_clock_origin(void)
                 }
                 if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWTIME) < 0)
                         system_call_1(syscall(exit_group), 2);
-                now /= NETWORK_NANOSECONDS;
-                do
-                        digits[count++] = (p8)('0' + now % 10);
-                while (now /= 10);
-                while (count)
-                        offsets[at++] = digits[--count];
+                at += positive_into(offsets + at, now / NETWORK_NANOSECONDS);
                 memory_copy(offsets + at, " 0\n", 3);
                 at += 3;
-                bipolar handle = system_open_at(AT_FDCWD, "/proc/self/timens_offsets",
-                                                1 | O_CLOEXEC);
-                if (handle < 0 || system_write_all((positive)handle, offsets, at) != at)
+                if (!storage_test_write_text("/proc/self/timens_offsets", offsets, at))
                         system_call_1(syscall(exit_group), 2);
                 bipolar grandchild = system_fork();
                 if (grandchild == 0)
@@ -73324,6 +73327,68 @@ static fn storage_test_dhcp_apart(void)
               status == DHCP_NO_OFFER && before >= 0 && after == before &&
                   system_call_4(syscall(wait4), (positive)-1, 0, 1, 0) ==
                       -ECHILD);
+}
+
+/* A restarted watcher meets the address its predecessor installed: the
+   exclusive create answers EEXIST. In a user, network and mount namespace
+   of its own (lo up, the address added first, a tmpfs over /etc for the
+   resolver), the lease must be taken, held without ownership, and released
+   without removing an address it never owned. NOT RUN without namespaces. */
+static fn storage_test_lease_over_existing(void)
+{
+        b32 status = 0;
+        bipolar child = system_fork();
+
+        if (child == 0)
+        {
+                p8 map[48] = "0 ";
+                p8 groups[48] = "0 ";
+                p8 hardware[6] = {2, 0, 0, 0, 0, 1};
+                dhcp_lease lease = {.address = 0x0a090909, .mask = 0xffffff00,
+                                    .server = 0x0a090901, .seconds = 60,
+                                    .renewal = 30, .rebinding = 52};
+                net_holding held = {0};
+                bipolar handle;
+                //      The ids outside, read before the namespace hides them;
+                //      a file made under an unmapped id is EOVERFLOW.
+                positive at = 2 + positive_into(
+                    map + 2, (positive)system_call_1(syscall(getuid), 0));
+                positive group = 2 + positive_into(
+                    groups + 2, (positive)system_call_1(syscall(getgid), 0));
+
+                if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWNET |
+                                                        CLONE_NEWNS) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                memory_copy(map + at, " 1\n", 4);
+                memory_copy(groups + group, " 1\n", 4);
+                if (!storage_test_write_text("/proc/self/uid_map", map, at + 3) ||
+                    !storage_test_write_text("/proc/self/setgroups", "deny", 4) ||
+                    !storage_test_write_text("/proc/self/gid_map", groups, group + 3) ||
+                    system_call_5(syscall(mount), 0, (positive) "/", 0, MS_REC | MS_PRIVATE, 0) < 0 ||
+                    system_call_5(syscall(mount), (positive) "tmpfs", (positive) "/etc",
+                                  (positive) "tmpfs", 0, 0) < 0 ||
+                    (handle = netlink_open_groups(0)) < 0 ||
+                    netlink_link_up((b32)handle, 1) < 0 ||
+                    netlink_address_add((b32)handle, 1, lease.address, 24) < 0)
+                        system_call_1(syscall(exit_group), 2);
+                if (net_apply_lease((b32)handle, 1, "lo", hardware, address_of lease,
+                                    address_of held, false) != 0 ||
+                    held.index != 1 || held.address_owned)
+                        system_call_1(syscall(exit_group), 1);
+                system_call_1(syscall(exit_group),
+                              net_holding_release((b32)handle, address_of held) == 0 &&
+                                      netlink_address_delete((b32)handle, 1, lease.address,
+                                                             24) == 0
+                                  ? 0 : 3);
+        }
+        if (child > 0)
+                system_call_4(syscall(wait4), (positive)child,
+                              (positive)address_of status, 0, 0);
+        if (child > 0 && status == 2 << 8)
+                log_direct(str("storage_io: lease over an existing address NOT RUN -- no namespaces\n"));
+        else
+                check("a lease over an address already there is taken, held unowned and left",
+                      child > 0 && status == 0);
 }
 
 static fn storage_test_netlink_output(void)
@@ -73971,6 +74036,7 @@ b32 main(void)
         storage_test_link_state();
         storage_test_lease_clock_origin();
         storage_test_dhcp_apart();
+        storage_test_lease_over_existing();
         storage_test_netlink_output();
         storage_test_net_files();
         return test_report(null);
