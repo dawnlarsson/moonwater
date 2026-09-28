@@ -26105,19 +26105,35 @@ cycle_done:
         two spaces before b and not at b. That is what -b is for, and what
         makes -k2 and -k2b different keys.
 */
-#define SORT_KEYS_MAX 8
+#define SORT_KEYS_MAX 256
 
 /*
         Which of the orderings a key is in, and which bytes it never sees.
 
-        -n -g -h -M -V are one answer each and the last one written wins, the
-        way GNU takes them. -d and -i are not orderings at all: they say which
-        bytes the comparison is allowed to look at, so they sit beside the
-        ordering rather than instead of it, and -f joins them.
+        Every ordering letter written is kept, as GNU keeps one flag for each,
+        and two that cannot both be asked -- any two of -n -g -h -M, or one of
+        them with -V, -R, -d or -i -- are refused by name once the keys are
+        settled. kind is the one a comparison runs, in GNU's precedence: -n,
+        then -g, -h, -M, -R and -V, so -RV hashes. -d and -i are not orderings
+        at all: they say which bytes the comparison is allowed to look at, so
+        they sit beside the ordering rather than instead of it, and -f joins
+        them. -d wins over -i whichever came first, as it does in GNU, where
+        one table of ignored bytes is all a key has room for.
 */
+enum
+{
+        SORT_KIND_G = 1,
+        SORT_KIND_H = 2,
+        SORT_KIND_M = 4,
+        SORT_KIND_N = 8,
+        SORT_KIND_R = 16,
+        SORT_KIND_V = 32,
+};
+
 typedef struct
 {
         p8 kind;
+        p8 kinds;
         positive how;
         bool reverse;
         bool blanks[2];
@@ -30000,36 +30016,114 @@ static fn sort_release()
         sort_failed = false;
 }
 
-static positive sort_key_flags(sort_key address_to key, string_address spec,
-                               positive at, p8 address_to kind, bool second)
+// The ordering bit a letter stands for, or zero for a letter that is not one.
+static p8 sort_kind_bit(p8 letter)
 {
-        while (spec[at] && (second || spec[at] != ','))
+        switch (letter)
         {
-                p8 option = spec[at++];
+        case 'h': return SORT_KIND_H;
+        case 'M': return SORT_KIND_M;
+        case 'n': return SORT_KIND_N;
+        case 'V': return SORT_KIND_V;
+        default: return 0;
+        }
+}
 
+// One ordering letter into order, as GNU's set_ordering reads it; false for
+// a letter that is none. b goes to the ends which says.
+static bool sort_order_letter(sort_ordering address_to order, p8 option,
+                              bool start, bool stop)
+{
+        p8 bit = sort_kind_bit(option);
+
+        if (bit)
+                order->kinds |= bit;
+        else if (option == 'r')
+                order->reverse = true;
+        else if (option == 'f')
+                order->how |= SORT_FOLD;
+        else if (option == 'd')
+                order->how = (order->how & ~(positive)SORT_PRINTABLE) | SORT_DICTIONARY;
+        else if (option == 'i')
+        {
+                if (!(order->how & SORT_DICTIONARY))
+                        order->how |= SORT_PRINTABLE;
+        }
+        else if (option == 'b')
+        {
+                order->blanks[0] |= start;
+                order->blanks[1] |= stop;
+        }
+        else
+                return false;
+
+        return true;
+}
+
+/*
+        A key's letters settled into what its comparison runs: GNU's
+        check_ordering_compatibility first, which allows one of -n -g -h -M
+        or one group of -V -R -d -i and names the letters of a key that asks
+        for more -- all of them but b and r, in the order its key_to_opts
+        writes them -- and then the ordering the comparison takes, in the
+        precedence GNU's keycompare tries them.
+*/
+static bool sort_order_settle(sort_ordering address_to order)
+{
+        p8 kinds = order->kinds;
+        b32 count = !!(kinds & SORT_KIND_N) + !!(kinds & SORT_KIND_G) +
+                    !!(kinds & SORT_KIND_H) + !!(kinds & SORT_KIND_M) +
+                    !!((kinds & (SORT_KIND_V | SORT_KIND_R)) ||
+                       (order->how & (SORT_DICTIONARY | SORT_PRINTABLE)));
+
+        if (count > 1)
+        {
+                p8 letters[12];
+                positive used = 0;
+
+                if (order->how & SORT_DICTIONARY)
+                        letters[used++] = 'd';
+                if (order->how & SORT_FOLD)
+                        letters[used++] = 'f';
+                if (kinds & SORT_KIND_G)
+                        letters[used++] = 'g';
+                if (kinds & SORT_KIND_H)
+                        letters[used++] = 'h';
+                if (order->how & SORT_PRINTABLE)
+                        letters[used++] = 'i';
+                if (kinds & SORT_KIND_M)
+                        letters[used++] = 'M';
+                if (kinds & SORT_KIND_N)
+                        letters[used++] = 'n';
+                if (kinds & SORT_KIND_R)
+                        letters[used++] = 'R';
+                if (kinds & SORT_KIND_V)
+                        letters[used++] = 'V';
+                letters[used] = 0;
+
+                text_flush();
+                return string_report(writer_stderr, false,
+                                     "%s: options '-%s' are incompatible\n", text_name,
+                                     letters);
+        }
+
+        order->kind = kinds & SORT_KIND_N   ? 'n'
+                      : kinds & SORT_KIND_G ? 'g'
+                      : kinds & SORT_KIND_H ? 'h'
+                      : kinds & SORT_KIND_M ? 'M'
+                      : kinds & SORT_KIND_R ? 'R'
+                      : kinds & SORT_KIND_V ? 'V'
+                                            : 0;
+        return true;
+}
+
+static positive sort_key_flags(sort_key address_to key, string_address spec,
+                               positive at, bool second)
+{
+        while (spec[at] && sort_order_letter(address_of key->order, spec[at], !second, second))
+        {
                 key->ordered = true;
-
-                if (option == 'n' || option == 'h' ||
-                    option == 'M' || option == 'V')
-                {
-                        if (address_to kind && address_to kind != option)
-                                return positive_max;
-
-                        address_to kind = option;
-                        key->order.kind = option;
-                }
-                else if (option == 'r')
-                        key->order.reverse = true;
-                else if (option == 'f')
-                        key->order.how |= SORT_FOLD;
-                else if (option == 'd')
-                        key->order.how |= SORT_DICTIONARY;
-                else if (option == 'i')
-                        key->order.how |= SORT_PRINTABLE;
-                else if (option == 'b')
-                        key->order.blanks[second] = true;
-                else
-                        return positive_max;
+                at++;
         }
 
         return at;
@@ -30037,18 +30131,28 @@ static positive sort_key_flags(sort_key address_to key, string_address spec,
 
 /*
         A field number or character offset in a key: digits read as GNU's
-        parse_field_count reads them, where one too large for size_t is
-        SIZE_MAX rather than a mistake -- sort -k 99999999999999999999 sorts,
-        keying every line on the nothing past its end. The ceiling here is a
+        parse_field_count reads them, through xstrtoumax -- blanks and a plus
+        before them are allowed, and one too large for size_t is SIZE_MAX
+        rather than a mistake: sort -k 99999999999999999999 sorts, keying
+        every line on the nothing past its end. The ceiling here is a
         quarter of the word, past any line there can be and still far enough
-        from the top that a key's start plus its offset cannot wrap.
+        from the top that a key's start plus its offset cannot wrap. taken is
+        zero when there were no digits at all, which is GNU's invalid count.
 */
 #define SORT_FIELD_MAX (positive_max / 4)
 
 static positive sort_field_count(string_address spec, positive address_to taken)
 {
         positive value = 0;
-        positive at = 0;
+        positive at = string_span(spec, string_set_space);
+
+        at += spec[at] == '+';
+
+        if (!byte_is_digit(spec[at]))
+        {
+                address_to taken = 0;
+                return 0;
+        }
 
         for (; byte_is_digit(spec[at]); at++)
         {
@@ -30062,47 +30166,77 @@ static positive sort_field_count(string_address spec, positive address_to taken)
         return value;
 }
 
+// GNU's two shapes of complaint about a -k: a count that is not one, named
+// from where it should have started, and a key that is wrong as a whole.
+static bool sort_count_refused(string_address what, string_address from)
+{
+        text_flush();
+        return string_report(writer_stderr, false,
+                             "%s: %s: invalid count at start of '%w'\n", text_name,
+                             what, writer_terminal_quoted_name, from);
+}
+
+static bool sort_key_refused(string_address what, string_address spec)
+{
+        text_flush();
+        return string_report(writer_stderr, false,
+                             "%s: %s: invalid field specification '%w'\n", text_name,
+                             what, writer_terminal_quoted_name, spec);
+}
+
+/*
+        One -k, refused where it is wrong in GNU's words and order: the start
+        field, a zero one, the character after a point, a zero one, the
+        letters, then the end after a comma, and anything left over is a
+        stray character.
+*/
 static bool sort_parse_key(string_address spec)
 {
         if (sort_key_count >= SORT_KEYS_MAX)
-                return false;
+                return string_diagnostic(&text_diagnostic, 0, null, "too many keys");
 
         sort_key address_to key = sort_keys + sort_key_count;
         positive at = 0;
         positive taken;
-        p8 local_kind = 0;
 
         address_to key = (sort_key){0};
 
         key->first_field = sort_field_count(spec + at, address_of taken);
+
+        if (!taken)
+                return sort_count_refused("invalid number at field start", spec + at);
+
         at += taken;
 
         if (!key->first_field)
-                return false;
+                return sort_key_refused("field number is zero", spec);
 
         if (spec[at] == '.')
         {
                 at++;
                 key->first_char = sort_field_count(spec + at, address_of taken);
 
-                if (!taken || !key->first_char)
-                        return false;
+                if (!taken)
+                        return sort_count_refused("invalid number after '.'", spec + at);
+
+                if (!key->first_char)
+                        return sort_key_refused("character offset is zero", spec);
 
                 at += taken;
         }
 
-        at = sort_key_flags(key, spec, at, address_of local_kind, false);
-
-        if (at == positive_max)
-                return false;
+        at = sort_key_flags(key, spec, at, false);
 
         if (spec[at] == ',')
         {
                 at++;
                 key->second_field = sort_field_count(spec + at, address_of taken);
 
-                if (!taken || !key->second_field)
-                        return false;
+                if (!taken)
+                        return sort_count_refused("invalid number after ','", spec + at);
+
+                if (!key->second_field)
+                        return sort_key_refused("field number is zero", spec);
 
                 at += taken;
 
@@ -30112,15 +30246,17 @@ static bool sort_parse_key(string_address spec)
                         key->second_char = sort_field_count(spec + at, address_of taken);
 
                         if (!taken)
-                                return false;
+                                return sort_count_refused("invalid number after '.'",
+                                                          spec + at);
 
                         at += taken;
                 }
 
-                if (sort_key_flags(key, spec, at, address_of local_kind,
-                                   true) == positive_max)
-                        return false;
+                at = sort_key_flags(key, spec, at, true);
         }
+
+        if (spec[at])
+                return sort_key_refused("stray character in field spec", spec);
 
         sort_key_count++;
         return true;
@@ -30200,8 +30336,7 @@ static bool sort_obsolete_failed;
 static bool sort_words_active;
 
 // The start of an obsolete key into key, true when all of plus is one.
-static bool sort_obsolete_start(sort_key address_to key, string_address plus,
-                                p8 address_to kind)
+static bool sort_obsolete_start(sort_key address_to key, string_address plus)
 {
         positive taken;
         positive at = 1;
@@ -30225,9 +30360,9 @@ static bool sort_obsolete_start(sort_key address_to key, string_address plus,
         key->first_field = field < SORT_FIELD_MAX ? field + 1 : SORT_FIELD_MAX;
         key->first_char = offset < SORT_FIELD_MAX ? offset + 1 : SORT_FIELD_MAX;
 
-        positive stop = sort_key_flags(key, plus, at, kind, false);
+        positive stop = sort_key_flags(key, plus, at, false);
 
-        return stop != positive_max && !plus[stop];
+        return !plus[stop];
 }
 
 static fn sort_obsolete_refuse(string_address what, string_address word)
@@ -30241,18 +30376,16 @@ static fn sort_obsolete_refuse(string_address what, string_address word)
 // The +POS1 at index, and the -POS2 after it when there is one, as a key.
 static fn sort_obsolete_key(string_address plus, string_address minus)
 {
-        p8 kind = 0;
-
         if (sort_key_count >= SORT_KEYS_MAX)
         {
                 sort_obsolete_failed = true;
-                string_diagnostic(&text_diagnostic, 0, null, "invalid key");
+                string_diagnostic(&text_diagnostic, 0, null, "too many keys");
                 return;
         }
 
         sort_key address_to key = sort_keys + sort_key_count;
 
-        (void)sort_obsolete_start(key, plus, address_of kind);
+        (void)sort_obsolete_start(key, plus);
 
         if (minus)
         {
@@ -30282,9 +30415,9 @@ static fn sort_obsolete_key(string_address plus, string_address minus)
                                            : (field ? field : 1);
                 key->second_char = offset;
 
-                positive stop = sort_key_flags(key, minus, at, address_of kind, true);
+                positive stop = sort_key_flags(key, minus, at, true);
 
-                if (stop == positive_max || minus[stop])
+                if (minus[stop])
                 {
                         text_flush();
                         string_format(writer_stderr,
@@ -30392,7 +30525,6 @@ static bool sort_obsolete_words(file_taking address_to taking)
                 }
 
                 sort_key scratch;
-                p8 kind = 0;
                 bool minus = at + 1 < count && argv[at + 1][0] == '-' &&
                              byte_is_digit(argv[at + 1][1]);
 
@@ -30401,7 +30533,7 @@ static bool sort_obsolete_words(file_taking address_to taking)
                 traditional |= minus && !correct;
 
                 if (!traditional ||
-                    !sort_obsolete_start(address_of scratch, word, address_of kind))
+                    !sort_obsolete_start(address_of scratch, word))
                 {
                         files = true;
                         continue;
@@ -30476,6 +30608,8 @@ static bool sort_size_valid(string_address said)
 static string_address sort_output_said;
 
 static b32 sort_option_status;
+// The orderings --sort named, as the letters they stand for.
+static p8 sort_said_kinds;
 static bool sort_tab_seen;
 static p8 sort_tab;
 
@@ -30664,13 +30798,26 @@ static bool sort_key_seen(p8 letter, string_address value)
                 return false;
         }
 
+        if (letter == 'W' && (string_equals(value, "general-numeric") ||
+                              string_equals(value, "random")))
+        {
+                sort_option_status = 1;
+                return string_diagnostic(&text_diagnostic, 0, value, "invalid argument for --sort");
+        }
+
+        if (letter == 'W')
+                sort_said_kinds |= sort_kind_bit(
+                    string_equals(value, "numeric")         ? 'n'
+                    : string_equals(value, "human-numeric") ? 'h'
+                    : string_equals(value, "month")         ? 'M'
+                    : string_equals(value, "version")       ? 'V'
+                    : string_equals(value, "random")        ? 'R'
+                                                            : 'g');
+
         if (letter != 'k')
                 return true;
 
-        if (sort_parse_key(value))
-                return true;
-
-        return string_diagnostic(&text_diagnostic, 0, null, "invalid key");
+        return sort_parse_key(value);
 }
 
 /*
@@ -31167,6 +31314,7 @@ static b32 text_sort()
         utility_arena.used = 0;
         sort_output_said = null;
         sort_option_status = 2;
+        sort_said_kinds = 0;
         sort_tab_seen = false;
         sort_key_count = 0;
         sort_have_separator = false;
@@ -31218,9 +31366,6 @@ static b32 text_sort()
         if (check_loud && check_quiet)
                 return text_done(string_diagnostic(&text_diagnostic, 2, null, "options '-cC' are incompatible"));
 
-        if (checking && output)
-                return text_done(string_diagnostic(&text_diagnostic, 2, null, "options '-co' are incompatible"));
-
         if (flags & FILE_FLAG('Z'))
         {
                 string_address list = file_option_value(address_of taking, 'Z');
@@ -31239,14 +31384,6 @@ static b32 text_sort()
                         return text_done(string_diagnostic(&text_diagnostic, 2, list, "no input from"));
         }
 
-        if (checking && text_files_count > 1)
-        {
-                text_flush();
-                string_format(writer_stderr, "%s: extra operand '%w' not allowed with -c\n",
-                              text_name, writer_terminal_quoted_name, text_file_name(1));
-                return text_done(2);
-        }
-
         sort_ordering defaults = {
             .reverse = (flags & FILE_FLAG('r')) != 0,
             .blanks = {(flags & FILE_FLAG('b')) != 0,
@@ -31261,56 +31398,18 @@ static b32 text_sort()
 
         if (flags & FILE_FLAG('d'))
                 defaults.how |= SORT_DICTIONARY;
-
-        if (flags & FILE_FLAG('i'))
+        else if (flags & FILE_FLAG('i'))
                 defaults.how |= SORT_PRINTABLE;
 
-        /*
-                Two ways of ordering the same lines is a question with no
-                answer, and GNU refuses it rather than picking one -- but
-                only where the question is asked: global orderings are the
-                default a key without its own inherits, and a key that names
-                its own ordering never sees them. The count of orderings
-                given is kept and judged where a key takes them.
-        */
-        positive default_kinds = 0;
+        // --sort=WORD is the letters spelled a third way, and was read into
+        // the same bits as it arrived.
+        defaults.kinds = sort_said_kinds;
 
-        for (positive k = 0; k < 4; k++)
-        {
-                p8 letter = k == 0 ? 'n' : k == 1 ? 'h' : k == 2 ? 'M' : 'V';
+        for (string_address letters = (string_address) "ghMnRV"; *letters; letters++)
+                if (flags & FILE_FLAG(*letters))
+                        defaults.kinds |= sort_kind_bit(*letters);
 
-                if (!(flags & FILE_FLAG(letter)))
-                        continue;
-
-                default_kinds++;
-                defaults.kind = letter;
-        }
-
-        string_address said = file_option_value(address_of taking, 'W');
-
-        if (said)
-        {
-                // --sort=WORD is the long options spelled a third way, and
-                // the word is what the letter would have been.
-                p8 kind = string_equals(said, "numeric")         ? 'n'
-                          : string_equals(said, "human-numeric") ? 'h'
-                          : string_equals(said, "month")         ? 'M'
-                          : string_equals(said, "version")       ? 'V'
-                                                                  : 0;
-
-                /*
-                        General-numeric needs floating point and random needs
-                        a hash. Accepting either as ordinary byte ordering was
-                        a plausible-looking answer to a different question.
-                */
-                if (!kind)
-                        return text_done(string_diagnostic(&text_diagnostic, 1, said, "invalid argument for --sort"));
-
-                if (defaults.kind != kind)
-                        default_kinds++;
-
-                defaults.kind = kind;
-        }
+        string_address said;
 
         said = file_option_value(address_of taking, 't');
 
@@ -31341,22 +31440,34 @@ static b32 text_sort()
         {
                 sort_key address_to key = sort_keys + i;
                 if (!key->ordered)
-                {
-                        if (default_kinds > 1)
-                                return text_done(string_diagnostic(&text_diagnostic, 2, null, "options are incompatible"));
-
                         key->order = defaults;
-                }
 
-                // -d and -i choose which bytes a comparison sees, and a
-                // number, a size or a month has no such bytes to leave out:
-                // GNU refuses -nd and -Mi, and -V alone stands beside them.
-                if ((key->order.kind == 'n' || key->order.kind == 'h' || key->order.kind == 'M') &&
-                    (key->order.how & (SORT_DICTIONARY | SORT_PRINTABLE)))
-                        return text_done(string_diagnostic(&text_diagnostic, 2, null, "options are incompatible"));
+                if (!sort_order_settle(address_of key->order))
+                        return text_done(2);
 
                 key->whole = key->first_field == 1 && key->first_char <= 1 &&
                              !key->second_field && !key->order.blanks[0];
+        }
+
+        // What -c and -C are refused beside, in GNU's order and named by the
+        // letter that was asked for.
+        string_address check_letter = (string_address)(checking_quiet ? "C" : "c");
+
+        if (checking && text_files_count > 1)
+        {
+                text_flush();
+                string_format(writer_stderr, "%s: extra operand '%w' not allowed with -%s\n",
+                              text_name, writer_terminal_quoted_name, text_file_name(1),
+                              check_letter);
+                return text_done(2);
+        }
+
+        if (checking && output)
+        {
+                text_flush();
+                return text_done(string_report(writer_stderr, 2,
+                                               "%s: options '-%so' are incompatible\n",
+                                               text_name, check_letter));
         }
 
 

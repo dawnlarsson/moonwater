@@ -18060,6 +18060,38 @@ _TEXT_SORT_KEYS = (
 )
 
 
+#       sort's own words, compared byte for byte: which part of a -k is
+#       wrong and how GNU names it, the letters of an ordering that asks
+#       for two at once, and the check letter a refusal names. The first
+#       word picks what standard input holds; the rest are sort's.
+_TEXT_SORT_SAID_INPUTS = {
+    "none": "",
+    "keys": "b 2\na 10\n\tc 1\n",
+}
+_TEXT_SORT_SAID_CASES = (
+    ("none", "-k0"), ("none", "-k1.0"), ("none", "-k0.1"), ("none", "-k1,0"), ("none", "-k1,"),
+    ("none", "-k", "2.,3"), ("none", "-k1x"), ("none", "-k1,2x"), ("none", "-k1,2.x"),
+    ("none", "-k1.2.3"), ("none", "-ka"), ("none", "-k", ""), ("none", "-k", " 2"), ("none", "-k+2"),
+    ("none", "-k1nM"), ("none", "-k1,1Mn"), ("none", "-k1di"), ("none", "-hn"), ("none", "-in"),
+    ("none", "-nd"), ("none", "-Vn"), ("none", "-fnM"), ("none", "--sort=numeric", "--sort=month"),
+    ("none", "--sort=version", "-d"), ("none", "-n", "-k1Vd", "-k2M"), ("none", "-nM", "-k1r"),
+    ("none", "-C", "-o", "/dev/null"), ("none", "-c", "-o", "/dev/null"),
+    ("none", "--check=quiet", "-o", "x"), ("none", "-C", "a.txt", "b.txt"),
+    ("none", "-c", "a.txt", "b.txt"),
+    ("keys", "-di"), ("keys", "-id"), ("keys", "-k1,1di"), ("keys", "-s", "-k2n", "-k1,1Vf"),
+)
+
+
+def _text_sort_said_valid(argv):
+    return len(argv) >= 1 and argv[0] in _TEXT_SORT_SAID_INPUTS
+
+
+def _text_sort_said_script(argv, stdin_name):
+    body = ("printf " + shlex.quote(_TEXT_SORT_SAID_INPUTS[argv[0]]) + " | run " +
+            ul_words(argv[1:]) + "\nexit $?\n")
+    return ul_live("sort", body)
+
+
 _TEXT_CUT_LISTS = (
     "1", "2-4", "3-", "-3", "1,3-", "1,3,5", "5-2", "0", "", "1,", "1x", "-", "2,4-6", "4-6,2",
     "1-3,5-", "-3,5-7", "1,1,1", "2-", "99", "18446744073709551615", "18446744073709551616-",
@@ -19186,6 +19218,8 @@ TEXT_UTILITIES = (
                        (("_POSIX2_VERSION", "200112"), ("POSIXLY_CORRECT", "1")), (("_POSIX2_VERSION", "x"),))
                      for argv in (("+1", "fields"), ("+1", "-2", "fields"), ("+0", "-1", "+2r", "fields"),
                                   ("fields", "+1"))))),
+    Utility("sort_said", operands=_TEXT_SORT_SAID_CASES, stdin=("empty",), fixture="text",
+            stderr="exact", modes=BASH, script=_text_sort_said_script, valid=_text_sort_said_valid),
     Utility("sum",
             options=(Option("-r"), Option("-s"), Option("--sysv")),
             operands=((), ("a.txt",), ("a.txt", "b.txt"), ("-",), ("missing",), ("empty",), ("binary",), ("dir",), ("big",),
