@@ -14575,6 +14575,15 @@ def shell_lang_directory_state(rng):
     return ("directory-state-" + shape, shell_ALL, shell_program(body, 'echo "end=$?"'))
 
 
+#       read from a directory, and ulimit with a negative number: each is a
+#       plain failure of 1 in dash too, where this answered 2, and a negative
+#       limit was taken as a number.
+def shell_lang_builtin_refusals(rng):
+    line = rng.choice(("mkdir -p dir; read x < ./dir", "mkdir -p dir; read -r x y < dir",
+                       "ulimit -f -- -42", "ulimit -f -1", "ulimit -n -- -5", "ulimit -f -- 10"))
+    return ("builtin-refusals", shell_ALL, shell_program(line + " 2>/dev/null", 'echo "s=$?"'))
+
+
 #       What bash does with a builtin handed words it has no place for, and
 #       with a subscript it cannot evaluate: the whole command the reader was
 #       running is dropped -- through eval, a sourced file and a function --
@@ -17414,6 +17423,7 @@ SHELL_FAMILIES = (
     shell_lang_builtin_discard,
     shell_lang_set_lone_plus,
     shell_lang_directory_state,
+    shell_lang_builtin_refusals,
     shell_lang_count_operators,
     shell_lang_brace_continuation,
     shell_lang_trap_return,

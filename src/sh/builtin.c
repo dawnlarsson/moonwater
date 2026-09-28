@@ -12725,8 +12725,10 @@ static bipolar read_waited(b32 descriptor, timespec address_to deadline)
 
 static PURE b32 read_result(bool failed, bool ended, bool timed_out)
 {
+        //      A read the system refused -- a directory, say -- is a
+        //      failure of 1 to both shells, as the end of input is.
         if (failed)
-                return shell_bash_compat ? 1 : 2;
+                return 1;
         if (timed_out)
                 return shell_bash_compat ? READ_TIMEOUT_STATUS : 1;
         return ended ? 1 : 0;
@@ -20795,10 +20797,11 @@ fn shell_ulimit(writer write, string_address input)
                         bool good;
                         bipolar asked = shell_signed(shell_argv[index], address_of good);
 
-                        if (!good ||
+                        //      A negative limit is no number to either
+                        //      shell; dash reads only digits there.
+                        if (!good || asked < 0 ||
                             (shell_bash_compat &&
-                             (asked < 0 ||
-                              (positive)asked >
+                             ((positive)asked >
                                   (UL_LIMIT_INFINITE - 1) /
                                       shell_limit_step(chosen))))
                         {
