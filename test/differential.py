@@ -14617,6 +14617,19 @@ def shell_lang_substitution_syntax(rng):
         "echo before", line, 'echo "reached=$?"'), ("command", "stdin", "file"))
 
 
+#       readonly -a, readonly -A and readonly name=(...), which bash takes;
+#       this refused both letters as invalid options, made name=(1 2) the
+#       scalar "(1 2)", and so left a "readonly" array open to a+=(4).
+def shell_lang_readonly_arrays(rng):
+    line = rng.choice(("readonly -a a", "readonly -A a", "readonly a=(1 2)", "readonly -a a=(x 'y z')",
+                       "readonly -A a=([k]=v)", "a=(1 2 3); readonly -a a", "readonly -a a b=(3)",
+                       "f() { readonly -a a=(in); }; f", "f() { local a=(l); readonly -a a; declare -p a; }; f"))
+    after = rng.choice(("a+=(4) 2>/dev/null; echo \"s=$?\"", "a[0]=z 2>/dev/null; echo \"s=$?\"", ":"))
+    return ("readonly-arrays", shell_BASH, shell_program(
+        line, "declare -p a 2>/dev/null | sed 's/^declare -[a-zA-Z]* //'", after,
+        'echo "${#a[@]}:${a[*]}"', 'echo "end=$?"'))
+
+
 #       Digits in front of > are a descriptor only while they fit one: bash
 #       reads a number past INT_MAX there as an ordinary word, so `echo a
 #       2147483648>f` writes "a 2147483648" to f. This called it a syntax
@@ -17481,6 +17494,7 @@ SHELL_FAMILIES = (
     shell_lang_builtin_discard,
     shell_lang_fd_prefix_range,
     shell_lang_case_substitution_lines,
+    shell_lang_readonly_arrays,
     shell_lang_set_lone_plus,
     shell_lang_directory_state,
     shell_lang_builtin_refusals,

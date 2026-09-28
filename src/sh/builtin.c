@@ -10262,10 +10262,97 @@ static fn shell_marked_written(writer write, string_address name,
         write("\n", 1);
 }
 
+static fn shell_declare(writer write, string_address input);
+static PURE shell_local_entry address_to local_find(string_address name,
+                                                    positive begin);
+
+/*
+        readonly -a, readonly -A and readonly name=(...), which bash takes
+        and this refused or made a scalar of. Each operand is handed to
+        declare as declare -r with the array letter, and -g unless the name
+        is a local of the running function: readonly reaches the variable in
+        scope rather than making a new local.
+*/
+static COLD bool shell_readonly_arrays(writer write)
+{
+        p8 letters[4] = {'-', 'r', 0, 0};
+        positive index = 1;
+        b32 answer = 0;
+
+        for (; index < shell_argc; index++)
+        {
+                string_address word = shell_argv[index];
+
+                if (word_is(word, "--"))
+                {
+                        index++;
+                        break;
+                }
+                if (!string_is(word, '-') || !string_get(word + 1))
+                        break;
+                for (string_address at = word + 1; string_get(at); at++)
+                        if (string_get(at) == 'a' || string_get(at) == 'A')
+                                letters[2] = string_get(at);
+                        else if (string_get(at) != 'p' || string_get(at + 1))
+                                return false;
+        }
+        if (!letters[2])
+        {
+                bool compound = false;
+
+                for (positive at = index; at < shell_argc; at++)
+                        compound |= exec_declaration_compound(shell_argv[at]);
+                if (!compound)
+                        return false;
+        }
+        if (index >= shell_argc)
+                return false;
+
+        string_address address_to held = shell_argv;
+        positive held_count = shell_argc;
+
+        for (positive at = index; at < held_count; at++)
+        {
+                string_address word = held[at];
+                string_address equal = string_first_of(word, '=');
+                p8 name[256];
+                positive length = equal ? (positive)(equal - word)
+                                        : string_length(word);
+                bool in_scope;
+                string_address words[4];
+
+                if (length && word[length - 1] == '+')
+                        length--;
+                if (length >= sizeof(name))
+                        length = sizeof(name) - 1;
+                memory_copy_end(name, word, length);
+                in_scope = local_depth &&
+                           local_find(name, local_from[local_depth - 1]);
+                words[0] = (string_address) "declare";
+                words[1] = letters;
+                words[2] = in_scope ? word : (string_address) "-g";
+                words[3] = word;
+                shell_argv = words;
+                shell_argc = in_scope ? 3 : 4;
+                shell_declare(write, null);
+                if (shell_status)
+                        answer = shell_status;
+        }
+        shell_argv = held;
+        shell_argc = held_count;
+        shell_answer(answer);
+        return true;
+}
+
 static COLD fn shell_marked(writer write, p8 mark)
 {
         string_address command = mark == DECLARE_EXPORT ? "export"
                                                         : "readonly";
+
+        if (mark == DECLARE_READONLY && shell_bash_compat &&
+            shell_readonly_arrays(write))
+                return;
+
         bool listed = shell_argc < 2;
         bool functions = false;
         bool unmark = false;
