@@ -6076,6 +6076,46 @@ BENCH_NOT_INLINED string_address reference_first_of(string_address source,
 
 #undef BENCH_NOT_INLINED
 #endif
+#elif defined(SHARED_random_filter)
+/*
+        A seccomp filter that answers getrandom with -EAGAIN when its flags
+        are first or second, and lets every other system call through. It tells the entropy policies of
+        DHCP and SNTP apart without replacing their production helpers.
+        -1 when this kernel or emulator cannot install a filter.
+*/
+typedef struct
+{
+        p16 code;
+        p8 yes;
+        p8 no;
+        p32 value;
+} random_filter_instruction;
+
+typedef struct
+{
+        p16 length;
+        random_filter_instruction address_to instructions;
+} random_filter_program;
+
+static bipolar random_filter(p32 first, p32 second)
+{
+        random_filter_instruction instructions[] = {
+            {0x20, 0, 0, 0},
+            {0x15, 0, 4, syscall(getrandom)},
+            {0x20, 0, 0, 32},
+            {0x15, 1, 0, first},
+            {0x15, 0, 1, second},
+            {0x06, 0, 0, 0x0005000b},
+            {0x06, 0, 0, 0x7fff0000},
+        };
+        random_filter_program program = {
+            array_count(instructions), instructions};
+
+        if (system_call_5(syscall(prctl), 38, 1, 0, 0, 0) < 0)
+                return -1;
+        return system_call_3(syscall(seccomp), 1, 0,
+                             (positive)address_of program);
+}
 #elif defined(SHARED_montgomery_reference)
 /*
         The generic Montgomery multiply and square crypto.c ran in C for the
@@ -59103,39 +59143,9 @@ static fn leasing_datagrams(void)
    The last child also calls the public acquisition and renewal paths with a
    nonexistent interface; DHCP_NO_RANDOM proves they returned before opening
    that socket (and therefore before sending a packet). */
-typedef struct
-{
-        p16 code;
-        p8 yes;
-        p8 no;
-        p32 value;
-} dhcp_test_filter_instruction;
-
-typedef struct
-{
-        p16 length;
-        dhcp_test_filter_instruction address_to instructions;
-} dhcp_test_filter_program;
-
-static bipolar dhcp_test_random_filter(p32 first, p32 second)
-{
-        dhcp_test_filter_instruction instructions[] = {
-            {0x20, 0, 0, 0},
-            {0x15, 0, 4, syscall(getrandom)},
-            {0x20, 0, 0, 32},
-            {0x15, 1, 0, first},
-            {0x15, 0, 1, second},
-            {0x06, 0, 0, 0x0005000b},
-            {0x06, 0, 0, 0x7fff0000},
-        };
-        dhcp_test_filter_program program = {
-            array_count(instructions), instructions};
-
-        if (system_call_5(syscall(prctl), 38, 1, 0, 0, 0) < 0)
-                return -1;
-        return system_call_3(syscall(seccomp), 1, 0,
-                             (positive)address_of program);
-}
+#define SHARED_random_filter
+#include "checks.c"
+#undef SHARED_random_filter
 
 static fn dhcp_test_random_child(positive which)
 {
@@ -59159,7 +59169,7 @@ static fn dhcp_test_random_child(positive which)
         };
         bool ok;
 
-        if (dhcp_test_random_filter(first, second) < 0)
+        if (random_filter(first, second) < 0)
                 system_call_1(syscall(exit_group), 77);
 
         ok = dhcp_transaction_early(address_of transaction) == (which != 3);
@@ -73823,41 +73833,11 @@ static fn machine_stop_self(void)
         return before any send, the way the old wall-clock fallback would
         have kept going.
 */
-typedef struct
-{
-        p16 code;
-        p8 yes;
-        p8 no;
-        p32 value;
-} sntp_test_filter_instruction;
+#define SHARED_random_filter
+#include "checks.c"
+#undef SHARED_random_filter
 
-typedef struct
-{
-        p16 length;
-        sntp_test_filter_instruction address_to instructions;
-} sntp_test_filter_program;
-
-static bipolar sntp_test_refuse_blocking_random(void)
-{
-        sntp_test_filter_instruction instructions[] = {
-            {0x20, 0, 0, 0},
-            {0x15, 0, 4, syscall(getrandom)},
-            {0x20, 0, 0, 32},
-            {0x15, 1, 0, 0}, /* flags == 0 (blocking) */
-            {0x15, 0, 1, 0},
-            {0x06, 0, 0, 0x0005000b},
-            {0x06, 0, 0, 0x7fff0000},
-        };
-        sntp_test_filter_program program = {
-            array_count(instructions), instructions};
-
-        if (system_call_5(syscall(prctl), 38, 1, 0, 0, 0) < 0)
-                return -1;
-        return system_call_3(syscall(seccomp), 1, 0,
-                             (positive)address_of program);
-}
-
-static fn sntp_test_random_child(void)
+static fn sntp_test_random_child(positive which)
 {
         p8 field[8];
         network_deadline deadline = {0};
@@ -73865,129 +73845,59 @@ static fn sntp_test_random_child(void)
         sntp_sample sample = {0};
         bool ok;
 
-        if (sntp_test_refuse_blocking_random() < 0)
+        memory_fill(field, 0xa5, sizeof field);
+        if (random_filter(which, which) < 0)
                 system_call_1(syscall(exit_group), 77);
-
-        ok = !sntp_put_stamp(field) &&
-             sntp_exchange(0, address_of deadline, false, address_of sequence,
-                           address_of sample) == SNTP_NO_REPLY &&
-             !sample.ok;
+        if (which)
+                ok = sntp_put_stamp(field);
+        else
+        {
+                ok = !sntp_put_stamp(field) &&
+                     sntp_exchange(0, address_of deadline, false,
+                                   address_of sequence,
+                                   address_of sample) == SNTP_NO_REPLY &&
+                     !sample.ok;
+                for (positive at = 0; at < sizeof field; at++)
+                        ok &= field[at] == 0xa5;
+        }
         system_call_1(syscall(exit_group), ok ? 0 : 1);
 }
 
 static fn machine_sntp(void)
 {
-        bipolar child;
-        positive raw = 0;
-        b32 code;
-
         check("RFC 5905 offset, min-delay pick and poison guards hold",
               sntp_math_ok());
         check("the clock is stepped when far out and slewed when near",
               locale_discipline_ok());
 
-        child = system_call_2(syscall(clone), SIGCHLD, 0);
-        check("SNTP entropy-policy child starts", child >= 0);
-        if (!child)
-                sntp_test_random_child();
-        if (child <= 0)
-                return;
-        if (system_wait4_retry((b32)child, address_of raw, 0, null) != child)
-        {
-                check("SNTP fails closed when blocking entropy is unavailable",
-                      false);
-                return;
-        }
-        code = wait_status_code(raw);
-        if (code == 77)
-        {
-                log_direct(str("SNTP: entropy-policy assertion NOT RUN -- seccomp unavailable\n"));
-                return;
-        }
-        check("SNTP fails closed when blocking entropy is unavailable",
-              code == 0);
-}
-
-/* Prove the production stamp helper asks for blocking, initialized kernel
-   randomness and propagates its failure. Merely checking reply comparison
-   cannot distinguish the CSPRNG nonce from the predictable clock fallback it
-   replaced, so each policy is isolated in a child with a getrandom filter. */
-typedef struct
-{
-        p16 code;
-        p8 yes;
-        p8 no;
-        p32 value;
-} machine_sntp_filter_instruction;
-
-typedef struct
-{
-        p16 length;
-        machine_sntp_filter_instruction address_to instructions;
-} machine_sntp_filter_program;
-
-static bipolar machine_sntp_random_filter(p32 refused)
-{
-        machine_sntp_filter_instruction instructions[] = {
-            {0x20, 0, 0, 0},
-            {0x15, 0, 3, syscall(getrandom)},
-            {0x20, 0, 0, 32},
-            {0x15, 0, 1, refused},
-            {0x06, 0, 0, 0x0005000b},
-            {0x06, 0, 0, 0x7fff0000},
-        };
-        machine_sntp_filter_program program = {
-            array_count(instructions), instructions};
-
-        if (system_call_5(syscall(prctl), 38, 1, 0, 0, 0) < 0)
-                return -1;
-        return system_call_3(syscall(seccomp), 1, 0,
-                             (positive)address_of program);
-}
-
-static fn machine_sntp_random_child(positive which)
-{
-        p8 stamp[8];
-        bool ok;
-
-        memory_fill(stamp, 0xa5, sizeof stamp);
-        if (machine_sntp_random_filter(which ? 1 : 0) < 0)
-                system_call_1(syscall(exit_group), 77);
-        ok = sntp_put_stamp(stamp) == (which != 0);
-        if (!which)
-                for (positive at = 0; at < sizeof stamp; at++)
-                        ok &= stamp[at] == 0xa5;
-        system_call_1(syscall(exit_group), ok ? 0 : 1);
-}
-
-static fn machine_sntp_randomness(void)
-{
+        /* Case 0 refuses blocking getrandom: the stamp fails untouched and
+           the exchange returns before any send. Case 1 refuses only
+           GRND_NONBLOCK, which the nonce must never need. */
         for (positive which = 0; which < 2; which++)
         {
                 bipolar child = system_call_2(syscall(clone), SIGCHLD, 0);
                 positive raw = 0;
-                b32 code;
+                bool held;
 
                 check("SNTP entropy-policy child starts", child >= 0);
-                if (child < 0)
-                        continue;
                 if (!child)
-                        machine_sntp_random_child(which);
-                if (system_wait4_retry((b32)child, address_of raw, 0, null) !=
-                    child)
+                        sntp_test_random_child(which);
+                if (child <= 0)
+                        return;
+                held = system_wait4_retry((b32)child, address_of raw, 0,
+                                          null) == child;
+                if (held && wait_status_code(raw) == 77)
                 {
-                        check("SNTP requires blocking CSPRNG output and preserves failure",
-                              false);
-                        continue;
-                }
-                code = wait_status_code(raw);
-                if (code == 77)
-                {
-                        log_direct(str("SNTP: stamp entropy-policy assertion NOT RUN -- seccomp unavailable\n"));
+                        log_direct(str("SNTP: entropy-policy assertion NOT RUN -- seccomp unavailable\n"));
                         return;
                 }
-                check("SNTP requires blocking CSPRNG output and preserves failure",
-                      code == 0);
+                held = held && wait_status_code(raw) == 0;
+                if (which)
+                        check("SNTP draws its nonce without GRND_NONBLOCK",
+                              held);
+                else
+                        check("SNTP fails closed when blocking entropy is unavailable",
+                              held);
         }
 }
 
@@ -74092,7 +74002,6 @@ b32 main(void)
         machine_policy();
         machine_stop_self();
         machine_sntp();
-        machine_sntp_randomness();
         machine_auto();
         return test_report(null);
 }
