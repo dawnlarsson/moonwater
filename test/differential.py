@@ -37603,12 +37603,22 @@ static bool network_deadline_begin(network_deadline *d, positive s, positive n)
         abort();
         return false;
 }
-static bipolar http_link_read_until(http_link *l, p8 *into, positive room,
-                                    positive *got, const network_deadline *d)
+#define MSG_DONTWAIT 0x40
+#define NETWORK_INTERRUPTED (-4)
+#define NETWORK_TRY_AGAIN (-11)
+static bipolar socket_receive(b32 h, p8 *into, positive room, int flags,
+                              void *from, positive size)
 {
-        (void)l; (void)into; (void)room; (void)got; (void)d;
+        (void)h; (void)into; (void)room; (void)flags; (void)from; (void)size;
         abort();
-        return -4;
+        return -1;
+}
+static bipolar network_stream_read_some_until(bipolar h, p8 *into, positive room,
+                                              const network_deadline *d)
+{
+        (void)h; (void)into; (void)room; (void)d;
+        abort();
+        return -1;
 }
 static bool byte_store_reserve(http_buffer *b, positive need, positive align)
 {
@@ -38320,6 +38330,20 @@ static bipolar network_stream_read_some_until(bipolar h, p8 *into, positive room
         memcpy(into, fuzz_segment + fuzz_segment_at, take);
         fuzz_segment_at += take;
         return (bipolar)take;
+}
+
+/* A plaintext body read tries the socket without waiting first; now and
+   then nothing is queued, and it has to take the deadline path. */
+#define MSG_DONTWAIT 0x40
+#define NETWORK_INTERRUPTED (-4)
+#define NETWORK_TRY_AGAIN (-11)
+static bipolar socket_receive(b32 h, p8 *into, positive room, int flags,
+                              void *from, positive size)
+{
+        (void)flags; (void)from; (void)size;
+        if (!fuzz_next(4))
+                return fuzz_next(2) ? NETWORK_TRY_AGAIN : NETWORK_INTERRUPTED;
+        return network_stream_read_some_until(h, into, room, NULL);
 }
 
 /* TLS: the segment is cut into records; a receive pulls one to three of them
