@@ -7477,14 +7477,17 @@ static fn writer_shell_name(writer output, string_address value)
 // The C styles: a quoted string a C compiler would read back, the same
 // without its quotes and with spaces escaped, and the locale style that in
 // the C locale is the C string in single quotes.
-// Whether a name must be escaped at all, which is what c-maybe quotes on.
+// Whether c-maybe must quote a name: for an unprintable byte, a double
+// quote or a heading's colon, and not for a backslash alone, which quotearg
+// leaves bare while it may still elide the quotes -- and escapes once it
+// quotes for something else.
 static bool ls_c_needs_escape(string_address name, positive length)
 {
         for (positive at = 0; at < length; at++)
         {
                 p8 byte = string_get(name + at);
 
-                if (byte == '\\' || byte == '"' || ls_byte_unprintable(byte) ||
+                if (byte == '"' || ls_byte_unprintable(byte) ||
                     (byte == ':' && ls_quote_heading))
                         return true;
         }
@@ -7518,8 +7521,10 @@ static fn ls_quote_c(writer write, string_address name, positive length, p8 styl
                 p8 byte = string_get(name + at);
                 p8 spelled[4];
 
-                if (byte == '\\')
+                if (byte == '\\' && (quote_length || style == 'b'))
                         write("\\\\", 2);
+                else if (byte == '\\')
+                        write(name + at, 1);
                 else if (quote_length && at + quote_length <= length &&
                          !string_compare_max(name + at, right, quote_length))
                 {
@@ -7656,14 +7661,34 @@ static bool ls_aligns_quotes()
                (ls_quoting == 's' || ls_quoting == 'e' || ls_quoting == 'm');
 }
 
+/*
+        The columns a quoted name takes, as GNU's quote_name_buf counts them:
+        in the C locale only printable ASCII takes a column, so a raw escape
+        or a byte above 127 takes none, and in a UTF-8 locale each character
+        takes one -- the curly quotes of the locale styles among them.
+*/
+static bool ls_width_utf8;
+
+static fn ls_count_columns(address_any text, positive length)
+{
+        string_address at = (string_address)text;
+
+        if (!length)
+                length = string_length(at);
+        for (positive i = 0; i < length; i++)
+        {
+                p8 byte = string_get(at + i);
+
+                ls_counted += (byte >= 32 && byte < 127) ||
+                              (ls_width_utf8 && byte >= 0xc2 && byte <= 0xf4);
+        }
+}
+
 static positive ls_quoted_width(ls_entry address_to entry)
 {
         ls_counted = 0;
-        ls_quote(ls_count_bytes, ls_arena + entry->name);
-
-        //      Each of U+2018 and U+2019 is three bytes and one column.
-        if ((ls_quoting == 'o' || ls_quoting == 'C') && text_locale_utf8())
-                ls_counted -= 4;
+        ls_width_utf8 = text_locale_utf8();
+        ls_quote(ls_count_columns, ls_arena + entry->name);
 
         if (ls_aligns_quotes() && ls_some_quoted && !entry->quoted)
                 ls_counted++;
@@ -9256,8 +9281,12 @@ static fn ls_print_long(string_address directory)
                 positive name_column = ls_out_bytes - column_base;
 
                 ls_name_say(directory, entry, name, name_column);
-                ls_mark_after(directory, entry, name,
-                              name_column + ls_quoted_width(entry) + 4);
+                //      GNU places the target by the bytes the name took,
+                //      its pad included, not by the columns.
+                ls_counted = 0;
+                ls_quote(ls_count_bytes, name);
+                ls_counted += ls_aligns_quotes() && ls_some_quoted && !entry->quoted;
+                ls_mark_after(directory, entry, name, name_column + ls_counted + 4);
                 ls_out(address_of ls_eol, 1);
         }
 }
