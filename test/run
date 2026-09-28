@@ -4993,9 +4993,11 @@ lane_misc()
         #       stdbuf, read from inside the program it starts. The misc
         #       grammar compares the variables stdbuf publishes; this reads
         #       glibc's own stream state once libstdbuf has run, which is the
-        #       change those variables only promise. GNU runs a static target
-        #       its preload cannot reach; ours refuses one rather than claim a
-        #       mode it never applied.
+        #       change those variables only promise. A static target its
+        #       preload cannot reach is run all the same, as GNU runs it, with
+        #       the variables and no preload (this shell's own programs, all
+        #       static, read _STDBUF_O themselves), so the static probe
+        #       reports what GNU's run of it reports.
         if $compiler -O2 -o "$work/stdio-buffer" -DCHECK_stdio_buffer \
                 test/checks.c > "$work/stdio-buffer.err" 2>&1 &&
                 $compiler -O2 -static -o "$work/stdio-buffer-static" \
@@ -5013,17 +5015,40 @@ lane_misc()
                         misc_failed=1
                 fi
 
+                stdbuf -o0 "$work/stdio-buffer-static" \
+                        > "$work/stdbuf.static.want" 2>&1
                 "$farm/stdbuf" -o0 "$work/stdio-buffer-static" \
-                        > "$work/stdbuf.static" 2> "$work/stdbuf.static.err"
+                        > "$work/stdbuf.static" 2>&1
                 static_status=$?
-                if [ "$static_status" = 125 ] && [ ! -s "$work/stdbuf.static" ] &&
-                        grep -q 'statically linked' "$work/stdbuf.static.err"; then
-                        tally stdbuf-static-refused 1 1
+                if [ "$static_status" = 0 ] &&
+                        cmp -s "$work/stdbuf.static.want" "$work/stdbuf.static"; then
+                        tally stdbuf-static-runs 1 1
                 else
-                        tally stdbuf-static-refused 0 1
-                        note "stdbuf did not refuse a static target: status $static_status"
+                        tally stdbuf-static-runs 0 1
+                        note "stdbuf on a static target: status $static_status, $(cat "$work/stdbuf.static"), GNU $(cat "$work/stdbuf.static.want")"
                         misc_failed=1
                 fi
+
+                #       upstream misc/responsive: under stdbuf -oL a line
+                #       into a pipe comes out while the writer still holds
+                #       the pipe open (it used to wait for the end, or for
+                #       stdbuf to refuse the static program outright).
+                rm -f "$work/prompt.in" "$work/prompt.out"
+                mkfifo "$work/prompt.in"
+                "$farm/stdbuf" -oL "$farm/cut" -b1 < "$work/prompt.in" \
+                        > "$work/prompt.out" 2>&1 &
+                prompt_reader=$!
+                { printf '1\n'; sleep 3; } > "$work/prompt.in" &
+                prompt_writer=$!
+                sleep 1
+                if [ "$(cat "$work/prompt.out")" = 1 ]; then
+                        tally stdbuf-line-prompt 1 1
+                else
+                        tally stdbuf-line-prompt 0 1
+                        note "stdbuf -oL cut -b1 wrote nothing while its pipe stayed open"
+                        misc_failed=1
+                fi
+                wait "$prompt_writer" "$prompt_reader"
         else
                 note "stdbuf: the glibc stream probe did not build"
                 sed 's/^/    /' "$work/stdio-buffer.err" | head -10

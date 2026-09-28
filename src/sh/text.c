@@ -787,6 +787,14 @@ static bool text_reader_fill_amount(text_reader address_to reader,
         if (text_out_failed)
                 return false;
 
+        //      Under stdbuf -oL or -o0, what is written goes out before a
+        //      read that may wait (see stdbuf_prompt).
+        if (stdbuf_prompt())
+        {
+                text_flush_out();
+                log_flush();
+        }
+
         bipolar got = system_read_retry(reader->handle, reader->buffer,
                                         min(amount, (positive)TEXT_READ_MAX));
 

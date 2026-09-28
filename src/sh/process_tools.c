@@ -476,17 +476,22 @@ static b32 process_stdbuf()
         string_address forced = file_environment(
             (string_address) "MOONWATER_STDBUF_LIBRARY");
 
-        if (!stdbuf_find_library(has_bowl_root ? bowl_root : null))
+        /*
+                A statically linked target -- this shell's own programs among
+                them -- gets the _STDBUF_ variables and no preload: GNU's
+                stdbuf runs it all the same, and ours read _STDBUF_O
+                themselves (stdbuf_prompt). Only a dynamic one needs the
+                library.
+        */
+        bool preload = !(target_found && stdbuf_target_kind(target) == STDBUF_ELF_STATIC);
+
+        if (preload && !stdbuf_find_library(has_bowl_root ? bowl_root : null))
                 return string_report(log_error, 125, forced
                     ? "stdbuf: '%s' is not a compatible libstdbuf.so\n"
                     : "stdbuf: no compatible libstdbuf.so found in the native or Bowl roots\n",
                     forced);
 
-        if (target_found && stdbuf_target_kind(target) == STDBUF_ELF_STATIC)
-                return string_report(log_error, 125, "stdbuf: '%w' is statically linked; preload buffering cannot apply\n",
-                              writer_terminal_quoted_name, words[0]);
-
-        if (!stdbuf_preload(stdbuf_library))
+        if (preload && !stdbuf_preload(stdbuf_library))
                 return string_report(log_error, 125, "stdbuf: environment is too large\n");
 
         env_have = 0;
@@ -504,7 +509,7 @@ static b32 process_stdbuf()
              !env_put(stdbuf_output_assignment)) ||
             ((modes & FILE_FLAG('e')) &&
              !env_put(stdbuf_error_assignment)) ||
-            !env_put(stdbuf_preload_assignment))
+            (preload && !env_put(stdbuf_preload_assignment)))
                 return 125;
 
         env_list[env_have] = null;

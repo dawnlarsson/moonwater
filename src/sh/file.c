@@ -5072,6 +5072,27 @@ static string_address file_environment(string_address name)
         return environment ? string_get_environment(environment, name) : null;
 }
 
+/*
+        stdbuf -oL or -o0 in front of one of these programs. They are
+        statically linked, so libstdbuf's preload never reaches them; stdbuf
+        still hands them _STDBUF_O as it hands it to everything, and the
+        readers below write out what is waiting before each read that may
+        block, so a line in is a line out on a pipe. A size (-o4K) keeps
+        the ordinary buffering.
+*/
+static bool stdbuf_prompt()
+{
+        static b32 decided = -1;
+
+        if (decided < 0)
+        {
+                string_address mode = file_environment((string_address) "_STDBUF_O");
+
+                decided = mode && (mode[0] == 'L' || mode[0] == '0') && !mode[1];
+        }
+        return decided != 0;
+}
+
 /* Fixture paths never cross a real/effective uid or gid boundary. */
 static string_address file_environment_override(string_address name,
                                          string_address fallback)
