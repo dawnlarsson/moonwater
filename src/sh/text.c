@@ -1209,63 +1209,60 @@ static bool text_unsigned_option(string_address source, bool saturate,
 }
 
 /*
-        gnulib's xnumtoumax in base 10 with no suffixes, words and all:
-        blanks may lead and a plus may sign, a minus or a word with no digits
-        or anything after them is "WHAT: 'WORD'", and a number past CEILING
-        (or one too long to hold) adds the reason, ERANGE where the caller
-        asked for it and EOVERFLOW where it did not. FLOOR works the same
-        way from below.
+        gnulib's xnumtoimax and xnumtoumax in base 10 with no suffixes, words
+        and all: blanks may lead and a sign may lead them, a word that is no
+        number or has anything after it is "WHAT: 'WORD'", and a number
+        outside FLOOR..CEILING -- one too long to hold is outside too, on
+        its side -- adds the reason: ERANGE where the caller's flag for that
+        side asks for it, EOVERFLOW where it does not, and nothing at all
+        past the ceiling under TEXT_XNUM_MAX_QUIET, which takes the ceiling.
+        A minus is no number without TEXT_XNUM_SIGNED, as strtoumax has it.
 */
 enum
 {
         TEXT_XNUM_MIN_RANGE = 1,
         TEXT_XNUM_MAX_RANGE = 2,
+        TEXT_XNUM_MAX_QUIET = 4,
+        TEXT_XNUM_SIGNED = 8,
 };
 
-static bool text_xnum(string_address said, positive floor, positive ceiling,
-                      p8 flags, string_address what,
-                      positive address_to value)
+static bool text_xnum(string_address said, bipolar floor, bipolar ceiling,
+                      p8 flags, string_address what, bipolar address_to value)
 {
         string_address at = said + string_span(said, string_set_space);
-        bool invalid = at[0] == '-';
+        bool negative = at[0] == '-';
+        bool invalid = negative && !(flags & TEXT_XNUM_SIGNED);
         bool overflow = false;
-        bool range = false;
         positive made = 0;
 
-        if (at[0] == '+')
-                at++;
-        if (!invalid && !byte_is_digit(at[0]))
-                invalid = true;
+        at += at[0] == '+' || negative;
+        invalid = invalid || !byte_is_digit(at[0]);
 
-        if (!invalid)
+        for (; !invalid && byte_is_digit(at[0]); at++)
         {
-                for (; byte_is_digit(at[0]); at++)
-                {
-                        positive digit = (positive)(at[0] - '0');
+                positive digit = (positive)(at[0] - '0');
 
-                        if (made > (positive_max - digit) / 10)
-                        {
-                                overflow = true;
-                                made = positive_max;
-                        }
-                        else if (!overflow)
-                                made = made * 10 + digit;
-                }
-
-                if (at[0])
-                        invalid = true;
+                if (made > ((positive)bipolar_max + negative - digit) / 10)
+                        overflow = true;
+                else if (!overflow)
+                        made = made * 10 + digit;
         }
+        invalid = invalid || at[0];
 
-        if (!invalid && (overflow || made > ceiling))
-                range = (flags & TEXT_XNUM_MAX_RANGE) != 0;
-        else if (!invalid && made < floor)
+        //      The side a number falls out on; -0 is zero.
+        bipolar number = negative ? (bipolar)(0 - made) : (bipolar)made;
+        bool below = !invalid && (negative && made ? overflow || number < floor
+                                                   : !overflow && number < floor);
+        bool above = !invalid && !below && (overflow || number > ceiling);
+
+        if (above && (flags & TEXT_XNUM_MAX_QUIET))
         {
-                overflow = true;
-                range = (flags & TEXT_XNUM_MIN_RANGE) != 0;
+                address_to value = ceiling;
+                return true;
         }
-        else if (!invalid)
+        if (!invalid && !below && !above)
         {
-                address_to value = made;
+                address_to value = number;
                 return true;
         }
 
@@ -1273,8 +1270,9 @@ static bool text_xnum(string_address said, positive floor, positive ceiling,
         string_format(writer_stderr, "%s: %s: '%w'%s\n", text_name, what,
                       writer_terminal_quoted_name, said,
                       invalid ? ""
-                      : range ? ": Numerical result out of range"
-                              : ": Value too large for defined data type");
+                      : (flags & (below ? TEXT_XNUM_MIN_RANGE : TEXT_XNUM_MAX_RANGE))
+                          ? ": Numerical result out of range"
+                          : ": Value too large for defined data type");
         return false;
 }
 
@@ -1379,14 +1377,25 @@ static string_address text_literal_find(string_address text, positive length,
 
 // regcomp's reason for the last pattern that would not compile, in the
 // words glibc's regerror gives it, for the tools that report it.
+// regcomp's words for why the last compile refused its pattern.
 static string_address regex_failure_reason()
 {
-        return regex_failure == REGEX_FAILED_BRACE ? (string_address) "Unmatched \\{"
-               : regex_failure == REGEX_FAILED_CONTENT ? (string_address) "Invalid content of \\{\\}"
-               : regex_failure == REGEX_FAILED_SIZE ? (string_address) "Regular expression too big"
-               : regex_failure == REGEX_FAILED_OPEN ? (string_address) "Unmatched ( or \\("
-               : regex_failure == REGEX_FAILED_CLOSE ? (string_address) "Unmatched ) or \\)"
-                                                     : (string_address) "Invalid regular expression";
+        static const char address_to const reasons[] = {
+            [REGEX_FAILED_BRACE] = "Unmatched \\{",
+            [REGEX_FAILED_CONTENT] = "Invalid content of \\{\\}",
+            [REGEX_FAILED_SIZE] = "Regular expression too big",
+            [REGEX_FAILED_OPEN] = "Unmatched ( or \\(",
+            [REGEX_FAILED_CLOSE] = "Unmatched ) or \\)",
+            [REGEX_FAILED_ESCAPE] = "Trailing backslash",
+            [REGEX_FAILED_REFERENCE] = "Invalid back reference",
+            [REGEX_FAILED_BRACKET] = "Unmatched [, [^, [:, [., or [=",
+            [REGEX_FAILED_CLASS] = "Invalid character class name",
+        };
+
+        return (string_address)(regex_failure < sizeof(reasons) / sizeof(reasons[0]) &&
+                                        reasons[regex_failure]
+                                    ? reasons[regex_failure]
+                                    : "Invalid regular expression");
 }
 
 // What the kernel says about an open descriptor, through the one statx
@@ -2275,8 +2284,7 @@ static b32 z85_decode(bool ignore_garbage)
         leading '1', and the number is written in base 58 after them. So the
         input is gathered whole before a digit can be written -- all but its
         leading zeros, which are only counted, so twenty megabytes of zeros
-        are twenty megabytes of '1' and no store. The number is worked in
-        32-bit limbs, five base-58 digits at a time (58^5 fits a limb).
+        are twenty megabytes of '1' and no store.
 */
 static const p8 base58_alphabet[] =
     "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -2311,6 +2319,477 @@ static inline INLINE p64 base58_divide(p64 high, p64 low, p64 address_to rest)
         }
         address_to rest = remainder;
         return quotient;
+}
+
+/*
+        Past a few hundred digits the conversion is divide and conquer, as
+        GMP's is, rather than one digit group at a time over the whole
+        number, which was quadratic: 465 ms for 100 KB where GNU takes 8,
+        and 4.2 s for 300 KB. A number below 58^(2k) is split by 58^k into
+        halves converted apart, and digits go back to a number as two
+        halves joined by one multiplication. The powers 58^(10 * 2^j) are
+        made by squaring, multiplication is Karatsuba's above
+        BIG_KARATSUBA limbs, and the split divides by multiplying with a
+        reciprocal of the power made by squaring the one below it. Every
+        reciprocal is rounded down, so the quotient it gives is never too
+        big and at most a step or two short, and each step is one more
+        subtraction of the power.
+*/
+#define BIG_KARATSUBA 32
+#define BASE58_SMALL 32 // limbs the digit-group loops convert whole
+#define BASE58_SMALL_DIGITS 320
+
+typedef struct
+{
+        p64 address_to power;   // 58^(10 * 2^j)
+        p64 address_to inverse; // at most B^scale / power, in B = 2^64
+        positive power_used, inverse_used, scale;
+} base58_level;
+
+static positive big_trim(const p64 address_to a, positive n)
+{
+        while (n && !a[n - 1])
+                n--;
+        return n;
+}
+
+// a += b over a's n limbs, b's m no more than n; the carry out.
+static p64 big_add(p64 address_to a, positive n, const p64 address_to b, positive m)
+{
+        p64 carry = 0;
+        positive at = 0;
+
+        for (; at < m; at++)
+        {
+                p64 sum = a[at] + carry;
+
+                carry = sum < carry;
+                sum += b[at];
+                carry += sum < b[at];
+                a[at] = sum;
+        }
+        for (; carry && at < n; at++)
+                carry = !++a[at];
+        return carry;
+}
+
+// a -= b the same way; the borrow out.
+static p64 big_subtract(p64 address_to a, positive n, const p64 address_to b, positive m)
+{
+        p64 borrow = 0;
+        positive at = 0;
+
+        for (; at < m; at++)
+        {
+                p64 x = a[at];
+                p64 y = b[at];
+
+                a[at] = x - y - borrow;
+                borrow = (x < y) | ((x == y) & borrow);
+        }
+        for (; borrow && at < n; at++)
+                borrow = !a[at]--;
+        return borrow;
+}
+
+static bipolar big_compare(const p64 address_to a, positive an,
+                           const p64 address_to b, positive bn)
+{
+        an = big_trim(a, an);
+        bn = big_trim(b, bn);
+        if (an != bn)
+                return an < bn ? -1 : 1;
+        while (an--)
+                if (a[an] != b[an])
+                        return a[an] < b[an] ? -1 : 1;
+        return 0;
+}
+
+/*
+        r = a * b, an + bn limbs, r apart from both. The scratch is
+        8 max(an, bn) + 2048 limbs, which the Karatsuba step's three
+        (h + 1)-limb pieces and the recursion under them stay inside.
+*/
+static fn big_multiply_into(p64 address_to r, const p64 address_to a, positive an,
+                            const p64 address_to b, positive bn, p64 address_to scratch)
+{
+        if (an < bn)
+        {
+                const p64 address_to swap = a;
+                positive length = an;
+
+                a = b;
+                an = bn;
+                b = swap;
+                bn = length;
+        }
+
+        if (bn < BIG_KARATSUBA)
+        {
+                memory_fill(r, 0, (an + bn) * sizeof(p64));
+                for (positive i = 0; i < bn; i++)
+                {
+                        p64 carry = 0;
+
+                        for (positive j = 0; j < an; j++)
+                        {
+                                unsigned __int128 t = (unsigned __int128)a[j] * b[i] +
+                                                      r[i + j] + carry;
+
+                                r[i + j] = (p64)t;
+                                carry = (p64)(t >> 64);
+                        }
+                        r[i + an] = carry;
+                }
+                return;
+        }
+
+        positive h = (an + 1) / 2;
+
+        // Far apart in length: b against a in pieces its own size.
+        if (bn <= h)
+        {
+                memory_fill(r, 0, (an + bn) * sizeof(p64));
+                for (positive at = 0; at < an; at += bn)
+                {
+                        positive take = min(bn, an - at);
+
+                        big_multiply_into(scratch, a + at, take, b, bn, scratch + take + bn);
+                        big_add(r + at, an + bn - at, scratch, take + bn);
+                }
+                return;
+        }
+
+        // (a1 B^h + a0)(b1 B^h + b0) with the middle as (a0 + a1)(b0 + b1)
+        // less the two ends.
+        p64 address_to sa = scratch;
+        p64 address_to sb = scratch + h + 1;
+        p64 address_to middle = scratch + 2 * h + 2;
+        positive high = an + bn - 2 * h;
+
+        big_multiply_into(r, a, h, b, h, scratch);
+        big_multiply_into(r + 2 * h, a + h, an - h, b + h, bn - h, scratch);
+        memory_copy_apart(sa, a, h * sizeof(p64));
+        sa[h] = big_add(sa, h, a + h, an - h);
+        memory_copy_apart(sb, b, h * sizeof(p64));
+        sb[h] = big_add(sb, h, b + h, bn - h);
+        big_multiply_into(middle, sa, h + 1, sb, h + 1, scratch + 4 * h + 4);
+        big_subtract(middle, 2 * h + 2, r, 2 * h);
+        big_subtract(middle, 2 * h + 2, r + 2 * h, high);
+        big_add(r + h, an + bn - h, middle, min(2 * h + 2, an + bn - h));
+}
+
+static bool big_multiply(p64 address_to r, const p64 address_to a, positive an,
+                         const p64 address_to b, positive bn)
+{
+        p64 address_to scratch = null;
+
+        if (min(an, bn) >= BIG_KARATSUBA &&
+            !(scratch = (p64 address_to)memory_take((8 * max(an, bn) + 2048) * sizeof(p64))))
+                return false;
+        big_multiply_into(r, a, an, b, bn, scratch);
+        if (scratch)
+                memory_give(scratch);
+        return true;
+}
+
+/*
+        Level j + 1 from level j: the power squared, and when asked the
+        reciprocal squared and cut back to three limbs past the power, each
+        cut rounding down again.
+*/
+static bool base58_level_next(base58_level address_to level, bool inverse)
+{
+        base58_level address_to next = level + 1;
+        positive dn = level->power_used;
+
+        if (!(next->power = (p64 address_to)memory_take(2 * dn * sizeof(p64))) ||
+            !big_multiply(next->power, level->power, dn, level->power, dn))
+                return false;
+        next->power_used = big_trim(next->power, 2 * dn);
+        if (!inverse)
+                return true;
+
+        positive rn = level->inverse_used;
+
+        if (!(next->inverse = (p64 address_to)memory_take((2 * rn + 1) * sizeof(p64))) ||
+            !big_multiply(next->inverse, level->inverse, rn, level->inverse, rn))
+                return false;
+
+        positive square = big_trim(next->inverse, 2 * rn);
+        positive keep = next->power_used + 3;
+        positive drop = square > keep ? square - keep : 0;
+
+        memory_copy(next->inverse, next->inverse + drop, (square - drop) * sizeof(p64));
+        next->inverse_used = square - drop;
+        next->scale = 2 * level->scale - drop;
+
+        /*
+                Squaring keeps the reciprocal's relative error, doubled,
+                where the power squared needs it squared: one Newton step,
+                r += r (B^s - power r) / B^s, which leaves it below the
+                true reciprocal still. power r < B^s, so B^s less it is its
+                negation in s limbs.
+        */
+        positive scale = next->scale;
+        positive rn2 = next->inverse_used;
+        positive dn2 = next->power_used;
+        positive room = max(scale, dn2 + rn2);
+        p64 address_to error = (p64 address_to)memory_take((room + rn2 + scale + 1) * sizeof(p64));
+        p64 address_to step = error + room;
+
+        if (!error)
+                return false;
+        memory_fill(error, 0, room * sizeof(p64));
+        if (!big_multiply(error, next->power, dn2, next->inverse, rn2))
+        {
+                memory_give(error);
+                return false;
+        }
+
+        p64 one = 1;
+
+        for (positive at = 0; at < scale; at++)
+                error[at] = ~error[at];
+        big_add(error, scale, &one, 1);
+
+        positive en = big_trim(error, scale);
+
+        if (!big_multiply(step, next->inverse, rn2, error, en))
+        {
+                memory_give(error);
+                return false;
+        }
+        if (rn2 + en > scale)
+        {
+                next->inverse[rn2] = 0;
+                big_add(next->inverse, rn2 + 1, step + scale, rn2 + en - scale);
+                next->inverse_used = big_trim(next->inverse, rn2 + 1);
+        }
+        memory_give(error);
+        return true;
+}
+
+static const p64 base58_power_first[] = {BASE58_CHUNK};
+static const p64 base58_inverse_first[] = { // floor(2^192 / 58^10)
+    0xd723fdba60afd36full, 0xd1bf16ed97e42595ull, 0x2a};
+
+static fn base58_levels_begin(base58_level address_to levels)
+{
+        memory_fill(levels, 0, 64 * sizeof(base58_level));
+        levels[0] = (base58_level){(p64 address_to)base58_power_first,
+                                   (p64 address_to)base58_inverse_first, 1, 3, 3};
+}
+
+static fn base58_levels_end(base58_level address_to levels)
+{
+        for (positive j = 1; j < 64; j++)
+        {
+                if (levels[j].power)
+                        memory_give(levels[j].power);
+                if (levels[j].inverse)
+                        memory_give(levels[j].inverse);
+        }
+}
+
+/*
+        x = x mod power and q = x / power, for x below the power squared;
+        q needs the power's length and one more. Answers q's length, or
+        -1 when memory ran out. x's top limbs past the power's but two are
+        all the estimate reads, which can only make it smaller.
+*/
+static bipolar base58_split(p64 address_to x, positive address_to x_used,
+                            const base58_level address_to level, p64 address_to q)
+{
+        positive dn = level->power_used;
+        positive xn = address_to x_used;
+        positive skip = dn > 2 ? dn - 2 : 0;
+        positive qn = 0;
+        p64 address_to work = (p64 address_to)memory_take(
+            (xn + level->inverse_used + dn + 2) * sizeof(p64));
+
+        if (!work)
+                return -1;
+
+        if (xn > skip)
+        {
+                positive made = xn - skip + level->inverse_used;
+                positive shift = level->scale - skip;
+
+                if (!big_multiply(work, x + skip, xn - skip, level->inverse,
+                                  level->inverse_used))
+                {
+                        memory_give(work);
+                        return -1;
+                }
+                if (made > shift)
+                {
+                        qn = big_trim(work + shift, made - shift);
+                        memory_copy_apart(q, work + shift, qn * sizeof(p64));
+                }
+        }
+
+        if (qn)
+        {
+                if (!big_multiply(work, q, qn, level->power, dn))
+                {
+                        memory_give(work);
+                        return -1;
+                }
+                big_subtract(x, xn, work, big_trim(work, qn + dn));
+                xn = big_trim(x, xn);
+        }
+        memory_give(work);
+
+        while (big_compare(x, xn, level->power, dn) >= 0)
+        {
+                p64 one = 1;
+
+                big_subtract(x, xn, level->power, dn);
+                xn = big_trim(x, xn);
+                q[qn] = 0;
+                big_add(q, qn + 1, &one, 1);
+                qn = big_trim(q, qn + 1);
+        }
+
+        address_to x_used = xn;
+        return (bipolar)qn;
+}
+
+// Ten digits a pass over the whole number, least significant first.
+static positive base58_digits_small(p64 address_to limb, positive used,
+                                    p8 address_to digits)
+{
+        positive made = 0;
+
+        used = big_trim(limb, used);
+        while (used)
+        {
+                p64 rest = 0;
+
+                for (positive at = used; at; at--)
+                {
+                        p64 value = limb[at - 1];
+
+                        limb[at - 1] = base58_divide(
+                            (rest << BASE58_SHIFT) | (value >> (64 - BASE58_SHIFT)),
+                            value << BASE58_SHIFT, address_of rest);
+                        rest >>= BASE58_SHIFT;
+                }
+                used = big_trim(limb, used);
+                for (positive digit = 0; digit < 10; digit++)
+                {
+                        digits[made++] = (p8)(rest % 58);
+                        rest /= 58;
+                }
+        }
+        return made;
+}
+
+// width digits of x, least significant first, x below 58^width; level
+// j splits a width of 20 * 2^j. x is used up.
+static bool base58_digits(p64 address_to x, positive used,
+                          const base58_level address_to levels, bipolar j,
+                          p8 address_to digits, positive width)
+{
+        used = big_trim(x, used);
+        if (j < 0 || used <= BASE58_SMALL)
+        {
+                positive made = base58_digits_small(x, used, digits);
+
+                memory_fill(digits + made, 0, width - made);
+                return true;
+        }
+
+        const base58_level address_to level = levels + j;
+        p64 address_to q = (p64 address_to)memory_take((level->power_used + 1) * sizeof(p64));
+        bipolar qn = q ? base58_split(x, address_of used, level, q) : -1;
+        bool made = qn >= 0 &&
+                    base58_digits(x, used, levels, j - 1, digits, width / 2) &&
+                    base58_digits(q, (positive)qn, levels, j - 1, digits + width / 2,
+                                  width / 2);
+
+        if (q)
+                memory_give(q);
+        return made;
+}
+
+// The value of count digits, most significant first, in a fresh store
+// the caller gives back; null when memory ran out.
+static p64 address_to base58_value(const p8 address_to digits, positive count,
+                                   const base58_level address_to levels,
+                                   positive address_to used)
+{
+        if (count <= BASE58_SMALL_DIGITS)
+        {
+                // 58 < 2^6, so a digit is at most six bits of the number.
+                p64 address_to limb = (p64 address_to)memory_take(
+                    ((count * 6 + 63) / 64 + 1) * sizeof(p64));
+                positive made = 0;
+                positive at = 0;
+                positive first = count % 10 ? count % 10 : 10;
+
+                if (!limb)
+                        return null;
+                while (at < count)
+                {
+                        positive take = at ? 10 : first;
+                        p64 scale = 1;
+                        p64 carry = 0;
+
+                        for (positive k = 0; k < take; k++)
+                        {
+                                carry = carry * 58 + digits[at + k];
+                                scale *= 58;
+                        }
+                        at += take;
+                        for (positive k = 0; k < made; k++)
+                        {
+                                unsigned __int128 wide =
+                                    (unsigned __int128)limb[k] * scale + carry;
+
+                                limb[k] = (p64)wide;
+                                carry = (p64)(wide >> 64);
+                        }
+                        if (carry)
+                                limb[made++] = carry;
+                }
+                address_to used = made;
+                return limb;
+        }
+
+        bipolar j = 0;
+
+        while (((positive)20 << j) < count)
+                j++;
+
+        const base58_level address_to level = levels + j;
+        positive low_count = (positive)10 << j;
+        positive high_used = 0;
+        positive low_used = 0;
+        p64 address_to high = base58_value(digits, count - low_count, levels, address_of high_used);
+        p64 address_to low = high ? base58_value(digits + count - low_count, low_count, levels,
+                                                 address_of low_used)
+                                  : null;
+        positive room = high_used + level->power_used + 1;
+        p64 address_to value = low ? (p64 address_to)memory_take(room * sizeof(p64)) : null;
+
+        if (value && big_multiply(value, high, high_used, level->power, level->power_used))
+        {
+                value[room - 1] = 0;
+                big_add(value, room, low, low_used);
+                address_to used = big_trim(value, room);
+        }
+        else if (value)
+        {
+                memory_give(value);
+                value = null;
+        }
+        if (high)
+                memory_give(high);
+        if (low)
+                memory_give(low);
+        return value;
 }
 
 static bool base58_emit(encoding_output address_to output,
@@ -2393,73 +2872,54 @@ static b32 base58_encode(positive wrap)
         if (writing && number.used)
         {
                 positive limbs = (number.used + 7) / 8;
-                positive digits_room = number.used * 138 / 100 + 32;
                 p64 address_to limb = (p64 address_to)memory_take(limbs * sizeof(p64));
-                p8 address_to digits = (p8 address_to)memory_take(digits_room);
+                base58_level levels[64];
+                bipolar top = 0;
+                p8 address_to digits = null;
 
-                if (!limb || !digits)
+                base58_levels_begin(levels);
+
+                // Big-endian bytes read backwards are little-endian limbs.
+                if (limb)
                 {
+                        p8 address_to bytes = (p8 address_to)limb;
+
+                        memory_copy_apart(bytes, number.bytes, number.used);
+                        memory_reverse(bytes, number.used);
+                        memory_fill(bytes + number.used, 0, limbs * sizeof(p64) - number.used);
+                }
+
+                // 58^(10 * 2^top) is past 2^(58 * 2^top), so past the
+                // number once that many bits hold it; the level below
+                // splits first, and top itself is never made.
+                positive bits = number.used * 8;
+                bool enough = limb != null;
+
+                for (p8 lead = number.bytes[0]; !(lead & 0x80); lead <<= 1)
+                        bits--;
+                while (((positive)58 << top) < bits)
+                        top++;
+                for (bipolar made = 0; enough && made + 1 < top; made++)
+                        enough = base58_level_next(levels + made, true);
+
+                positive width = (positive)10 << top;
+
+                if (enough)
+                        digits = (p8 address_to)memory_take(width);
+                if (!digits || !base58_digits(limb, limbs, levels, top - 1, digits, width))
+                {
+                        base58_levels_end(levels);
                         if (limb)
                                 memory_give(limb);
                         if (digits)
                                 memory_give(digits);
                         return base58_refuse_memory(address_of number);
                 }
+                base58_levels_end(levels);
 
-                // Big-endian bytes into little-endian limbs.
-                for (positive at = 0; at < limbs; at++)
-                {
-                        p64 value = 0;
+                positive made = width - memory_span_byte_reverse(digits, 0, width);
 
-                        for (positive byte = 8; byte; byte--)
-                        {
-                                positive index = at * 8 + byte - 1;
-
-                                value = (value << 8) |
-                                        (index < number.used
-                                             ? number.bytes[number.used - 1 - index]
-                                             : 0);
-                        }
-                        limb[at] = value;
-                }
-
-                positive used = limbs;
-                positive made = 0;
-
-                while (used && !limb[used - 1])
-                        used--;
-
-                while (used)
-                {
-                        p64 rest = 0;
-
-                        for (positive at = used; at; at--)
-                        {
-                                p64 value = limb[at - 1];
-
-                                limb[at - 1] = base58_divide(
-                                    (rest << BASE58_SHIFT) | (value >> (64 - BASE58_SHIFT)),
-                                    value << BASE58_SHIFT, address_of rest);
-                                rest >>= BASE58_SHIFT;
-                        }
-                        while (used && !limb[used - 1])
-                                used--;
-                        for (positive digit = 0; digit < 10; digit++)
-                        {
-                                digits[made++] = (p8)(rest % 58);
-                                rest /= 58;
-                        }
-                }
-
-                while (made && !digits[made - 1])
-                        made--;
-                for (positive at = 0; at < made / 2; at++)
-                {
-                        p8 swap = digits[at];
-
-                        digits[at] = digits[made - 1 - at];
-                        digits[made - 1 - at] = swap;
-                }
+                memory_reverse(digits, made);
                 for (positive at = 0; at < made; at++)
                         digits[at] = base58_alphabet[digits[at]];
 
@@ -2537,66 +2997,29 @@ static b32 base58_decode(bool ignore_garbage)
 
         if (digits.used)
         {
-                // 58 < 2^6, so a digit is at most six bits of the number.
-                positive limbs = (digits.used * 6 + 63) / 64 + 1;
-                p64 address_to limb = (p64 address_to)memory_take(limbs * sizeof(p64));
+                base58_level levels[64];
+                positive top = 0;
+                positive used = 0;
+                bool enough = true;
+                p64 address_to limb = null;
 
+                base58_levels_begin(levels);
+                while (enough && top < 62 && ((positive)20 << top) < digits.used)
+                        enough = base58_level_next(levels + top++, false);
+                if (enough)
+                        limb = base58_value(digits.bytes, digits.used, levels, address_of used);
+                base58_levels_end(levels);
                 if (!limb)
                         return base58_refuse_memory(address_of digits);
 
-                positive used = 0;
-                positive at = 0;
-                positive first = digits.used % 10 ? digits.used % 10 : 10;
+                // Little-endian limbs read backwards are the big-endian
+                // number, less its leading zero bytes.
+                p8 address_to bytes = (p8 address_to)limb;
 
-                while (at < digits.used)
-                {
-                        positive take = at ? 10 : first;
-                        p64 scale = 1;
-                        p64 chunk = 0;
+                memory_reverse(bytes, used * sizeof(p64));
+                positive lead = memory_span_byte(bytes, 0, used * sizeof(p64));
 
-                        for (positive k = 0; k < take; k++)
-                        {
-                                chunk = chunk * 58 + digits.bytes[at + k];
-                                scale *= 58;
-                        }
-                        at += take;
-
-                        p64 carry = chunk;
-
-                        for (positive k = 0; k < used; k++)
-                        {
-                                unsigned __int128 wide =
-                                    (unsigned __int128)limb[k] * scale + carry;
-
-                                limb[k] = (p64)wide;
-                                carry = (p64)(wide >> 64);
-                        }
-                        if (carry)
-                                limb[used++] = carry;
-                }
-
-                // Most significant first, with the leading zero bytes gone.
-                bool leading = true;
-                p8 staged[256];
-                positive held = 0;
-
-                for (positive k = used; k; k--)
-                        for (positive shift = 64; shift; shift -= 8)
-                        {
-                                p8 byte = (p8)(limb[k - 1] >> (shift - 8));
-
-                                if (leading && !byte)
-                                        continue;
-                                leading = false;
-                                staged[held++] = byte;
-                                if (held == sizeof(staged))
-                                {
-                                        text_put(staged, held);
-                                        held = 0;
-                                }
-                        }
-                if (held)
-                        text_put(staged, held);
+                text_put(bytes + lead, used * sizeof(p64) - lead);
                 memory_give(limb);
         }
 
@@ -3650,7 +4073,8 @@ static bool join_number(string_address value, positive address_to number)
         if (!text_unsigned_option(value, true, address_of made) || !made)
                 return false;
 
-        address_to number = made - 1;
+        // ... held, as GNU holds it, in a ptrdiff_t.
+        address_to number = min(made, (positive)bipolar_max) - 1;
         return true;
 }
 
@@ -3662,10 +4086,12 @@ static bool join_key_said[2];
 // one after the walk is not said as well.
 static bool join_complained;
 
+// GNU quote()s the word, so an apostrophe or a control byte in it is
+// spelled as quote() spells it in the C locale.
 static bool join_complain(string_address format, string_address word)
 {
         text_flush();
-        string_format(writer_stderr, format, word);
+        string_format(writer_stderr, format, writer_terminal_quoted_name, word);
         join_complained = true;
         return false;
 }
@@ -3687,64 +4113,63 @@ static bool join_key_set(positive side, positive field)
         return true;
 }
 
+static bool join_complain(string_address format, string_address word);
+
+/*
+        -o as GNU's add_field_list reads it: auto alone, or a list whose
+        pieces are what lies between each comma, blank or tab -- an empty
+        one included -- and each piece 0, or 1. or 2. and a field number,
+        refused in decode_field_spec's words. auto and a list may both be
+        given; the list is what is written.
+*/
 static bool join_output_add(string_address word)
 {
-        positive at = 0;
-
         if (string_equals(word, "auto"))
         {
-                if (join_output_count)
-                        return false;
                 join_output_auto = true;
                 return true;
         }
 
-        if (join_output_auto)
-                return false;
-
-        while (word[at])
+        for (;;)
         {
-                at += string_span_of_set(word + at, ", \t");
-
-                if (!word[at])
-                        break;
-                if (join_output_count == JOIN_OUTPUT_MAX)
-                        return false;
-
+                string_address stop = string_first_of_set(word, ", \t");
+                positive length = stop ? (positive)(stop - word) : string_length(word);
+                p8 piece[64];
+                p8 address_to held = length < sizeof(piece)
+                                         ? piece
+                                         : (p8 address_to)memory_take(length + 1);
                 join_output output = {0, 0};
+                bool fine = true;
 
-                if (word[at] == '0' &&
-                    (!word[at + 1] || word[at + 1] == ',' ||
-                     byte_is_blank(word[at + 1])))
-                        at++;
-                else
+                if (!held)
+                        return join_complain("join: memory exhausted\n", null);
+                memory_copy_apart(held, word, length);
+                held[length] = 0;
+
+                if (held[0] == '0' || ((held[0] == '1' || held[0] == '2') && held[1] != '.'))
+                        fine = (held[0] == '0' && !held[1]) ||
+                               join_complain("join: invalid field specifier: '%w'\n", held);
+                else if (held[0] == '1' || held[0] == '2')
                 {
-                        if ((word[at] != '1' && word[at] != '2') ||
-                            word[at + 1] != '.')
-                                return false;
-
-                        output.file = word[at] - '0';
-                        at += 2;
-                        string_address digits = word + at;
-                        positive field = 0;
-
-                        if (!string_digits_checked(address_of digits, 10,
-                                                   address_of field) ||
-                            !field)
-                                return false;
-
-                        at = (positive)(digits - word);
-
-                        output.field = field - 1;
+                        output.file = held[0] - '0';
+                        fine = join_number(held + 2, address_of output.field) ||
+                               join_complain("join: invalid field number: '%w'\n", held + 2);
                 }
+                else
+                        fine = join_complain("join: invalid file number in field spec: '%w'\n", held);
 
-                if (word[at] && word[at] != ',' && !byte_is_blank(word[at]))
+                if (held != piece)
+                        memory_give(held);
+                if (!fine)
                         return false;
-
+                if (join_output_count == JOIN_OUTPUT_MAX)
+                        return join_complain("join: memory exhausted\n", null);
                 join_outputs[join_output_count++] = output;
+                // A separator that ends the list ends it: 1.1, is 1.1.
+                if (!stop || !stop[1])
+                        return true;
+                word = stop + 1;
         }
-
-        return join_output_count != 0;
 }
 
 static bool join_side(string_address value, positive address_to mask)
@@ -3783,7 +4208,7 @@ static bool join_option_read(p8 letter, string_address value)
                 bool zero = value[0] == '\\' && value[1] == '0' && !value[2];
 
                 if (value[0] && value[1] && !zero)
-                        return join_complain("join: multi-character tab '%s'\n", value);
+                        return join_complain("join: multi-character tab '%w'\n", value);
                 b32 separator = zero ? 0 : value[0] ? value[0] : '\n';
                 if (join_separator >= 0 && join_separator != separator)
                         return join_complain("join: incompatible tabs\n", null);
@@ -3796,7 +4221,7 @@ static bool join_option_read(p8 letter, string_address value)
                 positive field;
 
                 if (!join_number(value, address_of field))
-                        return join_complain("join: invalid field number: '%s'\n", value);
+                        return join_complain("join: invalid field number: '%w'\n", value);
                 if (!join_key_set((positive)(letter - '1'), field))
                         return false;
         }
@@ -3805,19 +4230,19 @@ static bool join_option_read(p8 letter, string_address value)
                 positive field;
 
                 if (!join_number(value, address_of field))
-                        return join_complain("join: invalid field number: '%s'\n", value);
+                        return join_complain("join: invalid field number: '%w'\n", value);
                 if (!join_key_set(0, field) || !join_key_set(1, field))
                         return false;
         }
         else if (letter == 'a')
         {
                 if (!join_side(value, address_of join_unpaired))
-                        return join_complain("join: invalid file number: '%s'\n", value);
+                        return join_complain("join: invalid file number: '%w'\n", value);
         }
         else if (letter == 'v')
         {
                 if (!join_side(value, address_of join_only))
-                        return join_complain("join: invalid file number: '%s'\n", value);
+                        return join_complain("join: invalid file number: '%w'\n", value);
         }
         else if (letter == 'o')
         {
@@ -7293,20 +7718,17 @@ static bool text_tail_device(positive count)
         if (at < 0)
                 return false;
 
-        bipolar from = system_seek(text_input.handle,
-                                   count > (positive)0x7fffffffffffffff
-                                       ? (bipolar)0x8000000000000001
-                                       : -(bipolar)count,
-                                   FILE_SEEK_END);
-        bipolar stop = from >= 0 ? from + (bipolar)min(count, (positive)0x7fffffffffffffff)
+        // A count past the offsets there are is all of it, not a
+        // negative one: tail -c 18446744073709551615 of a disk read none.
+        bipolar want = (bipolar)min(count, (positive)bipolar_max);
+        bipolar from = system_seek(text_input.handle, -want, FILE_SEEK_END);
+        bipolar stop = from >= 0 ? from + want
                                 : system_seek(text_input.handle, 0, FILE_SEEK_END);
 
         if (from < 0)
                 from = stop;
 
-        bipolar start = at < stop && (bipolar)count < stop - at
-                            ? stop - (bipolar)count
-                            : at;
+        bipolar start = at < stop && want < stop - at ? stop - want : at;
 
         if (start != from)
                 system_seek(text_input.handle, start, FILE_SEEK_SET);
@@ -7996,7 +8418,10 @@ static inline INLINE bool tail_input(positive count, bool by_bytes, bool marked)
                         read through: tail -c +N of a two-terabyte disk's
                         last kilobyte ran out its time reading from byte 0.
                 */
-                if (by_bytes && count > 1 && !head_tail_pipe_presumed &&
+                // An N - 1 past the largest offset reached the kernel as
+                // a negative one and went backwards; GNU reads through.
+                if (by_bytes && count > 1 && count - 1 <= (positive)bipolar_max &&
+                    !head_tail_pipe_presumed &&
                     text_input.position == text_input.filled &&
                     system_seek(text_input.handle, count - 1, FILE_SEEK_CUR) >= 0)
                 {
@@ -9745,25 +10170,6 @@ static regex_program nl_patterns[3];
 
 // A line number or an increment: an optional minus and digits, within what a
 // signed 64-bit count can hold. GNU refuses the rest as too large.
-static bool nl_signed(string_address said, bipolar address_to into)
-{
-        bool negative = said[0] == '-';
-        positive magnitude;
-
-        if (negative)
-                said++;
-
-        if (!byte_is_digit(said[0]) ||
-            !file_decimal_read(address_of said, true, address_of magnitude) || said[0])
-                return false;
-
-        if (magnitude > (positive)NL_NUMBER_MAX + negative)
-                return false;
-
-        address_to into = negative ? (bipolar)(0 - magnitude) : (bipolar)magnitude;
-        return true;
-}
-
 // The number in its field: right aligned, left aligned, or zero filled
 // behind its sign, none of which cut a number that is wider than the field.
 static fn nl_put_number(bipolar number, positive width, p8 justify, bool zeros)
@@ -9853,40 +10259,64 @@ static bipolar nl_start;
 static bipolar nl_step;
 static positive nl_join;
 
+/*
+        A style or format nl has no use for is said, "WHAT: 'WORD'", and the
+        options go on being read, as GNU's getopt loop does: every such word
+        is named, and the pointer at --help comes once they are all read. A
+        number that will not do ends the reading where it is met.
+*/
+static bool nl_refused_any;
+
+static bool nl_refused(string_address what, string_address value)
+{
+        text_flush();
+        string_format(writer_stderr, "%s: %s: '%w'\n", text_name, what,
+                      writer_terminal_quoted_name, value);
+        nl_refused_any = true;
+        return true;
+}
+
 static bool nl_option_seen(p8 letter, string_address value)
 {
         if (letter == 'b' || letter == 'f' || letter == 'h')
         {
                 if (!nl_style_valid(value))
-                        return string_diagnostic(&text_diagnostic, 0, value,
-                                                 letter == 'h' ? "invalid header numbering style"
-                                                 : letter == 'b' ? "invalid body numbering style"
-                                                                 : "invalid footer numbering style");
+                        return nl_refused((string_address)(letter == 'h' ? "invalid header numbering style"
+                                                           : letter == 'b' ? "invalid body numbering style"
+                                                                           : "invalid footer numbering style"),
+                                          value);
         }
         else if (letter == 'n')
         {
                 if (!string_equals(value, "ln") && !string_equals(value, "rn") &&
                     !string_equals(value, "rz"))
-                        return string_diagnostic(&text_diagnostic, 0, value, "invalid line numbering format");
+                        return nl_refused((string_address) "invalid line numbering format", value);
         }
         else if (letter == 'w')
         {
-                if (!text_unsigned_option(value, false, address_of nl_width) ||
-                    !nl_width || nl_width > 0x7fffffff)
-                        return string_diagnostic(&text_diagnostic, 0, value, "invalid line number field width");
+                bipolar width;
+
+                if (!text_xnum(value, 1, 0x7fffffff, TEXT_XNUM_SIGNED | TEXT_XNUM_MIN_RANGE,
+                               (string_address) "invalid line number field width", address_of width))
+                        return false;
+                nl_width = (positive)width;
         }
         else if (letter == 'l')
         {
-                if (!text_unsigned_option(value, false, address_of nl_join))
-                        return string_diagnostic(&text_diagnostic, 0, value, "invalid line number of blank lines");
+                bipolar join;
+
+                if (!text_xnum(value, 0, bipolar_max,
+                               TEXT_XNUM_SIGNED | TEXT_XNUM_MIN_RANGE | TEXT_XNUM_MAX_QUIET,
+                               (string_address) "invalid line number of blank lines", address_of join))
+                        return false;
+                nl_join = (positive)join;
         }
         else if (letter == 'v' || letter == 'i')
         {
-                if (!nl_signed(value, letter == 'v' ? address_of nl_start
-                                                    : address_of nl_step))
-                        return string_diagnostic(&text_diagnostic, 0, value,
-                                                 letter == 'v' ? "invalid starting line number"
-                                                               : "invalid line number increment");
+                return text_xnum(value, -bipolar_max - 1, bipolar_max, TEXT_XNUM_SIGNED,
+                                 (string_address)(letter == 'v' ? "invalid starting line number"
+                                                                : "invalid line number increment"),
+                                 letter == 'v' ? address_of nl_start : address_of nl_step);
         }
 
         return true;
@@ -9906,9 +10336,14 @@ static b32 text_nl()
         nl_start = 1;
         nl_step = 1;
         nl_join = 1;
+        nl_refused_any = false;
 
         if (!text_took(address_of taking))
                 return text_done(1);
+        if (nl_refused_any)
+                return text_done(string_report(writer_stderr, 1,
+                                               "Try '%s --help' for more information.\n",
+                                               text_name));
 
         positive width = nl_width;
         bipolar number = nl_start;
@@ -9942,10 +10377,12 @@ static b32 text_nl()
                 if (said[0] != 'p')
                         continue;
 
-                if (pattern_count >= 3 ||
-                    !regex_compile(said + 1, false, false, false,
-                                   REGEX_POLICY_DEFAULT))
-                        return text_done(string_diagnostic(&text_diagnostic, 1, said + 1, "invalid regular expression"));
+                // GNU compiles it with regcomp's basic syntax, and says
+                // regcomp's reason alone.
+                if (!regex_compile(said + 1, false, false, false,
+                                   REGEX_POLICY_EXPR))
+                        return text_done(string_diagnostic(&text_diagnostic, 1, null,
+                                                           regex_failure_reason()));
 
                 regex_keep(nl_patterns + pattern_count);
                 patterns[k] = pattern_count++;
@@ -10954,8 +11391,17 @@ static bool fmt_failed;
 static const b8 fmt_word_bytes[STRING_SET_BYTES] = {
     [0 ... 8] = 1, [14 ... 31] = 1, [33 ... 255] = 1};
 
-static fn fmt_put_space(positive count)
+/*
+        GNU's put_space takes an int and writes nothing for a negative one,
+        which fmt_put_line asks for when a tagged paragraph's other lines
+        indent less than the prefix already written: fmt -t -p '>' wrote
+        spaces without end there, a column before the prefix wrapped.
+*/
+static fn fmt_put_space(bipolar count)
 {
+        if (count <= 0)
+                return;
+
         positive target = fmt_out_column > positive_max - count
                               ? positive_max
                               : fmt_out_column + count;
@@ -11667,7 +12113,7 @@ static b32 text_fmt()
         if (!text_took(address_of taking))
                 return text_done(1);
 
-        positive width = FMT_WIDTH_DEFAULT;
+        bipolar width = FMT_WIDTH_DEFAULT;
         string_address width_value = (taking.flags & FILE_FLAG('w'))
                                          ? file_option_value(address_of taking, 'w')
                                          : (taking.flags & FILE_FLAG('W'))
@@ -11679,7 +12125,7 @@ static b32 text_fmt()
                        "invalid width", address_of width))
                 return text_done(1);
 
-        positive goal;
+        bipolar goal;
 
         if (taking.flags & FILE_FLAG('g'))
         {
@@ -19804,44 +20250,36 @@ static fn tr_printable(p8 address_to into, positive address_to made, p8 c)
         address_to made += 4;
 }
 
+/*
+        A set's piece as GNU names it: make_printable_str's spelling, and
+        under quoted, quote() of that in the C locale -- 'a\\nb' for the
+        backslash it spelled, 'a\\'b' for an apostrophe -- where the format
+        holds its quotes. The piece is whole however long it is.
+*/
 static bool tr_complain(string_address format, p8 address_to from,
                         positive length, bool quoted)
 {
-        p8 shown[256];
+        p8 small[256];
+        p8 address_to shown = length * 4 < sizeof(small)
+                                  ? small
+                                  : (p8 address_to)memory_take(length * 4 + 1);
         positive made = 0;
 
-        for (positive i = 0; i < length && made + 5 < sizeof(shown); i++)
+        text_flush();
+        text_status = 1;
+        if (!shown)
+                return string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+
+        for (positive i = 0; i < length; i++)
                 tr_printable(shown, address_of made, from[i]);
 
         shown[made] = '\0';
-        text_flush();
-
         if (quoted)
-        {
-                //      quote() in the C locale: single quotes, and an
-                //      apostrophe inside is closed, escaped and reopened.
-                p8 wrapped[sizeof(shown) * 4 + 3];
-                positive w = 0;
-
-                wrapped[w++] = '\'';
-                for (positive i = 0; i < made; i++)
-                {
-                        if (shown[i] == '\'')
-                        {
-                                memory_copy_apart(wrapped + w, "'\\''", 4);
-                                w += 4;
-                        }
-                        else
-                                wrapped[w++] = shown[i];
-                }
-                wrapped[w++] = '\'';
-                wrapped[w] = '\0';
-                string_format(writer_stderr, format, wrapped);
-        }
+                string_format(writer_stderr, format, writer_terminal_quoted_name, shown);
         else
                 string_format(writer_stderr, format, shown);
-
-        text_status = 1;
+        if (shown != small)
+                memory_give(shown);
         return false;
 }
 
@@ -19970,7 +20408,7 @@ static b32 tr_repeat(positive start, positive length, p8 address_to repeated,
 
                         if (!good)
                         {
-                                tr_complain("tr: invalid repeat count %s in [c*n] construct\n",
+                                tr_complain("tr: invalid repeat count '%w' in [c*n] construct\n",
                                             at, digits, true);
                                 return -2;
                         }
@@ -20064,7 +20502,7 @@ static bool tr_parse(string_address spec, tr_list address_to list)
                                                         taken = true;
                                                 }
                                                 else if (!tr_star_digits_close(i + 2, length))
-                                                        return tr_complain("tr: invalid character class %s\n",
+                                                        return tr_complain("tr: invalid character class '%w'\n",
                                                                            name, size, true);
                                         }
                                         else if (size == 1)
@@ -21053,16 +21491,17 @@ static b32 text_uniq()
         if (flags & FILE_FLAG('z'))
                 text_delimiter = '\0';
 
-        if (all_repeated && counting)
-                return text_done(text_operand_trouble("printing all duplicated lines and repeat counts is meaningless",
-                                                      null, null));
+        // In GNU's order: the operands, then --group, then -c with -D.
+        if (text_files_count > 2)
+                return text_done(text_operand_trouble("extra operand", program_argument(text_files[2]), null));
 
         if (grouping && (counting || repeated_only || unique_only || all_repeated))
                 return text_done(text_operand_trouble("--group is mutually exclusive with -c/-d/-D/-u",
                                                       null, null));
 
-        if (text_files_count > 2)
-                return text_done(text_operand_trouble("extra operand", program_argument(text_files[2]), null));
+        if (all_repeated && counting)
+                return text_done(text_operand_trouble("printing all duplicated lines and repeat counts is meaningless",
+                                                      null, null));
 
         if (!text_open(text_file_name(0)))
                 return text_done(1);
@@ -21079,7 +21518,13 @@ static b32 text_uniq()
                 target = text_open_handle(name, TEXT_WRITE, 0666);
 
                 if (target < 0)
-                        return text_done(string_diagnostic(&text_diagnostic, 1, name, "Cannot open file"));
+                {
+                        //      quotef's name and the system's reason.
+                        text_flush();
+                        string_format(writer_stderr, "%s: %w: %s\n", text_name,
+                                      writer_shell_name, name, file_reason(target));
+                        return text_done(1);
+                }
 
                 text_out_handle = (positive)target;
         }
@@ -29310,8 +29755,10 @@ static bool sort_looked_at(p8 character, positive how)
         // walk at their own pace rather than in step.
         // Alphanumeric, not a word character: sort -d keeps no underscore,
         // which is what separates it from every other definition here.
+        // Blank is GNU's field_sep, which a newline is too: under -z a
+        // record can hold one.
         if ((how & SORT_DICTIONARY) &&
-            !(byte_is_blank(character) || byte_is_alnum(character)))
+            !(sort_blanks[character] || byte_is_alnum(character)))
                 return false;
 
         if ((how & SORT_PRINTABLE) && (character < 0x20 || character >= 0x7f))
@@ -35317,7 +35764,7 @@ static b32 sort_check(bool quiet)
                                                       number);
                                         system_write_all(2, source.head.at,
                                                          source.head.length);
-                                        writer_stderr("\n", 0);
+                                        writer_stderr(address_of text_delimiter, 1);
                                 }
 
                                 code = 1;
@@ -36528,15 +36975,9 @@ static expr_value expr_matched(expr_value address_to subject,
 
         if (!regex_compile(rule, false, false, false, REGEX_POLICY_EXPR))
         {
-                //      regcomp's own reasons for a malformed interval, as
-                //      GNU's expr says them.
+                //      regcomp's own reasons, as GNU's expr says them.
                 if (!expr_dead)
-                        expr_stop(regex_failure == REGEX_FAILED_BRACE ? "Unmatched \\{"
-                                  : regex_failure == REGEX_FAILED_CONTENT ? "Invalid content of \\{\\}"
-                                  : regex_failure == REGEX_FAILED_SIZE ? "Regular expression too big"
-                                  : regex_failure == REGEX_FAILED_OPEN ? "Unmatched ( or \\("
-                                  : regex_failure == REGEX_FAILED_CLOSE ? "Unmatched ) or \\)"
-                                                                        : "invalid expression");
+                        expr_stop(regex_failure_reason());
 
                 return made;
         }

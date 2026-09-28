@@ -2226,6 +2226,9 @@ static fn run_line_inner(string_address line)
                         `sh -c 'cat <<'`, `sh -c 'cat > '`, `sh -c case`
                         and `sh -c for` all died in strlen.
                 */
+                else if (parse_syntax_reason)
+                        string_format(log_error, "Syntax error: %s\n",
+                                      parse_syntax_reason);
                 else if (!tok || tok->kind == PT_END ||
                          tok->kind == PT_NEWLINE || !tok->text)
                         log_error(str("Syntax error: unexpected end of file\n"));

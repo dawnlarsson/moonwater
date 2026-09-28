@@ -319,6 +319,26 @@ positive shell_substitution_generation;
 #define EXPAND_PARAMETER_INDIRECT 1
 #define EXPAND_PARAMETER_MISSING 2
 
+//      Set while an assignment's value is expanded: the word of a ${x-word}
+//      inside it takes the value's tilde rules, after each colon as well,
+//      as bash and dash both do: x=${u-~:~} is two home directories; and
+//      bash joins an unquoted $@ there with blanks, as it joins "$@".
+static bool expand_assigning;
+
+/*
+        Whether an unquoted list comes out as fields, which is how it is
+        joined with blanks, or joined by IFS. An assigned $@ and ${a[@]} is
+        joined with blanks in bash -- as a slice, a substitution and a case
+        change of one are -- while a trim or a transform of one is joined by
+        IFS, and an assigned $* with IFS empty is joined by nothing.
+*/
+#define expand_list_by_ifs(form, between)                                   \
+        (!(between) && !(expand_assigning && shell_bash_compat &&           \
+                         (form) == '*'))
+#define expand_list_blanks(form, between)                                   \
+        (expand_list_by_ifs(form, between) ||                               \
+         (expand_assigning && shell_bash_compat && (form) == '@'))
+
 //      One word being built, and what each of its bytes is allowed to become.
 //      "$@" against a directory's worth of parameters is a single word, so
 //      this grows with it. Everything here is reached by index, never by an
@@ -1974,7 +1994,9 @@ static bool expand_push_parameter_as(expand_reference reference, bool quoted,
                    (string_is(name, '@') || string_is(name, '*'));
 
         if (!(mode & EXPAND_PARAMETER_MISSING) && all &&
-            (quoted ? string_is(name, '@') : !string_get(expand_ifs())))
+            (quoted ? string_is(name, '@')
+                    : expand_list_blanks(string_get(name),
+                                         string_get(expand_ifs()))))
         {
                 positive at;
 
@@ -2163,12 +2185,25 @@ static p8 address_to expand_lift(positive start, b32 mode)
         return into;
 }
 
+//      Set while a compound assignment expands its bare words, which bash
+//      does not read as assignments however they are spelled.
+static bool expand_list_element;
+
+
 // The word of ${x-word} and ${x:+word}, expanded in place: a leading tilde
 // first, unless the whole form sits inside double quotes.
 static fn expand_word_into(string_address word, bool quoted)
 {
+        if (!quoted && expand_assigning &&
+            !(shell_bash_compat && shell_posix_on()))
+        {
+                expand_into(word, quoted, MARK_FIELD, true);
+                return;
+        }
+        //      bash ends that tilde prefix at a colon as well as a slash:
+        //      ${u-~:~} is the home directory and :~.
         if (!quoted && string_is(word, '~'))
-                word = expand_tilde(word, false);
+                word = expand_tilde(word, shell_bash_compat);
 
         expand_into(word, quoted, MARK_FIELD, false);
 }
@@ -5962,7 +5997,8 @@ static COLD fn expand_positional_slice(string_address name,
         p8 form = string_get(name);
         p8 mark = quoted ? MARK_QUOTED : MARK_FIELD;
         p8 between = string_get(expand_ifs());
-        bool fields = quoted ? form == '@' : !between;
+        bool fields = quoted ? form == '@'
+                             : expand_list_blanks(form, between);
         positive origin = shell_parameter_count + 1;
 
         if (!expand_slice_bounds((expand_reference){.name = name}, expression, origin, origin, SLICE_POSITIONAL,
@@ -6363,6 +6399,42 @@ static inline INLINE positive shell_ansi_byte(p8 address_to into, p8 value, bool
 }
 
 /*
+        How many bytes of a character bash shows as itself start here: a
+        whole UTF-8 character under a UTF-8 locale, or none -- a byte that
+        begins nothing valid, and every high byte in any other locale, is
+        spelled as an octal escape.
+*/
+static positive shell_shown_character(const p8 address_to value, positive left)
+{
+        memory_utf8_state state = {0};
+        positive used = 0;
+        b32 fed = 0;
+
+        if (!shell_utf8_on())
+                return 0;
+        while (used < left &&
+               !(fed = memory_utf8_feed(address_of state, value[used])))
+                used++;
+        return used < left && fed == 1 ? used + 1 : 0;
+}
+
+// Whether a value holds a high byte bash will not show as itself.
+static bool shell_bytes_unshown(const p8 address_to value, positive length)
+{
+        for (positive at = 0; at < length; at++)
+                if (value[at] >= 0x80)
+                {
+                        positive shown = shell_shown_character(value + at,
+                                                               length - at);
+
+                        if (!shown)
+                                return true;
+                        at += shown - 1;
+                }
+        return false;
+}
+
+/*
         The value as bytes the shell would read back as itself.
 
         A single-quoted run holds anything but a quote, so that is the answer
@@ -6378,7 +6450,9 @@ static fn transform_quoted(string_address value, positive length, p8 mark)
         // it in $'...' the way bash 5.2 does. UTF-8 may keep it inside quotes.
         bool high = !shell_utf8_on();
         bool awkward = memory_escape_index(value, length,
-            HEX_CONTROL | HEX_TAB | (high ? HEX_HIGH : 0)) < length;
+            HEX_CONTROL | HEX_TAB | (high ? HEX_HIGH : 0)) < length ||
+                       (shell_bash_compat &&
+                        shell_bytes_unshown((const p8 address_to)value, length));
 
         if (!awkward)
         {
@@ -6417,6 +6491,26 @@ static fn transform_quoted(string_address value, positive length, p8 mark)
                                                         shell_quote_ansi);
                         expand_push_run(value + at, run, mark);
                         at += run;
+                        continue;
+                }
+                //      bash keeps a whole character and spells a byte
+                //      that is none in octal.
+                if (value[at] >= 0x80 && shell_bash_compat)
+                {
+                        positive shown = shell_shown_character(
+                            (const p8 address_to)value + at, length - at);
+
+                        if (shown)
+                        {
+                                expand_push_run(value + at, shown, mark);
+                                at += shown;
+                                continue;
+                        }
+                        p8 written[4];
+                        expand_push_run(written,
+                                        shell_ansi_byte(written, value[at++],
+                                                        true),
+                                        mark);
                         continue;
                 }
                 p8 written[4];
@@ -6939,7 +7033,8 @@ static COLD fn expand_positional_transform(p8 which, p8 form, bool quoted)
 {
         p8 mark = quoted ? MARK_QUOTED : MARK_FIELD;
         p8 between = string_get(expand_ifs());
-        bool fields = quoted ? form == '@' : !between;
+        bool fields = quoted ? form == '@'
+                             : expand_list_by_ifs(form, between);
         positive at;
 
         if (!shell_parameter_count)
@@ -7445,7 +7540,8 @@ static COLD fn expand_bash_positional_trim(p8 form, string_address pattern,
 {
         p8 mark = quoted ? MARK_QUOTED : MARK_FIELD;
         p8 between = string_get(expand_ifs());
-        bool fields = quoted ? form == '@' : !between;
+        bool fields = quoted ? form == '@'
+                             : expand_list_by_ifs(form, between);
         positive at;
 
         if (!shell_parameter_count)
@@ -7589,7 +7685,8 @@ static COLD fn expand_positional_each(p8 form, p8 operation,
 {
         p8 mark = quoted ? MARK_QUOTED : MARK_FIELD;
         p8 between = string_get(expand_ifs());
-        bool fields = quoted ? form == '@' : !between;
+        bool fields = quoted ? form == '@'
+                             : expand_list_blanks(form, between);
         bool default_pattern = !string_get(word);
         string_address pattern;
         string_address replacement = null;
@@ -7752,7 +7849,10 @@ static COLD fn expand_array_sequence(string_address name, positive length,
 {
         p8 mark = quoted ? MARK_QUOTED : MARK_FIELD;
         p8 between = string_get(expand_ifs());
-        bool fields = quoted ? form == '@' : !between;
+        bool fields = quoted ? form == '@'
+                             : operation == '#' || operation == '%' || operation == '@'
+                                   ? expand_list_by_ifs(form, between)
+                                   : expand_list_blanks(form, between);
         bool slice = operation == ':';
         bool transform = operation && !slice;
         shell_mark held = shell_store_mark(address_of expand_store);
@@ -7912,7 +8012,8 @@ static COLD fn expand_array_whole_transform(string_address name, positive length
         p8 mark_join = (quoted && form == '*') ? MARK_QUOTED : MARK_FIELD;
         p8 mark_body = quoted ? MARK_QUOTED : MARK_FIELD;
         p8 between = string_get(expand_ifs());
-        bool fields = quoted ? form == '@' : !between;
+        bool fields = quoted ? form == '@'
+                             : expand_list_by_ifs(form, between);
         p8 attributes;
         bool exported;
         bool readonly;
@@ -9664,8 +9765,25 @@ static fn expand_word(string_address word)
 
         if (string_is(word, '~'))
                 step = expand_tilde(word, false);
+        //      Outside posix mode bash takes an argument spelled like an
+        //      assignment, name=value, as one for its tildes: echo x=~ and
+        //      PATH=a:~/bin as a word to a command both expand.
+        else if (shell_bash_compat && expand_assignable_name(word))
+        {
+                positive name = string_span(word, string_set_name);
 
-        expand_into(step, false, MARK_PLAIN, false);
+                if (string_is(word + name, '=') &&
+                    string_first_of(word + name, '~') && !shell_posix_on() &&
+                    !expand_list_element)
+                {
+                        expand_push_run(word, name + 1, MARK_PLAIN);
+                        expand_into(word + name + 1, false, MARK_PLAIN, true);
+                        step = null;
+                }
+        }
+
+        if (step)
+                expand_into(step, false, MARK_PLAIN, false);
 
         /*
                 A word that is only "$@" and has no parameters behind it is no
@@ -10350,6 +10468,16 @@ static bool expand_emit(positive at, positive stop, shell_words address_to out)
                                       pattern);
                         shell_status = 1;
                         expand_failed = true;
+                        //      bash drops the rest of the line with it,
+                        //      whatever holds the word -- a for list and a
+                        //      compound list too -- and under -e leaves.
+                        if (shell_bash_compat && !expand_errors_soft)
+                        {
+                                if (shell_options & ((positive)1 << ('e' - 'a')))
+                                        expand_fatal_status(1);
+                                else
+                                        exec_expand_input_error();
+                        }
                         return false;
                 }
 
@@ -11339,7 +11467,13 @@ RETURNS_NONNULL string_address shell_expand_assignment(string_address word, posi
                 return result;
 
         expand_push_run(word, value_at, MARK_PLAIN);
-        expand_into(word + value_at, false, MARK_PLAIN, true);
+        {
+                bool held = expand_assigning;
+
+                expand_assigning = true;
+                expand_into(word + value_at, false, MARK_PLAIN, true);
+                expand_assigning = held;
+        }
 
         if (!expand_failed)
                 shell_scratch_bytes(expand_length);

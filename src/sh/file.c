@@ -1355,9 +1355,13 @@ typedef struct file_codec_cli
         /* A codec's own options, asked before the shared ones: a whole
            --word, or the rest of a short cluster from one letter.  It
            answers how many characters it took (0: not its option), or a
-           negative exit status once it has said what it refused. */
+           negative exit status once it has said what it refused.  An
+           option whose value is the next argument reads next_argument (null
+           after the last) and sets took_next. */
         bipolar (*option)(struct file_codec_cli address_to codec,
                           string_address at, bool word);
+        string_address next_argument;
+        bool took_next;
 } file_codec_cli;
 
 /* One regular-file output transaction shared by utilities that must never
@@ -1499,6 +1503,10 @@ static bool file_codec_parse(file_codec_cli address_to codec,
                 }
                 if (word[0] != '-' || !word[1])
                         break;
+                codec->next_argument = *first + 1 < count
+                                           ? program_argument((b32)(*first + 1))
+                                           : null;
+                codec->took_next = false;
                 if (word[1] == '-')
                 {
                         bipolar taken = codec->option
@@ -1511,7 +1519,10 @@ static bool file_codec_parse(file_codec_cli address_to codec,
                                 return false;
                         }
                         if (taken)
+                        {
+                                *first += codec->took_next;
                                 continue;
+                        }
                         if (string_equals(word, "--decompress") ||
                             string_equals(word, "--uncompress"))
                                 codec->decompress = true;
@@ -1601,6 +1612,11 @@ static bool file_codec_parse(file_codec_cli address_to codec,
                         if (taken)
                         {
                                 letter += taken - 1;
+                                if (codec->took_next)
+                                {
+                                        (*first)++;
+                                        break;
+                                }
                                 continue;
                         }
                         if ((*letter >= '1' ||
@@ -2396,16 +2412,32 @@ static bool file_account_cached_name(positive which, positive id,
 /* Ownership syscalls narrow IDs to 32 bits; UINT32_MAX means unchanged.
    Reject numeric operands outside that range before they can name root or
    silently suppress an ownership change. Names keep the shared lookup. */
-static bipolar file_identity_of(string_address text, bool group)
+/* An ID that is not a name, read as xstrtoumax reads one: blanks, a plus,
+   then digits and nothing after them, so chgrp +1000 and chown ' 1000' are
+   numbers as they are to GNU. -1 when it is not one. */
+static bipolar file_identity_number(string_address text)
 {
         positive number;
+
+        while (byte_is_space(string_get(text)))
+                text++;
+        if (string_is(text, '+'))
+                text++;
+        return string_digits_checked_exact(text, 10, address_of number) &&
+                       number < p32_max
+                   ? (bipolar)number : -1;
+}
+
+static bipolar file_identity_of(string_address text, bool group)
+{
         if (string_digits_exact(text, null))
-                return string_digits_checked_exact(text, 10, address_of number) &&
-                               number < p32_max
-                           ? (bipolar)number : -1;
+                return file_identity_number(text);
 
         bipolar found = group ? file_group_id(text) : file_user_id(text);
-        return found >= 0 && (positive)found < p32_max ? found : -1;
+
+        if (found >= 0)
+                return (positive)found < p32_max ? found : -1;
+        return file_identity_number(text);
 }
 
 // A user or group the way every listing says one: the name when there is
@@ -2466,13 +2498,21 @@ fn file_stamp(writer write, b64 seconds, positive nanoseconds)
         date_shape(write, seconds, 0, (string_address)" %z");
 }
 
-b64 file_now()
+// The wall clock, and its nanoseconds when they are asked for.
+b64 file_now_exact(positive address_to nanoseconds)
 {
         p64 wall[2] = {0, 0};
 
         system_call_2(syscall(clock_gettime), 0, (positive)wall);
+        if (nanoseconds)
+                address_to nanoseconds = (positive)wall[1];
 
         return (b64)wall[0];
+}
+
+b64 file_now()
+{
+        return file_now_exact(null);
 }
 
 // Month and weekday names as the reference date's own output spells them:
@@ -4127,6 +4167,31 @@ static fn pd_local_table_add(pd_parser address_to pc, b64 at)
         The body of parse_datetime: TEXT read from NOW (seconds and
         nanoseconds) in the zone of TZ, or of TZ="..." in front of it.
 */
+/* The TZ in force, held while another stands in for it: a zone the date
+   string names, or one a repair tries. Held by copy, since setenv may reuse
+   the entry it replaces, and at whatever length the environment gave it --
+   a fixed buffer here once refused every date under a long TZ. False only
+   when the copy could not be made. */
+static bool pd_zone_hold(string_address address_to held)
+{
+        string_address was = getenv((string_address) "TZ");
+
+        address_to held = was ? string_duplicate(was) : null;
+        return !was || address_to held;
+}
+
+static fn pd_zone_restore(string_address held)
+{
+        if (held)
+        {
+                setenv((string_address) "TZ", held, 1);
+                memory_give((address_any)held);
+        }
+        else
+                unsetenv((string_address) "TZ");
+        tzset();
+}
+
 static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
                      b64 address_to out, positive address_to out_ns)
 {
@@ -4134,14 +4199,8 @@ static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
         string_address tzstring = getenv((string_address) "TZ");
         bool own_zone = false;
         p8 zone[256];
-        p8 saved[256];
-        bool had_tz = tzstring != null;
+        string_address saved = null;
         bool ok = false;
-
-        if (had_tz && string_length(tzstring) >= sizeof(saved))
-                return false;
-        if (had_tz)
-                string_copy(saved, tzstring);
 
         while (pd_space(string_get(p)))
                 p++;
@@ -4164,6 +4223,8 @@ static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
                         else if (string_is(s, '"'))
                         {
                                 zone[used] = end;
+                                if (!pd_zone_hold(address_of saved))
+                                        return false;
                                 setenv((string_address) "TZ", zone, 1);
                                 tzset();
                                 own_zone = true;
@@ -4426,23 +4487,21 @@ static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
                                 //      A time near the ends of time_t read in
                                 //      another zone: tried again in that zone.
                                 p8 fixed[40] = "XXX";
-                                p8 held[256];
-                                string_address was = getenv((string_address) "TZ");
-                                bool had = was != null && string_length(was) < sizeof(held);
+                                string_address held;
 
-                                if (had)
-                                        string_copy(held, was);
-                                pd_zone_text(pc->time_zone, fixed + 3);
-                                setenv((string_address) "TZ", fixed, 1);
-                                tzset();
-                                t = t0;
-                                moment = pd_mktime(address_of t);
-                                repaired = pd_mktime_ok(address_of t0, address_of t);
-                                if (had)
-                                        setenv((string_address) "TZ", held, 1);
-                                else
-                                        unsetenv((string_address) "TZ");
-                                tzset();
+                                if (pd_zone_hold(address_of held))
+                                {
+                                        pd_zone_text(pc->time_zone, fixed + 3);
+                                        setenv((string_address) "TZ", fixed, 1);
+                                        tzset();
+                                        t = t0;
+                                        moment = pd_mktime(address_of t);
+                                        repaired = pd_mktime_ok(address_of t0, address_of t);
+                                        pd_zone_restore(held);
+                                        // The entry tzstring named may be gone.
+                                        if (!own_zone)
+                                                tzstring = getenv((string_address) "TZ");
+                                }
                         }
                         if (!repaired)
                         {
@@ -4772,13 +4831,7 @@ static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
 
 pd_done:
         if (own_zone)
-        {
-                if (had_tz)
-                        setenv((string_address) "TZ", saved, 1);
-                else
-                        unsetenv((string_address) "TZ");
-                tzset();
-        }
+                pd_zone_restore(saved);
         return ok;
 }
 
@@ -4793,13 +4846,6 @@ bool file_moment_read_exact(string_address text, b64 now, b64 address_to out,
                             positive address_to nanoseconds)
 {
         return file_moment_read_from(text, now, 0, out, nanoseconds);
-}
-
-bool file_moment_read(string_address text, b64 now, b64 address_to out)
-{
-        positive nanoseconds;
-
-        return file_moment_read_exact(text, now, out, address_of nanoseconds);
 }
 
 // Walking directories ---------------------------------------
@@ -4938,491 +4984,9 @@ PURE bool file_is_dot(string_address name)
 
 // Walking a tree --------------------------------------------
 
-/*
-        A tree, one name at a time, in the order a recursive walk meets it.
-
-        Each directory is opened through the handle of the directory above it
-        and read to its end before the first of its names is handed out. No
-        name is looked up by a path the kernel has to walk again, a caller may
-        remove what it is handed without moving what comes after it, and the
-        names of every directory still being walked stay readable below it.
-        The listings sit one above another in one store, the way the
-        directories do, so the walk costs one getdents block per level rather
-        than a block on the stack per frame.
-
-        walk_next hands out a name inside the directory above it (WALK_NAME)
-        and, once a directory the caller entered is finished, that directory
-        again (WALK_LEAVE), with the handle of the directory that holds it.
-        Nothing is entered unless the caller calls walk_enter straight after
-        the name: what to look at, whether to follow, what to prune and how
-        deep to go stay the caller's, and the kind is getdents' own,
-        DT_UNKNOWN included. A name and path are good until the next call.
-
-        A walk started holding its handles closes none of them on the way out
-        of a directory until walk_release. Names copied into a batch can then
-        be worked on relative to their directories after the walk has moved
-        past them -- a stat, an unlink, a change, an open -- which is the shape
-        a parallel pass over a fixed-size batch takes, with the order the
-        batch was filled in as the order its results are written.
-*/
-#define WALK_LEVELS (FILE_MAX_DEPTH + 2)
+// The getdents block each tree job reads one directory's listing into.
 #define WALK_READ 32768
 
-enum
-{
-        WALK_NAME = 1,
-        WALK_LEAVE = 2,
-};
-
-typedef struct
-{
-        p8 event;
-        p8 type;
-        positive depth;
-        bipolar directory;
-        string_address name;
-        //      The name joined to the directories above it, as shown; null
-        //      when that does not fit, and then parent is the part that did.
-        string_address path;
-        string_address parent;
-        positive path_length;
-        //      WALK_LEAVE: why the listing stopped short, when it did.
-        bipolar error;
-} walk_item;
-
-typedef struct
-{
-        bipolar handle;
-        bipolar parent;
-        positive path_length;
-        positive name_at;
-        positive listing;
-        positive stop;
-        positive at;
-        bipolar error;
-        bool borrowed;
-} walk_level;
-
-typedef struct
-{
-        walk_level levels[WALK_LEVELS];
-        positive depth;
-        walk_item item;
-        string_address root;
-        bool root_pending;
-        bool root_fits;
-        bool hold;
-        p8 address_to records;
-        positive records_room;
-        positive records_used;
-        bipolar address_to held;
-        positive held_room;
-        positive held_used;
-        p8 path[FILE_PATH_MAX];
-} walk;
-
-static fn walk_start(walk address_to walker, string_address root, bool hold)
-{
-        positive length = string_length(root);
-
-        walker->depth = 0;
-        walker->root = root;
-        walker->root_pending = true;
-        walker->root_fits = length < FILE_PATH_MAX;
-        walker->hold = hold;
-        walker->records_used = 0;
-        if (walker->root_fits)
-                memory_copy_apart(walker->path, root, length + 1);
-}
-
-static fn walk_release(walk address_to walker)
-{
-        for (positive i = 0; i < walker->held_used; i++)
-                system_close(walker->held[i]);
-        walker->held_used = 0;
-}
-
-// A handle nothing can be holding is closed; one a batch may still name
-// waits for walk_release, and is closed now only if it cannot be kept.
-static fn walk_close_level(walk address_to walker, bipolar handle)
-{
-        if (walker->hold &&
-            array_store_reserve(walker->held, walker->held_room,
-                                walker->held_used, walker->held_used + 1,
-                                256))
-        {
-                walker->held[walker->held_used++] = handle;
-                return;
-        }
-        system_close(handle);
-}
-
-static walk_item address_to walk_next(walk address_to walker)
-{
-        walk_item address_to item = address_of walker->item;
-
-        if (walker->root_pending)
-        {
-                walker->root_pending = false;
-                item->event = WALK_NAME;
-                item->type = 0;
-                item->depth = 0;
-                item->directory = AT_FDCWD;
-                item->name = walker->root;
-                item->path = walker->root;
-                item->parent = null;
-                item->path_length = string_length(walker->root);
-                item->error = 0;
-                return item;
-        }
-
-        while (walker->depth)
-        {
-                walk_level address_to level = address_of walker->levels[walker->depth - 1];
-
-                if (level->at >= level->stop)
-                {
-                        walker->depth--;
-                        walker->records_used = level->listing;
-                        if (!level->borrowed)
-                                walk_close_level(walker, level->handle);
-                        walker->path[level->path_length] = end;
-                        item->event = WALK_LEAVE;
-                        item->type = DT_DIR;
-                        item->depth = walker->depth;
-                        item->directory = level->parent;
-                        item->name = walker->depth
-                                         ? (string_address)walker->path + level->name_at
-                                         : walker->root;
-                        item->path = walker->depth ? (string_address)walker->path
-                                                   : walker->root;
-                        item->parent = null;
-                        item->path_length = level->path_length;
-                        item->error = level->error;
-                        return item;
-                }
-
-                struct linux_dirent64 address_to record =
-                    (struct linux_dirent64 address_to)(walker->records + level->at);
-
-                level->at += record->d_reclen;
-                if (file_is_dot(record->d_name))
-                        continue;
-
-                positive length = string_length(record->d_name);
-                positive head = level->path_length;
-                positive separator = head && walker->path[head - 1] != '/';
-
-                item->event = WALK_NAME;
-                item->type = record->d_type;
-                item->depth = walker->depth;
-                item->directory = level->handle;
-                item->name = record->d_name;
-                item->error = 0;
-
-                if (head + separator + length < FILE_PATH_MAX)
-                {
-                        if (separator)
-                                walker->path[head] = '/';
-                        memory_copy_apart(walker->path + head + separator,
-                                          record->d_name, length + 1);
-                        item->path = walker->path;
-                        item->parent = null;
-                        item->path_length = head + separator + length;
-                }
-                else
-                {
-                        walker->path[head] = end;
-                        item->path = null;
-                        item->parent = walker->path;
-                        item->path_length = head;
-                }
-                return item;
-        }
-
-        return null;
-}
-
-static fn walk_read_listing(walk address_to walker, walk_level address_to level);
-
-/* Enter the directory walk_next just named, opened through its parent with
-   flags (O_NOFOLLOW, or 0 to follow), and read the whole of it. A name
-   whose path does not fit is not entered: nothing below it could be shown. */
-static bipolar walk_enter(walk address_to walker, positive flags)
-{
-        walk_item address_to item = address_of walker->item;
-
-        if (item->event != WALK_NAME || !item->path ||
-            (!item->depth && !walker->root_fits))
-                return -ERROR_NAME_TOO_LONG;
-        if (walker->depth >= WALK_LEVELS)
-                return -ERROR_TOO_MANY_LEVELS;
-
-        bipolar handle = system_open_at(item->directory, item->name,
-                                        FILE_READ | O_DIRECTORY | O_CLOEXEC | flags);
-
-        if (handle < 0)
-                return handle;
-
-        walk_level address_to level = address_of walker->levels[walker->depth];
-
-        level->handle = handle;
-        level->parent = item->directory;
-        level->path_length = item->path_length;
-        level->name_at = item->depth ? item->path_length - string_length(item->name) : 0;
-        level->borrowed = false;
-        walk_read_listing(walker, level);
-        return handle;
-}
-
-// Read the whole of a level's directory onto the top of the store.
-static fn walk_read_listing(walk address_to walker, walk_level address_to level)
-{
-        bipolar handle = level->handle;
-
-        level->listing = walker->records_used;
-        level->error = 0;
-
-        for (;;)
-        {
-                if (!array_store_reserve(walker->records, walker->records_room,
-                                         walker->records_used,
-                                         walker->records_used + WALK_READ,
-                                         1 << 20))
-                {
-                        level->error = -ERROR_NO_MEMORY;
-                        break;
-                }
-
-                bipolar taken = system_read_directory(
-                    handle, walker->records + walker->records_used, WALK_READ);
-
-                if (taken <= 0)
-                {
-                        if (taken < 0)
-                                level->error = taken;
-                        break;
-                }
-                walker->records_used += (positive)taken;
-        }
-
-        level->stop = walker->records_used;
-        level->at = level->listing;
-        walker->depth++;
-}
-
-/* Walk what is in a directory the caller already holds, shown as path. The
-   handle stays the caller's; its WALK_LEAVE comes at depth 0 like a root's. */
-static bool walk_start_borrowed(walk address_to walker, bipolar handle,
-                                string_address path, bool hold)
-{
-        positive length = string_length(path);
-        walk_level address_to level = address_of walker->levels[0];
-
-        walker->depth = 0;
-        walker->root = path;
-        walker->root_pending = false;
-        walker->root_fits = length < FILE_PATH_MAX;
-        walker->hold = hold;
-        walker->records_used = 0;
-        if (!walker->root_fits)
-                return false;
-
-        memory_copy_apart(walker->path, path, length + 1);
-        level->handle = handle;
-        level->parent = AT_FDCWD;
-        level->path_length = length;
-        level->name_at = 0;
-        level->borrowed = true;
-        walk_read_listing(walker, level);
-        return true;
-}
-
-// Back out of the directory walk_enter just entered, as if it had not been:
-// no name in it has been handed out and nothing is left to leave.
-static fn walk_abandon(walk address_to walker)
-{
-        walk_level address_to level = address_of walker->levels[--walker->depth];
-
-        walker->records_used = level->listing;
-        if (!level->borrowed)
-                system_close(level->handle);
-}
-
-// Close whatever a walk stopped early left open, and give its store back.
-static fn walk_end(walk address_to walker)
-{
-        while (walker->depth)
-        {
-                walk_level address_to level = address_of walker->levels[--walker->depth];
-
-                if (!level->borrowed)
-                        system_close(level->handle);
-        }
-        walk_release(walker);
-        walker->root_pending = false;
-        array_store_release(walker->records, walker->records_room,
-                            walker->records_used);
-        array_store_release(walker->held, walker->held_room,
-                            walker->held_used);
-}
-
-/*
-        A walk cut into batches for the pool.
-
-        The walk itself stays on the caller: it decides what to enter, and a
-        tool copies the names it wants worked on into a batch with a tag of
-        its own. A job per index then does that name's system call through
-        the directory handle the walk still holds, writing only its own item
-        and facts; the caller reads the batch back in index order and does
-        everything whose order shows -- output, totals, removing a directory
-        once what was in it is gone -- exactly as a serial walk would have.
-
-        A batch ends at WALK_BATCH names or at WALK_BATCH_HANDLES held
-        directory handles, whichever comes first, so a tree of many small
-        directories cannot hold more descriptors than a process is given.
-        Both limits come from the tree, never from how many threads there
-        are, and a batch too small to be worth waking a thread for runs on
-        the caller. The store is the caller's, reused batch after batch and
-        written only by the caller, so nothing is allocated on one thread and
-        freed on another.
-*/
-#define WALK_BATCH 4096
-#define WALK_BATCH_HANDLES 128
-#define WALK_BATCH_SPREAD 512
-
-typedef struct
-{
-        bipolar directory;
-        positive name;
-        //      Offset of the shown path, or of the part that fitted when
-        //      the whole did not.
-        positive path;
-        positive depth;
-        p8 event;
-        p8 type;
-        p8 mark;
-        p8 spare;
-        b32 result;
-        //      A second directory and a second string, for a tool that works
-        //      a name into another tree.
-        bipolar target;
-        positive extra;
-} walk_batch_item;
-
-typedef struct
-{
-        walk_batch_item address_to items;
-        positive items_room;
-        file_facts address_to facts;
-        positive facts_room;
-        p8 address_to text;
-        positive text_room;
-        positive text_used;
-        positive count;
-} walk_batch;
-
-// The directory handles a walk has open or is holding for its batch.
-static positive walk_held(walk address_to walker)
-{
-        return walker->held_used + walker->depth;
-}
-
-static bool walk_batch_full_at(walk address_to walker, walk_batch address_to batch,
-                               positive handles)
-{
-        return batch->count >= WALK_BATCH || walk_held(walker) >= handles;
-}
-
-static bool walk_batch_full(walk address_to walker, walk_batch address_to batch)
-{
-        return walk_batch_full_at(walker, batch, WALK_BATCH_HANDLES);
-}
-
-// The item walk_next handed out, kept under mark; null when out of memory.
-static walk_batch_item address_to walk_batch_add(walk_batch address_to batch,
-                                                 walk_item address_to item,
-                                                 p8 mark)
-{
-        string_address shown = item->path ? item->path : item->parent;
-        positive name_bytes = string_length(item->name) + 1;
-        positive path_bytes = string_length(shown) + 1;
-
-        if (!array_store_reserve(batch->items, batch->items_room, batch->count,
-                                 batch->count + 1, WALK_BATCH) ||
-            !array_store_reserve(batch->facts, batch->facts_room, batch->count,
-                                 batch->count + 1, WALK_BATCH) ||
-            !array_store_reserve(batch->text, batch->text_room, batch->text_used,
-                                 batch->text_used + name_bytes + path_bytes,
-                                 1 << 18))
-                return null;
-
-        walk_batch_item address_to kept = batch->items + batch->count;
-
-        kept->directory = item->directory;
-        kept->depth = item->depth;
-        kept->event = item->event;
-        kept->type = item->type;
-        kept->mark = mark;
-        kept->spare = 0;
-        kept->result = 0;
-        kept->name = batch->text_used;
-        memory_copy_apart(batch->text + batch->text_used, item->name, name_bytes);
-        batch->text_used += name_bytes;
-        kept->path = batch->text_used;
-        memory_copy_apart(batch->text + batch->text_used, shown, path_bytes);
-        batch->text_used += path_bytes;
-        kept->target = -1;
-        kept->extra = kept->path;
-        batch->count++;
-        return kept;
-}
-
-// A string kept beside the batch's names; positive_max when out of memory.
-static positive walk_batch_text(walk_batch address_to batch, p8 address_to text,
-                                positive length)
-{
-        if (!array_store_reserve(batch->text, batch->text_room, batch->text_used,
-                                 batch->text_used + length + 1, 1 << 18))
-                return positive_max;
-
-        positive at = batch->text_used;
-
-        memory_copy_apart(batch->text + at, text, length);
-        batch->text[at + length] = end;
-        batch->text_used += length + 1;
-        return at;
-}
-
-static fn walk_batch_run(walk_batch address_to batch, parallel_job job,
-                         address_any context)
-{
-#if defined(LIBRARY_THREAD_RUNTIME)
-        (void)parallel_for(job, context, batch->count,
-                           batch->count >= WALK_BATCH_SPREAD ? PARALLEL_SPREAD : 0);
-#else
-        for (positive index = 0; index < batch->count; index++)
-                job(context, index);
-#endif
-}
-
-// After the caller's pass: the next batch starts empty, and the handles the
-// last one named are closed.
-static fn walk_batch_next(walk address_to walker, walk_batch address_to batch)
-{
-        walk_release(walker);
-        batch->count = 0;
-        batch->text_used = 0;
-}
-
-static fn walk_batch_end(walk_batch address_to batch)
-{
-        array_store_release(batch->items, batch->items_room, batch->count);
-        array_store_release(batch->facts, batch->facts_room, batch->count);
-        array_store_release(batch->text, batch->text_room, batch->text_used);
-}
-
-#if defined(LIBRARY_THREAD_RUNTIME)
 /*
         Every parallel walk in this file keeps its tree as nodes that are a
         header of its own shape followed by the whole path the node names, so
@@ -5508,7 +5072,6 @@ static bool file_tree_put(parallel_output address_to output,
         path[length] = end;
         return true;
 }
-#endif
 
 /*
         A tool that changes something about a name, and under -R about
@@ -5664,7 +5227,6 @@ static fn file_change_walk_as(bipolar directory, string_address name,
         }
 }
 
-#if defined(LIBRARY_THREAD_RUNTIME)
 /*
         The node a -R walk on the pool keeps for one directory: what the
         parent looked at, so the job that opens it can prove it is still the
@@ -5722,7 +5284,6 @@ typedef struct file_change_tree_node
 FILE_TREE_NODE_NEW(file_change_tree_node_new, file_change_tree_node,
                    node->length = length;
                    node->name_at = length - name_length;)
-#endif
 
 //      A walk of the tool's own for everything under an operand of -R, when
 //      it has one; the serial walk below otherwise.
@@ -6517,17 +6078,6 @@ static bool file_color_span_is(file_color_span span, string_address text)
                !string_compare_max(span.text, text, length);
 }
 
-static PURE bool file_color_table_valid(string_address table, bool bare_flags)
-{
-        file_color_entry entry;
-
-        while (file_color_next(address_of table, address_of entry))
-                if (!entry.assigned && entry.key.length && !bare_flags)
-                        return false;
-
-        return true;
-}
-
 /* A span of no bytes is written as no bytes.  Spelling that out is the whole
    of this guard: a writer reads a length of zero as "measure the pointer", and
    an assigned-but-empty entry such as the rs= in LS_COLORS='rs=:di=01;34'
@@ -6620,14 +6170,13 @@ static bipolar file_send_range_once(bipolar in, p64 address_to in_offset,
 #define FILE_TRANSFER_SIZE (FILE_BLOCK * 32)
 static p8 file_transfer[FILE_TRANSFER_SIZE];
 
-#if defined(LIBRARY_THREAD_RUNTIME)
 /* A copy that falls back to reading and writing inside a pool job gets a
    buffer of its own thread's; the caller's slot is the shared one, because
    nothing else on the calling thread runs while it works a batch.  The table
    has a place for every slot below parallel_slots() and grows on the calling
    thread before a batch runs, never inside a job.  A slot past it gets no
-   buffer rather than the shared one: its job leaves the name to the serial
-   replay, which runs on the caller. */
+   buffer rather than the shared one: its job leaves the name to the
+   one-name copy in the sink, which runs on the caller. */
 static p8 address_to address_to file_transfer_slots;
 static positive file_transfer_slots_room;
 static positive file_transfer_slots_have;
@@ -6665,10 +6214,6 @@ static p8 address_to file_transfer_buffer(void)
         }
         return file_transfer_slots[slot];
 }
-#else
-#define file_transfer_buffer() file_transfer
-#define file_transfer_prepare() (true)
-#endif
 
 /* What cp --debug says of one copy, in GNU's words: whether the kernel
    copied (copy offload) and how holes were found. Set by the copy below,
@@ -13669,7 +13214,15 @@ static b32 find_parse_primary(positive depth)
 
                 if (word[7] == 't')
                 {
-                        if (!file_moment_read(named, find_moment, address_of made->number))
+                        positive fraction = 0;
+                        bool read = file_moment_read_exact(named, find_moment,
+                                                           address_of made->number,
+                                                           address_of fraction);
+
+                        //      The fraction counts: -newermt @N.5 is past
+                        //      a file made at N.3.
+                        made->extra = (b64)fraction;
+                        if (!read)
                         {
                                 string_format(log_error, "find: invalid date '%w'\n",
                                               writer_terminal_quoted_name, named);
@@ -14113,7 +13666,13 @@ static b32 find_parse_primary(positive depth)
                                                               : 'm';
                 if (find_is(word, "-newermt"))
                 {
-                        if (!file_moment_read(value, find_moment, address_of node->number))
+                        positive fraction = 0;
+                        bool read = file_moment_read_exact(value, find_moment,
+                                                           address_of node->number,
+                                                           address_of fraction);
+
+                        node->extra = (b64)fraction;
+                        if (!read)
                         {
                                 string_format(log_error, "find: invalid date '%w'\n",
                                               writer_terminal_quoted_name, value);
@@ -15591,7 +15150,6 @@ static fn find_walk(string_address path, string_address name, positive depth, bo
         }
 }
 
-#if defined(LIBRARY_THREAD_RUNTIME)
 /*
         find over parallel_tree, for an expression that neither prunes, quits,
         deletes nor runs anything in the directory it found.
@@ -16225,7 +15783,6 @@ static fn find_tree_root(string_address path, string_address name, bipolar paren
                 find_true(find_root);
         }
 }
-#endif
 
 /* Hold a command-line root's parent before any predicate is evaluated.  This
    gives -execdir, -okdir and -delete the same descriptor-relative boundary
@@ -16293,11 +15850,9 @@ static fn find_walk_root(string_address root)
         }
 
         path_tail_copy(name, FILE_PATH_MAX, root);
-#if defined(LIBRARY_THREAD_RUNTIME)
         if (find_tree_usable())
                 find_tree_root(root, name, parent, entry);
         else
-#endif
                 find_walk(root, name, 0, true, parent, entry, 0);
         system_close(parent);
 }
@@ -16529,12 +16084,15 @@ typedef struct
         positive width, precision;
 } stat_spec;
 
-static positive stat_digits(string_address at, positive address_to value)
+/* The digits at the front of a directive's first bound bytes: the directive
+   is read out of a copy that ends where its bound does, not at a terminator. */
+static positive stat_digits(string_address at, positive bound,
+                            positive address_to value)
 {
         positive length = 0;
 
         address_to value = 0;
-        while (byte_is_digit(string_get(at + length)))
+        while (length < bound && byte_is_digit(string_get(at + length)))
         {
                 if (address_to value < 100000000u)
                         address_to value = address_to value * 10 +
@@ -16560,11 +16118,12 @@ static fn stat_spec_read(string_address prefix, positive length,
                 spec->alternate |= flag == '#';
                 spec->zero |= flag == '0';
         }
-        at += stat_digits(prefix + at, address_of spec->width);
+        at += stat_digits(prefix + at, length - at, address_of spec->width);
         if (at < length && string_get(prefix + at) == '.')
         {
                 spec->precise = true;
-                stat_digits(prefix + at + 1, address_of spec->precision);
+                stat_digits(prefix + at + 1, length - at - 1,
+                            address_of spec->precision);
         }
 }
 
@@ -16583,7 +16142,9 @@ static positive stat_out_text(stat_spec address_to spec, string_address text,
 
         if (!spec->left)
                 stat_pad(pad, ' ');
-        log(text, length);
+        // A length of 0 would have log measure the text for itself.
+        if (length)
+                log(text, length);
         if (spec->left)
                 stat_pad(pad, ' ');
         return length + pad;
@@ -16609,6 +16170,8 @@ static positive stat_out_number(stat_spec address_to given, p8 kind,
         if (minus_zero)
                 spec.precise = false;
 
+        bool nonzero = magnitude != 0;
+
         if (!(spec.precise && !spec.precision && !magnitude) || minus_zero)
                 do
                 {
@@ -16617,10 +16180,12 @@ static positive stat_out_number(stat_spec address_to given, p8 kind,
                         magnitude /= base;
                 } while (magnitude);
 
-        while (spec.precise && count < spec.precision && count < sizeof(digits) - 8)
-                digits[sizeof(digits) - 1 - count++] = '0';
+        //      The precision's zeros are written, not stored: it has no
+        //      bound but the one the directive reader puts on it.
+        positive zeros = spec.precise && spec.precision > count
+                             ? spec.precision - count : 0;
 
-        if (kind == 'o' && spec.alternate &&
+        if (kind == 'o' && spec.alternate && !zeros &&
             (!count || digits[sizeof(digits) - count] != '0'))
                 digits[sizeof(digits) - 1 - count++] = '0';
 
@@ -16630,22 +16195,25 @@ static positive stat_out_number(stat_spec address_to given, p8 kind,
                 sign[signs++] = '+';
         else if (spec.space)
                 sign[signs++] = ' ';
-        if (kind == 'x' && spec.alternate && count &&
-            !(count == 1 && digits[sizeof(digits) - 1] == '0'))
+        if (kind == 'x' && spec.alternate && nonzero)
         {
                 sign[signs++] = '0';
                 sign[signs++] = 'x';
         }
 
-        positive length = signs + count;
+        positive length = signs + zeros + count;
         positive pad = spec.width > length ? spec.width - length : 0;
 
         if (!spec.left && !(spec.zero && !spec.precise))
                 stat_pad(pad, ' ');
-        log(sign, signs);
+        // Either may be empty, and log takes a length of 0 as "measure it".
+        if (signs)
+                log(sign, signs);
         if (!spec.left && spec.zero && !spec.precise)
                 stat_pad(pad, '0');
-        log(digits + sizeof(digits) - count, count);
+        stat_pad(zeros, '0');
+        if (count)
+                log(digits + sizeof(digits) - count, count);
         if (spec.left)
                 stat_pad(pad, ' ');
         return length + pad;
@@ -16670,21 +16238,21 @@ static fn stat_out_unsigned(string_address prefix, positive length, p8 kind,
 static fn stat_out_epoch(string_address prefix, positive length, b64 seconds,
                          positive nanoseconds)
 {
-        p8 whole[64];
-        positive whole_length = length < sizeof(whole) - 16 ? length : sizeof(whole) - 16;
+        //      The rewritten directive: its flags, each once, and a number.
+        p8 whole[32];
+        string_address shape = prefix;
+        positive shape_length = length;
         string_address dot = memory_first_of(prefix, '.', length);
         positive precision = 0;
         positive width = 0;
-
-        memory_copy_apart(whole, prefix, whole_length);
 
         if (dot)
         {
                 positive before = (positive)(dot - prefix);
 
-                whole_length = before;
-                if (byte_is_digit(string_get(dot + 1)))
-                        stat_digits(dot + 1, address_of precision);
+                shape_length = before;
+                if (before + 1 < length && byte_is_digit(string_get(dot + 1)))
+                        stat_digits(dot + 1, length - before - 1, address_of precision);
                 else
                         precision = 9;
 
@@ -16694,27 +16262,33 @@ static fn stat_out_epoch(string_address prefix, positive length, b64 seconds,
 
                         while (run && byte_is_digit(string_get(prefix + run - 1)))
                                 run--;
-                        stat_digits(prefix + run, address_of width);
+                        stat_digits(prefix + run, before - run, address_of width);
                         if (width > 1)
                         {
                                 run += string_get(prefix + run) == '0';
-                                whole_length = run;
+                                shape_length = run;
                                 if (width - 1 > 1 && width - 1 > precision + 1)
                                 {
                                         positive kept = 0;
                                         bool left = false;
 
+                                        /* Only flags stand before run, and a
+                                           flag said twice says nothing more,
+                                           so each is kept once. */
                                         for (positive at = 0; at < run; at++)
                                         {
-                                                if (string_get(prefix + at) == '-')
+                                                p8 flag = string_get(prefix + at);
+
+                                                if (flag == '-')
                                                         left = true;
-                                                else
-                                                        whole[kept++] = string_get(prefix + at);
+                                                else if (!memory_first_of(whole, flag, kept))
+                                                        whole[kept++] = flag;
                                         }
                                         if (!left)
                                                 kept += positive_into_string(
                                                     whole + kept, width - 1 - precision);
-                                        whole_length = kept;
+                                        shape = whole;
+                                        shape_length = kept;
                                 }
                         }
                 }
@@ -16737,7 +16311,7 @@ static fn stat_out_epoch(string_address prefix, positive length, b64 seconds,
 
         stat_spec spec;
 
-        stat_spec_read(whole, whole_length, address_of spec);
+        stat_spec_read(shape, shape_length, address_of spec);
         spec.alternate = false;
 
         positive written = stat_out_number(address_of spec, 'd',
@@ -17518,31 +17092,6 @@ static du_moment du_grand_stamp;
 */
 static p8 du_suffix[8];
 
-#if !defined(LIBRARY_THREAD_RUNTIME)
-static bool du_already(file_facts address_to facts)
-{
-        if (du_count_links || facts->hard_links < 2)
-                return false;
-
-        if ((facts->mode & MODE_FORMAT) == MODE_DIRECTORY)
-                return false;
-
-        bipolar seen = file_identity_seen(address_of du_seen, facts);
-
-        if (seen < 0)
-        {
-                shell_memory_failed = true;
-                log_error("du: out of memory while tracking hard links\n", 0);
-                du_seen_broken = true;
-                du_status = 1;
-        }
-
-        /* Counting one it could not record would be the silent over-count
-           this table avoids. */
-        return seen != 0;
-}
-#endif
-
 // The system's du takes a pattern against the whole path it built and
 // against the last component of it, so --exclude=b and --exclude=a/b both
 // leave out a/b.
@@ -17649,57 +17198,6 @@ static fn du_listed(p64 bytes, du_moment stamp, string_address path)
                 du_report(bytes, stamp, path);
 }
 
-/*
-        What a tree costs, printed on the way back up, which is the order du has
-        always reported in: each name is looked at through the directory that
-        holds it, and a directory's line comes once the walk leaves it. A frame
-        per depth keeps what the directory itself costs with what is under it,
-        and, for -S, what of that is under its subdirectories.
-*/
-#if !defined(LIBRARY_THREAD_RUNTIME)
-static struct
-{
-        p64 total;
-        p64 below;
-        du_moment stamp;
-        du_moment shallow;
-} du_levels[WALK_LEVELS];
-#endif
-
-static walk du_walker;
-static walk_batch du_batch;
-
-/*
-        What each name in a batch is to du. A job looks at the plain ones; the
-        walk looks at a root, a directory, a kind the listing would not give
-        and a link -L follows, because whether to enter them depends on the
-        answer.
-*/
-enum
-{
-        DU_LOOK = 1,
-        DU_LOOKED,
-        DU_ENTERED,
-        DU_UNREAD,
-        DU_LEAVE,
-        DU_LONG,
-        DU_DEEP,
-};
-
-#if !defined(LIBRARY_THREAD_RUNTIME)
-static fn du_look_job(address_any context, positive index)
-{
-        walk_batch address_to batch = (walk_batch address_to)context;
-        walk_batch_item address_to item = batch->items + index;
-
-        if (item->mark == DU_LOOK)
-                item->result = (b32)file_look_code(
-                    item->directory, (string_address)batch->text + item->name,
-                    du_follow ? 0 : AT_SYMLINK_NOFOLLOW, batch->facts + index);
-}
-#endif
-
-#if defined(LIBRARY_THREAD_RUNTIME)
 /*
         du over parallel_tree.  enter looks at every name of one directory
         through the handle the pool opened and writes a record for each into
@@ -18266,7 +17764,6 @@ static p64 du_measure_tree(string_address root)
         du_measure_stamp = du_tree_result_stamp;
         return du_seen_broken ? 0 : du_tree_result;
 }
-#endif
 
 static p64 du_measure(string_address root)
 {
@@ -18277,252 +17774,7 @@ static p64 du_measure(string_address root)
 
         if (du_exclude_have && du_excluded(root))
                 return 0;
-#if defined(LIBRARY_THREAD_RUNTIME)
         return du_measure_tree(root);
-#else
-        walk address_to walker = address_of du_walker;
-        walk_batch address_to batch = address_of du_batch;
-        p64 result = 0;
-        bool walking = true;
-        bool stopped = false;
-
-        walk_start(walker, root, true);
-
-        while (walking && !stopped)
-        {
-                walk_item address_to item = null;
-
-                while (!walk_batch_full(walker, batch) && (item = walk_next(walker)))
-                {
-                        positive depth = item->depth;
-                        p8 mark;
-
-                        // Out of depth is answered by the first entry there
-                        // is, before an exclusion could hide it: a tree this
-                        // deep has not been measured and saying so is the
-                        // whole of what is left to do here.
-                        if (item->event == WALK_LEAVE)
-                                mark = DU_LEAVE;
-                        else if (depth > FILE_MAX_DEPTH)
-                                mark = DU_DEEP;
-                        else if (!item->path)
-                                mark = DU_LONG;
-                        else if (depth && du_excluded(item->path))
-                                continue;
-                        else if (depth && item->type != DT_DIR && item->type != 0 &&
-                                 !(du_follow && item->type == DT_LNK))
-                                mark = DU_LOOK;
-                        else
-                                mark = DU_LOOKED;
-
-                        walk_batch_item address_to kept = walk_batch_add(batch, item, mark);
-
-                        if (!kept)
-                        {
-                                log_error("du: out of memory while walking the tree\n", 0);
-                                du_seen_broken = true;
-                                du_status = 1;
-                                stopped = true;
-                                break;
-                        }
-                        if (mark == DU_DEEP)
-                        {
-                                walking = false;
-                                break;
-                        }
-                        if (mark != DU_LOOKED)
-                                continue;
-
-                        file_facts address_to facts = batch->facts + batch->count - 1;
-                        bipolar looked = file_look_code(item->directory, item->name,
-                                                        du_follow ? 0 : AT_SYMLINK_NOFOLLOW,
-                                                        facts);
-
-                        kept->result = (b32)looked;
-                        if (looked < 0)
-                                continue;
-
-                        p64 device = file_device_key(facts->device_major,
-                                                     facts->device_minor);
-
-                        if (!depth)
-                                du_device = device;
-                        if ((facts->mode & MODE_FORMAT) != MODE_DIRECTORY ||
-                            (depth && du_one_system && device != du_device))
-                                continue;
-
-                        // A root is opened as it was written, trailing slash
-                        // and all; below it a link was not a directory to the
-                        // look above, and the open refuses to become one
-                        // unless -L follows.
-                        bipolar entered = walk_enter(walker,
-                                                     du_follow || !depth ? 0 : O_NOFOLLOW);
-
-                        kept->mark = entered < 0 ? DU_UNREAD : DU_ENTERED;
-                        if (entered < 0)
-                                kept->result = (b32)entered;
-                }
-
-                if (!item)
-                        walking = false;
-                if (stopped)
-                        break;
-
-                walk_batch_run(batch, du_look_job, batch);
-
-                //      Everything whose order shows, in the order the walk met it.
-                for (positive index = 0; index < batch->count && !stopped; index++)
-                {
-                        walk_batch_item address_to kept = batch->items + index;
-                        file_facts address_to facts = batch->facts + index;
-                        string_address path = (string_address)batch->text + kept->path;
-                        positive depth = kept->depth;
-
-                        if (kept->mark == DU_LEAVE)
-                        {
-                                p64 total = du_levels[depth].total;
-                                du_moment stamp = du_levels[depth].stamp;
-
-                                if (depth <= du_maximum)
-                                        du_listed(du_separate ? total - du_levels[depth].below
-                                                              : total,
-                                                  du_separate ? du_levels[depth].shallow : stamp,
-                                                  path);
-                                if (!depth)
-                                {
-                                        result = total;
-                                        du_measure_stamp = stamp;
-                                }
-                                else
-                                {
-                                        du_levels[depth - 1].total += total;
-                                        du_levels[depth - 1].below += total;
-                                        du_levels[depth - 1].stamp =
-                                            du_newest(du_levels[depth - 1].stamp, stamp);
-                                }
-                                continue;
-                        }
-
-                        if (kept->mark == DU_DEEP)
-                        {
-                                log_error("du: tree is nested too deep\n", 0);
-                                du_depth_broken = true;
-                                du_status = 1;
-                                stopped = true;
-                                continue;
-                        }
-
-                        if (kept->mark == DU_LONG)
-                        {
-                                string_format(log_error, "du: cannot access '%w/%w': %s\n",
-                                              writer_terminal_quoted_name, path,
-                                              writer_terminal_quoted_name,
-                                              (string_address)batch->text + kept->name,
-                                              file_reason(-ERROR_NAME_TOO_LONG));
-                                du_status = 1;
-                                continue;
-                        }
-
-                        if (kept->result < 0 && kept->mark != DU_UNREAD)
-                        {
-                                string_format(log_error, "du: cannot access %w: %s\n",
-                                              writer_shell_quoted_name, path,
-                                              file_reason(kept->result));
-                                du_status = 1;
-                                continue;
-                        }
-
-                        bool directory = (facts->mode & MODE_FORMAT) == MODE_DIRECTORY;
-                        p64 device = file_device_key(facts->device_major, facts->device_minor);
-
-                        if (depth && du_one_system && device != du_device)
-                                continue;
-
-                        if (du_already(facts))
-                        {
-                                if (du_seen_broken)
-                                        stopped = true;
-                                continue;
-                        }
-
-                        p64 mine = du_inodes ? 1
-                                   : du_apparent
-                                       ? ((facts->mode & MODE_FORMAT) == MODE_DIRECTORY
-                                              ? 0
-                                              : (p64)facts->size)
-                                       : facts->blocks * 512;
-
-                        du_moment stamp = du_stamp(facts);
-
-                        if (kept->mark == DU_ENTERED)
-                        {
-                                du_levels[depth].total = mine;
-                                du_levels[depth].below = 0;
-                                du_levels[depth].stamp = stamp;
-                                du_levels[depth].shallow = stamp;
-                                continue;
-                        }
-
-                        if (kept->mark == DU_UNREAD)
-                        {
-                                // A directory that will not open at the bottom
-                                // of the walk is not complained about, because
-                                // nothing was going to be read out of it either
-                                // way.
-                                if (depth < FILE_MAX_DEPTH)
-                                {
-                                        string_format(log_error, "du: cannot read directory %w: %s\n",
-                                                      writer_shell_quoted_name, path,
-                                                      file_reason(kept->result));
-                                        du_status = 1;
-                                }
-                                if (depth <= du_maximum)
-                                        du_listed(mine, stamp, path);
-                                if (depth)
-                                {
-                                        du_levels[depth - 1].total += mine;
-                                        du_levels[depth - 1].below += mine;
-                                        du_levels[depth - 1].stamp =
-                                            du_newest(du_levels[depth - 1].stamp, stamp);
-                                }
-                                else
-                                {
-                                        result = mine;
-                                        du_measure_stamp = stamp;
-                                }
-                                continue;
-                        }
-
-                        if ((du_all || !depth) && depth <= du_maximum)
-                                du_listed(mine, stamp, path);
-                        if (depth)
-                        {
-                                du_levels[depth - 1].total += mine;
-                                du_levels[depth - 1].stamp =
-                                    du_newest(du_levels[depth - 1].stamp, stamp);
-                                du_levels[depth - 1].shallow =
-                                    du_newest(du_levels[depth - 1].shallow, stamp);
-                        }
-                        else
-                        {
-                                result = mine;
-                                du_measure_stamp = stamp;
-                        }
-                }
-
-                walk_batch_next(walker, batch);
-        }
-
-        // A broken walk measured nothing it can stand behind.
-        if (du_seen_broken || du_depth_broken)
-        {
-                walk_end(walker);
-                walk_batch_next(walker, batch);
-                return 0;
-        }
-
-        return result;
-#endif
 }
 
 static file_taking address_to du_taking;
@@ -19186,8 +18438,6 @@ static b32 file_du()
         if (du_total && !du_seen_broken && !du_depth_broken)
                 du_report(du_grand, du_grand_stamp, (string_address) "total");
 
-        walk_end(address_of du_walker);
-        walk_batch_end(address_of du_batch);
         log_flush();
 
         return du_status;
@@ -20596,7 +19846,6 @@ static fn chmod_one(bipolar directory, string_address name, string_address shown
         chmod_report(shown, address_of outcome);
 }
 
-#if defined(LIBRARY_THREAD_RUNTIME)
 /*
         chmod -R over parallel_tree.  A directory's mode is changed by the job
         reading the directory that holds it, before the pool opens it: the
@@ -20787,7 +20036,6 @@ static fn chmod_tree(string_address path)
         }
         system_close(handle);
 }
-#endif
 
 static const argument_option chmod_options[] = {
     {"changes", 'c', 0, ARGUMENT_SELECT(chmod_selection, loudness)},
@@ -20951,9 +20199,7 @@ static b32 file_chmod()
 
         chmod_umask = file_umask();
 
-#if defined(LIBRARY_THREAD_RUNTIME)
         file_change_tree = chmod_tree;
-#endif
         file_change_preserve_root = chmod_selected.root == 'p';
         file_change_paths(first, count, (taking.flags & FILE_FLAG('R')) != 0,
                           (string_address) "chmod", address_of chmod_status,
@@ -21337,7 +20583,6 @@ static fn chown_one(bipolar directory, string_address name, string_address shown
         chown_report(shown, address_of outcome);
 }
 
-#if defined(LIBRARY_THREAD_RUNTIME)
 /*
         chown and chgrp -R over parallel_tree.  A directory is walked as
         chmod's walk walks it, and changed after everything under it, which is
@@ -21612,7 +20857,6 @@ static fn chown_tree(string_address path)
         file_change_trusted = false;
         chown_one(AT_FDCWD, path, path, named_follow ? null : address_of facts);
 }
-#endif
 
 static const argument_option chown_options[] = {
     {"changes", 'c', 0, ARGUMENT_SELECT(chown_selection, loudness)},
@@ -21632,12 +20876,6 @@ static const argument_option chown_options[] = {
     {null},
 };
 
-/*
-        A USER[:GROUP] spec, read the way chown reads its operand: an empty
-        half means "leave this one alone", "user:" is a spec this image
-        cannot complete, and a half that names nobody is refused with the
-        whole spec quoted, which is how the reference quotes it.
-*/
 /*
         gnulib's parse_with_separator: the user before the separator, looked
         up by name first and as a number after; the group after it. A
@@ -21682,13 +20920,9 @@ static string_address chown_spec_try(string_address who, positive split,
                 {
                         if (separated && !after)
                                 return (string_address) "invalid spec";
-                        positive number;
-                        string_address digits = name[0] == '+' ? name + 1 : name;
-                        if (!string_digits_exact(digits, null) ||
-                            !string_digits_checked_exact(digits, 10, address_of number) ||
-                            number >= p32_max)
+                        id = file_identity_number(name);
+                        if (id < 0)
                                 return (string_address) "invalid user";
-                        id = (bipolar)number;
                 }
                 address_to user = id;
         }
@@ -21807,9 +21041,7 @@ static bool chown_spec_read(string_address who, bipolar address_to user,
 static fn chown_paths(positive first, positive count)
 {
         file_change_after_contents = true;
-#if defined(LIBRARY_THREAD_RUNTIME)
         file_change_tree = chown_tree;
-#endif
         file_change_preserve_root = chown_selected.root == 'p';
         file_change_paths(first, count, (chown_flags & FILE_FLAG('R')) != 0,
                           chown_program, address_of chown_status, chown_one);
@@ -27561,6 +26793,13 @@ static b32 csplit_execute_line(csplit_state address_to state,
 
         positive boundary;
 
+        /* GNU's process_line_count under --suppress-matched asks only that
+           a line is left when it starts: the line it then drops may be the
+           one after the last, so csplit --suppress-matched seq30 31 keeps
+           all thirty where the boundary alone would be out of range. */
+        if (state->suppress_matched && state->cursor == state->length)
+                return CSPLIT_NOT_FOUND;
+
         /* GNU last_line_to_save is absolute. A later equal or already-passed
            line is a warning-only empty slice, not `'N': match not found`. */
         if (target < state->cursor_line)
@@ -27574,7 +26813,8 @@ static b32 csplit_execute_line(csplit_state address_to state,
                 return CSPLIT_EXECUTED;
         }
 
-        if (!csplit_line_offset(state, target, false, address_of boundary))
+        if (!csplit_line_offset(state, target, state->suppress_matched,
+                                address_of boundary))
                 return CSPLIT_NOT_FOUND;
         if (!csplit_section(state, state->cursor, boundary, true))
                 return CSPLIT_FAILED;
@@ -33358,32 +32598,6 @@ static bipolar file_copy_publish(
 }
 
 
-/*
-        cp -r below a directory cp made itself, in batches over the walk.
-
-        The walk makes each directory as it enters it, as the ordinary copy
-        does: the source is opened first, the destination made fresh beside
-        it. A plain file is a job -- opened, created with O_EXCL under its
-        creation mode, copied, given what -p keeps, closed -- and a job that
-        cannot finish removes what it made. Each batch is read back in walk
-        order: -v's lines, the directories that could not be made, and every
-        name a job did not finish or that is not a plain file, which the
-        ordinary one-name copy then takes in its place and reports in its own
-        words. A directory gets its mode once the walk has left it.
-*/
-enum
-{
-        CP_FILE = 1,
-        CP_SERIAL,
-        CP_DIR,
-        CP_DIR_FAILED,
-        CP_DIR_DONE,
-        CP_TOP_DONE,
-        CP_LONG,
-};
-
-#define CP_BATCH_HANDLES 64
-
 static bool file_copy_one(bipolar source_directory, string_address source,
                           string_address source_shown,
                           bipolar destination_directory,
@@ -33394,192 +32608,6 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                           file_facts address_to known_source,
                           bipolar known_source_handle, positive how);
 
-static walk cp_walker;
-static walk_batch cp_batch;
-static struct
-{
-        bipolar handle;
-        file_facts facts;
-} cp_made[WALK_LEVELS];
-
-static fn cp_copy_job(address_any context, positive index)
-{
-        walk_batch address_to batch = (walk_batch address_to)context;
-        walk_batch_item address_to item = batch->items + index;
-
-        if (item->mark != CP_FILE)
-                return;
-
-        string_address name = (string_address)batch->text + item->name;
-        file_facts address_to facts = batch->facts + index;
-        bipolar in = system_open_at(item->directory, name,
-                                    FILE_READ | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
-
-        if (in < 0)
-        {
-                item->result = (b32)in;
-                return;
-        }
-
-        bipolar looked = file_look_code(in, (string_address)"", AT_EMPTY_PATH, facts);
-
-        /* A file with other names, where links are kept, is left to the
-           ordinary copy in walk order, which links the names after the
-           first to the first one's copy. */
-        if (looked >= 0 && cp_links_tracked(facts, false))
-                looked = -ERROR_AGAIN;
-        if (looked < 0 || (facts->mode & MODE_FORMAT) != MODE_FILE)
-        {
-                system_close(in);
-                item->result = (b32)(looked < 0 ? looked : -ERROR_AGAIN);
-                return;
-        }
-
-        bipolar out = file_copy_destination_open(
-            item->target, name, file_copy_creation_mode(facts), false, facts, true);
-
-        if (out < 0)
-        {
-                system_close(in);
-                item->result = (b32)out;
-                return;
-        }
-
-        bool copied = file_copy_handles_known(in, out, facts);
-        p8 names[FILE_XATTR_JOB_ROOM];
-        p8 value[FILE_XATTR_JOB_ROOM];
-        bool tag = copied && cp_preserve;
-        bool tag_late = tag && file_xattrs_after_owner();
-        bipolar tagged = tag && !tag_late
-                             ? file_xattrs_copy_in(in, null, out, null,
-                                                   (string_address) "cp", null,
-                                                   names, sizeof(names),
-                                                   value, sizeof(value))
-                             : 0;
-        bipolar kept = copied && cp_preserve
-                           ? file_keep_handle(out, -1, null, facts, false) : 0;
-
-        if (tag_late && kept >= 0)
-                tagged = file_xattrs_copy_in(in, null, out, null,
-                                             (string_address) "cp", null, names,
-                                             sizeof(names), value,
-                                             sizeof(value));
-        system_close(in);
-        bipolar closed = system_close(out);
-
-        //      Attributes it could not carry leave the name to the serial
-        //      copy, which says why.
-        if (!copied || tagged < 0 || kept < 0 || closed < 0)
-        {
-                (void)system_remove_at(item->target, name, 0);
-                item->result = tagged < 0 ? -ERROR_AGAIN : -ERROR_INPUT_OUTPUT;
-                return;
-        }
-        item->result = 0;
-}
-
-static bool cp_batch_replay(walk_batch address_to batch, positive depth)
-{
-        bool complete = true;
-
-        for (positive index = 0; index < batch->count; index++)
-        {
-                walk_batch_item address_to item = batch->items + index;
-                string_address name = (string_address)batch->text + item->name;
-                string_address from = (string_address)batch->text + item->path;
-                string_address to = (string_address)batch->text + item->extra;
-
-                switch (item->mark)
-                {
-                case CP_FILE:
-                        if (item->result == 0)
-                        {
-                                if (cp_loud)
-                                        string_format(log, "%w -> %w\n",
-                                                      writer_shell_quoted_name, from,
-                                                      writer_shell_quoted_name, to);
-                                break;
-                        }
-                        //      fall through: the ordinary copy says why.
-                case CP_SERIAL:
-                        if (!file_copy_one(item->directory, name, from, item->target,
-                                           name, to, depth - item->depth, false,
-                                           false, false, null, -1, FILE_COPY_FRESH))
-                                complete = false;
-                        break;
-                case CP_DIR:
-                        if (cp_loud)
-                                string_format(log, "%w -> %w\n",
-                                              writer_shell_quoted_name, from,
-                                              writer_shell_quoted_name, to);
-                        break;
-                case CP_DIR_FAILED:
-                        string_format(log_error, "cp: cannot open directory %w: %s\n",
-                                      writer_shell_quoted_name, to,
-                                      file_reason(item->result));
-                        complete = false;
-                        break;
-                case CP_LONG:
-                        string_format(log_error, "cp: cannot copy '%w/%w': %s\n",
-                                      writer_terminal_quoted_name, from,
-                                      writer_terminal_quoted_name, name,
-                                      file_reason(-ERROR_NAME_TOO_LONG));
-                        complete = false;
-                        break;
-                case CP_DIR_DONE:
-                case CP_TOP_DONE:
-                {
-                        if (item->result < 0)
-                        {
-                                string_format(log_error, "cp: cannot read directory %w: %s\n",
-                                              writer_shell_quoted_name, from,
-                                              file_reason(item->result));
-                                complete = false;
-                        }
-                        if (item->mark == CP_TOP_DONE)
-                                break;
-
-                        file_facts address_to facts = batch->facts + index;
-                        //      A directory's ACLs and attributes, from the
-                        //      source directory it was made from.
-                        if (cp_preserve)
-                        {
-                                bipolar source = system_open_at(
-                                    AT_FDCWD, from,
-                                    FILE_READ | O_DIRECTORY | O_NOFOLLOW |
-                                        O_CLOEXEC);
-
-                                if (source >= 0 &&
-                                    file_xattrs_copy(source, item->target,
-                                                     (string_address) "cp",
-                                                     to) < 0)
-                                        complete = false;
-                                if (source >= 0)
-                                        system_close(source);
-                        }
-                        bipolar attributed = cp_preserve
-                                                 ? file_keep_handle(item->target, -1, null, facts, true)
-                                                 : file_change_mode_handle(
-                                                       item->target,
-                                                       file_copy_creation_mode(facts));
-
-                        if (attributed < 0)
-                        {
-                                string_format(log_error,
-                                              "cp: cannot preserve attributes for %w: %s\n",
-                                              writer_shell_quoted_name, to,
-                                              file_reason(attributed));
-                                complete = false;
-                        }
-                        system_close(item->target);
-                        break;
-                }
-                }
-        }
-        return complete;
-}
-
-#if defined(LIBRARY_THREAD_RUNTIME)
 /*
         cp -r below a directory cp made itself, over parallel_tree.
 
@@ -33587,7 +32615,7 @@ static bool cp_batch_replay(walk_batch address_to batch, positive depth)
         the destination: every directory on that path was made 0700 by this
         command and is given its mode only once everything under it is in,
         so nobody else can have put anything there.  A plain file is copied
-        in that job the way the batch form's job copies it; a subdirectory
+        in that job by cp_tree_file; a subdirectory
         is made there, fresh, before the pool opens its source.  Every name a
         job does not finish, and every name that is not a plain file or a
         directory this caller can read, goes to the ordinary one-name copy in
@@ -33596,8 +32624,7 @@ static bool cp_batch_replay(walk_batch address_to batch, positive depth)
         its own words.  A directory gets its mode, or what -p keeps, in its
         leave -- unless a name in it went to the sink, whose copy lands in it
         after any job has finished: then the sink gives the directory its
-        mode after that copy, in walk order, which is where the batch form
-        gave it.  -v's lines and every complaint are said in the sink in walk
+        mode after that copy, in walk order.  -v's lines and every complaint are said in the sink in walk
         order.  There is no depth limit.
 */
 typedef struct cp_tree_node
@@ -33718,7 +32745,7 @@ static bool cp_tree_put(parallel_output address_to output, p8 kind, bipolar code
                              name, name_length);
 }
 
-//      The batch form's job: true when the copy is whole and kept.
+//      One plain file's copy inside a job: true when it is whole and kept.
 static bool cp_tree_file(bipolar source, bipolar copy, string_address name)
 {
         file_facts facts;
@@ -34198,6 +33225,8 @@ static bool cp_tree_sink(address_any context, address_any node_address,
         return true;
 }
 
+/* The copy of what is in source_handle into destination_handle, a directory
+   this cp made; false when anything below could not be copied. */
 static bool cp_tree_parallel(bipolar source_handle, string_address source_shown,
                              bipolar destination_handle,
                              string_address destination_shown, positive depth)
@@ -34235,173 +33264,6 @@ static bool cp_tree_parallel(bipolar source_handle, string_address source_shown,
                 return false;
         }
         return cp_tree_complete;
-}
-#endif
-
-/* The copy of what is in source_handle into destination_handle, a directory
-   this cp made; false when anything below could not be copied. */
-static bool cp_tree_batched(bipolar source_handle, string_address source_shown,
-                            bipolar destination_handle,
-                            string_address destination_shown, positive depth)
-{
-#if defined(LIBRARY_THREAD_RUNTIME)
-        return cp_tree_parallel(source_handle, source_shown, destination_handle,
-                                destination_shown, depth);
-#endif
-        walk address_to walker = address_of cp_walker;
-        walk_batch address_to batch = address_of cp_batch;
-        positive source_length = string_length(source_shown);
-        positive source_separator = source_length && source_shown[source_length - 1] != '/';
-        positive destination_length = string_length(destination_shown);
-        positive destination_separator =
-            destination_length && destination_shown[destination_length - 1] != '/';
-        bool complete = true;
-        bool walking = true;
-        p8 to[FILE_PATH_MAX];
-
-        if (!walk_start_borrowed(walker, source_handle, source_shown, true))
-                return false;
-        cp_made[0].handle = destination_handle;
-
-        while (walking)
-        {
-                walk_item address_to item = null;
-
-                while (!walk_batch_full_at(walker, batch, CP_BATCH_HANDLES) &&
-                       (item = walk_next(walker)))
-                {
-                        positive level = item->depth;
-                        walk_batch_item address_to kept = null;
-                        positive to_length = 0;
-
-                        //      Where the name lands: the destination, then the
-                        //      part of the source path below the source.
-                        if (item->path)
-                        {
-                                string_address below = item->path + source_length +
-                                                       (level ? source_separator : 0);
-                                positive below_length = string_length(below);
-
-                                to_length = destination_length +
-                                            (below_length ? destination_separator : 0) +
-                                            below_length;
-                                if (to_length < FILE_PATH_MAX)
-                                {
-                                        memory_copy_apart(to, destination_shown, destination_length);
-                                        if (below_length && destination_separator)
-                                                to[destination_length] = '/';
-                                        memory_copy_apart(to + destination_length +
-                                                              (below_length ? destination_separator : 0),
-                                                          below, below_length + 1);
-                                }
-                        }
-
-                        if (item->event == WALK_LEAVE)
-                        {
-                                kept = walk_batch_add(batch, item, level ? CP_DIR_DONE : CP_TOP_DONE);
-                                if (kept)
-                                {
-                                        kept->result = (b32)item->error;
-                                        kept->target = cp_made[level].handle;
-                                        batch->facts[batch->count - 1] = cp_made[level].facts;
-                                }
-                                goto added;
-                        }
-
-                        if (!item->path || to_length >= FILE_PATH_MAX)
-                        {
-                                //      Named by the directory above and the
-                                //      name, as the ordinary copy names it.
-                                string_address parent = item->path ? item->path : item->parent;
-                                positive parent_length = item->path
-                                                             ? item->path_length - string_length(item->name) -
-                                                                   (level > 1 || source_separator ? 1 : 0)
-                                                             : string_length(item->parent);
-
-                                kept = walk_batch_add(batch, item, CP_LONG);
-                                if (kept)
-                                {
-                                        kept->path = walk_batch_text(batch, (p8 address_to)parent,
-                                                                     parent_length);
-                                        if (kept->path == positive_max)
-                                                kept = null;
-                                }
-                                goto added;
-                        }
-
-                        if (item->type == DT_REG)
-                                kept = walk_batch_add(batch, item, CP_FILE);
-                        else if (item->type == DT_DIR && level < depth)
-                        {
-                                bipolar entered = walk_enter(walker, O_NOFOLLOW);
-                                file_facts facts;
-                                bipolar looked = entered < 0
-                                                     ? entered
-                                                     : file_look_code(entered, (string_address)"",
-                                                                      AT_EMPTY_PATH, address_of facts);
-
-                                if (looked >= 0 && (facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
-                                        looked = -ERROR_AGAIN;
-                                if (looked < 0)
-                                {
-                                        if (entered >= 0)
-                                                walk_abandon(walker);
-                                        kept = walk_batch_add(batch, item, CP_SERIAL);
-                                        goto targeted;
-                                }
-
-                                bipolar made = file_copy_directory_fresh(
-                                    cp_made[level - 1].handle, item->name);
-
-                                if (made < 0)
-                                {
-                                        walk_abandon(walker);
-                                        kept = walk_batch_add(batch, item, CP_DIR_FAILED);
-                                        if (kept)
-                                                kept->result = (b32)made;
-                                        goto targeted;
-                                }
-
-                                cp_made[level].handle = made;
-                                cp_made[level].facts = facts;
-                                kept = walk_batch_add(batch, item, CP_DIR);
-                        }
-                        else
-                                kept = walk_batch_add(batch, item, CP_SERIAL);
-targeted:
-                        if (kept)
-                        {
-                                kept->target = cp_made[level - 1].handle;
-                                kept->extra = walk_batch_text(batch, to, to_length);
-                                if (kept->extra == positive_max)
-                                        kept = null;
-                        }
-added:
-                        if (!kept)
-                        {
-                                log_error("cp: out of memory while walking the tree\n", 0);
-                                complete = false;
-                                walking = false;
-                                break;
-                        }
-                }
-
-                if (!item)
-                        walking = false;
-
-                (void)file_transfer_prepare();
-                walk_batch_run(batch, cp_copy_job, batch);
-                if (!cp_batch_replay(batch, depth))
-                        complete = false;
-                walk_batch_next(walker, batch);
-        }
-
-        //      A walk that stopped early still holds directories it made.
-        for (positive level = walker->depth; level > 1; level--)
-                system_close(cp_made[level - 1].handle);
-        walk_end(walker);
-        walk_batch_next(walker, batch);
-        return complete;
 }
 
 /* cp and cross-device mv copy the same object graph. Only source removal,
@@ -34729,16 +33591,24 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 }
         }
 
+        /* Under a backup GNU looks at a destination without following it,
+           as cp_pair does: a dangling link there is a name to weigh, back
+           up and replace, not a destination that is missing. */
+        bool weighed_link = file_backup_kind && !destination_exists &&
+                            destination_is_link;
+
         if (!moving && kind != MODE_DIRECTORY &&
             !(named && cp_destination_decided) &&
             !file_overwrite_allowed((string_address)"cp", destination_shown,
-                                    destination_exists,
+                                    destination_exists || weighed_link,
                                     cp_update_policy == 'n' ||
                                         cp_update_policy == 'F',
                                     cp_update_policy == 'u', cp_ask,
                                     cp_update_policy == 'F',
                                     cp_loud, address_of facts,
-                                    address_of there, address_of cp_status))
+                                    weighed_link ? address_of destination_entry
+                                                 : address_of there,
+                                    address_of cp_status))
         {
                 /* -u left a destination that is not older, and GNU still
                    remembers it as this file's copy, so the file's other
@@ -34782,6 +33652,27 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 return string_report(log_error, false, "cp: cannot stat %w: %s\n",
                                      writer_shell_quoted_name, destination_shown,
                                      file_reason(there_looked));
+
+        /* A name inside a tree is backed up as a named one is: cp_pair made
+           the named operand's backup, and nothing made one for what -r met
+           below it, so cp -rb x/d t overwrote t/d/f and kept nothing. GNU's
+           copy_internal backs up every destination that is not a directory. */
+        if (!moving && !named && !fresh && file_backup_kind &&
+            kind != MODE_DIRECTORY && destination_entry_exists &&
+            (destination_entry.mode & MODE_FORMAT) != MODE_DIRECTORY)
+        {
+                if (!file_backup_made_at(program, destination_directory,
+                                         destination, destination_shown,
+                                         address_of destination_entry))
+                        return false;
+                if (file_backup_did)
+                {
+                        destination_exists = false;
+                        destination_entry_exists = false;
+                        destination_is_link = false;
+                        there_looked = entry_looked = -ERROR_NO_ENTRY;
+                }
+        }
 
         /* GNU copy.c emit_verbose before the copy, so a later open/create
            failure still writes the arrow. -n skip above does not. A
@@ -35265,9 +34156,9 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         if (staged && !moving && !cp_hard && !cp_symbolic && !cp_attributes_only &&
             !file_debug)
         {
-                complete = cp_tree_batched(walk.handle, source_shown,
-                                           destination_handle, destination_shown,
-                                           depth);
+                complete = cp_tree_parallel(walk.handle, source_shown,
+                                            destination_handle, destination_shown,
+                                            depth);
                 walk.have = walk.at = 0;
         }
 
@@ -38443,75 +37334,7 @@ static bool rm_tree(bipolar directory, string_address name, string_address shown
         return complete;
 }
 
-/*
-        rm -r of a directory when nothing asks a question or reports a name,
-        in batches over the walk.
-
-        The walk enters directories, and a name the listing calls plain is an
-        unlink for a pool job through the directory handle the walk holds.
-        Each batch is then read back in walk order: a name that would not go
-        is reported once, where it was met, and every directory above it is
-        known to stay, so no removal of those is tried or reported -- the
-        reference rm says what it could not remove and nothing about the
-        directories that therefore still hold it. A directory is removed once
-        everything read out of it is gone, through its name where nobody but
-        the caller and root can write its parent, and pinned anywhere else.
-*/
-enum
-{
-        RM_UNLINK = 1,
-        RM_ENTER,
-        RM_FAILED,
-        RM_RMDIR,
-};
-
-enum
-{
-        RM_FAILED_LONG = 1,
-        RM_FAILED_REMOVE,
-        RM_FAILED_READ,
-        RM_FAILED_DEEP,
-        RM_FAILED_ROOT,
-};
-
-static walk rm_walker;
-static walk_batch rm_batch;
 static p32 rm_user;
-
-// The walk's side: each entered directory's facts and whether its entries
-// can be exchanged by anyone else.
-static struct
-{
-        file_facts facts;
-        bool trusted;
-} rm_entered[WALK_LEVELS];
-
-// The replay's side: whether something under a directory stayed.
-static bool rm_kept[WALK_LEVELS];
-
-static fn rm_unlink_job(address_any context, positive index)
-{
-        walk_batch address_to batch = (walk_batch address_to)context;
-        walk_batch_item address_to item = batch->items + index;
-
-        if (item->mark == RM_UNLINK)
-                item->result = (b32)system_remove_at(
-                    item->directory, (string_address)batch->text + item->name, 0);
-}
-
-static walk_batch_item address_to rm_failed(walk_batch address_to batch,
-                                            walk_item address_to item,
-                                            p8 why, bipolar code)
-{
-        walk_batch_item address_to kept = walk_batch_add(batch, item, RM_FAILED);
-
-        if (kept)
-        {
-                kept->spare = why;
-                kept->result = (b32)code;
-        }
-        return kept;
-}
 
 /* An operand spelled with a trailing slash reaches the directory a link
    names, and is read through it; but the name removed is the link's, which
@@ -38532,143 +37355,6 @@ static bool rm_through_link(string_address path)
                (facts.mode & MODE_FORMAT) == MODE_LINK;
 }
 
-static fn rm_stays(positive depth)
-{
-        for (positive above = 0; above < depth; above++)
-                rm_kept[above] = true;
-}
-
-static fn rm_batch_replay(walk_batch address_to batch)
-{
-        for (positive index = 0; index < batch->count; index++)
-        {
-                walk_batch_item address_to item = batch->items + index;
-                string_address name = (string_address)batch->text + item->name;
-                string_address shown = (string_address)batch->text + item->path;
-                positive depth = item->depth;
-                bipolar code = item->result;
-
-                if (item->mark == RM_ENTER)
-                {
-                        rm_kept[depth] = false;
-                        continue;
-                }
-
-                if (item->mark == RM_UNLINK && code == 0)
-                {
-                        if (rm_loud)
-                                string_format(log, "removed %w\n",
-                                              writer_shell_quoted_name, shown);
-                        continue;
-                }
-
-                /*      A directory that would not open is removed if it is
-                        empty, as the reference rm does; if it is not, what
-                        is reported is why it could not be read into. */
-                if (item->mark == RM_FAILED && item->spare == RM_FAILED_READ &&
-                    !(rm_force && code == -ERROR_NO_ENTRY))
-                {
-                        file_facts facts;
-                        bipolar gone = file_look_code(item->directory, name,
-                                                      AT_SYMLINK_NOFOLLOW,
-                                                      address_of facts);
-
-                        if (gone >= 0 && (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
-                                gone = rm_remove_same(item->directory, name,
-                                                        AT_REMOVEDIR,
-                                                        address_of facts);
-                        else if (gone >= 0)
-                                gone = -ERROR_NOT_DIRECTORY;
-                        if (gone == 0)
-                        {
-                                if (rm_loud)
-                                        string_format(log, "removed directory %w\n",
-                                                      writer_shell_quoted_name, shown);
-                                continue;
-                        }
-                        item->spare = RM_FAILED_REMOVE;
-                }
-
-                if (item->mark == RM_RMDIR)
-                {
-                        if (code < 0)
-                        {
-                                string_format(log_error, "rm: cannot read %w: %s\n",
-                                              writer_shell_quoted_name, shown,
-                                              file_reason(code));
-                                rm_status = 1;
-                                rm_kept[depth] = true;
-                        }
-                        if (rm_kept[depth])
-                        {
-                                rm_stays(depth);
-                                continue;
-                        }
-
-                        code = item->spare
-                                   ? system_remove_at(item->directory, name,
-                                                      AT_REMOVEDIR)
-                                   : !depth && rm_through_link(name)
-                                   ? -ERROR_NOT_DIRECTORY
-                                   : rm_remove_same(item->directory, name,
-                                                      AT_REMOVEDIR,
-                                                      batch->facts + index);
-                        if (code == 0)
-                        {
-                                if (rm_loud)
-                                        string_format(log, "removed directory %w\n",
-                                                      writer_shell_quoted_name, shown);
-                                continue;
-                        }
-                }
-
-                if (item->mark == RM_FAILED && item->spare == RM_FAILED_LONG)
-                        string_format(log_error, "rm: cannot remove '%w/%w': %s\n",
-                                      writer_terminal_quoted_name, shown,
-                                      writer_terminal_quoted_name, name,
-                                      file_reason(-ERROR_NAME_TOO_LONG));
-                else if (item->mark == RM_FAILED && item->spare == RM_FAILED_DEEP)
-                        string_format(log_error, "rm: %w is nested too deep\n",
-                                      writer_shell_quoted_name, shown);
-                else if (item->mark == RM_FAILED && item->spare == RM_FAILED_ROOT)
-                        string_format(log_error, "rm: refusing to read %w: preserved root directory\n",
-                                      writer_shell_quoted_name, shown);
-                else
-                {
-                        // -f forgives only a name that is not there, and a
-                        // name that is not there holds nothing up.
-                        if (rm_force && code == -ERROR_NO_ENTRY)
-                                continue;
-
-                        if (item->mark == RM_UNLINK)
-                        {
-                                file_facts facts;
-                                bipolar looked = file_look_code(item->directory, name,
-                                                                AT_SYMLINK_NOFOLLOW,
-                                                                address_of facts);
-
-                                if (looked < 0)
-                                        code = looked;
-                        }
-
-                        string_format(log_error,
-                                      item->mark == RM_FAILED &&
-                                              item->spare == RM_FAILED_READ
-                                          ? "rm: cannot read '%w': %s\n"
-                                          : "rm: cannot remove '%w': %s\n",
-                                      writer_terminal_quoted_name, shown,
-                                      file_reason(code));
-                }
-
-                rm_status = 1;
-                rm_stays(item->mark == RM_RMDIR || item->mark == RM_UNLINK ||
-                                 item->mark == RM_FAILED
-                             ? depth
-                             : 0);
-        }
-}
-
-#if defined(LIBRARY_THREAD_RUNTIME)
 /*
         rm -r over parallel_tree.  A directory's plain names are unlinked in
         the job that reads it, and the directory is removed in its own leave,
@@ -38681,8 +37367,7 @@ static fn rm_batch_replay(walk_batch address_to batch)
         it is tried.  A subdirectory the caller cannot read is handled by the
         job reading its parent, where the pool could not open it: removed if
         it is empty, reported if not.  Every line is said in the sink in walk
-        order, which is where the batch form said it.  There is no depth
-        limit.
+        order.  There is no depth limit.
 */
 typedef struct rm_tree_node
 {
@@ -39157,168 +37842,6 @@ static fn rm_tree_parallel(string_address root, file_facts address_to facts)
         rm_tree_top = null;
         memory_give(top);
 }
-#endif
-
-static fn rm_batched(string_address root, file_facts address_to facts)
-{
-#if defined(LIBRARY_THREAD_RUNTIME)
-        rm_tree_parallel(root, facts);
-        return;
-#endif
-        walk address_to walker = address_of rm_walker;
-        walk_batch address_to batch = address_of rm_batch;
-        walk_item address_to item;
-
-        rm_user = (p32)system_call(syscall(geteuid));
-        walk_start(walker, root, true);
-        item = walk_next(walker);
-
-        bipolar opened = walk_enter(walker, O_NOFOLLOW);
-        file_facts inside;
-        bipolar looked = opened < 0 ? opened
-                                    : file_look_code(opened, (string_address)"",
-                                                     AT_EMPTY_PATH, address_of inside);
-
-        if (looked >= 0 &&
-            (!file_same_identity(facts, address_of inside) ||
-             (inside.mode & MODE_FORMAT) != MODE_DIRECTORY))
-                looked = -ERROR_AGAIN;
-        if (looked < 0)
-        {
-                if (opened >= 0)
-                        walk_abandon(walker);
-                if (rm_force && looked == -ERROR_NO_ENTRY)
-                        return;
-                if (looked != -ERROR_AGAIN &&
-                    rm_remove_same(AT_FDCWD, root, AT_REMOVEDIR, facts) == 0)
-                {
-                        if (rm_loud)
-                                string_format(log, "removed directory %w\n",
-                                              writer_shell_quoted_name, root);
-                        return;
-                }
-                string_format(log_error, "rm: cannot remove %w: %s\n",
-                              writer_shell_quoted_name, root,
-                              file_reason(looked));
-                rm_status = 1;
-                return;
-        }
-
-        rm_entered[0].facts = inside;
-        rm_entered[0].trusted = (inside.owner == rm_user || inside.owner == 0) &&
-                                !(inside.mode & 0022);
-        rm_kept[0] = false;
-
-        bool walking = true;
-
-        while (walking)
-        {
-                item = null;
-
-                while (!walk_batch_full(walker, batch) && (item = walk_next(walker)))
-                {
-                        positive depth = item->depth;
-                        walk_batch_item address_to kept = null;
-
-                        if (item->event == WALK_LEAVE)
-                        {
-                                kept = walk_batch_add(batch, item, RM_RMDIR);
-                                if (kept)
-                                {
-                                        kept->result = (b32)item->error;
-                                        kept->spare = depth ? rm_entered[depth - 1].trusted : 0;
-                                        batch->facts[batch->count - 1] = rm_entered[depth].facts;
-                                }
-                        }
-                        else if (!item->path)
-                                kept = rm_failed(batch, item, RM_FAILED_LONG, 0);
-                        else if (item->type != DT_DIR && item->type != 0)
-                                kept = walk_batch_add(batch, item, RM_UNLINK);
-                        else
-                        {
-                                //      A kind the listing would not give is
-                                //      unlinked here first, as a serial rm
-                                //      does: for a file that is all of it.
-                                bipolar tried = -ERROR_IS_DIRECTORY;
-                                file_facts entry;
-
-                                if (item->type == 0)
-                                {
-                                        tried = system_remove_at(item->directory,
-                                                                 item->name, 0);
-                                        if (tried == 0)
-                                                continue;
-
-                                        bipolar seen = file_look_code(
-                                            item->directory, item->name,
-                                            AT_SYMLINK_NOFOLLOW, address_of entry);
-
-                                        if (seen < 0 ||
-                                            (entry.mode & MODE_FORMAT) != MODE_DIRECTORY)
-                                        {
-                                                kept = rm_failed(batch, item, RM_FAILED_REMOVE,
-                                                                 seen < 0 ? seen : tried);
-                                                if (kept && rm_force && tried == -ERROR_NO_ENTRY)
-                                                        kept->result = -ERROR_NO_ENTRY;
-                                                goto added;
-                                        }
-                                }
-
-                                if (depth >= FILE_MAX_DEPTH)
-                                {
-                                        kept = rm_failed(batch, item, RM_FAILED_DEEP, 0);
-                                        goto added;
-                                }
-
-                                bipolar entered = walk_enter(walker, O_NOFOLLOW);
-                                bipolar seen = entered < 0
-                                                   ? entered
-                                                   : file_look_code(entered, (string_address)"",
-                                                                    AT_EMPTY_PATH,
-                                                                    address_of entry);
-
-                                if (seen < 0)
-                                {
-                                        if (entered >= 0)
-                                                walk_abandon(walker);
-                                        kept = rm_failed(batch, item, RM_FAILED_READ, seen);
-                                        goto added;
-                                }
-
-                                if (rm_preserve_root &&
-                                    file_same_identity(address_of entry, address_of rm_root))
-                                {
-                                        walk_abandon(walker);
-                                        kept = rm_failed(batch, item, RM_FAILED_ROOT, 0);
-                                        goto added;
-                                }
-
-                                rm_entered[depth].facts = entry;
-                                rm_entered[depth].trusted =
-                                    (entry.owner == rm_user || entry.owner == 0) &&
-                                    !(entry.mode & 0022);
-                                kept = walk_batch_add(batch, item, RM_ENTER);
-                        }
-added:
-                        if (!kept)
-                        {
-                                log_error("rm: out of memory while walking the tree\n", 0);
-                                rm_status = 1;
-                                walking = false;
-                                break;
-                        }
-                }
-
-                if (!item)
-                        walking = false;
-
-                walk_batch_run(batch, rm_unlink_job, batch);
-                rm_batch_replay(batch);
-                walk_batch_next(walker, batch);
-        }
-
-        walk_end(walker);
-}
 
 static const argument_option rm_options[] = {
     {"dir", 'd'},
@@ -39518,14 +38041,6 @@ static b32 file_rm()
                         path = rm_trimmed;
                 }
 
-                if (rm_recursive && rm_dot_operand(path))
-                {
-                        string_format(log_error, "rm: refusing to remove '.' or '..' directory: skipping %w\n",
-                                      writer_shell_quoted_name, path);
-                        rm_status = 1;
-                        continue;
-                }
-
                 looked = file_look_code(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW,
                                         address_of facts);
 
@@ -39545,6 +38060,17 @@ static b32 file_rm()
                                 rm_status = 1;
                         }
 
+                        continue;
+                }
+
+                /* After the look, as fts meets a root: nonexist/.. is a
+                   name that is not there -- forgiven by -f, reported
+                   without it -- before it is a dot to refuse. */
+                if (rm_recursive && rm_dot_operand(path))
+                {
+                        string_format(log_error, "rm: refusing to remove '.' or '..' directory: skipping %w\n",
+                                      writer_shell_quoted_name, path);
+                        rm_status = 1;
                         continue;
                 }
 
@@ -39613,12 +38139,11 @@ static b32 file_rm()
 
                 if (here && rm_recursive && rm_prompting != 'i' && !rm_sometimes &&
                     !rm_one_system)
-                        rm_batched(path, address_of facts);
+                        rm_tree_parallel(path, address_of facts);
                 else
                         rm_tree(AT_FDCWD, path, path, RM_TREE_DEPTH);
         }
 
-        walk_batch_end(address_of rm_batch);
         log_flush();
 
         return rm_status;
@@ -39867,16 +38392,17 @@ static b32 file_touch()
 
         if (written)
         {
-                // Relative dates start from each reference timestamp,
-                // including its own fraction; absolute dates replace it.
-                b64 now = from ? 0 : file_now();
+                // Relative dates start from each reference timestamp, or
+                // from now, fraction and all; absolute dates replace it.
+                positive now_ns = 0;
+                b64 now = from ? 0 : file_now_exact(address_of now_ns);
                 for (positive at = 0; at < 4; at += 2)
                 {
                         b64 seconds;
                         positive fraction;
                         if (!file_moment_read_from(written,
                                                    from ? (b64)times[at] : now,
-                                                   from ? times[at + 1] : 0,
+                                                   from ? times[at + 1] : now_ns,
                                                    address_of seconds,
                                                    address_of fraction))
                                 return string_report(log_error, 1, "touch: invalid date format '%w'\n", writer_terminal_quoted_name, written);
@@ -42797,8 +41323,14 @@ static b32 file_seq()
 
                 scale = max(number[0].scale, max(number[1].scale, number[2].scale));
                 exact = seq_decimal_dyadic(number[0]) && seq_decimal_dyadic(number[1]);
+                /* A field that could come within reach of INT_MAX with the
+                   text around it is the wide road's, which measures each one
+                   as glibc does before writing it: seq -f %.2147483646f 1 1
+                   wrote two gigabytes here where GNU's printf refuses it. The
+                   margin is more than any long double's integer digits. */
+                positive reach = SEQ_INT_MAX - 8192 - format.prefix - format.suffix;
                 decimal = (format.conversion | 0x20) == 'f' &&
-                          format.width <= SEQ_INT_MAX && shown <= SEQ_INT_MAX &&
+                          format.width <= reach && shown <= reach &&
                           shown >= scale && !number[0].infinite && !number[1].infinite &&
                           seq_decimal_rescale(address_of number[0], scale) &&
                           seq_decimal_rescale(address_of number[1], scale) &&
@@ -47622,19 +46154,6 @@ static fn date_operand(b32 index)
         date_operand_count++;
 }
 
-//      Now, to the nanosecond, which a date that names no time of day
-//      keeps (date -d '+1 hour' is now and an hour, fraction and all).
-static positive date_now_ns;
-
-static b64 date_now_seconds()
-{
-        p64 wall[2] = {0, 0};
-
-        system_call_2(syscall(clock_gettime), 0, (positive)wall);
-        date_now_ns = (positive)wall[1];
-        return (b64)wall[0];
-}
-
 //      The format as given, which --debug names before each date.
 static string_address date_given_format;
 
@@ -47669,7 +46188,10 @@ static bool date_emit(string_address format, b64 when, positive nanoseconds)
         return true;
 }
 
-static bool date_batch(string_address path, string_address format, b64 now)
+/* now_ns is now's fraction, which a date that names no time of day keeps
+   (date -d '+1 hour' is now and an hour, fraction and all). */
+static bool date_batch(string_address path, string_address format, b64 now,
+                       positive now_ns)
 {
         bipolar handle;
         bool close_handle = false;
@@ -47745,7 +46267,7 @@ static bool date_batch(string_address path, string_address format, b64 now)
                 p8 saved = lines.bytes[length];
 
                 lines.bytes[length] = end;
-                if (!pd_parse(lines.bytes, now, date_now_ns, pd_debug, address_of when,
+                if (!pd_parse(lines.bytes, now, now_ns, pd_debug, address_of when,
                               address_of ns))
                 {
                         string_format(log_error, "date: invalid date '%w'\n",
@@ -47869,7 +46391,10 @@ static b32 file_date()
 
         if (batch)
         {
-                status = date_batch(batch, format, date_now_seconds()) ? 0 : 1;
+                positive now_ns;
+                b64 now = file_now_exact(address_of now_ns);
+
+                status = date_batch(batch, format, now, now_ns) ? 0 : 1;
                 return file_output_told((string_address) "date") ? status : 1;
         }
 
@@ -47899,21 +46424,16 @@ static b32 file_date()
         {
                 string_address text = set_text ? set_text : given;
 
-                b64 now = date_now_seconds();
+                positive now_ns;
+                b64 now = file_now_exact(address_of now_ns);
 
-                if (!pd_parse(text, now, date_now_ns, pd_debug,
+                if (!pd_parse(text, now, now_ns, pd_debug,
                               address_of when, address_of nanoseconds))
                         return string_report(log_error, 1,
                                              "date: invalid date '%w'\n", writer_terminal_quoted_name, text);
         }
         else
-        {
-                p64 wall[2] = {0, 0};
-
-                system_call_2(syscall(clock_gettime), 0, (positive)wall);
-                when = (b64)wall[0];
-                nanoseconds = (positive)wall[1];
-        }
+                when = file_now_exact(address_of nanoseconds);
 
         if (set_date)
         {
@@ -48067,6 +46587,21 @@ static fn xargs_item_put(p8 letter)
         }
 
         xargs_item[xargs_item_length++] = letter;
+}
+
+// As many puts of a run of bytes: what fits is kept, and the rest marks the
+// item broken.
+static fn xargs_item_append(p8 address_to bytes, positive length)
+{
+        positive fits = xargs_item_room - 1 - xargs_item_length;
+
+        if (length > fits)
+        {
+                xargs_item_broken = true;
+                length = fits;
+        }
+        memory_copy_apart(xargs_item + xargs_item_length, bytes, length);
+        xargs_item_length += length;
 }
 
 /*
@@ -49310,49 +47845,45 @@ static b32 file_xargs()
                 {
                         p8 letter = xargs_buffer[at];
 
-                        if (!letter && !xargs_null && !xargs_delimited &&
-                            !xargs_said_nul)
+                        /* -0 and -d: the item is everything up to the next
+                           separator, found with one scan and kept with one
+                           copy rather than a test and a store a byte. */
+                        if (xargs_delimited)
+                        {
+                                p8 address_to stop = memory_first_of(
+                                    xargs_buffer + at, xargs_delimiter,
+                                    (positive)got - at);
+                                positive run = stop
+                                                   ? (positive)(stop - (xargs_buffer + at))
+                                                   : (positive)got - at;
+
+                                if (run)
+                                {
+                                        xargs_item_append(xargs_buffer + at, run);
+                                        started = true;
+                                }
+                                at += run;
+                                if (!stop)
+                                {
+                                        at--;
+                                        continue;
+                                }
+
+                                xargs_item[xargs_item_length] = end;
+                                xargs_item_done();
+                                xargs_line_tick();
+                                xargs_item_length = 0;
+                                started = false;
+                                continue;
+                        }
+
+                        if (!letter && !xargs_said_nul)
                         {
                                 log_error("xargs: WARNING: a NUL character occurred in the "
                                           "input.  It cannot be passed through in the "
                                           "argument list.  Did you mean to use the --null "
                                           "option?\n", 0);
                                 xargs_said_nul = true;
-                        }
-
-                        if (xargs_delimited && !xargs_null)
-                        {
-                                if (letter != xargs_delimiter)
-                                {
-                                        xargs_item_put(letter);
-                                        started = true;
-                                        continue;
-                                }
-
-                                xargs_item[xargs_item_length] = end;
-                                xargs_item_done();
-                                xargs_line_tick();
-                                xargs_item_length = 0;
-                                started = false;
-                                continue;
-                        }
-
-                        if (xargs_null)
-                        {
-                                if (letter)
-                                {
-                                        xargs_item_put(letter);
-
-                                        started = true;
-                                        continue;
-                                }
-
-                                xargs_item[xargs_item_length] = end;
-                                xargs_item_done();
-                                xargs_line_tick();
-                                xargs_item_length = 0;
-                                started = false;
-                                continue;
                         }
 
                         if (escaped)
