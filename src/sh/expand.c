@@ -6399,6 +6399,42 @@ static inline INLINE positive shell_ansi_byte(p8 address_to into, p8 value, bool
 }
 
 /*
+        How many bytes of a character bash shows as itself start here: a
+        whole UTF-8 character under a UTF-8 locale, or none -- a byte that
+        begins nothing valid, and every high byte in any other locale, is
+        spelled as an octal escape.
+*/
+static positive shell_shown_character(const p8 address_to value, positive left)
+{
+        memory_utf8_state state = {0};
+        positive used = 0;
+        b32 fed = 0;
+
+        if (!shell_utf8_on())
+                return 0;
+        while (used < left &&
+               !(fed = memory_utf8_feed(address_of state, value[used])))
+                used++;
+        return used < left && fed == 1 ? used + 1 : 0;
+}
+
+// Whether a value holds a high byte bash will not show as itself.
+static bool shell_bytes_unshown(const p8 address_to value, positive length)
+{
+        for (positive at = 0; at < length; at++)
+                if (value[at] >= 0x80)
+                {
+                        positive shown = shell_shown_character(value + at,
+                                                               length - at);
+
+                        if (!shown)
+                                return true;
+                        at += shown - 1;
+                }
+        return false;
+}
+
+/*
         The value as bytes the shell would read back as itself.
 
         A single-quoted run holds anything but a quote, so that is the answer
@@ -6414,7 +6450,9 @@ static fn transform_quoted(string_address value, positive length, p8 mark)
         // it in $'...' the way bash 5.2 does. UTF-8 may keep it inside quotes.
         bool high = !shell_utf8_on();
         bool awkward = memory_escape_index(value, length,
-            HEX_CONTROL | HEX_TAB | (high ? HEX_HIGH : 0)) < length;
+            HEX_CONTROL | HEX_TAB | (high ? HEX_HIGH : 0)) < length ||
+                       (shell_bash_compat &&
+                        shell_bytes_unshown((const p8 address_to)value, length));
 
         if (!awkward)
         {
@@ -6453,6 +6491,26 @@ static fn transform_quoted(string_address value, positive length, p8 mark)
                                                         shell_quote_ansi);
                         expand_push_run(value + at, run, mark);
                         at += run;
+                        continue;
+                }
+                //      bash keeps a whole character and spells a byte
+                //      that is none in octal.
+                if (value[at] >= 0x80 && shell_bash_compat)
+                {
+                        positive shown = shell_shown_character(
+                            (const p8 address_to)value + at, length - at);
+
+                        if (shown)
+                        {
+                                expand_push_run(value + at, shown, mark);
+                                at += shown;
+                                continue;
+                        }
+                        p8 written[4];
+                        expand_push_run(written,
+                                        shell_ansi_byte(written, value[at++],
+                                                        true),
+                                        mark);
                         continue;
                 }
                 p8 written[4];

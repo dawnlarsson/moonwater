@@ -9222,10 +9222,55 @@ static fn shell_ansi_quoted(writer write, string_address text, bool high)
         write("'", 1);
 }
 
+/*
+        $'...' the way bash writes it: a whole character in the locale as
+        itself, a byte that is none as an octal escape, a control byte by its
+        name.
+*/
+static fn shell_ansi_quoted_shown(writer write, string_address text,
+                                  positive length)
+{
+        write("$'", 2);
+        for (positive at = 0; at < length;)
+        {
+                p8 escaped[4];
+                p8 value = (p8)text[at];
+                positive shown = value >= 0x80
+                    ? shell_shown_character((const p8 address_to)text + at,
+                                            length - at)
+                    : 0;
+
+                if (shown)
+                {
+                        write(text + at, shown);
+                        at += shown;
+                        continue;
+                }
+                if (shell_quote_ansi[value])
+                        write(address_of value, 1);
+                else
+                        write(escaped, shell_ansi_byte(escaped, value, true));
+                at++;
+        }
+        write("'", 1);
+}
+
 static fn shell_declare_quoted(writer write, string_address value)
 {
-        if (string_get(value + memory_escape_index(value, string_length(value),
-                                              HEX_CONTROL | HEX_TAB | HEX_HIGH)))
+        positive length = string_length(value);
+
+        //      bash keeps what is a character in its locale inside double
+        //      quotes, and takes $'...' only for a control byte or a byte
+        //      that is no character.
+        if (shell_bash_compat)
+        {
+                if (string_get(value + memory_escape_index(value, length,
+                                                      HEX_CONTROL | HEX_TAB)) ||
+                    shell_bytes_unshown((const p8 address_to)value, length))
+                        return shell_ansi_quoted_shown(write, value, length);
+        }
+        else if (string_get(value + memory_escape_index(value, length,
+                                                   HEX_CONTROL | HEX_TAB | HEX_HIGH)))
                 return shell_ansi_quoted(write, value, true);
 
         write("\"", 1);
@@ -9252,10 +9297,15 @@ static fn shell_declare_quoted(writer write, string_address value)
 
 // A subscript is written bare when it could be typed back bare, and quoted
 // the way a value is when it could not. Bash draws the line at a name.
+static COLD PURE bool shell_listing_quoted(string_address value);
+
 static COLD fn shell_declare_key(writer write, string_address key, positive length)
 {
         if (string_span_max(key, length, string_set_name) != length)
         {
+                //      bash writes a key bare when it holds nothing a shell
+                //      would read as syntax -- a-b, x/y, a character of the
+                //      locale -- and quotes @ alone, a leading ~ and the rest.
                 shell_mark held =
                     shell_store_mark(address_of expand_store);
                 p8 address_to kept = shell_store_take(
@@ -9264,7 +9314,16 @@ static COLD fn shell_declare_key(writer write, string_address key, positive leng
                 if (kept)
                 {
                         memory_copy_end(kept, key, length);
-                        shell_declare_quoted(write, kept);
+                        if (shell_bash_compat &&
+                            !(length == 1 && key[0] == '@') &&
+                            !shell_listing_quoted(kept) &&
+                            memory_escape_index(key, length,
+                                                HEX_CONTROL | HEX_TAB) >= length &&
+                            !shell_bytes_unshown((const p8 address_to)key,
+                                                 length))
+                                write(key, length);
+                        else
+                                shell_declare_quoted(write, kept);
                 }
 
                 shell_store_rewind(address_of expand_store, held);
@@ -9512,9 +9571,17 @@ static COLD PURE bool shell_listing_quoted(string_address value)
 
 static COLD fn shell_listing_value(writer write, string_address value)
 {
+        positive length = string_length(value);
+
+        //      A character of the locale is written as itself, as bash does;
+        //      $'...' is for a control byte or a byte that is none.
         if (!shell_posix_on() &&
-            string_get(value + memory_escape_index(value, string_length(value),
-                                              HEX_CONTROL | HEX_TAB | HEX_HIGH)))
+            (shell_bash_compat
+                 ? string_get(value + memory_escape_index(value, length,
+                                                     HEX_CONTROL | HEX_TAB)) ||
+                       shell_bytes_unshown((const p8 address_to)value, length)
+                 : string_get(value + memory_escape_index(
+                       value, length, HEX_CONTROL | HEX_TAB | HEX_HIGH))))
                 shell_declare_quoted(write, value);
         else if (shell_listing_quoted(value))
                 shell_quoted(write, value);
@@ -12035,11 +12102,19 @@ static COLD PURE bool printf_quote_wanted(p8 value)
 COLD fn printf_reusable(writer write, string_address text)
 {
         string_address step = text;
+        positive length = string_length(text);
         bool control = string_get(text + memory_escape_index(
-            text, string_length(text), HEX_CONTROL | HEX_TAB));
+            text, length, HEX_CONTROL | HEX_TAB));
 
         if (!string_get(text))
                 return write("''", 2);
+
+        //      bash spells a byte that is no character in its locale in
+        //      octal inside $'...' and keeps a whole character as itself.
+        if (shell_bash_compat &&
+            (control ||
+             shell_bytes_unshown((const p8 address_to)text, length)))
+                return shell_ansi_quoted_shown(write, text, length);
 
         if (control)
                 return shell_ansi_quoted(write, text, false);
