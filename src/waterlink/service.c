@@ -2062,8 +2062,7 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         if (psk)
         {
                 if (link_stamp_new(who, hello) &&
-                    link_pair_greeted(group, who, hello + WATERLINK_STAMP_BYTES,
-                                      address, port, now))
+                    link_pair_greeted(group, who, hello, address, port, now))
                         link_stamp_keep(who, hello);
                 goto forget;
         }

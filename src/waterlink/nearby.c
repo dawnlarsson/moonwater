@@ -249,10 +249,16 @@ static bool link_nearby_labels(void)
         or moved, when the record is the group's own. A record paired by hand
         or by another group is never replaced or widened. True when the
         member was new here.
+
+        The record keeps the seconds of the last greeting it took, which is
+        the replay marker that outlives the listener: the markers in memory
+        are gone after a restart, and a greeting recorded on the link, played
+        back from anywhere, would otherwise move the member there for good.
 */
 static bool link_pair_keep(positive group, p8 address_to key,
-                           p8 address_to offered, p8 address_to address,
-                           p16 port, bool address_to accepted)
+                           p8 address_to offered, p32 stamped,
+                           p8 address_to address, p16 port,
+                           bool address_to accepted)
 {
         struct waterlink_group_keys address_to keys = link_nearby.keys + group;
         link_peers peers;
@@ -286,12 +292,16 @@ static bool link_pair_keep(positive group, p8 address_to key,
                 peer->group = keys->mark;
                 new = changed = true;
         }
-        if (peer && peer->group == keys->mark &&
-            (memory_compare(peer->address, address, 16) || peer->port != port))
+        else if (peer && peer->group == keys->mark && stamped <= peer->seen)
+                peer = null;
+        if (peer && peer->group == keys->mark)
         {
+                changed |= peer->seen != stamped ||
+                           memory_compare(peer->address, address, 16) ||
+                           peer->port != port;
                 memory_copy(peer->address, address, 16);
                 peer->port = port;
-                changed = true;
+                peer->seen = stamped;
         }
         if (changed)
         {
@@ -554,12 +564,13 @@ static fn link_pair_begin(positive group, p8 address_to address, p16 port,
 
 //      A greeting that opened: the member is kept, and greeted back if new.
 static bool link_pair_greeted(positive group, p8 address_to key,
-                              p8 address_to name, p8 address_to address,
+                              p8 address_to hello, p8 address_to address,
                               p16 port, p64 now)
 {
         bool accepted;
 
-        if (link_pair_keep(group, key, name, address, port,
+        if (link_pair_keep(group, key, hello + WATERLINK_STAMP_BYTES,
+                           network_load_32(hello + 4), address, port,
                            address_of accepted))
                 link_pair_begin(group, address, port, now);
         return accepted;

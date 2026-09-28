@@ -64922,6 +64922,19 @@ static fn greetings(bipolar listener, p16 port)
         check("a member greeting from somewhere new is followed there",
               peers.count == 1 && peers.peer[0].port == port + 1);
 
+        //      A restart forgets the replay markers in memory, and with them
+        //      the admission buckets; the record's own marker is what still
+        //      refuses the greeting played back from somewhere else.
+        link_self.stamps = 0;
+        memory_zero(address_of link_self.admission, sizeof link_self.admission);
+        link_server_initiation(greeting, WATERLINK_DATAGRAM, wls_loopback,
+                               (p16)(port + 3), 1420000);
+        link_peers_load(address_of peers);
+        check("sec: after a restart, a greeting played back does not move the "
+              "member, and spends no replay slot",
+              peers.count == 1 && peers.peer[0].port == port + 1 &&
+                      link_self.stamps == 0);
+
         //      A peers file that is there and cannot be read is not an empty
         //      list: a new member's greeting must not save itself over it.
         {
