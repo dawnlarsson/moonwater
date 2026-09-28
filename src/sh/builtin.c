@@ -9855,6 +9855,7 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                                 {
                                         if (name_end)
                                                 *name_end = delimiter;
+                                        shell_compound_prepare_drop();
                                         return shell_answered(2, "local: too many\n");
                                 }
                                 goto no_room;
@@ -10095,6 +10096,7 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                 {
                         string_format(log_error, "%s: cannot assign list to array member\n", word);
                         address_to name_end = delimiter;
+                        shell_compound_prepare_drop();
                         return expand_fatal_status(1);
                 }
         store_value:
@@ -10164,6 +10166,7 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                                                        length);
                                 if (name_end)
                                         *name_end = delimiter;
+                                exec_compound_kept = false;
                                 return shell_answer(2);
                         }
                         goto no_room;
@@ -10205,11 +10208,17 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                 }
 
         next:
+                //      A list read ahead for a name this word never made
+                //      would otherwise be taken by a later word at the
+                //      same address, after its store was rewound.
+                shell_compound_prepare_drop();
                 if (name_end)
                         address_to name_end = delimiter;
                 continue;
 
         no_room:
+                shell_compound_prepare_drop();
+                exec_compound_kept = false;
                 if (name_end)
                         address_to name_end = delimiter;
                 return shell_answered(2, "%s: no room\n", local_mode ? (string_address)"local" : (string_address)"declare");
