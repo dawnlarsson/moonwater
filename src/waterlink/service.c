@@ -753,6 +753,7 @@ struct link_session {
         p64 keyings; // how many handshakes this session has made
         p64 heard;
         p64 spoke;
+        p64 noted; // the second the state file last had it seen
         struct waterlink_link address_to link;
 
         //      The streams, and the command behind them at the machine.
@@ -2198,6 +2199,7 @@ static bool link_carried(p8 address_to datagram, positive length,
         struct link_keys address_to keys;
         struct waterlink_part parts[WATERLINK_PARTS];
         bipolar count = 0;
+        bool moved;
 
         //      The header is read before the tag is, so a datagram too short
         //      to be one is refused before that read, whoever calls.
@@ -2239,14 +2241,18 @@ static bool link_carried(p8 address_to datagram, positive length,
                 s->next.live = false;
         }
 
-        if (memory_compare(s->address, address, 16) || s->port != port)
-                link_self.state_dirty = true;
+        moved = memory_compare(s->address, address, 16) || s->port != port;
+        link_self.state_dirty |= moved;
         memory_copy(s->address, address, 16);
         s->port = port;
         s->heard = now;
-        if (link_self.server)
+        //      Seen, to the second and from where: once a second a session,
+        //      or when it moves, and not every datagram -- a walk of every
+        //      peer seen, 180 ticks a datagram with 64 of them.
+        if (link_self.server && (s->noted != link_wall(now) || moved))
         {
-                link_note_seen(s, link_wall(now));
+                s->noted = link_self.wall;
+                link_note_seen(s, s->noted);
                 link_self.state_dirty = true;
         }
 

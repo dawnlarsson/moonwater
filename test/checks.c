@@ -64444,6 +64444,54 @@ static fn carried_is_atomic(void)
         crypto_forget(address_of sealing_key, sizeof sealing_key);
 }
 
+/*
+        The state file hears of a session once a second, and at once when it
+        moves -- not at every datagram, which walked every peer seen and
+        rewrote the file five times a second under any traffic.
+*/
+static fn seen_once_a_second(void)
+{
+        struct link_session address_to s = link_self.session;
+        struct waterlink_datagram head = {WATERLINK_KIND_CARRY, 0x10203041, 0};
+        crypto_aesgcm_key sealing_key;
+        p8 raw[16], datagram[64], from[16];
+        link_state address_to state = address_of link_self.state;
+        positive dirtied = 0;
+        bool noted;
+        p64 now;
+
+        link_self.server = true;
+        memory_zero(state, sizeof(address_to state));
+        check("a session for the seen table opens", link_session_open(s));
+        wls_seeded(raw, sizeof raw, 92);
+        link_keys_install(address_of s->now, raw, raw, head.receiver, 5);
+        crypto_aesgcm_prepare(address_of sealing_key, raw);
+        wls_seeded(s->peer, 32, 93);
+        memory_copy(from, wls_loopback, 16);
+        now = link_now();
+
+        for (positive n = 0; n < 8; n++)
+        {
+                head.counter = n;
+                memory_copy(datagram, address_of head, 16);
+                (void)waterlink_seal(address_of sealing_key, datagram, 0);
+                if (n == 5)
+                        from[15] = 7;
+                link_self.state_dirty = false;
+                noted = link_carried(datagram, 48, from, 4321, now + n, null);
+                dirtied += noted && link_self.state_dirty;
+        }
+        check("a session is seen where it is, once a second and again when it "
+              "moves",
+              state->seen_count == 1 &&
+                      !memory_compare(state->seen[0].key, s->peer, 32) &&
+                      !memory_compare(state->seen[0].address, from, 16) &&
+                      state->seen[0].port == 4321 && dirtied == 2);
+        link_session_close(s);
+        memory_zero(state, sizeof(address_to state));
+        link_self.server = false;
+}
+
 /*      The encrypted frame key and its first payload byte are both format
         discriminators.  Exercise the cross-channel confusion cases directly:
         valid authentication must not let an input record impersonate a local
@@ -65386,6 +65434,7 @@ b32 main(void)
         responder(listener, port);
         initiator_answer();
         carried_is_atomic();
+        seen_once_a_second();
         segment_runs(listener, port);
         in_order_sends(listener, port);
         coalesced_runs();
