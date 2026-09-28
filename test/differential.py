@@ -7124,12 +7124,15 @@ FILES_UTILITIES = (
                       ("a.txt", "b.txt", "c.txt"), (), ("",), ("a b/c d",), ("--", "-dash"), ("abc", "b", "extra"),
                       ("x" * 20000,), ("/short/" + "x" * 20000,), ("x" * 20000 + ".tail", ".tail"), ("a/", "/"),
                       ("///a///",)),
-            stdin=("empty",), fixture="files", stderr="exact"),
+            # GNU's usage errors end in the "Try" line, which upstream's
+            # basename.pl compares; this spec keeps it rather than the
+            # domain's default of hiding it.
+            stdin=("empty",), fixture="files", stderr="exact", normalize=lambda channel, data: data),
     Utility("dirname", options=(Option("-z"), Option("--zero")),
             operands=(("/usr/bin/ls",), ("/usr/bin/",), ("usr",), ("",), ("/",), ("//",), ("///",), ("/a",),
                       ("//a//b///",), ("/a/b", "/c", "./d"), (), ("a b/c d",), ("--", "-dash"), ("x" * 20000 + "/tail",),
                       ("/" + "x" * 20000 + "/tail",), ("x" * 20000 + "/tail/",), ("a/b/",), ("./a",), ("../a/..",)),
-            stdin=("empty",), fixture="files", stderr="exact"),
+            stdin=("empty",), fixture="files", stderr="exact", normalize=lambda channel, data: data),
     Utility("seq", options=(Option("-w"), Option("--equal-width"),
                             Option("-s", (",", "", "|", "::", "\n", " ", "x" * 17000), False),
                             Option("--separator", (",", ""), True),

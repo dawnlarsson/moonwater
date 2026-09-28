@@ -22103,14 +22103,15 @@ static b32 file_basename()
         bool many = (taking.flags & (FILE_FLAG('a') | FILE_FLAG('s'))) != 0;
 
         if (index >= count)
-                return string_report(log_error, 1, "%s: missing operand\n", (string_address) "basename");
+                return file_need_operand((string_address) "basename");
 
         if (!many && index + 1 < count)
                 suffix = program_argument((b32)(index + 1));
 
         if (!many && index + 2 < count)
         {
-                return string_report(log_error, 1, "basename: extra operand '%w'\n",
+                return string_report(log_error, 1, "basename: extra operand '%w'\n"
+                              "Try 'basename --help' for more information.\n",
                               writer_terminal_quoted_name, program_argument((b32)(index + 2)));
         }
 
@@ -22166,7 +22167,7 @@ static b32 file_dirname()
         positive count = (positive)program_argument_count();
 
         if (first >= count)
-                return string_report(log_error, 1, "%s: missing operand\n", (string_address) "dirname");
+                return file_need_operand((string_address) "dirname");
 
         while (first < count)
                 dirname_one(program_argument((b32)first++),
