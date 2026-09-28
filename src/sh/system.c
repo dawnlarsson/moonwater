@@ -34,7 +34,10 @@
 // nothing is left to reap anything.
 
 static string_address init_argv[] = {init_program, null};
-static string_address init_envp[] = {null};
+//      What init hands what it starts: not the kernel's HOME=/ and
+//      TERM=linux, but root's home, which the shell no longer makes up for
+//      itself when nothing gave it one.
+static string_address init_envp[] = {"HOME=/root", null};
 
 /*
         The network, brought up by the system rather than by whoever logs in.

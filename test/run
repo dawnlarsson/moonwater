@@ -11593,9 +11593,9 @@ says transcript 'the spark device'    'kraps/ved/'
 says transcript 'the shell on disk'   'llehs/'
 says transcript 'a file written'      'nettirw'
 says transcript 'and measured'        'bytes8'
-#       The shell defaults HOME to /root as it does PATH and LANG, and only
-#       when nothing gave it one; the kernel's HOME=/ and TERM=linux are what
-#       must not arrive.
+#       init hands what it starts HOME=/root, which the shell no longer
+#       makes up when nothing gave it one; the kernel's HOME=/ and TERM=linux
+#       are what must not arrive.
 says transcript 'empty init environment' 'bootenv-/root-unset'
 says transcript 'cached environment'   'cache-first'
 says transcript 'changed environment'  'cache-second'
