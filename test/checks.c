@@ -84333,6 +84333,255 @@ b32 main(void)
 }
 #endif /* BENCH_span_byte */
 
+#ifdef BENCH_net_parsers
+/*
+        The network parsers' byte loops against the lib.c routines that
+        could replace them, each timed at its real caller: the whole
+        dhcp_walk over an options field, the whole KeyUsage parse, the whole
+        request-component check. Each pair is two copies of the caller that
+        differ only in the loop, in alternating order per trial; a row is
+        the median lib.c/C time ratio, under 100% when lib.c wins.
+*/
+#include "../src/lib.util.c"
+#include "../src/net/net.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define NOT_INLINED __attribute__((noinline, noclone))
+#define TRIES 15
+#define ROUNDS 200000
+
+static volatile positive sink;
+
+NOT_INLINED static bipolar walk_pad(p8 address_to region, positive size,
+                                    bool library)
+{
+        positive at = 0;
+
+        while (at < size)
+        {
+                p8 option = region[at];
+
+                if (option == DHCP_OPTION_END)
+                {
+                        at++;
+                        if (library)
+                                return memory_span_byte(region + at,
+                                                        DHCP_OPTION_PAD,
+                                                        size - at) ==
+                                               size - at
+                                           ? 0
+                                           : -1;
+                        for (; at < size; at++)
+                                if (region[at] != DHCP_OPTION_PAD)
+                                        return -1;
+                        return 0;
+                }
+                if (option == DHCP_OPTION_PAD)
+                {
+                        at++;
+                        continue;
+                }
+                if (at + 1 >= size || at + 2 + region[at + 1] > size)
+                        return -1;
+                at += 2 + region[at + 1];
+        }
+        return -1;
+}
+
+NOT_INLINED static bipolar key_usage(p8 address_to value, positive length,
+                                     tls_cert address_to cert, bool library)
+{
+        positive at = 0;
+        positive stop = 0;
+        p8 unused;
+        p8 canonical_unused = 0;
+        p8 final;
+
+        if (tls_asn1_enter(value, length, 0x03, address_of at, address_of stop) ||
+            stop != length || at >= stop)
+                return TLS_FAIL;
+        unused = value[at++];
+        if (unused > 7 || at >= stop)
+                return TLS_FAIL;
+        final = value[stop - 1];
+        if (!final)
+                return TLS_FAIL;
+        if (library)
+                canonical_unused = (p8)bits_trailing_zeros(final);
+        else
+                while (!(final & 1))
+                {
+                        canonical_unused++;
+                        final >>= 1;
+                }
+        if (unused != canonical_unused)
+                return TLS_FAIL;
+        if (stop - at > 2 ||
+            (stop - at == 2 &&
+             (value[at + 1] != 0x80 || !(value[at] & 0x08))))
+                return TLS_FAIL;
+        cert->digital_signature = (value[at] & 0x80) != 0;
+        cert->key_cert_sign = (value[at] & 0x04) != 0;
+        return TLS_OK;
+}
+
+static p8 host_set[] =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._";
+
+NOT_INLINED static bool host_valid(string_address text, bool library)
+{
+        if (!string_get(text))
+                return false;
+        if (library)
+                return !string_get(text + string_span_of_set(text, host_set));
+        for (; string_get(text); text++)
+        {
+                p8 byte = string_get(text);
+
+                if (byte_is_control(byte) || byte == 0x7f || byte == ' ' ||
+                    (!byte_is_alnum(byte) && byte != '-' && byte != '.' &&
+                     byte != '_'))
+                        return false;
+        }
+        return true;
+}
+
+/* Target bytes outside the plain run: controls, space, '%', '\\', DEL and
+   every byte above it. Built once; the '%' escapes still take the peel. */
+static p8 target_reject[1 + 32 + 2 + 129];
+
+NOT_INLINED static bool target_plain(string_address text, bool library)
+{
+        if (library)
+        {
+                for (;;)
+                {
+                        p8 byte;
+
+                        text += string_span_without_set(text, target_reject);
+                        byte = string_get(text);
+                        if (!byte)
+                                return true;
+                        if (byte != '%')
+                                return false;
+                        text++;
+                }
+        }
+        for (; string_get(text); text++)
+        {
+                p8 byte = string_get(text);
+
+                if (byte_is_control(byte) || byte == 0x7f || byte == ' ' ||
+                    byte == '\\' || byte > 0x7f)
+                        return false;
+        }
+        return true;
+}
+
+static p8 offer[312];
+static positive offer_size;
+static p8 usage_digital[] = {0x03, 0x02, 0x07, 0x80};
+static p8 usage_sign[] = {0x03, 0x02, 0x01, 0x06};
+static string_address bench_text;
+
+static positive run_row(positive which, bool library)
+{
+        positive total = 0;
+        tls_cert cert = {0};
+
+        for (positive round = 0; round < ROUNDS; round++)
+                switch (which)
+                {
+                case 0: total += (positive)walk_pad(offer, offer_size, library); break;
+                case 1: total += (positive)key_usage(usage_digital, 4, &cert, library); break;
+                case 2: total += (positive)key_usage(usage_sign, 4, &cert, library); break;
+                case 3: total += host_valid(bench_text, library); break;
+                default: total += target_plain(bench_text, library); break;
+                }
+        return total;
+}
+
+static fn row(string_address name, positive which)
+{
+        positive ratio[TRIES];
+        positive c_answer = run_row(which, false);
+
+        if (c_answer != run_row(which, true))
+        {
+                string_format(log, "  %s: lib.c and C disagree\n", name);
+                return;
+        }
+        for (positive trial = 0; trial < TRIES; trial++)
+        {
+                p64 elapsed[2];
+
+                for (positive i = 0; i < 2; i++)
+                {
+                        positive library = (i + trial) & 1;
+                        p64 started = get_cpu_time();
+
+                        sink += run_row(which, library);
+                        elapsed[library] = get_cpu_time() - started;
+                }
+                ratio[trial] = (positive)(elapsed[1] * 10000 /
+                                          max(elapsed[0], (p64)1));
+        }
+        order(ratio, TRIES);
+        {
+                p8 fraction[3];
+
+                positive_into_padded(fraction, ratio[TRIES / 2] % 100, 2, '0');
+                fraction[2] = end;
+                string_format(log, "  %s  lib.c/C %p.%s%%\n", name,
+                              ratio[TRIES / 2] / 100, fraction);
+        }
+}
+
+b32 main(void)
+{
+        positive at = 0;
+
+        for (positive byte = 1; byte < 0x20; byte++)
+                target_reject[at++] = (p8)byte;
+        target_reject[at++] = ' ';
+        target_reject[at++] = '%';
+        target_reject[at++] = '\\';
+        for (positive byte = 0x7f; byte < 0x100; byte++)
+                target_reject[at++] = (p8)byte;
+
+        /* A typical OFFER's options field: cookie-less options then END and
+           the zero padding a 300-byte BOOTP minimum leaves. */
+        {
+                static const p8 options[] = {
+                    53, 1, 2, 54, 4, 10, 0, 2, 2, 51, 4, 0, 0, 14, 16,
+                    1, 4, 255, 255, 255, 0, 3, 4, 10, 0, 2, 2,
+                    6, 4, 10, 0, 2, 3, 255};
+
+                memory_copy(offer, options, sizeof options);
+                offer_size = 300 - 240;
+                row("dhcp_walk, END then 26 PAD bytes (300-byte packet)", 0);
+                offer_size = sizeof offer;
+                row("dhcp_walk, END then 278 PAD bytes (552-byte packet)", 0);
+        }
+        row("KeyUsage digitalSignature (7 trailing zeros)", 1);
+        row("KeyUsage keyCertSign|cRLSign (1 trailing zero)", 2);
+        bench_text = "example.com";
+        row("Host example.com", 3);
+        bench_text = "a-rather-long-subdomain.cdn.example-provider.net";
+        row("Host 48 bytes", 3);
+        bench_text = "/";
+        row("target /", 4);
+        bench_text = "/assets/js/app.bundle.min.js?v=20260928&lang=en";
+        row("target 48 bytes", 4);
+        bench_text = "/releases/download/v7.2.0/moonwater-x86_64-bootx64.efi.sha256?"
+                     "response-content-disposition=attachment&filename=image";
+        row("target 115 bytes", 4);
+        return 0;
+}
+#endif /* BENCH_net_parsers */
+
 #ifdef BENCH_cells_ascii
 /*
         Terminal cells from a printable run: the loop src/canvas/term.c's

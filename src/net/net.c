@@ -9160,10 +9160,11 @@ static COLD bipolar dhcp_walk(p8 address_to region, positive size,
                            option stream. Require canonical PAD bytes so this
                            parser cannot disagree with a middlebox or another
                            client which keeps scanning after option 255. */
-                        for (at++; at < size; at++)
-                                if (region[at] != DHCP_OPTION_PAD)
-                                        return -1;
-                        return 0;
+                        at++;
+                        return memory_span_byte(region + at, DHCP_OPTION_PAD,
+                                                size - at) == size - at
+                                   ? 0
+                                   : -1;
                 }
 
                 if (option == DHCP_OPTION_PAD)

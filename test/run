@@ -14918,7 +14918,7 @@ counted
 #       absolute number that is not. A Linux host target runs directly.
 #
 
-benchmarks="floor baseline numbers bases hex escape codec fixed table padded input-bases fields human human-nearest hash-33 span-byte cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery shell tools awk find boot-time engines compression compression-floor cksum-crc unicode-width link"
+benchmarks="floor baseline numbers bases hex escape codec fixed table padded input-bases fields human human-nearest hash-33 span-byte net-parsers cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery shell tools awk find boot-time engines compression compression-floor cksum-crc unicode-width link"
 
 #       One benchmark's section and one line about it. A name with no section
 #       is one of the drivers below, which time a whole binary against the
@@ -14959,6 +14959,8 @@ bench_about()
                  bench_line="the DJB2 byte hash: dependent scalar loop against four-byte assembly" ;;
         span-byte) bench_section=BENCH_span_byte
                  bench_line="bounded equal-byte prefix and suffix: scalar caller loops against the assembly" ;;
+        net-parsers) bench_section=BENCH_net_parsers
+                 bench_line="network parser byte loops against the lib.c routines, at their callers" ;;
         cells-ascii) bench_section=BENCH_cells_ascii
                  bench_line="terminal cells from a printable run: term.c's C loop against the assembly" ;;
         fill-u32) bench_section=BENCH_fill_u32
