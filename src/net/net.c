@@ -7298,6 +7298,15 @@ static bipolar tls_read(tls_conn address_to tls, p8 address_to into,
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
 
+/* HTTP Host and DNS have narrower syntax than an arbitrary URI reg-name:
+   letters, digits and the unreserved '-', '.' and '_' (DNS carries the
+   underscore, and wget and curl reach such hosts).  The URL parser and the
+   request serializer hold a host to this one rule. */
+static bool http_host_byte(p8 byte)
+{
+        return byte_is_alnum(byte) || byte == '-' || byte == '.' || byte == '_';
+}
+
 /* The length of the scheme and its ':' in front of a URL or a reference --
    a letter, then letters, digits, '+', '-' and '.' (RFC 3986 3.1) -- or 0
    when there is none.  http_web_scheme says whether it is http or https, in
@@ -7375,14 +7384,10 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
         if (length + 1 >= room)
                 return HTTP_BAD_URL;
 
-        /* HTTP Host and DNS have narrower syntax than an arbitrary URI
-           reg-name: letters, digits and the unreserved '-', '.' and '_'
-           (DNS carries the underscore, and wget and curl reach such hosts).
-           Validate before touching the caller's output so a rejected URL
+        /* Validate before touching the caller's output so a rejected URL
            cannot leave a plausible partial destination there. */
         for (positive byte = 0; byte < length; byte++)
-                if (!byte_is_alnum(at[byte]) && at[byte] != '-' &&
-                    at[byte] != '.' && at[byte] != '_')
+                if (!http_host_byte(at[byte]))
                         return HTTP_BAD_URL;
 
         if (!length)
@@ -7506,6 +7511,27 @@ static bool http_token_byte(p8 byte)
                memory_first_of("!#$%&'*+-.^_`|~", byte, 15);
 }
 
+/* One line of a head or of a trailer, its line end gone.  A status line is
+   text with no control but tab; a field is a token, a colon, and a value
+   held to the same.  The token also refuses obs-fold, whitespace before the
+   colon, and an empty field name. */
+static bool http_line_valid(p8 address_to line, positive stop, bool field)
+{
+        positive at = 0;
+
+        if (field)
+        {
+                while (at < stop && http_token_byte(line[at]))
+                        at++;
+                if (!at || at == stop || line[at++] != ':')
+                        return false;
+        }
+        for (; at < stop; at++)
+                if (byte_is_control(line[at]) && line[at] != '\t')
+                        return false;
+        return true;
+}
+
 static bool http_header_block_valid(p8 address_to bytes, positive size)
 {
         positive at = 0;
@@ -7516,7 +7542,6 @@ static bool http_header_block_valid(p8 address_to bytes, positive size)
                 positive line = at;
                 positive stop = at + memory_span_without_byte(
                     bytes + at, '\n', size - at);
-                positive colon = line;
 
                 if (stop == size)
                         return false;
@@ -7526,28 +7551,9 @@ static bool http_header_block_valid(p8 address_to bytes, positive size)
 
                 if (stop == line)
                         return !status && at == size;
-
-                if (status)
-                {
-                        status = false;
-                        for (positive byte = line; byte < stop; byte++)
-                                if ((bytes[byte] < 0x20 && bytes[byte] != '\t') ||
-                                    bytes[byte] == 0x7f)
-                                        return false;
-                        continue;
-                }
-
-                /* A field begins with a token.  This also rejects obs-fold,
-                   whitespace before the colon, and an empty field name. */
-                while (colon < stop && http_token_byte(bytes[colon]))
-                        colon++;
-                if (colon == line || colon == stop || bytes[colon] != ':')
+                if (!http_line_valid(bytes + line, stop - line, !status))
                         return false;
-
-                for (positive byte = colon + 1; byte < stop; byte++)
-                        if ((bytes[byte] < 0x20 && bytes[byte] != '\t') ||
-                            bytes[byte] == 0x7f)
-                                return false;
+                status = false;
         }
 
         return false;
@@ -7710,7 +7716,6 @@ static bipolar http_chunk_line(p8 address_to line, positive line_length,
 static bipolar http_trailer_line(p8 address_to line, positive line_length)
 {
         positive stop = line_length;
-        positive colon = 0;
 
         if (!stop || line[stop - 1] != '\n')
                 return HTTP_MALFORMED;
@@ -7719,21 +7724,7 @@ static bipolar http_trailer_line(p8 address_to line, positive line_length)
                 stop--;
         if (!stop)
                 return 1;
-
-        while (colon < stop && line[colon] != ':')
-        {
-                if (!http_token_byte(line[colon]))
-                        return HTTP_MALFORMED;
-                colon++;
-        }
-        if (!colon || colon == stop)
-                return HTTP_MALFORMED;
-
-        for (positive at = colon + 1; at < stop; at++)
-                if (byte_is_control(line[at]) && line[at] != '\t')
-                        return HTTP_MALFORMED;
-
-        return 0;
+        return http_line_valid(line, stop, true) ? 0 : HTTP_MALFORMED;
 }
 
 static bipolar http_unchunk(p8 address_to bytes, positive size);
@@ -8441,7 +8432,7 @@ static bool http_request_component_valid(string_address text, p8 kind)
         {
                 p8 byte = string_get(text);
 
-                if (byte_is_control(byte) || byte == 0x7f ||
+                if (byte_is_control(byte) ||
                     (kind != HTTP_REQUEST_FIELD && byte == ' ') ||
                     (kind == HTTP_REQUEST_TARGET &&
                      (byte == '\\' || byte > 0x7f)))
@@ -8489,15 +8480,22 @@ static bool http_request_component_valid(string_address text, p8 kind)
                         }
                         peeled = at;
                 }
-                if (kind == HTTP_REQUEST_HOST &&
-                    !byte_is_alnum(byte) && byte != '-' && byte != '.' &&
-                    byte != '_')
+                if (kind == HTTP_REQUEST_HOST && !http_host_byte(byte))
                         return false;
         }
 
         return true;
 }
 
+
+/* ":port" into into[7] when the port is not the scheme's own; its length,
+   and zero when there is nothing to name. */
+static positive http_port_suffix(p8 address_to into, bool tls, p16 port)
+{
+        into[0] = ':';
+        return port == (tls ? HTTP_HTTPS_PORT : HTTP_PORT)
+                   ? 0 : 1 + positive_into(into + 1, port);
+}
 
 static bipolar http_get_request(p8 address_to request, positive room,
                                 string_address host, p16 port,
@@ -8506,10 +8504,8 @@ static bipolar http_get_request(p8 address_to request, positive room,
                                 positive address_to used)
 {
         p8 target[HTTP_URL_MAX];
-        p8 port_text[7] = {':'};
+        p8 port_text[7];
         byte_store out = {request, room, 0};
-        bool named_port = (tls && port != HTTP_HTTPS_PORT) ||
-                          (!tls && port != HTTP_PORT);
         bool ok;
 
         if (!http_request_component_valid(host, HTTP_REQUEST_HOST) ||
@@ -8525,9 +8521,8 @@ static bipolar http_get_request(p8 address_to request, positive room,
         ok &= byte_store_append_exact(address_of out, address_of version_minor, 1);
         ok &= byte_store_append_exact(address_of out, "\r\nHost: ", 8);
         ok &= byte_store_append_exact(address_of out, host, string_length(host));
-        ok &= byte_store_append_exact(
-            address_of out, port_text,
-            named_port ? 1 + positive_into(port_text + 1, port) : 0);
+        ok &= byte_store_append_exact(address_of out, port_text,
+                                      http_port_suffix(port_text, tls, port));
         ok &= byte_store_append_exact(address_of out, "\r\nUser-Agent: ", 14);
         ok &= byte_store_append_exact(address_of out, agent, string_length(agent));
         ok &= byte_store_append_exact(
@@ -8541,11 +8536,9 @@ static bipolar http_get_request(p8 address_to request, positive room,
 static bipolar http_put_url(p8 address_to into, positive room, bool tls,
                             string_address host, p16 port, string_address path)
 {
-        p8 port_text[7] = {':'};
+        p8 port_text[7];
         //      The last byte of the room is kept for the terminator.
         byte_store out = {into, room ? room - 1 : 0, 0};
-        bool named_port = (tls && port != HTTP_HTTPS_PORT) ||
-                          (!tls && port != HTTP_PORT);
         bool ok = room != 0;
 
         if (!string_get(path))
@@ -8553,9 +8546,8 @@ static bipolar http_put_url(p8 address_to into, positive room, bool tls,
         ok &= byte_store_append_exact(address_of out, tls ? "https://" : "http://",
                                       tls ? 8 : 7);
         ok &= byte_store_append_exact(address_of out, host, string_length(host));
-        ok &= byte_store_append_exact(
-            address_of out, port_text,
-            named_port ? 1 + positive_into(port_text + 1, port) : 0);
+        ok &= byte_store_append_exact(address_of out, port_text,
+                                      http_port_suffix(port_text, tls, port));
         ok &= byte_store_append_exact(address_of out, path, string_length(path));
         if (!ok)
                 return HTTP_BAD_URL;
