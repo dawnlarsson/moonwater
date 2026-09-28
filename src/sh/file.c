@@ -33691,6 +33691,36 @@ static b32 file_mv()
         nothing else, and neither of them takes a directory that is in the way
         of the other.
 */
+/*
+        rm's removal of a name it has looked at. file_remove_same binds the
+        removal to the object that was looked at, and refuses outright under
+        a parent others can write into without the sticky bit, where the
+        binding cannot be made race-free. GNU's rm removes there all the same
+        -- umask 000; mkdir -p q/r; rm -rf q answered 1 with "Permission
+        denied" here and 0 there -- so a refusal is tried once more as GNU
+        does it: the name is looked at again and, when it is still the object
+        seen, removed by name. A real refusal comes back from the kernel the
+        second time too.
+*/
+static bipolar rm_remove_same(bipolar directory, string_address name,
+                              positive flags, file_facts address_to expected)
+{
+        bipolar gone = file_remove_same(directory, name, flags, expected);
+
+        if (gone != -ERROR_ACCESS)
+                return gone;
+
+        file_facts now;
+        bipolar looked = file_look_code(directory, name, AT_SYMLINK_NOFOLLOW,
+                                        address_of now);
+
+        if (looked < 0)
+                return looked;
+        if (!file_same_identity(address_of now, expected))
+                return gone;
+        return system_remove_at(directory, name, flags);
+}
+
 static bool rm_force;
 static bool rm_recursive;
 static bool rm_empty_directories;
@@ -34031,7 +34061,7 @@ static bool rm_tree(bipolar directory, string_address name, string_address shown
                 // terminal is removed as the quiet walk removes it, in the
                 // three calls GNU makes for it rather than six.
                 tried = ask || rm_prompting == 'i' || rm_loud || rm_one_system
-                            ? file_remove_same(directory, name, 0, address_of facts)
+                            ? rm_remove_same(directory, name, 0, address_of facts)
                             : system_remove_at(directory, name, 0);
 
                 if (tried == 0)
@@ -34153,7 +34183,7 @@ static bool rm_tree(bipolar directory, string_address name, string_address shown
                         {
                                 bipolar gone = inside == -ERROR_NO_ENTRY
                                                    ? inside
-                                                   : file_remove_same(directory, name,
+                                                   : rm_remove_same(directory, name,
                                                                       AT_REMOVEDIR,
                                                                       address_of facts);
 
@@ -34248,7 +34278,7 @@ static bool rm_tree(bipolar directory, string_address name, string_address shown
                 return inside >= 0;
         }
 
-        bipolar gone = file_remove_same(directory, name, AT_REMOVEDIR,
+        bipolar gone = rm_remove_same(directory, name, AT_REMOVEDIR,
                                         address_of facts);
         if (inside >= 0)
                 system_close(inside);
@@ -34410,7 +34440,7 @@ static fn rm_batch_replay(walk_batch address_to batch)
                                                       address_of facts);
 
                         if (gone >= 0 && (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
-                                gone = file_remove_same(item->directory, name,
+                                gone = rm_remove_same(item->directory, name,
                                                         AT_REMOVEDIR,
                                                         address_of facts);
                         else if (gone >= 0)
@@ -34446,7 +34476,7 @@ static fn rm_batch_replay(walk_batch address_to batch)
                                                       AT_REMOVEDIR)
                                    : !depth && rm_through_link(name)
                                    ? -ERROR_NOT_DIRECTORY
-                                   : file_remove_same(item->directory, name,
+                                   : rm_remove_same(item->directory, name,
                                                       AT_REMOVEDIR,
                                                       batch->facts + index);
                         if (code == 0)
@@ -34712,7 +34742,7 @@ static fn rm_tree_enter(address_any context, address_any node_address,
                                                       address_of entry);
                                 if (gone >= 0 &&
                                     (entry.mode & MODE_FORMAT) == MODE_DIRECTORY)
-                                        gone = file_remove_same(directory, name,
+                                        gone = rm_remove_same(directory, name,
                                                                 AT_REMOVEDIR,
                                                                 address_of entry);
                                 else if (gone >= 0)
@@ -34816,7 +34846,7 @@ static fn rm_tree_leave(address_any context, address_any node_address,
                         code = looked < 0 ? looked
                                : !file_same_identity(address_of facts, address_of parent->facts)
                                    ? -ERROR_AGAIN
-                                   : file_remove_same(above, name, AT_REMOVEDIR,
+                                   : rm_remove_same(above, name, AT_REMOVEDIR,
                                                       address_of node->facts);
                 }
                 system_close(above);
@@ -34918,7 +34948,7 @@ static fn rm_tree_parallel(string_address root, file_facts address_to facts)
                 if (rm_force && looked == -ERROR_NO_ENTRY)
                         return;
                 if (looked != -ERROR_AGAIN &&
-                    file_remove_same(AT_FDCWD, root, AT_REMOVEDIR, facts) == 0)
+                    rm_remove_same(AT_FDCWD, root, AT_REMOVEDIR, facts) == 0)
                 {
                         if (rm_loud)
                                 string_format(log, "removed directory %w\n",
@@ -34971,7 +35001,7 @@ static fn rm_tree_parallel(string_address root, file_facts address_to facts)
                 bool through = rm_through_link(root);
                 bipolar code = through
                                    ? -ERROR_NOT_DIRECTORY
-                                   : file_remove_same(AT_FDCWD, root, AT_REMOVEDIR,
+                                   : rm_remove_same(AT_FDCWD, root, AT_REMOVEDIR,
                                                       address_of top->facts);
 
                 if (code == 0)
@@ -35026,7 +35056,7 @@ static fn rm_batched(string_address root, file_facts address_to facts)
                 if (rm_force && looked == -ERROR_NO_ENTRY)
                         return;
                 if (looked != -ERROR_AGAIN &&
-                    file_remove_same(AT_FDCWD, root, AT_REMOVEDIR, facts) == 0)
+                    rm_remove_same(AT_FDCWD, root, AT_REMOVEDIR, facts) == 0)
                 {
                         if (rm_loud)
                                 string_format(log, "removed directory %w\n",
