@@ -7047,7 +7047,12 @@ def files_owner_word_cases(group_only=False):
     cases = []
     for spec in (user + ":", user + ".", user + "." + group, user + ":" + group, files_UID + ":", files_UID + ".",
                  files_UID + "." + files_GID, "nosuchuser.", "nosuchuser." + group, user + ".nosuchgroup",
-                 user, "root.", "0.", user + "..", user + ":.", "+" + files_UID, "+" + files_UID + ":"):
+                 user, "root.", "0.", user + "..", user + ":.", "+" + files_UID, "+" + files_UID + ":",
+                 #   -v's words as describe_change has them: a group by name
+                 #   alone, or after a user by number, is ":group" ownership;
+                 #   by number it is the group; a failure names both sides.
+                 ":" + group, ":" + files_GID, files_UID + ":" + group, files_UID + ":" + files_GID,
+                 ":+" + files_GID, "0", ":0", "0:" + group, ":", ""):
         for flags in ((), ("-v",), ("-c",)):
             cases.append(flags + (spec, "a.txt"))
     for words in ((user + ":", "-R", "dir"), ("a.txt", user + ":", "-v"), ("-v", "--", user, "a.txt"),
@@ -7071,6 +7076,21 @@ FIXTURES["files_rmdir"] = {
     "ro/n/m": files_dir(1080000000),
     "ro/n": files_dir(1090000000, 0o555),
     "ro": files_dir(1100000000),
+    #   Links named with a slash on the end: to an empty directory, to a
+    #   file and to nothing, each told apart in rmdir's words.
+    "e/d": files_dir(1110000000),
+    "e": files_dir(1120000000),
+    "sl": files_link("e", 1130000000),
+    "fl": files_link("p/q/s", 1140000000),
+    "dl": files_link("missing", 1150000000),
+}
+
+
+#       A directory that can be listed but not searched, for the walks that
+#       have to say they could not reach what is in it.
+FIXTURES["files_noexec"] = {
+    "nx/y": files_dir(1000000000),
+    "nx": files_dir(1010000000, 0o600),
 }
 
 
@@ -7520,7 +7540,12 @@ FILES_UTILITIES = (
             operands=files_UID_OPERANDS, stdin=("empty",), fixture="files", stderr="exact",
             #       As chmod's: a directory the walk cannot read is named and
             #       answered for, silently under -f.
-            extra=((("-R", files_UID, "shut"), ("-fR", files_UID, "shut"))) + files_owner_word_cases()),
+            extra=((("-R", files_UID, "shut"), ("-fR", files_UID, "shut"))) + files_owner_word_cases()
+            #       -H follows a link named on the line into its tree, and a
+            #       name in a directory that can be read but not searched is
+            #       one that could not be accessed.
+            + (("-HRv", files_UID, "dirlink"), ("-HRc", files_UID, "dirlink", "dir"),
+               {"fixture": "files_noexec", "argv": ("-R", files_UID, "nx")})),
     Utility("chgrp", options=(Option("-c"), Option("-f"), Option("-v"), Option("-h"), Option("-R"), Option("-H"),
                               Option("-L"), Option("-P"), Option("--changes"), Option("--silent"), Option("--quiet"),
                               Option("--verbose"), Option("--no-dereference"), Option("--dereference"),
@@ -7530,7 +7555,9 @@ FILES_UTILITIES = (
             operands=files_GID_OPERANDS, stdin=("empty",), fixture="files", stderr="exact",
             #       As chmod's: a directory the walk cannot read is named and
             #       answered for, silently under -f.
-            extra=((("-R", files_GID, "shut"), ("-fR", files_GID, "shut"))) + files_owner_word_cases(True)),
+            extra=((("-R", files_GID, "shut"), ("-fR", files_GID, "shut"))) + files_owner_word_cases(True)
+            + (("-HRv", files_GID, "dirlink"), ("-HRc", files_GID, "dirlink", "dir"),
+               {"fixture": "files_noexec", "argv": ("-R", files_GID, "nx")})),
     Utility("chmod", options=(Option("-c"), Option("-f"), Option("-v"), Option("-R"), Option("--changes"),
                               Option("--silent"), Option("--quiet"), Option("--verbose"), Option("--recursive"),
                               Option("--preserve-root"), Option("--no-preserve-root"),

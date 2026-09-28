@@ -20647,10 +20647,6 @@ typedef struct { p8 dereference, traverse, loudness, root; } chown_selection;
 _Static_assert(sizeof(chown_selection) <= 16, "selection mask covers every field");
 static chown_selection chown_selected;
 static string_address chown_program;
-//      The spec exactly as it was written, which is what the reference puts
-//      after "to" when it says what it could not do -- the name it was given
-//      and not the name that number happens to have in the database.
-static string_address chown_spec;
 //      --from: change only where the owner is already this one. -1 in either
 //      half is "whatever it is", so --from=:group tests the group alone.
 static bipolar chown_from_user = -1;
@@ -20660,25 +20656,64 @@ static bipolar chown_from_group = -1;
 
 
 
-// Who a file will belong to, said the way chown says it: the user alone when
-// only a user was named, and user:group when a group was.
-static fn chown_who(positive user, positive group, p8 address_to into)
+/*
+        What -v and -c say, as GNU's describe_change says it. The new owner
+        and group are named as they were written when they were names --
+        and a login group by its name -- and by number otherwise; the old
+        ones by name where they have one. chown given only a group by name
+        speaks of ownership, ":group", as the reference does; given one by
+        number, or chgrp, of the group. The halves not asked for are left
+        out of both sides.
+*/
+static p8 chown_new_user[FILE_NAME_MAX];
+static p8 chown_new_group[FILE_NAME_MAX];
+static bool chown_has_new_user;
+static bool chown_has_new_group;
+
+static fn chown_join(string_address user, string_address group,
+                     p8 address_to into)
 {
-        if (chown_group_words())
+        positive length = 0;
+
+        into[0] = end;
+        if (user)
         {
-                file_account_label(group, true, true, into);
-                return;
+                length = string_length(user);
+                memory_copy_apart_end(into, user, length);
         }
+        if (group)
+        {
+                if (user)
+                        into[length++] = ':';
+                memory_copy_apart_end(into + length, group,
+                                      string_length(group));
+        }
+}
 
-        file_account_label(user, false, true, into);
+//      The old side: the file's owner and group, only the halves asked for.
+static fn chown_old_spec(file_facts address_to was, p8 address_to into)
+{
+        p8 user[FILE_NAME_MAX];
+        p8 group[FILE_NAME_MAX];
 
-        if (chown_group < 0)
-                return;
+        file_account_label(was->owner, false, true, user);
+        file_account_label(was->group, true, true, group);
+        chown_join(chown_has_new_user ? (string_address)user : null,
+                   chown_has_new_group ? (string_address)group : null, into);
+}
 
-        positive length = string_length(into);
+static fn chown_new_spec(p8 address_to into)
+{
+        chown_join(chown_has_new_user ? (string_address)chown_new_user : null,
+                   chown_has_new_group ? (string_address)chown_new_group : null,
+                   into);
+}
 
-        into[length++] = ':';
-        file_account_label(group, true, true, into + length);
+static string_address chown_noun(void)
+{
+        return chown_has_new_user ? (string_address) "ownership"
+               : chown_has_new_group ? (string_address) "group"
+                                     : (string_address) "ownership";
 }
 
 static fn chown_said(string_address shown, file_facts address_to was, bool changed)
@@ -20687,36 +20722,56 @@ static fn chown_said(string_address shown, file_facts address_to was, bool chang
             !(chown_selected.loudness == 'c' && changed))
                 return;
 
-        p8 who[FILE_PATH_MAX];
+        p8 before[2 * FILE_NAME_MAX + 2];
+        p8 after[2 * FILE_NAME_MAX + 2];
+        bool named = chown_has_new_user || chown_has_new_group;
 
+        chown_old_spec(was, before);
+        chown_new_spec(after);
         if (!changed)
         {
-                //      A spec that names neither half asked for nothing, and
-                //      the reference says so without naming what was kept --
-                //      in chown's words, whichever of the two was called.
-                if (chown_user < 0 && chown_group < 0)
-                {
+                if (!named)
                         string_format(log, "ownership of %w retained\n",
                                       writer_shell_quoted_name, shown);
-                        return;
-                }
-
-                chown_who(was->owner, was->group, who);
-                string_format(log, "%s%w retained as %s\n",
-                              chown_group_words() ? (string_address)"group of " : (string_address)"ownership of ",
-                              writer_shell_quoted_name, shown, who);
+                else
+                        string_format(log, "%s of %w retained as %s\n",
+                                      chown_noun(), writer_shell_quoted_name,
+                                      shown, before);
                 return;
         }
+        if (!named)
+                string_format(log, "no change to ownership of %w\n",
+                              writer_shell_quoted_name, shown);
+        else
+                string_format(log, "changed %s of %w from %s to %s\n",
+                              chown_noun(), writer_shell_quoted_name, shown,
+                              before, after);
+}
 
-        p8 before[FILE_PATH_MAX];
+//      A change that failed, with what the file had when it was looked at.
+static fn chown_said_failed(string_address shown, file_facts address_to was)
+{
+        p8 before[2 * FILE_NAME_MAX + 2];
+        p8 after[2 * FILE_NAME_MAX + 2];
 
-        chown_who(was->owner, was->group, before);
-        chown_who(chown_user < 0 ? was->owner : (positive)chown_user,
-                  chown_group < 0 ? was->group : (positive)chown_group, who);
-
-        string_format(log, "%s%w from %s to %s\n",
-                      chown_group_words() ? (string_address)"changed group of " : (string_address)"changed ownership of ",
-                      writer_shell_quoted_name, shown, before, who);
+        if (!chown_has_new_user && !chown_has_new_group)
+        {
+                string_format(log, "failed to change ownership of %w\n",
+                              writer_shell_quoted_name, shown);
+                return;
+        }
+        chown_new_spec(after);
+        if (!was)
+        {
+                string_format(log, "failed to change %s of %w to %s\n",
+                              chown_noun(), writer_shell_quoted_name, shown,
+                              after);
+                return;
+        }
+        chown_old_spec(was, before);
+        string_format(log, "failed to change %s of %w from %s to %s\n",
+                      chown_noun(), writer_shell_quoted_name, shown, before,
+                      after);
 }
 
 /*
@@ -20891,11 +20946,7 @@ static fn chown_report(string_address shown, chown_outcome address_to out)
         case CHOWN_DANGLING:
         case CHOWN_UNREACHED:
                 if (chown_selected.loudness == 'v')
-                {
-                        string_format(log, "%s%w to %s\n",
-                                      chown_group_words() ? (string_address)"failed to change group of " : (string_address) "failed to change ownership of ",
-                                      writer_shell_quoted_name, shown, chown_spec);
-                }
+                        chown_said_failed(shown, null);
 
                 if (!chown_quiet)
                 {
@@ -20917,15 +20968,7 @@ static fn chown_report(string_address shown, chown_outcome address_to out)
         case CHOWN_REFUSED:
         case CHOWN_REFUSED_UNLOOKED:
                 if (chown_selected.loudness == 'v' && out->kind == CHOWN_REFUSED)
-                {
-                        p8 before[FILE_PATH_MAX];
-
-                        chown_who(out->owner, out->group, before);
-                        string_format(log, "%s%w from %s to %s\n",
-                                      chown_group_words() ? (string_address) "failed to change group of " : (string_address) "failed to change ownership of ",
-                                      writer_shell_quoted_name, shown, before,
-                                      chown_spec);
-                }
+                        chown_said_failed(shown, address_of was);
 
                 if (!chown_quiet)
                 {
@@ -21061,9 +21104,12 @@ static fn chown_tree_enter(address_any context, address_any node_address,
 
                 file_facts facts;
                 positive name_length = string_length(name);
-                bool looked = (type == 0 || type == DT_DIR) &&
-                              file_look(directory, name, AT_SYMLINK_NOFOLLOW,
-                                        address_of facts);
+                bipolar seen = type == 0 || type == DT_DIR
+                                   ? file_look_code(directory, name,
+                                                    AT_SYMLINK_NOFOLLOW,
+                                                    address_of facts)
+                                   : -ERROR_NO_ENTRY;
+                bool looked = seen >= 0;
                 bool here = looked && (facts.mode & MODE_FORMAT) == MODE_DIRECTORY;
 
                 if (!here)
@@ -21072,6 +21118,18 @@ static fn chown_tree_enter(address_any context, address_any node_address,
 
                         chown_decide(directory, name, looked ? address_of facts : null,
                                      node->trusted, true, address_of outcome);
+                        /*      A directory the walk had to look at and
+                                could not -- one in a directory it may list
+                                but not search -- is one the reference's
+                                fts could not access, whatever the change
+                                then said. */
+                        if ((type == 0 || type == DT_DIR) && !looked &&
+                            seen != -ERROR_NO_ENTRY &&
+                            outcome.kind != CHOWN_DONE)
+                        {
+                                outcome.kind = CHOWN_UNREACHED;
+                                outcome.error = (b32)seen;
+                        }
                         if (chown_outcome_heard(address_of outcome) &&
                             !chown_tree_put(output, address_of outcome,
                                             (string_address)node->path, node->length,
@@ -21145,8 +21203,20 @@ static bool chown_tree_sink(address_any context, address_any node_address,
 static fn chown_tree(string_address path)
 {
         file_facts facts;
-        bool looked = file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts);
+        /*      -H and -L follow a link named on the command line into the
+                directory it names, as the reference's FTS_COMFOLLOW does;
+                the walk below it still follows none (see
+                file_change_root_refused). */
+        bool named_follow = chown_selected.traverse == 'H' ||
+                            chown_selected.traverse == 'L';
+        bool looked = file_look(AT_FDCWD, path,
+                                named_follow ? 0 : AT_SYMLINK_NOFOLLOW,
+                                address_of facts);
         bool here = looked && (facts.mode & MODE_FORMAT) == MODE_DIRECTORY;
+
+        if (!here && named_follow)
+                looked = file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW,
+                                   address_of facts);
 
         file_change_user = (p32)system_call(syscall(geteuid));
         file_change_descended = false;
@@ -21160,16 +21230,25 @@ static fn chown_tree(string_address path)
 
         file_facts opened;
         bipolar handle = file_open_same_facts(AT_FDCWD, path, address_of facts,
-                                              FILE_READ | O_DIRECTORY | O_NOFOLLOW,
+                                              FILE_READ | O_DIRECTORY |
+                                                  (named_follow ? 0 : O_NOFOLLOW),
                                               address_of opened);
 
+        /*      A directory named on the line that cannot be read is left
+                alone, as fts's FTS_DNR leaves it: GNU changes nothing and
+                -v says it failed, with no old owner to name. */
         if (handle < 0)
         {
                 if (!chown_quiet)
                         string_format(log_error, "%s: cannot read directory %w: %s\n",
                                       chown_program, writer_shell_quoted_name, path,
                                       file_reason(handle));
+                if (chown_selected.loudness == 'v')
+                        chown_said_failed(path, null);
                 chown_status = 1;
+                file_change_descended = false;
+                file_change_trusted = false;
+                return;
         }
         else
         {
@@ -21192,7 +21271,7 @@ static fn chown_tree(string_address path)
 
         file_change_descended = false;
         file_change_trusted = false;
-        chown_one(AT_FDCWD, path, path, address_of facts);
+        chown_one(AT_FDCWD, path, path, named_follow ? null : address_of facts);
 }
 #endif
 
@@ -21227,7 +21306,9 @@ static const argument_option chown_options[] = {
         a number has none of; "user:" is refused only for want of that.
         Answers the complaint, or null.
 */
-static string_address chown_spec_parsed;
+
+//      Whether the user half chown_spec_try read was found by its name.
+static bool chown_user_named;
 
 static string_address chown_spec_try(string_address who, positive split,
                                      bool separated, bipolar address_to user,
@@ -21242,12 +21323,14 @@ static string_address chown_spec_try(string_address who, positive split,
         memory_copy_apart(name, who, split);
         name[split] = end;
 
+        chown_user_named = false;
         if (split)
         {
                 bipolar id = name[0] == '+'
                                  ? -1
                                  : file_account_id(file_account_text(FILE_ACCOUNT_USER),
                                                    name, 2);
+                chown_user_named = id >= 0;
                 if (id >= 0 && separated && !after)
                 {
                         bipolar login = file_account_id(
@@ -21273,7 +21356,11 @@ static string_address chown_spec_try(string_address who, positive split,
 
         if (after)
         {
-                address_to group = file_identity_of(after, true);
+                //      A leading + asks for the number without a lookup.
+                address_to group = after[0] == '+' &&
+                                           string_digits_exact(after + 1, null)
+                                       ? file_identity_of(after + 1, true)
+                                       : file_identity_of(after, true);
                 if (address_to group < 0)
                         return (string_address) "invalid group";
         }
@@ -21328,34 +21415,52 @@ static bool chown_spec_read(string_address who, bipolar address_to user,
         if (group_now >= 0)
                 address_to group = group_now;
 
-        /* What -v says it changed to is the user and the group as GNU parsed
-           them, colon between: dawn. and dawn: say dawn:dawn, the login
-           group by its name. */
+        /* What -v says it changed to, as GNU's parse_user_spec hands it
+           over: a half written as a name by that name, one written as a
+           number by the number, a login group by its name; and chown given
+           a group by name alone speaks of ownership, ":group". */
         string_address split = colon ? colon : dotted ? string_first_of(who, '.') : null;
-        chown_spec_parsed = null;
-        if (split && (dotted || !string_get(split + 1)))
-        {
-                static p8 shown[2 * FILE_NAME_MAX + 2];
-                positive head = (positive)(split - who);
-                p8 group_name[FILE_NAME_MAX];
-                string_address tail = split + 1;
+        positive head = split ? (positive)(split - who) : length;
+        string_address tail = split && string_get(split + 1) ? split + 1 : null;
+        bool group_named = false;
 
-                if (!string_get(tail) && group_now >= 0)
+        chown_has_new_user = head > 0;
+        if (chown_has_new_user)
+        {
+                if (chown_user_named && head < FILE_NAME_MAX)
+                {
+                        memory_copy_apart(chown_new_user, who, head);
+                        chown_new_user[head] = end;
+                }
+                else
+                        positive_into_string(chown_new_user, (positive)user_now);
+        }
+        bool user_named = chown_has_new_user && chown_user_named;
+        chown_has_new_group = group_now >= 0;
+        if (chown_has_new_group)
+        {
+                if (!tail)
                 {
                         file_account_label((positive)group_now, true, true,
-                                           group_name);
-                        tail = group_name;
+                                           chown_new_group);
+                        group_named = true;
                 }
-                if (head < FILE_NAME_MAX)
+                else if (!string_digits_exact(tail, null) && tail[0] != '+' &&
+                         string_length(tail) < FILE_NAME_MAX)
                 {
-                        memory_copy_apart(shown, who, head);
-                        shown[head] = ':';
-                        memory_copy_apart_end(shown + head + 1, tail,
-                                              string_length(tail) < FILE_NAME_MAX
-                                                  ? string_length(tail)
-                                                  : FILE_NAME_MAX - 1);
-                        chown_spec_parsed = shown;
+                        memory_copy_apart_end(chown_new_group, tail,
+                                              string_length(tail));
+                        group_named = true;
                 }
+                else
+                        positive_into_string(chown_new_group,
+                                             (positive)group_now);
+        }
+        //      A user by number is no name, so 1000:group says ":group" too.
+        if (!user_named && group_named)
+        {
+                chown_has_new_user = true;
+                chown_new_user[0] = end;
         }
         return true;
 }
@@ -21384,7 +21489,8 @@ static b32 file_chown_common(string_address program, bool groups_only)
         chown_selected = (chown_selection){};
         chown_program = program;
         chown_groups_only = groups_only;
-        chown_spec = (string_address) "";
+        chown_has_new_user = false;
+        chown_has_new_group = false;
 
         file_operands_begin();
         file_taking taking = {
@@ -21409,6 +21515,9 @@ static b32 file_chown_common(string_address program, bool groups_only)
         if (from && !chown_spec_read(from, address_of chown_from_user,
                                      address_of chown_from_group))
                 return 1;
+        //      What -v names is the spec's, not --from's.
+        chown_has_new_user = false;
+        chown_has_new_group = false;
 
         //      A recursive walk that was told to follow links has to be
         //      told which ones, and the last of -H, -L and -P is the one
@@ -21459,16 +21568,18 @@ static b32 file_chown_common(string_address program, bool groups_only)
                 chown_group = (bipolar)facts.group;
         }
 
-        static p8 chown_reference_spec[FILE_PATH_MAX];
-
         if (like)
         {
-                //      There is no written spec behind --reference, so the
-                //      one -v quotes is the reference file's own ownership.
-                chown_who(chown_user < 0 ? 0 : (positive)chown_user,
-                          chown_group < 0 ? 0 : (positive)chown_group,
-                          chown_reference_spec);
-                chown_spec = chown_reference_spec;
+                //      There is no written spec behind --reference: -v names
+                //      the reference file's owner and group, by name where
+                //      they have one.
+                chown_has_new_user = !groups_only;
+                chown_has_new_group = true;
+                if (!groups_only)
+                        file_account_label((positive)chown_user, false, true,
+                                           chown_new_user);
+                file_account_label((positive)chown_group, true, true,
+                                   chown_new_group);
                 chown_paths(first, count);
 
                 return chown_status;
@@ -21476,7 +21587,6 @@ static b32 file_chown_common(string_address program, bool groups_only)
 
         string_address who = file_operand_at(first++);
 
-        chown_spec = who;
 
         if (groups_only)
         {
@@ -21488,6 +21598,17 @@ static b32 file_chown_common(string_address program, bool groups_only)
                 {
                         return string_report(log_error, 1, "%s: invalid group: '%w'\n", program, writer_terminal_quoted_name, who);
                 }
+                chown_has_new_group = chown_group >= 0;
+                if (chown_has_new_group)
+                {
+                        if (!string_digits_exact(who, null) &&
+                            string_length(who) < FILE_NAME_MAX)
+                                memory_copy_apart_end(chown_new_group, who,
+                                                      string_length(who));
+                        else
+                                positive_into_string(chown_new_group,
+                                                     (positive)chown_group);
+                }
 
                 chown_paths(first, count);
 
@@ -21496,8 +21617,6 @@ static b32 file_chown_common(string_address program, bool groups_only)
 
         if (!chown_spec_read(who, address_of chown_user, address_of chown_group))
                 return 1;
-        if (chown_spec_parsed)
-                chown_spec = chown_spec_parsed;
 
         chown_paths(first, count);
 
