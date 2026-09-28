@@ -18072,6 +18072,29 @@ _TEXT_SORT_KEYS = (
 )
 
 
+
+#       -R hashes each key with a salt, and without --random-source the salt
+#       is the kernel's: two runs of either program disagree with each other,
+#       so only a case that names its source is a question with one answer.
+def _text_sort_valid(argv):
+    hashing = source = False
+    before = None
+    for word in argv:
+        if word.startswith("--random-source"):
+            source = True
+        elif word in ("--random-sort", "--sort=random"):
+            hashing = True
+        elif before in ("-k", "--key") and "R" in word:
+            hashing = True
+        elif word.startswith(("-k", "--key=")) and "R" in word.split("=", 1)[-1][2 if word.startswith("-k") else 0:]:
+            hashing = True
+        elif (word.startswith("-") and not word.startswith("--") and len(word) > 1 and
+              before not in ("-t", "-o", "-T", "-S") and word[1] not in "toTS" and "R" in word):
+            hashing = True
+        before = word
+    return source or not hashing
+
+
 #       sort's own words, compared byte for byte: which part of a -k is
 #       wrong and how GNU names it, the letters of an ordering that asks
 #       for two at once, and the check letter a refusal names. The first
@@ -19188,8 +19211,8 @@ TEXT_UTILITIES = (
             stdin=("text", "numbers", "text_sort_numbers", "text_sort_human", "text_sort_version", "text_sort_month",
                    "text_sort_keys", "fields", "repeats", "mixed_case", "unsorted", "empty", "nonl", "nul", "blanks",
                    "text_sort_zero_run", "edge_65536", "many_lines", "high", "text_names0", "text_random_lines",
-                   "spaces", "edge_65535", "edge_65537", "text_utf8"),
-            fixture="text",
+                   "spaces", "edge_65535", "edge_65537", "text_utf8", "text_sort_general"),
+            fixture="text", valid=_text_sort_valid,
             extra=(("--nosuchflag",), ("-Q",), ("-n", "-h"), ("-h", "-n"), ("-n", "-V"), ("-V", "-n"), ("-h", "--sort=numeric"),
                    ("-k1nV",), ("-k1Q",), ("-k1,",), ("-k1.",), ("-k1.0",), ("-r", "-k1n"), ("-r", "-k1"), ("-r", "-k1b"),
                    ("-f", "-k1,1r"), ("-n", "-k1r"), ("-t", ":", "-k2"), ("-t", ":", "-k3"), ("-t", "", "-k1"), ("-t", "::", "-k1"),
@@ -19199,7 +19222,25 @@ TEXT_UTILITIES = (
                    ("-C", "unsorted"), ("-cu", "repeats"), ("-c", "-C"), ("-o", "a.txt", "a.txt"), ("-o", "a.txt", "a.txt", "a.txt"),
                    ("-z", "-t", ":", "-k2,2n"), ("-t:", "-k2,2n"), ("-t:", "-k2,2nr", "-s"), ("-t:", "-k2,2n", "-u"),
                    ("-t:", "-k3,3", "-k2,2n"), ("-t:", "-k2.2,2.7n"), ("-k3n", "big"), ("-u", "big"), ("-n", "big"),
-                   ("--sort=random",), ("-g",), ("--debug",), ("--random-source=a.txt", "-R"),
+                   ("-g",), ("--debug",), ("--random-source=a.txt", "-R"),
+                   #   -R is MD5 over the salt a source gives and the key, so
+                   #   with a source its order is GNU's to the byte: equal
+                   #   keys together, folded and ignored bytes gone first,
+                   #   and a source too short, missing or a directory refused
+                   #   in GNU's words -- and never read when nothing hashes.
+                   *({"argv": argv, "stdin": "text_sort_keys", "fixture": "text"} for argv in (
+                       ("-R", "--random-source=big"), ("-Rf", "--random-source=big"),
+                       ("-Rd", "--random-source=big"), ("-Ri", "--random-source=wide"),
+                       ("-RV", "--random-source=big"), ("-Rr", "--random-source=big"),
+                       ("-Ru", "--random-source=big"), ("-Rs", "--random-source=big"),
+                       ("-k2R", "-k1,1", "--random-source=big"), ("-k1,1Rf", "-u", "--random-source=big"),
+                       ("--sort=random", "--random-source=big"), ("--random-sort", "--random-source=/dev/zero"),
+                       ("-R", "--random-source=a.txt"), ("-R", "--random-source=empty"),
+                       ("-R", "--random-source=missing"), ("-R", "--random-source=dir"),
+                       ("--random-source=missing",), ("-R", "--random-source=big", "--random-source=a.txt"),
+                       ("-R", "--random-source=big", "--random-source=big"), ("-nR", "--random-source=big"),
+                       ("--sort=random", "-n"), ("-Rc", "--random-source=big"), ("-Rm", "--random-source=big", "-", "b.txt"),
+                       ("-R", "-S", "1K", "--random-source=big"), ("-fV",), ("-hf",), ("-k1,1Vf", "-s"))),
                    #   -g is strtold's order, long double and all.
                    *({"argv": argv, "stdin": "text_sort_general", "fixture": "text"} for argv in (
                        ("-g",), ("-gr",), ("-gs",), ("-gu",), ("-s", "-k1,1g"), ("-gm", "-", "-"), ("-gc",),
@@ -39401,10 +39442,7 @@ REASONS = {
  "r270": "deliberate: GNU's execution trace and annotated-program diagnostic format, not command-result semantics. The interpreter rejects it rather than pretending to emit that debugging protocol.",
  "r271": "bug: more than one thing is wrong with this argv and sort names a different first cause from the reference's.",
  "r272": "deliberate: -S is honoured in this sort's own record size, and GNU's buffer also grows with its thread count, so a buffer of a kilobyte or two spills at a different line here than there; whether a -T directory that cannot hold a temporary is ever reached follows from that. --compress-program is never run, because compressing a temporary cannot change a byte of the answer.",
- "r273": "deliberate: a key ordering of R asks for the random comparison the whole sort refuses, and refusing the key is the same answer in the same place.",
  "r274": "deliberate: GNU's key annotation and diagnostic format, not ordering semantics. It is rejected rather than producing an incomplete diagnostic stream.",
- "r276": "deliberate: random ordering hashes every key with a seed this deterministic sort has no source for; accepting it would falsely claim a reproducible shuffle.",
- "r277": "deliberate: this supplies entropy to GNU random-sort, which is itself outside this deterministic sort's surface. Accepting and ignoring the source would falsely claim reproducible randomized ordering.",
  "r279": "bug: a separator expression that can match nothing splits the input differently from the reference's, which counts an empty match at a position this passes over.",
  "r28": "gawk's --debug; refused with usage",
  "r280": "bug: the obsolete -N form and the counted options around it are read in a different order from the reference's, so these argvs disagree about which count and which headers were asked for.",
@@ -44839,22 +44877,10 @@ PINNED = r"""
 {"candidate":{"effects":"3180385f920a2edc2b4d3b8da9b4c43c8cee36519de53dcfe4a2c0a57f77bb0e","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--quiet","-e","1{a one\nr b.txt\na two\n}","--expression=s/a/A/","-fscript3.sed","--file=script.sed","--follow-symlinks","-i","-i.bak","--in-place","-l","1","--posix","--regexp-extended","-s","--sandbox","--unbuffered","--null-data","nonl"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"empty","tier":"pinned","utility":"sed"},"domain":"text","id":"ffbf1547e4fb1ffb","kind":"bug","list":"ledger","reason":"sed's wording for a script or an input it cannot open, and what it leaves behind when -i is refused, differ from GNU's.","reference":{"effects":"5154e59ad645ed2c9f325de909b424f0bfe3fb2bb05dc00a25d8ca4109e6f6e6","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"sed"},
 {"domain":"text","kind":"deliberate","list":"ledger","option":"--debug","reason_id":"r270","utility":"sed"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"5c8002761584f4e218118804120901a70b854c829058897805d49e148fa4ac99"},"case":{"argv":["-t:","--unique","-r","-S1","-Tmissing","-d","numbers"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"nul","utility":"sort"},"domain":"text","id":"3c14f8abfef10172","kind":"deliberate","list":"ledger","reason_id":"r272","utility":"sort"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--parallel=1","-c","-u","--check","--random-sort","--ignore-case","a.txt"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text_sort_month","utility":"sort"},"domain":"text","id":"4f3a91ac37e72036","kind":"bug","list":"ledger","reason_id":"r271","utility":"sort"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--parallel=1","--check","--random-source=/dev/zero","--dictionary-order","-z","-Tdir","mixed"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text_random_lines","tier":"pinned","utility":"sort"},"domain":"text","id":"9b3fb65e519b40fc","kind":"bug","list":"ledger","reason":"sort names a directory it cannot read in its own words, and -g and --random-source are not implemented.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"sort"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--reverse","--dictionary-order","-c","-k","1R","--parallel=1","--merge","big"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text_sort_month","utility":"sort"},"domain":"text","id":"9ece016dae0c8fbe","kind":"deliberate","list":"ledger","reason_id":"r273","utility":"sort"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-T","dir","-u","-k","3,3n","-V","--human-numeric-sort","-k","1R","a.txt","b.txt"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"blanks","utility":"sort"},"domain":"text","id":"ae845c0b6f8e583c","kind":"deliberate","list":"ledger","reason_id":"r273","utility":"sort"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--zero-terminated","-k","1R","--buffer-size=2","-t",":","--ignore-nonprinting","-m","empty"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text_sort_zero_run","utility":"sort"},"domain":"text","id":"bd8ef6ef4464c53d","kind":"deliberate","list":"ledger","reason_id":"r273","utility":"sort"},
-{"candidate":{"effects":"31f5c7f10ec32eabe7b98ba703d34693f7b619016e66d0bfab2b0895deff11b7","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-d","--ignore-case","--output=out","-k","1.2","-V","-s","human"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text_utf8","tier":"pinned","utility":"sort"},"domain":"text","id":"c5c959a6b01b9e4b","kind":"bug","list":"ledger","reason":"sort names a directory it cannot read in its own words, and -g and --random-source are not implemented.","reference":{"effects":"ff00f89c3cc0463990afb4142feffd47dfcb431706178227eb9ec2b853ee2faf","status":0,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"sort"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"71fe5f003a3b15c50586b78cecf1e4da1447b4a5a3cef9f098702abd951ff3d3"},"case":{"argv":["-V","-d","--compress-program=nosuch","--field-separator=:","-S","1K","-Tdir","blank_runs"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"blanks","utility":"sort"},"domain":"text","id":"d650efeb494eb2dc","kind":"deliberate","list":"ledger","reason_id":"r272","utility":"sort"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":1,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--temporary-directory=dir","-r","--merge","--dictionary-order","--check=quiet","--check","big"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"edge_65536","utility":"sort"},"domain":"text","id":"df706ff58f3c4dca","kind":"bug","list":"ledger","reason_id":"r271","utility":"sort"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["--check","-R","-V","-d","-z","-r","unsorted"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"repeats","utility":"sort"},"domain":"text","id":"e8a5e6f72f504a51","kind":"bug","list":"ledger","reason_id":"r271","utility":"sort"},
 {"candidate":{"effects":"ed3508afed150d8a78a4e3b810ff94b17242f83f63889b96965436dd9947088c","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-o","a.txt","-r","--version-sort","--ignore-nonprinting","--key=1,1","-z","dir"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"fields","tier":"pinned","utility":"sort"},"domain":"text","id":"e98c1a3bfd732ab2","kind":"bug","list":"ledger","reason":"sort names a directory it cannot read in its own words, and -g and --random-source are not implemented.","reference":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"utility":"sort"},
-{"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":2,"stdout":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"case":{"argv":["-k","1R"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text","utility":"sort"},"domain":"text","id":"fb3dae6b69da1d02","kind":"deliberate","list":"ledger","reason_id":"r273","utility":"sort"},
 {"domain":"text","kind":"deliberate","list":"ledger","option":"--debug","reason_id":"r274","utility":"sort"},
-{"domain":"text","kind":"deliberate","list":"ledger","option":"--random-sort","reason_id":"r276","utility":"sort"},
-{"domain":"text","kind":"deliberate","list":"ledger","option":"--random-source","reason_id":"r277","utility":"sort"},
-{"domain":"text","kind":"deliberate","list":"ledger","option":"--sort=random","reason_id":"r276","utility":"sort"},
-{"domain":"text","kind":"deliberate","list":"ledger","option":"-R","reason_id":"r276","utility":"sort"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"52bb0f11a0d96cd79b15cbc47947e28d7da7fd63263e8f76cea9b643bc51d92b"},"case":{"argv":["-r","--separator=:","-b","-s^","--before","big"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"text_random_lines","utility":"tac"},"domain":"text","id":"0bdc603cf851d7ec","kind":"bug","list":"ledger","reason_id":"r279","utility":"tac"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"63be28c14377de31674813c9b075d062a6d20288307c0ad20bf4db6b7ab8d6db"},"case":{"argv":["-b","-r","--regex","-s^","wide"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"many_lines","utility":"tac"},"domain":"text","id":"7cc3c4c7963e3be1","kind":"bug","list":"ledger","reason_id":"r279","utility":"tac"},
 {"candidate":{"effects":"b92847f38872c2d75e0a4f6e7f069421447e6eaddf9ab3630be924bfc07a019a","status":0,"stdout":"63be28c14377de31674813c9b075d062a6d20288307c0ad20bf4db6b7ab8d6db"},"case":{"argv":["--separator=:","--before","-s","^","--regex","wide"],"domain":"text","family":null,"fixture":"text","input_kind":"command","mode":null,"stdin":"blanks","utility":"tac"},"domain":"text","id":"a8252bb35e483fbd","kind":"bug","list":"ledger","reason_id":"r279","utility":"tac"},

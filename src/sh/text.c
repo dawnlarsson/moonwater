@@ -26583,6 +26583,135 @@ static PURE bipolar sort_compare_bytes(p8 address_to a, positive la, p8 address_
 }
 
 /*
+        -R, as GNU's compare_random does it in the C locale: MD5 over sixteen
+        bytes of salt and then the key, the two digests compared as bytes,
+        and the keys themselves when the digests collide. Equal keys hash
+        alike, so they land together, and a --random-source file makes the
+        salt its first sixteen bytes and the whole order reproducible -- the
+        same order GNU gives for that file, byte for byte.
+*/
+static digest_state sort_random_state;
+
+static b32 sort_open_failed(string_address name, bipolar reason);
+
+static PURE bipolar sort_compare_random(p8 address_to a, positive la, p8 address_to b,
+                                        positive lb)
+{
+        digest_state one = sort_random_state;
+        digest_state two = sort_random_state;
+        p8 first[16];
+        p8 second[16];
+
+        digest_write(address_of one, a, la);
+        digest_close(address_of one, first);
+        digest_write(address_of two, b, lb);
+        digest_close(address_of two, second);
+
+        bipolar order = memory_compare(first, second, sizeof(first));
+
+        if (!order)
+                order = memory_compare(a, b, min(la, lb));
+
+        if (order)
+                return order < 0 ? -1 : 1;
+
+        return la == lb ? 0 : la < lb ? -1 : 1;
+}
+
+// The salt, from the named file or the kernel; false after GNU's words for
+// a source that would not give sixteen bytes.
+static bool sort_random_ready(string_address source)
+{
+        p8 salt[16];
+        positive have = 0;
+
+        if (!source)
+        {
+                if (system_random_fill(salt, sizeof(salt), 0) < 0)
+                        return string_diagnostic(&text_diagnostic, 0, null,
+                                                 "open failed: getrandom");
+        }
+        else
+        {
+                bipolar handle = text_open_handle(source, FILE_READ, 0);
+                bipolar got = 0;
+
+                if (handle < 0)
+                        return !sort_open_failed(source, handle);
+
+                while (have < sizeof(salt) &&
+                       (got = system_read_retry((positive)handle, salt + have,
+                                                sizeof(salt) - have)) > 0)
+                        have += (positive)got;
+
+                system_close((positive)handle);
+
+                if (have < sizeof(salt))
+                {
+                        text_flush();
+                        if (got < 0)
+                                return string_report(writer_stderr, false,
+                                                     "%s: '%w': read error: %s\n", text_name,
+                                                     writer_terminal_quoted_name, source,
+                                                     file_reason(got));
+                        return string_report(writer_stderr, false,
+                                             "%s: '%w': end of file\n", text_name,
+                                             writer_terminal_quoted_name, source);
+                }
+        }
+
+        digest_open(address_of sort_random_state, DIGEST_MD5, 16);
+        digest_write(address_of sort_random_state, salt, sizeof(salt));
+        return true;
+}
+
+/*
+        A key with -f, -d or -i under an ordering that reads its bytes whole
+        -- -R, -V, and -h, whose suffix -f can change -- is compared as GNU
+        compares it: a copy with the ignored bytes gone and the rest folded,
+        and the ordering run on the copies.
+*/
+static PURE bipolar sort_compare_kind(p8 kind, positive how, p8 address_to a, positive la,
+                                      p8 address_to b, positive lb);
+
+static positive sort_translate(p8 address_to into, p8 address_to from, positive length,
+                               positive how)
+{
+        positive used = 0;
+
+        for (positive at = 0; at < length; at++)
+        {
+                p8 byte = from[at];
+
+                if ((how & (SORT_DICTIONARY | SORT_PRINTABLE)) && !sort_looked_at(byte, how))
+                        continue;
+
+                into[used++] = how & SORT_FOLD ? (p8)byte_to_upper(byte) : byte;
+        }
+
+        return used;
+}
+
+static bipolar sort_compare_translated(p8 kind, positive how, p8 address_to a, positive la,
+                                       p8 address_to b, positive lb)
+{
+        p8 small[4000];
+        p8 address_to room = small;
+
+        if (la + lb > sizeof(small) && !(room = memory_take(la + lb)))
+                return 0;
+
+        positive ta = sort_translate(room, a, la, how);
+        positive tb = sort_translate(room + ta, b, lb, how);
+        bipolar answer = sort_compare_kind(kind, 0, room, ta, room + ta, tb);
+
+        if (room != small)
+                memory_give(room);
+
+        return answer;
+}
+
+/*
         -h, which is one comparison of the suffix and then an ordinary one.
 
         The suffix outranks the digits -- 2K is larger than 1000 -- but only
@@ -26841,8 +26970,14 @@ static PURE bipolar sort_compare_version(p8 address_to a, positive la, p8 addres
 }
 
 static PURE bipolar sort_compare_kind(p8 kind, positive how, p8 address_to a, positive la,
-                                 p8 address_to b, positive lb)
+                                      p8 address_to b, positive lb)
 {
+        if (how && (kind == 'R' || kind == 'V' || (kind == 'h' && (how & SORT_FOLD))))
+                return sort_compare_translated(kind, how, a, la, b, lb);
+
+        if (kind == 'R')
+                return sort_compare_random(a, la, b, lb);
+
         if (kind == 'n')
                 return sort_compare_number(a, la, b, lb);
 
@@ -30176,6 +30311,7 @@ static p8 sort_kind_bit(p8 letter)
         case 'h': return SORT_KIND_H;
         case 'M': return SORT_KIND_M;
         case 'n': return SORT_KIND_N;
+        case 'R': return SORT_KIND_R;
         case 'V': return SORT_KIND_V;
         default: return 0;
         }
@@ -30443,6 +30579,8 @@ static const argument_option sort_options[] = {
     {"sort", 'W', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"check", 'K', ARGUMENT_OPTIONAL | ARGUMENT_LONG_ONLY},
     {"version-sort", 'V'},
+    {"random-sort", 'R'},
+    {"random-source", 'X', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"key", 'k', ARGUMENT_REQUIRED},
     {"merge", 'm'},
     {"output", 'o', ARGUMENT_REQUIRED},
@@ -30763,6 +30901,7 @@ static string_address sort_output_said;
 static b32 sort_option_status;
 // The orderings --sort named, as the letters they stand for.
 static p8 sort_said_kinds;
+static string_address sort_random_source;
 static bool sort_tab_seen;
 static p8 sort_tab;
 
@@ -30951,11 +31090,12 @@ static bool sort_key_seen(p8 letter, string_address value)
                 return false;
         }
 
-        if (letter == 'W' && string_equals(value, "random"))
-        {
-                sort_option_status = 1;
-                return string_diagnostic(&text_diagnostic, 0, value, "invalid argument for --sort");
-        }
+        if (letter == 'X' && sort_random_source && !string_equals(sort_random_source, value))
+                return string_diagnostic(&text_diagnostic, 0, null,
+                                         "multiple random sources specified");
+
+        if (letter == 'X')
+                sort_random_source = value;
 
         if (letter == 'W')
                 sort_said_kinds |= sort_kind_bit(
@@ -31467,6 +31607,7 @@ static b32 text_sort()
         sort_output_said = null;
         sort_option_status = 2;
         sort_said_kinds = 0;
+        sort_random_source = null;
         sort_tab_seen = false;
         sort_key_count = 0;
         sort_have_separator = false;
@@ -31600,6 +31741,16 @@ static b32 text_sort()
                 key->whole = key->first_field == 1 && key->first_char <= 1 &&
                              !key->second_field && !key->order.blanks[0];
         }
+
+        // The salt is read only when some key hashes, as GNU reads it: a
+        // --random-source that is never used is never opened.
+        bool hashing = false;
+
+        for (b32 i = 0; i < sort_key_count; i++)
+                hashing |= (sort_keys[i].order.kinds & SORT_KIND_R) != 0;
+
+        if (hashing && !sort_random_ready(sort_random_source))
+                return text_done(2);
 
         // What -c and -C are refused beside, in GNU's order and named by the
         // letter that was asked for.
