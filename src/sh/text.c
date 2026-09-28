@@ -3151,7 +3151,22 @@ static bool join_side(string_address value, positive address_to mask)
         return true;
 }
 
+static bool join_option_refused;
+
+static bool join_option_read(p8 letter, string_address value);
+
+// A value refused here, as against an option the scan refused and already
+// named with its "Try" line, which is all GNU says of it.
 static bool join_option_seen(p8 letter, string_address value)
+{
+        bool taken = join_option_read(letter, value);
+
+        if (!taken)
+                join_option_refused = true;
+        return taken;
+}
+
+static bool join_option_read(p8 letter, string_address value)
 {
         if (letter == 't')
         {
@@ -3737,9 +3752,10 @@ static b32 text_join()
         join_separator = -1;
         join_output_written = -1;
         join_complained = false;
+        join_option_refused = false;
 
         if (!text_took(address_of taking))
-                return text_done(join_complained
+                return text_done(join_complained || !join_option_refused
                                      ? 1
                                      : string_diagnostic(&text_diagnostic, 1, null, "invalid option value"));
 

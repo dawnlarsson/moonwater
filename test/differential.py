@@ -18838,6 +18838,9 @@ TEXT_UTILITIES = (
                       ("dir", "right"), ("wide", "wide"), ("a.txt", "b.txt"), ("-", "-")),
             stdin=("text_join_left", "empty", "nonl", "text", "text_sorted_a", "nul", "edge_65535", "edge_65536", "edge_65537", "text_utf8"), fixture="text",
             extra=(("--nosuchflag", "left", "right"), ("-Q", "left", "right"),
+                   #   An option the scan refuses is named with its Try line
+                   #   and nothing else; only a refused value adds more.
+                   ("-/", "left", "right"), ("-1", "0", "-/", "left", "right"),
                    ("-t", ":", "-1", "2", "-2", "2", "fleft", "fright"),
                    ("-o", "auto", "-t", ":", "-1", "2", "-2", "2", "-a1", "-a2", "fleft", "fright"),
                    ("-o", "auto", "--header", "-a1", "-a2", "-e", "EMPTY", "hleft", "hright"),
