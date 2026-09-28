@@ -5220,6 +5220,8 @@ static b32 text_wc()
         bool want_bytes = (flags & FILE_FLAG('c')) != 0;
         bool want_chars = (flags & FILE_FLAG('m')) != 0;
         bool want_longest = (flags & FILE_FLAG('L')) != 0;
+        bool debug = (flags & FILE_FLAG('D')) != 0;
+        bool debug_said = false;
         positive total_mode = wc_total_mode;
         positive total_lines = 0, total_words = 0, total_chars = 0, total_bytes = 0;
         positive total_longest = 0;
@@ -5307,6 +5309,28 @@ static b32 text_wc()
 
                 if (!text_open(name))
                         continue;
+
+                /*
+                        --debug names the line counter's hardware once, the
+                        first time an input is counted for lines alone -- with
+                        or without bytes, and characters that are bytes --
+                        which is when GNU's wc_lines picks its SIMD body.
+                */
+                if (debug && !debug_said && want_lines && !want_words && !want_longest &&
+                    !(want_chars && utf8))
+                {
+                        debug_said = true;
+                        text_flush();
+#if X64 && !defined(KERNEL_MODE)
+                        if (!cpu_has_avx512)
+                                log_error("wc: avx512 support not detected\n", 0);
+                        log_error(cpu_has_avx512 ? "wc: using avx512 hardware support\n"
+                                  : cpu_has_avx2 ? "wc: using avx2 hardware support\n"
+                                                 : "wc: avx2 support not detected\n", 0);
+#elif ARM64
+                        log_error("wc: using neon hardware support\n", 0);
+#endif
+                }
 
                 /*
                         wc -c on a regular file does not have to read it.

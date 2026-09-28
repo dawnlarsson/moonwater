@@ -39204,7 +39204,6 @@ REASONS = {
  "r281": "bug: --output-error is validated after the destinations are opened rather than before, so a bad word and an unopenable file are reported in the other order.",
  "r282": "deliberate: an expanded set is bounded at 1024 bytes rather than taken from an attacker-controlled repeat count straight into a mapping; a longer set is refused aloud instead of translating with a plausible prefix.",
  "r283": "bug: --all-repeated beside -d and -u chooses a different set of lines from the reference's when the fields and characters skipped make the compared parts equal.",
- "r284": "deliberate: GNU wc names on the error stream the acceleration it counted with. There is one counting path here and naming it would be a message, not a count.",
  "r285": "deliberate: a word is a run of bytes between the C locale's blanks. The reference counts wide characters and treats a byte that decodes to nothing as its own word, which splits a file of arbitrary bytes differently.",
  "r286": "a bit list or mask is accepted only when every digit and separator of it is well formed and in range; util-linux 2.42.2 turns each of these into an empty or partial mask instead",
  "r287": "identity comes from a direct low-level probe of the device named: the cache-driven lookups, libblkid's probing modes, I/O limits, the type and usage filters, the known-filesystem list, size and offset overrides and probing hints are refused",
