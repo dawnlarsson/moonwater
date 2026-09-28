@@ -8004,10 +8004,9 @@ static bipolar http_link_read_until(
         return HTTP_OK;
 }
 
-/* The request built and put on the wire. Both clients send the same GET and
-   differ only in what they call themselves and which minor version they
-   claim, so the two words they disagree about are arguments and the wire
-   format is not written twice. */
+/* A request built and put on the wire in one step, for a caller that
+   already holds an open link (locale_auto_get in src/sh/host.c). http_run
+   builds its request before it connects instead. */
 static bipolar http_send_get(http_link address_to link, string_address host,
                              p16 port, string_address path, bool tls,
                              p8 version_minor, string_address agent)
@@ -8768,12 +8767,20 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                 positive header = 0;
                 positive used = 0;
 
+                /* The request is built before any name is looked up or any
+                   connection opened: a Location this client cannot put on
+                   the wire costs its target no connection and no handshake.
+                   It is the head buffer's first bytes until it is sent. */
                 status = http_split_into(url, host, sizeof host, address_of port,
                                          address_of path, address_of tls);
                 if (!status && tls && !how->allow_tls)
                         status = HTTP_TLS;
                 if (!status && !http_transport_allowed(address_of secure, tls))
                         status = HTTP_DOWNGRADE;
+                if (!status)
+                        status = http_get_request(
+                            head, sizeof head, host, port, path, tls,
+                            how->version_minor, how->agent, address_of used);
                 if (!status && !(ip = http_lookup(host)))
                         status = HTTP_NO_HOST;
                 if (status)
@@ -8784,8 +8791,9 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                 if (status)
                         goto done;
 
-                status = http_send_get(address_of link, host, port, path, tls,
-                                       how->version_minor, how->agent);
+                status = http_link_write(address_of link, head, used);
+                crypto_forget(head, used);
+                used = 0;
                 if (!status)
                         status = http_response_head(
                             address_of link, head, sizeof head, address_of used,

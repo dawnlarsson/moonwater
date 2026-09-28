@@ -57714,6 +57714,14 @@ static fn redirect_urls(void)
                 check("wget's start URL ceiling matches fetch",
                       http_fetch_to(url, -1, false, address_of code) ==
                           HTTP_BAD_URL);
+                /* A target the request builder refuses is refused before
+                   the connect: port 1 is closed, so a client that dials
+                   first answers HTTP_NO_ROUTE instead. */
+                check("a URL with no valid request is refused before any connection",
+                      http_get((string_address)"http://127.0.0.1:1/caf\xe9",
+                               address_of body, address_of code) == HTTP_BAD_URL &&
+                          http_fetch_to((string_address)"http://127.0.0.1:1/%0d",
+                                        -1, false, address_of code) == HTTP_BAD_URL);
 
                 /* Absolute Location that already fills the next-URL buffer. */
                 {
