@@ -440,32 +440,134 @@ static COLD string_address exec_bash_command_value(positive address_to value_len
         return exec_bash_command;
 }
 
+static positive exec_bash_command_add(positive used, string_address text,
+                                      positive length)
+{
+        if (length > sizeof(exec_bash_command) - 1 - used)
+                length = sizeof(exec_bash_command) - 1 - used;
+        if (length)
+                memory_copy(exec_bash_command + used, text, length);
+        return used + length;
+}
+
+/*
+        bash writes BASH_COMMAND back from its parse tree: the words with one
+        blank between them and each redirection as `2> file`; a for, select
+        or case as its header, `case a in `; and an arithmetic for as the
+        clause about to be evaluated, ((i<1)).
+*/
 static COLD fn exec_bash_command_from(parse_node address_to node)
 {
         positive used = 0;
         b32 at;
+        bool header = node->kind == NODE_FOR || node->kind == NODE_SELECT ||
+                      node->kind == NODE_CASE;
+
+        if (header)
+                used = exec_bash_command_add(
+                    used,
+                    node->kind == NODE_FOR ? (string_address) "for "
+                    : node->kind == NODE_SELECT ? (string_address) "select "
+                                                : (string_address) "case ",
+                    node->kind == NODE_SELECT ? 7 : node->kind == NODE_FOR ? 4 : 5);
 
         for (at = 0; at < node->word_count; at++)
         {
                 b32 word = node->word + at;
-                string_address text = parse_words[word];
-                positive length = parse_word_lengths[word];
 
-                if (used && used + 1 < sizeof(exec_bash_command))
+                if (used && !(header && !at) &&
+                    used + 1 < sizeof(exec_bash_command))
                         exec_bash_command[used++] = ' ';
-
-                if (length > sizeof(exec_bash_command) - 1 - used)
-                        length = sizeof(exec_bash_command) - 1 - used;
-
-                if (length)
-                {
-                        memory_copy(exec_bash_command + used, text, length);
-                        used += length;
-                }
+                if (header && at == 1 && node->kind != NODE_CASE)
+                        used = exec_bash_command_add(
+                            used, (string_address) "in ", 3);
+                used = exec_bash_command_add(used, parse_words[word],
+                                             parse_word_lengths[word]);
+                if (node->kind == NODE_CASE)
+                        break;
         }
+        if (node->kind == NODE_CASE)
+                used = exec_bash_command_add(used, (string_address) " in ", 4);
+        else if ((node->kind == NODE_FOR || node->kind == NODE_SELECT) &&
+                 !node->flags)
+                used = exec_bash_command_add(used,
+                                             (string_address) " in \"$@\"", 8);
+
+        if (node->kind == NODE_SIMPLE)
+                for (at = 0; at < node->redirect_count; at++)
+                {
+                        parse_redirect address_to want =
+                            parse_redirects + node->redirect + at;
+                        static const string_address spelling[] = {
+                            [OP_DLESS] = "<<", [OP_DGREAT] = ">>",
+                            [OP_LESSAND] = "<&", [OP_GREATAND] = ">&",
+                            [OP_LESSGREAT] = "<>", [OP_CLOBBER] = ">|",
+                            [OP_LESS] = "<", [OP_GREAT] = ">",
+                            [OP_ANDGREAT] = "&>", [OP_ANDDGREAT] = "&>>",
+                            [OP_HERESTRING] = "<<<"};
+                        bool input = want->op == OP_LESS ||
+                                     want->op == OP_LESSAND ||
+                                     want->op == OP_DLESS ||
+                                     want->op == OP_LESSGREAT ||
+                                     want->op == OP_HERESTRING;
+                        p8 number[24];
+
+                        if (want->op >= (b32)array_count(spelling) ||
+                            !spelling[want->op])
+                                continue;
+                        if (used && used + 1 < sizeof(exec_bash_command))
+                                exec_bash_command[used++] = ' ';
+                        if (!want->var_length && want->op != OP_ANDGREAT &&
+                            want->op != OP_ANDDGREAT &&
+                            want->fd != (input ? 0 : 1))
+                                used = exec_bash_command_add(
+                                    used, number,
+                                    positive_into_string(number, want->fd));
+                        used = exec_bash_command_add(
+                            used, spelling[want->op],
+                            string_length(spelling[want->op]));
+                        if (want->op != OP_GREATAND && want->op != OP_LESSAND &&
+                            want->op != OP_DLESS &&
+                            used + 1 < sizeof(exec_bash_command))
+                                exec_bash_command[used++] = ' ';
+                        used = exec_bash_command_add(used, want->text,
+                                                     string_length(want->text));
+                }
 
         exec_bash_command[used] = end;
 }
+
+static COLD fn exec_bash_command_clause(string_address clause)
+{
+        positive used = exec_bash_command_add(0, (string_address) "((", 2);
+
+        clause = arith_skip_space(clause);
+        used = exec_bash_command_add(used, clause, string_length(clause));
+        used = exec_bash_command_add(used, (string_address) "))", 2);
+        exec_bash_command[used] = end;
+}
+
+/*
+        The DEBUG trap before one command, with $LINENO on that command's
+        line: it read the line of the command before, one behind all the
+        way down a script. bash raises it before a simple command, before
+        (( )) and [[ ]], before case, before each pass of a for or select,
+        and before each clause of an arithmetic for.
+*/
+static fn exec_debug_clause(parse_node address_to node, string_address clause)
+{
+        if (!trap_debug_here || exec_condition_inside || !exec_debug_reaches())
+                return;
+        if (node->line)
+                exec_line = node->line;
+        if (clause)
+                exec_bash_command_clause(clause);
+        else
+                exec_bash_command_from(node);
+        exec_trap_condition(TRAP_DEBUG);
+}
+
+#define exec_debug_before(node) exec_debug_clause((node), null)
 
 static COLD fn exec_source_return_trap()
 {
@@ -11614,6 +11716,8 @@ static b32 exec_for(b32 index, bool selecting)
                 else
                 {
                         value = exec_items[base + at++];
+                        if (trap_debug_here)
+                                exec_debug_before(node);
                         exec_trace_for_header(node, false);
                 }
                 if (!env_assign(name, value))
@@ -11818,6 +11922,8 @@ static b32 exec_cfor(b32 index)
         condition = arith_skip_space(first + 1);
         update = arith_skip_space(second + 1);
 
+        if (trap_debug_here)
+                exec_debug_clause(node, initialize);
         if (string_get(initialize) &&
             !exec_arithmetic_value(initialize, address_of value, "(("))
         {
@@ -11827,6 +11933,8 @@ static b32 exec_cfor(b32 index)
 
         while (1)
         {
+                if (trap_debug_here)
+                        exec_debug_clause(node, condition);
                 if (string_get(condition))
                 {
                         if (!exec_arithmetic_value(condition, address_of value,
@@ -11847,6 +11955,8 @@ static b32 exec_cfor(b32 index)
                 if (!exec_loop_again())
                         break;
 
+                if (trap_debug_here)
+                        exec_debug_clause(node, update);
                 if (string_get(update) &&
                     !exec_arithmetic_value(update, address_of value, "(("))
                 {
@@ -14226,6 +14336,24 @@ static b32 exec_pipeline(b32 index)
                 exec_redirect_failed_node = 0;
         }
 
+        /*
+                bash raises DEBUG for each simple command of a pipeline in
+                the shell itself, before that stage is forked; a stage that
+                is a group or a subshell runs in its child, where the trap
+                does not reach. A lastpipe stage runs here and raises it
+                for itself.
+        */
+        if (count > 1 && trap_debug_here)
+        {
+                bool lastpipe = !job_monitor() && shell_shopt_on(LASTPIPE);
+
+                for (b32 stage = node->left; stage;
+                     stage = parse_nodes[stage].next)
+                        if (parse_nodes[stage].kind == NODE_SIMPLE &&
+                            !(lastpipe && !parse_nodes[stage].next))
+                                exec_debug_before(parse_nodes + stage);
+        }
+
         status = count > 1
                      ? exec_pipe(node->left, count, false, shell_pipefail(),
                                  false)
@@ -14428,12 +14556,8 @@ static b32 exec_node_kind(b32 index)
         {
                 // Before the words are expanded, which is where Bash runs it
                 // and the only place the action can use argv of its own.
-                if (trap_debug_here && !exec_condition_inside &&
-                    exec_debug_reaches())
-                {
-                        exec_bash_command_from(node);
-                        exec_trap_condition(TRAP_DEBUG);
-                }
+                if (trap_debug_here)
+                        exec_debug_before(node);
 
                 bool expand_scratch = node->redirect_count != 0;
                 b32 word_at = node->word;
@@ -14529,6 +14653,11 @@ static b32 exec_node_kind(b32 index)
         }
 
         exec_compound_depth++;
+
+        if (trap_debug_here &&
+            (node->kind == NODE_ARITHMETIC || node->kind == NODE_CONDITIONAL ||
+             node->kind == NODE_CASE))
+                exec_debug_before(node);
 
         if (node->kind == NODE_ARITHMETIC)
                 status = exec_arithmetic_command(index);

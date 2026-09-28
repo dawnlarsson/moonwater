@@ -14701,6 +14701,24 @@ def shell_lang_command_lookup_kinds(rng):
         "printf '%s\\n' \"$out\" | sed \"s|$PWD/||g; s/^.*: //\"", 'echo "s=$s"'))
 
 
+#       Where bash raises DEBUG and what $LINENO says there: before each
+#       simple command with that command's own line (this read the line of
+#       the command before), before (( )), [[ ]] and case, before each pass
+#       of a for and each clause of an arithmetic for, and before each simple
+#       stage of a pipeline in the shell itself.
+def shell_lang_debug_trap_places(rng):
+    bodies = ("echo a\necho b", "x=1\n(( h = 42 ))\n[[ j == j ]]", "for x in 1 2; do\n  echo x=$x\ndone",
+              "for (( i=0; i<2; i++ )); do echo i=$i; done", "case a in\n  a) echo c;;\nesac",
+              "echo p | cat | wc -l", "{ echo x; echo y; } | wc -l", "if test x = x; then\n  echo yes\nfi",
+              "f() { echo in-f; }\nf\necho after", "while false; do :; done\necho w",
+              "echo d && echo e\necho f || echo g")
+    body = "\n".join(rng.sample(bodies, rng.randint(1, 3)))
+    action = rng.choice(("echo \"  [$LINENO]\"", "echo \"  [$LINENO] $BASH_COMMAND\"", "echo dbg"))
+    return ("debug-trap-places", shell_BASH, shell_program(
+        "trap " + shell_quote(action) + " DEBUG", body, "trap - DEBUG", 'echo "end=$?"'),
+        ("command", "stdin", "file"))
+
+
 #       Digits in front of > are a descriptor only while they fit one: bash
 #       reads a number past INT_MAX there as an ordinary word, so `echo a
 #       2147483648>f` writes "a 2147483648" to f. This called it a syntax
@@ -17565,6 +17583,7 @@ SHELL_FAMILIES = (
     shell_lang_builtin_discard,
     shell_lang_fd_prefix_range,
     shell_lang_case_substitution_lines,
+    shell_lang_debug_trap_places,
     shell_lang_readonly_arrays,
     shell_lang_legacy_arithmetic,
     shell_lang_case_toggle,
