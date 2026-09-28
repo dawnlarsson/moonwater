@@ -4695,8 +4695,7 @@ static bipolar tls_send_enc(tls_conn address_to tls, p8 inner_type,
 
 /* Open a record where it lies. The inner type is its last nonzero byte;
    zeros after it are padding, and a record of nothing else is refused. A
-   failed open wipes what it decrypted and is fatal (RFC 8446 5.2): the read
-   keys are spent, so no later record opens behind a forged one. */
+   failed open wipes what it decrypted. */
 static bipolar tls_decrypt_record(tls_conn address_to tls, p8 address_to payload,
                                   positive payload_length, p8 address_to aad,
                                   positive address_to inner_length,
@@ -4714,10 +4713,7 @@ static bipolar tls_decrypt_record(tls_conn address_to tls, p8 address_to payload
                                     payload, at, payload + at);
         crypto_forget(nonce, sizeof nonce);
         if (!opened)
-        {
-                tls->seq_read = TLS_AES_GCM_RECORD_LIMIT;
                 return TLS_FAIL;
-        }
 
         tls->seq_read++;
         while (at && payload[at - 1] == 0)
@@ -4854,7 +4850,7 @@ static bipolar tls_next_record(tls_conn address_to tls, p8 address_to type,
         {
                 if (!tls_compatibility_ccs_valid(payload, payload_length,
                                                  tls->application))
-                        return TLS_FAIL;
+                        goto refused;
                 address_to type = TLS_CT_CCS;
                 address_to inner = payload;
                 address_to length = 0;
@@ -4865,7 +4861,7 @@ static bipolar tls_next_record(tls_conn address_to tls, p8 address_to type,
         {
                 if (header[0] != TLS_CT_HANDSHAKE ||
                     payload_length > TLS_PLAINTEXT_MAX)
-                        return TLS_FAIL;
+                        goto refused;
                 address_to type = TLS_CT_HANDSHAKE;
                 address_to inner = payload;
                 address_to length = payload_length;
@@ -4877,16 +4873,25 @@ static bipolar tls_next_record(tls_conn address_to tls, p8 address_to type,
             tls_decrypt_record(tls, payload, payload_length, header,
                                address_of inner_length, address_of inner_type) ||
             inner_type == TLS_CT_CCS)
-                return TLS_FAIL;
+                goto refused;
 
         if (inner_type == TLS_CT_ALERT)
-                return inner_length == 2 && payload[1] == 0 ? TLS_EOF
-                                                            : TLS_FAIL;
+        {
+                if (inner_length == 2 && payload[1] == 0)
+                        return TLS_EOF;
+                goto refused;
+        }
 
         address_to type = inner_type;
         address_to inner = payload;
         address_to length = inner_length;
         return TLS_OK;
+
+refused:
+        /* A record refused past its header is fatal (RFC 8446 5.2, 6): the
+           read keys are spent, so no record behind it ever opens. */
+        tls->seq_read = TLS_AES_GCM_RECORD_LIMIT;
+        return TLS_FAIL;
 }
 
 static fn tls_transcript_add(tls_conn address_to tls, p8 address_to msg,

@@ -53349,6 +53349,45 @@ static fn tls_closure_boundaries(void)
                 }
         }
 
+        //      The same after a plaintext record the keys forbid: a
+        //      compatibility CCS once the application keys are in.
+        {
+                b32 pair[2];
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_STREAM, 0,
+                                                (positive)pair);
+                check("TLS forged-CCS socket pair opens", opened == 0);
+                if (!opened)
+                {
+                        static p8 forged[] = {TLS_CT_CCS, 0x03, 0x03, 0, 1, 1};
+                        tls_conn sender = {0};
+                        tls_conn receiver = {0};
+                        p8 data[] = {'o', 'k'};
+                        p8 received[2] = {0};
+                        positive got = 0;
+
+                        sender.handle = pair[1];
+                        receiver.handle = pair[0];
+                        receiver.encrypted = true;
+                        receiver.application = true;
+                        check("TLS forged CCS and genuine record queue",
+                              network_stream_send_all(pair[1], forged,
+                                                      sizeof forged) &&
+                                  tls_send_enc(address_of sender, TLS_CT_APP,
+                                               data, sizeof data) == TLS_OK);
+                        check("TLS CCS after the application keys is refused",
+                              tls_read(address_of receiver, received,
+                                       sizeof received, address_of got) ==
+                                  TLS_FAIL);
+                        check("TLS opens nothing after a refused plaintext record",
+                              tls_read(address_of receiver, received,
+                                       sizeof received, address_of got) ==
+                                  TLS_FAIL);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                }
+        }
+
         /*
                 RFC 8446 5: a change_cipher_spec record that arrives
                 protected is unexpected_message. Only the plaintext one-byte
