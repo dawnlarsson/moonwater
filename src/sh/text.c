@@ -3260,8 +3260,8 @@ static fn join_fields_begin(join_fields address_to fields,
         A blank-separated field, from where the last one stopped: x is the first
         byte at or after at that is not a space, a tab or extra, and y the first
         such byte after x, both no further than the length. join's blanks are
-        these and the newline; sort's, uniq's and cut -w's are only the two, so
-        they pass the tab again. Sixteen
+        these and the newline, and so are sort's; uniq's and cut -w's are only
+        the two, so they pass the tab again. Sixteen
         bytes are classed at once and each end is one bit scan, where the byte
         loop GCC made of it branched on every byte and mispredicted its way out
         of every field. Sixteen bytes past the length are read where the page
@@ -26161,6 +26161,14 @@ static bool sort_stable;
 static bool sort_have_separator;
 static p8 sort_separator;
 
+/*
+        What sort calls a blank: a space, a tab, and the newline, as GNU's
+        blanks table has it. A newline is inside a line only under -z, and
+        there it separates fields and is skipped by -b and in front of a
+        number like the other two.
+*/
+static const b8 sort_blanks[STRING_SET_BYTES] = {['\t'] = 1, ['\n'] = 1, [' '] = 1};
+
 static positive sort_separator_from(p8 address_to at, positive length, positive from)
 {
         p8 address_to found = memory_first_of(at + from, sort_separator,
@@ -26190,7 +26198,7 @@ static inline INLINE positive sort_field_edge(p8 address_to at,
         }
 
         for (positive i = first; i < field && scan < length; i++)
-                scan = text_blank_field(at, length, scan, '\t').y;
+                scan = text_blank_field(at, length, scan, '\n').y;
 
         return scan;
 }
@@ -26207,7 +26215,7 @@ static fn sort_key_span(sort_key address_to key, p8 address_to at, positive leng
         positive finish = length;
 
         if (key->order.blanks[0])
-                while (begin < length && string_set_blanks[at[begin]])
+                while (begin < length && sort_blanks[at[begin]])
                         begin++;
 
         // A character position is counted from where the field starts and
@@ -26223,7 +26231,7 @@ static fn sort_key_span(sort_key address_to key, p8 address_to at, positive leng
                         finish = sort_field_start(at, length, key->second_field);
 
                         if (key->order.blanks[1])
-                                while (finish < length && string_set_blanks[at[finish]])
+                                while (finish < length && sort_blanks[at[finish]])
                                         finish++;
 
                         finish += key->second_char;
@@ -26270,7 +26278,7 @@ typedef struct
 // has its own rank, including -0 and -.000; nonzero fractions have width zero.
 static sort_number sort_number_of(p8 address_to text, positive length)
 {
-        positive at = string_span_max(text, length, string_set_blanks);
+        positive at = string_span_max(text, length, sort_blanks);
         bool minus = at < length && text[at] == '-';
 
         // A leading plus is not a sign here: GNU sort reads +7 as no number
@@ -26726,7 +26734,7 @@ static bipolar sort_human_order(p8 address_to at, positive length)
         bipolar sign = 1;
         bool nonzero = false;
 
-        scan = string_span_max(at, length, string_set_blanks);
+        scan = string_span_max(at, length, sort_blanks);
 
         // Only a minus: GNU reads +7 as no number at all, here as in every
         // other number this file reads.
@@ -26792,7 +26800,7 @@ static b32 sort_month_of(p8 address_to at, positive length)
 {
         positive scan = 0;
 
-        scan = string_span_max(at, length, string_set_blanks);
+        scan = string_span_max(at, length, sort_blanks);
 
         if (length - scan < 3)
                 return 0;
@@ -27296,7 +27304,7 @@ static p64 sort_number_window(p8 address_to text, positive length,
         // nothing was a quarter of sort -rn.
         positive at = 0;
 
-        while (at < length && string_set_blanks[text[at]])
+        while (at < length && sort_blanks[text[at]])
                 at++;
 
         bool minus = at < length && text[at] == '-';

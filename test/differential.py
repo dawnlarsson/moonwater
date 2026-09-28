@@ -17253,6 +17253,10 @@ INPUTS.update({
                           b"1e-4960\n-1e-4960\n2.2250738585072014e-308\n4.9e-324\n-0\n0\n-0.0e7\n"
                           b"inf\n-Infinity\nINFINITY\ninfin\nnan\n-nan\nNaN(123)\n-nan(x_1)\nnan(\n"
                           b"abc\n\n \n-\n.\n1e\n1e+\n.e1\n0x\n0x.p1\n5.\n.5\n-.5e-1\n\t7\n1,5\n"),
+    #   NUL-ended records with newlines inside, where -z makes the newline
+    #   a blank like the space and the tab: between fields, under -b and
+    #   in front of a number or a month.
+    "text_sort_nul_fields": (b"1\n2\x002\n1\x00\n\n3\x00b\nJAN\x00a\nFEB\x00 \n-1\x00\n10\x00"),
     "text_sort_version": (b"1.10\n1.9\n1.2.3\nfoo-1.0.tar.gz\nfoo-1.0~rc1\nfoo-2.tar.gz\n.hidden\n"
                           b"1.0\n1.0.0\nabc\nabc1\nabc10\nabc2\n\n~\n1~\na.b\na.c\n01\n1\n"),
     "text_sort_month": (b"Mar\nJAN\nfeb\nnotamonth\nDec 3\n  Apr\nmay\nJune\nJul\naugust\nSEP\n"
@@ -19241,6 +19245,9 @@ TEXT_UTILITIES = (
                        ("-R", "--random-source=big", "--random-source=big"), ("-nR", "--random-source=big"),
                        ("--sort=random", "-n"), ("-Rc", "--random-source=big"), ("-Rm", "--random-source=big", "-", "b.txt"),
                        ("-R", "-S", "1K", "--random-source=big"), ("-fV",), ("-hf",), ("-k1,1Vf", "-s"))),
+                   *({"argv": argv, "stdin": "text_sort_nul_fields", "fixture": "text"} for argv in (
+                       ("-z", "-k2,2"), ("-zb", "-k2,2"), ("-z", "-k2b,2"), ("-zn",), ("-z", "-k1,1n"),
+                       ("-z", "-k2M"), ("-zh",), ("-zg",), ("-zs", "-k2"), ("-z", "-t", "a", "-k2"))),
                    #   -g is strtold's order, long double and all.
                    *({"argv": argv, "stdin": "text_sort_general", "fixture": "text"} for argv in (
                        ("-g",), ("-gr",), ("-gs",), ("-gu",), ("-s", "-k1,1g"), ("-gm", "-", "-"), ("-gc",),
