@@ -36912,7 +36912,8 @@ def harness_tls_chains(argv):
     one fixed chain. This builds the shell trusting a P-384 root it makes
     (TLS_BENCH_ANCHOR), then walks a grammar of chains -- the leaf's key
     (P-256, P-384, RSA-2048) against every mutation below -- serving each
-    from a loopback TLS 1.3 server and asking wget for it, and asks openssl
+    from a loopback TLS 1.3 server and asking wget for it (and again over
+    TLS 1.2, whose verdict has to be the same), and asks openssl
     verify the same question with the same root, intermediates, name and
     purpose. The two verdicts have to agree, except where this tree refuses
     by policy what openssl accepts, which DELIBERATE names with its reason.
@@ -37354,37 +37355,54 @@ def harness_tls_chains(argv):
                                "accepts" if ours_ok else "refuses"))
                     continue
                 context.set_ecdh_curve("prime256v1")
-                listener = socket.socket()
-                listener.bind(("127.0.0.1", 0))
-                listener.listen(1)
-                listener.settimeout(20)
 
-                def serve():
-                    try:
-                        raw, _ = listener.accept()
-                        raw.settimeout(20)
-                        with context.wrap_socket(raw, server_side=True) as tls:
-                            head = b""
-                            while b"\r\n\r\n" not in head:
-                                got = tls.recv(4096)
-                                if not got:
-                                    return
-                                head += got
-                            tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n"
-                                        b"Connection: close\r\n\r\ntrusted")
-                    except (OSError, ssl.SSLError):
-                        pass
+                def fetch(context):
+                    listener = socket.socket()
+                    listener.bind(("127.0.0.1", 0))
+                    listener.listen(1)
+                    listener.settimeout(20)
 
-                server = threading.Thread(target=serve, daemon=True)
-                server.start()
-                fetched = subprocess.run(
-                    [str(work / "wget"), "-q", "-O", "-", "https://127.0.0.1:%d/" %
-                     listener.getsockname()[1]], capture_output=True, timeout=30,
-                    env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
-                server.join(25)
-                listener.close()
+                    def serve():
+                        try:
+                            raw, _ = listener.accept()
+                            raw.settimeout(20)
+                            with context.wrap_socket(raw, server_side=True) as tls:
+                                head = b""
+                                while b"\r\n\r\n" not in head:
+                                    got = tls.recv(4096)
+                                    if not got:
+                                        return
+                                    head += got
+                                tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n"
+                                            b"Connection: close\r\n\r\ntrusted")
+                        except (OSError, ssl.SSLError):
+                            pass
+
+                    server = threading.Thread(target=serve, daemon=True)
+                    server.start()
+                    fetched = subprocess.run(
+                        [str(work / "wget"), "-q", "-O", "-", "https://127.0.0.1:%d/" %
+                         listener.getsockname()[1]], capture_output=True, timeout=30,
+                        env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+                    server.join(25)
+                    listener.close()
+                    return fetched
+
+                fetched = fetch(context)
+                # The same chain over TLS 1.2, whose Certificate is relaid
+                # for the one chain check: the verdict may not move.
+                context12 = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context12.minimum_version = context12.maximum_version = \
+                    ssl.TLSVersion.TLSv1_2
+                context12.set_ciphers("ECDHE-ECDSA-AES128-GCM-SHA256:"
+                                      "ECDHE-RSA-AES128-GCM-SHA256")
+                context12.load_cert_chain(work / "chain.pem", work / "leaf.key")
+                fetched12 = fetch(context12)
                 ours_ok = fetched.returncode == 0 and fetched.stdout.startswith(b"truste")
                 name = "%s with a %s leaf" % (mutation, key_name)
+                checks(ours_ok == (fetched12.returncode == 0 and
+                                   fetched12.stdout.startswith(b"truste")),
+                       "%s: wget's TLS 1.2 verdict differs from its TLS 1.3 one" % name)
                 expected = mutation in MUST_ACCEPT
                 checks(openssl_ok == expected or mutation in DELIBERATE,
                        "%s: the OpenSSL oracle %s a chain the standards matrix says to %s" % (
