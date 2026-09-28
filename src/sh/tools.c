@@ -7463,27 +7463,8 @@ invalid:
 
                 text_flush();
                 writer_stderr(ceiling ? "factor: " : "factor: '", 0);
-                for (positive at = 0; at < length && bytes[at];)
-                {
-                        p8 shown[256];
-                        positive take = 0;
-
-                        for (; at < length && bytes[at] && take + 4 < sizeof(shown); at++)
-                        {
-                                p8 byte = bytes[at];
-
-                                if (byte_is_printable(byte))
-                                        shown[take++] = byte;
-                                else
-                                {
-                                        shown[take++] = '\\';
-                                        shown[take++] = (p8)('0' + (byte >> 6));
-                                        shown[take++] = (p8)('0' + ((byte >> 3) & 7));
-                                        shown[take++] = (p8)('0' + (byte & 7));
-                                }
-                        }
-                        writer_stderr(shown, take);
-                }
+                writer_terminal_quoted_name_span(writer_stderr, (string_address)bytes,
+                                                 memory_span_without_byte(bytes, 0, length));
                 if (ceiling)
                         string_format(writer_stderr, ": too large; at most %p digits are factored\n",
                                       (positive)FACTOR_DIGITS);

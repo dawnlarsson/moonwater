@@ -10688,7 +10688,9 @@ MISC_UTILITIES = (
                        "324518553658426726783156020576257", "19807040628566084398385987585"),
                       # The widest number carried, with its top bit set, and
                       # past it only in leading zeros.
-                      (str(2003 ** 363 * 2011 ** 407),), ("0" * 2600 + "12",)),
+                      (str(2003 ** 363 * 2011 ** 407),), ("0" * 2600 + "12",),
+                      # How a refused word is quoted.
+                      ("\t12", "a'b", "a\\b", "a\x01", "1 2")),
             stdin=("misc_factor", "misc_factor_random", "numbers", "empty", "text", "nonl", "blanks", "long",
                    "many_lines", "nul", "high", "wide_words"),
             # The widest operand costs a Miller-Rabin power over 8448 bits,
