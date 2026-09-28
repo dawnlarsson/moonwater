@@ -4695,7 +4695,8 @@ static bipolar tls_send_enc(tls_conn address_to tls, p8 inner_type,
 
 /* Open a record where it lies. The inner type is its last nonzero byte;
    zeros after it are padding, and a record of nothing else is refused. A
-   failed open wipes what it decrypted. */
+   failed open wipes what it decrypted and is fatal (RFC 8446 5.2): the read
+   keys are spent, so no later record opens behind a forged one. */
 static bipolar tls_decrypt_record(tls_conn address_to tls, p8 address_to payload,
                                   positive payload_length, p8 address_to aad,
                                   positive address_to inner_length,
@@ -4713,7 +4714,10 @@ static bipolar tls_decrypt_record(tls_conn address_to tls, p8 address_to payload
                                     payload, at, payload + at);
         crypto_forget(nonce, sizeof nonce);
         if (!opened)
+        {
+                tls->seq_read = TLS_AES_GCM_RECORD_LIMIT;
                 return TLS_FAIL;
+        }
 
         tls->seq_read++;
         while (at && payload[at - 1] == 0)

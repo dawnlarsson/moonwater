@@ -53305,6 +53305,51 @@ static fn tls_closure_boundaries(void)
         }
 
         /*
+                RFC 8446 5.2: a record that fails to open is bad_record_mac,
+                and fatal. A forged record injected ahead of the peer's next
+                one fails; asked again, the connection must not go on to
+                open the genuine record behind it as though nothing
+                happened.
+        */
+        {
+                b32 pair[2];
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_STREAM, 0,
+                                                (positive)pair);
+                check("TLS forged-record socket pair opens", opened == 0);
+                if (!opened)
+                {
+                        static p8 forged[5 + 17] = {TLS_CT_APP, 0x03, 0x03, 0,
+                                                    17, 'x'};
+                        tls_conn sender = {0};
+                        tls_conn receiver = {0};
+                        p8 data[] = {'o', 'k'};
+                        p8 received[2] = {0};
+                        positive got = 0;
+
+                        sender.handle = pair[1];
+                        receiver.handle = pair[0];
+                        receiver.encrypted = true;
+                        receiver.application = true;
+                        check("TLS forged and genuine records queue",
+                              network_stream_send_all(pair[1], forged,
+                                                      sizeof forged) &&
+                                  tls_send_enc(address_of sender, TLS_CT_APP,
+                                               data, sizeof data) == TLS_OK);
+                        check("TLS forged record is refused",
+                              tls_read(address_of receiver, received,
+                                       sizeof received, address_of got) ==
+                                  TLS_FAIL);
+                        check("TLS opens nothing after a record failed to open",
+                              tls_read(address_of receiver, received,
+                                       sizeof received, address_of got) ==
+                                  TLS_FAIL);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                }
+        }
+
+        /*
                 RFC 8446 5: a change_cipher_spec record that arrives
                 protected is unexpected_message. Only the plaintext one-byte
                 compatibility record may pass, once, before Finished.
