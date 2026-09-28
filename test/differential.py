@@ -49145,7 +49145,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         n = fz_frame_length[which];
                         memcpy(frame, fz_frames[which], n);
                         step = fz_deliver(frame, n);
-                        if (crypto_be64(frame + 9) <= fz_verified && fz_verified &&
+                        if (n >= 17 && crypto_be64(frame + 9) <= fz_verified && fz_verified &&
                             (step != 0 || fz_sends))
                                 abort();
                         fz_lost |= step != 0 || fz_sends;
