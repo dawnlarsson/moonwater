@@ -12025,6 +12025,22 @@ static bool printf_number_at(string_address word, string_address address_to at,
         if (string_is(address_to at, '\'') || string_is(address_to at, '"'))
         {
                 address_to quoted = string_get(address_to at + 1);
+                //      Bash reads the character after the quote the way the
+                //      locale does: under UTF-8 'μ is 956, and a sequence
+                //      that does not decode is its first byte.
+                if (address_to quoted >= 0x80 && shell_bash_compat &&
+                    shell_utf8_on())
+                {
+                        memory_utf8_state state = {0};
+                        string_address byte = address_to at + 1;
+                        b32 fed;
+
+                        while ((fed = memory_utf8_feed(address_of state,
+                                                       string_get(byte))) == 0)
+                                byte++;
+                        if (fed == 1)
+                                address_to quoted = state.value;
+                }
                 return false;
         }
 
@@ -12165,6 +12181,56 @@ static bool printf_star(string_address word, bipolar address_to value)
         return !out_of_range;
 }
 
+/*
+        The zone bash writes a time in is the TZ it exports: its tzset follows
+        the variable, so a TZ assigned without export, or unset here while
+        still in the environment this shell was handed, is no zone at all.
+        The clock reads the process environment, which only holds what the
+        shell was started with; this puts the shell's answer there for the
+        one call and takes it back after.
+*/
+static p8 shell_zone_saved[256];
+static b32 shell_zone_swapped;
+
+static COLD fn shell_zone_enter()
+{
+        positive found = env_find_span((const_string) "TZ", 2);
+        string_address want =
+            found < shell_var_count && env_variable_exports(shell_vars + found)
+                ? env_get((const_string) "TZ")
+                : null;
+        string_address have = getenv((string_address) "TZ");
+
+        shell_zone_swapped = 0;
+        if (!shell_bash_compat ||
+            (want ? have && string_equals(want, have) : !have))
+                return;
+        if (have)
+        {
+                if (string_length(have) >= sizeof(shell_zone_saved))
+                        return;
+                string_copy(shell_zone_saved, have);
+        }
+        shell_zone_swapped = have ? 1 : 2;
+        if (want)
+                setenv((string_address) "TZ", want, 1);
+        else
+                unsetenv((string_address) "TZ");
+        tzset();
+}
+
+static COLD fn shell_zone_leave()
+{
+        if (!shell_zone_swapped)
+                return;
+        if (shell_zone_swapped == 1)
+                setenv((string_address) "TZ", shell_zone_saved, 1);
+        else
+                unsetenv((string_address) "TZ");
+        shell_zone_swapped = 0;
+        tzset();
+}
+
 fn printf_one(writer write, string_address format)
 {
         string_address step = format;
@@ -12301,10 +12367,44 @@ fn printf_one(writer write, string_address format)
                         continue;
                 }
 
-                if (conversion == 'q')
+                /*
+                        %q quotes and then cuts the quoted text to the
+                        precision; bash 5.3's %Q cuts the argument first and
+                        quotes what is left. Either is padded to the width.
+                */
+                if (conversion == 'q' ||
+                    (conversion == 'Q' && shell_bash_compat))
                 {
-                        printf_reusable(write, printf_next());
+                        string_address value = printf_next();
+                        p8 address_to cut = null;
+                        p8 kept = 0;
 
+                        if (conversion == 'Q' && precision >= 0 &&
+                            (positive)precision < string_length(value))
+                        {
+                                cut = (p8 address_to)value + precision;
+                                kept = address_to cut;
+                                address_to cut = end;
+                        }
+
+                        if (!width && (conversion == 'Q' || precision < 0))
+                                printf_reusable(write, value);
+                        else
+                        {
+                                positive length;
+
+                                printf_hold.used = 0;
+                                printf_reusable(printf_holder, value);
+                                length = printf_hold.used;
+                                if (conversion == 'q' && precision >= 0 &&
+                                    (positive)precision < length)
+                                        length = (positive)precision;
+                                writer_field_bulk(write, printf_hold.bytes,
+                                                  length, width, ' ', left);
+                        }
+
+                        if (cut)
+                                address_to cut = kept;
                         continue;
                 }
 
@@ -12381,6 +12481,31 @@ fn printf_one(writer write, string_address format)
                         {
                                 shell_seconds_begin();
                                 when = (bipolar)shell_started_seconds;
+                        }
+
+                        //      Bash formats into 128 bytes and writes
+                        //      nothing when the time does not fit; an
+                        //      empty format is %X. The result is a string
+                        //      to the width and the precision.
+                        if (shell_bash_compat)
+                        {
+                                positive length;
+
+                                if (!kept)
+                                        string_copy(shape, (string_address) "%X");
+                                printf_hold.used = 0;
+                                shell_zone_enter();
+                                date_shape(printf_holder, (b64)when, 0, shape);
+                                shell_zone_leave();
+                                length = printf_hold.used;
+                                if (length >= 128)
+                                        length = 0;
+                                if (precision >= 0 &&
+                                    (positive)precision < length)
+                                        length = (positive)precision;
+                                writer_field_bulk(write, printf_hold.bytes,
+                                                  length, width, ' ', left);
+                                continue;
                         }
 
                         date_shape(write, (b64)when, 0, shape);
@@ -21623,6 +21748,16 @@ static fn prompt_quoted(address_any data, positive length)
         }
 }
 
+// A prompt's clock is in the zone the shell exports, as printf's %T is.
+static COLD fn prompt_time(writer write, string_address format)
+{
+        shell_zone_enter();
+        date_shape(write, shell_clock_seconds(SHELL_CLOCK_REALTIME, null), 0,
+                   format);
+        shell_zone_leave();
+}
+
+
 positive shell_job_count();
 positive shell_history_next();
 
@@ -21709,34 +21844,22 @@ COLD fn shell_prompt_written(writer write, string_address text)
                         break;
 
                 case 'd':
-                        date_shape(quoted,
-                                   shell_clock_seconds(SHELL_CLOCK_REALTIME,
-                                                       null),
-                                   0, (string_address) "%a %b %d");
+                        prompt_time(quoted, (string_address) "%a %b %d");
                         break;
 
                 case 't':
-                        date_shape(quoted,
-                                   shell_clock_seconds(SHELL_CLOCK_REALTIME,
-                                                       null),
-                                   0, (string_address) "%H:%M:%S");
+                        prompt_time(quoted, (string_address) "%H:%M:%S");
                         break;
 
                 case 'A':
-                        date_shape(quoted,
-                                   shell_clock_seconds(SHELL_CLOCK_REALTIME,
-                                                       null),
-                                   0, (string_address) "%H:%M");
+                        prompt_time(quoted, (string_address) "%H:%M");
                         break;
 
                 case 'T':
                 case '@':
-                        date_shape(quoted,
-                                   shell_clock_seconds(SHELL_CLOCK_REALTIME,
-                                                       null),
-                                   0, letter == 'T'
-                                          ? (string_address) "%I:%M:%S"
-                                          : (string_address) "%I:%M %p");
+                        prompt_time(quoted, letter == 'T'
+                                                ? (string_address) "%I:%M:%S"
+                                                : (string_address) "%I:%M %p");
                         break;
 
                 //      \D{format}: strftime, the locale's time when empty.
@@ -21751,11 +21874,9 @@ COLD fn shell_prompt_written(writer write, string_address text)
                                 if (shut && length < sizeof(format))
                                 {
                                         memory_copy_end(format, text + 1, length);
-                                        date_shape(quoted,
-                                                   shell_clock_seconds(
-                                                       SHELL_CLOCK_REALTIME, null),
-                                                   0, length ? format
-                                                             : (p8 address_to)"%X");
+                                        prompt_time(quoted,
+                                                    length ? format
+                                                           : (p8 address_to)"%X");
                                         text = shut + 1;
                                         break;
                                 }

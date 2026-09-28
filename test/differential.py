@@ -14842,6 +14842,30 @@ def shell_lang_prompt_expansion(rng):
     return ("prompt-expansion", shell_BASH, shell_program(setup, line, 'echo "end=$?"'), ("command", "stdin", "file"))
 
 
+#       printf's quoting and time conversions as bash 5.3 has them: %q takes
+#       a width and cuts the quoted text to the precision, %Q cuts the
+#       argument and quotes the rest, a quoted character is its code point
+#       under UTF-8, and %(...)T is a string to the width and precision, in
+#       the zone the shell exports, empty past 128 bytes and %X when empty.
+#       These wrote %q bare, refused %Q, read the first byte and ignored TZ.
+def shell_lang_printf_quote_time(rng):
+    line = rng.choice((
+        "printf '[%6q][%-6q][%.2q][%8.3q]\\n' 'a b' 'a b' 'a b' 'a b'",
+        "printf '[%Q][%5.2Q][%-4Q]\\n' 'x' 'a b' ''",
+        "printf '%d %x %o|' \\'$'\\316\\274' \\'$'\\344\\270\\211' \\'$'\\316\\316'; echo",
+        "printf '%d %d %d %d|' \\'$'\\360\\237\\231\\202' \\'$'\\355\\240\\200' \\'$'\\301\\201' \\'$'\\316'; echo",
+        "export TZ=JST-9; printf '%(%F %T %Z)T\\n' 1557978599; export TZ=EST5EDT,M3.2.0,M11.1.0; printf '%(%F %T %Z)T\\n' 1557978599",
+        "export TZ=JST-9; TZ=UTC0; printf '%(%H)T\\n' 0; declare +x TZ; printf '%(%H)T\\n' 0; unset TZ; printf '%(%H)T\\n' 0",
+        "TZ=JST-9; printf '%(%H)T\\n' 0",
+        "export TZ=UTC0; printf '[%10.5(%Y-%m-%d)T][%-4(%H)T][%()T]\\n' 1557978599 0 0",
+        "export TZ=UTC0; f=$(printf '%%Y%.0s' {1..31}); printf \"%($f)T\" 0 | wc -c; f=$f%Y; printf \"%($f)T\" 0 | wc -c",
+        "export TZ=UTC0; printf -v v '[%6(%H)T]' 0; echo \"$v\"",
+    ))
+    locale = rng.choice(("LC_ALL=C.UTF-8", "LC_ALL=C", ""))
+    return ("printf-quote-time", shell_BASH, shell_program(
+        locale, line, 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
 #       Whether a list is null to :- and :+: bash joins it and asks the join,
 #       so a=("") and set -- "" are null, ("" "") is not as @ (a blank joins
 #       them) but is as quoted * under IFS=. This called one "" set and any
@@ -17757,6 +17781,7 @@ SHELL_FAMILIES = (
     shell_lang_underscore_forms,
     shell_lang_cfor_lineno,
     shell_lang_list_null_tests,
+    shell_lang_printf_quote_time,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,
