@@ -9603,7 +9603,9 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                         shell_words_bind(address_of fields,
                                          address_of exec_compound_word,
                                          address_of exec_compound_room);
+                        expand_list_element = true;
                         count = shell_expand_fields(piece, address_of fields);
+                        expand_list_element = false;
 
                         for (positive one = 0; one < count && answer; one++)
                         {

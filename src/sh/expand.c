@@ -319,6 +319,11 @@ positive shell_substitution_generation;
 #define EXPAND_PARAMETER_INDIRECT 1
 #define EXPAND_PARAMETER_MISSING 2
 
+//      Set while an assignment's value is expanded: the word of a ${x-word}
+//      inside it takes the value's tilde rules, after each colon as well,
+//      as bash and dash both do: x=${u-~:~} is two home directories.
+static bool expand_assigning;
+
 //      One word being built, and what each of its bytes is allowed to become.
 //      "$@" against a directory's worth of parameters is a single word, so
 //      this grows with it. Everything here is reached by index, never by an
@@ -2163,12 +2168,25 @@ static p8 address_to expand_lift(positive start, b32 mode)
         return into;
 }
 
+//      Set while a compound assignment expands its bare words, which bash
+//      does not read as assignments however they are spelled.
+static bool expand_list_element;
+
+
 // The word of ${x-word} and ${x:+word}, expanded in place: a leading tilde
 // first, unless the whole form sits inside double quotes.
 static fn expand_word_into(string_address word, bool quoted)
 {
+        if (!quoted && expand_assigning &&
+            !(shell_bash_compat && shell_posix_on()))
+        {
+                expand_into(word, quoted, MARK_FIELD, true);
+                return;
+        }
+        //      bash ends that tilde prefix at a colon as well as a slash:
+        //      ${u-~:~} is the home directory and :~.
         if (!quoted && string_is(word, '~'))
-                word = expand_tilde(word, false);
+                word = expand_tilde(word, shell_bash_compat);
 
         expand_into(word, quoted, MARK_FIELD, false);
 }
@@ -9664,8 +9682,25 @@ static fn expand_word(string_address word)
 
         if (string_is(word, '~'))
                 step = expand_tilde(word, false);
+        //      Outside posix mode bash takes an argument spelled like an
+        //      assignment, name=value, as one for its tildes: echo x=~ and
+        //      PATH=a:~/bin as a word to a command both expand.
+        else if (shell_bash_compat && expand_assignable_name(word))
+        {
+                positive name = string_span(word, string_set_name);
 
-        expand_into(step, false, MARK_PLAIN, false);
+                if (string_is(word + name, '=') &&
+                    string_first_of(word + name, '~') && !shell_posix_on() &&
+                    !expand_list_element)
+                {
+                        expand_push_run(word, name + 1, MARK_PLAIN);
+                        expand_into(word + name + 1, false, MARK_PLAIN, true);
+                        step = null;
+                }
+        }
+
+        if (step)
+                expand_into(step, false, MARK_PLAIN, false);
 
         /*
                 A word that is only "$@" and has no parameters behind it is no
@@ -11339,7 +11374,13 @@ RETURNS_NONNULL string_address shell_expand_assignment(string_address word, posi
                 return result;
 
         expand_push_run(word, value_at, MARK_PLAIN);
-        expand_into(word + value_at, false, MARK_PLAIN, true);
+        {
+                bool held = expand_assigning;
+
+                expand_assigning = true;
+                expand_into(word + value_at, false, MARK_PLAIN, true);
+                expand_assigning = held;
+        }
 
         if (!expand_failed)
                 shell_scratch_bytes(expand_length);

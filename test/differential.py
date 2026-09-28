@@ -15051,6 +15051,19 @@ def shell_lang_array_element_refusals(rng):
         "a=(1 2); x=1", line, 'echo "next=$?"', "declare -p a x 2>&1"), ("command", "stdin", "file"))
 
 
+#       Tildes the way bash expands them: an argument spelled like an
+#       assignment, name=~ or PATH=a:~/b, is one for its tildes outside posix
+#       mode (not a list element, not --opt=~); the word of ${u-word} ends its
+#       tilde prefix at a colon too; and inside an assignment that word takes
+#       the value's rules, after each colon as well, as dash does. These left
+#       the tildes after = and : as they were written.
+def shell_lang_tilde_words(rng):
+    line = rng.choice(("echo x=~ x=~/a x=a:~ a:~ =~ 1x=~ --opt=~ y=~:~ a_b=~ x=\\~ 'x=~'", "echo ${u-~:~} ${u:-~/x:~}",
+                       "x=~:${undef-~:~}; echo $x", "a=(${u-~:~} ~ x=~); echo ${a[@]}", "for w in x=~ ${u-~:~}; do echo $w; done",
+                       "case x=~ in x=/h) echo matched;; esac", "y=\"${u-~}\"; echo $y", "export v=~ w=a:~; echo $v $w"))
+    return ("tilde-words", shell_ALL, shell_program("HOME=/h", line, 'echo "end=$?"'), ("command", "stdin", "file"))
+
+
 #       bash's kill takes -n signum where it takes -s, and -L where it
 #       takes -l; both were unknown signals named n and L.
 def shell_lang_kill_bash_options(rng):
@@ -18029,6 +18042,7 @@ SHELL_FAMILIES = (
     shell_lang_array_element_refusals,
     shell_lang_bash_trapsig,
     shell_lang_kill_bash_options,
+    shell_lang_tilde_words,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,
