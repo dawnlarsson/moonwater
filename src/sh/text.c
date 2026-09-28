@@ -2979,6 +2979,54 @@ static fn comm_order_look(comm_order address_to order, positive side,
                                : "file 1 is not in sorted order");
 }
 
+/*
+        comm - - reads both sides from the one standard input, a line at a
+        time in the order the merge asks for them, as GNU's two reads of the
+        one stdin do. Each side keeps its line in a store of its own -- two,
+        so the line before is still there for the order check -- since the
+        other side's next read may take the fill it was seen in.
+*/
+static bool comm_shared;
+static text_record_cursor address_to comm_shared_reader;
+static byte_store comm_copies[2][2];
+static p8 comm_copy_flip[2];
+
+static bool comm_next(text_record_cursor address_to cursor, positive side,
+                      p8 delimiter, p8 address_to address_to previous,
+                      positive previous_length, p8 address_to storage)
+{
+        if (!comm_shared)
+                return text_record_next(cursor, delimiter, previous,
+                                        previous_length, storage);
+
+        text_record_cursor address_to shared = comm_shared_reader;
+
+        if (!text_record_next(shared, delimiter, null, 0, null))
+        {
+                cursor->record = null;
+                cursor->length = 0;
+                cursor->have = false;
+                cursor->reader.failed = shared->reader.failed;
+                return false;
+        }
+
+        positive length = shared->length;
+        bool ended = shared->ended;
+        byte_store address_to store = comm_copies[side] + (comm_copy_flip[side] ^= 1);
+
+        if (!byte_store_reserve(store, length + 1, 4096))
+        {
+                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                exit(text_done(1));
+        }
+        memory_copy_apart(store->bytes, shared->record, length);
+        cursor->record = store->bytes;
+        cursor->length = length;
+        cursor->ended = ended;
+        cursor->have = true;
+        return true;
+}
+
 static bool comm_advance(text_record_cursor address_to cursor,
                          positive side, p8 delimiter,
                          comm_order address_to order)
@@ -2986,8 +3034,8 @@ static bool comm_advance(text_record_cursor address_to cursor,
         bool check = order->mode != 'N';
         p8 address_to old = cursor->record;
         positive old_length = cursor->length;
-        bool more = text_record_next(
-            cursor, delimiter, check ? address_of old : null,
+        bool more = comm_next(
+            cursor, side, delimiter, check ? address_of old : null,
             old_length, comm_hold);
 
         if (!check)
@@ -3038,28 +3086,34 @@ static b32 text_comm()
         string_address left_name = text_file_name(0);
         string_address right_name = text_file_name(1);
 
-        // One buffered reader cannot stand at two places in the same
-        // stream: the first cursor's refill would take the records the
-        // second is about to be asked for.
-        if (string_equals(left_name, "-") && string_equals(right_name, "-"))
-                return text_done(string_diagnostic(&text_diagnostic, 1, null,
-                                                   "standard input is meaningful only once"));
+        comm_shared = string_equals(left_name, "-") && string_equals(right_name, "-");
 
         if (taking.flags & FILE_FLAG('z'))
                 text_delimiter = '\0';
 
+        // A third cursor is the one reader both sides share under - -.
         text_record_cursor address_to sides =
             (text_record_cursor address_to)utility_arena_take(
-                2 * sizeof(text_record_cursor));
+                3 * sizeof(text_record_cursor));
         if (!sides)
                 return text_done(1);
 
-        if (!text_record_open(sides, left_name, text_line))
-                return text_done(1);
-        if (!text_record_open(sides + 1, right_name, relation_spill))
+        memory_fill(sides, 0, 3 * sizeof(text_record_cursor));
+        comm_shared_reader = sides + 2;
+        if (comm_shared)
         {
-                text_record_close(sides);
-                return text_done(1);
+                if (!text_record_open(sides + 2, left_name, text_line))
+                        return text_done(1);
+        }
+        else
+        {
+                if (!text_record_open(sides, left_name, text_line))
+                        return text_done(1);
+                if (!text_record_open(sides + 1, right_name, relation_spill))
+                {
+                        text_record_close(sides);
+                        return text_done(1);
+                }
         }
 
         string_address separator = file_option_value(address_of taking, 'O');
@@ -3087,11 +3141,11 @@ static b32 text_comm()
         //      An input that cannot be read ends the program where the
         //      reference ends it, before the other is asked for a line: comm
         //      d d said "Is a directory" twice where GNU says it once.
-        bool have_left = text_record_next(sides, text_delimiter,
-                                           null, 0, null);
+        bool have_left = comm_next(sides, 0, text_delimiter,
+                                   null, 0, null);
         bool have_right = !sides[0].reader.failed &&
-                          text_record_next(sides + 1, text_delimiter,
-                                           null, 0, null);
+                          comm_next(sides + 1, 1, text_delimiter,
+                                    null, 0, null);
         order.read[0] = have_left;
         order.read[1] = have_right;
 #define comm_stop (order.mode == 'C' && (order.warned[0] || order.warned[1]))
@@ -3156,6 +3210,22 @@ static b32 text_comm()
         bool failed = sides[0].reader.failed || sides[1].reader.failed;
         bool order_failed = order.warned[0] || order.warned[1];
 
+        /*
+                GNU closes the one stdin once for each side, and the second
+                close fails: "comm: -", status 1, before any total or the
+                closing word on disorder.
+        */
+        if (comm_shared && !failed && !comm_stop)
+        {
+                text_record_close(sides + 2);
+                for (positive s = 0; s < 2; s++)
+                        for (positive k = 0; k < 2; k++)
+                                byte_store_release(comm_copies[s] + k);
+                text_flush();
+                string_format(writer_stderr, "%s: -\n", text_name);
+                return text_done(1);
+        }
+
         if ((taking.flags & FILE_FLAG('T')) && !failed && !comm_stop)
         {
                 for (positive side = 0; side < array_count(totals); side++)
@@ -3173,6 +3243,10 @@ static b32 text_comm()
 
         text_record_close(sides);
         text_record_close(sides + 1);
+        text_record_close(sides + 2);
+        for (positive s = 0; s < 2; s++)
+                for (positive k = 0; k < 2; k++)
+                        byte_store_release(comm_copies[s] + k);
         return text_done((failed || order_failed) ? 1 : 0);
 }
 
