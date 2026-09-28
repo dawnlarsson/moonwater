@@ -15102,6 +15102,17 @@ def shell_lang_dynamic_set_tests(rng):
         form.replace("%s", name) + '; echo "set=$?"', 'echo "end=$?"'), ("command", "stdin", "file"))
 
 
+#       A for loop's variable that is no name: bash reads it and refuses it
+#       when the loop runs ("`i.j': not a valid identifier", 1, the line going
+#       on), dash refuses it as it parses ("Bad for loop variable"). Both
+#       loops ran with the word for a name.
+def shell_lang_for_variable_names(rng):
+    name = rng.choice(("i.j", "1x", "a-b", "'q'", "x"))
+    loop = rng.choice(("for %s in a b; do echo hi; done; echo same $?", "f() { for %s in a; do :; done; }; echo def; f; echo after $?",
+                       "for %s; do :; done; echo same $?"))
+    return ("for-variable-names", shell_ALL, shell_program(loop % name, 'echo "next=$?"'), ("command", "stdin", "file"))
+
+
 #       bash's kill takes -n signum where it takes -s, and -L where it
 #       takes -l; both were unknown signals named n and L.
 def shell_lang_kill_bash_options(rng):
@@ -18084,6 +18095,7 @@ SHELL_FAMILIES = (
     shell_lang_assigned_list_joins,
     shell_lang_failglob_discard,
     shell_lang_dynamic_set_tests,
+    shell_lang_for_variable_names,
     shell_lang_prompt_expansion,
     shell_lang_source_path,
     shell_lang_enable_special,

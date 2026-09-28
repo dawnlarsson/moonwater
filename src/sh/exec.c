@@ -12030,6 +12030,23 @@ static b32 exec_for(b32 index, bool selecting)
         b32 count;
         b32 status = 0;
 
+        //      bash reads a for loop whose variable is no name and refuses
+        //      it here, with 1, before it expands a word of the list.
+        if (shell_bash_compat &&
+            !shell_valid_name(name, string_length(name)))
+        {
+                shell_diagnostic_where();
+                string_format(log_error, "`%s': not a valid identifier\n",
+                              name);
+                //      Under posix mode it ends the shell, with 2.
+                if (shell_posix_on())
+                {
+                        expand_fatal_status(2);
+                        return 2;
+                }
+                return shell_answer(1), 1;
+        }
+
         token_used = 0;
         count = exec_loop_items(node, base);
 
