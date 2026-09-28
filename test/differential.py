@@ -39615,6 +39615,7 @@ typedef unsigned long positive;
 #define fn void
 #define address_to *
 #define address_of &
+#define null NULL
 #define if_rare(c) if (c)
 #define if_common(c) if (c)
 #define bipolar_max INT64_MAX
@@ -39835,7 +39836,7 @@ def sntp_fuzz_source(host):
         sec(host, "#define SNTP_PORT 123", "static inline INLINE bipolar sntp_now_ns(void)"),
         sec(host, "static inline INLINE PURE bipolar sntp_load_stamp",
             "/*\n        t4 is meant to be"),
-        sec(host, "static bool sntp_control_stamp(", "static HOT bipolar sntp_receive_stamped("),
+        sec(host, "static p8 address_to sntp_control_find(", "/*\n        recvmsg into one buffer"),
         sec(host, "static bool sntp_control_sequence(", "static HOT bool sntp_transmit_stamp("),
         sec(host, "static COLD bipolar sntp_reply_ok(", "static HOT bipolar sntp_exchange("),
         sec(host, "#define LOCALE_NTP_RETRY_LEAST", "/*\n        A query that runs in a child"),
