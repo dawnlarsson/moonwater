@@ -1819,7 +1819,6 @@ static fn crypto_put_be64(p8 address_to bytes, p64 value)
         used. A transcript copy is a digest_state copy.
 */
 typedef digest_state crypto_sha256;
-typedef digest_state crypto_sha512;
 
 static fn crypto_sha256_open(crypto_sha256 address_to hash)
 {
@@ -1846,29 +1845,13 @@ static fn crypto_sha256_of(p8 address_to data, positive length, p8 address_to ou
         crypto_sha256_close(address_of hash, out);
 }
 
-static fn crypto_sha384_open(crypto_sha512 address_to hash)
-{
-        digest_open(hash, DIGEST_SHA384, 48);
-}
-
-static fn crypto_sha512_write(crypto_sha512 address_to hash, p8 address_to data,
-                              positive length)
-{
-        digest_write(hash, data, length);
-}
-
-static fn crypto_sha384_close(crypto_sha512 address_to hash, p8 address_to out)
-{
-        digest_close(hash, out);
-}
-
 static fn crypto_sha384(p8 address_to data, positive length, p8 address_to out)
 {
-        crypto_sha512 hash;
+        digest_state hash;
 
-        crypto_sha384_open(address_of hash);
-        crypto_sha512_write(address_of hash, data, length);
-        crypto_sha384_close(address_of hash, out);
+        digest_open(address_of hash, DIGEST_SHA384, 48);
+        digest_write(address_of hash, data, length);
+        digest_close(address_of hash, out);
 }
 
 static fn crypto_forget(address_any secret, positive length);
@@ -2031,18 +2014,12 @@ static fn crypto_pbkdf2(positive algorithm, positive size,
         crypto_forget(mix, sizeof mix);
 }
 
+/* RFC 5869's absent salt is 32 zero bytes, and HMAC pads a key with zeros
+   to its block, so no salt at all is the same key. */
 static fn crypto_hkdf_extract(p8 address_to salt, positive salt_length,
                               p8 address_to ikm, positive ikm_length,
                               p8 address_to prk)
 {
-        static p8 zeros[32];
-
-        if (!salt || !salt_length)
-        {
-                salt = zeros;
-                salt_length = 32;
-        }
-
         crypto_hmac_sha256(salt, salt_length, ikm, ikm_length, prk);
 }
 
@@ -2305,19 +2282,14 @@ static bool crypto_aesgcm_open(crypto_aesgcm_key address_to key,
                                positive text_length, p8 address_to tag)
 {
         p8 got[16];
-        positive i;
-        p8 diff = 0;
         bool valid;
 
         crypto_aesgcm_crypt(key, iv, aad, aad_length, text, text_length, got,
                             false);
-        for (i = 0; i < 16; i++)
-                diff |= got[i] ^ tag[i];
-        valid = diff == 0;
+        valid = crypto_same(got, tag, 16);
         if (!valid)
                 crypto_forget(text, text_length);
         crypto_forget(got, sizeof got);
-        crypto_forget(address_of diff, sizeof diff);
         return valid;
 }
 
@@ -3516,7 +3488,7 @@ static bool crypto_scalar_from_int_be(p64 address_to out,
         memory_copy(padded + limbs * 8 - length, bytes, length);
         crypto_fe_load_be(out, padded, limbs);
         less = crypto_fe_subtract_raw(difference, out, n, limbs);
-        valid = !crypto_fe_is_zero(out, limbs) && less;
+        valid = (bool)((crypto_fe_zero_bit(out, limbs) ^ 1) & less);
         crypto_forget(padded, sizeof padded);
         crypto_forget(difference, sizeof difference);
         crypto_forget(address_of less, sizeof less);
