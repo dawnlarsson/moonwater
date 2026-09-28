@@ -7038,6 +7038,7 @@ static b32 radio_wifi_off(bool say)
 static b32 radio_wifi_add(string_address ssid, string_address pass)
 {
         radio_network networks[RADIO_WIFI_MOST];
+        bipolar lock;
         positive count;
         positive at;
         positive ssid_length = string_length(ssid);
@@ -7057,6 +7058,13 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
             (pass_length && !radio_text_plain(pass, pass_length)))
                 return host_refuse("that network name cannot be stored%s\n", "");
 
+        /*      The radio lock from here, before the network is saved: the
+                machine's own pass, finding it saved and nothing joined,
+                joined it first while this scanned, and this then left that
+                join to make its own. */
+        lock = radio_lock(true);
+        if (lock < 0)
+                return host_fail("wifi", lock);
         count = radio_wifi_load(networks, RADIO_WIFI_MOST);
 
         for (at = 0; at < count; at++)
@@ -7068,6 +7076,7 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
                 if (count == RADIO_WIFI_MOST)
                 {
                         crypto_forget(networks, sizeof(networks));
+                        radio_unlock(lock);
                         return host_refuse("too many saved networks%s\n", "");
                 }
                 count++;
@@ -7086,6 +7095,7 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
         if (radio_wifi_save(networks, count) < 0)
         {
                 crypto_forget(networks, sizeof(networks));
+                radio_unlock(lock);
                 return host_fail("wifi", -1);
         }
 
@@ -7106,6 +7116,9 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
                      (radio_air_take(address_of air, RADIO_AIR_NOW | RADIO_AIR_JOINABLE) &&
                       (heard = radio_air_find(address_of air, ssid)))))
                 {
+                        if (!radio_security_joinable(heard->security) ||
+                            (heard->security != RADIO_OPEN && !pass_length))
+                                radio_unlock(lock);
                         if (!radio_security_joinable(heard->security))
                                 return host_refuse("saved, but it asks for %s, which "
                                                    "moonwater cannot join yet\n",
@@ -7118,12 +7131,9 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
         }
 
         {
-                bipolar lock = radio_lock(true);
                 bipolar failed;
                 p8 why[RADIO_WHY_ROOM];
 
-                if (lock < 0)
-                        return host_fail("wifi", lock);
                 /*      No radio at all is not one that is still arriving:
                         the join's eight seconds of asking are for a card
                         whose interface is on its way at boot. */
