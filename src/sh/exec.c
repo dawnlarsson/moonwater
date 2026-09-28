@@ -158,6 +158,12 @@ static fn exec_saves_child_drop();
 fn exec_child_began()
 {
         exec_forked = true;
+        //      A child does not inherit the right to become its parent's
+        //      final command: a substitution forked while a pipeline stage
+        //      expands its one command's words ran `env true; echo b` as
+        //      if env were that command, execed true and never echoed. A
+        //      child that is one command's process says so after this.
+        shell_tail_command = false;
         exec_saves_child_drop();
         exec_floodlight_child_began();
         trap_child_began();
@@ -386,8 +392,13 @@ static COLD fn exec_trap_condition(positive number)
         {
                 positive line = exec_line ? (positive)exec_line
                                           : shell_line_number;
+                bipolar kept_trapsig = shell_trap_signal;
 
+                shell_trap_signal = number == TRAP_DEBUG ? 65
+                                    : number == TRAP_ERR ? 66
+                                                         : 67;
                 exec_run_nested(action, false, line ? line - 1 : 0);
+                shell_trap_signal = kept_trapsig;
         }
         exec_condition_inside = false;
 
@@ -3022,6 +3033,21 @@ fn shell_kill(writer write, string_address input)
                 // This builtin shares the utility parser, but needs no helper
                 // process. Handlers only mark pending traps until argv is back.
                 log_flush();
+                //      bash's kill also takes -n signum for -s and -L for -l,
+                //      in the words before the first operand.
+                if (shell_bash_compat)
+                        for (positive word = 1; word < shell_argc; word++)
+                        {
+                                if (word_is(shell_argv[word], "--") ||
+                                    string_get(shell_argv[word]) != '-')
+                                        break;
+                                if (word_is(shell_argv[word], "-n"))
+                                        shell_argv[word] = (string_address) "-s";
+                                else if (word_is(shell_argv[word], "-L"))
+                                        shell_argv[word] = (string_address) "-l";
+                                if (word_is(shell_argv[word], "-s"))
+                                        word++;
+                        }
                 program_arguments_use(shell_argv, (b32)shell_argc);
                 kill_shell_spelling = true;
                 answer = file_kill();
@@ -9583,7 +9609,9 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                         shell_words_bind(address_of fields,
                                          address_of exec_compound_word,
                                          address_of exec_compound_room);
+                        expand_list_element = true;
                         count = shell_expand_fields(piece, address_of fields);
+                        expand_list_element = false;
 
                         for (positive one = 0; one < count && answer; one++)
                         {
@@ -10772,6 +10800,9 @@ fn exec_traps()
                 exec_signal = EXEC_SIGNAL_NONE;
                 exec_tested = false;
                 exec_trap_status = kept_status;
+                bipolar kept_trapsig = shell_trap_signal;
+
+                shell_trap_signal = number;
                 // An action is source, however many lines of it there are,
                 // and what it leaves unfinished is its own syntax error --
                 // the same two calls eval makes. One line at a time used to
@@ -10780,6 +10811,7 @@ fn exec_traps()
                 // A signal's action counts its lines from one, as both
                 // references do.
                 exec_run_nested(action, false, 0);
+                shell_trap_signal = kept_trapsig;
 
                 if (exec_line_aborted())
                 {
@@ -12003,6 +12035,23 @@ static b32 exec_for(b32 index, bool selecting)
             expand_substitutions_ever ? expand_substitutions_count : 0;
         b32 count;
         b32 status = 0;
+
+        //      bash reads a for loop whose variable is no name and refuses
+        //      it here, with 1, before it expands a word of the list.
+        if (shell_bash_compat &&
+            !shell_valid_name(name, string_length(name)))
+        {
+                shell_diagnostic_where();
+                string_format(log_error, "`%s': not a valid identifier\n",
+                              name);
+                //      Under posix mode it ends the shell, with 2.
+                if (shell_posix_on())
+                {
+                        expand_fatal_status(2);
+                        return 2;
+                }
+                return shell_answer(1), 1;
+        }
 
         token_used = 0;
         count = exec_loop_items(node, base);

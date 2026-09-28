@@ -4448,16 +4448,6 @@ static b32 tools_tsort()
 
 // numfmt ----------------------------------------------------
 
-/*
-        Decimal input stays decimal here too.  numfmt needs multiplication
-        and division by user units in addition to seq's power-of-ten scale,
-        so the one extra representation is a reduced unsigned rational.  Its
-        numerator and denominator are each one native word; inputs whose
-        exact reduced form exceeds that bound are rejected instead of being
-        rounded through binary floating point.  The source coefficient is
-        consequently bounded by signed 64-bit and at most eighteen decimal
-        places, the same checked floor seq already owns.
-*/
 enum
 {
         NUMFMT_SCALE_NONE,
@@ -4893,11 +4883,6 @@ static fn numfmt_body_out(p8 address_to number, positive number_length,
         and expld, the conversion to intmax_t its rounding functions lean
         on, and a comparison against a small whole number.
 */
-static seq_wide numfmt_wide_word(p64 word)
-{
-        return seq_wide_round(word, 0, false);
-}
-
 static seq_wide numfmt_wide_divide(seq_wide left, seq_wide right)
 {
         bool negative = left.negative != right.negative;
@@ -4939,7 +4924,7 @@ static seq_wide numfmt_wide_power(seq_wide base, positive power)
         seq_wide result = base;
 
         if (!power)
-                return numfmt_wide_word(1);
+                return seq_wide_from(1);
         while (--power)
                 result = seq_wide_multiply(result, base);
         return result;
@@ -4951,13 +4936,13 @@ static bool numfmt_wide_below(seq_wide value, p64 word)
         value.negative = false;
         return value.kind == SEQ_WIDE_ZERO ||
                (value.kind == SEQ_WIDE_FINITE &&
-                seq_wide_order(value, numfmt_wide_word(word)) < 0);
+                seq_wide_order(value, seq_wide_from(word)) < 0);
 }
 
 // expld: divided by base while it is at least base, counting.
 static seq_wide numfmt_wide_scale(seq_wide value, p64 base, positive address_to power)
 {
-        seq_wide divisor = numfmt_wide_word(base);
+        seq_wide divisor = seq_wide_from(base);
 
         address_to power = 0;
         if (value.kind != SEQ_WIDE_FINITE && value.kind != SEQ_WIDE_ZERO)
@@ -5000,7 +4985,7 @@ static seq_wide numfmt_wide_from(bipolar integer)
 {
         bool negative = integer < 0;
         positive magnitude = negative ? (positive)0 - (positive)integer : (positive)integer;
-        seq_wide out = numfmt_wide_word(magnitude);
+        seq_wide out = seq_wide_from(magnitude);
 
         out.negative = negative && magnitude;
         return out;
@@ -5009,7 +4994,7 @@ static seq_wide numfmt_wide_from(bipolar integer)
 // simple_round: the whole part in steps of INTMAX_MAX, the rest by --round.
 static seq_wide numfmt_wide_round(seq_wide value)
 {
-        seq_wide most = numfmt_wide_word((positive)bipolar_max);
+        seq_wide most = seq_wide_from((positive)bipolar_max);
         bipolar times = numfmt_wide_integer(numfmt_wide_divide(value, most));
         seq_wide product = seq_wide_multiply(most, numfmt_wide_from(times));
 
@@ -5037,7 +5022,7 @@ static seq_wide numfmt_wide_round(seq_wide value)
                 break;
         case NUMFMT_ROUND_NEAREST:
         {
-                seq_wide half = numfmt_wide_divide(numfmt_wide_word(1), numfmt_wide_word(2));
+                seq_wide half = numfmt_wide_divide(seq_wide_from(1), seq_wide_from(2));
 
                 if (value.negative)
                         half.negative = true;
@@ -5048,6 +5033,157 @@ static seq_wide numfmt_wide_round(seq_wide value)
 
         return seq_wide_add(seq_wide_multiply(most, numfmt_wide_from(times)),
                             numfmt_wide_from(rounded));
+}
+
+/*
+        The whole number V -- no fraction, no units, under 10^17 -- that
+        GNU's long double would carry without a rounding it can show, done
+        in integers: most of what numfmt is handed. Written as is, V is V.
+        Scaled by 1024 it is dyadic, and each division, the multiply by ten
+        and the add of a half inside GNU's rounding are exact while V is
+        below 2^50, so the rounding is the integer one. Scaled by 1000 the
+        divisions round, but V / 1000^p is dyadic once 125^p divides V, and
+        otherwise its denominator keeps a five, so it is no integer or half:
+        the p + 1 roundings move it by at most (p + 2) 2^-64 of itself, and
+        a quotient that far from every boundary rounds as the exact one
+        does. Anything nearer, or any other shape, is the long double's.
+        Answers false, having written nothing, when it cannot answer.
+*/
+static bool numfmt_exact(positive magnitude, bool minus, positive automatic_width)
+{
+        bool user = numfmt.have_format && numfmt.format.has_precision;
+        positive used = user ? numfmt.format.precision : 0;
+        p8 number_text[48];
+        positive length = 0;
+        p8 unit[2];
+        positive unit_length = 0;
+
+        if (magnitude >= 100000000000000000ull || (!magnitude && minus) ||
+            numfmt.from_unit != 1 || numfmt.to_unit != 1)
+                return false;
+
+        if (numfmt.to == NUMFMT_SCALE_NONE)
+        {
+                positive tens = 0;
+
+                for (positive left = magnitude; left >= 10; left /= 10)
+                        tens++;
+                if (tens + used > 18 || used > sizeof(number_text) - 24)
+                        return false;
+                if (minus)
+                        number_text[length++] = '-';
+                length += positive_into(number_text + length, magnitude);
+                if (used)
+                {
+                        number_text[length++] = '.';
+                        memory_fill(number_text + length, '0', used);
+                        length += used;
+                }
+                numfmt_body_out(number_text, length, unit, 0, automatic_width);
+                return true;
+        }
+
+        if (user)
+                return false;
+
+        bool binary = numfmt.to != NUMFMT_SCALE_SI;
+        positive base = binary ? 1024 : 1000;
+        positive power = 0;
+        positive scale = 1;
+
+        while (magnitude / scale >= base)
+        {
+                scale *= base;
+                power++;
+        }
+        if (binary ? magnitude >= (positive)1 << 50 : false)
+                return false;
+
+        // Ten times over when below ten, as GNU keeps one decimal there.
+        positive adjust = magnitude < 10 * scale;
+        positive numerator = magnitude * (adjust ? 10 : 1); // below 10^18
+        positive whole = numerator / scale;
+        positive rest = numerator % scale;
+
+        if (!binary && rest)
+        {
+                positive fives = 1;
+
+                for (positive k = 0; k < power; k++)
+                        fives *= 125;
+                if (magnitude % fives)
+                {
+                        p128 margin = (((p128)(whole + 1) * (power + 2) * scale) >> 63) + 1;
+                        positive near = min(rest, scale - rest);
+                        positive half = rest * 2 > scale ? rest * 2 - scale : scale - rest * 2;
+
+                        if (near <= margin || half <= 2 * margin)
+                                return false;
+                }
+        }
+
+        bool up;
+
+        switch (numfmt.rounding)
+        {
+        case NUMFMT_ROUND_UP:
+                up = rest && !minus;
+                break;
+        case NUMFMT_ROUND_DOWN:
+                up = rest && minus;
+                break;
+        case NUMFMT_ROUND_TO_ZERO:
+                up = false;
+                break;
+        case NUMFMT_ROUND_NEAREST:
+                up = rest * 2 >= scale;
+                break;
+        default:
+                up = rest != 0;
+                break;
+        }
+
+        positive rounded = whole + up;
+        positive shown_tenths = adjust;
+
+        // Rounded up to the base: one more power, 1.0 of it.
+        if (rounded >= (adjust ? 10 : 1) * base)
+        {
+                rounded = 10;
+                shown_tenths = 1;
+                power++;
+        }
+        else if (adjust && (rounded >= 100 || !power))
+        {
+                // Ten or more, or no unit at all: no decimal is shown.
+                shown_tenths = 0;
+                if (rounded % 10 == 0 || !power)
+                        rounded /= 10;
+                else
+                        return false;
+        }
+
+        if (minus)
+                number_text[length++] = '-';
+        length += positive_into(number_text + length, shown_tenths ? rounded / 10 : rounded);
+        if (shown_tenths)
+        {
+                number_text[length++] = '.';
+                number_text[length++] = (p8)('0' + rounded % 10);
+        }
+
+        if (power)
+        {
+                static const p8 powers[] = "kMGTPEZYRQ";
+
+                unit[unit_length++] = power == 1 && !binary ? 'k'
+                                      : power == 1          ? 'K'
+                                                            : powers[power - 1];
+                if (numfmt.to == NUMFMT_SCALE_IEC_I)
+                        unit[unit_length++] = 'i';
+        }
+        numfmt_body_out(number_text, length, unit, unit_length, automatic_width);
+        return true;
 }
 
 /* GNU's sentence for each way simple_strtod_human refuses a number. */
@@ -5219,6 +5355,24 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
                 return false;
         }
 
+        // A whole number the long double would carry exactly takes the
+        // integer path; any other goes on below.
+        {
+                bool minus = numeric_length && bytes[0] == '-';
+                positive digits_at = minus;
+                positive whole = 0;
+
+                while (digits_at < numeric_length && byte_is_digit(bytes[digits_at]) &&
+                       whole < 100000000000000000ull)
+                        whole = whole * 10 + (positive)(bytes[digits_at++] - '0');
+                for (positive k = 0; k < power; k++)
+                        whole = whole < 100000000000000000ull / base ? whole * base
+                                                                     : 100000000000000000ull;
+                if (digits_at == numeric_length && whole < 100000000000000000ull &&
+                    !numfmt.debug && numfmt_exact(whole, minus, automatic_width))
+                        return true;
+        }
+
         /*
                 From here the arithmetic is GNU's, in its long double: the
                 digits accumulated one at a time, the fraction divided by
@@ -5231,7 +5385,7 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
         bool minus = numeric_length && bytes[0] == '-';
         positive digit_at = minus;
         positive whole_digits = 0, fraction_digits = 0, precision = 0;
-        seq_wide ten = numfmt_wide_word(10);
+        seq_wide ten = seq_wide_from(10);
         seq_wide value = {0, 0, SEQ_WIDE_ZERO, false};
         bool loss = false;
 
@@ -5240,7 +5394,7 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
                 if (value.kind != SEQ_WIDE_ZERO || bytes[digit_at] != '0')
                         whole_digits++;
                 value = seq_wide_add(seq_wide_multiply(value, ten),
-                                     numfmt_wide_word((p64)(bytes[digit_at] - '0')));
+                                     seq_wide_from((p64)(bytes[digit_at] - '0')));
         }
         loss |= whole_digits > 18;
         if (minus)
@@ -5256,7 +5410,7 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
                         if (part.kind != SEQ_WIDE_ZERO || bytes[digit_at] != '0')
                                 fraction_digits++;
                         part = seq_wide_add(seq_wide_multiply(part, ten),
-                                            numfmt_wide_word((p64)(bytes[digit_at] - '0')));
+                                            seq_wide_from((p64)(bytes[digit_at] - '0')));
                 }
                 loss |= fraction_digits > 18;
                 precision = digit_at - from;
@@ -5268,7 +5422,7 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
 
         if (suffix_bytes)
                 precision = 0;
-        value = seq_wide_multiply(value, numfmt_wide_power(numfmt_wide_word(base), power));
+        value = seq_wide_multiply(value, numfmt_wide_power(seq_wide_from(base), power));
 
         if (loss && numfmt.debug)
         {
@@ -5285,8 +5439,8 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
 
         if (numfmt.from_unit != 1 || numfmt.to_unit != 1)
                 value = numfmt_wide_divide(
-                    seq_wide_multiply(value, numfmt_wide_word(numfmt.from_unit)),
-                    numfmt_wide_word(numfmt.to_unit));
+                    seq_wide_multiply(value, seq_wide_from(numfmt.from_unit)),
+                    seq_wide_from(numfmt.to_unit));
 
         bool user = numfmt.have_format && numfmt.format.has_precision;
         positive used = user ? numfmt.format.precision : precision;
@@ -5343,7 +5497,7 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
         else
         {
                 positive output_base = numfmt.to == NUMFMT_SCALE_SI ? 1000 : 1024;
-                seq_wide scale_base = numfmt_wide_word(output_base);
+                seq_wide scale_base = seq_wide_from(output_base);
 
                 value = numfmt_wide_scale(value, output_base, address_of output_power);
 
@@ -5394,29 +5548,26 @@ static fn numfmt_record(p8 address_to bytes, positive length)
 {
         if (numfmt.delimiter_given)
         {
-                positive start = 0;
-                positive field = 1;
+                for (positive start = 0, field = 1;; field++)
+                {
+                        p8 address_to mark = start < length
+                                                 ? memory_first_of(bytes + start,
+                                                                   numfmt.field_delimiter,
+                                                                   length - start)
+                                                 : null;
+                        positive at = mark ? (positive)(mark - bytes) : length;
 
-                for (positive at = 0; at <= length; at++)
-                        if (at == length || bytes[at] == numfmt.field_delimiter)
-                        {
-                                positive size = at - start;
+                        if (text_list_has(field))
+                                numfmt_convert(bytes + start, at - start, 0);
+                        else
+                                text_put(bytes + start, at - start);
 
-                                if (text_list_has(field))
-                                        numfmt_convert(bytes + start, size, 0);
-                                else
-                                        text_put(bytes + start, size);
+                        if (numfmt.stop || !mark)
+                                return;
 
-                                if (numfmt.stop)
-                                        return;
-
-                                if (at < length)
-                                        text_put_character(numfmt.field_delimiter);
-                                start = at + 1;
-                                field++;
-                        }
-
-                return;
+                        text_put_character(numfmt.field_delimiter);
+                        start = at + 1;
+                }
         }
 
         positive at = 0;
@@ -6270,10 +6421,13 @@ static bool factor_collect(positive number, positive address_to factors,
 #define FACTOR_POOL (FACTOR_LIMBS * 2 + 8704)
 #define FACTOR_MOST 8704
 
+/*      One limb past the widest number read, for the doubling that
+        builds R mod n and walks a division: a residue below a modulus with
+        its top bit set is one limb wider for a moment before it is reduced. */
 typedef struct
 {
         positive size;
-        p64 limb[FACTOR_LIMBS];
+        p64 limb[FACTOR_LIMBS + 1];
 } factor_big;
 
 static fn factor_big_trim(factor_big address_to value)
@@ -6325,8 +6479,9 @@ static fn factor_big_half(factor_big address_to value)
         factor_big_trim(value);
 }
 
-// value = value * 2 + bit; false when it would pass the limbs there are.
-static bool factor_big_double(factor_big address_to value, p64 bit)
+// value = value * 2 + bit, in at most the spare limb past FACTOR_LIMBS; no
+// caller doubles a value wider than a modulus it is below.
+static fn factor_big_double(factor_big address_to value, p64 bit)
 {
         p64 carry = bit;
 
@@ -6338,12 +6493,7 @@ static bool factor_big_double(factor_big address_to value, p64 bit)
                 carry = top;
         }
         if (carry)
-        {
-                if (value->size == FACTOR_LIMBS)
-                        return false;
                 value->limb[value->size++] = carry;
-        }
-        return true;
 }
 
 static bool factor_big_multiply_add(factor_big address_to value, p64 times, p64 add)
@@ -7145,12 +7295,26 @@ static bool factor_big_collect(factor_big address_to number)
                 return factor_found_add(number->limb, number->size);
 
         factor_big divisor, quotient;
+        positive times = 1;
 
         if (!factor_big_rho(number, address_of divisor))
                 return false;
         factor_big_divide(number, address_of divisor, address_of quotient);
-        return factor_big_collect(address_of divisor) &&
-               factor_big_collect(address_of quotient);
+
+        /*      A divisor of half a word goes out as often as it divides, a
+                word division each, rather than a rho over the whole of what
+                is left each time: 2003^363 * 2011^407 took 52 s that way. */
+        if (divisor.size == 1 && divisor.limb[0] >> 32 == 0)
+                while (quotient.size > 1 &&
+                       !factor_big_remainder_word(address_of quotient, divisor.limb[0]))
+                {
+                        factor_big_divide_word(address_of quotient, divisor.limb[0]);
+                        times++;
+                }
+        for (; times; times--)
+                if (!factor_big_collect(address_of divisor))
+                        return false;
+        return factor_big_collect(address_of quotient);
 }
 
 static b32 factor_found_order(positive left, positive right)
@@ -7291,6 +7455,10 @@ static bool factor_number(p8 address_to bytes, positive length,
         start += memory_span_byte(bytes + start, ' ', length - start);
         if (start < length && bytes[start] == '+')
                 start++;
+        //      Leading zeros are no part of the size: GNU factors
+        //      thousands of them before a 12.
+        if (start < length)
+                start += memory_span_byte(bytes + start, '0', length - start - 1);
 
         if (start == length || length - start >= sizeof(decimal))
                 goto invalid;
@@ -7446,27 +7614,8 @@ invalid:
 
                 text_flush();
                 writer_stderr(ceiling ? "factor: " : "factor: '", 0);
-                for (positive at = 0; at < length && bytes[at];)
-                {
-                        p8 shown[256];
-                        positive take = 0;
-
-                        for (; at < length && bytes[at] && take + 4 < sizeof(shown); at++)
-                        {
-                                p8 byte = bytes[at];
-
-                                if (byte_is_printable(byte))
-                                        shown[take++] = byte;
-                                else
-                                {
-                                        shown[take++] = '\\';
-                                        shown[take++] = (p8)('0' + (byte >> 6));
-                                        shown[take++] = (p8)('0' + ((byte >> 3) & 7));
-                                        shown[take++] = (p8)('0' + (byte & 7));
-                                }
-                        }
-                        writer_stderr(shown, take);
-                }
+                writer_terminal_quoted_name_span(writer_stderr, (string_address)bytes,
+                                                 memory_span_without_byte(bytes, 0, length));
                 if (ceiling)
                         string_format(writer_stderr, ": too large; at most %p digits are factored\n",
                                       (positive)FACTOR_DIGITS);
@@ -8452,14 +8601,6 @@ static fn dd_report(address_any data, positive length)
                 dd_report_failed = true;
 }
 
-static positive dd_now()
-{
-        p64 wall[2] = {0, 0};
-
-        system_call_2(syscall(clock_gettime), 1, (positive)wall);
-        return (positive)wall[0] * 1000000000u + (positive)wall[1];
-}
-
 /* coreutils' print_xfer_stats: the bytes, the time and the rate, on a line
    of its own at the end or rewritten in place once a second under
    status=progress, where the seconds are whole. */
@@ -8471,7 +8612,7 @@ static fn dd_transfer(bool progress)
                                                                  false);
         positive iec_length = positive_into_human_nearest_string(iec, dd_written,
                                                                   true);
-        positive elapsed = dd_now() - dd_started;
+        positive elapsed = clock_monotonic_nanoseconds() - dd_started;
 
         if (!elapsed)
                 elapsed = 1;
@@ -9361,52 +9502,75 @@ static fn dd_copy_simple(const p8 address_to from, positive length)
         }
 }
 
+// count copies of byte, whole output blocks written as they fill.
+static fn dd_fill(p8 byte, positive count)
+{
+        while (count && !dd_quit)
+        {
+                positive take = min(count, dd_obs - dd_oc);
+
+                memory_fill(dd_obuf + dd_oc, byte, take);
+                count -= take;
+                dd_oc += take;
+                if (dd_oc >= dd_obs)
+                        dd_write_output();
+        }
+}
+
 /* conv=block: each newline-ended record padded with spaces to cbs, the
-   newline gone, and a record longer than cbs cut there and counted. */
+   newline gone, and a record longer than cbs cut there and counted once. */
 static fn dd_copy_block(const p8 address_to from, positive length)
 {
-        for (positive at = 0; at < length && !dd_quit; at++)
+        while (length && !dd_quit)
         {
-                if (from[at] == dd_newline)
-                {
-                        for (positive column = dd_col; column < dd_cbs; column++)
-                                dd_put(dd_space);
-                        dd_col = 0;
-                }
-                else
-                {
-                        if (dd_col == dd_cbs)
-                                dd_truncated++;
-                        else if (dd_col < dd_cbs)
-                                dd_put(from[at]);
-                        dd_col++;
-                }
+                const p8 address_to newline = memory_first_of((address_any)from,
+                                                              dd_newline, length);
+                positive run = newline ? (positive)(newline - from) : length;
+                positive room = dd_col < dd_cbs ? dd_cbs - dd_col : 0;
+
+                dd_copy_simple(from, min(run, room));
+                if (run > room && dd_col <= dd_cbs)
+                        dd_truncated++;
+                dd_col += run;
+                if (!newline)
+                        return;
+
+                if (dd_col < dd_cbs)
+                        dd_fill(dd_space, dd_cbs - dd_col);
+                dd_col = 0;
+                from += run + 1;
+                length -= run + 1;
         }
 }
 
 /* conv=unblock: every cbs bytes a record, its trailing spaces dropped and a
    newline after it; spaces are held until something other than a space
-   shows they were not trailing. */
+   shows they were not trailing, and the newline until a byte of the next
+   record comes. */
 static fn dd_copy_unblock(const p8 address_to from, positive length)
 {
-        for (positive at = 0; at < length && !dd_quit; at++)
+        while (length && !dd_quit)
         {
-                p8 byte = from[at];
-
-                if (dd_col++ >= dd_cbs)
+                if (dd_col >= dd_cbs)
                 {
                         dd_col = dd_pending_spaces = 0;
-                        at--;
                         dd_put(dd_newline);
+                        continue;
                 }
-                else if (byte == dd_space)
-                        dd_pending_spaces++;
-                else
+
+                positive take = min(length, dd_cbs - dd_col);
+                positive spaces = memory_span_byte_reverse((address_any)from, dd_space, take);
+
+                if (take > spaces)
                 {
-                        for (; dd_pending_spaces; dd_pending_spaces--)
-                                dd_put(dd_space);
-                        dd_put(byte);
+                        dd_fill(dd_space, dd_pending_spaces);
+                        dd_pending_spaces = 0;
+                        dd_copy_simple(from, take - spaces);
                 }
+                dd_pending_spaces += spaces;
+                dd_col += take;
+                from += take;
+                length -= take;
         }
 }
 
@@ -9492,7 +9656,7 @@ static b32 tools_dd(void)
         utility_arena.used = 0;
         dd_report_failed = false;
         dd_progress_length = 0;
-        dd_started = dd_now();
+        dd_started = clock_monotonic_nanoseconds();
         dd_progress_next = dd_started + 1000000000u;
 
         bool progress = false;
@@ -10042,7 +10206,7 @@ static b32 tools_dd(void)
 
                 if (progress)
                 {
-                        positive now = dd_now();
+                        positive now = clock_monotonic_nanoseconds();
 
                         if (now >= dd_progress_next)
                         {
@@ -10153,8 +10317,7 @@ static b32 tools_dd(void)
                                         memory_to_upper_ascii(dd_ibuf, read_bytes);
                         }
                         else
-                                for (positive at = 0; at < read_bytes; at++)
-                                        dd_ibuf[at] = table[dd_ibuf[at]];
+                                memory_translate(dd_ibuf, read_bytes, table);
                 }
 
                 p8 address_to start = dd_ibuf;
@@ -10192,9 +10355,8 @@ static b32 tools_dd(void)
                         dd_put(held);
         }
 
-        if ((conv & DD_BLOCK) && dd_col > 0)
-                for (positive column = dd_col; column < cbs; column++)
-                        dd_put(dd_space);
+        if ((conv & DD_BLOCK) && dd_col > 0 && dd_col < cbs)
+                dd_fill(dd_space, cbs - dd_col);
 
         if (dd_col && (conv & DD_UNBLOCK))
                 dd_put(dd_newline);
@@ -10474,10 +10636,13 @@ static fn dump_add_canonical()
 
 /*
         od's own numeric arguments -- -j, -N, -S -- are read by coreutils
-        with xstrtoumax and a suffix set of its own: b, then E, G, K, k, M,
-        m, P, T, Y and Z, each of which may be spelled out as B for the
-        decimal step or iB for the binary one. dd's parser is a different
-        one (its x is a product, and c and w are counts), so od gets this.
+        with xstrtoimax and a suffix set of its own: b, then E, G, K, k, M,
+        m, P, Q, R, T, Y and Z, each of which may be spelled out as B or D
+        for the decimal step or iB for the binary one, and a value past
+        intmax_t is too large -- except nought, which no unit makes larger.
+        -w is the same reader in base ten with no suffixes (decimal). dd's
+        parser is a different one (its x is a product, and c and w are
+        counts), so od gets this.
 
         The three ways a word can fail are three different sentences in the
         reference, so the kind is answered rather than a bare false.
@@ -10487,7 +10652,8 @@ static fn dump_add_canonical()
 #define DUMP_OD_NUMBER_SUFFIX 2
 #define DUMP_OD_NUMBER_LARGE 3
 
-static p8 dump_od_number(string_address text, positive address_to out)
+static p8 dump_od_number(string_address text, positive address_to out,
+                         bool decimal)
 {
         string_address at = text;
         positive value = 0;
@@ -10510,8 +10676,10 @@ static p8 dump_od_number(string_address text, positive address_to out)
            digit follows that -- so 0x on its own is the number zero with a
            stray x after it, which is a suffix complaint and not a bad
            number. */
-        if (string_get(at) == '0' && (at[1] == 'x' || at[1] == 'X') &&
-            byte_is_hexadecimal(at[2]))
+        if (decimal)
+                ;
+        else if (string_get(at) == '0' && (at[1] == 'x' || at[1] == 'X') &&
+                 byte_is_hexadecimal(at[2]))
         {
                 base = 16;
                 at += 2;
@@ -10536,10 +10704,10 @@ static p8 dump_od_number(string_address text, positive address_to out)
 
         p8 suffix = string_get(at);
         positive power = size_suffix_power(suffix, false);
-        /* b, or the shared exponent letters through Y with only k and m in
+        /* b, or the shared exponent letters through Q with only k and m in
            lower case. */
-        bool letter = suffix == 'b' ||
-                      (power && power <= 8 && (suffix < 'a' || power <= 2));
+        bool letter = !decimal &&
+                      (suffix == 'b' || (power && (suffix < 'a' || power <= 2)));
 
         /* A word that is only a suffix counts as one of that unit. */
         if (!digits)
@@ -10564,7 +10732,7 @@ static p8 dump_od_number(string_address text, positive address_to out)
 
                         if (string_get(at) == 'i' && at[1] == 'B')
                                 at += 2;
-                        else if (string_get(at) == 'B')
+                        else if (string_get(at) == 'B' || string_get(at) == 'D')
                         {
                                 step = 1000;
                                 at++;
@@ -10574,7 +10742,7 @@ static p8 dump_od_number(string_address text, positive address_to out)
                         if (!size_scale_power_checked(
                                 1, step, (p8)power, (p64)positive_max,
                                 address_of scaled))
-                                large = true;
+                                large |= value != 0;
                         else
                                 multiple = (positive)scaled;
                 }
@@ -10588,7 +10756,7 @@ static p8 dump_od_number(string_address text, positive address_to out)
                         value *= multiple;
         }
 
-        if (large)
+        if (large || value > (positive)bipolar_max)
                 return DUMP_OD_NUMBER_LARGE;
 
         address_to out = value;
@@ -10700,15 +10868,7 @@ static p8 dump_od_offset_read(string_address text, positive address_to value)
 
         for (;; at++)
         {
-                p8 byte = (p8)*at;
-                positive digit;
-
-                if (byte >= '0' && byte <= '9')
-                        digit = (positive)(byte - '0');
-                else if (base == 16 && (byte | 0x20) >= 'a' && (byte | 0x20) <= 'f')
-                        digit = (positive)((byte | 0x20) - 'a' + 10);
-                else
-                        break;
+                positive digit = digit_known((p8)*at, base);
 
                 if (digit >= base)
                         break;
@@ -10785,10 +10945,10 @@ static positive dump_od_width(p8 type, positive size)
         return size == 1 ? 4 : size == 2 ? 6 : size == 4 ? 11 : 20;
 }
 
-/* One -t word can hold several formats (`-t x1c`) and z decorates the
-   integer format immediately before it.  Floating point and the named C
-   sizes are intentionally refused instead of being interpreted nearly. */
 /*
+        One -t word can hold several formats (`-t x1c`), and z decorates the
+        format immediately before it.
+
         -t reads a whole string of specifications, and the reference has a
         separate sentence for each way one can be wrong: a byte that begins
         no specification at all, and a width no integral type on this
@@ -11146,7 +11306,11 @@ static bool dump_od_seen(p8 letter, string_address value)
                         return true;
                 }
 
-                kind = dump_od_number(value, address_of read);
+                kind = dump_od_number(value, address_of read, false);
+                // GNU holds a string and its NUL, so -S stops one short.
+                if (letter == 'S' && kind == DUMP_OD_NUMBER_OK &&
+                    read == (positive)bipolar_max)
+                        kind = DUMP_OD_NUMBER_LARGE;
                 if (kind != DUMP_OD_NUMBER_OK)
                         return dump_od_number_refuse(
                             named[letter == 'j' ? 0 : letter == 'N' ? 1 : 2],
@@ -11164,14 +11328,11 @@ static bool dump_od_seen(p8 letter, string_address value)
 
         if (letter == 'w' && value)
         {
-                positive width;
+                positive width = 0;
+                p8 kind = dump_od_number(value, address_of width, true);
 
-                if (!dump_number(value, address_of width) || !width)
-                {
-                        text_flush();
-                        return string_report(writer_stderr, false, "od: invalid -w argument '%s'\n",
-                                      value);
-                }
+                if (kind != DUMP_OD_NUMBER_OK || !width)
+                        return dump_od_number_refuse("-w", value, kind);
         }
 
         //      The old letters for the floating types: -e and -F are
@@ -12385,7 +12546,9 @@ static b32 dump_run(positive first, positive count)
                                  : tools_text_done(text_status);
 }
 
-#define DUMP_STRING_MAX 65536
+/* A printable run is held until what ends it says whether it was a string,
+   so the store grows with the run, as GNU's buffer does; a step at a time. */
+#define DUMP_STRING_STEP 65536
 
 static fn dump_string_line(positive offset, p8 address_to bytes, positive length)
 {
@@ -12411,7 +12574,7 @@ static fn dump_string_line(positive offset, p8 address_to bytes, positive length
    Only 0x20 through 0x7e are printable in the C locale, so no escapes. */
 static b32 dump_strings(positive first, positive count, positive minimum)
 {
-        static p8 held[DUMP_STRING_MAX];
+        byte_store held = {null, 0, 0};
         positive have = 0;
         positive address = 0;
         positive skip = dump_arguments.skip;
@@ -12446,6 +12609,12 @@ static b32 dump_strings(positive first, positive count, positive minimum)
                 while (!skip && !done && !text_out_failed && text_fill())
                 {
                         positive available = text_input.filled - text_input.position;
+                        /*      Where the bytes outside ' '..'~' are, found up
+                                to sixty four at a time from base; the bytes
+                                between two of them are a run of a string. */
+                        p32 marks[64];
+                        positive marked = 0, next = 0, scanned = 0;
+                        p8 address_to base = null;
 
                         while (available && !done)
                         {
@@ -12455,27 +12624,56 @@ static b32 dump_strings(positive first, positive count, positive minimum)
                                         break;
                                 }
 
-                                p8 byte = text_input.buffer[text_input.position++];
+                                p8 address_to at = text_input.buffer + text_input.position;
 
-                                available--;
-                                address++;
-                                if (limited)
-                                        left--;
-
-                                if (byte >= ' ' && byte <= '~' && have < DUMP_STRING_MAX)
-                                        held[have++] = byte;
-                                else if (!byte && have >= minimum)
+                                if (!base || at == base + scanned)
                                 {
-                                        dump_string_line(address - have - 1, held, have);
+                                        positive window = limited && left < available ? left : available;
+
+                                        base = at;
+                                        marked = memory_offsets_outside(marks, at, window, ' ', '~',
+                                                                        array_count(marks));
+                                        scanned = marked == array_count(marks) ? marks[marked - 1] + 1
+                                                                               : window;
+                                        next = 0;
+                                }
+
+                                bool ends = next < marked;
+                                positive run = (positive)(base + (ends ? marks[next] : scanned) - at);
+                                positive taken = run + ends;
+
+                                held.used = have;
+                                if (run && !byte_store_reserve(address_of held, have + run,
+                                                               DUMP_STRING_STEP))
+                                {
+                                        dump_close();
+                                        byte_store_release(address_of held);
+                                        string_diagnostic(&text_diagnostic, 0, null,
+                                                          "memory exhausted");
+                                        return text_done(1);
+                                }
+                                if (run)
+                                        memory_copy(held.bytes + have, at, run);
+                                have += run;
+
+                                text_input.position += taken;
+                                available -= taken;
+                                address += taken;
+                                if (limited)
+                                        left -= taken;
+
+                                if (ends)
+                                {
+                                        next++;
+                                        if (!at[run] && have >= minimum)
+                                                dump_string_line(address - have - 1, held.bytes, have);
                                         have = 0;
                                 }
-                                else
-                                        have = 0;
 
                                 if (limited && !left)
                                 {
                                         if (have >= minimum)
-                                                dump_string_line(address - have, held, have);
+                                                dump_string_line(address - have, held.bytes, have);
                                         done = true;
                                 }
                         }
@@ -12483,6 +12681,8 @@ static b32 dump_strings(positive first, positive count, positive minimum)
 
                 dump_close();
         }
+
+        byte_store_release(address_of held);
 
         if (skip)
         {
@@ -12515,13 +12715,8 @@ static b32 tools_od(void)
                 dump_arguments.width_given = true;
                 if (!width)
                         dump_arguments.width = 32;
-                else if (!dump_number(width, address_of dump_arguments.width) ||
-                         !dump_arguments.width)
-                {
-                        string_format(writer_stderr, "od: invalid -w argument '%s'\n",
-                                      width);
-                        return text_done(1);
-                }
+                else
+                        dump_od_number(width, address_of dump_arguments.width, true);
         }
 
         /* A dump of strings takes no format, and the reference says so

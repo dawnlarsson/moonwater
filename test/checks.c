@@ -25424,6 +25424,28 @@ static positive lengths[] = {
 
 #define LENGTHS (sizeof(lengths) / sizeof(lengths[0]))
 
+/*
+        A stopping table is asked, before it is used, for one entry a table
+        folded from the literal holds as 1: a byte outside the set. It asked
+        for the terminator, which a stopping table holds as 0 however it was
+        built, so every set of two or more members went to the routine and
+        the table was never read -- about eighty instructions a call where
+        the table's scan is a handful, on every arithmetic body the shell
+        expanded. The table the macro reads has to answer 1 at the byte it
+        is asked about, whenever the set leaves one out.
+*/
+static void witness(string_address set, bool asked, b8 answer)
+{
+        checks++;
+
+        if (asked && answer != 1)
+        {
+                failures++;
+                string_format(log, "  FAIL witness: [%s] folds to a table that "
+                                   "stops at the byte it is asked about\n", set);
+        }
+}
+
 //      The literal has to be written into every call, because a set held in a
 //      variable is a set the compiler has not been told.
 #define CHECK_SET(literal)                                                    \
@@ -25442,6 +25464,10 @@ static positive lengths[] = {
                                               string_span_without_set(at, literal), \
                                               string_first_of_set(at, literal)); \
                                 }                                             \
+                witness(set, set_known_length(literal) > 1 &&                 \
+                                     set_known_outside(literal),              \
+                        set_known_table(literal, set_known_stops)             \
+                                [set_known_outside(literal)]);                \
         } while (0)
 
 //      A set the compiler cannot see, so that the other arm of every macro is
@@ -54545,6 +54571,44 @@ static fn tls_seal_in_receive(tls_conn address_to tls, positive content)
    plaintext record and for a protected record's inner plaintext, so
    TLS_RECORD_MAX, the header's gate, is that plus the type byte and the
    AES-GCM tag. Exact fills are accepted, one past and empty are refused. */
+/*
+        A receive behind a partial record moves it to the front first, so
+        the read has the whole room: with 200,000 bytes opened and three of
+        the next record's header held, 64 KiB queued on the socket come in
+        one read. Left where it was, the partial record's 62,141 bytes of
+        room took the first read and the rest a second.
+*/
+static tls_conn tls_receive_conn;
+
+static fn tls_receive_whole_room(void)
+{
+        static p8 queued[65536];
+        tls_conn address_to tls = address_of tls_receive_conn;
+        b32 pair[2];
+        bool opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM,
+                                    0, (positive)pair) == 0;
+
+        check("TLS receive-room socket pair opens", opened);
+        if (!opened)
+                return;
+        memory_fill(tls, 0, TLS_CONN_HEAD);
+        tls->handle = pair[0];
+        memory_fill(queued, 0x5a, sizeof queued);
+        memory_copy(tls->receive + 200000, "\x17\x03\x03", 3);
+        tls->receive_start = 200000;
+        tls->receive_end = tls->receive_high = 200003;
+        check("TLS receive-room bytes queue",
+              socket_send(pair[1], queued, sizeof queued, 0, null, 0) ==
+                  (bipolar)sizeof queued);
+        check("a receive behind a partial record takes the whole room in one read",
+              tls_receive(tls, null) && tls->receive_start == 0 &&
+                  tls->receive_end == 3 + sizeof queued &&
+                  !memory_compare(tls->receive, "\x17\x03\x03", 3));
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+        tls_forget(tls);
+}
+
 static fn tls_record_payload_ceiling(void)
 {
         tls_conn tls = {0};
@@ -56158,6 +56222,59 @@ static fn tls_client_hello_groups(void)
         p8 hello[512];
         positive host;
         positive at;
+
+        {
+                static const struct
+                {
+                        string_address host;
+                        string_address sni;
+                } names[] = {
+                    {"example.com", "example.com"},
+                    {"example.com.", "example.com"},
+                    {"123.example", "123.example"},
+                    {"xn--bcher-kva.example", "xn--bcher-kva.example"},
+                    {"127.0.0.1", null},
+                    {"127.0.0.1.", null},
+                    {"127.1", null},
+                    {"::1", null},
+                    {"[2001:db8::1]", null},
+                    {"fe80::1%eth0", null},
+                    {".", null},
+                };
+                bool all = true;
+
+                for (positive row = 0; row < array_count(names); row++)
+                {
+                        tls_conn named = {.host = names[row].host};
+                        p8 out[512];
+                        positive length = 0;
+                        positive at = 0;
+                        positive size = 0;
+                        bool has;
+
+                        if (tls_client_hello(address_of named, out, sizeof out,
+                                             address_of length, null, 0))
+                        {
+                                all = false;
+                                continue;
+                        }
+                        has = tls_hello_extension(out, length, 0, address_of at,
+                                                  address_of size);
+                        if (names[row].sni
+                                ? !has || !named.named ||
+                                      size != 5 + string_length(names[row].sni) ||
+                                      memory_compare(out + at + 5, names[row].sni,
+                                                     size - 5)
+                                : has || named.named)
+                        {
+                                all = false;
+                                string_format(log, "  SNI row: %s\n",
+                                              names[row].host);
+                        }
+                        crypto_forget(named.scalar, sizeof named.scalar);
+                }
+                check("server_name names DNS hosts only, without a trailing dot", all);
+        }
 
         for (host = 0; host < array_count(hosts); host++)
         {
@@ -60381,6 +60498,37 @@ static fn tls12_pieces(void)
                       !tls12_certificate(tls, body, sizeof body, scratch));
                 body[5]--;
 
+                /* A Certificate the checker refuses marks the connection
+                   untrusted, for tls_connect's TLS_UNTRUSTED; unchecked,
+                   the same leaf is only kept. The leaf names no SAN. */
+                {
+                        static p8 message[4 + sizeof body];
+
+                        message[0] = TLS_HS_CERTIFICATE;
+                        message[1] = 0;
+                        network_store_16(message + 2, (p16)sizeof body);
+                        memory_copy(message + 4, body, sizeof body);
+                        crypto_sha256_open(address_of tls->transcript);
+                        tls->check_cert = true;
+                        check("a refused Certificate marks the connection untrusted",
+                              tls_flight_message(tls, message, sizeof message,
+                                                 scratch) == TLS_FAIL &&
+                                  tls->untrusted);
+                        tls->check_cert = false;
+                        check("an unchecked Certificate is kept, not untrusted",
+                              tls_flight_message(tls, message, sizeof message,
+                                                 scratch) == TLS_OK &&
+                                  !tls->untrusted);
+                        tls->suite = 0xc02f;
+                        tls->check_cert = true;
+                        check("a TLS 1.2 leaf the suite cannot use is untrusted too",
+                              tls_flight_message(tls, message, sizeof message,
+                                                 scratch) == TLS_FAIL &&
+                                  tls->untrusted);
+                        tls->check_cert = false;
+                        tls->suite = 0xc02b;
+                }
+
                 crypto_hex_into(exchange, sizeof exchange, exchange_hex);
                 crypto_hex_into(exchange384, sizeof exchange384,
                                 exchange384_hex);
@@ -62372,6 +62520,7 @@ b32 main(void)
         network_stream_sigpipe();
         tls_closure_boundaries();
         tls_record_payload_ceiling();
+        tls_receive_whole_room();
         tls_sensitive_state_erasure();
         tls_certificate_dates();
         tls_certificate_identity_rules();

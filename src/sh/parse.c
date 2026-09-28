@@ -373,8 +373,13 @@ bool parse_eof_can_complete()
         return parse_pending_used && !lex_unfinished(parse_pending);
 }
 
+//      dash's own reason for a syntax error the grammar cannot name by its
+//      token: a for loop's variable that is no name.
+static string_address parse_syntax_reason;
+
 fn parse_reset()
 {
+        parse_syntax_reason = null;
         parse_pending_used = 0;
         parse_pending_line = 0;
         parse_want_used = 0;
@@ -2484,6 +2489,21 @@ static b32 parse_for(b32 kind)
 
         if (!parse_want_word(index))
                 return 0;
+
+        //      dash refuses a loop variable that is no name as it reads it;
+        //      bash takes it and refuses it when the loop runs.
+        if (!shell_bash_compat)
+        {
+                parse_token address_to named = parse_look(-1);
+
+                if (!shell_valid_name(named->text, named->length))
+                {
+                        parse_syntax_reason = (string_address) "Bad for loop variable";
+                        parse_position--;
+                        parse_state = PARSE_SYNTAX;
+                        return 0;
+                }
+        }
 
         /* The linebreak production is allowed between the loop variable and
            `in` (or `do`). Without consuming it here, a perfectly ordinary

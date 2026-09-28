@@ -2939,9 +2939,12 @@ static b32 zstd_entropy_block(zstd_encoder address_to e, positive n, bool last)
                         return 0;
                 address_to modes = (p8)(ll_mode << 6 | of_mode << 4 | ml_mode << 2);
                 at += described;
-                lt = ll_mode == 1 ? null : address_of pending[0].table;
-                ot = of_mode == 1 ? null : address_of pending[1].table;
-                mt = ml_mode == 1 ? null : address_of pending[2].table;
+                /* An RLE stream sends no state, and neither does a repeat of
+                   one: the table a repeat names is the RLE cell the decoder
+                   kept, not the last table this encoder built. */
+                lt = pending[0].mode == 1 ? null : address_of pending[0].table;
+                ot = pending[1].mode == 1 ? null : address_of pending[1].table;
+                mt = pending[2].mode == 1 ? null : address_of pending[2].table;
                 bits.acc = 0;
                 bits.bits = 0;
                 bits.start = at;
@@ -4673,6 +4676,19 @@ static bool zstd_encoder_job(zstd_encoder address_to e, const zstd_params addres
         memory_fill(address_of e->price, 0, sizeof(e->price));
         if (prefix && p->strategy <= ZSTD_DFAST)
                 zstd_encoder_prefix(e, 1, 1 + (p32)prefix);
+        /* The row finder takes every position of the prefix, as libzstd
+           loads one; left to the parse, its first update would skip all
+           but 128 of them as the tail of a long match. */
+        else if (prefix > 8 && p->strategy <= ZSTD_LAZY2)
+        {
+                p8 const row_log = zstd_row_log(p);
+                p8 const mls = p->min_match < 4 ? 4 : p->min_match > 6 ? 6 : p->min_match;
+                p32 const target = 1 + (p32)prefix - 8;
+
+                for (p32 at = 1; at < target; at++)
+                        zstd_row_insert(e, at, row_log, mls);
+                e->next = target;
+        }
         do
         {
                 positive const left = e->filled - e->block;

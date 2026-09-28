@@ -4209,9 +4209,9 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #define TLS_RECORD_MAX (TLS_PLAINTEXT_MAX + 1 + 16)
 #define TLS12_RECORD_MAX (TLS_PLAINTEXT_MAX + 8 + 16)
 /* One receive takes as many whole records as the socket has queued and this
-   room holds: about fifteen full records. At least two whole records must
-   fit, since the unopened tail moves to the front only when a record would
-   not. */
+   room holds: about fifteen full records. At least one whole record must
+   fit: the unopened tail, at most one partial record, moves to the front
+   before every read, and the read has to be able to finish it. */
 #ifndef TLS_RECEIVE_ROOM
 #define TLS_RECEIVE_ROOM ((positive)1 << 18)
 #endif
@@ -4222,6 +4222,9 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #define TLS_EOF 1
 #define TLS_AGAIN 2
 #define TLS_RETRY 3
+/* tls_connect's answer when certificate checking refused the server: wget
+   says so apart, as GNU wget's status 5 does. */
+#define TLS_UNTRUSTED (-2)
 
 #define TLS_CT_CCS 20
 #define TLS_CT_ALERT 21
@@ -4295,6 +4298,8 @@ typedef struct
         p8 s_ap_traffic[32];
         bool update_asked;
         bool cert_requested;
+        /* The server's Certificate was refused while checking it. */
+        bool untrusted;
         /* TLS 1.2 (RFC 5246, 5288, 7627): the suite, the server's random,
            the master secret -- the premaster until the client's flight --
            and the client's key exchange point, made when the server's
@@ -4585,50 +4590,35 @@ static bool tls_record_version_valid(p8 address_to header)
         return header[1] == 0x03 && header[2] == 0x03;
 }
 
-/* Receive behind receive_end. Opened bytes before receive_start are dropped:
-   for free when nothing unopened remains, and otherwise the unopened tail
-   moves to the front only when the room behind it could not hold a whole
-   record, so a record arriving in pieces is not moved again per piece. The
-   read is tried before any wait, because mid-transfer the socket almost
-   always has bytes queued; only an empty socket polls, under the deadline,
-   and nothing blocks past it. */
+/* Receive behind receive_end. Opened bytes before receive_start are dropped
+   first, so every read has the whole room behind what is still unopened --
+   at most one partial record, moved to the front at most once -- and takes
+   as much as the socket has queued: a read into the few kilobytes left
+   behind a partial record was a second read, and a second writev, for what
+   one could carry. The read is tried before any wait, because mid-transfer
+   the socket almost always has bytes queued; only an empty socket polls,
+   under the deadline, and nothing blocks past it. */
 static bool tls_receive(tls_conn address_to tls,
                         const network_deadline address_to deadline)
 {
         positive have = tls->receive_end - tls->receive_start;
+        p8 address_to into;
         positive room;
         bipolar got;
 
-        if (!have)
-        {
-                tls->receive_start = 0;
-                tls->receive_end = 0;
-        }
-        else if (sizeof(tls->receive) - tls->receive_end < 5 + TLS12_RECORD_MAX)
-        {
+        if (tls->receive_start)
                 memory_copy(tls->receive, tls->receive + tls->receive_start,
                             have);
-                tls->receive_start = 0;
-                tls->receive_end = have;
-        }
-        room = sizeof(tls->receive) - tls->receive_end;
-
-        do
-        {
-                p8 address_to into = tls->receive + tls->receive_end;
-
-                if (!deadline)
-                        got = system_read_retry((positive)tls->handle, into,
-                                                room);
-                else
-                {
-                        got = socket_receive((b32)tls->handle, into, room,
-                                             MSG_DONTWAIT, null, 0);
-                        if (got == NETWORK_TRY_AGAIN)
-                                got = network_stream_read_some_until(
-                                    tls->handle, into, room, deadline);
-                }
-        } while (got == NETWORK_INTERRUPTED);
+        tls->receive_start = 0;
+        tls->receive_end = have;
+        into = tls->receive + have;
+        room = sizeof(tls->receive) - have;
+        if (!deadline)
+                got = system_read_retry((positive)tls->handle, into, room);
+        else if ((got = network_stream_read_now(tls->handle, into, room)) ==
+                 NETWORK_TRY_AGAIN)
+                got = network_stream_read_some_until(tls->handle, into, room,
+                                                     deadline);
 
         if (got <= 0 || (positive)got > room)
                 return false;
@@ -6896,7 +6886,8 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
         p8 share[10 + 97];
         positive share_length;
         positive host_length = string_length(tls->host);
-        bool named = string_to_host(tls->host) < 0;
+        bool letter = false;
+        bool colon = false;
         positive at = 0;
         positive ext_len_at;
         bipolar status = TLS_FAIL;
@@ -6923,7 +6914,19 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
 
         ext_len_at = at - 2;
 
-        tls->named = named && host_length && host_length < 256;
+        /* server_name names a DNS host (RFC 6066 3): an absolute name
+           without its trailing dot, and never an address -- nothing with a
+           colon (IPv6, bracketed or bare) and nothing of digits and dots
+           alone (IPv4, which no top-level domain can spell). */
+        if (host_length && tls->host[host_length - 1] == '.')
+                host_length--;
+        for (positive i = 0; i < host_length; i++)
+        {
+                colon |= tls->host[i] == ':';
+                letter |= tls->host[i] != '.' &&
+                          (tls->host[i] < '0' || tls->host[i] > '9');
+        }
+        tls->named = letter && !colon && host_length < 256;
         if (tls->named)
         {
                 positive n = 5 + host_length;
@@ -7760,10 +7763,13 @@ static COLD bipolar tls_flight_message(tls_conn address_to tls,
                                          body + 1, body_length - 1,
                                          positive_max);
         else if (msg[0] == TLS_HS_CERTIFICATE)
+        {
                 valid = tls->tls12 ? tls12_certificate(tls, body, body_length,
                                                        scratch)
                                    : tls_verify_chain(body, body_length,
                                                       tls->host, tls);
+                tls->untrusted = tls->check_cert && !valid;
+        }
         else if (msg[0] == TLS_HS_SERVER_KEY_EXCHANGE)
                 valid = tls12_key_exchange(tls, body, body_length);
         else if (msg[0] == TLS_HS_SERVER_HELLO_DONE)
@@ -8009,7 +8015,10 @@ static COLD bipolar tls_connect(tls_conn address_to tls, bipolar handle,
                                         TLS_HANDSHAKE_SECONDS, 0)
                      ? tls_handshake(tls, address_of deadline) : TLS_FAIL;
         if (status)
+        {
+                status = tls->untrusted ? TLS_UNTRUSTED : TLS_FAIL;
                 tls_forget(tls);
+        }
         return status;
 }
 

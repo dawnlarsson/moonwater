@@ -1221,7 +1221,8 @@ static positive process_timeout_relayed(b32 term)
                 if (signal == PROCESS_SIGNAL_ALARM || signal == term || !process_timeout_ignored(signal))
                         mask |= (positive)1 << (signal - 1);
         }
-        return mask | (positive)1 << (term - 1);
+        // -s 0 is a signal that is never sent, and has no bit.
+        return term ? mask | (positive)1 << (term - 1) : mask;
 }
 
 /* Wait for one child until a monotonic deadline. pidfd+ppoll is the native
@@ -1585,6 +1586,7 @@ static b32 process_timeout()
                 shell_default(SIGINT);
                 shell_default(SIGQUIT);
                 shell_default(SIGTERM);
+                shell_default(PROCESS_SIGNAL_ALARM);
                 shell_default(signal);
 
                 system_signal_mask(UL_SIGNAL_SET_MASK,
@@ -1597,11 +1599,15 @@ static b32 process_timeout()
                         A timeout killed outright (SIGKILL) can send nothing,
                         so the kernel is asked to send the command the signal
                         for it when timeout dies (PR_SET_PDEATHSIG), as GNU's
-                        does; one already gone by then is sent it at once.
+                        does; one already gone by then is sent it at once --
+                        to this process alone, since under --foreground its
+                        group is the caller's whole job.
                 */
                 system_call_2(syscall(prctl), 1, (positive)signal);
                 if ((bipolar)system_call(syscall(getppid)) != parent)
-                        system_call_2(syscall(kill), 0, (positive)signal);
+                        system_call_2(syscall(kill),
+                                      (positive)system_call(syscall(getpid)),
+                                      (positive)signal);
 
                 b32 answer = process_tool_exec((string_address) "timeout",
                     program_argument_list() + taking.first);
@@ -2895,10 +2901,12 @@ static bool process_replay_payload(process_replay_reader address_to reader,
                 positive chunk = min(length, reader->from.have - reader->from.at);
                 if (emit)
                 {
-                        if (carriage)
-                                for (positive at = 0; at < chunk; at++)
-                                        if (reader->from.buf[reader->from.at + at] == '\r')
-                                                reader->from.buf[reader->from.at + at] = '\n';
+                        p8 address_to past = reader->from.buf + reader->from.at + chunk;
+
+                        for (p8 address_to cr = carriage ? memory_first_of(past - chunk, '\r', chunk)
+                                                         : null;
+                             cr; cr = memory_first_of(cr + 1, '\r', (positive)(past - cr - 1)))
+                                *cr = '\n';
                         if (system_write_all(1, reader->from.buf + reader->from.at,
                                              chunk) != chunk)
                                 return false;
