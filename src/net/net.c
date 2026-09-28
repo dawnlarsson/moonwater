@@ -8282,14 +8282,20 @@ static bipolar http_copy(http_body address_to body, bipolar dest, positive want,
 
 /* Borrow complete framing lines from the current span. Socket lines split
    across reads use the caller's scratch and retain the streaming line limit;
-   complete memory responses have their existing whole-response bound. */
+   complete memory responses have their existing whole-response bound. A
+   plaintext socket's reads fill the scratch, so what follows a line -- the
+   next chunk's data, usually -- is already in the stash for the copy after
+   it: one read where a chunk took three. TLS reads stop at the limit, since
+   its data is lent from where it was decrypted and reading on would copy
+   it. */
 static bipolar http_line(http_body address_to body, positive limit,
                           p8 address_to address_to line,
                           positive address_to length)
 {
         positive used = body->stash_used;
-        positive span = memory_span_without_byte(body->stash, '\n', used);
-        if (span < used && span < limit)
+        positive span = memory_span_without_byte(body->stash, '\n',
+                                                 min(used, limit));
+        if (span < min(used, limit))
         {
                 *line = body->stash;
                 *length = span + 1;
@@ -8301,18 +8307,21 @@ static bipolar http_line(http_body address_to body, positive limit,
                 return HTTP_MALFORMED;
 
         p8 address_to scratch = body->scratch;
+        positive reach = body->link->tls ? limit : HTTP_HEAD_MAX;
         memory_copy(scratch, body->stash, used);
         body->stash_used = 0;
         while (used < limit)
         {
                 positive got = 0;
-                if (http_body_read(body, scratch + used, limit - used,
+                positive seen;
+                if (http_body_read(body, scratch + used, reach - used,
                                    address_of got))
                         return HTTP_NO_REPLY;
                 if (!got)
                         return HTTP_MALFORMED;
-                span = memory_span_without_byte(scratch + used, '\n', got);
-                if (span < got)
+                seen = min(got, limit - used);
+                span = memory_span_without_byte(scratch + used, '\n', seen);
+                if (span < seen)
                 {
                         *line = scratch;
                         *length = used + span + 1;
@@ -8323,13 +8332,6 @@ static bipolar http_line(http_body address_to body, positive limit,
                 used += got;
         }
         return HTTP_MALFORMED;
-}
-
-static bipolar http_body_byte(http_body address_to body, p8 address_to byte)
-{
-        positive got = 0;
-        return http_body_read(body, byte, 1, address_of got) || !got
-                   ? HTTP_MALFORMED : HTTP_OK;
 }
 
 static bipolar http_copy_trailers(http_body address_to body)
@@ -8361,17 +8363,14 @@ static bipolar http_copy_trailers(http_body address_to body)
 static bipolar http_copy_chunked(http_body address_to body, bipolar dest)
 {
         p8 address_to line;
+        positive line_length = 0;
+        positive size = 0;
 
         for (;;)
         {
-                positive line_length = 0;
-                positive size = 0;
-                p8 delimiter;
-
                 if (http_line(body, 127, address_of line,
-                              address_of line_length))
-                        return HTTP_MALFORMED;
-                if (http_chunk_line(line, line_length, address_of size))
+                              address_of line_length) ||
+                    http_chunk_line(line, line_length, address_of size))
                         return HTTP_MALFORMED;
                 if (!size)
                         return http_copy_trailers(body);
@@ -8381,13 +8380,11 @@ static bipolar http_copy_chunked(http_body address_to body, bipolar dest)
                         if (copied)
                                 return copied;
                 }
-                if (http_body_byte(body, address_of delimiter))
-                        return HTTP_MALFORMED;
-                if (delimiter == '\n')
-                        continue;
-                if (delimiter != '\r' ||
-                    http_body_byte(body, address_of delimiter) ||
-                    delimiter != '\n')
+                /* The data ends in CRLF or a bare LF: a line of at most two
+                   bytes, borrowed like any other rather than read a byte
+                   at a time. */
+                if (http_line(body, 2, address_of line, address_of line_length) ||
+                    (line_length == 2 && line[0] != '\r'))
                         return HTTP_MALFORMED;
         }
 }
