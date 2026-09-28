@@ -2697,6 +2697,10 @@ static bool crypto_x25519(p8 address_to out, p8 address_to scalar, p8 address_to
 #define CRYPTO_FE_MAX 6
 #define CRYPTO_RSA_LIMBS 64
 
+/* One, whose Montgomery product with an element in Montgomery form is the
+   element as a plain integer. */
+static const p64 crypto_unit[CRYPTO_RSA_LIMBS] = {1};
+
 static const p64 crypto_p256_p[4] = {
     0xffffffffffffffffull, 0x00000000ffffffffull, 0x0000000000000000ull,
     0xffffffff00000001ull};
@@ -3448,7 +3452,6 @@ static fn crypto_point_affine(crypto_point address_to p)
 {
         const crypto_field address_to f = p->field;
         p64 zinv[CRYPTO_FE_MAX], z2[CRYPTO_FE_MAX], z3[CRYPTO_FE_MAX];
-        p64 unit[CRYPTO_FE_MAX];
 
         if (crypto_fe_is_zero(p->z, p->n))
                 goto done;
@@ -3458,10 +3461,8 @@ static fn crypto_point_affine(crypto_point address_to p)
         crypto_fe_mul(z3, z2, zinv, f);
         crypto_fe_mul(p->x, p->x, z2, f);
         crypto_fe_mul(p->y, p->y, z3, f);
-        memory_fill(unit, 0, sizeof unit);
-        unit[0] = 1;
-        crypto_fe_mul(p->x, p->x, unit, f);
-        crypto_fe_mul(p->y, p->y, unit, f);
+        crypto_fe_mul(p->x, p->x, crypto_unit, f);
+        crypto_fe_mul(p->y, p->y, crypto_unit, f);
         memory_fill(p->z, 0, sizeof p->z);
         p->z[0] = 1;
 
@@ -3939,7 +3940,6 @@ static bool crypto_comb_base(p64 address_to x, p64 address_to y,
         crypto_projective r;
         crypto_projective chosen;
         p64 zinv[CRYPTO_FE_MAX];
-        p64 unit[CRYPTO_FE_MAX];
         p64 digit;
         bool ok;
 
@@ -3989,10 +3989,8 @@ static bool crypto_comb_base(p64 address_to x, p64 address_to y,
                 crypto_fe_inv(zinv, r.z, f);
                 crypto_fe_mul(x, r.x, zinv, f);
                 crypto_fe_mul(y, r.y, zinv, f);
-                memory_fill(unit, 0, sizeof unit);
-                unit[0] = 1;
-                crypto_fe_mul(x, x, unit, f);
-                crypto_fe_mul(y, y, unit, f);
+                crypto_fe_mul(x, x, crypto_unit, f);
+                crypto_fe_mul(y, y, crypto_unit, f);
         }
 
         crypto_forget(address_of r, sizeof r);
@@ -4132,7 +4130,6 @@ static fn crypto_rsa_modexp(p64 address_to out, p64 address_to base, p64 exp,
         p64 square[CRYPTO_RSA_LIMBS];
         p64 b[CRYPTO_RSA_LIMBS];
         p64 result[CRYPTO_RSA_LIMBS];
-        p64 unit[CRYPTO_RSA_LIMBS];
         p64 inverse = mod[0];
         positive bits;
         positive top;
@@ -4182,9 +4179,7 @@ static fn crypto_rsa_modexp(p64 address_to out, p64 address_to base, p64 exp,
                         montgomery_multiply(result, result, b, mod, inverse, n);
         }
 
-        memory_fill(unit, 0, n * 8);
-        unit[0] = 1;
-        montgomery_multiply(out, result, unit, mod, inverse, n);
+        montgomery_multiply(out, result, crypto_unit, mod, inverse, n);
 }
 
 /* Decode the public operation once for both RSA signature encodings.  The
