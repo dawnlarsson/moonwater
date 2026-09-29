@@ -20232,6 +20232,33 @@ def text_expr_operands():
                       "[[:" + "x" * 31 + ":]]", "[[:" + "x" * 32 + ":]]", "\\{1,2,3", "\\{1,2,",
                       "\\{1,2,3\\}", "\\+b", "\\?b", "*b", "\\{1\\}b"):
             fixed.append(("+b", ":", lead + piece + ("\\)" if lead.startswith("\\(") else "")))
+    #   Products, quotients and remainders in limbs: numbers either side of
+    #   each 19-digit chunk and 64-bit limb, runs of nines and ones then
+    #   zeros that carry and borrow through every limb, and drawn digits of
+    #   up to 4000 places, each operand pair under each sign and operator.
+    def big_number(size, shape):
+        if shape == "nines":
+            return "9" * size
+        if shape == "power":
+            return "1" + "0" * (size - 1)
+        drawn = hashlib.shake_256(b"expr %d %s" % (size, shape.encode())).digest(size)
+        return str(1 + drawn[0] % 9) + "".join(str(byte % 10) for byte in drawn[1:])
+    sizes = (18, 19, 20, 38, 39, 40, 57, 58, 96, 200, 1500, 4000)
+    for big in sizes:
+        for small in sizes:
+            if small > big:
+                continue
+            for shape in ("nines", "power", "drawn"):
+                for other in ("nines", "drawn"):
+                    for operator in ("*", "/", "%"):
+                        for sign in ("", "-"):
+                            fixed.append((sign + big_number(big, shape), operator,
+                                          big_number(small, other)))
+    #   Past 3000 limbs the product is the transform's.
+    for shape in ("nines", "drawn"):
+        fixed.append((big_number(60000, "drawn"), "*", big_number(60000, shape)))
+        fixed.append((big_number(60000, shape), "/", big_number(30000, "drawn")))
+        fixed.append((big_number(60000, shape), "%", big_number(30000, "drawn")))
     operators = ["|", "&", "=", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%"]
     for left in operators:
         for right in operators:

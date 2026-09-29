@@ -38556,136 +38556,246 @@ static expr_value expr_big_sum(expr_value address_to left,
                                    b_negative);
 }
 
+/*
+        Products and quotients are worked in 64-bit limbs, nineteen digits
+        to a limb's worth of reading and writing: lib.c's limb routines
+        multiply (base58's Karatsuba and transform above them) and Knuth's
+        algorithm D divides with positive_divide_wide, so the cost is that
+        of the limbs and not of the digits, which was a machine-word
+        multiply per pair of digits, and per digit of the quotient one
+        subtraction of the divisor a time.
+*/
+static positive expr_limbs_read(p64 address_to limb, string_address digits, positive length)
+{
+        positive used = 0;
+        positive at = 0;
+        positive first = length % 19 ? length % 19 : 19;
+
+        while (at < length)
+        {
+                positive take = at ? 19 : first;
+                p64 chunk = 0;
+                p64 scale = 1;
+
+                for (positive k = 0; k < take; k++)
+                {
+                        chunk = chunk * 10 + (p64)(digits[at + k] - '0');
+                        scale *= 10;
+                }
+                at += take;
+                p64 carry = limbs_multiply_word(limb, limb, used, scale, chunk);
+
+                if (carry)
+                        limb[used++] = carry;
+        }
+        return used;
+}
+
+// The limbs as digits, least significant first, in a run of 20 * (used + 2) bytes,
+// and how many were written; the limbs are used up.
+static positive expr_limbs_write(p8 address_to digits, p64 address_to limb, positive used)
+{
+        positive made = 0;
+
+        while (used)
+        {
+                p64 rest = 0;
+
+                for (positive at = used; at; at--)
+                {
+                        positive2 step = positive_divide_wide(rest, limb[at - 1], 10000000000000000000ull);
+
+                        limb[at - 1] = step.x;
+                        rest = step.y;
+                }
+                while (used && !limb[used - 1])
+                        used--;
+                for (positive k = 0; k < 19; k++)
+                {
+                        digits[made++] = (p8)(rest % 10);
+                        rest /= 10;
+                }
+        }
+        if (!made)
+                digits[made++] = 0;
+        return made;
+}
+
+/*
+        q = a / b and r = a mod b, an limbs over bn with the top limb of b
+        nonzero and an >= bn; q takes an - bn + 1 limbs and r bn. The
+        divisor is shifted up until its top bit is set, each quotient limb is
+        estimated from the two limbs above it and corrected by the divisor's
+        second limb, and the rare estimate one too big is put back.
+*/
+static bool expr_limbs_divide(p64 address_to q, p64 address_to r, const p64 address_to a,
+                              positive an, const p64 address_to b, positive bn)
+{
+        if (bn == 1)
+        {
+                p64 rest = 0;
+
+                for (positive at = an; at; at--)
+                {
+                        positive2 step = positive_divide_wide(rest, a[at - 1], b[0]);
+
+                        q[at - 1] = step.x;
+                        rest = step.y;
+                }
+                r[0] = rest;
+                return true;
+        }
+
+        positive shift = (positive)bits_leading_zeros(b[bn - 1]);
+        p64 address_to work = (p64 address_to)utility_arena_take((an + 1 + 2 * bn + 1) * sizeof(p64));
+
+        if (!work)
+                return false;
+
+        p64 address_to u = work;
+        p64 address_to v = work + an + 1;
+        p64 address_to product = v + bn;
+
+        u[an] = shift ? a[an - 1] >> (64 - shift) : 0;
+        for (positive at = an - 1; at; at--)
+                u[at] = a[at] << shift | (shift ? a[at - 1] >> (64 - shift) : 0);
+        u[0] = a[0] << shift;
+        for (positive at = bn - 1; at; at--)
+                v[at] = b[at] << shift | (shift ? b[at - 1] >> (64 - shift) : 0);
+        v[0] = b[0] << shift;
+
+        for (positive j = an - bn + 1; j--;)
+        {
+                p64 top = u[j + bn];
+                p64 guess, rest;
+                bool spilled = false;
+
+                if (top >= v[bn - 1])
+                {
+                        // top is v's top limb, and so u's top two limbs are at most v's: one too big at most.
+                        guess = ~(p64)0;
+                        rest = u[j + bn - 1] + v[bn - 1];
+                        spilled = rest < v[bn - 1];
+                }
+                else
+                {
+                        positive2 step = positive_divide_wide(top, u[j + bn - 1], v[bn - 1]);
+
+                        guess = step.x;
+                        rest = step.y;
+                }
+                while (!spilled)
+                {
+                        p128 chance = (p128)guess * v[bn - 2];
+
+                        if (chance <= ((p128)rest << 64 | u[j + bn - 2]))
+                                break;
+                        guess--;
+                        rest += v[bn - 1];
+                        spilled = rest < v[bn - 1];
+                }
+
+                product[bn] = limbs_multiply_word(product, v, bn, guess, 0);
+                if (limbs_subtract(u + j, bn + 1, product, bn + 1))
+                {
+                        guess--;
+                        limbs_add(u + j, bn + 1, v, bn);
+                }
+                q[j] = guess;
+        }
+        for (positive at = 0; at < bn; at++)
+                r[at] = u[at] >> shift | (shift ? u[at + 1] << (64 - shift) : 0);
+        return true;
+}
+
+static expr_value expr_limbs_result(p64 address_to limb, positive used, bool negative)
+{
+        p8 address_to digits = (p8 address_to)utility_arena_take(20 * (used + 2));
+        expr_value failed = {expr_empty, 0};
+
+        if (!digits)
+        {
+                expr_stop("memory exhausted");
+                return failed;
+        }
+        return expr_digits_value(digits, expr_limbs_write(digits, limb, used), negative);
+}
+
 static expr_value expr_big_product(expr_value address_to left,
                                    expr_value address_to right)
 {
         expr_magnitude a = expr_magnitude_of(left);
         expr_magnitude b = expr_magnitude_of(right);
-        positive length = a.length + b.length;
-        positive address_to wide = (positive address_to)utility_arena_take(
-            length * sizeof(positive));
-        p8 address_to digits = expr_scratch(length);
+        positive an = a.length / 19 + 1;
+        positive bn = b.length / 19 + 1;
+        p64 address_to x = (p64 address_to)utility_arena_take((an + bn + 2 * (an + bn)) * sizeof(p64));
         expr_value failed = {expr_empty, 0};
 
-        if (!wide || !digits)
+        if (!x)
         {
                 expr_stop("memory exhausted");
                 return failed;
         }
 
-        memory_fill(wide, 0, length * sizeof(positive));
-        for (positive i = 0; i < a.length; i++)
+        p64 address_to y = x + an;
+        p64 address_to product = y + bn;
+
+        memory_fill(x, 0, an * sizeof(p64));
+        memory_fill(y, 0, bn * sizeof(p64));
+        an = expr_limbs_read(x, a.digits, a.length);
+        bn = expr_limbs_read(y, b.digits, b.length);
+        if (!an || !bn)
+                return expr_limbs_result(product, 0, false);
+        if (!big_multiply(product, x, an, y, bn))
         {
-                positive x = (positive)(a.digits[a.length - 1 - i] - '0');
-
-                if (!x)
-                        continue;
-                for (positive j = 0; j < b.length; j++)
-                        wide[i + j] += x * (positive)(b.digits[b.length - 1 - j] - '0');
-                // Keep each column small enough that the sums never wrap.
-                if ((i & 0xffff) == 0xffff)
-                        for (positive k = 0; k + 1 < length; k++)
-                        {
-                                wide[k + 1] += wide[k] / 10;
-                                wide[k] %= 10;
-                        }
+                expr_stop("memory exhausted");
+                return failed;
         }
-
-        positive carry = 0;
-
-        for (positive at = 0; at < length; at++)
-        {
-                positive column = wide[at] + carry;
-
-                digits[at] = (p8)(column % 10);
-                carry = column / 10;
-        }
-
-        return expr_digits_value(digits, length, a.negative != b.negative);
+        return expr_limbs_result(product, an + bn, a.negative != b.negative);
 }
 
 /*
-        Long division on the digits, truncating toward zero as mpz_tdiv_q
-        and mpz_tdiv_r do: the quotient takes the sign of the two, the
-        remainder the sign of the dividend.
+        Truncating toward zero as mpz_tdiv_q and mpz_tdiv_r do: the quotient
+        takes the sign of the two, the remainder the sign of the dividend.
 */
 static expr_value expr_big_divide(expr_value address_to left,
                                   expr_value address_to right, bool remainder)
 {
         expr_magnitude a = expr_magnitude_of(left);
         expr_magnitude b = expr_magnitude_of(right);
-        p8 address_to quotient = expr_scratch(a.length);
-        // The running remainder, most significant first, never longer than
-        // the divisor and one digit.
-        p8 address_to rest = expr_scratch(b.length + 1);
+        positive an = a.length / 19 + 1;
+        positive bn = b.length / 19 + 1;
+        p64 address_to x = (p64 address_to)utility_arena_take((an + bn + an + 1 + bn) * sizeof(p64));
         expr_value failed = {expr_empty, 0};
 
-        if (!quotient || !rest)
-                return failed;
-
-        positive used = 0;
-
-        for (positive at = 0; at < a.length; at++)
+        if (!x)
         {
-                // rest = rest * 10 + next digit, dropping a leading zero.
-                if (used == 1 && !rest[0])
-                        used = 0;
-                rest[used++] = (p8)(a.digits[at] - '0');
-
-                p8 count = 0;
-
-                for (;;)
-                {
-                        bipolar order = used != b.length
-                                            ? (used < b.length ? -1 : 1)
-                                            : 0;
-
-                        for (positive k = 0; !order && k < used; k++)
-                                if (rest[k] != (p8)(b.digits[k] - '0'))
-                                        order = rest[k] < (p8)(b.digits[k] - '0') ? -1 : 1;
-                        if (order < 0)
-                                break;
-
-                        bipolar borrow = 0;
-
-                        for (positive k = used; k; k--)
-                        {
-                                positive from_end = used - k;
-                                bipolar digit = (bipolar)rest[k - 1] - borrow -
-                                                (from_end < b.length
-                                                     ? (bipolar)(b.digits[b.length - 1 - from_end] - '0')
-                                                     : 0);
-
-                                borrow = digit < 0;
-                                rest[k - 1] = (p8)(digit + 10 * borrow);
-                        }
-
-                        positive lead = 0;
-
-                        while (lead + 1 < used && !rest[lead])
-                                lead++;
-                        if (lead)
-                        {
-                                memory_copy(rest, rest + lead, used - lead);
-                                used -= lead;
-                        }
-                        count++;
-                }
-
-                quotient[a.length - 1 - at] = count;
+                expr_stop("memory exhausted");
+                return failed;
         }
 
-        if (!remainder)
-                return expr_digits_value(quotient, a.length,
-                                         a.negative != b.negative);
+        p64 address_to y = x + an;
+        p64 address_to quotient = y + bn;
+        p64 address_to rest = quotient + an + 1;
 
-        p8 address_to low_first = expr_scratch(used);
-
-        if (!low_first)
+        memory_fill(x, 0, an * sizeof(p64));
+        memory_fill(y, 0, bn * sizeof(p64));
+        an = expr_limbs_read(x, a.digits, a.length);
+        bn = expr_limbs_read(y, b.digits, b.length);
+        if (!bn)
                 return failed;
-        for (positive k = 0; k < used; k++)
-                low_first[k] = rest[used - 1 - k];
-        return expr_digits_value(low_first, used, a.negative);
+        if (!an || an < bn)
+                return remainder ? expr_limbs_result(x, an, a.negative)
+                                 : expr_limbs_result(x, 0, false);
+        memory_fill(quotient, 0, (an - bn + 1) * sizeof(p64));
+        if (!expr_limbs_divide(quotient, rest, x, an, y, bn))
+        {
+                expr_stop("memory exhausted");
+                return failed;
+        }
+        if (!remainder)
+                return expr_limbs_result(quotient, an - bn + 1, a.negative != b.negative);
+        return expr_limbs_result(rest, bn, a.negative);
 }
 
 static bool expr_true(expr_value address_to value)
