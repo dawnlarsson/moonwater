@@ -15265,7 +15265,7 @@ static fn find_out_byte(p8 byte)
         find_out.block[find_out.used++] = byte;
 }
 
-static fn find_out_bytes(const p8 address_to bytes, positive length)
+static fn find_out_bytes(address_any data, positive length)
 {
         while (length)
         {
@@ -15275,22 +15275,9 @@ static fn find_out_bytes(const p8 address_to bytes, positive length)
                 memory_copy(find_out.block + find_out.used, bytes, now);
                 find_out.used += now;
                 bytes += now;
+        const p8 address_to bytes = data;
+
                 length -= now;
-                if (find_out.used == sizeof(find_out.block))
-                        find_out_flush();
-        }
-}
-
-static fn find_out_fill(p8 byte, positive count)
-{
-        while (count)
-        {
-                positive room = sizeof(find_out.block) - find_out.used;
-                positive now = min(room, count);
-
-                memory_fill(find_out.block + find_out.used, byte, now);
-                find_out.used += now;
-                count -= now;
                 if (find_out.used == sizeof(find_out.block))
                         find_out_flush();
         }
@@ -15421,10 +15408,10 @@ static fn find_printf_walk(string_address format, bipolar handle)
                 positive pad = difference_or_zero(width, length);
 
                 if (!left)
-                        find_out_fill(' ', pad);
+                        writer_fill_bulk(find_out_bytes, pad, ' ');
                 find_out_bytes(find_field, length);
                 if (left)
-                        find_out_fill(' ', pad);
+                        writer_fill_bulk(find_out_bytes, pad, ' ');
         }
 
         find_out_flush();
@@ -42137,21 +42124,6 @@ static fn seq_emit(address_any data, positive length)
         seq_collected_used += length;
 }
 
-static fn seq_emit_fill(p8 byte, positive count)
-{
-        p8 block[64];
-
-        memory_fill(block, byte, sizeof(block));
-
-        while (count)
-        {
-                positive part = min(count, (positive)sizeof(block));
-
-                seq_emit(block, part);
-                count -= part;
-        }
-}
-
 //      The spaces or zeros before a body of this length, the sign and the
 //      0x between them where the flags put them; answers the spaces left.
 static positive seq_emit_begin(seq_format address_to format, positive body,
@@ -42164,13 +42136,13 @@ static positive seq_emit_begin(seq_format address_to format, positive body,
         zeros = zeros && (format->flags & CONVERSION_FLAG_ZERO) && !left;
 
         if (!left && !zeros)
-                seq_emit_fill(' ', spaces);
+                writer_fill_bulk(seq_emit, spaces, ' ');
         if (sign)
                 seq_emit(address_of sign, 1);
         seq_emit((address_any)prefix, prefix_length);
         if (zeros)
         {
-                seq_emit_fill('0', spaces);
+                writer_fill_bulk(seq_emit, spaces, '0');
                 spaces = 0;
         }
 
@@ -42219,7 +42191,7 @@ static fn seq_wide_word(seq_wide value, seq_format address_to format, bool upper
         positive spaces = seq_emit_begin(format, 3 + (sign != 0), sign, null, 0, false);
 
         seq_emit((address_any)word, 3);
-        seq_emit_fill(' ', spaces);
+        writer_fill_bulk(seq_emit, spaces, ' ');
 }
 
 /*
@@ -42341,7 +42313,7 @@ static fn seq_wide_decimal(seq_wide value, seq_format address_to format)
                 if (point)
                         seq_emit(".", 1);
                 seq_emit(seq_digit + 1, run);
-                seq_emit_fill('0', (positive)precision - run);
+                writer_fill_bulk(seq_emit, (positive)precision - run, '0');
                 seq_emit(tail, tail_length);
         }
         else
@@ -42351,7 +42323,7 @@ static fn seq_wide_decimal(seq_wide value, seq_format address_to format)
                         positive run = min(seq_digit_count, whole);
 
                         seq_emit(seq_digit, run);
-                        seq_emit_fill('0', whole - run);
+                        writer_fill_bulk(seq_emit, whole - run, '0');
                 }
                 else
                         seq_emit("0", 1);
@@ -42366,12 +42338,12 @@ static fn seq_wide_decimal(seq_wide value, seq_format address_to format)
                 positive lead_zeros = (positive)(cut - seq_digit_exponent);
                 positive run = (positive)difference_or_zero(stop, begin);
 
-                seq_emit_fill('0', lead_zeros);
+                writer_fill_bulk(seq_emit, lead_zeros, '0');
                 seq_emit(seq_digit + begin, run);
-                seq_emit_fill('0', (positive)precision - lead_zeros - run);
+                writer_fill_bulk(seq_emit, (positive)precision - lead_zeros - run, '0');
         }
 
-        seq_emit_fill(' ', spaces);
+        writer_fill_bulk(seq_emit, spaces, ' ');
 }
 
 /*
@@ -42536,9 +42508,9 @@ static fn seq_wide_hex(seq_wide value, seq_format address_to format)
         if (point)
                 seq_emit(".", 1);
         seq_emit(text, shown);
-        seq_emit_fill('0', precision - shown);
+        writer_fill_bulk(seq_emit, precision - shown, '0');
         seq_emit(tail, tail_length);
-        seq_emit_fill(' ', spaces);
+        writer_fill_bulk(seq_emit, spaces, ' ');
 }
 
 static fn seq_wide_field(seq_wide value, seq_format address_to format)
