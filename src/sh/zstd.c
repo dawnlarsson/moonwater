@@ -1932,23 +1932,71 @@ typedef struct
         p16 target_length;
 } zstd_params;
 
-/* libzstd 1.5's levels for inputs past 256 KiB: window, chain, hash and
-   search logs, minimum match, strategy and target length.  Row 0 is the
-   base of --fast=N, whose N becomes the target length (the step). */
-static const zstd_params zstd_level_table[23] = {
-        {19, 12, 13, 1, 6, ZSTD_FAST, 1},      {19, 13, 14, 1, 7, ZSTD_FAST, 0},
-        {20, 15, 16, 1, 6, ZSTD_FAST, 0},      {21, 16, 17, 1, 5, ZSTD_DFAST, 0},
-        {21, 18, 18, 1, 5, ZSTD_DFAST, 0},     {21, 18, 19, 3, 5, ZSTD_GREEDY, 2},
-        {21, 18, 19, 3, 5, ZSTD_LAZY, 4},      {21, 19, 20, 4, 5, ZSTD_LAZY, 8},
-        {21, 19, 20, 4, 5, ZSTD_LAZY2, 16},    {22, 20, 21, 4, 5, ZSTD_LAZY2, 16},
-        {22, 21, 22, 5, 5, ZSTD_LAZY2, 16},    {22, 21, 22, 6, 5, ZSTD_LAZY2, 16},
-        {22, 22, 23, 6, 5, ZSTD_LAZY2, 32},    {22, 22, 22, 4, 5, ZSTD_BTLAZY2, 32},
-        {22, 22, 23, 5, 5, ZSTD_BTLAZY2, 32},  {22, 23, 23, 6, 5, ZSTD_BTLAZY2, 32},
-        {22, 22, 22, 5, 5, ZSTD_BTOPT, 48},    {23, 23, 22, 5, 4, ZSTD_BTOPT, 64},
-        {23, 23, 22, 6, 3, ZSTD_BTULTRA, 64},  {23, 24, 22, 7, 3, ZSTD_BTULTRA2, 256},
-        {25, 25, 23, 7, 3, ZSTD_BTULTRA2, 256}, {26, 26, 24, 7, 3, ZSTD_BTULTRA2, 512},
-        {27, 27, 25, 9, 3, ZSTD_BTULTRA2, 999},
+/* libzstd 1.5's levels: window, chain, hash and search logs, minimum match,
+   strategy and target length, in four tables by the size of the input --
+   past 256 KiB (and for an input of no known size), to 256 KiB, to 128 KiB
+   and to 16 KiB.  Row 0 is the base of --fast=N, whose N becomes the target
+   length (the step). */
+#define ZSTD_L(w, c, h, s, l, strat, t) {w, c, h, s, l, strat, t}
+static const zstd_params zstd_level_table[4][23] = {
+    {
+        ZSTD_L(19, 12, 13, 1, 6, ZSTD_FAST, 1),      ZSTD_L(19, 13, 14, 1, 7, ZSTD_FAST, 0),
+        ZSTD_L(20, 15, 16, 1, 6, ZSTD_FAST, 0),      ZSTD_L(21, 16, 17, 1, 5, ZSTD_DFAST, 0),
+        ZSTD_L(21, 18, 18, 1, 5, ZSTD_DFAST, 0),     ZSTD_L(21, 18, 19, 3, 5, ZSTD_GREEDY, 2),
+        ZSTD_L(21, 18, 19, 3, 5, ZSTD_LAZY, 4),      ZSTD_L(21, 19, 20, 4, 5, ZSTD_LAZY, 8),
+        ZSTD_L(21, 19, 20, 4, 5, ZSTD_LAZY2, 16),    ZSTD_L(22, 20, 21, 4, 5, ZSTD_LAZY2, 16),
+        ZSTD_L(22, 21, 22, 5, 5, ZSTD_LAZY2, 16),    ZSTD_L(22, 21, 22, 6, 5, ZSTD_LAZY2, 16),
+        ZSTD_L(22, 22, 23, 6, 5, ZSTD_LAZY2, 32),    ZSTD_L(22, 22, 22, 4, 5, ZSTD_BTLAZY2, 32),
+        ZSTD_L(22, 22, 23, 5, 5, ZSTD_BTLAZY2, 32),  ZSTD_L(22, 23, 23, 6, 5, ZSTD_BTLAZY2, 32),
+        ZSTD_L(22, 22, 22, 5, 5, ZSTD_BTOPT, 48),    ZSTD_L(23, 23, 22, 5, 4, ZSTD_BTOPT, 64),
+        ZSTD_L(23, 23, 22, 6, 3, ZSTD_BTULTRA, 64),  ZSTD_L(23, 24, 22, 7, 3, ZSTD_BTULTRA2, 256),
+        ZSTD_L(25, 25, 23, 7, 3, ZSTD_BTULTRA2, 256), ZSTD_L(26, 26, 24, 7, 3, ZSTD_BTULTRA2, 512),
+        ZSTD_L(27, 27, 25, 9, 3, ZSTD_BTULTRA2, 999),
+    },
+    {
+        ZSTD_L(18, 12, 13, 1, 5, ZSTD_FAST, 1),      ZSTD_L(18, 13, 14, 1, 6, ZSTD_FAST, 0),
+        ZSTD_L(18, 14, 14, 1, 5, ZSTD_DFAST, 0),     ZSTD_L(18, 16, 16, 1, 4, ZSTD_DFAST, 0),
+        ZSTD_L(18, 16, 17, 3, 5, ZSTD_GREEDY, 2),    ZSTD_L(18, 17, 18, 5, 5, ZSTD_GREEDY, 2),
+        ZSTD_L(18, 18, 19, 3, 5, ZSTD_LAZY, 4),      ZSTD_L(18, 18, 19, 4, 4, ZSTD_LAZY, 4),
+        ZSTD_L(18, 18, 19, 4, 4, ZSTD_LAZY2, 8),     ZSTD_L(18, 18, 19, 5, 4, ZSTD_LAZY2, 8),
+        ZSTD_L(18, 18, 19, 6, 4, ZSTD_LAZY2, 8),     ZSTD_L(18, 18, 19, 5, 4, ZSTD_BTLAZY2, 12),
+        ZSTD_L(18, 19, 19, 7, 4, ZSTD_BTLAZY2, 12),  ZSTD_L(18, 18, 19, 4, 4, ZSTD_BTOPT, 16),
+        ZSTD_L(18, 18, 19, 4, 3, ZSTD_BTOPT, 32),    ZSTD_L(18, 18, 19, 6, 3, ZSTD_BTOPT, 128),
+        ZSTD_L(18, 19, 19, 6, 3, ZSTD_BTULTRA, 128), ZSTD_L(18, 19, 19, 8, 3, ZSTD_BTULTRA, 256),
+        ZSTD_L(18, 19, 19, 6, 3, ZSTD_BTULTRA2, 128), ZSTD_L(18, 19, 19, 8, 3, ZSTD_BTULTRA2, 256),
+        ZSTD_L(18, 19, 19, 10, 3, ZSTD_BTULTRA2, 512), ZSTD_L(18, 19, 19, 12, 3, ZSTD_BTULTRA2, 512),
+        ZSTD_L(18, 19, 19, 13, 3, ZSTD_BTULTRA2, 999),
+    },
+    {
+        ZSTD_L(17, 12, 12, 1, 5, ZSTD_FAST, 1),      ZSTD_L(17, 12, 13, 1, 6, ZSTD_FAST, 0),
+        ZSTD_L(17, 13, 15, 1, 5, ZSTD_FAST, 0),      ZSTD_L(17, 15, 16, 2, 5, ZSTD_DFAST, 0),
+        ZSTD_L(17, 17, 17, 2, 4, ZSTD_DFAST, 0),     ZSTD_L(17, 16, 17, 3, 4, ZSTD_GREEDY, 2),
+        ZSTD_L(17, 16, 17, 3, 4, ZSTD_LAZY, 4),      ZSTD_L(17, 16, 17, 3, 4, ZSTD_LAZY2, 8),
+        ZSTD_L(17, 16, 17, 4, 4, ZSTD_LAZY2, 8),     ZSTD_L(17, 16, 17, 5, 4, ZSTD_LAZY2, 8),
+        ZSTD_L(17, 16, 17, 6, 4, ZSTD_LAZY2, 8),     ZSTD_L(17, 17, 17, 5, 4, ZSTD_BTLAZY2, 8),
+        ZSTD_L(17, 18, 17, 7, 4, ZSTD_BTLAZY2, 12),  ZSTD_L(17, 18, 17, 3, 4, ZSTD_BTOPT, 12),
+        ZSTD_L(17, 18, 17, 4, 3, ZSTD_BTOPT, 32),    ZSTD_L(17, 18, 17, 6, 3, ZSTD_BTOPT, 256),
+        ZSTD_L(17, 18, 17, 6, 3, ZSTD_BTULTRA, 128), ZSTD_L(17, 18, 17, 8, 3, ZSTD_BTULTRA, 256),
+        ZSTD_L(17, 18, 17, 10, 3, ZSTD_BTULTRA, 512), ZSTD_L(17, 18, 17, 5, 3, ZSTD_BTULTRA2, 256),
+        ZSTD_L(17, 18, 17, 7, 3, ZSTD_BTULTRA2, 512), ZSTD_L(17, 18, 17, 9, 3, ZSTD_BTULTRA2, 512),
+        ZSTD_L(17, 18, 17, 11, 3, ZSTD_BTULTRA2, 999),
+    },
+    {
+        ZSTD_L(14, 12, 13, 1, 5, ZSTD_FAST, 1),      ZSTD_L(14, 14, 15, 1, 5, ZSTD_FAST, 0),
+        ZSTD_L(14, 14, 15, 1, 4, ZSTD_FAST, 0),      ZSTD_L(14, 14, 15, 2, 4, ZSTD_DFAST, 0),
+        ZSTD_L(14, 14, 14, 4, 4, ZSTD_GREEDY, 2),    ZSTD_L(14, 14, 14, 3, 4, ZSTD_LAZY, 4),
+        ZSTD_L(14, 14, 14, 4, 4, ZSTD_LAZY2, 8),     ZSTD_L(14, 14, 14, 6, 4, ZSTD_LAZY2, 8),
+        ZSTD_L(14, 14, 14, 8, 4, ZSTD_LAZY2, 8),     ZSTD_L(14, 15, 14, 5, 4, ZSTD_BTLAZY2, 8),
+        ZSTD_L(14, 15, 14, 9, 4, ZSTD_BTLAZY2, 8),   ZSTD_L(14, 15, 14, 3, 4, ZSTD_BTOPT, 12),
+        ZSTD_L(14, 15, 14, 4, 3, ZSTD_BTOPT, 24),    ZSTD_L(14, 15, 14, 5, 3, ZSTD_BTULTRA, 32),
+        ZSTD_L(14, 15, 15, 6, 3, ZSTD_BTULTRA, 64),  ZSTD_L(14, 15, 15, 7, 3, ZSTD_BTULTRA, 256),
+        ZSTD_L(14, 15, 15, 5, 3, ZSTD_BTULTRA2, 48), ZSTD_L(14, 15, 15, 6, 3, ZSTD_BTULTRA2, 128),
+        ZSTD_L(14, 15, 15, 7, 3, ZSTD_BTULTRA2, 256), ZSTD_L(14, 15, 15, 8, 3, ZSTD_BTULTRA2, 256),
+        ZSTD_L(14, 15, 15, 8, 3, ZSTD_BTULTRA2, 512), ZSTD_L(14, 15, 15, 9, 3, ZSTD_BTULTRA2, 512),
+        ZSTD_L(14, 15, 15, 10, 3, ZSTD_BTULTRA2, 999),
+    },
 };
+#undef ZSTD_L
 
 /* Level 0 is the default, 3; a level below 0 is --fast.  A long window
    replaces the level's.  A known input size shrinks the window to the
@@ -1956,13 +2004,19 @@ static const zstd_params zstd_level_table[23] = {
 static fn zstd_level_params(b32 level, p8 long_log, p64 size,
                             zstd_params address_to p)
 {
+        /* A known size picks its row from the table that size belongs to:
+           to 16 KiB, 128 KiB, 256 KiB, else the largest. */
+        positive const table = size ? (size <= (256u << 10)) + (size <= (128u << 10)) +
+                                          (size <= (16u << 10))
+                                    : 0;
+
         if (level < 0)
         {
-                address_to p = zstd_level_table[0];
+                address_to p = zstd_level_table[table][0];
                 p->target_length = (p16)(-level > 65535 ? 65535 : -level);
         }
         else
-                address_to p = zstd_level_table[!level ? 3 : level > 22 ? 22 : level];
+                address_to p = zstd_level_table[table][!level ? 3 : level > 22 ? 22 : level];
         if (long_log)
                 p->window_log = long_log;
         if (size && size < ((p64)1 << 30))
