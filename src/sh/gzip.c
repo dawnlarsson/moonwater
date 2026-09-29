@@ -377,6 +377,11 @@ typedef struct
            gzip's window goes out in steps of 32 KiB, so a stream that fails
            inside a block loses the part of it past the last step. */
         positive carry;
+        /* The second slab of a decode that writes on another thread, its
+           history before it, and the memory it came from. */
+        p8 address_to alt;
+        p8 address_to alt_base;
+        positive size;
         bool garbage;
         /* How many bits of lookahead gzip's decoder wants before it will
            decode a code: the table's root width, cut to the longest code
@@ -427,6 +432,9 @@ static gzip_inflater address_to gzip_inflater_new(void)
         z->finished = false;
         z->fixed_loaded = false;
         z->carry = 0;
+        z->alt = null;
+        z->alt_base = null;
+        z->size = GZIP_INFLATER_SIZE;
         z->garbage = false;
         z->look_lit = 0;
         z->look_dist = 0;
@@ -504,6 +512,13 @@ static bool gzip_why_end(gzip_inflater address_to z)
 {
         z->why = (string_address)z->why_text;
         return false;
+}
+
+static fn gzip_inflater_free(gzip_inflater address_to z)
+{
+        if (z->alt_base)
+                memory_free(z->alt_base, GZIP_WINDOW + GZIP_DECODE_OUT + GZIP_DECODE_SLACK);
+        memory_free(z, z->size);
 }
 
 /* Hand whole lookahead bytes back to the input window first, so that a
@@ -1215,6 +1230,23 @@ static fn gzip_inflate_slide(gzip_inflater address_to z)
         z->crc_at = 0;
 }
 
+/* The same, into the second slab: its history is the last 32 KiB of this
+   one, and the writer may still be reading this one meanwhile. */
+static fn gzip_inflate_swap(gzip_inflater address_to z)
+{
+        p8 address_to other = z->alt;
+
+        if (z->crc_at < z->fill)
+                z->crc = hash_crc32(z->crc, z->out + z->crc_at, z->fill - z->crc_at);
+        memory_copy_apart(other - GZIP_WINDOW, z->out + z->fill - GZIP_WINDOW, GZIP_WINDOW);
+        z->alt = z->out;
+        z->out = other;
+        z->flushed += z->fill;
+        z->fill = 0;
+        z->taken = 0;
+        z->crc_at = 0;
+}
+
 /* The pull interface. State comes from memory() and is freed by close. */
 static address_any gzip_pull_open(bipolar fd, p8 address_to prefix, positive prefix_len)
 {
@@ -1268,7 +1300,7 @@ static bool gzip_pull_close(address_any state)
         if (!z)
                 return false;
         ok = !z->why;
-        memory_free(z, GZIP_INFLATER_SIZE);
+        gzip_inflater_free(z);
         return ok;
 }
 
@@ -1301,10 +1333,79 @@ static positive gzip_hold(gzip_inflater address_to z, bool ok)
         return (positive)(made & (GZIP_WINDOW - 1));
 }
 
+/*
+        A decode that goes on past its first slab writes on a second thread:
+        the slabs take turns, the decoder fills one while the other is being
+        written, and hands each over whole. Which bytes of a slab go out is
+        the decoder's to say and no different from the plain loop's, so the
+        bytes on the descriptor are the same; only when the write syscalls
+        run moves.
+*/
+typedef struct
+{
+        bipolar out;
+        p8 address_to bytes[2];
+        positive length[2];
+        /* full says a slot holds bytes to write; wake counts changes of
+           any kind for the futex both sides sleep on. */
+        b32 full[2];
+        b32 wake;
+        b32 done;
+        b32 failed;
+} gzip_sink;
+
+static fn gzip_sink_signal(gzip_sink address_to k)
+{
+        atomic_inc(address_of k->wake);
+        thread_wake(address_of k->wake, 1 << 30);
+}
+
+static fn gzip_sink_job(address_any context, positive index)
+{
+        gzip_sink address_to k = (gzip_sink address_to)context;
+
+        (void)index;
+        for (positive slot = 0;; slot ^= 1)
+        {
+                for (;;)
+                {
+                        b32 word = atomic_load(address_of k->wake);
+
+                        if (atomic_load(address_of k->full[slot]))
+                                break;
+                        if (atomic_load(address_of k->done))
+                                return;
+                        thread_wait(address_of k->wake, word);
+                }
+                if (k->length[slot] &&
+                    system_write_all((positive)k->out, k->bytes[slot], k->length[slot]) !=
+                        (bipolar)k->length[slot])
+                        atomic_exchange(address_of k->failed, 1);
+                atomic_exchange(address_of k->full[slot], 0);
+                gzip_sink_signal(k);
+        }
+}
+
+/* Sleep until a slot is empty. */
+static fn gzip_sink_wait_empty(gzip_sink address_to k, positive slot)
+{
+        for (;;)
+        {
+                b32 word = atomic_load(address_of k->wake);
+
+                if (!atomic_load(address_of k->full[slot]))
+                        return;
+                thread_wait(address_of k->wake, word);
+        }
+}
+
 /* The whole stream from in to out (out < 0 tests without writing). */
 static bool gzip_stream_decode(bipolar in, bipolar out)
 {
         gzip_inflater address_to z = (gzip_inflater address_to)gzip_pull_open(in, null, 0);
+        gzip_sink sink = {0};
+        bool piped = false;
+        positive slot = 0;
         bool ok;
 
         gzip_note = null;
@@ -1320,8 +1421,22 @@ static bool gzip_stream_decode(bipolar in, bipolar out)
                 ok = gzip_inflate_run(z);
                 hold = gzip_hold(z, ok);
                 length = z->carry + z->fill - hold;
-                if (out >= 0 && length &&
-                    system_write_all((positive)out, z->out - z->carry, length) != (bipolar)length)
+                if (piped)
+                {
+                        sink.bytes[slot] = z->out - z->carry;
+                        sink.length[slot] = length;
+                        atomic_exchange(address_of sink.full[slot], 1);
+                        gzip_sink_signal(address_of sink);
+                        if (atomic_load(address_of sink.failed))
+                        {
+                                z->why = null;
+                                ok = gzip_inflate_fail(z, "gzip write failed");
+                                break;
+                        }
+                }
+                else if (out >= 0 && length &&
+                         system_write_all((positive)out, z->out - z->carry, length) !=
+                             (bipolar)length)
                 {
                         z->why = null;
                         ok = gzip_inflate_fail(z, "gzip write failed");
@@ -1330,7 +1445,49 @@ static bool gzip_stream_decode(bipolar in, bipolar out)
                 if (!ok || z->finished)
                         break;
                 z->carry = hold;
-                gzip_inflate_slide(z);
+                if (out >= 0 && !piped && !z->alt_base)
+                {
+                        /* Past the first slab: a second slab and a writer. */
+                        p8 address_to more = (p8 address_to)memory_checked(
+                            GZIP_WINDOW + GZIP_DECODE_OUT + GZIP_DECODE_SLACK);
+
+                        if (more)
+                        {
+                                sink.out = out;
+                                if (parallel_beside(gzip_sink_job, address_of sink))
+                                {
+                                        z->alt_base = more;
+                                        z->alt = more + GZIP_WINDOW;
+                                        piped = true;
+                                        /* The next slab goes to the writer first. */
+                                        slot = 1;
+                                }
+                                else
+                                        memory_free(more, GZIP_WINDOW + GZIP_DECODE_OUT +
+                                                              GZIP_DECODE_SLACK);
+                        }
+                }
+                if (piped)
+                {
+                        /* The slab just read is the writer's to write while the
+                           other is filled. */
+                        gzip_sink_wait_empty(address_of sink, slot ^ 1);
+                        gzip_inflate_swap(z);
+                        slot ^= 1;
+                }
+                else
+                        gzip_inflate_slide(z);
+        }
+        if (piped)
+        {
+                atomic_exchange(address_of sink.done, 1);
+                gzip_sink_signal(address_of sink);
+                parallel_beside_wait();
+                if (ok && atomic_load(address_of sink.failed))
+                {
+                        z->why = null;
+                        ok = gzip_inflate_fail(z, "gzip write failed");
+                }
         }
         if (z->why)
         {
@@ -1349,7 +1506,7 @@ static bool gzip_stream_decode(bipolar in, bipolar out)
                 gzip_why = null;
         gzip_note_more = z->why2;
         gzip_garbage = ok && z->garbage;
-        memory_free(z, GZIP_INFLATER_SIZE);
+        gzip_inflater_free(z);
         return ok;
 }
 
@@ -1381,7 +1538,7 @@ static bipolar gzip_inflate_mem(p8 address_to src, positive src_len,
                 gzip_inflate_slide(z);
         }
         gzip_why = z->why;
-        memory_free(z, GZIP_INFLATER_SIZE);
+        gzip_inflater_free(z);
         return ok ? (bipolar)used : -1;
 }
 
