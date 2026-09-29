@@ -4768,6 +4768,10 @@ static positive join_output_count;
 static bool join_output_auto;
 static positive join_order_mode;
 static b32 join_separator;
+//      A tab of more than a byte is one character of a multibyte locale;
+//      join_separator then holds its first byte.
+static string_address join_mb_text;
+static positive join_mb_length;
 /* The byte -t actually carried, which is not always the field separator it
    names: -t '' names the newline that makes the whole line one field but
    writes no byte, so the output stays blank-separated. One written byte
@@ -5045,16 +5049,26 @@ static bool join_option_read(p8 letter, string_address value)
 {
         if (letter == 't')
         {
-                // One byte, the two that spell a NUL, or nothing at all,
-                // which makes the whole line the key.
+                // One byte, the two that spell a NUL, one character of a
+                // multibyte locale, or nothing at all, which makes the whole
+                // line the key.
                 bool zero = value[0] == '\\' && value[1] == '0' && !value[2];
+                positive size = string_length(value);
+                bool character = size > 1 && !zero &&
+                                 text_mb_length(text_charset(), (const p8 address_to)value, size) == size;
 
-                if (value[0] && value[1] && !zero)
+                if (value[0] && value[1] && !zero && !character)
                         return join_complain("join: multi-character tab '%w'\n", value);
                 b32 separator = zero ? 0 : value[0] ? value[0] : '\n';
-                if (join_separator >= 0 && join_separator != separator)
+                if (join_separator >= 0 &&
+                    (join_separator != separator ||
+                     (character ? join_mb_length != size ||
+                                      memory_compare(join_mb_text, value, size)
+                                : join_mb_length)))
                         return join_complain("join: incompatible tabs\n", null);
                 join_separator = separator;
+                join_mb_text = character ? value : null;
+                join_mb_length = character ? size : 0;
                 if (value[0])
                         join_output_written = separator;
         }
@@ -5316,14 +5330,29 @@ static bool join_field_next(join_fields address_to fields,
         else
         {
                 start = at;
+                positive step = 1;
+
                 // -t LF selects the whole record, including with -z.
-                at += fields->separator == '\n' ? fields->length - at
-                    : memory_span_without_byte(fields->bytes + at,
-                                               fields->separator,
-                                               fields->length - at);
+                if (join_mb_length > 1)
+                {
+                        positive charset = text_charset();
+
+                        step = join_mb_length;
+                        while (at + step <= fields->length &&
+                               memory_compare(fields->bytes + at, join_mb_text, step))
+                                at += text_mb_length(charset, fields->bytes + at,
+                                                     fields->length - at);
+                        if (at + step > fields->length)
+                                at = fields->length;
+                }
+                else
+                        at += fields->separator == '\n' ? fields->length - at
+                            : memory_span_without_byte(fields->bytes + at,
+                                                       fields->separator,
+                                                       fields->length - at);
 
                 if (at < fields->length)
-                        fields->position = at + 1;
+                        fields->position = at + step;
                 else
                 {
                         fields->position = at;
@@ -5408,7 +5437,12 @@ static fn join_put_field(bool address_to first,
                          p8 output_separator)
 {
         if (!address_to first)
-                text_put_character(output_separator);
+        {
+                if (join_mb_length > 1)
+                        text_put((p8 address_to)join_mb_text, join_mb_length);
+                else
+                        text_put_character(output_separator);
+        }
         address_to first = false;
 
         if (present)
@@ -5671,6 +5705,8 @@ static b32 text_join()
         join_output_auto = false;
         join_order_mode = RELATION_ORDER_DEFAULT;
         join_separator = -1;
+        join_mb_text = null;
+        join_mb_length = 0;
         join_output_written = -1;
         join_complained = false;
         join_option_refused = false;
@@ -11939,8 +11975,11 @@ static const b8 text_tab_expand_span[256] = {[0 ... 7] = 1, [11 ... 255] = 1};
 static const b8 text_tab_space_span[256] = {[' '] = 1};
 // What unexpand has to decide about: a blank, a backspace and a newline,
 // each of which moves a column or ends a line. Everything else passes.
-static const b8 text_tab_unexpand_special[256] = {['\b'] = 1, ['\t'] = 1, ['\n'] = 1,
-                                                  [' '] = 1};
+//     Under UTF-8 the lead bytes 0xe1 to 0xe3 are asked about too, since the
+//     blanks of width beyond a space (the ideographic space among them) start
+//     there.
+static b8 text_tab_unexpand_special[256] = {['\b'] = 1, ['\t'] = 1, ['\n'] = 1,
+                                            [' '] = 1};
 
 static positive text_tab_extend;
 static positive text_tab_increment;
@@ -12271,10 +12310,29 @@ static bool text_tab_next(positive column, positive address_to next,
 /* GNU delays blanks until it knows whether their first byte belongs at a tab
    stop. In the C byte locale they are all spaces except possibly that first
    byte, so a count and one bit replace its allocated pending-byte array. */
+/*
+        The blanks waiting, when one of them is a character and not a space:
+        their own bytes, so that those not turned into a tab go out as they
+        came. The first is the tab where the count asks for one.
+*/
+static p8 text_unexpand_raw[1024];
+static positive text_unexpand_raw_used;
+static bool text_unexpand_raw_on;
+
 static fn text_unexpand_pending(positive count, bool first_tab)
 {
         if (!count)
                 return;
+
+        if (text_unexpand_raw_on)
+        {
+                if (first_tab)
+                        text_unexpand_raw[0] = '\t';
+                text_put(text_unexpand_raw, text_unexpand_raw_used);
+                text_unexpand_raw_on = false;
+                text_unexpand_raw_used = 0;
+                return;
+        }
 
         if (first_tab)
         {
@@ -12468,6 +12526,91 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                         }
                                 }
 
+                                //      A blank that is a character of more than a
+                                //      byte -- the ideographic space, the wide and
+                                //      thin spaces -- takes the columns of its
+                                //      width and waits with the others.
+                                if (unexpand && text_tab_utf8 &&
+                                    data[at] >= 0xe1 && data[at] <= 0xe3)
+                                {
+                                        p32 code;
+                                        positive got;
+
+                                        if (wc_utf8_decode(data + at, left - at, address_of code,
+                                                           address_of got) == WC_VALID &&
+                                            got > 1 &&
+                                            (code == 0x1680 || (code >= 0x2000 && code <= 0x2006) ||
+                                             (code >= 0x2008 && code <= 0x200a) || code == 0x205f ||
+                                             code == 0x3000))
+                                        {
+                                                positive stop;
+                                                bool explicit;
+                                                bool have = text_tab_next(column, address_of stop,
+                                                                          address_of explicit);
+                                                bool suppress = false;
+                                                positive width = unicode_width(code, UNICODE_WIDTH_WCWIDTH);
+
+                                                if (!have)
+                                                        convert = false;
+                                                else
+                                                {
+                                                        column += width;
+
+                                                        if (!(previous_blank && column == stop))
+                                                        {
+                                                                if (column == stop)
+                                                                        one_blank_before_stop = true;
+                                                                if (!text_unexpand_raw_on)
+                                                                {
+                                                                        text_unexpand_raw_on = true;
+                                                                        text_unexpand_raw_used = 0;
+                                                                        for (positive k = 0; k < pending &&
+                                                                                             text_unexpand_raw_used < sizeof(text_unexpand_raw);
+                                                                             k++)
+                                                                                text_unexpand_raw[text_unexpand_raw_used++] = ' ';
+                                                                }
+                                                                for (positive k = 0; k < got &&
+                                                                                     text_unexpand_raw_used < sizeof(text_unexpand_raw);
+                                                                     k++)
+                                                                        text_unexpand_raw[text_unexpand_raw_used++] = data[at + k];
+                                                                pending += got;
+                                                                previous_blank = true;
+                                                                at += got;
+                                                                continue;
+                                                        }
+
+                                                        text_put_character('\t');
+                                                        pending_first_tab = true;
+                                                        pending = one_blank_before_stop;
+                                                        if (!pending)
+                                                        {
+                                                                pending_first_tab = false;
+                                                                text_unexpand_raw_on = false;
+                                                                text_unexpand_raw_used = 0;
+                                                        }
+                                                        else if (text_unexpand_raw_on)
+                                                                text_unexpand_raw_used = 1;
+                                                        suppress = true;
+                                                }
+
+                                                if (pending)
+                                                {
+                                                        if (pending > 1 && one_blank_before_stop)
+                                                                pending_first_tab = true;
+                                                        text_unexpand_pending(pending, pending_first_tab);
+                                                        pending = 0;
+                                                        pending_first_tab = false;
+                                                        one_blank_before_stop = false;
+                                                }
+
+                                                previous_blank = true;
+                                                if (!suppress)
+                                                        text_put(data + at, got);
+                                                at += got;
+                                                continue;
+                                        }
+                                }
+
                                 if (unexpand)
                                 {
                                         p8 character = data[at++];
@@ -12512,7 +12655,20 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                                         pending = one_blank_before_stop;
 
                                                         if (!pending)
+
+                                                        {
+
                                                                 pending_first_tab = false;
+
+                                                                text_unexpand_raw_on = false;
+
+                                                                text_unexpand_raw_used = 0;
+
+                                                        }
+
+                                                        else if (text_unexpand_raw_on)
+
+                                                                text_unexpand_raw_used = 1;
                                                 }
                                                 else
                                                 {
@@ -12526,6 +12682,9 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                                                         one_blank_before_stop =
                                                                             true;
 
+                                                                if (text_unexpand_raw_on &&
+                                                                    text_unexpand_raw_used < sizeof(text_unexpand_raw))
+                                                                        text_unexpand_raw[text_unexpand_raw_used++] = ' ';
                                                                 pending++;
                                                                 previous_blank = true;
                                                                 continue;
@@ -12536,7 +12695,20 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                                         pending = one_blank_before_stop;
 
                                                         if (!pending)
+
+                                                        {
+
                                                                 pending_first_tab = false;
+
+                                                                text_unexpand_raw_on = false;
+
+                                                                text_unexpand_raw_used = 0;
+
+                                                        }
+
+                                                        else if (text_unexpand_raw_on)
+
+                                                                text_unexpand_raw_used = 1;
                                                         suppress = true;
                                                 }
                                         }
@@ -12727,6 +12899,8 @@ static inline INLINE b32 text_tabs(bool unexpand)
         text_begin(taking.program);
         text_tab_reset();
         text_tab_utf8 = text_locale_utf8();
+        text_tab_unexpand_special[0xe1] = text_tab_unexpand_special[0xe2] =
+            text_tab_unexpand_special[0xe3] = text_tab_utf8;
 
         if (!text_took(address_of taking))
                 return text_done(1);
@@ -40780,6 +40954,28 @@ static bool expr_more()
 }
 
 /*
+        Positions and lengths in characters, as GNU expr counts them where a
+        character is more than a byte: a byte that begins nothing valid is a
+        character of its own.
+*/
+static positive expr_step(positive charset, string_address text, positive left)
+{
+        return charset == TEXT_CHARSET_BYTES ? 1
+                                             : text_mb_length(charset, (const p8 address_to)text, left);
+}
+
+static positive expr_characters(string_address text, positive bytes)
+{
+        positive charset = text_charset();
+        positive count = 0;
+
+        for (positive at = 0; at < bytes; count++)
+                at += expr_step(charset, text + at, bytes - at);
+
+        return count;
+}
+
+/*
         The match operator, and match, which is the same thing spelled out.
 
         Only a match at byte zero is accepted. A pattern with a group answers
@@ -40793,7 +40989,8 @@ static expr_value expr_matched(expr_value address_to subject,
         string_address rule = expr_shown(pattern);
         positive length = string_length(text);
 
-        if (!regex_compile(rule, false, false, false, REGEX_POLICY_EXPR))
+        if (!regex_compile(rule, false, false, false,
+                           REGEX_POLICY_EXPR | (text_locale_utf8() ? REGEX_CHARACTERS : 0)))
         {
                 //      regcomp's own reasons, as GNU's expr says them.
                 if (!expr_dead)
@@ -40822,7 +41019,7 @@ static expr_value expr_matched(expr_value address_to subject,
                 return made;
         }
 
-        made.number = (bipolar)regex_slots[1];
+        made.number = (bipolar)expr_characters(text, regex_slots[1]);
 
         return made;
 }
@@ -40904,7 +41101,9 @@ static expr_value expr_primary()
                 of = expr_primary();
                 if (expr_fault)
                         return made;
-                made.number = (bipolar)string_length(expr_shown(address_of of));
+                string_address said = expr_shown(address_of of);
+
+                made.number = (bipolar)expr_characters(said, string_length(said));
 
                 return made;
         }
@@ -40948,10 +41147,42 @@ static expr_value expr_primary()
                 text = expr_shown(address_of of);
                 wanted = expr_shown(address_of set);
 
-                positive before = string_span_without_set(text, wanted);
+                positive charset = text_charset();
 
-                if (string_get(text + before))
-                        made.number = (bipolar)(before + 1);
+                if (charset == TEXT_CHARSET_BYTES)
+                {
+                        positive before = string_span_without_set(text, wanted);
+
+                        if (string_get(text + before))
+                                made.number = (bipolar)(before + 1);
+
+                        return made;
+                }
+
+                //      The first character of the string that is any of the
+                //      characters of the set, by their bytes, an invalid byte
+                //      alone in either being a character.
+                positive text_length = string_length(text);
+                positive wanted_length = string_length(wanted);
+
+                for (positive at = 0, index = 1; wanted_length && at < text_length; index++)
+                {
+                        positive size = expr_step(charset, text + at, text_length - at);
+
+                        for (positive there = 0; there < wanted_length;)
+                        {
+                                positive other = expr_step(charset, wanted + there,
+                                                           wanted_length - there);
+
+                                if (other == size && !memory_compare(text + at, wanted + there, size))
+                                {
+                                        made.number = (bipolar)index;
+                                        return made;
+                                }
+                                there += other;
+                        }
+                        at += size;
+                }
 
                 return made;
         }
@@ -40975,7 +41206,10 @@ static expr_value expr_primary()
                         return made;
 
                 string_address text = expr_shown(address_of of);
-                positive whole = string_length(text);
+                positive bytes = string_length(text);
+                positive charset = text_charset();
+                positive whole = charset == TEXT_CHARSET_BYTES ? bytes
+                                                              : expr_characters(text, bytes);
 
                 made.text = expr_empty;
 
@@ -40990,7 +41224,26 @@ static expr_value expr_primary()
                         return made;
 
                 length = min(length, whole - start + 1);
-                made.text = expr_keep(text + start - 1, length);
+
+                if (charset == TEXT_CHARSET_BYTES)
+                {
+                        made.text = expr_keep(text + start - 1, length);
+                        return made;
+                }
+
+                //      Characters, not bytes: walk to the first and take as
+                //      many as were asked for.
+                positive at = 0;
+
+                for (positive skipped = 1; skipped < start; skipped++)
+                        at += expr_step(charset, text + at, bytes - at);
+
+                positive stop = at;
+
+                for (positive taken = 0; taken < length && stop < bytes; taken++)
+                        stop += expr_step(charset, text + stop, bytes - stop);
+
+                made.text = expr_keep(text + at, stop - at);
 
                 return made;
         }
