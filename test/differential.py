@@ -8560,6 +8560,10 @@ FILES_SCENE_CASES = (
     ("tmax", "ls", "-lgo", "--time-style=+%Y", "f"),
     ("noco", "ls", "--color=always", "-d", "dir", "a.txt", "exe", "link", "dangling", "/dev/null", "loop"),
     ("dumbterm", "ls", "--color=always", "-d", "dir", "exe"), ("colorterm", "ls", "--color=always", "-d", "dir", "exe"),
+    # Output nobody could be given by split and csplit is said in GNU's words.
+    ("full_out", "split", "-n", "2/3", "a.txt"), ("full_out", "split", "-n", "l/2/3", "a.txt"), ("full_out", "split", "-n", "r/2/3", "a.txt"),
+    ("full_out", "split", "--verbose", "-b", "10", "a.txt"), ("full_out", "split", "-n", "1/2", "b.txt"),
+    ("full_out", "csplit", "c.txt", "2"), ("full_out", "csplit", "c.txt", "2", "3"), ("full_out", "csplit", "-s", "c.txt", "2"),
     ("fraction", "touch", "-d", "now", "t"), ("fraction", "touch", "-d", "1.5 seconds ago", "t"),
     ("fraction", "touch", "-d", "+1 hour", "t"), ("fraction", "touch", "-d", "12:00", "t"),
     ("fraction", "touch", "-d", "@5.25", "t"), ("fraction", "find", "a", "b", "-newermt", "@1700000000.5"),

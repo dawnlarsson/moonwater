@@ -25424,9 +25424,23 @@ static bool split_materialized(bipolar in, file_facts address_to facts,
         return answer;
 }
 
-static bool split_stdout_write(address_any bytes, positive length)
+static bool file_output_told(string_address program);
+
+/* What -n K/N and -n l/K/N and r/K/N send to standard output, said in GNU's
+   words when it cannot be written: "-: reason" for a byte range, "write
+   error: reason" for lines. */
+static bool split_stdout_write(address_any bytes, positive length, bool ranged)
 {
-        return !length || system_write_all(1, bytes, length) == length;
+        if (!length)
+                return true;
+
+        system_write_result wrote = system_write_all_checked(1, bytes, length);
+
+        if (wrote.bytes == length)
+                return true;
+        string_format(log_error, ranged ? "split: -: %s\n" : "split: write error: %s\n",
+                      file_reason(wrote.error ? wrote.error : -ERROR_INPUT_OUTPUT));
+        return false;
 }
 
 enum
@@ -25582,7 +25596,7 @@ static bool split_lines_chunk(p8 address_to input, positive length,
 
                         if (k == chunk_no)
                         {
-                                if (!split_stdout_write(bp, to_write))
+                                if (!split_stdout_write(bp, to_write, false))
                                         return false;
                         }
                         else if (!k)
@@ -25896,8 +25910,8 @@ static bool split_round_robin(bipolar in, split_chunk chunk, p8 separator,
                         if (k)
                         {
                                 if (line == k && split_rr_unbuffered &&
-                                    !split_stdout_write(at, length))
-                                        return string_report(log_error, false, "split: write error\n");
+                                    !split_stdout_write(at, length, false))
+                                        return false;
                                 if (line == k && !split_rr_unbuffered)
                                         log(at, length);
                                 if (found)
@@ -25942,9 +25956,8 @@ static bool split_round_robin(bipolar in, split_chunk chunk, p8 separator,
 split_rr_done:
         if (k)
         {
-                log_flush();
-                if (log_failed())
-                        return string_report(log_error, false, "split: write error\n");
+                if (!file_output_told((string_address) "split"))
+                        return false;
                 return good;
         }
 
@@ -25983,7 +25996,7 @@ static bool split_bytes_extract(p8 address_to bytes, p64 length, positive k,
                           : (p64)k * (length / n) + min((p64)k, length % n);
 
         return split_stdout_write(bytes + (positive)start,
-                                  (positive)(stop - start));
+                                  (positive)(stop - start), true);
 }
 
 static bool split_chunk_buffer(p8 address_to input, positive length,
@@ -26488,7 +26501,10 @@ static b32 file_split()
         //      Whatever runs split in this process gets SIGPIPE back as it was.
         if (filter)
                 system_signal_action(13, pipe_before, null, 8);
-        log_flush();
+        //      What --verbose and -n l/K/N wrote to the buffer is written
+        //      here, and a failure of that is said too.
+        if (!file_output_told((string_address) "split"))
+                complete = false;
         return complete ? 0 : split_status ? split_status : 1;
 }
 
@@ -27696,9 +27712,11 @@ static b32 file_csplit()
         if (failed)
                 csplit_cleanup(address_of state);
 
-        log_flush();
+        //      The sizes it prints are written here, and a stream that will
+        //      not take them is a failure whatever was split.
+        bool told = file_output_told((string_address) "csplit");
         utility_arena.used = 0;
-        return failed ? 1 : 0;
+        return failed || !told ? 1 : 0;
 }
 
 // truncate ---------------------------------------------------------
