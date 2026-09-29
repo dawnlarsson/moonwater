@@ -1371,6 +1371,13 @@ int execute_spark(struct linux_binprm *bprm)
         }
 
 #ifdef CONFIG_X86_64
+        /* The registers the caller of execve held are not the image's: an ELF
+           starts with them zeroed (ELF_PLAT_INIT), and here they were the
+           exec'ing program's own, whatever it had put in them, handed to an
+           image that may run with more privilege than it did. Only the entry
+           ABI's four are set. */
+        memset(regs, 0, offsetof(struct pt_regs, orig_ax));
+
         /* CPUID and XGETBV are serialising startup work whose answer the
            kernel already has.  Spark's private entry ABI hands that answer
            to _start; an image run by an older loader simply misses the magic
@@ -1386,6 +1393,8 @@ int execute_spark(struct linux_binprm *bprm)
         regs->cs = __USER_CS;
         regs->ss = __USER_DS;
 #elif defined(CONFIG_ARM64)
+        // As start_thread_common zeroes them for an ELF.
+        memset(regs->regs, 0, sizeof(regs->regs));
         regs->regs[19] = SPARK_START_MAGIC_FACTS;
         regs->regs[20] = spark_cpu_features;
         regs->regs[21] = spark_entry_process();
@@ -1536,16 +1545,13 @@ static int spawn_terminal(void)
         work->arguments = kvmalloc(sizeof(*work->arguments) +
                                    2 * sizeof(char *), GFP_KERNEL);
 
-        /* spawn_free handles either allocation failing. */
-        if (work->arguments)
-                refcount_set(&work->arguments->references, 1);
-
         if (!work->arguments)
         {
                 spawn_free(work);
                 return -ENOMEM;
         }
 
+        refcount_set(&work->arguments->references, 1);
         work->arguments->vector = (char **)(work->arguments + 1);
         work->arguments->vector[0] = work->path;
         work->arguments->vector[1] = NULL;
@@ -1735,7 +1741,10 @@ static int copy_strings(unsigned long user_block, unsigned int bytes,
                 size_t length = string_length_max(walk, remaining);
 
                 if (length == remaining)
-                        goto malformed;
+                {
+                        kvfree(strings);
+                        return -EINVAL;
+                }
 
                 vector[i] = walk;
                 walk += length + 1;
@@ -1744,10 +1753,6 @@ static int copy_strings(unsigned long user_block, unsigned int bytes,
 
         *out = strings;
         return 0;
-
-malformed:
-        kvfree(strings);
-        return -EINVAL;
 }
 
 // What a kept environment counted, given back as it stops being kept.
