@@ -448,6 +448,31 @@ static rx_fragment rx_atom(rx_compiler *c)
         {
                 positive at = c->at++;
                 bool wide = (c->program.policy & REGEX_CHARACTERS) != 0;
+
+                /*
+                        A character of more than one byte is one atom, so a
+                        repeat after it repeats all of it: é+ was the byte
+                        C3 and then one or more of A9, which matched the
+                        first é of ééé and no more.
+                */
+                if (wide && byte >= 0xc2 && byte <= 0xf4)
+                {
+                        positive size = memory_utf8_span((address_any)(c->pattern + at),
+                                                         c->length - at, 1).x;
+
+                        if (size > 1)
+                        {
+                                rx_fragment run = {0};
+
+                                for (positive b = 0; b < size; b++)
+                                        run = rx_join(c, run,
+                                                      rx_one(c, RX_BYTE, c->pattern[at + b]));
+
+                                c->at = at + size;
+                                return run;
+                        }
+                }
+
                 if (byte == '.')
                 {
                         kind = RX_ANY;
