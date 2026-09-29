@@ -5022,6 +5022,7 @@ static bool zstd_enc_checksum;
 static struct
 {
         bool active;
+        bool ran;       /* the fd path ran the final round itself */
         bool final;
         bool first_round;
         zstd_params p;
@@ -5033,6 +5034,10 @@ static struct
         positive count;
         p8 address_to buffer;
         positive buffer_room;
+        /* The fd path reads the next round here while the round in buffer
+           runs, then the two trade places. */
+        p8 address_to spare;
+        positive spare_room;
         zstd_encoder address_to slots;
         positive slot_count;
         p8 failed[ZSTD_JOBS_MAX];
@@ -5222,12 +5227,17 @@ static b32 zstd_jobs_open(const zstd_params address_to p)
         positive room;
 
         zstd_jobs.active = false;
+        zstd_jobs.ran = false;
         if (zstd_single_job)
                 return 0;
         if (!per_round)
                 per_round = 1;
         if (zstd_job_limit && per_round > zstd_job_limit)
                 per_round = zstd_job_limit;
+        /* With no -T a round is two waves of the pool, so the next round
+           can be read while this one runs; the bytes never depend on it. */
+        if (!zstd_job_limit && parallel_width() > 1 && per_round > 2 * parallel_width())
+                per_round = 2 * parallel_width();
         zstd_jobs.overlap = ((positive)1 << p->window_log) >> (9 - overlap_log);
         room = zstd_jobs.overlap + per_round * job + 64;
         if (zstd_jobs.buffer_room < room)
@@ -5255,14 +5265,10 @@ static b32 zstd_jobs_open(const zstd_params address_to p)
         return 1;
 }
 
-/* The jobs gathered so far, then the overlap kept for the next round's
-   first job.  The final round's last job may be short, or empty when the
-   input ended with a round. */
-static bool zstd_jobs_round(bool final)
+/* The jobs of the round in the buffer, the last one ending the frame when
+   final. */
+static bool zstd_jobs_run(bool final)
 {
-        positive const input = zstd_jobs.history + zstd_jobs.filled;
-        positive const keep = input < zstd_jobs.overlap ? input : zstd_jobs.overlap;
-
         zstd_jobs.count = final ? (zstd_jobs.filled + zstd_jobs.job - 1) / zstd_jobs.job
                                 : zstd_jobs.per_round;
         if (!zstd_jobs.count)
@@ -5271,11 +5277,132 @@ static bool zstd_jobs_round(bool final)
         if (!parallel_ordered(zstd_job_run, zstd_job_sink, null, zstd_jobs.count,
                               zstd_jobs.filled))
                 return zstd_why ? false : zstd_fail("zstd jobs stopped");
+        return true;
+}
+
+/* The jobs gathered so far, then the overlap kept for the next round's
+   first job.  The final round's last job may be short, or empty when the
+   input ended with a round. */
+static bool zstd_jobs_round(bool final)
+{
+        positive const input = zstd_jobs.history + zstd_jobs.filled;
+        positive const keep = input < zstd_jobs.overlap ? input : zstd_jobs.overlap;
+
+        if (!zstd_jobs_run(final))
+                return false;
         memory_copy(zstd_jobs.buffer, zstd_jobs.buffer + input - keep, keep);
         zstd_jobs.history = keep;
         zstd_jobs.filled = 0;
         zstd_jobs.first_round = false;
         return true;
+}
+
+/* Reading ahead: the next round's bytes, into its buffer behind the
+   overlap, and into the checksum in order. */
+typedef struct
+{
+        bipolar in;
+        p8 address_to into;
+        positive room;
+        positive got;
+        bool failed;
+} zstd_reader;
+
+static fn zstd_reader_job(address_any context, positive index)
+{
+        zstd_reader address_to const r = context;
+
+        (void)index;
+        while (r->got < r->room)
+        {
+                bipolar const n = system_read_retry((positive)r->in, r->into + r->got,
+                                                    r->room - r->got);
+
+                if (n < 0)
+                {
+                        r->failed = true;
+                        return;
+                }
+                if (!n)
+                        break;
+                if (zstd_enc_checksum)
+                        hash_xxh64_add(address_of zstd_enc_hash, r->into + r->got, (positive)n);
+                r->got += (positive)n;
+        }
+}
+
+/*
+        A descriptor's frame as jobs, reading the next round beside the
+        pool while this one compresses, as libzstd's reader thread keeps
+        its workers fed; the read was the serial front of every round, the
+        workers idle through it.  A full round waits for one more byte
+        before it runs, as the loop over zstd_encode_space does, so the
+        frame's last block always falls in the final round.  0 done, 1 read
+        failed, -1 anything else (zstd_why says).
+*/
+static b32 zstd_jobs_fd(bipolar in)
+{
+        positive const capacity = zstd_jobs.per_round * zstd_jobs.job;
+        zstd_reader reader = {0};
+
+        if (zstd_jobs.spare_room < zstd_jobs.buffer_room)
+        {
+                if (zstd_jobs.spare)
+                        memory_free(zstd_jobs.spare, zstd_jobs.spare_room);
+                zstd_jobs.spare_room = 0;
+                if (!(zstd_jobs.spare = memory_checked(zstd_jobs.buffer_room)))
+                        return zstd_fail("zstd cannot map its jobs"), -1;
+                zstd_jobs.spare_room = zstd_jobs.buffer_room;
+        }
+        reader.in = in;
+        reader.into = zstd_jobs.buffer + zstd_jobs.history;
+        reader.room = capacity;
+        zstd_reader_job(address_of reader, 0);
+        if (reader.failed)
+                return 1;
+        zstd_jobs.filled = reader.got;
+        for (;;)
+        {
+                positive const input = zstd_jobs.history + zstd_jobs.filled;
+                positive const keep = input < zstd_jobs.overlap ? input : zstd_jobs.overlap;
+                p8 address_to const next = zstd_jobs.spare;
+                bipolar probe;
+                bool beside;
+                bool ok;
+
+                if (zstd_jobs.filled < capacity)
+                        return zstd_jobs_run(true) ? 0 : -1;
+                memory_copy_apart(next, zstd_jobs.buffer + input - keep, keep);
+                probe = system_read_retry((positive)in, next + keep, 1);
+                if (probe < 0)
+                        return 1;
+                if (!probe)
+                        return zstd_jobs_run(true) ? 0 : -1;
+                if (zstd_enc_checksum)
+                        hash_xxh64_add(address_of zstd_enc_hash, next + keep, 1);
+                reader = (zstd_reader){in, next + keep + 1, capacity - 1, 0, false};
+                beside = parallel_beside(zstd_reader_job, address_of reader);
+                ok = zstd_jobs_run(false);
+                if (beside)
+                        parallel_beside_wait();
+                else
+                        zstd_reader_job(address_of reader, 0);
+                if (!ok)
+                        return -1;
+                if (reader.failed)
+                        return 1;
+                {
+                        positive const room = zstd_jobs.spare_room;
+
+                        zstd_jobs.spare = zstd_jobs.buffer;
+                        zstd_jobs.spare_room = zstd_jobs.buffer_room;
+                        zstd_jobs.buffer = next;
+                        zstd_jobs.buffer_room = room;
+                }
+                zstd_jobs.history = keep;
+                zstd_jobs.filled = 1 + reader.got;
+                zstd_jobs.first_round = false;
+        }
 }
 #else
 static b32 zstd_jobs_open(const zstd_params address_to p)
@@ -5288,6 +5415,12 @@ static bool zstd_jobs_round(bool final)
 {
         (void)final;
         return false;
+}
+
+static b32 zstd_jobs_fd(bipolar in)
+{
+        (void)in;
+        return -1;
 }
 #endif
 
@@ -5391,7 +5524,7 @@ static bool zstd_encode_end(void)
         if (zstd_jobs.active)
         {
                 zstd_jobs.active = false;
-                if (!zstd_jobs_round(true))
+                if (!zstd_jobs.ran && !zstd_jobs_round(true))
                         return false;
         }
         else
@@ -5583,6 +5716,22 @@ static b32 zstd_encode_fd(bipolar in, bipolar out, p8 level)
         zstd_output.bytes = null;
         if (!zstd_encode_start(address_of params, !zstd_cli_no_check))
                 goto refused;
+        if (zstd_jobs.active)
+        {
+                b32 const ran = zstd_jobs_fd(in);
+
+                if (ran > 0)
+                {
+                        zstd_refuse("read failed");
+                        return 1;
+                }
+                if (ran < 0)
+                        goto refused;
+                zstd_jobs.ran = true;
+                if (zstd_encode_end())
+                        return 0;
+                goto refused;
+        }
         for (;;)
         {
                 positive room;
