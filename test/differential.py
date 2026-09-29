@@ -23772,6 +23772,13 @@ static void wake_up(wait_queue_head_t *w) { (void)w; wakes++; }
                       "static void bind_stop(void)")
     source += section(moonwater, "static void bind_answer",
                       "#endif /* STANDARD_MODERN_C_KERNEL */")
+    #   The settings requests, the real ones, under other names: the stubs
+    #   above answer the dispatch's calls and these answer the checks'.
+    source += section(spark, "static struct spark_settings *settings_current;",
+                      "static COLD void __init settings_start")
+    source += (section(spark, "static long settings_get(", "static HOT long report_snapshot")
+               .replace("settings_get(", "settings_get_real(")
+               .replace("settings_set(", "settings_set_real("))
     source += r"""
 static pid_t user_mode_thread(int (*fn)(void *), void *arg, unsigned long sig) {
     struct bind_spawn *spawn=arg;
@@ -25305,6 +25312,34 @@ static void check_pointer_state(struct input_handle *handle) {
     check(desktop.shake_count==1,"shake ignores only subthreshold motion");
 }
 
+/* The settings requests, who may make them and that nothing is copied to or
+   from a caller with settings_lock held. */
+static void check_settings_requests(void) {
+    static struct spark_settings slot, got;
+    struct spark_settings_request ask={.address=(unsigned long)&got};
+
+    power_admin=0;
+    check(settings_get_real(&ask)==-EPERM && settings_set_real(&ask)==-EPERM,
+          "the boot settings are CAP_SYS_ADMIN's to read and to set");
+    power_admin=1;
+    check(settings_get_real(&ask)==-ENODATA,"a machine that booted with none has none to give");
+    memset(&slot,0,sizeof(slot));
+    slot.magic=SPARK_SETTINGS_MAGIC; slot.version=SPARK_SETTINGS_VERSION;
+    slot.header=SPARK_SETTINGS_HEADER; slot.slot=SPARK_SETTINGS_SLOT;
+    slot.generation=7; slot.flags=SPARK_SETTINGS_CANVAS_OFF;
+    slot.sum=spark_settings_sum(&slot);
+    ask.address=(unsigned long)&slot;
+    check(!settings_set_real(&ask),"a slot that checks is taken");
+    memset(&got,0,sizeof(got)); ask.address=(unsigned long)&got;
+    unsigned before=copies_under_lock;
+    check(!settings_get_real(&ask) && !memcmp(&got,&slot,sizeof(slot)),
+          "and read back whole");
+    check(copies_under_lock==before,"the slot is copied out of settings_lock, not under it");
+    slot.sum^=1; ask.address=(unsigned long)&slot;
+    check(settings_set_real(&ask)==-EINVAL,"a slot that does not check is refused");
+    free(settings_current); settings_current=NULL;
+}
+
 static void reset(void) {
     free(snapshot); snapshot=NULL; snapshot_room=0;
     allocations=fail_allocation=copies=fail_copy=0;
@@ -25340,10 +25375,12 @@ static void check_focus_visibility(void) {
     screen=saved;
 }
 int main(void) {
-    lock_watch[0]=&machine_script_lock;
+    lock_watch[0]=&snapshot_lock; lock_watch[1]=&machine_script_lock;
+    lock_watch[2]=&settings_lock;
     check_spawn_dispatch();
     check_console_teardown();
     check_focus_visibility();
+    check_settings_requests();
     const unsigned capacities[]={0,111,112,113,4095,4096,4097,8192,SPARK_SNAPSHOT_MAX_BYTES};
     const unsigned records[]={0,1,32,171};
     unsigned char *output=malloc(SPARK_SNAPSHOT_MAX_BYTES+1);
@@ -25664,7 +25701,7 @@ int main(void) {
     check_settings_sum();
     check_input_suspension();
     check(!copies_under_lock,
-          "nothing was copied to or from a caller with machine_script_lock held");
+          "nothing was copied to or from a caller with snapshot_lock, machine_script_lock or settings_lock held");
     free(output);
     printf("  core-state %u of %u\n",checks-failures,checks);
     const char *tally=getenv("TEST_TALLY");

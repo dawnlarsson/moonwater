@@ -1941,6 +1941,7 @@ static COLD void __init settings_start(void)
 static long settings_get(struct spark_settings_request __user *request)
 {
         struct spark_settings_request asked;
+        struct spark_settings *held = NULL;
         long answer = 0;
 
         if (!capable(CAP_SYS_ADMIN))
@@ -1950,12 +1951,24 @@ static long settings_get(struct spark_settings_request __user *request)
         if (asked.flags)
                 return -EINVAL;
 
+        /* A copy of the slot goes out, not the slot: what the caller's
+           buffer is mapped from decides how long a copy to it takes, and
+           settings_lock is not to be held for that. */
         mutex_lock(&settings_lock);
         if (!settings_current)
                 answer = -ENODATA;
-        else if (copy_to_user((void __user *)asked.address, settings_current, SPARK_SETTINGS_SLOT))
-                answer = -EFAULT;
+        else if (!(held = kmemdup(settings_current, SPARK_SETTINGS_SLOT,
+                                  GFP_KERNEL)))
+                answer = -ENOMEM;
         mutex_unlock(&settings_lock);
+
+        if (answer)
+                return answer;
+
+        if (copy_to_user((void __user *)asked.address, held,
+                         SPARK_SETTINGS_SLOT))
+                answer = -EFAULT;
+        kfree(held);
 
         return answer;
 }
@@ -1997,6 +2010,9 @@ static HOT long report_snapshot(struct snapshot_request __user *out)
         struct snapshot_request request;
         struct snapshot_builder build;
         struct snapshot_header *header;
+        u8 *data;
+        u32 room;
+        u32 capacity;
         long answer = 0;
 
         if (copy_from_user(&request, out, sizeof(request)))
@@ -2014,27 +2030,47 @@ static HOT long report_snapshot(struct snapshot_request __user *out)
                 return -ENOSPC;
         }
 
+        /*
+                The warm buffer is taken, not locked.
+
+                It was held under snapshot_lock for the whole call, the copy
+                to the caller's buffer included -- and /dev/spark is open to
+                everyone, so a caller whose buffer lay in a page that a
+                filesystem it controls answers slowly, or never (a FUSE
+                mount in a user namespace is enough), held the lock for as
+                long and every top, ps and free after it waited. Taken out,
+                the buffer is this call's alone while it builds and copies,
+                and the lock is held for two pointer moves. Whoever finishes
+                first puts theirs back; the other is freed, so what stays
+                resident is still one buffer of at most what a capture
+                needed.
+        */
         mutex_lock(&snapshot_lock);
+        data = snapshot;
+        room = snapshot_room;
+        snapshot = NULL;
+        snapshot_room = 0;
+        mutex_unlock(&snapshot_lock);
+
         // A caller's spare capacity is not live kernel data. Keep the warm
         // buffer, but grow beyond a page only after a capture needs more.
-        u32 capacity = min_t(u32, request.capacity,
-                             max_t(u32, snapshot_room, PAGE_SIZE));
+        capacity = min_t(u32, request.capacity, max_t(u32, room, PAGE_SIZE));
 retry:
-        if (unlikely(capacity > snapshot_room))
+        if (unlikely(capacity > room))
         {
-                u8 *larger = kvrealloc(snapshot, capacity, GFP_KERNEL);
+                u8 *larger = kvrealloc(data, capacity, GFP_KERNEL);
 
                 if (!larger)
                 {
                         answer = -ENOMEM;
-                        goto unlock;
+                        goto keep;
                 }
 
-                snapshot = larger;
-                snapshot_room = capacity;
+                data = larger;
+                room = capacity;
         }
 
-        build.data = snapshot;
+        build.data = data;
         build.capacity = capacity;
         build.used = 0;
         build.required = 0;
@@ -2072,7 +2108,7 @@ retry:
                          build.used))
         {
                 answer = -EFAULT;
-                goto done;
+                goto keep;
         }
 
         if (build.required > build.capacity)
@@ -2080,9 +2116,16 @@ retry:
 
         if (copy_to_user(out, &request, sizeof(request)))
                 answer = -EFAULT;
-done:
-unlock:
+keep:
+        mutex_lock(&snapshot_lock);
+        if (data && !snapshot)
+        {
+                snapshot = data;
+                snapshot_room = room;
+                data = NULL;
+        }
         mutex_unlock(&snapshot_lock);
+        kvfree(data);
         return answer;
 }
 
