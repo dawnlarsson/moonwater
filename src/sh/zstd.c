@@ -3220,8 +3220,14 @@ static p8 address_to zstd_parse_fast(zstd_encoder address_to e, p32 from,
         return anchor;
 }
 
-/* dfast: an eight-byte hash and a min_match hash; a short hit also tries
-   the eight-byte hash one byte on. */
+/*
+        dfast, libzstd 1.5's: an eight-byte hash and a min_match hash at
+        each position, the long one of the next position read one step
+        early; a repeat one byte on first, then the long match, then the
+        short one, which a long match one byte on replaces only when it is
+        longer.  The step starts at 1 and grows by one every 256 bytes
+        without a match.
+*/
 static p8 address_to zstd_parse_dfast(zstd_encoder address_to e, p32 from,
                                       p32 to, p32 low)
 {
@@ -3236,87 +3242,131 @@ static p8 address_to zstd_parse_dfast(zstd_encoder address_to e, p32 from,
         p8 address_to const ilimit = iend - 8;
         p8 address_to ip = base + from;
         p8 address_to anchor = ip;
+        p32 rep = e->rep[0];
 
         ip += ip == lowest;
-        while (ip < ilimit)
+        if (rep > (p32)(ip - lowest))
+                rep = 0;
+        for (;;)
         {
-                p32 const cur = (p32)(ip - base);
-                positive const hl = zstd_hash_bytes(ip, hlog, 8);
-                positive const hs = zstd_hash_bytes(ip, slog, mls);
-                p32 const long_candidate = longer[hl];
-                p32 const short_candidate = shorter[hs];
-                p32 const rep = e->rep[0];
-                p8 address_to start;
+                positive step = 1;
+                p8 address_to next_step = ip + 256;
+                p8 address_to ip1 = ip + step;
                 p8 address_to there;
+                positive hl0;
+                positive hl1;
                 positive distance;
                 positive match;
+                p32 idxl0;
+                p32 idxl1;
+                p32 cur;
 
-                longer[hl] = cur;
-                shorter[hs] = cur;
-                if (rep && rep <= cur + 1 - low &&
-                    memory_load_unaligned(p32, ip + 1 - rep) == memory_load_unaligned(p32, ip + 1))
+                if (ip1 > ilimit)
+                        break;
+                hl0 = zstd_hash_bytes(ip, hlog, 8);
+                idxl0 = longer[hl0];
+                for (;;)
                 {
-                        start = ip + 1;
-                        distance = rep;
-                        match = 4 + memory_common_prefix(ip + 5, ip + 5 - rep,
-                                                         (positive)(iend - ip - 5));
-                        there = start - rep;
-                }
-                else if (long_candidate >= low &&
-                         memory_load_unaligned(p64, base + long_candidate) == memory_load_unaligned(p64, ip))
-                {
-                        start = ip;
-                        there = base + long_candidate;
-                        distance = cur - long_candidate;
-                        match = 8 + memory_common_prefix(ip + 8, there + 8,
-                                                         (positive)(iend - ip - 8));
-                }
-                else if (short_candidate >= low &&
-                         memory_load_unaligned(p32, base + short_candidate) == memory_load_unaligned(p32, ip))
-                {
-                        positive const h1 = zstd_hash_bytes(ip + 1, hlog, 8);
-                        p32 const next_candidate = longer[h1];
+                        positive const hs0 = zstd_hash_bytes(ip, slog, mls);
+                        p32 const idxs0 = shorter[hs0];
 
-                        longer[h1] = cur + 1;
-                        if (next_candidate >= low &&
-                            memory_load_unaligned(p64, base + next_candidate) ==
-                                memory_load_unaligned(p64, ip + 1))
+                        cur = (p32)(ip - base);
+                        longer[hl0] = shorter[hs0] = cur;
+                        if (rep && memory_load_unaligned(p32, ip + 1 - rep) ==
+                                       memory_load_unaligned(p32, ip + 1))
                         {
-                                start = ip + 1;
-                                there = base + next_candidate;
-                                distance = cur + 1 - next_candidate;
-                                match = 8 + memory_common_prefix(ip + 9, there + 8,
-                                                                 (positive)(iend - ip - 9));
+                                match = 4 + memory_common_prefix(ip + 5, ip + 5 - rep,
+                                                                 (positive)(iend - ip - 5));
+                                ip++;
+                                zstd_store(e, anchor, (positive)(ip - anchor), rep, match);
+                                goto stored;
                         }
-                        else
+                        hl1 = zstd_hash_bytes(ip1, hlog, 8);
+                        if (idxl0 > low &&
+                            memory_load_unaligned(p64, base + idxl0) == memory_load_unaligned(p64, ip))
                         {
-                                start = ip;
-                                there = base + short_candidate;
-                                distance = cur - short_candidate;
+                                there = base + idxl0;
+                                match = 8 + memory_common_prefix(ip + 8, there + 8,
+                                                                 (positive)(iend - ip - 8));
+                                distance = (positive)(ip - there);
+                                while (ip > anchor && there > lowest && ip[-1] == there[-1])
+                                        ip--, there--, match++;
+                                goto found;
+                        }
+                        idxl1 = longer[hl1];
+                        if (idxs0 > low &&
+                            memory_load_unaligned(p32, base + idxs0) == memory_load_unaligned(p32, ip))
+                        {
+                                there = base + idxs0;
                                 match = 4 + memory_common_prefix(ip + 4, there + 4,
                                                                  (positive)(iend - ip - 4));
+                                distance = (positive)(ip - there);
+                                if (idxl1 > low &&
+                                    memory_load_unaligned(p64, base + idxl1) ==
+                                        memory_load_unaligned(p64, ip1))
+                                {
+                                        positive const length =
+                                            8 + memory_common_prefix(ip1 + 8, base + idxl1 + 8,
+                                                                     (positive)(iend - ip1 - 8));
+
+                                        if (length > match)
+                                        {
+                                                ip = ip1;
+                                                match = length;
+                                                there = base + idxl1;
+                                                distance = (positive)(ip - there);
+                                        }
+                                }
+                                while (ip > anchor && there > lowest && ip[-1] == there[-1])
+                                        ip--, there--, match++;
+                                goto found;
                         }
+                        if (ip1 >= next_step)
+                        {
+                                __builtin_prefetch(ip1 + 64);
+                                __builtin_prefetch(ip1 + 128);
+                                step++;
+                                next_step += 256;
+                        }
+                        ip = ip1;
+                        ip1 += step;
+                        hl0 = hl1;
+                        idxl0 = idxl1;
+                        if (ip1 > ilimit)
+                                return anchor;
                 }
-                else
-                {
-                        ip += ((positive)(ip - anchor) >> 8) + 1;
-                        continue;
-                }
-                while (start > anchor && there > lowest && start[-1] == there[-1])
-                        start--, there--, match++;
-                zstd_store(e, anchor, (positive)(start - anchor), distance, match);
-                ip = start + match;
-                if (ip < ilimit)
+        found:
+                if (step < 4)
+                        longer[hl1] = (p32)(ip1 - base);
+                zstd_store(e, anchor, (positive)(ip - anchor), distance, match);
+        stored:
+                ip += match;
+                anchor = ip;
+                if (ip <= ilimit)
                 {
                         p32 const at = cur + 2;
 
                         longer[zstd_hash_bytes(base + at, hlog, 8)] = at;
-                        shorter[zstd_hash_bytes(base + at, slog, mls)] = at;
                         longer[zstd_hash_bytes(ip - 2, hlog, 8)] = (p32)(ip - 2 - base);
+                        shorter[zstd_hash_bytes(base + at, slog, mls)] = at;
                         shorter[zstd_hash_bytes(ip - 1, slog, mls)] = (p32)(ip - 1 - base);
-                        ip = zstd_repeat_run(e, ip, ilimit, iend, low, shorter, slog, mls);
+                        while (ip <= ilimit && e->rep[1] &&
+                               e->rep[1] <= (p32)(ip - lowest) &&
+                               memory_load_unaligned(p32, ip) ==
+                                   memory_load_unaligned(p32, ip - e->rep[1]))
+                        {
+                                positive const length =
+                                    4 + memory_common_prefix(ip + 4, ip + 4 - e->rep[1],
+                                                             (positive)(iend - ip - 4));
+
+                                shorter[zstd_hash_bytes(ip, slog, mls)] = (p32)(ip - base);
+                                longer[zstd_hash_bytes(ip, hlog, 8)] = (p32)(ip - base);
+                                zstd_store(e, ip, 0, e->rep[1], length);
+                                ip += length;
+                                anchor = ip;
+                        }
                 }
-                anchor = ip;
+                rep = e->rep[0];
         }
         return anchor;
 }
