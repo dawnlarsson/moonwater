@@ -8715,6 +8715,42 @@ static COLD bool exec_not_found_handled()
 }
 
 static b32 exec_call(positive slot)
+/*
+        How deep functions may call before the stack is spent.
+
+        A function that calls itself with nothing to stop it used to run the
+        process off the end of its stack and die of a fault. The limit is
+        the stack the process was given less a margin for the frames between
+        one call and the next, worked out at the first call from the same
+        stack top and rlimit awk measures against, and a call that would
+        cross it is refused as FUNCNEST refuses one.
+*/
+extern p8 address_to program_stack_base;
+static positive exec_stack_floor;
+
+static COLD bool exec_stack_spent()
+{
+        positive here;
+        positive limits[2];
+
+        if (!exec_stack_floor)
+        {
+                positive top = program_stack_base ? (positive)program_stack_base
+                                                  : (positive)address_of here;
+                positive room = 8u << 20;
+
+                if (!system_call_4(syscall(prlimit64), 0, 3, 0,
+                                   (positive)limits) && limits[0])
+                        room = limits[0] == ~(positive)0 ? (256u << 20)
+                                                          : limits[0];
+                exec_stack_floor = top - room + (room / 8 > (256u << 10)
+                                                     ? room / 8
+                                                     : (256u << 10));
+        }
+
+        return (positive)address_of here < exec_stack_floor;
+}
+
 {
         b32 body = exec_functions[slot].body;
         positive saved_count = shell_parameter_count;
@@ -8760,6 +8796,17 @@ static b32 exec_call(positive slot)
 
         if (!shell_local_enter())
         {
+        if (exec_stack_spent())
+        {
+                shell_diagnostic_where();
+                string_format(log_error,
+                              "%s: maximum function nesting level exceeded "
+                              "(%p)\n",
+                              shell_argv[0], exec_function_depth);
+                expand_discard_whole(1);
+                return 1;
+        }
+
                 shell_status = 1;
                 return 1;
         }
@@ -15640,7 +15687,28 @@ static b32 exec_node_kind(b32 index)
                 status = exec_case(index);
         else if (node->kind == NODE_SUBSHELL)
         {
-                bipolar made = exec_spawn_node(parse_nodes[index].left, false);
+                /*
+                        A subshell whose only content is another subshell,
+                        with nothing redirected between them, is one
+                        process: the child that would fork to run the inner
+                        one is the inner one. ( ( ( x ) ) ) forks once, and
+                        the levels it did not fork still count in
+                        BASH_SUBSHELL.
+                */
+                b32 body = parse_nodes[index].left;
+                positive skipped = 0;
+                bipolar made;
+
+                while (parse_nodes[body].kind == NODE_SUBSHELL &&
+                       !parse_nodes[body].redirect_count)
+                {
+                        body = parse_nodes[body].left;
+                        skipped++;
+                }
+
+                shell_subshell_depth += skipped;
+                made = exec_spawn_node(body, false);
+                shell_subshell_depth -= skipped;
 
                 status = job_monitor() ? job_foreground_child(made, index)
                                        : exec_child_status(made);
