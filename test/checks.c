@@ -73811,6 +73811,94 @@ static fn blocks(void)
 
 /* SHA-256 checks: a stream decodes, and one flipped check byte fails it,
    as a whole stream and as a block on its own. */
+/* The filters, whole against chopped: a chain encoded in place over a block
+   decodes to the block whole, and through the stage-by-stage carry that a
+   ring decode uses, in pieces of every awkward size with the final flush.
+   The bytes are planted with what each converter converts. */
+static fn filters_split(void)
+{
+        static p8 plain[300000];
+        static p8 coded[300000];
+        static p8 back[300000];
+        static p8 window[300000 + 4 * XZ_FILTER_HEAD];
+        static p8 rebuilt[300000 + 4 * XZ_FILTER_HEAD];
+        static const p8 ids[] = {XZ_FILTER_X86, XZ_FILTER_PPC, XZ_FILTER_IA64, XZ_FILTER_ARM,
+                                 XZ_FILTER_ARMT, XZ_FILTER_SPARC, XZ_FILTER_ARM64,
+                                 XZ_FILTER_RISCV, XZ_FILTER_DELTA};
+        p32 random = 0x9e3779b9u;
+
+        for (positive i = 0; i < sizeof(plain); i++)
+        {
+                random ^= random << 13;
+                random ^= random >> 17;
+                random ^= random << 5;
+                plain[i] = (p8)random;
+                if ((random >> 24) % 9 == 0 && i + 8 < sizeof(plain))
+                {
+                        static const p8 shapes[][8] = {
+                            {0xe8, 1, 2, 3, 0, 0, 0, 0}, {1, 2, 3, 0xeb, 0, 0, 0, 0},
+                            {0xef, 0, 1, 2, 0x17, 5, 0, 0}, {0x48, 1, 2, 1, 0, 0, 0, 0},
+                            {0x40, 3, 4, 5, 0, 0, 0, 0}, {0, 0xf0, 4, 5, 0, 0xf8, 0, 0},
+                            {0x25, 0, 0, 0, 0x90, 1, 2, 3}};
+
+                        memory_copy_apart(plain + i, shapes[(random >> 8) % 7], 8);
+                }
+        }
+        for (positive at = 0; at < 2 * array_count(ids) + 3; at++)
+        {
+                xz_filter list[XZ_FILTERS_MAX];
+                positive count = at < array_count(ids) ? 1 : at < 2 * array_count(ids) ? 2 : 3;
+                bool all_ok = true;
+
+                memory_fill(list, 0, sizeof(list));
+                for (positive k = 0; k < count; k++)
+                {
+                        list[k].id = ids[(at + 4 * k) % array_count(ids)];
+                        list[k].start = (at & 1) && list[k].id != XZ_FILTER_DELTA
+                                            ? 16 * xz_filter_alignment(list[k].id) : 0;
+                        list[k].dist = (p8)(at + k) % 8;
+                }
+                memory_copy_apart(coded, plain, sizeof(plain));
+                xz_filter_block(list, count, true, coded, sizeof(coded));
+                memory_copy_apart(back, coded, sizeof(coded));
+                xz_filter_block(list, count, false, back, sizeof(back));
+                all_ok = !memory_compare(back, plain, sizeof(plain));
+                check("filter chain decodes whole", all_ok);
+
+                for (positive k = 0; k < count; k++)
+                        xz_filter_reset(list + k);
+
+                positive from = 0;
+                positive made = 0;
+                positive step = 1 + (at * 977) % 61;
+
+                while (from < sizeof(coded))
+                {
+                        positive n = min(step, sizeof(coded) - from);
+                        p8 address_to head = window + XZ_FILTER_HEAD;
+                        positive got;
+
+                        memory_copy_apart(head, coded + from, n);
+                        got = xz_filter_chain(list, count, false, address_of head, n, false);
+                        memory_copy_apart(rebuilt + made, head, got);
+                        made += got;
+                        from += n;
+                        random ^= random << 13;
+                        random ^= random >> 17;
+                        random ^= random << 5;
+                        step = 1 + random % (from & 1 ? 40 : 9000);
+                }
+
+                p8 address_to head = window + XZ_FILTER_HEAD;
+                positive got = xz_filter_chain(list, count, false, address_of head, 0, true);
+
+                memory_copy_apart(rebuilt + made, head, got);
+                made += got;
+                check("filter chain decodes in pieces", made == sizeof(plain) &&
+                                                          !memory_compare(rebuilt, plain, sizeof(plain)));
+        }
+}
+
 static fn sha256_checks(void)
 {
         static p8 into[16384];
@@ -73981,6 +74069,7 @@ b32 main(void)
         pulled();
         blocks();
         sha256_checks();
+        filters_split();
         salvaged();
         return test_report(null);
 }

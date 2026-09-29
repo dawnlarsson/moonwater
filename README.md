@@ -203,6 +203,19 @@ levels 10 to 12), which takes several times `-9`'s time for a few percent less
 output, and every gzip reads what it writes. `-10` and up still mean their
 last digit, as in GNU. The bytes never depend on how many CPUs ran.
 
+## xz
+
+`xz` is xz 5.8's command line for `-0` to `-9`, `-e`, `-C`, `-T`, `--block-size`,
+the branch converters (`--x86`, `--powerpc`, `--ia64`, `--arm`, `--armthumb`,
+`--arm64`, `--sparc`, `--riscv`), `--delta` and `--lzma2` with all its options,
+in xz's order and with its wording for everything it refuses; it reads every
+stream those write, filters included, and any xz reads its output. Where xz
+leaves a choice open Moonwater makes it for the ratio: blocks at `-0` to `-3`
+are four dictionaries and at least 8 MiB, not one megabyte, and `-e` tries the
+x86 converter on each block and keeps it when it pays. A stream that is one
+block at `-4` or above runs its match finder on a second CPU when there is one.
+The bytes never depend on how many CPUs ran.
+
 ## Building
 
 The build is one C program, `src/build/build.c`, on this project's own

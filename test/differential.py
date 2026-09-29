@@ -33686,6 +33686,27 @@ def harness_compression(argv):
                             got = call(runner + [exe, '-dc'], patched)
                             check('%s/xz/dictionary-property-%d' % (label, prop),
                                   got.returncode == 0 and got.stdout == code[:5000], got.stderr.decode(errors='replace'))
+                        # -e without a chain of its own tries the x86 converter on
+                        # each block: on a program's code it is used, on
+                        # bytes without code it is not, and xz reads both.
+                        program = b''
+                        for candidate in ('/usr/lib/libc.so.6', '/lib/x86_64-linux-gnu/libc.so.6',
+                                          '/usr/lib/x86_64-linux-gnu/libc.so.6', sys.executable):
+                            try:
+                                found = Path(candidate).resolve().read_bytes()[:3 << 20]
+                            except OSError:
+                                continue
+                            if found[:4] == b'\x7fELF' and found[18:20] == b'\x3e\x00' and len(found) > (1 << 20):
+                                program = found
+                                break
+                        if program:
+                            for name, blob, want in (('program', program, True), ('noise', random.Random(5).randbytes(600000), False)):
+                                mine = call(runner + [exe, '-c', '-0e'], blob)
+                                back = call([refs['xz'], '-dc'], mine.stdout)
+                                chain = chain_of(mine.stdout) or ''
+                                check('%s/xz/extreme-pick-%s' % (label, name),
+                                      mine.returncode == back.returncode == 0 and back.stdout == blob and
+                                      ('--x86' in chain) == want, 'chain %r, want x86 %s' % (chain, want))
                         made = call([refs['xz'], '-c', '-0', '-T1', '--x86', '--lzma2=preset=0'], code)
                         hurt = random.Random(0xF117)
                         for trial in range(40):
