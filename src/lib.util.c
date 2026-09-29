@@ -1093,9 +1093,19 @@ static bool system_path_parent_cleanup_safe(bipolar directory)
 
         if (found < 0 || (parent.mode & 0170000) != 0040000)
                 return false;
+#if MOONWATER_STRICT < STRICT_TIGHT
+        /* What the reference does: it makes an entry in any directory the
+           kernel lets it, a world-writable one included, and takes the
+           chance of another writer there that every mkdir, cp and mknod
+           takes. Only STRICT_TIGHT refuses a parent it cannot trust to
+           still hold the name it checked. */
+        (void)user;
+        return true;
+#else
         if (parent.mode & 01000)
                 return parent.user == user || parent.user == 0;
         return (parent.user == user || user == 0) && !(parent.mode & 0002);
+#endif
 }
 
 static bipolar system_path_private_directory_valid(

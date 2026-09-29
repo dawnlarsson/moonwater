@@ -3908,14 +3908,18 @@ secure_creation_regressions()
                 [ "$(stat -c '%a' unsafe/locked)" = 0 ] || exit 1
         fi
 
-        "$farm/mkdir" -p unsafe/x > /dev/null 2>&1 && exit 1
-        "$farm/mkfifo" -m 0600 unsafe/f > /dev/null 2>&1 && exit 1
-        "$farm/mknod" -m 0600 unsafe/n p > /dev/null 2>&1 && exit 1
-        "$farm/install" -D source unsafe/a/out > /dev/null 2>&1 && exit 1
-        "$farm/install" -d unsafe/d/e > /dev/null 2>&1 && exit 1
-        for entry in unsafe/x unsafe/f unsafe/n unsafe/a unsafe/d; do
-                [ ! -e "$entry" ] || exit 1
+        # A world-writable directory without the sticky bit is somewhere GNU
+        # makes entries, and so does the default; the tight tier's refusal is
+        # floodlight_hardened's (unsafe-* rows).
+        "$farm/mkdir" -p unsafe/x || exit 1
+        "$farm/mkfifo" -m 0600 unsafe/f || exit 1
+        "$farm/mknod" -m 0600 unsafe/n p || exit 1
+        "$farm/install" -D source unsafe/a/out || exit 1
+        "$farm/install" -d unsafe/d/e || exit 1
+        for entry in unsafe/x unsafe/f unsafe/n unsafe/a/out unsafe/d/e; do
+                [ -e "$entry" ] || exit 1
         done
+        [ -z "$(ls -A unsafe | grep moonwater-stage)" ] || exit 1
 
         "$farm/mkdir" -p -m 0700 sticky/x || exit 1
         "$farm/mkfifo" -m 0600 sticky/f || exit 1
@@ -4727,6 +4731,12 @@ wget|126|run refused|wget
 shell-find-delete|126|flag refused|"$HB/sh" -c 'find /dev/null -delete'
 shell-xargs|126|run refused|"$HB/sh" -c 'xargs < /dev/null'
 cat|0||cat /dev/null
+unsafe-mkdir|1|Permission denied|d=$(mktemp -d) && chmod 0777 "$d" && "$HB/mkdir" -p "$d/x"; s=$?; rm -rf "$d"; exit $s
+unsafe-mkfifo|1|Permission denied|d=$(mktemp -d) && chmod 0777 "$d" && "$HB/mkfifo" "$d/f"; s=$?; rm -rf "$d"; exit $s
+unsafe-mknod|1|Permission denied|d=$(mktemp -d) && chmod 0777 "$d" && "$HB/mknod" "$d/n" p; s=$?; rm -rf "$d"; exit $s
+unsafe-install|1|Permission denied|d=$(mktemp -d) && chmod 0777 "$d" && echo x > "$d.src" && "$HB/install" -D "$d.src" "$d/a/out"; s=$?; rm -rf "$d" "$d.src"; exit $s
+unsafe-cp|1|Permission denied|d=$(mktemp -d) && chmod 0777 "$d" && echo x > "$d.src" && "$HB/cp" "$d.src" "$d/c"; s=$?; rm -rf "$d" "$d.src"; exit $s
+sticky-mkdir|0||d=$(mktemp -d) && chmod 1777 "$d" && "$HB/mkdir" -p "$d/x"; s=$?; rm -rf "$d"; exit $s
 masked-find-exec|126|flag refused|/usr/bin/unshare -rm /bin/sh -c 'mount -t tmpfs tmpfs /proc && "$HB/find" /dev/null -exec true {} ";"'
 masked-awk|126||/usr/bin/unshare -rm /bin/sh -c 'mount -t tmpfs tmpfs /proc && echo x | "$HB/awk" 1'
 masked-cat|0||/usr/bin/unshare -rm /bin/sh -c 'mount -t tmpfs tmpfs /proc && "$HB/cat" /dev/null'
