@@ -13722,29 +13722,8 @@ static fn diff_name_c_quoted(string_address name)
         }
 
         text_put_character('"');
-        for (string_address at = name; string_get(at); at++)
-        {
-                p8 byte = string_get(at);
-
-                if (byte == '"' || byte == '\\')
-                {
-                        text_put_character('\\');
-                        text_put_character(byte);
-                }
-                else if (byte == '\n')
-                        text_put_string("\\n");
-                else if (byte == '\t')
-                        text_put_string("\\t");
-                else if (byte < ' ' || byte == 127)
-                {
-                        p8 octal[5] = {'\\', (p8)('0' + (byte >> 6)),
-                                       (p8)('0' + ((byte >> 3) & 7)),
-                                       (p8)('0' + (byte & 7)), end};
-                        text_put_string(octal);
-                }
-                else
-                        text_put_character(byte);
-        }
+        writer_spelled(text_put, name, string_length(name),
+                       spelling_c(SPELL_C_QUOTE | SPELL_C_HIGH_BARE | SPELL_C_NT_ONLY));
         text_put_character('"');
 }
 

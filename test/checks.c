@@ -33526,7 +33526,7 @@ static fn spelled_fuzz(positive rounds)
 //      writer_c_escape, sed l): every byte under every extra set.
 static fn spelled_c_check(void)
 {
-        for (positive extra = 0; extra < 16; extra++)
+        for (positive extra = 0; extra < 64; extra++)
         {
                 p64 address_to table = spelling_c(extra);
                 bool right = table == spelling_c(extra);
@@ -33539,7 +33539,10 @@ static fn spelled_c_check(void)
                                        (byte == '"' && (extra & SPELL_C_QUOTE)) ||
                                        (byte == ' ' && (extra & SPELL_C_SPACE)) ||
                                        (byte == ':' && (extra & SPELL_C_COLON));
-                        if (byte >= 7 && byte <= 13)
+                        if (byte >= 128 && (extra & SPELL_C_HIGH_BARE))
+                                text[0] = (p8)byte, length = 1;
+                        else if (byte >= 7 && byte <= 13 &&
+                                 (!(extra & SPELL_C_NT_ONLY) || byte == '\t' || byte == '\n'))
                                 text[0] = '\\', text[1] = "abtnvfr"[byte - 7], length = 2;
                         else if (byte < ' ' || byte >= 127)
                         {

@@ -2709,19 +2709,24 @@ static p64 address_to spelling_caret(positive flags)
         return table;
 }
 
-enum { SPELL_C_APOSTROPHE = 1, SPELL_C_QUOTE = 2, SPELL_C_SPACE = 4, SPELL_C_COLON = 8 };
+enum {
+        SPELL_C_APOSTROPHE = 1, SPELL_C_QUOTE = 2, SPELL_C_SPACE = 4, SPELL_C_COLON = 8,
+        SPELL_C_HIGH_BARE = 16, SPELL_C_NT_ONLY = 32,
+};
 
 /* A C string's spelling, as coreutils' quotearg, GNU tar and sed's l write
    it in the C locale: the seven letters from \a to \r, the backslash
    doubled, three octal digits for any other control, DEL or byte past
    ASCII, and the rest as it is; extra escapes the apostrophe, the double
-   quote, the space and the colon with a backslash as well. */
+   quote, the space and the colon with a backslash as well, leaves bytes past
+   ASCII as they are (SPELL_C_HIGH_BARE), or keeps letters for newline and
+   tab only (SPELL_C_NT_ONLY), as diff's C-quoted names do. */
 static p64 address_to spelling_c(positive extra)
 {
-        static spelling_table tables[16];
-        static p8 built[16];
+        static spelling_table tables[64];
+        static p8 built[64];
 
-        extra &= 15;
+        extra &= 63;
         p64 address_to table = tables[extra];
         if (__atomic_load_n(&built[extra], __ATOMIC_ACQUIRE))
                 return table;
@@ -2730,7 +2735,10 @@ static p64 address_to spelling_c(positive extra)
                 p8 text[4] = {'\\', (p8)byte};
                 positive length = 2;
 
-                if (byte >= 7 && byte <= 13)
+                if (byte >= 128 && (extra & SPELL_C_HIGH_BARE))
+                        text[0] = (p8)byte, length = 1;
+                else if (byte >= 7 && byte <= 13 &&
+                         (!(extra & SPELL_C_NT_ONLY) || byte == 9 || byte == 10))
                         text[1] = "abtnvfr"[byte - 7];
                 else if (byte < 32 || byte >= 127)
                 {
