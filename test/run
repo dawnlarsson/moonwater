@@ -1609,8 +1609,10 @@ kernel_simd_boundary()
 
 #       The module side of the same boundary, over the module's own sources:
 #       a wide name only in a declaration, TARGET_PICK or TERM_PICK, Canvas's
-#       bracket opened as often as it is closed, and the console emulator's
-#       term_simd set true only inside it.
+#       bracket opened as often as it is closed, the console emulator's
+#       term_simd set true only inside it, and the kernel functions in
+#       kernel/kernel.c, which call a wide body only between their own
+#       kernel_fpu_begin_mask and kernel_fpu_end.
 kernel_simd_callers()
 {
         # Every wide routine lib.c defines, by name, whichever file calls it.
@@ -1622,11 +1624,15 @@ kernel_simd_callers()
                 /^[[:space:]]*(\/?\*|\/\/)/ { next }
                 ($0 ~ named || /##_wide/) &&
                     !/^void canvas_[a-z0-9_]*_wide\(/ &&
+                    !(/^[[:space:]]*"[[:space:]]*call[[:space:]]+hash_half_md4_wide\\n"$/ &&
+                      kernel_held && FILENAME ~ /kernel\.c$/) &&
                     !/^#define TARGET_PICK\(t, name\) \(\(t\)->simd \? name##_wide : name\)$/ &&
                     !/^#define TERM_PICK\(name\) \(term_simd \? name##_wide : name\)$/ {
                         print FILENAME ":" FNR ": a wide body named outside TARGET_PICK or TERM_PICK: " $0
                         bad = 1
                 }
+                FILENAME ~ /kernel\.c$/ && /^[[:space:]]*"[[:space:]]*call[[:space:]]+kernel_fpu_begin_mask\\n"$/ { kernel_begins++; kernel_held = 1 }
+                FILENAME ~ /kernel\.c$/ && /^[[:space:]]*"[[:space:]]*call[[:space:]]+kernel_fpu_end\\n"$/ { kernel_ends++; kernel_held = 0 }
                 FILENAME ~ /canvas\.c$/ && /canvas_simd_begin\(&/ { begins++; held = 1 }
                 FILENAME ~ /canvas\.c$/ && /canvas_simd_end\(&/ { ends++; held = 0 }
                 # The emulator takes its wide bodies on term_simd, which only
@@ -1641,10 +1647,14 @@ kernel_simd_callers()
                                 print "canvas_simd_begin " begins + 0 " times, canvas_simd_end " ends + 0
                                 bad = 1
                         }
+                        if (kernel_begins != kernel_ends || !kernel_begins) {
+                                print "kernel.c: kernel_fpu_begin_mask " kernel_begins + 0 " times, kernel_fpu_end " kernel_ends + 0
+                                bad = 1
+                        }
                         exit bad
                 }
         ' src/moonwater/*.c src/canvas/canvas.c src/canvas/window.c \
-                src/canvas/term.c
+                src/canvas/term.c kernel/kernel.c
 }
 
 x86_kernel_vector_audit()

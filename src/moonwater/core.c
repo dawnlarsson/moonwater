@@ -158,6 +158,13 @@ struct device_context
 #include "../canvas/canvas.c"
 #endif
 
+// Kernel functions rewritten in assembly (kernel/kernel.c, GPL-2.0), which
+// kernel/patch/functions puts in the place of the C originals. A stock build
+// keeps every one of them as Linux wrote it.
+#ifndef STOCK_STRINGS
+#include "../../kernel/kernel.c"
+#endif
+
 /*
         The Spark half of this module: the loader that maps the format, the
         spawn the device offers, the stats beside them, and the typed system

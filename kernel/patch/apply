@@ -858,6 +858,22 @@ EOF
 settings_insert linux/kernel/sched/fair.c "Moonwater: nor does it preempt that task" \
         "${tab}if (test_tsk_need_resched(rq->curr))" before "$settings_work/yield" scheduler
 
+#
+#       KERNEL FUNCTIONS IN ASSEMBLY
+#
+#       kernel/kernel.c holds functions of Linux rewritten from the top in
+#       assembly, in lib.c's style, and tags above each one say what it
+#       replaces and what it needs from the kernel. kernel/patch/functions
+#       reads the tags and edits the tree to match: the C original is retired
+#       to a prototype so the asm symbol takes its place, a function the asm
+#       has to call loses its static, the structure offsets the asm reads are
+#       asked of the compiler through the architecture's asm-offsets.c, and a
+#       value the asm takes as a literal is asserted where the kernel keeps it.
+#       Only the architectures a routine covers are touched; MOONWATER_STOCK
+#       touches nothing.
+#
+sh kernel/patch/functions || die "kernel/kernel.c: its functions were not put in place"
+
 rm -rf "$settings_work"
 
 line_add_padded "linux/Kconfig" "source \"kernel/moonwater/Kconfig\"" ||

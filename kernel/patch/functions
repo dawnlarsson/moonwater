@@ -1,0 +1,342 @@
+#!/bin/sh
+#
+#       Reads kernel/kernel.c and makes the kernel tree agree with it.
+#
+#           sh kernel/patch/functions          (kernel/patch/apply runs it)
+#
+#       kernel/kernel.c holds kernel functions rewritten in assembly, in
+#       lib.c's style: top-level asm, one ASM_FUNC to a routine. This is the
+#       other half of that file. A routine says what it replaces and what it
+#       needs in comments directly above it, and this script turns those
+#       into edits of Linux's own source, so that the C original is not
+#       built, the asm symbol takes its place, and the asm reads the kernel's
+#       structures at the offsets the compiler chose for THIS configuration
+#       rather than at numbers somebody copied down.
+#
+#       THE TAGS. A block of consecutive //> lines above a definition belongs
+#       to it. An //> arch line limits the block to those architectures; a
+#       block without one is for all three. On any other architecture the
+#       block is ignored, the C original stays, and nothing changes.
+#
+#         //> arch x86_64 arm64 riscv64
+#         //> replace <path under linux/> <function>
+#                 The function's definition becomes a prototype of the same
+#                 signature, without static. What was there is preserved
+#                 nowhere in the tree; the pristine source is the tarball.
+#         //> unstatic <path under linux/> <function>
+#                 Drops the static from a function the asm has to call.
+#         //> assert <path under linux/> <C constant expression>
+#                 Appends a _Static_assert to that file, for a value the asm
+#                 takes as a literal because it cannot see it (a private enum).
+#                 A kernel that moves it stops the build.
+#         //> perf <one line of text>
+#                 What the port measured, shown in the index at the top of
+#                 kernel.c. The routine's comment carries the whole table.
+#         //> include <header>
+#                 Added to the file the offsets are computed in.
+#         //> offset NAME <struct> <member>
+#         //> const  NAME <C constant expression, without a percent sign>
+#                 Both become a #define in include/generated/asm-offsets.h,
+#                 through the arch's own asm-offsets.c, and kernel.c turns
+#                 them into assembler symbols with MWSET(NAME).
+#
+#       Every edit is idempotent, so running it twice changes nothing, and
+#       every edit stops the build when the line it is placed by has moved:
+#       an image built without a replacement is a kernel nobody chose, and
+#       one built with half of one does not link.
+#
+#       MOONWATER_STOCK keeps every function as Linux wrote it.
+#
+set -u
+
+#
+#       The index at the top of kernel/kernel.c, made from the tags so that it
+#       cannot say anything they do not:
+#
+#           sh kernel/patch/functions --index     rewrite it
+#           sh kernel/patch/functions --check     fail when it is stale, when a
+#                                                 tagged routine has no ASM_FUNC,
+#                                                 or when MWSET and the tags
+#                                                 disagree about a name
+#
+#       Neither needs a kernel tree or a configuration.
+#
+if [ "${1:-}" = --index ] || [ "${1:-}" = --check ]; then
+        mode=$1
+        source=kernel/kernel.c
+        [ -f "$source" ] || { echo "kernel/patch/functions: no $source" >&2; exit 1; }
+        scratch=$(mktemp -d) || exit 1
+        trap 'rm -rf "$scratch"' EXIT
+
+        awk '
+                function flush(    k, arches, row) {
+                        if (nrep) {
+                                for (k = 1; k <= nrep; k++) {
+                                        row = rep[k]
+                                        n++
+                                        name[n] = fn[k]; where[n] = file[k]; result[n] = perf
+                                        x86[n] = (!limited || has["x86_64"]) ? "yes" : "no"
+                                        a64[n] = (!limited || has["arm64"]) ? "yes" : "no"
+                                        rv[n] = (!limited || has["riscv64"]) ? "yes" : "no"
+                                }
+                        }
+                        nrep = 0; limited = 0; perf = ""; delete has
+                }
+                /^\/\/> / {
+                        line = $0; sub(/^\/\/> /, "", line)
+                        split(line, f, /[ \t]+/)
+                        if (f[1] == "arch") { limited = 1; for (k = 2; k in f; k++) has[f[k]] = 1; next }
+                        if (f[1] == "replace") { nrep++; rep[nrep] = line; file[nrep] = f[2]; fn[nrep] = f[3] }
+                        if (f[1] == "perf") { perf = line; sub(/^perf[ \t]+/, "", perf) }
+                        next
+                }
+                { flush() }
+                END {
+                        flush()
+                        w1 = length("routine"); w2 = length("replaces")
+                        for (i = 1; i <= n; i++) {
+                                if (length(name[i]) > w1) w1 = length(name[i])
+                                r = where[i] " " name[i]
+                                if (length(r) > w2) w2 = length(r)
+                        }
+                        printf "//    %-*s  %-*s  %-7s %-7s %-7s %s\n", w1, "routine", w2, "replaces", "x86_64", "arm64", "riscv64", "measured"
+                        d1 = ""; for (i = 0; i < w1; i++) d1 = d1 "-"
+                        d2 = ""; for (i = 0; i < w2; i++) d2 = d2 "-"
+                        printf "//    %s  %s  ------- ------- ------- --------\n", d1, d2
+                        for (i = 1; i <= n; i++)
+                                printf "//    %-*s  %-*s  %-7s %-7s %-7s %s\n", w1, name[i], w2, where[i] " " name[i], x86[i], a64[i], rv[i], (result[i] == "" ? "-" : result[i])
+                        printf "//\n//    %d routine%s.\n", n, (n == 1 ? "" : "s")
+                }
+        ' "$source" > "$scratch/table"
+
+        awk -v add="$scratch/table" '
+                /^\/\/  \(index begin\)/ { print; while ((getline line < add) > 0) print line; skipping = 1; next }
+                /^\/\/  \(index end\)/ { skipping = 0 }
+                !skipping { print }
+        ' "$source" > "$scratch/new"
+
+        if [ "$mode" = --index ]; then
+                cp "$scratch/new" "$source"
+                echo "kernel.c: index rewritten"
+                exit 0
+        fi
+
+        bad=0
+        cmp -s "$scratch/new" "$source" || { echo "kernel.c: the index is stale; run kernel/patch/functions --index" >&2; bad=1; }
+
+        awk '/^\/\/> replace / { print $4 }' "$source" | while read -r function; do
+                grep -q "ASM_FUNC($function)" "$source" ||
+                        { echo "kernel.c: $function is tagged replace and has no ASM_FUNC($function)" >&2; exit 1; }
+        done || bad=1
+
+        sed -n 's/^[[:space:]]*MWSET(\([A-Za-z0-9_]*\)).*/\1/p' "$source" | sort -u > "$scratch/mwset"
+        awk '/^\/\/> (offset|const) / { print $3 }' "$source" | sort -u > "$scratch/tagged"
+        if ! cmp -s "$scratch/mwset" "$scratch/tagged"; then
+                echo "kernel.c: MWSET and the //> offset and //> const tags disagree:" >&2
+                diff "$scratch/mwset" "$scratch/tagged" >&2
+                bad=1
+        fi
+
+        exit $bad
+fi
+
+. src/build/host.sh
+
+die() {
+        echo "kernel/patch/functions: $*" >&2
+        exit 1
+}
+
+arch=$(key_one arch) && [ -n "$arch" ] || die "no '#> arch' in artifacts/.config"
+
+case "$arch" in
+x86_64 | amd64 | x64) arch=x86_64; offsets_file=linux/arch/x86/kernel/asm-offsets.c ;;
+arm64 | aarch64) arch=arm64; offsets_file=linux/arch/arm64/kernel/asm-offsets.c ;;
+riscv64 | riscv) arch=riscv64; offsets_file=linux/arch/riscv/kernel/asm-offsets.c ;;
+*) exit 0 ;;
+esac
+
+if [ -n "${MOONWATER_STOCK:-}" ]; then
+        echo "  MOONWATER_STOCK: the kernel keeps its own functions"
+        exit 0
+fi
+
+source=kernel/kernel.c
+[ -f "$source" ] || die "no $source"
+
+work=$(mktemp -d) || die "no scratch directory"
+trap 'rm -rf "$work"' EXIT
+
+#       The blocks that are for this architecture, one action a line. A block
+#       ends at the first line that is not a tag.
+awk -v arch="$arch" '
+        function flush(    k) {
+                if (n && (!limited || allowed))
+                        for (k = 1; k <= n; k++)
+                                print action[k]
+                n = 0; limited = 0; allowed = 0
+        }
+        /^\/\/> / {
+                line = $0
+                sub(/^\/\/> /, "", line)
+                split(line, f, /[ \t]+/)
+                if (f[1] == "arch") {
+                        limited = 1
+                        for (k = 2; k in f; k++)
+                                if (f[k] == arch) allowed = 1
+                        next
+                }
+                action[++n] = line
+                next
+        }
+        { flush() }
+        END { flush() }
+' "$source" > "$work/actions"
+
+[ -s "$work/actions" ] || { echo "  functions: nothing in $source is for $arch"; exit 0; }
+
+#       A file of the kernel's, rewritten through a copy: the tree is root's.
+put() {
+        sudo cp "$work/edit" "$1" || die "writing $1"
+}
+
+#       Turns one definition into a prototype. The header is every line from
+#       the one that opens the function to the line before its brace; static
+#       goes, and a semicolon comes. A marker in front records it, and finding
+#       the marker is how a second run knows.
+retire() {
+        file=linux/$1
+        function=$2
+        [ -f "$file" ] || die "replace: no $file"
+
+        if grep -q -F "/* Moonwater: $function is in kernel/kernel.c */" "$file"; then
+                return 0
+        fi
+
+        awk -v fname="$function" '
+                { line[NR] = $0 }
+                END {
+                        for (i = 1; i <= NR && !head; i++) {
+                                if (line[i] !~ "^(static )?[A-Za-z_][^(;]*[ *]" fname "\\(") continue
+                                for (j = i; j <= NR; j++) {
+                                        if (line[j] == "{") { head = i; brace = j; break }
+                                        if (line[j] ~ /;[ \t]*$/) break        # a prototype, not the definition
+                                }
+                        }
+                        if (!head) exit 3
+                        for (last = brace; last <= NR && line[last] != "}"; last++) ;
+                        if (last > NR) exit 3
+                        for (i = 1; i < head; i++) print line[i]
+                        print "/* Moonwater: " fname " is in kernel/kernel.c */"
+                        for (i = head; i < brace; i++) {
+                                text = line[i]
+                                if (i == head) sub(/^static /, "", text)
+                                if (i == brace - 1) text = text ";"
+                                print text
+                        }
+                        for (i = last + 1; i <= NR; i++) print line[i]
+                }
+        ' "$file" > "$work/edit" ||
+                die "replace: $file has no definition of $function to retire, or it is not laid out the way this expects"
+        put "$file"
+        echo "  functions: $1 gives up $function to kernel/kernel.c"
+}
+
+unstatic() {
+        file=linux/$1
+        function=$2
+        [ -f "$file" ] || die "unstatic: no $file"
+
+        awk -v fname="$function" '
+                { line[NR] = $0 }
+                END {
+                        for (i = 1; i <= NR && !head; i++) {
+                                if (line[i] !~ "^(static )?[A-Za-z_][^(;]*[ *]" fname "\\(") continue
+                                for (j = i; j <= NR; j++) {
+                                        if (line[j] == "{") { head = i; break }
+                                        if (line[j] ~ /;[ \t]*$/) break
+                                }
+                        }
+                        if (!head) exit 3
+                        if (line[head] !~ /^static /) exit 4                # already global
+                        for (brace = head; brace <= NR && line[brace] != "{"; brace++) ;
+                        for (i = 1; i <= NR; i++) {
+                                if (i == head) {
+                                        # a prototype ahead of the definition, so the compiler has one to see
+                                        for (j = head; j < brace; j++) {
+                                                text = line[j]
+                                                if (j == head) sub(/^static /, "", text)
+                                                if (j == brace - 1) text = text ";"
+                                                print text
+                                        }
+                                }
+                                text = line[i]
+                                if (i == head) sub(/^static /, "", text)
+                                print text
+                        }
+                }
+        ' "$file" > "$work/edit"
+        case $? in
+        0) put "$file"; echo "  functions: $1 makes $function global" ;;
+        4) return 0 ;;
+        *) die "unstatic: $file has no $function laid out the way this expects" ;;
+        esac
+}
+
+#       A check the compiler makes, for a number the asm cannot read.
+assert_in() {
+        file=linux/$1
+        shift
+        expression=$*
+        [ -f "$file" ] || die "assert: no $file"
+        marker="_Static_assert($expression, \"kernel/kernel.c reads this as a literal\");"
+        grep -q -F -- "$marker" "$file" && return 0
+        { cat "$file"; printf '\n/* Moonwater */ %s\n' "$marker"; } > "$work/edit"
+        put "$file"
+        echo "  functions: $1 asserts $expression"
+}
+
+while read -r verb one two rest; do
+        case "$verb" in
+        replace) retire "$one" "$two" ;;
+        unstatic) unstatic "$one" "$two" ;;
+        assert) assert_in "$one" "$two" $rest ;;
+        esac
+done < "$work/actions"
+
+#       What the asm asks the compiler: one function appended to the
+#       architecture's asm-offsets.c, between two markers so that a changed
+#       list replaces the old one. kbuild reads the ->NAME lines out of the
+#       compiled result whichever function they are in, exactly as it does for
+#       the file's own.
+{
+        echo "/* Moonwater: what kernel/kernel.c asks the compiler about Linux's structures. */"
+        awk '$1 == "include" { $1 = ""; sub(/^ /, ""); print "#include " $0 }' "$work/actions"
+        echo "void moonwater_offsets(void);"
+        echo "void moonwater_offsets(void)"
+        echo "{"
+        awk '
+                $1 == "offset" { printf "\tOFFSET(%s, %s, %s);\n", $2, $3, $4 }
+                $1 == "const" { name = $2; $1 = ""; $2 = ""; sub(/^  /, ""); printf "\tDEFINE(%s, %s);\n", name, $0 }
+        ' "$work/actions"
+        echo "}"
+        echo "/* Moonwater: end */"
+} > "$work/offsets"
+
+if grep -q "^void moonwater_offsets(void)$" "$work/offsets" &&
+   [ "$(grep -c "OFFSET(\|DEFINE(" "$work/offsets")" -gt 0 ]; then
+        [ -f "$offsets_file" ] || die "no $offsets_file to ask the compiler in"
+        awk -v add="$work/offsets" '
+                /^\/\* Moonwater: what kernel\/kernel.c asks/ { skipping = 1 }
+                !skipping { print }
+                skipping && /^\/\* Moonwater: end \*\// { skipping = 0 }
+                END {
+                        while ((getline line < add) > 0)
+                                print line
+                }
+        ' "$offsets_file" > "$work/edit"
+        if ! cmp -s "$work/edit" "$offsets_file"; then
+                put "$offsets_file"
+                echo "  functions: $(basename "$(dirname "$(dirname "$offsets_file")")")/asm-offsets.c answers for kernel/kernel.c"
+        fi
+fi

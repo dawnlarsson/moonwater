@@ -72,6 +72,9 @@ def production_sources():
     for root in (ROOT / 'programs', ROOT / 'src', ROOT / 'kernel/patch'):
         paths += [path for path in root.rglob('*')
                   if path.suffix in ('.c', '.h', '.inc')]
+    #   kernel/kernel.c is assembly and its tags and offsets, with no C body,
+    #   but it is production source and a change to it has to break the seal.
+    paths.append(ROOT / 'kernel/kernel.c')
     return sorted(path for path in paths if 'test' not in path.parts)
 
 
@@ -82,6 +85,8 @@ def audited_sources():
         paths += [path for path in root.rglob('*')
                   if path.suffix in ('.c', '.h', '.inc', '.asm') and
                   'test' not in path.parts]
+    paths.append(ROOT / 'kernel/kernel.c')
+    paths.append(ROOT / 'kernel/patch/functions')
     # A parser change must invalidate the inventory sealed by the old parser.
     paths += [ROOT / 'test/function_audit.py',
               ROOT / 'test/assembly/inventory.py']
@@ -256,6 +261,31 @@ def marked_assembly(root):
     return bodies
 
 
+def kernel_c_assembly():
+    """The routines of kernel/kernel.c, one body for each architecture its
+    //> arch tag names (all three when it names none): the kernel functions
+    rewritten in assembly, which kernel/patch/functions puts in the place of
+    their C originals."""
+    path = ROOT / 'kernel/kernel.c'
+    if not path.is_file():
+        raise SystemExit('function audit: kernel/kernel.c is gone; the kernel '
+                         'assembly counted there has moved')
+    bodies, arches = [], None
+    for line, text in enumerate(path.read_text(
+            encoding='utf-8', errors='replace').splitlines(), 1):
+        match = re.match(r'//>\s+arch\s+(.*)', text)
+        if match:
+            arches = match.group(1).split()
+            continue
+        match = re.match(r'\s*ASM_FUNC\(([^)]+)\)', text)
+        if match:
+            for architecture in (arches or ['x86_64', 'arm64', 'riscv64']):
+                bodies.append((path.relative_to(ROOT).as_posix(), line,
+                               match.group(1), architecture))
+            arches = None
+    return bodies
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--summary', action='store_true')
@@ -279,7 +309,7 @@ def main():
     library, library_bodies, library_aliases = library_routines()
     canvas = marked_assembly(ROOT / 'src/canvas')
     canvas_names = {item[2] for item in canvas}
-    kernel = marked_assembly(ROOT / 'kernel/replace')
+    kernel = marked_assembly(ROOT / 'kernel/replace') + kernel_c_assembly()
 
     def sealed_counts():
         """The eight numbers the seal carries, asked in one place so that the

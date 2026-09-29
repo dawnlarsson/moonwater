@@ -26404,6 +26404,18 @@ int main(void) {
                 "#else\n\t.set\ttextsize, ZO__data\n#endif\n\n\t.ascii\t\".data\\0\\0\\0\"\n",
             "linux/arch/x86/boot/Makefile":
                 "sed-zoffset := -e 's/^\\([0-9a-fA-F]*\\) [a-zA-Z] \\(startup_32\\|_e\\?data\\|_e\\?sbat\\|z_.*\\)$$/\\#define ZO_\\2 0x\\1/p'\n",
+            "linux/fs/ext4/namei.c":
+                "typedef enum {\n\tEITHER, INDEX, DIRENT, DIRENT_HTREE\n} dirblock_type_t;\n\n"
+                "static struct buffer_head *__ext4_read_dirblock(struct inode *inode,\n"
+                "\t\t\t\t\t\text4_lblk_t block,\n\t\t\t\t\t\tdirblock_type_t type,\n"
+                "\t\t\t\t\t\tconst char *func,\n\t\t\t\t\t\tunsigned int line)\n{\n\treturn 0;\n}\n\n"
+                "/*\n * This function fills a red-black tree with information from a\n * directory block.\n */\n"
+                "static int htree_dirblock_to_tree(struct file *dir_file,\n"
+                "\t\t\t\t  struct inode *dir, ext4_lblk_t block,\n"
+                "\t\t\t\t  struct dx_hash_info *hinfo,\n"
+                "\t\t\t\t  __u32 start_hash, __u32 start_minor_hash)\n{\n\tint count = 0;\n\treturn count;\n}\n",
+            "linux/arch/x86/kernel/asm-offsets.c":
+                "#include <linux/kbuild.h>\n\nstatic void __used common(void)\n{\n}\n",
             "linux/kernel/sched/fair.c":
                 "static int\nselect_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)\n{\n"
                 "\tlockdep_assert_held(&p->pi_lock);\n\tif (wake_flags & WF_TTWU) {\n\t}\n}\n"
@@ -26428,6 +26440,22 @@ int main(void) {
                     "textsize, ZO__mwset" in header and "textsize, ZO__data" not in header and
                     "_e\\?mwset" in read("linux/arch/x86/boot/Makefile") and
                     scheduler_placed(read("linux/kernel/sched/fair.c")))
+
+        # kernel/kernel.c's tags made real: the C original retired to a prototype,
+        # the function the asm calls made global with one, the literal asserted,
+        # and the offsets asked of the compiler. A stock tree gets none of it.
+        def functions_placed(tree):
+            namei = (tree / "linux/fs/ext4/namei.c").read_text()
+            offsets = (tree / "linux/arch/x86/kernel/asm-offsets.c").read_text()
+            return ("/* Moonwater: htree_dirblock_to_tree is in kernel/kernel.c */\nint htree_dirblock_to_tree("
+                    in namei and "__u32 start_hash, __u32 start_minor_hash);\n" in namei and
+                    "int count = 0;" not in namei and
+                    "\nstruct buffer_head *__ext4_read_dirblock(" in namei and
+                    "static struct buffer_head *__ext4_read_dirblock(" not in namei and
+                    "_Static_assert(DIRENT_HTREE == 3," in namei and
+                    "void moonwater_offsets(void)" in offsets and
+                    "OFFSET(MW_INODE_SB, inode, i_sb);" in offsets and
+                    "DEFINE(MW_AVX2_BIT, (X86_FEATURE_AVX2 & 31));" in offsets)
 
         # Where a new process starts: each scheduler edit inside the function
         # it belongs to, ahead of the line it is placed by.
@@ -26459,6 +26487,8 @@ line_add_padded() { line_add "$@"; }
             for target in ("linux/Kconfig", "linux/kernel/Makefile"):
                 (tree / target).write_text("")
             shutil.copy(root / "kernel/patch/fold-x86.h", tree / "kernel/patch/fold-x86.h")
+            shutil.copy(root / "kernel/patch/functions", tree / "kernel/patch/functions")
+            shutil.copy(root / "kernel/kernel.c", tree / "kernel/kernel.c")
             # The kernel's own lines the settings section's edits are placed by.
             for name, text in settings_anchors.items():
                 (tree / name).parent.mkdir(parents=True, exist_ok=True)
@@ -26486,6 +26516,7 @@ line_add_padded() { line_add "$@"; }
                 assert all(("# moonwater took " + name in makefile) != stock
                            for name in displaced), makefile
                 assert settings_placed(tree), result.stderr
+                assert functions_placed(tree) != stock, result.stderr
                 if kind in ("directory", "file"):
                     preserved = link / "precious" if kind == "directory" else link
                     assert preserved.read_text() == "preserve me\n"
@@ -26500,6 +26531,17 @@ line_add_padded() { line_add "$@"; }
                     assert header.read_bytes() == before
                     assert settings_before == {name: (tree / name).read_bytes()
                                                for name in settings_anchors}
+        # A function kernel/kernel.c replaces, gone from where it was: the
+        # build stops and names the file, rather than linking an image in which
+        # two definitions of it exist or neither does.
+        tree = Path(work) / "patch-moved-function"
+        patch_tree(tree, makefile_lines)
+        namei = tree / "linux/fs/ext4/namei.c"
+        namei.write_text(namei.read_text().replace("htree_dirblock_to_tree", "htree_dirblock_to_leaf"))
+        result = subprocess.run(["sh", str(patch)], cwd=tree,
+                                env={**os.environ, "MOONWATER_STOCK": ""},
+                                text=True, capture_output=True)
+        assert result.returncode != 0 and "namei.c" in result.stderr, result.stderr
         # A makefile that no longer names an object stops the build, and says
         # which: apply had no die of its own, and every edit it could not make
         # used to go by without a word.
