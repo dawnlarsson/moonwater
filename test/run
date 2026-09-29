@@ -3653,6 +3653,13 @@ lane_net()
         2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
         *) net_outcome=1 ;;
         esac
+        python3 test/differential.py --harness tls_peer --shell "$shell_binary" \
+                --mutate 100
+        case $? in
+        0) ;;
+        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+        *) net_outcome=1 ;;
+        esac
         python3 test/differential.py --harness https_downgrade
         case $? in
         0) ;;

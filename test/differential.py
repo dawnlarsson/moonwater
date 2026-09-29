@@ -39807,6 +39807,13 @@ def harness_tls_peer(argv):
     by the HTTP framing. The verdicts have to agree with the RFC 8446 column
     (MUST_ACCEPT) and with each other, except where this client refuses by
     design what OpenSSL accepts, which DELIBERATE names with its reason.
+
+    With --mutate N the verdicts are set aside: N seeded flights are served to
+    wget with EncryptedExtensions, Certificate, CertificateRequest,
+    CertificateVerify, tickets and KeyUpdate mutated before they are sealed,
+    so they reach the client's parsers under real crypto, and a run that
+    ends by a signal or hangs fails. Built with UBSan in trap mode, a shell
+    turns undefined behaviour into that signal.
     """
     import datetime
     import hashlib
@@ -39820,6 +39827,10 @@ def harness_tls_peer(argv):
     parser = argparse.ArgumentParser(prog="differential.py --harness tls_peer")
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
     parser.add_argument("--shell", help="a built shell to use instead of building one")
+    parser.add_argument("--mutate", type=int, default=0,
+                        help="instead of the verdicts, serve N flights whose "
+                             "handshake messages are mutated to wget and demand "
+                             "it does not die")
     args = parser.parse_args(argv)
     if platform.system() != "Linux":
         print("tls peer: NOT RUN -- needs Linux")
@@ -39853,7 +39864,41 @@ def harness_tls_peer(argv):
     def extract(salt, key):
         return hmac_module.new(salt, key, hashlib.sha256).digest()
 
+    #       With --mutate a handshake message the client parses after the hello
+    #       -- EncryptedExtensions, Certificate, CertificateRequest,
+    #       CertificateVerify, a ticket, KeyUpdate -- is mutated before it is
+    #       sealed, so it reaches the client's parsers under real crypto with
+    #       the server's transcript agreeing with what it sent.
+    mutation = {"rng": None}
+
+    def mutated(body):
+        rng = mutation["rng"]
+        body = bytearray(body)
+        for _ in range(rng.randint(1, 3)):
+            if not body:
+                body = bytearray(b"\0\0")
+            kind = rng.randrange(7)
+            at = rng.randrange(len(body))
+            if kind == 0:
+                body[at] ^= 1 << rng.randrange(8)
+            elif kind == 1:
+                body[at] = rng.choice([0, 255, 1, 2, 0x80, 0x30, 0x06])
+            elif kind == 2:
+                body[at:at] = bytes(rng.randrange(256) for _ in range(rng.randint(1, 6)))
+            elif kind == 3:
+                del body[at:at + rng.randint(1, 10)]
+            elif kind == 4:
+                body = body[:at]
+            elif kind == 5:
+                body[at:at] = body[at:at + rng.randint(1, 20)]
+            else:
+                body[at] = (body[at] + rng.randint(1, 255)) & 255
+        return bytes(body)
+
     def message(kind, body):
+        if mutation["rng"] is not None and kind in (8, 11, 13, 15, 4, 24) and \
+                mutation["rng"].random() < 0.6:
+            body = mutated(body)
         return bytes([kind]) + len(body).to_bytes(3, "big") + body
 
     def record(kind, body):
@@ -40499,6 +40544,43 @@ def harness_tls_peer(argv):
                 print(built.stderr[-3000:])
                 return 1
         (work / "wget").symlink_to(shell)
+
+        if args.mutate:
+            mutation["rng"] = random.Random(0x7157)
+            deaths = []
+            exits = {}
+            for number in range(args.mutate):
+                script, flight, steps = mutation["rng"].choice(SCRIPTS)
+                listener = socket.socket()
+                listener.bind(("127.0.0.1", 0))
+                listener.listen(1)
+                listener.settimeout(20)
+                port = listener.getsockname()[1]
+                outcome = []
+                server = threading.Thread(target=serve,
+                                          args=(listener, dict(flight, answer_deferred=False),
+                                                steps, outcome), daemon=True)
+                server.start()
+                try:
+                    code = subprocess.run(
+                        [str(work / "wget"), "-q", "--no-check-certificate", "-O", "-",
+                         "https://127.0.0.1:%d/" % port], capture_output=True, timeout=30,
+                        env={"PATH": "/usr/bin:/bin", "HOME": str(work)}).returncode
+                except subprocess.TimeoutExpired:
+                    code = "timeout"
+                server.join(25)
+                listener.close()
+                exits[code] = exits.get(code, 0) + 1
+                if code == "timeout" or code < 0 or code >= 128:
+                    deaths.append((script, code))
+            print("tls peer mutation: exit statuses of %d flights: %s"
+                  % (args.mutate, ", ".join("%s x%d" % kv for kv in sorted(
+                      exits.items(), key=str))))
+            for script, code in deaths[:8]:
+                checks(False, "wget ended with %s on a mutated flight of %s" % (code, script))
+            checks(not deaths, "no wget run of %d mutated flights ended by a signal or hung"
+                   % args.mutate)
+            return checks.verdict("tls peer mutation", "tls-peer-mutation")
 
         for script, flight, steps in SCRIPTS:
             verdicts = {}
