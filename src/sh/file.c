@@ -34696,6 +34696,28 @@ static bool cp_update_kept(file_facts address_to facts, file_facts address_to th
         return true;
 }
 
+/*
+        The directories a copy is inside, by identity. A link followed back to
+        one of them would be copied inside itself without end; GNU's
+        is_ancestor names the link and goes on with its neighbours.
+*/
+#define CP_ANCESTORS_MAX 4096
+static p64 cp_ancestor_inode[CP_ANCESTORS_MAX];
+static p32 cp_ancestor_major[CP_ANCESTORS_MAX];
+static p32 cp_ancestor_minor[CP_ANCESTORS_MAX];
+static positive cp_ancestor_count;
+
+static bool cp_ancestor_holds(file_facts address_to facts)
+{
+        for (positive at = 0; at < cp_ancestor_count; at++)
+                if (cp_ancestor_inode[at] == facts->inode &&
+                    cp_ancestor_major[at] == facts->device_major &&
+                    cp_ancestor_minor[at] == facts->device_minor)
+                        return true;
+
+        return false;
+}
+
 static bool file_copy_one(bipolar source_directory, string_address source,
                           string_address source_shown,
                           bipolar destination_directory,
@@ -35249,6 +35271,9 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         {
                 /* This image has no FICLONE. GNU --reflink=always fails
                    closed; auto/never still copy. */
+                if (!moving && cp_reflink_policy == 'A' && kind == MODE_FILE &&
+                    file_debug)
+                        string_format(log, "copy offload: unknown, reflink: unsupported, sparse detection: unknown\n");
                 if (!moving && cp_reflink_policy == 'A' && kind == MODE_FILE)
                         return string_report(
                             log_error, false,
@@ -35411,6 +35436,10 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 return string_report(log_error, false, "cp: %w is nested too deep\n",
                               writer_shell_quoted_name, source_shown);
         }
+        if (!moving && cp_ancestor_holds(address_of facts))
+                return string_report(log_error, false,
+                                     "cp: cannot copy cyclic symbolic link %w\n",
+                                     writer_shell_quoted_name, source_shown);
 
         // A handle the walk opened for reading is read from directly; the
         // caller closes it.
@@ -35487,6 +35516,15 @@ static bool file_copy_one(bipolar source_directory, string_address source,
             .at = 0,
         };
 
+        bool pushed = !moving && cp_ancestor_count < CP_ANCESTORS_MAX;
+        if (pushed)
+        {
+                cp_ancestor_inode[cp_ancestor_count] = facts.inode;
+                cp_ancestor_major[cp_ancestor_count] = facts.device_major;
+                cp_ancestor_minor[cp_ancestor_count] = facts.device_minor;
+                cp_ancestor_count++;
+        }
+
         bool complete = true;
         positive skipped = 0;
         struct linux_dirent64 address_to child;
@@ -35494,7 +35532,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         /*      A directory cp made in its own stage is filled in batches; the
                 ones below it, and every other kind of copy, name by name. */
         if ((staged || in_place) && !moving && !cp_symbolic && !cp_attributes_only &&
-            !file_debug)
+            !file_debug && cp_reflink_policy != 'A')
         {
                 complete = cp_tree_parallel(walk.handle, source_shown,
                                             destination_handle, destination_shown,
@@ -35516,7 +35554,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 listed = file_listing_by_inode(address_of walk,
                                                address_of listed_count);
         while (!((staged || in_place) && !moving && !cp_hard && !cp_symbolic && !cp_attributes_only &&
-                 !file_debug) &&
+                 !file_debug && cp_reflink_policy != 'A') &&
                (child = listed ? (listed_at < listed_count ? listed[listed_at++] : null)
                                : file_walk_next(address_of walk)))
         {
@@ -35579,6 +35617,9 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 if (held >= 0)
                         system_close(held);
         }
+
+        if (pushed)
+                cp_ancestor_count--;
 
         /* The names of files with other names that the walk remembered
            were taken from the arena after the listing: it is given back
@@ -36026,12 +36067,26 @@ static fn cp_pair(string_address source, string_address destination)
             source_flags);
         if (source_pinned < 0)
         {
-                string_format(log_error,
-                              kind == MODE_DIRECTORY
-                                  ? "cp: cannot access '%w': %s\n"
-                                  : "cp: cannot stat '%w': %s\n",
-                              writer_terminal_quoted_name, source,
-                              file_reason(source_pinned));
+                //      A file that is there but will not open is GNU's open
+                //      of the source, after the arrow -v writes for it.
+                bool unopened = kind != MODE_DIRECTORY && !(source_flags & O_PATH) &&
+                                source_pinned == -ERROR_ACCESS;
+
+                if (unopened && cp_loud)
+                        file_backup_told(source, destination, (string_address) "'",
+                                         (string_address) "' -> '");
+                if (unopened)
+                        string_format(log_error,
+                                      "cp: cannot open %w for reading: %s\n",
+                                      writer_shell_quoted_name, source,
+                                      file_reason(source_pinned));
+                else
+                        string_format(log_error,
+                                      kind == MODE_DIRECTORY
+                                          ? "cp: cannot access '%w': %s\n"
+                                          : "cp: cannot stat '%w': %s\n",
+                                      writer_terminal_quoted_name, source,
+                                      file_reason(source_pinned));
                 system_close(source_directory);
                 system_close(destination_directory);
                 cp_status = 1;
