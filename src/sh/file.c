@@ -33032,6 +33032,47 @@ static fn cp_tree_leave(address_any context, address_any node_address,
         if (!node->parent)
                 return;
 
+        bipolar copy = -1;
+        bipolar tagged = 0;
+
+        if (!node->deferred)
+        {
+                copy = cp_tree_open_below(cp_tree_destination_root,
+                                          (string_address)node->path, node->length);
+
+                //      A directory's ACLs and attributes, from the source
+                //      directory it was made from.
+                if (copy >= 0 && cp_preserve)
+                {
+                        p8 names[FILE_XATTR_JOB_ROOM];
+                        p8 value[FILE_XATTR_JOB_ROOM];
+                        bipolar source = cp_tree_open_below(cp_tree_source_root,
+                                                            (string_address)node->path,
+                                                            node->length);
+
+                        if (source >= 0)
+                        {
+                                tagged = file_xattrs_copy_in(source, null, copy, null,
+                                                             (string_address) "cp",
+                                                             null, names, sizeof(names),
+                                                             value, sizeof(value));
+                                system_close(source);
+                        }
+                }
+
+                /* More than a job has room for is the sink's to copy, with
+                   buffers the size of the largest list and value: cp -a of
+                   a directory with 30 KB of attributes failed "Numerical
+                   result out of range" and left it 0700, where GNU copies. */
+                if (tagged == -ERROR_OUT_OF_RANGE)
+                {
+                        system_close(copy);
+                        copy = -1;
+                        tagged = 0;
+                        node->deferred = true;
+                }
+        }
+
         if (node->deferred)
         {
                 positive length = node->length;
@@ -33052,30 +33093,6 @@ static fn cp_tree_leave(address_any context, address_any node_address,
                 return;
         }
 
-        bipolar copy = cp_tree_open_below(cp_tree_destination_root,
-                                          (string_address)node->path, node->length);
-        bipolar tagged = 0;
-
-        //      A directory's ACLs and attributes, from the source directory
-        //      it was made from; one with more than a job has room for is
-        //      refused as its attributes are.
-        if (copy >= 0 && cp_preserve)
-        {
-                p8 names[FILE_XATTR_JOB_ROOM];
-                p8 value[FILE_XATTR_JOB_ROOM];
-                bipolar source = cp_tree_open_below(cp_tree_source_root,
-                                                    (string_address)node->path,
-                                                    node->length);
-
-                if (source >= 0)
-                {
-                        tagged = file_xattrs_copy_in(source, null, copy, null,
-                                                     (string_address) "cp",
-                                                     null, names, sizeof(names),
-                                                     value, sizeof(value));
-                        system_close(source);
-                }
-        }
         bipolar attributed = copy < 0
                                  ? copy
                                  : tagged < 0

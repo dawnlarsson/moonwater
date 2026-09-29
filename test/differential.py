@@ -8402,6 +8402,15 @@ FILES_SCENES = {
               "for n in c cd cd/sf m; do [ -e $n ] || continue; echo \"== $n\"; "
               "env getfattr -d --absolute-names $n 2>&1 | env grep -v '^#'; "
               "env getfacl -cp $n 2>/dev/null; done\n"),
+    # a tree whose directories carry attributes past the kilobyte a pool
+    # job copies with: a value of 2000 bytes, and 40 names; what the copy
+    # carries and its modes looked at afterwards.
+    "xattr_big": ("env mkdir -p sb/x/y sb/n && echo q > sb/x/f && "
+                  "env setfattr -n user.big -v \"$(env printf '%02000d' 0)\" sb/x && "
+                  "for n in $(env seq 40); do env setfattr -n user.name_long_enough_$n -v $n sb/n || exit 9; done && "
+                  "env setfattr -n user.mid -v \"$(env printf '%01500d' 0)\" sb/x/y || exit 9\n", "",
+                  "for n in cb cb/x cb/x/y cb/n; do [ -e $n ] || continue; echo \"== $n $(env stat -c %a $n)\"; "
+                  "env getfattr -d --absolute-names $n 2>&1 | env grep -v '^#' | env md5sum; done\n"),
     # a tree made under umask 000: every directory writable by all, no
     # sticky bit, and what is left of it looked at afterwards.
     "wide": ("(umask 000; env mkdir -p w/x/y && env touch w/x/f w/g) || exit 9\n", "",
@@ -8426,6 +8435,8 @@ FILES_SCENE_CASES = (
     ("xattr", "cp", "--preserve=all", "sf", "c"), ("xattr", "cp", "-a", "--no-preserve=xattr", "sf", "c"),
     ("xattr", "cp", "-a", "sd", "cd"), ("xattr", "cp", "-rp", "sd", "cd"), ("xattr", "mv", "sf", "m"),
     ("xattr", "cp", "-a", "sd", "cd"), ("xattr", "install", "-p", "sf", "c"),
+    ("xattr_big", "cp", "-a", "sb", "cb"), ("xattr_big", "cp", "-r", "--preserve=xattr", "sb", "cb"),
+    ("xattr_big", "cp", "-rp", "sb", "cb"), ("xattr_big", "cp", "-r", "sb", "cb"), ("xattr_big", "mv", "sb", "cb"),
     ("wide", "rm", "-rf", "w"), ("wide", "rm", "-r", "w"), ("wide", "rm", "-rv", "w"),
     ("wide", "rm", "-ri", "w"), ("wide", "rm", "-rI", "w"), ("wide", "rm", "-r", "---presume-input-tty", "w"),
     ("wide", "rm", "-r", "--one-file-system", "w"), ("wide", "rm", "-d", "w/x/y"), ("wide", "rmdir", "w/x/y"),
