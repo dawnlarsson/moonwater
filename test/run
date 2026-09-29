@@ -4803,12 +4803,99 @@ text_sort_widths()
         [ "$width_pass" = "$width_total" ]
 }
 
-#       The pieces tr hands to the pool exist only past its crossover, which
-#       no grammar input comes near: one generated file of about 32 MiB, each
-#       shape the pool takes, on one processor and on every processor the
-#       lane was given, against GNU -- the bytes must not move with the number
-#       of threads. And the descriptor must end where reading through leaves
-#       it, for the command after tr in a group.
+#       Whatever a tool hands to the pool exists only past its crossover,
+#       which no grammar input comes near: a few generated files of 10 to 35
+#       MiB, every tool that cuts a file into pieces and each shape it takes
+#       through them, on one processor, on two, on three and on every
+#       processor the lane was given -- the bytes, the diagnostics and the
+#       status must not move with the number of threads or with where a piece
+#       happens to end, and tr is held to GNU's as well. The inputs are the ones that
+#       make an edge fall somewhere awkward: lines of every length, tabs and
+#       blanks and multibyte text and NULs, a line past a piece's bound and
+#       one that is the whole file, and no last newline. And the descriptor
+#       must end where reading through leaves it, for the command after tr in
+#       a group.
+parallel_cpus()
+{
+        # The first $1 processors of this lane's affinity, as taskset writes them.
+        taskset -cp $$ | sed 's/.*: *//' | awk -v want="$1" '{
+                n = split($0, part, ",")
+                for (i = 1; i <= n; i++) {
+                        m = split(part[i], span, "-")
+                        for (c = span[1]; c <= (m > 1 ? span[2] : span[1]); c++) {
+                                if (++have > want) exit
+                                printf "%s%s", (have > 1 ? "," : ""), c
+                        }
+                }
+        }'
+}
+
+parallel_inputs()
+{
+        LC_ALL=C awk 'BEGIN {
+                srand(7)
+                for (i = 0; i < 700000; i++) {
+                        line = ""
+                        n = int(rand() * 90)
+                        for (j = 0; j < n; j++)
+                                line = line sprintf("%c", 32 + int(rand() * 95))
+                        print line
+                }
+        }' > "$parallel_dir/plain" || return 1
+
+        # Tabs, runs of blanks, form feeds, returns, NULs, 0xa0 and UTF-8 of
+        # every width, empty lines, and lines long enough to cross a piece.
+        LC_ALL=C awk 'BEGIN {
+                srand(11)
+                split("a b ab word words the_quick x9 \t \t\t \f \r    \302\240 \303\251 \344\270\255 \360\237\230\200 \200 \377 , : ; = _", frag, " ")
+                for (i = 0; i < 500000; i++) {
+                        line = ""
+                        n = rand() < 0.3 ? 0 : int(rand() * 40)
+                        if (rand() < 0.001)
+                                n = 4000 + int(rand() * 30000)
+                        for (j = 0; j < n; j++)
+                                line = line frag[1 + int(rand() * 23)] (rand() < 0.5 ? " " : "")
+                        print line
+                }
+        }' > "$parallel_dir/mixed" || return 1
+
+        # The same, with NULs among the bytes.
+        tr 'x9' '\000\000' < "$parallel_dir/mixed" > "$parallel_dir/nul" || return 1
+
+        # A line past a piece's bound, then a run of short ones, then one of
+        # several megabytes, then the rest of the plain lines.
+        { head -c 9000000 "$parallel_dir/plain"
+          head -c 1200000 /dev/zero | tr '\000' 'a'; echo
+          head -c 100000 "$parallel_dir/plain"
+          head -c 4000000 /dev/zero | tr '\000' 'b'; echo
+          head -c 6000000 "$parallel_dir/plain"; } > "$parallel_dir/long" || return 1
+
+        # No last newline, and no newline at all.
+        head -c 12000001 "$parallel_dir/plain" > "$parallel_dir/noeol" || return 1
+        head -c 10000000 /dev/zero | tr '\000' 'c' > "$parallel_dir/oneline" || return 1
+}
+
+#       What a program says of a file with these arguments -- output, diagnostics
+#       and status -- as a checksum, under a locale, on every processor or on
+#       the set named.
+parallel_answer()
+{
+        parallel_lc=$1
+        parallel_set=$2
+        parallel_program=$3
+        parallel_operand=$4
+        shift 4
+
+        if [ -n "$parallel_set" ]; then
+                taskset -c "$parallel_set" sh -c 'lc=$1; program=$2; operand=$3; shift 3
+                        { env LC_ALL="$lc" "$program" "$@" "$operand" 2>&1; echo "status $?"; } | cksum' \
+                        sh "$parallel_lc" "$parallel_program" "$parallel_operand" "$@"
+        else
+                { env LC_ALL="$parallel_lc" "$parallel_program" "$@" "$parallel_operand" 2>&1
+                        echo "status $?"; } | cksum
+        fi
+}
+
 text_parallel_checks()
 {
         need_shell || return 1
@@ -4826,19 +4913,14 @@ text_parallel_checks()
                 return 0
         fi
 
-        parallel_input="$work/text-parallel.in"
-        LC_ALL=C awk 'BEGIN {
-                srand(7)
-                for (i = 0; i < 700000; i++) {
-                        line = ""
-                        n = int(rand() * 90)
-                        for (j = 0; j < n; j++)
-                                line = line sprintf("%c", 32 + int(rand() * 95))
-                        print line
-                }
-        }' > "$parallel_input" || return 1
+        parallel_dir="$work/text-parallel"
+        mkdir -p "$parallel_dir" || return 1
+        parallel_inputs || return 1
+        parallel_input="$parallel_dir/plain"
 
-        parallel_first=$(taskset -cp $$ | sed 's/.*: *//; s/[,-].*//')
+        parallel_first=$(parallel_cpus 1)
+        parallel_two=$(parallel_cpus 2)
+        parallel_three=$(parallel_cpus 3)
         parallel_pass=0
         parallel_total=0
 
@@ -4875,7 +4957,272 @@ text_parallel_checks()
                 note "text-parallel: after tr the descriptor left $parallel_got bytes to read, GNU $parallel_want"
         fi
 
-        rm -f "$parallel_input"
+        # A tool over a file: one processor, which runs the serial loop and
+        # is GNU's answer wherever the differential lanes find ours equal to
+        # it, then two, three and all. The arguments are
+        # one word, parted at @, so a script with a blank or a star in it
+        # reaches the tool as it is written.
+        parallel_file_case()
+        {
+                parallel_lc=$1
+                parallel_name=$2
+                parallel_path=$3
+                parallel_row=$4
+                parallel_total=$((parallel_total + 1))
+                parallel_saved=$IFS
+                IFS=@
+                set -f
+                # shellcheck disable=SC2086
+                set -- $parallel_row
+                set +f
+                IFS=$parallel_saved
+                # One processor is the serial loop, the answer the others must give.
+                parallel_want=$(parallel_answer "$parallel_lc" "$parallel_first" \
+                        "$farm/$parallel_name" "$parallel_path" "$@")
+                parallel_bad=
+                for parallel_set in "$parallel_two" "$parallel_three" ""; do
+                        parallel_got=$(parallel_answer "$parallel_lc" "$parallel_set" \
+                                "$farm/$parallel_name" "$parallel_path" "$@")
+                        [ "$parallel_want" = "$parallel_got" ] ||
+                                parallel_bad="$parallel_bad [${parallel_set:-all}]"
+                done
+
+                if [ -z "$parallel_bad" ]; then
+                        parallel_pass=$((parallel_pass + 1))
+                else
+                        note "text-parallel: $parallel_lc $parallel_name $parallel_row ${parallel_path##*/} differs from one processor at$parallel_bad"
+                fi
+        }
+
+        # Every row of a tool against every input: rows are read a line at a time.
+        parallel_rows()
+        {
+                parallel_rows_lc=$1
+                parallel_rows_name=$2
+                parallel_rows_inputs=$3
+                parallel_rows_list=$4
+
+                printf '%s\n' "$parallel_rows_list" > "$parallel_dir/rows"
+
+                for parallel_rows_input in $parallel_rows_inputs; do
+                        while IFS= read -r parallel_rows_row; do
+                                parallel_file_case "$parallel_rows_lc" "$parallel_rows_name" \
+                                        "$parallel_dir/$parallel_rows_input" "$parallel_rows_row"
+                        done < "$parallel_dir/rows"
+                done
+        }
+
+        # The same tools reading standard input from where another command left
+        # it: the file offset is the first byte a piece cuts, and the descriptor
+        # must be left where the pieces stopped for the command after.
+        parallel_offset_case()
+        {
+                parallel_path=$1
+                parallel_name=$2
+                parallel_total=$((parallel_total + 1))
+                parallel_saved=$IFS
+                IFS=@
+                set -f
+                # shellcheck disable=SC2086
+                set -- $3
+                set +f
+                IFS=$parallel_saved
+                parallel_want=
+                parallel_bad=
+                for parallel_set in "$parallel_first" "$parallel_two" "$parallel_three" ""; do
+                        parallel_got=$(
+                                if [ -n "$parallel_set" ]; then
+                                        taskset -c "$parallel_set" sh -c 'dd bs=4097 count=1 of=/dev/null 2>/dev/null
+                                                { "$0" "$@"; echo "status $?"; } 2>&1' "$farm/$parallel_name" "$@" < "$parallel_path"
+                                else
+                                        sh -c 'dd bs=4097 count=1 of=/dev/null 2>/dev/null
+                                                { "$0" "$@"; echo "status $?"; } 2>&1' "$farm/$parallel_name" "$@" < "$parallel_path"
+                                fi | cksum)
+                        [ -n "$parallel_want" ] || parallel_want=$parallel_got
+                        [ "$parallel_want" = "$parallel_got" ] ||
+                                parallel_bad="$parallel_bad [${parallel_set:-all}]"
+                done
+
+                if [ -z "$parallel_bad" ]; then
+                        parallel_pass=$((parallel_pass + 1))
+                else
+                        note "text-parallel: $parallel_name $* from an offset in ${parallel_path##*/} differs from one processor at$parallel_bad"
+                fi
+        }
+
+        # sed -i edits a copy: the staged output is what the pieces write to.
+        parallel_inplace_case()
+        {
+                parallel_path=$1
+                parallel_row=$2
+                parallel_total=$((parallel_total + 1))
+                parallel_saved=$IFS
+                IFS=@
+                set -f
+                # shellcheck disable=SC2086
+                set -- $parallel_row
+                set +f
+                IFS=$parallel_saved
+                parallel_want=
+                parallel_bad=
+                for parallel_set in "$parallel_first" "$parallel_two" "$parallel_three" ""; do
+                        cp "$parallel_path" "$parallel_dir/edit" || return 1
+                        rm -f "$parallel_dir/edit.bak"
+                        parallel_got=$(
+                                if [ -n "$parallel_set" ]; then
+                                        taskset -c "$parallel_set" sh -c '"$0" "$@" 2>&1; echo "status $?"' "$farm/sed" "$@" "$parallel_dir/edit"
+                                else
+                                        sh -c '"$0" "$@" 2>&1; echo "status $?"' "$farm/sed" "$@" "$parallel_dir/edit"
+                                fi
+                                cat "$parallel_dir/edit"
+                                cat "$parallel_dir/edit.bak" 2> /dev/null) 
+                        parallel_got=$(printf '%s' "$parallel_got" | cksum)
+                        [ -n "$parallel_want" ] || parallel_want=$parallel_got
+                        [ "$parallel_want" = "$parallel_got" ] ||
+                                parallel_bad="$parallel_bad [${parallel_set:-all}]"
+                done
+
+                if [ -z "$parallel_bad" ]; then
+                        parallel_pass=$((parallel_pass + 1))
+                else
+                        note "text-parallel: sed $parallel_row in place in ${parallel_path##*/} differs from one processor at$parallel_bad"
+                fi
+        }
+
+        for parallel_name in plain noeol long; do
+                parallel_inplace_case "$parallel_dir/$parallel_name" '-i@s/ab/AB/g'
+                parallel_inplace_case "$parallel_dir/$parallel_name" '-i.bak@/^a/d'
+                parallel_inplace_case "$parallel_dir/$parallel_name" '-i@-n@/a/p'
+                parallel_inplace_case "$parallel_dir/$parallel_name" '-i@y/abc/xyz/'
+        done
+
+        for parallel_name in plain noeol long; do
+                parallel_offset_case "$parallel_dir/$parallel_name" wc '-l@-w@-c'
+                parallel_offset_case "$parallel_dir/$parallel_name" grep '-n@ab'
+                parallel_offset_case "$parallel_dir/$parallel_name" cut '-d,@-f2'
+                parallel_offset_case "$parallel_dir/$parallel_name" sed 's/ab/AB/g'
+        done
+
+        parallel_all='plain mixed nul long noeol oneline'
+
+        parallel_rows C wc "$parallel_all" '-l
+-w
+-c
+-m
+-L
+-l@-w@-c
+-l@-w
+-w@-L'
+
+        # wc -m, -w and -L follow the locale; the multibyte lines are where
+        # a piece's edge must not cut a character.
+        parallel_rows C.UTF-8 wc 'mixed nul long' '-m
+-w
+-L
+-l@-m@-w'
+
+        # grep over a file: the count, the lines, their numbers and offsets,
+        # the questions, and what -v and the boundaries make of an edge.
+        parallel_rows C grep "$parallel_all" '-c@ab
+-n@ab
+ab
+-v@-c@ab
+-v@-n@ab
+-c@-E@a.b|xyz
+-c@-i@AB
+-c@-w@a
+-c@-x@ab
+-n@-b@ab
+-H@-n@ab
+-l@ab
+-L@ab
+-q@ab
+-q@zzzz
+-c@-F@-e@ab@-e@zz@-e@qq
+-c@^
+-c@$
+-c@^$
+-T@-n@ab
+-c@a'
+
+        # rev, by bytes and by characters, and with NUL for the line's end.
+        parallel_rows C rev "$parallel_all" '
+-0'
+        parallel_rows C.UTF-8 rev 'mixed nul long' '
+-0'
+
+        # cut over a file: fields by one delimiter, bytes and characters as one
+        # range or several, kept or left out, in both locales.
+        parallel_rows C cut "$parallel_all" '-d,@-f2
+-d,@-f1,3,5
+-d,@-f2-
+-d,@-s@-f2
+-d,@--complement@-f2
+-f2
+-f1-2,4
+-d @-f3-
+-d,@-f100
+-c1-20
+-c5
+-c5-
+-c-10
+-b3-8
+-c1-5,10-15
+-c1-3,5-7,9-
+--complement@-c3-5
+--complement@-b1-2,6-'
+
+        # A dot is a character where the locale says so, and a job's machine
+        # has to know it as the serial one does.
+        parallel_rows C.UTF-8 grep 'mixed long' '-c@ab
+-n@e
+-c@-i@AB
+-c@-w@a
+-v@-c@ab
+-c@^.\{3\}$
+-c@-E@(.)\1'
+
+        parallel_rows C.UTF-8 sed 'mixed long' 's/./X/g
+s/.$//
+/^.\{3\}/d
+-n@/^..*$/p
+s/\(.\)\(.\)/\2\1/g
+y/abc/xyz/'
+
+        parallel_rows C.UTF-8 cut 'mixed nul long' '-c1-20
+-c5-9
+-c1-3,7-9
+--complement@-c2-4'
+
+        # sed over a file: the scripts whose every line is answered by that
+        # line alone, which are the ones cut into pieces, and a few that are
+        # not and must come out the same all the same.
+        parallel_rows C sed "$parallel_all" 's/ab/AB/g
+-n@/ab/p
+/^a/d
+/^$/!d
+y/abc/xyz/
+s/a/b/;s/b/c/
+-n@s/x/Y/p
+s/e/E/3
+s/e/&&/2g
+/a/s/a/A/
+/a/!s/e/E/
+s/a*/X/g
+s/[0-9]/<&>/g
+s/\(a\)\(b\)/\2\1/g
+-E@s/(a)(b)?/\2\1/g
+s/b/\n/g
+-n@/a/{/b/p}
+p;p
+:a;s/aa/a/;ta
+/a/{s/a/b/;t;s/b/c/}
+$!d
+5q
+s/^/> /
+s/$/ </'
+
+        rm -rf "$parallel_dir"
         printf '  %-12s %s of %s\n' text-parallel "$parallel_pass" "$parallel_total"
         tally text-parallel "$parallel_pass" "$parallel_total"
         [ "$parallel_pass" = "$parallel_total" ]

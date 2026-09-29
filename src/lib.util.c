@@ -9250,6 +9250,378 @@ pub bool parallel_beside_wait(void)
 }
 
 /*
+        THE LINES OF A FILE
+
+        A regular file's bytes, cut into pieces of a fixed size that end where
+        a line ends, run on the pool a piece a job. Piece i is the lines that
+        begin in [start + i * chunk, start + (i + 1) * chunk): its first line
+        is the first one that begins at or after its nominal start, and its
+        last runs on past its nominal end to the delimiter. Each job finds
+        both edges itself from the bytes, by reading one byte before its
+        nominal start and on past its nominal end to the next delimiter, so
+        two neighbours agree on the edge between them without asking each
+        other, and the cut depends on nothing but the file, the delimiter and
+        the chunk -- never on the width. A file is read with pread, into the
+        scratch of the slot the job runs on, and never moved.
+
+        A tool whose answer for a line depends on that line alone, and on a
+        state a line's beginning resets, needs nothing more than the pieces:
+        a kernel gets a piece's whole lines and either counts them (for) or
+        writes what it makes of them into its output (ordered), which the
+        pool hands to the sink on the calling thread in piece order.
+
+        A kernel may refuse a piece, and so does the cut itself when a line
+        runs more than bound bytes past its piece's nominal end or a read
+        fails. Nothing after a refused piece is used: resume is where the
+        last piece that was taken ended, and the caller goes on from there
+        with the loop it always had, which then meets whatever refused and
+        answers it word for word. So nothing a tool says can depend on the
+        pieces either.
+*/
+#define PARALLEL_LINES_CHUNK (256ull << 10)
+//      A piece reads chunk + bound at most, so a line of a megabyte or more
+//      is never cut: grep's serial loop refuses one past TEXT_LINE_MAX.
+#define PARALLEL_LINES_BOUND (768ull << 10)
+#define PARALLEL_LINES_MINIMUM (8ull << 20)
+#define PARALLEL_LINES_SLACK 4096
+#define PARALLEL_LINES_TAKEN 1
+#define PARALLEL_LINES_REFUSED 2
+//      What the search for a delimiter answers when there is none before the
+//      file ends, and when the bound says to stop looking.
+#define PARALLEL_LINES_NONE (positive_max - 1)
+#define PARALLEL_LINES_GIVEN_UP positive_max
+
+typedef bool(address_to parallel_lines_kernel)(address_any context, positive index,
+                                              p8 address_to lines, positive length,
+                                              positive offset);
+typedef bool(address_to parallel_lines_emit)(address_any context, positive index,
+                                            p8 address_to lines, positive length,
+                                            positive offset,
+                                            parallel_output address_to output);
+
+typedef struct
+{
+        positive handle;
+        positive start;
+        positive size;
+        positive chunk;
+        positive bound;
+        positive count;
+        positive stride;
+        positive address_to ends;
+        p8 address_to state;
+        p8 address_to scratch;
+        positive mapped;
+        p8 delimiter;
+        //      Where the pieces that were taken end, and how many there were:
+        //      the rest of the file is the caller's.
+        positive resume;
+        positive taken;
+        //      A sink said no, so the caller stops rather than resuming.
+        bool sink_stopped;
+        parallel_lines_kernel kernel;
+        parallel_lines_emit emit;
+        parallel_sink sink;
+        address_any context;
+} parallel_lines;
+
+/*
+        Whether the file from start to size is worth cutting, and the room
+        for it if so. The delimiter is the caller's, and so is the chunk when
+        it wants one that is not the usual: a chunk of zero is the usual, and
+        only that one has a size below which threads are not worth it.
+*/
+pub bool parallel_lines_open(parallel_lines address_to run, positive handle,
+                             positive start, positive size, p8 delimiter,
+                             positive chunk)
+{
+        positive pieces;
+        positive table;
+
+        //      A call from inside a job or a sink would run inline anyway.
+        if (start >= size || parallel_width() == 1 || thread_self()->run ||
+            (!chunk && size - start < PARALLEL_LINES_MINIMUM))
+                return false;
+
+        chunk = chunk ? chunk : PARALLEL_LINES_CHUNK;
+        pieces = (size - start + chunk - 1) / chunk;
+        memory_fill(run, 0, sizeof(*run));
+        run->handle = handle;
+        run->start = start;
+        run->size = size;
+        run->chunk = chunk;
+        run->bound = PARALLEL_LINES_BOUND;
+        run->count = pieces;
+        run->delimiter = delimiter;
+        run->stride = (chunk + run->bound + PARALLEL_LINES_SLACK + 4095) & ~4095ull;
+        //      One mapping, zeroed by the kernel: where each piece ends, its
+        //      state, and a span of scratch for every slot the pool has.
+        table = (pieces * (sizeof(positive) + 1) + 4095) & ~4095ull;
+        run->mapped = table + parallel_slots() * run->stride;
+        run->ends = (positive address_to)(address_any)memory_checked(run->mapped);
+
+        if (!run->ends)
+                return false;
+
+        run->state = (p8 address_to)(run->ends + pieces);
+        run->scratch = (p8 address_to)run->ends + table;
+        run->resume = start;
+        return true;
+}
+
+//      Forgets what a pass did, for a second one over the same pieces.
+pub fn parallel_lines_again(parallel_lines address_to run)
+{
+        memory_fill(run->state, 0, run->count);
+        run->resume = run->start;
+        run->taken = 0;
+        run->sink_stopped = false;
+}
+
+pub fn parallel_lines_close(parallel_lines address_to run)
+{
+        if (run->ends)
+                memory_free(run->ends, run->mapped);
+
+        run->ends = null;
+}
+
+//      Reads into the scratch up to want bytes of the file from offset, and
+//      answers how many it holds: fewer at the end of the file.
+static positive parallel_lines_fill(parallel_lines address_to run, p8 address_to into,
+                                    positive have, positive want, positive offset)
+{
+        while (have < want)
+        {
+                bipolar got = system_call_4(syscall(pread64), run->handle,
+                                            (positive)(into + have), want - have,
+                                            offset + have);
+
+                if (got == -4)
+                        continue;
+
+                if (got < 0)
+                        return PARALLEL_LINES_GIVEN_UP;
+
+                if (!got)
+                        break;
+
+                have += (positive)got;
+        }
+
+        return have;
+}
+
+/*
+        The first delimiter at or after at, reading further as it needs to.
+        Its offset in the scratch, or that the file ends first, or that the
+        bound does.
+*/
+static positive parallel_lines_find(parallel_lines address_to run, p8 address_to scratch,
+                                    positive address_to have, positive from, positive at,
+                                    positive room)
+{
+        for (;;)
+        {
+                positive want;
+                positive got;
+
+                if (at < address_to have)
+                {
+                        p8 address_to found = memory_first_of(scratch + at, run->delimiter,
+                                                              address_to have - at);
+
+                        if (found)
+                                return (positive)(found - scratch);
+
+                        at = address_to have;
+                }
+
+                if (from + address_to have >= run->size)
+                        return PARALLEL_LINES_NONE;
+
+                if (address_to have >= room)
+                        return PARALLEL_LINES_GIVEN_UP;
+
+                want = address_to have + 65536 < room ? address_to have + 65536 : room;
+
+                if (want > run->size - from)
+                        want = run->size - from;
+
+                got = parallel_lines_fill(run, scratch, address_to have, want, from);
+
+                if (got == PARALLEL_LINES_GIVEN_UP)
+                        return got;
+
+                if (got == address_to have)
+                        return PARALLEL_LINES_NONE;
+
+                address_to have = got;
+        }
+}
+
+/*
+        Piece index: its whole lines, in the scratch of the slot this runs on.
+        False when the cut refuses. Where the piece ends goes to ends[index]
+        for the sink and for whoever resumes.
+*/
+static bool parallel_lines_piece(parallel_lines address_to run, positive index,
+                                 p8 address_to address_to lines,
+                                 positive address_to length,
+                                 positive address_to offset)
+{
+        p8 address_to scratch = run->scratch + parallel_slot() * run->stride;
+        positive nominal = run->start + index * run->chunk;
+        positive edge = nominal + run->chunk < run->size ? nominal + run->chunk : run->size;
+        //      The byte before the nominal start says whether a line begins on it.
+        positive from = index ? nominal - 1 : nominal;
+        positive room = run->stride - PARALLEL_LINES_SLACK;
+        positive want = edge - from + PARALLEL_LINES_SLACK;
+        positive have;
+        positive first;
+        positive last;
+
+        if (want > room)
+                want = room;
+
+        if (want > run->size - from)
+                want = run->size - from;
+
+        have = parallel_lines_fill(run, scratch, 0, want, from);
+
+        //      A file that came up short of its size was cut while this ran.
+        if (have == PARALLEL_LINES_GIVEN_UP || from + have < edge)
+                return false;
+
+        //      Where its first line begins: at the nominal start, or after the
+        //      first delimiter from there. A piece with no line beginning in
+        //      it begins at the end of the file, or where the next piece does.
+        if (!index || (have && scratch[0] == run->delimiter))
+                first = index ? 1 : 0;
+        else
+        {
+                first = parallel_lines_find(run, scratch, address_of have, from, 1, room);
+
+                if (first == PARALLEL_LINES_GIVEN_UP)
+                        return false;
+
+                first = first == PARALLEL_LINES_NONE ? have : first + 1;
+        }
+
+        //      And where its last line ends, where the next piece's first
+        //      begins: after the first delimiter at or past the byte before
+        //      the nominal end, or here if the first line began past that.
+        if (edge >= run->size)
+                last = have;
+        else if (first >= edge - from)
+                last = first;
+        else
+        {
+                last = parallel_lines_find(run, scratch, address_of have, from,
+                                          edge - from - 1, room);
+
+                if (last == PARALLEL_LINES_GIVEN_UP)
+                        return false;
+
+                last = last == PARALLEL_LINES_NONE ? have : last + 1;
+        }
+
+        run->ends[index] = from + last;
+        address_to lines = scratch + first;
+        address_to length = last - first;
+        address_to offset = from + first;
+        return true;
+}
+
+static fn parallel_lines_for_job(address_any context, positive index)
+{
+        parallel_lines address_to run = context;
+        p8 address_to lines;
+        positive length;
+        positive offset;
+
+        if (parallel_lines_piece(run, index, address_of lines, address_of length,
+                                 address_of offset) &&
+            run->kernel(run->context, index, lines, length, offset))
+        {
+                run->state[index] = PARALLEL_LINES_TAKEN;
+                return;
+        }
+
+        run->state[index] = PARALLEL_LINES_REFUSED;
+        parallel_stop();
+}
+
+//      Runs kernel over every piece of the file. resume says how far it got.
+pub fn parallel_lines_for(parallel_lines address_to run,
+                          parallel_lines_kernel kernel, address_any context)
+{
+        positive at;
+
+        run->kernel = kernel;
+        run->context = context;
+        parallel_for(parallel_lines_for_job, run, run->count, run->size - run->start);
+
+        for (at = 0; at < run->count && run->state[at] == PARALLEL_LINES_TAKEN; at++)
+                ;
+
+        run->resume = at ? run->ends[at - 1] : run->start;
+        run->taken = at;
+}
+
+static fn parallel_lines_emit_job(address_any context, positive index,
+                                  parallel_output address_to output)
+{
+        parallel_lines address_to run = context;
+        p8 address_to lines;
+        positive length;
+        positive offset;
+
+        if (parallel_lines_piece(run, index, address_of lines, address_of length,
+                                 address_of offset) &&
+            run->emit(run->context, index, lines, length, offset, output))
+        {
+                run->state[index] = PARALLEL_LINES_TAKEN;
+                return;
+        }
+
+        //      The sink stops the run at this piece, when it is the next one
+        //      to be handed over: the ones before it still are.
+        run->state[index] = PARALLEL_LINES_REFUSED;
+}
+
+static bool parallel_lines_emit_sink(address_any context, positive index,
+                                     address_any data, positive length)
+{
+        parallel_lines address_to run = context;
+
+        if (run->state[index] != PARALLEL_LINES_TAKEN)
+                return false;
+
+        if (!run->sink(run->context, index, data, length))
+        {
+                run->sink_stopped = true;
+                return false;
+        }
+
+        run->resume = run->ends[index];
+        run->taken = index + 1;
+        return true;
+}
+
+//      Runs emit over every piece and hands each one's output to sink in order.
+pub fn parallel_lines_ordered(parallel_lines address_to run, parallel_lines_emit emit,
+                              parallel_sink sink, address_any context)
+{
+        run->emit = emit;
+        run->sink = sink;
+        run->context = context;
+        run->taken = 0;
+        parallel_ordered(parallel_lines_emit_job, parallel_lines_emit_sink, run,
+                         run->count, run->size - run->start);
+}
+
+/*
         THE TREE
 
         parallel_tree walks a directory tree on the pool and hands the bytes

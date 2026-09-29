@@ -49438,6 +49438,335 @@ static fn lock_across_processes(void)
         munmap((address_any)page, 4096);
 }
 
+/*
+        parallel_lines: a file's lines, in pieces of whole lines cut by the
+        jobs that read them. The content is made here and the pieces are held
+        to the bytes: they must be contiguous, each beginning where a line
+        does, complete and in order at every width, whatever the chunk, from
+        a start in the middle of a line, with a last line that has no end;
+        and where a piece is refused, or a line is too long to cut, what was
+        taken must end on a line's edge for a serial loop to go on from.
+*/
+#define LINES_MAX 3200000
+#define LINES_PIECES 4096
+
+static p8 lines_data[LINES_MAX];
+static positive lines_piece_bytes[LINES_PIECES];
+static positive lines_piece_begin[LINES_PIECES];
+static positive lines_wrong;
+static positive lines_refuse_at;
+static positive lines_sink_hash;
+static positive lines_sink_bytes;
+static positive lines_sink_wrong;
+static positive lines_sink_next;
+static positive lines_start;
+static positive lines_expected_offset;
+
+static positive lines_fnv(positive hash, const p8 address_to bytes, positive length)
+{
+        for (positive at = 0; at < length; at++)
+                hash = (hash ^ bytes[at]) * 0x100000001b3ull;
+
+        return hash;
+}
+
+//      Lines of every length up to a few hundred, empty ones among them, and
+//      where long is set, one of more than the bound of a piece and one of
+//      a few kilobytes; ended is whether the last of them ends.
+static positive lines_make(bool long_line, bool ended)
+{
+        positive at = 0;
+        positive seed = 0x9e3779b97f4a7c15ull;
+        positive number = 0;
+
+        while (at < 3000000)
+        {
+                positive length;
+
+                seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+                length = (seed >> 33) % 300;
+
+                if (!(number % 50))
+                        length = 0;
+
+                if (long_line && number == 4000)
+                        length = 900000;
+                else if (number % 700 == 3)
+                        length = 3000 + (seed >> 40) % 3000;
+
+                for (positive c = 0; c < length; c++)
+                        lines_data[at + c] = (p8)(0x20 + (c * 7 + number) % 95);
+
+                at += length;
+                lines_data[at++] = '\n';
+                number++;
+        }
+
+        if (!ended)
+                at--;
+
+        return at;
+}
+
+static bool lines_kernel(address_any context, positive index, p8 address_to lines,
+                         positive length, positive offset)
+{
+        (void)context;
+
+        if (index == lines_refuse_at)
+                return false;
+
+        //      A piece with no line beginning in it is empty and stands anywhere.
+        if (length && (memory_compare(lines, lines_data + offset, length) ||
+                       (offset > lines_start && lines_data[offset - 1] != '\n') ||
+                       (offset + length < lines_expected_offset && lines[length - 1] != '\n')))
+                atomic_add(address_of lines_wrong, 1);
+
+        lines_piece_bytes[index] = length;
+        lines_piece_begin[index] = offset;
+        return true;
+}
+
+static bool lines_emit(address_any context, positive index, p8 address_to lines,
+                       positive length, positive offset,
+                       parallel_output address_to output)
+{
+        if (!lines_kernel(context, index, lines, length, offset))
+                return false;
+
+        return parallel_write(output, lines, length);
+}
+
+static bool lines_sink(address_any context, positive index, address_any data,
+                       positive length)
+{
+        (void)context;
+
+        if (index != lines_sink_next++)
+                lines_sink_wrong++;
+
+        lines_sink_hash = lines_fnv(lines_sink_hash, data, length);
+        lines_sink_bytes += length;
+        return true;
+}
+
+static fn lock_lines_one(string_address name, positive size, positive start, positive chunk,
+                         bool address_to whole, bool address_to prefix)
+{
+        static const positive widths[] = {2, 3, 8};
+        bipolar handle = system_open_at(AT_FDCWD, name, FILE_READ | O_CLOEXEC);
+        positive round;
+        positive reference = lines_fnv(0xcbf29ce484222325ull, lines_data + start, size - start);
+
+        lines_start = start;
+
+        for (round = 0; round < sizeof(widths) / sizeof(widths[0]); round++)
+        {
+                parallel_lines run;
+                positive at;
+                positive sum = 0;
+                positive count;
+
+                parallel_reset(widths[round]);
+
+                //      Every piece, counted.
+                if (!parallel_lines_open(address_of run, (positive)handle, start, size, '\n', chunk))
+                {
+                        address_to whole = false;
+                        break;
+                }
+
+                count = run.count;
+                lines_wrong = 0;
+                lines_expected_offset = size;
+                lines_refuse_at = positive_max;
+                parallel_lines_for(address_of run, lines_kernel, null);
+
+                for (at = 0; at < run.taken; at++)
+                        sum += lines_piece_bytes[at];
+
+                if (run.taken != count || run.resume != size || sum != size - start ||
+                    lines_wrong)
+                {
+                        address_to whole = false;
+                        string_format(log, "  lines: counted, start %p chunk %p width %p: "
+                                      "taken %p of %p, resume %p of %p, bytes %p of %p, wrong %p\n",
+                                      start, chunk, widths[round], run.taken, count, run.resume,
+                                      size, sum, size - start, lines_wrong);
+                }
+
+                //      In order, the bytes the file has.
+                parallel_lines_again(address_of run);
+                lines_sink_hash = 0xcbf29ce484222325ull;
+                lines_sink_bytes = 0;
+                lines_sink_next = 0;
+                lines_sink_wrong = 0;
+                lines_wrong = 0;
+                parallel_lines_ordered(address_of run, lines_emit, lines_sink, null);
+
+                if (run.taken != count || run.resume != size || lines_wrong || lines_sink_wrong ||
+                    lines_sink_hash != reference || lines_sink_bytes != size - start)
+                {
+                        address_to whole = false;
+                        string_format(log, "  lines: ordered, start %p chunk %p width %p: "
+                                      "taken %p of %p, resume %p of %p, bytes %p of %p, wrong %p, out of order %p\n",
+                                      start, chunk, widths[round], run.taken, count, run.resume,
+                                      size, lines_sink_bytes, size - start, lines_wrong,
+                                      lines_sink_wrong);
+                }
+
+                //      A piece refused: what came before it, and where that ends.
+                parallel_lines_again(address_of run);
+                lines_refuse_at = count / 2;
+                lines_wrong = 0;
+                parallel_lines_for(address_of run, lines_kernel, null);
+
+                if (count > 2 && lines_refuse_at)
+                {
+                        positive edge = run.resume;
+
+                        if (run.taken != lines_refuse_at || edge <= start ||
+                            lines_data[edge - 1] != '\n' || lines_wrong ||
+                            (run.taken && edge != lines_piece_begin[run.taken - 1] +
+                                                  lines_piece_bytes[run.taken - 1]))
+                                address_to prefix = false;
+                }
+
+                parallel_lines_again(address_of run);
+                lines_sink_hash = 0xcbf29ce484222325ull;
+                lines_sink_bytes = 0;
+                lines_sink_next = 0;
+                lines_sink_wrong = 0;
+                lines_refuse_at = count / 2;
+                parallel_lines_ordered(address_of run, lines_emit, lines_sink, null);
+
+                if (count > 2 && lines_refuse_at &&
+                    (run.taken != lines_refuse_at || run.resume <= start || lines_sink_wrong ||
+                     lines_sink_hash != lines_fnv(0xcbf29ce484222325ull, lines_data + start,
+                                                  run.resume - start)))
+                        address_to prefix = false;
+
+                lines_refuse_at = positive_max;
+                parallel_lines_close(address_of run);
+        }
+
+        system_close((positive)handle);
+}
+
+static fn lock_lines(void)
+{
+        p8 path[256];
+        positive at = 0;
+        string_address place = (string_address)getenv("TMPDIR");
+        bool whole = true;
+        bool prefix = true;
+        bool long_stops = true;
+        bipolar handle;
+        positive size;
+        positive variant;
+
+        if (!place || !string_get(place) || string_length(place) > 180)
+                place = (string_address)"/tmp";
+
+        at = string_length(place);
+        memory_copy(path, place, at);
+        memory_copy(path + at, "/mt-lines-check-", 16);
+        at += 16;
+        tree_number(path, address_of at, (positive)system_call(syscall(getpid)));
+        path[at] = 0;
+
+        for (variant = 0; variant < 4; variant++)
+        {
+                //      0 plain, 1 with no last newline, 2 with a line past the bound,
+                //      3 as 0 from the middle of a line.
+                size = lines_make(variant == 2, variant != 1);
+                handle = system_open_at_mode(AT_FDCWD, (string_address)path,
+                                             O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+
+                if (handle < 0)
+                {
+                        check("the lines file could be made", false);
+                        return;
+                }
+
+                {
+                        positive done = 0;
+
+                        while (done < size)
+                        {
+                                bipolar wrote = system_call_3(syscall(write), (positive)handle,
+                                                              (positive)(lines_data + done),
+                                                              size - done);
+
+                                if (wrote <= 0)
+                                        break;
+
+                                done += (positive)wrote;
+                        }
+                }
+
+                system_close((positive)handle);
+
+                if (variant == 2)
+                {
+                        //      The long line ends every run at or before the piece that
+                        //      holds it; nothing after it is taken.
+                        static const positive chunks[] = {4096, 30000};
+                        positive round;
+
+                        for (round = 0; round < 2; round++)
+                        {
+                                parallel_lines run;
+                                positive long_at = 0;
+                                positive number = 0;
+
+                                handle = system_open_at(AT_FDCWD, (string_address)path,
+                                                        FILE_READ | O_CLOEXEC);
+                                parallel_reset(3);
+
+                                for (long_at = 0; number < 4000; long_at++)
+                                        number += lines_data[long_at] == '\n';
+
+                                lines_refuse_at = positive_max;
+                                lines_wrong = 0;
+                                lines_start = 0;
+                                lines_expected_offset = size;
+
+                                if (!parallel_lines_open(address_of run, (positive)handle, 0, size,
+                                                         '\n', chunks[round]))
+                                {
+                                        long_stops = false;
+                                        system_close((positive)handle);
+                                        continue;
+                                }
+
+                                parallel_lines_for(address_of run, lines_kernel, null);
+                                long_stops = long_stops && run.taken < run.count &&
+                                             run.resume <= long_at && run.resume > 0 &&
+                                             lines_data[run.resume - 1] == '\n' &&
+                                             lines_wrong == 0;
+                                parallel_lines_close(address_of run);
+                                system_close((positive)handle);
+                        }
+                }
+                else
+                {
+                        lock_lines_one((string_address)path, size, variant == 3 ? 1234 : 0,
+                                       4096, address_of whole, address_of prefix);
+                        lock_lines_one((string_address)path, size, variant == 3 ? 777 : 0,
+                                       30000, address_of whole, address_of prefix);
+                }
+        }
+
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
+        parallel_reset(0);
+        check("pieces are contiguous, whole, in order and complete at widths 2, 3 and 8, "
+              "from any start and with or without a last newline",
+              whole);
+        check("a refused piece ends what was taken on the edge of a line", prefix);
+        check("a line past the bound stops the pieces at or before it", long_stops);
+}
+
 //      -- the lane ----------------------------------------------------------
 
 b32 main(void)
@@ -49451,6 +49780,7 @@ b32 main(void)
         lock_pool(program_argument_count() > 1 &&
                   !string_compare(program_argument(1), (string_address)"--emulated"));
         lock_tree();
+        lock_lines();
         lock_across_processes();
 
         check("nothing is left counted at the end", threads_live == 0);

@@ -1452,6 +1452,34 @@ static bool text_regular_size(positive handle, positive address_to size)
         return true;
 }
 
+/*
+        The rest of the regular file the input stands on, cut into pieces of
+        whole lines for the pool: whether it is worth doing, with the reader
+        empty and the descriptor where it will be read on from. A tool that
+        takes the pieces it can and leaves the rest to its serial loop calls
+        text_lines_done, which puts the descriptor where the pieces stopped.
+*/
+static bool text_lines_open(parallel_lines address_to run, p8 delimiter)
+{
+        positive size = 0;
+        bipolar at;
+
+        if (text_input.position < text_input.filled || text_input.finished ||
+            text_input.failed || !text_regular_size(text_input.handle, address_of size))
+                return false;
+
+        at = system_seek(text_input.handle, 0, FILE_SEEK_CUR);
+
+        return at >= 0 && parallel_lines_open(run, text_input.handle, (positive)at, size,
+                                              delimiter, 0);
+}
+
+static fn text_lines_done(parallel_lines address_to run)
+{
+        system_seek(text_input.handle, run->resume, FILE_SEEK_SET);
+        parallel_lines_close(run);
+}
+
 static b32 address_to text_files;
 static positive text_files_room;
 
@@ -6253,7 +6281,7 @@ static p32 wc_specials[WC_SPECIALS];
 
 static fn wc_bytes_longest(const p8 address_to at, positive left, bool want_lines,
                            positive address_to lines_out, positive address_to longest_out,
-                           positive address_to column_out)
+                           positive address_to column_out, p32 address_to wc_specials)
 {
         positive lines = address_to lines_out;
         positive longest = address_to longest_out;
@@ -6296,6 +6324,140 @@ static fn wc_bytes_longest(const p8 address_to at, positive left, bool want_line
         address_to lines_out = lines;
         address_to longest_out = longest;
         address_to column_out = column;
+}
+
+/*
+        The words of a run of single-byte text, from the word state the byte
+        before it left. A byte 0xa0 is U+00A0, a no-break space, which GNU's
+        wc splits words at in the C locale unless POSIXLY_CORRECT is set. The
+        counting pass knows only ASCII white space, so a run holding one is
+        counted between them, the word state ending at each.
+*/
+static positive wc_bytes_words(const p8 address_to at, positive left, bool posix,
+                               bool address_to inside)
+{
+        const p8 address_to from = at;
+        const p8 address_to past = at + left;
+        positive words = 0;
+
+        for (;;)
+        {
+                const p8 address_to stop = posix ? null
+                    : (const p8 address_to)memory_first_of(from, 0xa0, (positive)(past - from));
+                positive run = (positive)((stop ? stop : past) - from);
+                positive2 counted_words = memory_count_words(from, run, address_to inside);
+
+                words += counted_words.x;
+                address_to inside = (bool)counted_words.y;
+
+                if (!stop)
+                        break;
+
+                address_to inside = false;
+                from = stop + 1;
+        }
+
+        return words;
+}
+
+/*
+        wc over the pieces of a file. A line's beginning resets everything wc
+        carries -- the word state, the column, the bytes of a character not
+        yet whole -- so the counts of a piece of whole lines are the same as
+        the serial loop's over those bytes, and lines, words and characters
+        add up across pieces where the longest line is the greatest. What a
+        piece refuses, or the file past the last piece taken, is the serial
+        loop's, which goes on with these counts in hand.
+*/
+typedef struct
+{
+        bool utf8, posix, want_lines, want_words, want_longest;
+        positive address_to results;
+        positive bytes, lines, words, chars, longest;
+} wc_pieces;
+
+static bool wc_pieces_kernel(address_any context, positive index, p8 address_to lines,
+                             positive length, positive offset)
+{
+        wc_pieces address_to run = context;
+        positive address_to into = run->results + index * 4;
+        positive counted = 0, words = 0, chars = length, longest = 0, column = 0;
+
+        if (run->utf8)
+        {
+                wc_utf8 wide = {.posix = run->posix, .want_words = run->want_words,
+                                .want_longest = run->want_longest};
+
+                if (run->want_lines)
+                        counted = memory_count(lines, length, '\n');
+
+                wc_utf8_block(address_of wide, lines, length);
+                wc_utf8_finish(address_of wide);
+                chars = wide.chars;
+                words = wide.words;
+                longest = wide.longest;
+                column = wide.column;
+        }
+        else
+        {
+                p32 specials[WC_SPECIALS];
+                bool inside = false;
+
+                if (run->want_longest)
+                        wc_bytes_longest(lines, length, run->want_lines, address_of counted,
+                                         address_of longest, address_of column, specials);
+                else if (run->want_lines)
+                        counted = memory_count(lines, length, '\n');
+
+                if (run->want_words)
+                        words = wc_bytes_words(lines, length, run->posix, address_of inside);
+        }
+
+        into[0] = counted;
+        into[1] = words;
+        into[2] = chars;
+        into[3] = column > longest ? column : longest;
+        return true;
+}
+
+// True when pieces answered some of the input; its counts are in the run.
+static bool wc_pieces_count(wc_pieces address_to run)
+{
+        parallel_lines pieces;
+        positive size = 0;
+        positive at;
+
+        if (!text_lines_open(address_of pieces, '\n'))
+                return false;
+
+        size = pieces.count * 4 * sizeof(positive);
+        run->results = (positive address_to)(address_any)memory_checked(size);
+
+        if (!run->results)
+        {
+                parallel_lines_close(address_of pieces);
+                return false;
+        }
+
+        run->bytes = run->lines = run->words = run->chars = run->longest = 0;
+        parallel_lines_for(address_of pieces, wc_pieces_kernel, run);
+
+        for (at = 0; at < pieces.taken; at++)
+        {
+                positive address_to from = run->results + at * 4;
+
+                run->lines += from[0];
+                run->words += from[1];
+                run->chars += from[2];
+
+                if (from[3] > run->longest)
+                        run->longest = from[3];
+        }
+
+        run->bytes = pieces.resume - pieces.start;
+        text_lines_done(address_of pieces);
+        memory_free(run->results, size);
+        return true;
 }
 
 static bool cksum_hwcap_allowed(string_address name);
@@ -6499,6 +6661,29 @@ static b32 text_wc()
                         }
                 }
 
+                {
+                        wc_pieces pieces = {.utf8 = utf8, .posix = posix, .want_lines = want_lines,
+                                            .want_words = want_words,
+                                            .want_longest = want_longest};
+
+                        if ((want_lines || want_words || want_longest || (want_chars && utf8)) &&
+                            wc_pieces_count(address_of pieces))
+                        {
+                                bytes += pieces.bytes;
+                                lines += pieces.lines;
+                                longest = pieces.longest;
+
+                                if (utf8)
+                                {
+                                        wide.words = pieces.words;
+                                        wide.chars = pieces.chars;
+                                        wide.longest = pieces.longest;
+                                }
+                                else
+                                        words += pieces.words;
+                        }
+                }
+
                 while (text_fill())
                 {
                         p8 address_to at = text_input.buffer + text_input.position;
@@ -6541,7 +6726,8 @@ static b32 text_wc()
                         */
                         if (want_longest)
                                 wc_bytes_longest(at, left, want_lines, address_of lines,
-                                                 address_of longest, address_of column);
+                                                 address_of longest, address_of column,
+                                                 wc_specials);
                         else if (want_lines)
                                 lines += memory_count(at, left, '\n');
 
@@ -6555,29 +6741,7 @@ static b32 text_wc()
                                 them, the word state ending at each.
                         */
                         if (want_words)
-                        {
-                                p8 address_to from = at;
-                                p8 address_to past = at + left;
-
-                                for (;;)
-                                {
-                                        p8 address_to stop = posix ? null
-                                            : (p8 address_to)memory_first_of(
-                                                  from, 0xa0, (positive)(past - from));
-                                        positive run = (positive)((stop ? stop : past) - from);
-                                        positive2 counted_words =
-                                            memory_count_words(from, run, inside);
-
-                                        words += counted_words.x;
-                                        inside = (bool)counted_words.y;
-
-                                        if (!stop)
-                                                break;
-
-                                        inside = false;
-                                        from = stop + 1;
-                                }
-                        }
+                                words += wc_bytes_words(at, left, posix, address_of inside);
 
                         text_input.position = text_input.filled;
                 }
@@ -7155,6 +7319,122 @@ static inline INLINE fn rev_characters(p8 address_to at, positive length)
         memory_reverse(at, length);
 }
 
+/*
+        Whole lines reversed at once, into an output the caller reserved as
+        long as the lines are: every line end in the read comes from one
+        library pass and each line is copied and turned over where it lands.
+        What is answered is how many bytes of the read were taken, all whole
+        lines. The line reader's way keeps the lines this does not take, and
+        the pool's jobs run it over a piece with an offsets array of their own.
+*/
+#define REV_OFFSETS 4096
+
+static inline INLINE positive rev_lines_into(p8 address_to out, positive address_to made_out,
+                                             p32 address_to offsets, p8 address_to base,
+                                             positive left, bool utf8)
+{
+        positive made = 0;
+        positive line_start = 0;
+        positive scan = 0;
+
+        for (;;)
+        {
+                positive count = memory_offsets_of_either(offsets, base + scan, left - scan,
+                                                          text_delimiter, text_delimiter,
+                                                          REV_OFFSETS);
+
+                for (positive i = 0; i < count; i++)
+                {
+                        positive ending = scan + offsets[i];
+                        positive length = ending - line_start;
+
+                        memory_copy_apart(out + made, base + line_start, length);
+
+                        if (utf8)
+                                rev_characters(out + made, length);
+                        else
+                                memory_reverse(out + made, length);
+
+                        made += length;
+                        out[made++] = text_delimiter;
+                        line_start = ending + 1;
+                }
+
+                if (count < REV_OFFSETS)
+                        break;
+
+                scan += offsets[count - 1] + 1;
+        }
+
+        address_to made_out = made;
+        return line_start;
+}
+
+static positive rev_lines(p8 address_to base, positive left, bool utf8)
+{
+        static p32 offsets[REV_OFFSETS];
+        p8 address_to out = text_reserve(left);
+        positive made = 0;
+
+        if (!out)
+                return 0;
+
+        positive took = rev_lines_into(out, address_of made, offsets, base, left, utf8);
+
+        text_out_used -= left - made;
+        return took;
+}
+
+// Whether the run's lines are turned over by their characters.
+static bool rev_pieces_utf8;
+
+static bool rev_pieces_emit(address_any context, positive index, p8 address_to lines,
+                            positive length, positive offset,
+                            parallel_output address_to output)
+{
+        p32 offsets[REV_OFFSETS];
+        positive made = 0;
+        p8 address_to out = parallel_reserve(output, length);
+
+        (void)context;
+        (void)index;
+        (void)offset;
+
+        if (!out)
+                return false;
+
+        positive took = rev_lines_into(out, address_of made, offsets, lines, length,
+                                       rev_pieces_utf8);
+
+        output->used -= length - made;
+        return took == length;
+}
+
+static bool rev_pieces_sink(address_any context, positive index, address_any data,
+                            positive length)
+{
+        (void)context;
+        (void)index;
+
+        if (length)
+                text_put(data, length);
+
+        return !text_out_failed;
+}
+
+// The input's pieces, as far as they go; the descriptor is left where they stop.
+static fn rev_pieces_run(bool utf8)
+{
+        parallel_lines pieces;
+
+        if (!text_lines_open(address_of pieces, text_delimiter))
+                return;
+
+        rev_pieces_utf8 = utf8;
+        parallel_lines_ordered(address_of pieces, rev_pieces_emit, rev_pieces_sink, null);
+        text_lines_done(address_of pieces);
+}
+
 
 /*
         Whether bytes are all characters in UTF-8, which is what GNU's grep
@@ -7205,9 +7485,35 @@ static b32 text_rev()
 
                 p8 address_to line;
                 positive length;
-                while (text_line_view(address_of line, address_of length,
-                                      null, 0, null))
+
+                // Under STRICT_REFERENCE a file is looked at whole before any of it
+                // is printed in a UTF-8 locale, which the line reader does.
+#if MOONWATER_STRICT == STRICT_REFERENCE
+                bool bulk = !utf8;
+#else
+                bool bulk = true;
+#endif
+
+                if (bulk)
+                        rev_pieces_run(utf8);
+
+                for (;;)
                 {
+                        if (bulk && text_fill())
+                        {
+                                positive took = rev_lines(text_input.buffer + text_input.position,
+                                                          text_input.filled - text_input.position,
+                                                          utf8);
+
+                                text_input.position += took;
+
+                                if (took)
+                                        continue;
+                        }
+
+                        if (!text_line_view(address_of line, address_of length, null, 0, null))
+                                break;
+
 #if MOONWATER_STRICT == STRICT_REFERENCE
                         if (utf8 && !text_utf8_whole((string_address)line, length))
                         {
@@ -19338,7 +19644,7 @@ static const argument_option cut_options[] = {
 #define CUT_FIELDS 4096
 
 static p32 cut_offsets[CUT_OFFSETS];
-static p32 cut_fields[CUT_FIELDS];
+static p32 cut_marks[CUT_FIELDS];
 
 /*
         One range of fields, first to last, over a whole read: the delimiters
@@ -19353,17 +19659,13 @@ static p32 cut_fields[CUT_FIELDS];
         instructions (cut -d: -f2 over 18 MB, 11.3 M cycles at 5f31feaf,
         13.3 M after 0862f47f moved it); on its own it is back to 11.4 M.
 */
-__attribute__((noinline)) static positive cut_lines_range(
+static inline INLINE positive cut_lines_range_body(
+    p8 address_to out, positive address_to made_out, p32 address_to offsets,
     p8 address_to base, positive left, p8 delimiter, bool only_delimited)
 {
         positive first = text_list_single_first;
         positive last = text_list_single_last == TEXT_UNSET ? positive_max
                                                             : text_list_single_last;
-        p8 address_to out = text_reserve(left);
-
-        if (!out)
-                return 0;
-
         positive made = 0;
         positive line_start = 0;
         positive scan = 0;
@@ -19375,11 +19677,11 @@ __attribute__((noinline)) static positive cut_lines_range(
         for (;;)
         {
                 positive count = memory_offsets_of_either(
-                    cut_offsets, base + scan, left - scan, delimiter, newline, CUT_OFFSETS);
+                    offsets, base + scan, left - scan, delimiter, newline, CUT_OFFSETS);
 
                 for (positive i = 0; i < count; i++)
                 {
-                        positive at = scan + cut_offsets[i];
+                        positive at = scan + offsets[i];
 
                         if (base[at] != newline)
                         {
@@ -19427,42 +19729,82 @@ __attribute__((noinline)) static positive cut_lines_range(
                 if (count < CUT_OFFSETS)
                         break;
 
-                scan += cut_offsets[count - 1] + 1;
+                scan += offsets[count - 1] + 1;
         }
 
-        text_out_used -= left - made;
+        address_to made_out = made;
         return line_start;
 }
 
-static positive cut_lines(p8 address_to base, positive left, p8 delimiter,
-                          bool complement, bool only_delimited)
+/*
+        The serial run's copy has the scratch array it always had, a constant
+        to it, and the pool's has one on its job's stack: written once, built
+        twice, each out of line.
+*/
+__attribute__((noinline)) static positive cut_lines_range(
+    p8 address_to base, positive left, p8 delimiter, bool only_delimited)
+{
+        p8 address_to out = text_reserve(left);
+        positive made = 0;
+
+        if (!out)
+                return 0;
+
+        positive took = cut_lines_range_body(out, address_of made, cut_offsets, base, left,
+                                             delimiter, only_delimited);
+
+        text_out_used -= left - made;
+        return took;
+}
+
+__attribute__((noinline)) static positive cut_lines_range_pooled(
+    p8 address_to out, positive address_to made_out, p32 address_to offsets, p8 address_to base,
+    positive left, p8 delimiter, bool only_delimited)
+{
+        return cut_lines_range_body(out, made_out, offsets, base, left, delimiter,
+                                    only_delimited);
+}
+
+/*
+        Whole lines of fields, into an output the caller reserved as long as
+        the lines are -- a line is never longer cut than whole. What was made
+        is answered beside how many bytes of the input were taken, which stops
+        short of a line with more fields than the table keeps or one as long as
+        a reservation, and the scratch arrays are the caller's, so a job of the
+        pool can run it beside the serial loop.
+*/
+static inline INLINE positive cut_lines_into(p8 address_to out, positive address_to made_out,
+                                             p32 address_to offsets, p32 address_to marks,
+                                             p8 address_to base, positive left, p8 delimiter,
+                                             bool complement, bool only_delimited,
+                                             bool pooled)
 {
         positive line_start = 0;
         positive fields = 0;
         positive scan = 0;
+        positive made = 0;
 
-        _Static_assert(TEXT_READ_MAX <= TEXT_OUT_MAX,
-                       "a read's cut must fit one reservation");
-
-        if (text_list_single && !complement)
-                return cut_lines_range(base, left, delimiter, only_delimited);
+        // The serial run took this path before it reserved anything.
+        if (pooled && text_list_single && !complement)
+                return cut_lines_range_pooled(out, made_out, offsets, base, left,
+                                              delimiter, only_delimited);
 
         for (;;)
         {
                 positive count = memory_offsets_of_either(
-                    cut_offsets, base + scan, left - scan, delimiter,
+                    offsets, base + scan, left - scan, delimiter,
                     text_delimiter, CUT_OFFSETS);
 
                 for (positive i = 0; i < count; i++)
                 {
-                        positive ending = scan + cut_offsets[i];
+                        positive ending = scan + offsets[i];
 
                         if (base[ending] != text_delimiter)
                         {
                                 if (fields == CUT_FIELDS)
-                                        return line_start;
+                                        goto stop;
 
-                                cut_fields[fields++] = (p32)ending;
+                                marks[fields++] = (p32)ending;
                                 continue;
                         }
 
@@ -19472,19 +19814,17 @@ static positive cut_lines(p8 address_to base, positive left, p8 delimiter,
                         if (!fields)
                         {
                                 if (!only_delimited)
-                                        text_put(line, line_length + 1);
+                                {
+                                        memory_copy_apart(out + made, line, line_length + 1);
+                                        made += line_length + 1;
+                                }
                         }
                         else
                         {
                                 if (line_length + 1 > TEXT_OUT_MAX)
-                                        return line_start;
+                                        goto stop;
 
-                                positive reserved = line_length + 1;
-                                p8 address_to out = text_reserve(reserved);
-
-                                if (!out)
-                                        return line_start;
-
+                                p8 address_to into = out + made;
                                 positive out_length = 0;
                                 positive from = line_start;
                                 positive which = 1;
@@ -19492,14 +19832,14 @@ static positive cut_lines(p8 address_to base, positive left, p8 delimiter,
 
                                 for (positive f = 0;; f++)
                                 {
-                                        positive at = f < fields ? cut_fields[f] : ending;
+                                        positive at = f < fields ? marks[f] : ending;
 
                                         if (text_list_has(which) != complement)
                                         {
                                                 if (wrote)
-                                                        out[out_length++] = delimiter;
+                                                        into[out_length++] = delimiter;
 
-                                                memory_copy_apart(out + out_length, base + from,
+                                                memory_copy_apart(into + out_length, base + from,
                                                                   at - from);
                                                 out_length += at - from;
                                                 wrote = true;
@@ -19515,9 +19855,9 @@ static positive cut_lines(p8 address_to base, positive left, p8 delimiter,
                                                 if (complement)
                                                 {
                                                         if (wrote)
-                                                                out[out_length++] = delimiter;
+                                                                into[out_length++] = delimiter;
 
-                                                        memory_copy_apart(out + out_length,
+                                                        memory_copy_apart(into + out_length,
                                                                           base + at + 1,
                                                                           ending - at - 1);
                                                         out_length += ending - at - 1;
@@ -19530,8 +19870,8 @@ static positive cut_lines(p8 address_to base, positive left, p8 delimiter,
                                         which++;
                                 }
 
-                                out[out_length++] = text_delimiter;
-                                text_out_used -= reserved - out_length;
+                                into[out_length++] = text_delimiter;
+                                made += out_length;
                         }
 
                         line_start = ending + 1;
@@ -19539,10 +19879,284 @@ static positive cut_lines(p8 address_to base, positive left, p8 delimiter,
                 }
 
                 if (count < CUT_OFFSETS)
-                        return line_start;
+                        break;
 
-                scan += cut_offsets[count - 1] + 1;
+                scan += offsets[count - 1] + 1;
         }
+
+stop:
+        address_to made_out = made;
+        return line_start;
+}
+
+// One reservation for what a read's whole lines make, given back to the size
+// they made: the serial writer's way to the kernel above.
+static positive cut_lines(p8 address_to base, positive left, p8 delimiter,
+                          bool complement, bool only_delimited)
+{
+        _Static_assert(TEXT_READ_MAX <= TEXT_OUT_MAX,
+                       "a read's cut must fit one reservation");
+
+        if (text_list_single && !complement)
+                return cut_lines_range(base, left, delimiter, only_delimited);
+
+        p8 address_to out = text_reserve(left);
+        positive made = 0;
+
+        if (!out)
+                return 0;
+
+        positive took = cut_lines_into(out, address_of made, cut_offsets, cut_marks, base,
+                                       left, delimiter, complement, only_delimited, false);
+
+        text_out_used -= left - made;
+        return took;
+}
+
+/*
+        cut -b and -c over whole lines at once, as cut_lines_into does fields:
+        every line end in the read comes from one library pass, and each line
+        is the copies its list makes of it and a line end. One range, kept or
+        left out, or a list of them written one after another; a list whose
+        ranges are set apart by an output delimiter is the byte walk's. A copy
+        of a few bytes is two sixteen-byte moves where the input and the
+        output both have the room, as the fields' range has, and whatever
+        lands past what is kept is written over next.
+*/
+static inline INLINE p8 address_to cut_bytes_copy(p8 address_to out, p8 address_to from,
+                                                  positive size, p8 address_to room_in,
+                                                  p8 address_to room_out)
+{
+        if (size <= 32 && from + 32 <= room_in && out + 32 <= room_out)
+        {
+                __builtin_memcpy(out, from, 16);
+                __builtin_memcpy(out + 16, from + 16, 16);
+                return out + size;
+        }
+
+        return memory_copy_apart_end(out, from, size);
+}
+
+/*
+        A line whose characters are not its bytes, cut by characters with no
+        output delimiter between the runs: the list is asked about a run of
+        characters at a time, the marks say how far one goes, and the bytes of
+        a kept run are one copy. What is made is never longer than the line.
+        The same walk as the serial loop's below it, which keeps the
+        separator's case.
+*/
+static positive cut_characters_into(p8 address_to out, p8 address_to line, positive length,
+                                    bool complement)
+{
+        positive made = 0;
+        positive at = 0;
+        positive which = 1;
+
+        while (at < length)
+        {
+                bool take = text_list_has(which) != complement;
+                positive run = 1;
+
+                if (text_list_open ? which >= text_list_open : which >= text_list_used)
+                        run = positive_max;
+                else if (which < text_list_room)
+                {
+                        positive limit = text_list_room - which;
+
+                        if (text_list_open && text_list_open - which < limit)
+                                limit = text_list_open - which;
+
+                        run = memory_span_byte(text_list + which, text_list[which], limit);
+                }
+
+                if (!take && run == positive_max)
+                        break;
+
+                positive2 span = memory_utf8_span(line + at, length - at, run);
+
+                if (take)
+                {
+                        memory_copy_apart(out + made, line + at, span.x);
+                        made += span.x;
+                }
+
+                at += span.x;
+                which += span.y;
+        }
+
+        return made;
+}
+
+static inline INLINE positive cut_bytes_into(p8 address_to out, positive address_to made_out,
+                                             p32 address_to offsets, p8 address_to base,
+                                             positive left, bool complement, bool single,
+                                             bool characters)
+{
+        p8 address_to at_out = out;
+        p8 address_to room_in = base + left;
+        p8 address_to room_out = out + left;
+        positive line_start = 0;
+        positive scan = 0;
+
+        for (;;)
+        {
+                positive count = memory_offsets_of_either(
+                    offsets, base + scan, left - scan, text_delimiter, text_delimiter,
+                    CUT_OFFSETS);
+
+                for (positive i = 0; i < count; i++)
+                {
+                        positive ending = scan + offsets[i];
+                        p8 address_to line = base + line_start;
+                        positive length = ending - line_start;
+
+                        // Where characters are not bytes, only a line that has one
+                        // that is not is walked by them.
+                        if (characters &&
+                            memory_utf8_span(line, length, positive_max).y != length)
+                                at_out += cut_characters_into(at_out, line, length, complement);
+                        else if (single)
+                        {
+                                positive from = min(text_list_single_first - 1, length);
+                                positive through = text_list_single_last == TEXT_UNSET
+                                                       ? length
+                                                       : min(text_list_single_last, length);
+
+                                if (through < from)
+                                {
+                                        if (complement)
+                                                at_out = cut_bytes_copy(at_out, line, length,
+                                                                        room_in, room_out);
+                                }
+                                else if (complement)
+                                {
+                                        at_out = cut_bytes_copy(at_out, line, from, room_in,
+                                                                room_out);
+                                        at_out = cut_bytes_copy(at_out, line + through,
+                                                                length - through, room_in,
+                                                                room_out);
+                                }
+                                else if (through > from)
+                                        at_out = cut_bytes_copy(at_out, line + from,
+                                                                through - from, room_in,
+                                                                room_out);
+                        }
+                        else
+                        {
+                                for (positive s = 0; s < text_spans_count; s++)
+                                {
+                                        text_span address_to span = text_spans + s;
+
+                                        if (span->first > length)
+                                                break;
+
+                                        positive through = min(span->last, length);
+
+                                        at_out = cut_bytes_copy(at_out, line + span->first - 1,
+                                                                through - span->first + 1,
+                                                                room_in, room_out);
+                                }
+                        }
+
+                        *at_out++ = text_delimiter;
+                        line_start = ending + 1;
+                }
+
+                if (count < CUT_OFFSETS)
+                        break;
+
+                scan += offsets[count - 1] + 1;
+        }
+
+        address_to made_out = (positive)(at_out - out);
+        return line_start;
+}
+
+static positive cut_bytes(p8 address_to base, positive left, bool complement, bool single,
+                          bool characters)
+{
+        p8 address_to out = text_reserve(left);
+        positive made = 0;
+
+        if (!out)
+                return 0;
+
+        positive took = cut_bytes_into(out, address_of made, cut_offsets, base, left,
+                                       complement, single, characters);
+
+        text_out_used -= left - made;
+        return took;
+}
+
+/*
+        cut over the pieces of a regular file. A line is cut by itself, so a
+        piece of whole lines is cut by the same kernels the serial loop runs
+        over a read, into an output of its own that the pool hands to the sink
+        in order. A piece that a kernel does not take whole -- a line with too
+        many fields, or a last line with no end -- is left, and the serial loop
+        takes the file from its edge, which is what it would have done with
+        the rest.
+*/
+typedef struct
+{
+        bool by_field, complement, only_delimited, single, characters;
+        p8 delimiter;
+} cut_pieces;
+
+static bool cut_pieces_emit(address_any context, positive index, p8 address_to lines,
+                            positive length, positive offset,
+                            parallel_output address_to output)
+{
+        cut_pieces address_to run = context;
+        p32 offsets[CUT_OFFSETS];
+        p32 marks[CUT_FIELDS];
+        positive made = 0;
+        positive took;
+        p8 address_to out;
+
+        (void)index;
+        (void)offset;
+
+        out = parallel_reserve(output, length + 32);
+
+        if (!out)
+                return false;
+
+        took = run->by_field
+                   ? cut_lines_into(out, address_of made, offsets, marks, lines, length,
+                                    run->delimiter, run->complement, run->only_delimited, true)
+                   : cut_bytes_into(out, address_of made, offsets, lines, length,
+                                    run->complement, run->single,
+                                    run->characters &&
+                                        string_span_max(lines, length, text_set_ascii) != length);
+
+        output->used -= length + 32 - made;
+        return took == length;
+}
+
+static bool cut_pieces_sink(address_any context, positive index, address_any data,
+                            positive length)
+{
+        (void)context;
+        (void)index;
+
+        if (length)
+                text_put(data, length);
+
+        return !text_out_failed;
+}
+
+// True when pieces answered some of the input; the descriptor is where they stopped.
+static bool cut_pieces_run(cut_pieces address_to run)
+{
+        parallel_lines pieces;
+
+        if (!text_lines_open(address_of pieces, text_delimiter))
+                return false;
+
+        parallel_lines_ordered(address_of pieces, cut_pieces_emit, cut_pieces_sink, run);
+        text_lines_done(address_of pieces);
+        return true;
 }
 
 // The one record cut makes of its input when the field delimiter ends
@@ -19993,6 +20607,14 @@ static b32 text_cut()
         if (nothing_selected)
                 whole_lines = false;
 
+        // -b and -c that are one range, or ranges written one after another,
+        // go a read at a time too.
+        bool bytes_single = by_character && text_list_single &&
+                            (!complement || !separator);
+        bool bytes_lines = bytes_single || (spans && !separator);
+        positive ascii_fills = 0;
+        bool ascii_read = false;
+
         for (b32 i = 0; i < inputs; i++)
         {
                 if (!text_open(text_file_name(i)))
@@ -20000,6 +20622,18 @@ static b32 text_cut()
 
                 bool record_taken = false;
                 bool record_ended = false;
+
+                if ((whole_lines || bytes_lines) && !whole_record)
+                {
+                        cut_pieces pieces = {.by_field = whole_lines,
+                                             .complement = complement,
+                                             .only_delimited = only_delimited,
+                                             .single = bytes_single,
+                                             .characters = characters,
+                                             .delimiter = delimiter};
+
+                        cut_pieces_run(address_of pieces);
+                }
 
                 for (;;)
                 {
@@ -20046,6 +20680,33 @@ static b32 text_cut()
                                     text_input.buffer + text_input.position,
                                     text_input.filled - text_input.position,
                                     delimiter, complement, only_delimited);
+
+                                text_input.position += took;
+
+                                if (took)
+                                        continue;
+                        }
+
+                        if (bytes_lines && text_fill())
+                        {
+                                p8 address_to at = text_input.buffer + text_input.position;
+                                positive left = text_input.filled - text_input.position;
+                                positive took = 0;
+
+                                // Where characters are not bytes, a read that is all
+                                // ASCII skips asking each line, and a read is looked at
+                                // once, not for every line taken from it.
+                                if (characters && text_input.fills != ascii_fills)
+                                {
+                                        ascii_fills = text_input.fills;
+                                        ascii_read = string_span_max(text_input.buffer,
+                                                                     text_input.filled,
+                                                                     text_set_ascii) ==
+                                                     text_input.filled;
+                                }
+
+                                took = cut_bytes(at, left, complement, bytes_single,
+                                                 characters && !ascii_read);
 
                                 text_input.position += took;
 
@@ -24595,6 +25256,30 @@ static grep_plan grep_plan_of(const grep_run address_to run,
 }
 
 /*
+        What a file read on the pool needs to know of the run it is in, and
+        what it hands back: matches, and how far it read.
+*/
+typedef struct
+{
+        grep_run address_to run;
+        string_address name;
+        positive name_length;
+        positive column;
+        // The modes grep_one settled, as the spans take them.
+        bool first_mode, printing, plain, numbered, check_encoding, zap_hits;
+        // The file is looked at for NULs: a piece that holds one is the
+        // serial loop's, and a printing run asks the whole file first.
+        bool watch_nul;
+        // Answers, all counted from the first byte read.
+        positive matches, number, consumed;
+        bool stopped;
+        // A write to standard output failed.
+        bool failed;
+} grep_pieces;
+
+static bool grep_pieces_search(grep_pieces address_to task);
+
+/*
         One input, read and answered: a named file, standard input when name
         is null, or a file a walk's job handed back. False when -q has its
         answer.
@@ -24838,6 +25523,40 @@ static bool grep_one(grep_run address_to run, string_address name)
                 // listing or a question stops at it.
                 bool settles = printing ||
                                (grep_binary_files == GREP_BINARY_WITHOUT && first_mode);
+
+                /*
+                        A regular file, a few megabytes on, is read on the
+                        pool a piece of whole lines at a time. What it takes
+                        is exactly what this loop would have taken from the
+                        first byte, and the loop goes on from where the
+                        pieces stop: at the end of the file when nothing was
+                        refused, else at whatever the pieces would not
+                        answer, which it answers as ever.
+                */
+                if (limit == TEXT_UNSET && !directory && !never && !null_data &&
+                    input_known && (input_facts.mode & MODE_FORMAT) == MODE_FILE &&
+                    grep_binary_files != GREP_BINARY_WITHOUT)
+                {
+                        grep_pieces task = {
+                            .run = run, .name = shown_name, .name_length = shown_length,
+                            .column = grep_column, .first_mode = first_mode,
+                            .printing = printing, .plain = plain_output,
+                            .numbered = grep_numbered, .check_encoding = check_encoding,
+                            .zap_hits = zap_hits, .watch_nul = binary_watch,
+                        };
+
+                        if (grep_pieces_search(address_of task))
+                        {
+                                state.matches = task.matches;
+                                state.number = task.number;
+                                state.offset = task.consumed;
+                                state.done = task.stopped;
+                                binary.clean_to = task.consumed;
+
+                                if (task.failed)
+                                        state.done = true;
+                        }
+                }
 
                 while (!state.done && text_fill())
                 {
@@ -25639,6 +26358,197 @@ static rx_dfa_cache address_to grep_slot_dfa(grep_slot address_to scratch)
         }
 
         return scratch->dfa;
+}
+
+/*
+        The pieces of one file. The file is cut into whole lines by
+        parallel_lines, and a piece is searched by the span engine with a
+        slot's own machine, as a leaf searches a file, so what a line makes of
+        the output is what the serial loop made of it: the same plan and state,
+        seeded with where the piece stands in the file -- its bytes from the
+        first read, its lines before it. Two things are the serial loop's and
+        nobody else's. The binary rule decides a file from the region with its
+        first NUL on, so a file with a NUL in it is left to that loop: a
+        counting run refuses the first piece that holds one and goes on from
+        there, and a printing run finds out first, in a pass that also
+        counts the lines for -n, since lines already printed cannot be taken
+        back. And a line the machine gives up on or one that cannot be
+        printed is said by the serial loop, from its piece on.
+*/
+typedef struct
+{
+        grep_pieces address_to task;
+        positive origin;
+        positive address_to matches;
+        positive address_to lines;
+        positive address_to base;
+} grep_pieces_run;
+
+// A slot's machine, without the buffer a leaf reads its file into.
+static grep_slot address_to grep_slot_get(void)
+{
+        positive slot = parallel_slot();
+
+        return slot < grep_slots_have ? grep_slots + slot : null;
+}
+
+// The pass a printing run makes first: the lines of a piece, and no NUL in it.
+static bool grep_pieces_scan(address_any context, positive index, p8 address_to lines,
+                             positive length, positive offset)
+{
+        grep_pieces_run address_to run = context;
+
+        (void)offset;
+
+        if (run->task->watch_nul && memory_first_of(lines, 0, length))
+                return false;
+
+        run->lines[index] = memory_count(lines, length, text_delimiter);
+        return true;
+}
+
+static bool grep_pieces_search_one(address_any context, positive index,
+                                   p8 address_to lines, positive length, positive offset,
+                                   parallel_output address_to output)
+{
+        grep_pieces_run address_to run = context;
+        grep_pieces address_to task = run->task;
+        grep_run address_to grep = task->run;
+        grep_slot address_to scratch = grep_slot_get();
+        bool graph = !grep->literal_proves && !grep->literal_set;
+
+        if (!scratch)
+                return false;
+
+        // A line of the last piece with no end is given one, as the line
+        // reader gives it; the piece's scratch has room past what it holds.
+        if (length && lines[length - 1] != text_delimiter)
+                lines[length++] = text_delimiter;
+
+        if (task->watch_nul && !task->printing && memory_first_of(lines, 0, length))
+                return false;
+
+        grep_plan plan = grep_plan_of(grep, grep->machine ? grep_slot_dfa(scratch) : null,
+                                      TEXT_UNSET, task->first_mode);
+
+        plan.plain = task->plain;
+        plan.numbered = task->numbered;
+        plan.check_encoding = task->check_encoding;
+        plan.whole = true;
+        plan.zap_hits = task->zap_hits;
+
+        grep_state state = {
+            .match = graph ? grep_slot_match(scratch) : null,
+            .name = task->name,
+            .name_length = task->name_length,
+            .output = output,
+            .column = task->column,
+            .number = task->numbered ? run->base[index] : 0,
+            .offset = offset - run->origin,
+        };
+
+        if ((grep->machine && !plan.dfa) || (graph && !state.match))
+                return false;
+
+        grep_span(address_of plan, address_of state, (string_address)lines, length);
+        run->matches[index] = state.matches;
+
+        // A question or a listing has its answer.
+        if (task->first_mode && state.matches)
+                parallel_stop();
+
+        return !state.complex && !state.unprintable &&
+               (task->first_mode || !state.done);
+}
+
+static bool grep_pieces_count(address_any context, positive index, p8 address_to lines,
+                              positive length, positive offset)
+{
+        return grep_pieces_search_one(context, index, lines, length, offset, null);
+}
+
+static bool grep_pieces_sink(address_any context, positive index, address_any data,
+                             positive length)
+{
+        (void)context;
+        (void)index;
+
+        if (length)
+                text_put(data, length);
+
+        return !text_out_failed;
+}
+
+// True when pieces answered some of the file; the task says how much.
+static bool grep_pieces_search(grep_pieces address_to task)
+{
+        parallel_lines pieces;
+        grep_pieces_run run = {.task = task};
+        positive table;
+        positive at;
+        bool prescan = task->printing && (task->watch_nul || task->numbered);
+
+        if (!text_lines_open(address_of pieces, text_delimiter))
+                return false;
+
+        if (!grep_slots_prepare())
+        {
+                parallel_lines_close(address_of pieces);
+                return false;
+        }
+
+        run.origin = pieces.start;
+        table = pieces.count * 3 * sizeof(positive);
+        run.matches = (positive address_to)(address_any)memory_checked(table);
+
+        if (!run.matches)
+        {
+                parallel_lines_close(address_of pieces);
+                grep_slots_release();
+                return false;
+        }
+
+        run.lines = run.matches + pieces.count;
+        run.base = run.lines + pieces.count;
+
+        if (prescan)
+        {
+                parallel_lines_for(address_of pieces, grep_pieces_scan, address_of run);
+
+                // Every piece, or the file is left to the serial loop whole.
+                if (pieces.taken != pieces.count)
+                {
+                        memory_free(run.matches, table);
+                        parallel_lines_close(address_of pieces);
+                        grep_slots_release();
+                        return false;
+                }
+
+                for (at = 1; at < pieces.count; at++)
+                        run.base[at] = run.base[at - 1] + run.lines[at - 1];
+
+                parallel_lines_again(address_of pieces);
+        }
+
+        if (task->printing)
+                parallel_lines_ordered(address_of pieces, grep_pieces_search_one,
+                                       grep_pieces_sink, address_of run);
+        else
+                parallel_lines_for(address_of pieces, grep_pieces_count, address_of run);
+
+        for (at = 0; at < pieces.taken; at++)
+                task->matches += run.matches[at];
+
+        if (prescan && task->numbered && pieces.taken)
+                task->number = run.base[pieces.taken - 1] + run.lines[pieces.taken - 1];
+
+        task->consumed = pieces.resume - pieces.start;
+        task->stopped = task->first_mode && task->matches;
+        task->failed = text_out_failed;
+        text_lines_done(address_of pieces);
+        memory_free(run.matches, table);
+        grep_slots_release();
+        return true;
 }
 
 /*
@@ -27044,11 +27954,33 @@ typedef struct
         bool ended;
         byte_store address_to store;
 } sed_buffer;
+/*
+        What a substitution works in, kept together so that a job of the pool
+        can have one of its own: the pattern space, the store a substitution
+        is built in, the case a replacement is written in, and where the
+        machine runs -- the serial one's, or a slot's. The serial run has the
+        one below, and its names are the fields of it. A job says nothing from
+        where it is: a refused store, a reference the expression has no group
+        for and a machine that gave up are kept here for the serial run to
+        meet again and say.
+*/
+typedef struct
+{
+        sed_buffer pattern;
+        byte_store address_to work_store;
+        p8 case_span, case_once;
+        bool space_full;
+        bool pieces;
+        bool complex;
+        string_address failed;
+        rx_match address_to match;
+} sed_context;
+
+static sed_context sed_serial;
 // Pointed at the stores by text_sed before anything reads them.
-static sed_buffer sed_pattern = {null, 0, true, null};
+#define sed_pattern (sed_serial.pattern)
 static sed_buffer sed_holding = {null, 0, true, null};
-static byte_store address_to sed_work_store;
-#define sed_work (sed_work_store->bytes)
+#define sed_work_store (sed_serial.work_store)
 static positive sed_number;
 static bool sed_quiet;
 static bool sed_last;
@@ -27361,37 +28293,39 @@ static positive sed_wrap = 70;
         into whatever followed it. What does not fit is refused, with the
         status sed keeps for its own failures.
 */
-static bool sed_space_full;
+#define sed_space_full (sed_serial.space_full)
 
-static bool sed_work_byte(positive address_to have, p8 value);
+static bool sed_work_byte(sed_context address_to ctx, positive address_to have, p8 value);
 
-static bool sed_store_fits(byte_store address_to store, positive have, positive more)
+static bool sed_store_fits(sed_context address_to ctx, byte_store address_to store,
+                           positive have, positive more)
 {
         if (more < positive_max - 1 - have &&
             (have + more < store->room ||
              byte_store_reserve(store, have + more + 1, (positive)1 << 16)))
                 return true;
 
-        if (!sed_space_full)
+        if (!ctx->space_full && !ctx->pieces)
                 string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
 
-        sed_space_full = true;
+        ctx->space_full = true;
         return false;
 }
 
 // Room in the work store, where a substitution is built.
-static inline INLINE bool sed_space_fits(positive have, positive more)
+static inline INLINE bool sed_space_fits(sed_context address_to ctx, positive have,
+                                         positive more)
 {
-        return likely(have + more < sed_work_store->room) ||
-               sed_store_fits(sed_work_store, have, more);
+        return likely(have + more < ctx->work_store->room) ||
+               sed_store_fits(ctx, ctx->work_store, have, more);
 }
 
-static bool sed_work_byte(positive address_to have, p8 value)
+static bool sed_work_byte(sed_context address_to ctx, positive address_to have, p8 value)
 {
-        if (!sed_space_fits(address_to have, 1))
+        if (!sed_space_fits(ctx, address_to have, 1))
                 return false;
 
-        sed_work[(address_to have)++] = value;
+        ctx->work_store->bytes[(address_to have)++] = value;
         return true;
 }
 
@@ -27403,14 +28337,11 @@ static bool sed_work_byte(positive address_to have, p8 value)
         Everything a substitution writes -- its literal bytes, the whole
         match, a captured group -- goes through here.
 */
-static p8 sed_case_span;
-static p8 sed_case_once;
-
-static p8 sed_case_apply(p8 value)
+static p8 sed_case_apply(sed_context address_to ctx, p8 value)
 {
-        p8 how = sed_case_once ? sed_case_once : sed_case_span;
+        p8 how = ctx->case_once ? ctx->case_once : ctx->case_span;
 
-        sed_case_once = 0;
+        ctx->case_once = 0;
 
         if (how == 'U')
                 return (p8)byte_to_upper(value);
@@ -27421,30 +28352,30 @@ static p8 sed_case_apply(p8 value)
         return value;
 }
 
-static bool sed_case_byte(positive address_to have, p8 value)
+static bool sed_case_byte(sed_context address_to ctx, positive address_to have, p8 value)
 {
-        return sed_work_byte(have, sed_case_apply(value));
+        return sed_work_byte(ctx, have, sed_case_apply(ctx, value));
 }
 
-static bool sed_case_span_bytes(positive address_to have, p8 address_to from,
-                                positive length)
+static bool sed_case_span_bytes(sed_context address_to ctx, positive address_to have,
+                                p8 address_to from, positive length)
 {
-        if (!sed_space_fits(address_to have, length))
+        if (!sed_space_fits(ctx, address_to have, length))
                 return false;
 
-        p8 address_to into = sed_work + address_to have;
+        p8 address_to into = ctx->work_store->bytes + address_to have;
 
         memory_copy(into, from, length);
         address_to have += length;
 
-        if (sed_case_span == 'U')
+        if (ctx->case_span == 'U')
                 memory_to_upper_ascii(into, length);
-        else if (sed_case_span == 'L')
+        else if (ctx->case_span == 'L')
                 memory_to_lower_ascii(into, length);
 
         // \u and \l win over the span for the one byte in front of them.
-        if (length && sed_case_once)
-                into[0] = sed_case_apply(into[0]);
+        if (length && ctx->case_once)
+                into[0] = sed_case_apply(ctx, into[0]);
 
         return true;
 }
@@ -27453,7 +28384,7 @@ static bool sed_transfer(sed_buffer address_to into,
                          const sed_buffer address_to from, bool append)
 {
         positive start = append ? into->length + 1 : 0;
-        if (!sed_store_fits(into->store, start, from->length))
+        if (!sed_store_fits(address_of sed_serial, into->store, start, from->length))
                 return false;
         into->bytes = into->store->bytes;
         if (append)
@@ -28582,7 +29513,31 @@ static fn sed_put_file(string_address name)
         system_close(handle);
 }
 
-static bool sed_substitute(sed_command address_to command)
+// Where the machine looks for the program `which`: the serial one's own copy,
+// loaded by the caller and saying what it gives up on, or the context's slot.
+static inline INLINE bool sed_find(sed_context address_to ctx, b32 which, p8 mode,
+                                   string_address text, positive length, positive from,
+                                   bool pieces)
+{
+        if (!pieces)
+                return regex_find(mode, text, length, from);
+
+        p8 result = rx_find(ctx->match, &sed_programs[which], mode & ~REGEX_CAPTURES,
+                            mode & REGEX_CAPTURES, text, length, from);
+
+        if (result == RX_COMPLEX)
+                ctx->complex = true;
+
+        return result == RX_MATCH;
+}
+
+/*
+        Written once and built twice, with the answer to "is this a job" known
+        at each call, so that the serial run's copy is the one it always was:
+        the context it works in is a constant and nothing asks where it is.
+*/
+static inline INLINE bool sed_substitute_in(sed_context address_to ctx,
+                                            sed_command address_to command, bool pieces)
 {
         string_address replacement = sed_text + command->text;
         positive at = 0;
@@ -28591,42 +29546,53 @@ static bool sed_substitute(sed_command address_to command)
         positive after_last = TEXT_UNSET;
         bool changed = false;
 
-        if (!sed_use_regex(command->pattern))
-                return false;
+        b32 program = command->pattern;
+        positive address_to slots = pieces ? ctx->match->slots : regex_match.slots;
 
-        regex_current = sed_programs[sed_recent];
-
-        while (at <= sed_pattern.length)
+        if (!pieces)
         {
-                if (!regex_find(REGEX_LONGEST | (command->references ? REGEX_CAPTURES : 0),
-                                sed_pattern.bytes, sed_pattern.length, at))
+                if (!sed_use_regex(command->pattern))
+                        return false;
+
+                program = sed_recent;
+                regex_current = sed_programs[program];
+        }
+
+        while (at <= ctx->pattern.length)
+        {
+                if (!sed_find(ctx, program,
+                              REGEX_LONGEST | (command->references ? REGEX_CAPTURES : 0),
+                              ctx->pattern.bytes, ctx->pattern.length, at, pieces))
                         break;
-                if (command->references > regex_group_count)
+                if (command->references > sed_programs[program].groups)
                 {
-                        sed_failed = (string_address)"invalid reference in replacement";
+                        if (pieces)
+                                ctx->failed = (string_address)"invalid reference in replacement";
+                        else
+                                sed_failed = (string_address)"invalid reference in replacement";
                         return false;
                 }
 
-                positive from = regex_slots[0];
-                positive to = regex_slots[1];
+                positive from = slots[0];
+                positive to = slots[1];
 
-                if (!sed_space_fits(have, from - at))
+                if (!sed_space_fits(ctx, have, from - at))
                         return false;
 
-                memory_copy(sed_work + have, sed_pattern.bytes + at, from - at);
+                memory_copy(ctx->work_store->bytes + have, ctx->pattern.bytes + at, from - at);
                 have += from - at;
 
                 // An empty match sitting where the last one ended is not a
                 // second match: s/a*/X/g over "aaa" is one X, not two.
                 if (from == to && from == after_last)
                 {
-                        if (from >= sed_pattern.length)
+                        if (from >= ctx->pattern.length)
                         {
                                 at = from;
                                 break;
                         }
 
-                        if (!sed_work_byte(address_of have, sed_pattern.bytes[from]))
+                        if (!sed_work_byte(ctx, address_of have, ctx->pattern.bytes[from]))
                                         return false;
                         at = from + 1;
                         continue;
@@ -28638,8 +29604,8 @@ static bool sed_substitute(sed_command address_to command)
 
                 if (now)
                 {
-                        sed_case_span = 0;
-                        sed_case_once = 0;
+                        ctx->case_span = 0;
+                        ctx->case_once = 0;
 
                         for (positive c = 0; replacement[c]; c++)
                         {
@@ -28658,8 +29624,8 @@ static bool sed_substitute(sed_command address_to command)
 
                                         if (byte_is_digit(next))
                                         {
-                                                copy_from = regex_slots[(next - '0') * 2];
-                                                copy_to = regex_slots[(next - '0') * 2 + 1];
+                                                copy_from = slots[(next - '0') * 2];
+                                                copy_to = slots[(next - '0') * 2 + 1];
 
                                                 if (copy_from == TEXT_UNSET ||
                                                     copy_to == TEXT_UNSET)
@@ -28667,19 +29633,19 @@ static bool sed_substitute(sed_command address_to command)
                                         }
                                         else if (next == 'U' || next == 'L')
                                         {
-                                                sed_case_span = next;
-                                                sed_case_once = 0;
+                                                ctx->case_span = next;
+                                                ctx->case_once = 0;
                                                 continue;
                                         }
                                         else if (next == 'u' || next == 'l')
                                         {
-                                                sed_case_once = next == 'u' ? 'U' : 'L';
+                                                ctx->case_once = next == 'u' ? 'U' : 'L';
                                                 continue;
                                         }
                                         else if (next == 'E')
                                         {
-                                                sed_case_span = 0;
-                                                sed_case_once = 0;
+                                                ctx->case_span = 0;
+                                                ctx->case_once = 0;
                                                 continue;
                                         }
                                         else
@@ -28689,7 +29655,7 @@ static bool sed_substitute(sed_command address_to command)
                                                              : next == 'r' ? '\r'
                                                                            : next;
 
-                                                if (!sed_case_byte(address_of have,
+                                                if (!sed_case_byte(ctx, address_of have,
                                                                    escaped))
                                                         return false;
 
@@ -28698,13 +29664,13 @@ static bool sed_substitute(sed_command address_to command)
                                 }
                                 else
                                 {
-                                        if (!sed_case_byte(address_of have, character))
+                                        if (!sed_case_byte(ctx, address_of have, character))
                                         return false;
                                         continue;
                                 }
 
-                                if (!sed_case_span_bytes(address_of have,
-                                                         sed_pattern.bytes + copy_from,
+                                if (!sed_case_span_bytes(ctx, address_of have,
+                                                         ctx->pattern.bytes + copy_from,
                                                          copy_to - copy_from))
                                         return false;
                         }
@@ -28713,10 +29679,10 @@ static bool sed_substitute(sed_command address_to command)
                 }
                 else
                 {
-                        if (!sed_space_fits(have, to - from))
+                        if (!sed_space_fits(ctx, have, to - from))
                                 return false;
 
-                        memory_copy(sed_work + have, sed_pattern.bytes + from, to - from);
+                        memory_copy(ctx->work_store->bytes + have, ctx->pattern.bytes + from, to - from);
                         have += to - from;
                 }
 
@@ -28727,8 +29693,8 @@ static bool sed_substitute(sed_command address_to command)
 
                 if (to == from)
                 {
-                        if (from < sed_pattern.length)
-                                if (!sed_work_byte(address_of have, sed_pattern.bytes[from]))
+                        if (from < ctx->pattern.length)
+                                if (!sed_work_byte(ctx, address_of have, ctx->pattern.bytes[from]))
                                         return false;
 
                         at = from + 1;
@@ -28745,20 +29711,264 @@ static bool sed_substitute(sed_command address_to command)
         if (!changed)
                 return false;
 
-        if (at < sed_pattern.length)
+        if (at < ctx->pattern.length)
         {
-                if (!sed_space_fits(have, sed_pattern.length - at))
+                if (!sed_space_fits(ctx, have, ctx->pattern.length - at))
                         return false;
 
-                memory_copy(sed_work + have, sed_pattern.bytes + at, sed_pattern.length - at);
-                have += sed_pattern.length - at;
+                memory_copy(ctx->work_store->bytes + have, ctx->pattern.bytes + at, ctx->pattern.length - at);
+                have += ctx->pattern.length - at;
         }
 
-        byte_store address_to previous = sed_pattern.store;
-        sed_pattern.store = sed_work_store;
-        sed_pattern.bytes = sed_work_store->bytes;
-        sed_work_store = previous;
-        sed_pattern.length = have;
+        byte_store address_to previous = ctx->pattern.store;
+        ctx->pattern.store = ctx->work_store;
+        ctx->pattern.bytes = ctx->work_store->bytes;
+        ctx->work_store = previous;
+        ctx->pattern.length = have;
+        return true;
+}
+
+static bool sed_substitute(sed_command address_to command)
+{
+        return sed_substitute_in(address_of sed_serial, command, false);
+}
+
+static bool sed_substitute_pieces(sed_context address_to ctx, sed_command address_to command)
+{
+        return sed_substitute_in(ctx, command, true);
+}
+
+/*
+        sed over the pieces of a regular file, for a script whose every line
+        is answered by that line alone: s, y, p and d, and the branches that
+        a substitution's success steers, with nothing but a regular
+        expression, or none, in front of them. There is nothing a line leaves
+        for the next -- no hold space, no line number to count, no range
+        that is open -- so a piece of whole lines is run through the same
+        commands into an output of its own, with a pattern space and a work
+        space of its own and a slot's machine, and the pool hands the outputs
+        to the sink in order. The substitution is sed_substitute, given the
+        context of the job. What a job meets that the serial run would say --
+        a machine that gives up, a reference without a group, a store that
+        will not grow -- it does not say: it refuses its piece, and the serial
+        loop goes on from the piece's edge and says it in its place. A last
+        line with no end is refused the same way, since where that leaves the
+        output is the writer's to settle.
+
+        Where a run writes to standard output the first bytes go through the
+        model of GNU's stdio that the serial loop follows for its diagnostic,
+        a line at a time as the serial loop does, until that has settled.
+*/
+static bool sed_pieces_script(void)
+{
+        for (b32 c = 0; c < sed_command_count; c++)
+        {
+                sed_command address_to command = sed_commands + c;
+
+                if (command->second_type != SED_ADDRESS_NONE ||
+                    (command->first_type != SED_ADDRESS_NONE &&
+                     (command->first_type != SED_ADDRESS_REGEX || command->first_regex < 0)))
+                        return false;
+
+                switch (command->kind)
+                {
+                case 's':
+                        if (command->writer >= 0 || command->pattern < 0)
+                                return false;
+                        break;
+                case 'y':
+                case 'p':
+                case 'd':
+                case '{':
+                case '}':
+                case 'b':
+                case 't':
+                case 'T':
+                case ':':
+                        break;
+                default:
+                        return false;
+                }
+        }
+
+        return true;
+}
+
+static inline INLINE bool sed_pieces_put(parallel_output address_to output, p8 address_to bytes,
+                                         positive length)
+{
+        p8 address_to at = parallel_reserve(output, length + 1);
+
+        if (!at)
+                return false;
+
+        memory_copy_apart(at, bytes, length);
+        at[length] = '\n';
+        return true;
+}
+
+static bool sed_pieces_emit(address_any context, positive index, p8 address_to lines,
+                            positive length, positive offset,
+                            parallel_output address_to output)
+{
+        grep_slot address_to scratch = grep_slot_get();
+        byte_store stores[2] = {{null, 0, 0}, {null, 0, 0}};
+        sed_context ctx = {.pieces = true};
+        bool answered = false;
+        positive at = 0;
+
+        (void)context;
+        (void)index;
+        (void)offset;
+
+        if (!scratch || (length && lines[length - 1] != '\n'))
+                return false;
+
+        ctx.match = grep_slot_match(scratch);
+
+        if (!ctx.match || !byte_store_reserve(address_of stores[0], 4096, 4096) ||
+            !byte_store_reserve(address_of stores[1], 4096, 4096))
+                goto done;
+
+        ctx.pattern = (sed_buffer){lines, 0, true, address_of stores[0]};
+        ctx.work_store = address_of stores[1];
+
+        while (at < length)
+        {
+                p8 address_to newline = memory_first_of(lines + at, '\n', length - at);
+                b32 pc = 0;
+                bool dropped = false;
+                bool replaced = false;
+
+                ctx.pattern.bytes = lines + at;
+                ctx.pattern.length = (positive)(newline - (lines + at));
+                at += ctx.pattern.length + 1;
+
+                while (pc < sed_command_count)
+                {
+                        sed_command address_to command = sed_commands + pc;
+                        p8 kind = command->kind;
+                        bool selected;
+
+                        if (kind == '}')
+                        {
+                                pc++;
+                                continue;
+                        }
+
+                        selected = command->first_type != SED_ADDRESS_REGEX ||
+                                   sed_find(address_of ctx, command->first_regex, REGEX_FIRST,
+                                            ctx.pattern.bytes, ctx.pattern.length, 0, true);
+
+                        if (selected == command->negate)
+                        {
+                                pc = kind == '{' ? command->block_stop : pc + 1;
+                                continue;
+                        }
+
+                        pc++;
+
+                        if (kind == 's')
+                        {
+                                if (sed_substitute_pieces(address_of ctx, command))
+                                {
+                                        replaced = true;
+
+                                        if (command->printing &&
+                                            !sed_pieces_put(output, ctx.pattern.bytes,
+                                                            ctx.pattern.length))
+                                                goto done;
+                                }
+                        }
+                        else if (kind == 'y')
+                                memory_translate(ctx.pattern.bytes, ctx.pattern.length,
+                                                 sed_maps[command->map]);
+                        else if (kind == 'p')
+                        {
+                                if (!sed_pieces_put(output, ctx.pattern.bytes, ctx.pattern.length))
+                                        goto done;
+                        }
+                        else if (kind == 'd')
+                        {
+                                dropped = true;
+                                break;
+                        }
+                        else if (kind == 'b' || kind == 't' || kind == 'T')
+                        {
+                                if (kind == 'b' || (kind == 't') == replaced)
+                                        pc = (b32)command->which;
+
+                                if (kind != 'b')
+                                        replaced = false;
+                        }
+
+                        if (ctx.space_full || ctx.failed || ctx.complex)
+                                goto done;
+                }
+
+                if (ctx.space_full || ctx.failed || ctx.complex)
+                        goto done;
+
+                if (!sed_quiet && !dropped &&
+                    !sed_pieces_put(output, ctx.pattern.bytes, ctx.pattern.length))
+                        goto done;
+        }
+
+        answered = true;
+
+done:
+        byte_store_release(address_of stores[0]);
+        byte_store_release(address_of stores[1]);
+        return answered && !ctx.space_full && !ctx.failed && !ctx.complex;
+}
+
+static bool sed_pieces_sink(address_any context, positive index, address_any data,
+                            positive length)
+{
+        p8 address_to at = data;
+
+        (void)context;
+        (void)index;
+
+        while (length && unlikely(sed_output_state & (SED_OUTPUT_MODELLING | SED_OUTPUT_PENDING)))
+        {
+                p8 address_to newline = memory_first_of(at, '\n', length);
+                positive line = (positive)(newline - at) + 1;
+
+                // A line and then its end, two checked writes to GNU's stdio.
+                sed_stdio(line - 1);
+                sed_stdio(1);
+                text_put(at, line);
+                at += line;
+                length -= line;
+        }
+
+        if (length)
+                text_put(at, length);
+
+        return !text_out_failed;
+}
+
+// True when pieces answered some of the input; the descriptor is where they stopped.
+static bool sed_pieces_run(void)
+{
+        parallel_lines pieces;
+
+        if (sed_output_state & SED_OUTPUT_UNTERMINATED)
+                return false;
+
+        if (!text_lines_open(address_of pieces, '\n'))
+                return false;
+
+        if (!grep_slots_prepare())
+        {
+                parallel_lines_close(address_of pieces);
+                return false;
+        }
+
+        parallel_lines_ordered(address_of pieces, sed_pieces_emit, sed_pieces_sink, null);
+        text_lines_done(address_of pieces);
+        grep_slots_release();
         return true;
 }
 
@@ -29071,6 +30281,8 @@ static b32 text_sed()
         if (sed_broken)
                 return text_done(string_diagnostic(&text_diagnostic, sed_broken_status, null, "unsupported or invalid script"));
 
+        bool pieces_ok = !sed_null_data && sed_pieces_script();
+
         // -i edits files, and there is nothing to edit when the input is a
         // pipe. GNU says so and stops with four.
         // Every file w writes to is emptied before the first line is read,
@@ -29259,6 +30471,12 @@ static b32 text_sed()
                                 if (sed_commands[c].begins)
                                         sed_commands[c].active = true;
                 }
+
+                // A regular file that a stateless script cuts into pieces goes
+                // through the pool as far as the pieces will take it, into the
+                // staged copy where -i is editing in place.
+                if (pieces_ok)
+                        sed_pieces_run();
 
                 while (sed_line_next())
                 {
@@ -31722,6 +32940,19 @@ static bool sort_merge_levels(positive count, b32 stage)
         return true;
 }
 
+// The items start out as the lines in order, a block a job: the pages of a
+// hundred megabytes of them are touched for the first time here.
+static fn sort_items_iota_job(address_any context, positive index)
+{
+        positive from = index * SORT_BLOCK;
+        positive to = min(from + SORT_BLOCK, sort_lines_count);
+
+        (void)context;
+
+        for (positive at = from; at < to; at++)
+                sort_items[at].line = (p32)at;
+}
+
 static bool sort_chunk()
 {
         positive count = sort_lines_count;
@@ -31732,8 +32963,8 @@ static bool sort_chunk()
              !array_store_reserve(sort_spans, sort_spans_room, 0, count + 1, 4096)))
                 return string_diagnostic(&text_diagnostic, 0, null, "out of memory");
 
-        for (positive at = 0; at < count; at++)
-                sort_items[at].line = (p32)at;
+        parallel_for(sort_items_iota_job, null, sort_blocks(count),
+                     sort_alone ? 0 : count * sizeof(sort_item));
 
         if (!sort_keys[0].whole)
                 parallel_for(sort_spans_job, null, sort_blocks(count),
@@ -34354,8 +35585,83 @@ static inline INLINE positive sort_split_batch()
         into lines as it arrives. A read error is said and ends that input,
         and the sort goes on with the rest, as it always has here.
 */
+/*
+        A regular file's next batch read by the pool: SORT_READ blocks by
+        pread into the text where each is to lie, so the copy and the faults
+        of pages nobody has touched are spread over the threads instead of
+        being the one that reads, which was most of the wall time of a sort
+        of a big file at sixteen. A block that came up short ends what is
+        taken, and the serial reads go on from there and say why: an end, or
+        an error worded as it always was. The descriptor is left where the
+        bytes taken end, as reading would leave it.
+*/
+typedef struct
+{
+        positive handle;
+        positive offset;
+        p8 address_to into;
+        positive got[SORT_SPLIT_BATCH / SORT_READ];
+} sort_read_run;
+
+static fn sort_read_job(address_any context, positive index)
+{
+        sort_read_run address_to run = context;
+        positive from = index * SORT_READ;
+        positive at = 0;
+
+        while (at < SORT_READ)
+        {
+                bipolar got = system_call_4(syscall(pread64), run->handle,
+                                            (positive)(run->into + from + at),
+                                            SORT_READ - at, run->offset + from + at);
+
+                if (got == -4)
+                        continue;
+
+                if (got <= 0)
+                        break;
+
+                at += (positive)got;
+        }
+
+        run->got[index] = at;
+}
+
+static positive sort_read_pieces(positive handle, positive offset, p8 address_to into,
+                                 positive blocks)
+{
+        sort_read_run run = {.handle = handle, .offset = offset, .into = into};
+        positive taken = 0;
+
+        parallel_for(sort_read_job, address_of run, blocks, blocks * SORT_READ);
+
+        while (taken < blocks && run.got[taken] == SORT_READ)
+                taken++;
+
+        system_seek(handle, offset + taken * SORT_READ, FILE_SEEK_SET);
+        return taken * SORT_READ;
+}
+
 static bool sort_gather(positive handle, string_address name)
 {
+        positive read_at = 0;
+        positive read_end = 0;
+        bool pooled = false;
+
+        {
+                positive size = 0;
+                bipolar at = sort_alone || parallel_width() == 1 ? -1
+                             : system_seek(handle, 0, FILE_SEEK_CUR);
+
+                if (at >= 0 && text_regular_size(handle, address_of size) &&
+                    size > (positive)at && size - (positive)at >= 4 * SORT_READ)
+                {
+                        read_at = (positive)at;
+                        read_end = size;
+                        pooled = true;
+                }
+        }
+
         for (;;)
         {
                 // Text not yet cut is counted at a line every eight bytes, and
@@ -34381,11 +35687,27 @@ static bool sort_gather(positive handle, string_address name)
                         continue;
                 }
 
-                if (sort_text_used + SORT_READ / 4 + SORT_SLACK > sort_text_room)
+                // What a pooled read takes: whole blocks of the batch, while
+                // at least a few are left of the file.
+                positive blocks = 0;
+
+                if (pooled)
+                {
+                        positive left = (read_end - read_at) / SORT_READ;
+                        positive batch = sort_split_batch() / SORT_READ;
+
+                        blocks = left < batch ? left : batch;
+                        pooled = blocks >= 2;
+                        blocks = pooled ? blocks : 0;
+                }
+
+                positive want = blocks ? blocks * SORT_READ : SORT_READ;
+
+                if (sort_text_used + (blocks ? want : SORT_READ / 4) + SORT_SLACK > sort_text_room)
                 {
                         if (!array_store_reserve(sort_text, sort_text_room,
                                                  sort_text_used,
-                                                 sort_text_used + SORT_READ + SORT_SLACK,
+                                                 sort_text_used + want + SORT_SLACK,
                                                  4 * SORT_READ))
                         {
                                 if (unsplit)
@@ -34406,6 +35728,21 @@ static bool sort_gather(positive handle, string_address name)
 
                                 return sort_exhausted();
                         }
+
+                        continue;
+                }
+
+                if (blocks)
+                {
+                        positive taken = sort_read_pieces(handle, read_at,
+                                                          sort_text + sort_text_used, blocks);
+
+                        pooled = taken != 0;
+                        read_at += taken;
+                        sort_text_used += taken;
+
+                        if (sort_text_used - sort_scanned >= sort_split_batch() && !sort_split())
+                                return false;
 
                         continue;
                 }
