@@ -2496,31 +2496,11 @@ static inline INLINE p32 xz_reverse_price(xz_encoder address_to e, p16 address_t
         return price;
 }
 
-/* Bit counts are one instruction where the ISA has them; RV64 without
-   Zbb takes the library routine rather than a libgcc call. */
-static inline INLINE p32 xz_top_bit(p32 value)
-{
-#if X64 || ARM64
-        return 31 - (p32)__builtin_clz(value);
-#else
-        return 63 - (p32)bits_leading_zeros(value);
-#endif
-}
-
-static inline INLINE p32 xz_low_bit(p64 value)
-{
-#if X64 || ARM64
-        return (p32)__builtin_ctzll(value);
-#else
-        return (p32)bits_trailing_zeros(value);
-#endif
-}
-
 static inline INLINE p32 xz_slot(p32 dist)
 {
         if (dist < 4)
                 return dist;
-        p32 top = xz_top_bit(dist);
+        p32 top = top_bit_known(dist);
         return (top << 1) + ((dist >> (top - 1)) & 1);
 }
 
@@ -2842,7 +2822,7 @@ static inline INLINE p32 xz_common(p8 address_to a, p8 address_to b, p32 len, p3
 
                 if (x)
                 {
-                        len += xz_low_bit(x) >> 3;
+                        len += bottom_bit_known(x) >> 3;
                         return len < limit ? len : limit;
                 }
                 len += 8;
@@ -4220,7 +4200,7 @@ static bool xz_block_prepare(xz_encoder address_to e, p32 n)
         //      of two, as liblzma counts them: a dictionary that is not one
         //      (3 MiB, 96 MiB) has distances in the slot the floor left out,
         //      and priced at nothing they were never chosen.
-        e->dist_table_size = 2 * (xz_top_bit(dict - 1) + 1);
+        e->dist_table_size = 2 * (top_bit_known(dict - 1) + 1);
         e->len_table_size = e->nice + 1 - 2;
         e->fin = (xz_finder){e->preset, e->input, e->input_n, 0, e->offset, e->hash, e->hash_mask,
                              e->son, 0, e->cyclic_size, e->nice, e->depth, e->matches};

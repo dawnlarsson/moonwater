@@ -166,11 +166,7 @@ static p32 zstd_get24(p8 address_to p)
    Once per sequence: the compiler's inline count where the ISA has one. */
 static p8 zstd_highbit32(p32 value)
 {
-#if X64 || ARM64
-        return value ? (p8)(31 - __builtin_clz(value)) : 0;
-#else
-        return value ? (p8)(63 - bits_leading_zeros(value)) : 0;
-#endif
+        return value ? (p8)top_bit_known(value) : 0;
 }
 
 static bool zstd_fail(string_address why)
@@ -3964,15 +3960,6 @@ static p8 address_to zstd_parse_dfast(zstd_encoder address_to e, p32 from,
         the row's tags a word at a time and walks, newest first, only the
         slots whose tag matched; the first one older than the window ends it.
 */
-static __attribute__((always_inline)) inline positive zstd_lowbit64(p64 value)
-{
-#if X64 || ARM64
-        return (positive)__builtin_ctzll(value);
-#else
-        return (positive)bits_trailing_zeros(value);
-#endif
-}
-
 /* One bit a slot whose tag is tag: the exact zero-byte test on the row
    xor the tag, and a multiply that gathers a word's eight flags. */
 static __attribute__((always_inline)) inline p64
@@ -4112,7 +4099,7 @@ zstd_row_find(zstd_encoder address_to e, p8 address_to ip, p8 address_to iend,
                 mask &= ((p64)1 << entries) - 1;
         while (mask && attempts)
         {
-                p32 const candidate = slots[(zstd_lowbit64(mask) + head) & (entries - 1)];
+                p32 const candidate = slots[(bottom_bit_known(mask) + head) & (entries - 1)];
 
                 mask &= mask - 1;
                 if (candidate < low)

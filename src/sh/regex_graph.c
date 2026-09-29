@@ -1836,12 +1836,7 @@ static b32 rx_dfa_intern(rx_dfa_cache *cache, p8 flags, bool *reset)
         for (positive word = 0; word < RX_DFA_NFA_MAX / 64; word++)
                 for (p64 bits = cache->bits[word]; bits; bits &= bits - 1)
                 {
-#if X64 || ARM64
-                        p16 id = (p16)(word * 64 + (positive)__builtin_ctzll(bits));
-#else
-                        // No Zbb on the riscv floor: the builtin is a libgcc call.
-                        p16 id = (p16)(word * 64 + (positive)bits_trailing_zeros(bits));
-#endif
+                        p16 id = (p16)(word * 64 + bottom_bit_known(bits));
                         cache->found[size++] = id;
                         hash = (hash ^ id) * 1099511628211ull;
                 }

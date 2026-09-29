@@ -1679,24 +1679,6 @@ static fn gzip_bits_align(gzip_encoder address_to e)
         e->bits = 0;
 }
 
-static inline INLINE positive gzip_low_bit(p64 value)
-{
-#if X64 || ARM64
-        return (positive)__builtin_ctzll(value);
-#else
-        return (positive)bits_trailing_zeros(value);
-#endif
-}
-
-static inline INLINE positive gzip_high_bit(p32 value)
-{
-#if X64 || ARM64
-        return 31 - (positive)__builtin_clz(value);
-#else
-        return 63 - (positive)bits_leading_zeros((p64)value);
-#endif
-}
-
 /* The finders' hashes of the four and three bytes at a position. */
 static inline INLINE p32 gzip_hash(p32 bytes, p32 bits)
 {
@@ -1713,7 +1695,7 @@ static inline INLINE positive gzip_extend(p8 address_to here, p8 address_to ther
                         memory_load_unaligned(p64, there + at);
 
                 if (x)
-                        return at + (gzip_low_bit(x) >> 3);
+                        return at + (bottom_bit_known(x) >> 3);
                 at += 8;
         }
         while (at < limit && here[at] == there[at])
@@ -2510,7 +2492,7 @@ static inline INLINE bipolar gzip_lazy_gain(positive length, positive dist,
                                             positive next_length, positive next_dist)
 {
         return 4 * ((bipolar)next_length - (bipolar)length) +
-               ((bipolar)gzip_high_bit((p32)dist) - (bipolar)gzip_high_bit((p32)next_dist));
+               ((bipolar)top_bit_known(dist) - (bipolar)top_bit_known(next_dist));
 }
 
 static inline INLINE positive gzip_parse_chain(gzip_encoder address_to e, positive start,
